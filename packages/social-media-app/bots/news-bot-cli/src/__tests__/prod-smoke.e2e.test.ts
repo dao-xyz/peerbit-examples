@@ -1,10 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { Peerbit } from "peerbit";
+import { Peerbit, resolveBootstrapAddresses } from "peerbit";
 import os from "os";
 import path from "path";
 import fs from "fs";
 import { createHash } from "crypto";
-import { BOOTSTRAP_ADDRS } from "@giga-app/network";
 import { peerIdFromString } from "@libp2p/peer-id";
 import { getPublicKeyFromPeerId } from "@peerbit/crypto";
 import {
@@ -96,9 +95,10 @@ describe("news-bot-cli (prod smoke)", () => {
         "publishes a simple post and confirms bootstrap can read it",
         { timeout: 240_000 },
         async () => {
-            const bootstrapPeers = BOOTSTRAP_ADDRS.map(
-                peerHashFromMultiaddr
-            ).filter((x): x is string => !!x);
+            const bootstrapAddrs = await resolveBootstrapAddresses();
+            const bootstrapPeers = bootstrapAddrs
+                .map(peerHashFromMultiaddr)
+                .filter((x): x is string => !!x);
             expect(bootstrapPeers.length).toBeGreaterThan(0);
 
             const dir = path.join(
@@ -110,7 +110,7 @@ describe("news-bot-cli (prod smoke)", () => {
 
             const client = await Peerbit.create({ directory: dir });
             try {
-                await client.bootstrap([...BOOTSTRAP_ADDRS]);
+                await client.bootstrap(bootstrapAddrs);
 
                 const { scope, canvas: root } = await createRoot(client, {
                     persisted: true,

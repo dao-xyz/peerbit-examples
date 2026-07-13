@@ -241,18 +241,26 @@ function looksLikeIpv4(value) {
 }
 
 async function detectPublicIp() {
-    const urls = [
-        "https://checkip.amazonaws.com/",
-        "https://api.ipify.org/",
-        "https://ifconfig.me/ip",
+    const endpoints = [
+        {
+            url: "https://1.1.1.1/cdn-cgi/trace",
+            parse: (text) =>
+                text
+                    .split(/\r?\n/)
+                    .find((line) => line.startsWith("ip="))
+                    ?.slice(3) || "",
+        },
+        { url: "https://api.ipify.org/", parse: (text) => text.trim() },
+        { url: "https://ifconfig.me/ip", parse: (text) => text.trim() },
     ];
 
-    for (const url of urls) {
+    for (const { url, parse } of endpoints) {
         try {
             const res = await fetch(url, { method: "GET" });
             if (!res.ok) continue;
-            const text = (await res.text().catch(() => "")).trim();
-            if (looksLikeIpv4(text)) return text;
+            const text = await res.text().catch(() => "");
+            const ip = parse(text).trim();
+            if (looksLikeIpv4(ip)) return ip;
         } catch {
             // ignore
         }

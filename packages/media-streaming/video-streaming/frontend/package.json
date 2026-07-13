@@ -2,7 +2,7 @@
     "name": "videostreaming",
     "version": "0.1.3",
     "private": true,
-    "homepage": "https://stream.peerchecker.com",
+    "homepage": "https://stream.dao.xyz",
     "type": "module",
     "scripts": {
         "dev": "vite",

@@ -1,6 +1,6 @@
 {
-    "short_name": "file share",
-    "name": "File share",
+    "short_name": "Chess",
+    "name": "Chess",
     "icons": [],
     "start_url": ".",
     "display": "standalone",

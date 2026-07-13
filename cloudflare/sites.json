@@ -1,0 +1,72 @@
+{
+    "schemaVersion": 1,
+    "compatibilityDate": "2026-07-13",
+    "staticSites": [
+        {
+            "id": "stream",
+            "worker": "peerbit-examples-stream",
+            "directory": "packages/media-streaming/video-streaming/frontend/dist",
+            "title": "Livestream",
+            "domains": ["stream.dao.xyz"]
+        },
+        {
+            "id": "music",
+            "worker": "peerbit-examples-music",
+            "directory": "packages/media-streaming/music-library/frontend/dist",
+            "title": "Music library",
+            "domains": ["music.dao.xyz"]
+        },
+        {
+            "id": "chat",
+            "worker": "peerbit-examples-chat",
+            "directory": "packages/one-chat-room/frontend/dist",
+            "title": "Chat",
+            "domains": ["chat.dao.xyz"]
+        },
+        {
+            "id": "giga",
+            "worker": "peerbit-examples-giga",
+            "directory": "packages/social-media-app/frontend/dist",
+            "title": "Giga",
+            "domains": ["demo.dao.xyz", "giga.place"]
+        },
+        {
+            "id": "ml",
+            "worker": "peerbit-examples-ml",
+            "directory": "packages/collaborative-learning/frontend/dist",
+            "title": "Collaborative learning demo",
+            "domains": ["mldemo.dao.xyz"]
+        },
+        {
+            "id": "text",
+            "worker": "peerbit-examples-text",
+            "directory": "packages/text-document/frontend/dist",
+            "title": "Text",
+            "domains": ["text.dao.xyz"]
+        },
+        {
+            "id": "files",
+            "worker": "peerbit-examples-files",
+            "directory": "packages/file-share/frontend/dist",
+            "title": "Filedrop",
+            "domains": ["files.dao.xyz"]
+        },
+        {
+            "id": "chess",
+            "worker": "peerbit-examples-chess",
+            "directory": "packages/chess/frontend/dist",
+            "title": "Chess",
+            "domains": ["chess.dao.xyz"]
+        }
+    ],
+    "redirects": [
+        {
+            "id": "legacy-stream",
+            "worker": "peerbit-examples-legacy-stream",
+            "script": "cloudflare/stream-peerchecker-redirect.mjs",
+            "domains": ["stream.peerchecker.com"],
+            "location": "https://stream.dao.xyz/#/",
+            "status": 307
+        }
+    ]
+}

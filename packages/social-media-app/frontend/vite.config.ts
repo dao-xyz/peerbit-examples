@@ -4,6 +4,7 @@ import peerbit from "@peerbit/vite";
 // @ts-ignore
 import tailwindcss from "@tailwindcss/vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
+import { bootstrapPrefetchPlugin } from "./scripts/update-prefetch";
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -11,6 +12,7 @@ export default defineConfig({
         react(),
         peerbit(),
         tailwindcss(),
+        bootstrapPrefetchPlugin(),
         // Only enable TLS for explicit test flag; default is plain http
         ...(process.env.VITE_TEST_HTTPS === "true" ? [basicSsl()] : []),
     ],

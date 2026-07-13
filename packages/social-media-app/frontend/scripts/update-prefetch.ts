@@ -1,9 +1,6 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { type Multiaddr, multiaddr } from "@multiformats/multiaddr";
-
-// import your named export
 import { BOOTSTRAP_ADDRS } from "@giga-app/network";
+import type { Plugin } from "vite";
 
 function toOptions(multiaddr: Multiaddr) {
     var opts: { family: string; host: string; port: number } = {
@@ -29,7 +26,7 @@ function toHostPortScheme(ma: Multiaddr) {
 
 const uniq = <T>(arr: T[]) => [...new Set(arr)];
 
-function generateTags(addrs: string[]): string {
+export function generateTags(addrs: string[]): string {
     const parsed = addrs
         .filter((a) => a.includes("/dns4/") || a.includes("/dns6/"))
         .map((a) => multiaddr(a));
@@ -59,32 +56,25 @@ function generateTags(addrs: string[]): string {
     return [...prefetchTags, ...preconnectTags].join("\n");
 }
 
-function updateIndexHtml(indexPath: string, block: string) {
+export function renderBootstrapPrefetch(
+    html: string,
+    addrs: string[] = BOOTSTRAP_ADDRS
+) {
     const START = "<!-- BOOTSTRAP_PREFETCH_START -->";
     const END = "<!-- BOOTSTRAP_PREFETCH_END -->";
-    const html = readFileSync(indexPath, "utf8");
     const pattern = new RegExp(`${START}[\\s\\S]*?${END}`, "m");
     if (!pattern.test(html)) {
         throw new Error(
-            `Markers not found in ${indexPath}. Please add:\n${START}\n${END}`
+            `Bootstrap prefetch markers are missing. Add:\n${START}\n${END}`
         );
     }
-    const replacement = `${START}\n<!-- (auto-generated; do not edit by hand) -->\n${block}\n${END}`;
-    writeFileSync(indexPath, html.replace(pattern, replacement), "utf8");
+    const replacement = `${START}\n<!-- Generated from @giga-app/network; do not edit by hand. -->\n${generateTags(addrs)}\n${END}`;
+    return html.replace(pattern, replacement);
 }
 
-function main() {
-    try {
-        const tags = generateTags(BOOTSTRAP_ADDRS);
-        const indexPath = resolve(process.cwd(), "index.html"); // adjust if needed
-        updateIndexHtml(indexPath, tags);
-        console.log(
-            `✔ Updated ${indexPath} from ${BOOTSTRAP_ADDRS.length} bootstrap addr(s).`
-        );
-    } catch (error) {
-        console.error("✘ Error updating prefetch tags:", error);
-        process.exit(1);
-    }
-}
-
-main();
+export const bootstrapPrefetchPlugin = (): Plugin => ({
+    name: "peerbit-bootstrap-prefetch",
+    transformIndexHtml(html) {
+        return renderBootstrapPrefetch(html);
+    },
+});

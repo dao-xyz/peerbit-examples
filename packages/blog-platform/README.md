@@ -1,4 +1,3 @@
-
 # A P2P Blog Platform
 
 An app that allows you to do blogging, in a local first, p2p way.
@@ -22,9 +21,10 @@ Launch it:
 ```sh
 blog
 ```
+
 Data will persist in /HOME_DIR/peerbit-blog-platform
 
-To set a custom working directory 
+To set a custom working directory
 
 ```sh
 blog --directory DIRECTORY
@@ -48,22 +48,34 @@ In the library folder, you can find all the code that handles file data. The CLI
 
 ## Deploying the Blog Platform to a Server for Persistence
 
-To keep the state available for peers when only a few peers are online, you might want to host a dedicated server for this. With the Peerbit CLI, it looks something like this:
+To keep the state available for peers when only a few peers are online, run a
+dedicated Peerbit node on a persistent Linux host. Cloudflare Workers can host
+the web frontend, but they cannot run this long-lived stateful Peerbit process.
+
+First, run `peerbit id` on the administrator machine and copy its peer ID. Then
+install `@peerbit/server` on the host, configure its public DNS and TLS without
+proxying Peerbit's non-HTTP ports, and run the following command with a process
+supervisor such as systemd:
 
 ```sh
 npm install -g @peerbit/server
-peerbit remote spawn aws --count 1 --size medium --name "blog-platform"
+peerbit start --grant-access <ADMINISTRATOR_PEER_ID>
 ```
 
-Wait for the server to become ready, then do:
+The access grant is required before the local CLI can manage programs on the
+remote. Once that server is reachable, register it on the administrator machine
+and open the blog program:
 
 ```sh
-peerbit remote connect blog-platform-1
+peerbit remote add blog-platform node.example.com
+peerbit remote connect blog-platform
 install @peerbit/blog-sdk
 program open --variant blog-posts
 ```
 
-Now, you have launched a server on your AWS account in the default region. This node will maintain whatever posts others have created and will be available when new peers want to read posts, but no others are online, except this server.
+This node maintains posts created by other peers and keeps them available when
+no other peers are online. Keep the server package updated and back up the
+node's Peerbit data directory.
 
 ## Express Server API Wrapper
 
