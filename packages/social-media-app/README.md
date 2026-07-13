@@ -1,21 +1,57 @@
 # 🚧 WIP 🚧
 
-This app requires you to run all dependent apps (sub-apps) in the background. Todo so you also need to serve them using self signed certificates, that you create and put in `.cert`folders of each sub-application.
+This app can embed other examples from this repository. To use local versions,
+run each required frontend with its `start-remote` script. The remote Vite
+configurations use names under the RFC-reserved `.test` top-level domain, so
+local development never depends on public DNS.
 
-To generate certificates run 
+## Configure local names
 
-```sh
-openssl req -x509 -sha256 -new -nodes -days 3650 -key CA.key -out CA.pem
+Add this line to `/etc/hosts` on macOS or Linux, or to
+`C:\Windows\System32\drivers\etc\hosts` on Windows:
+
+```text
+127.0.0.1 stream.test chess.test chat.test text.test filedrop.test social.test
 ```
 
-To add a domain name to your system you can modify you hosts file, e.g. add 
+## Create a trusted local certificate
+
+Install [`mkcert`](https://github.com/FiloSottile/mkcert) with your operating
+system's package manager. Then, from the repository root, create one certificate
+covering every local name and copy it to the frontend directories that consume
+`.cert/key.pem` and `.cert/cert.pem`:
 
 ```sh
-127.0.0.1 text.test.xyz
+mkcert -install
+
+cert_dir="$(mktemp -d)"
+mkcert \
+  -cert-file "$cert_dir/cert.pem" \
+  -key-file "$cert_dir/key.pem" \
+  stream.test chess.test chat.test text.test filedrop.test social.test
+
+for app_dir in \
+  packages/media-streaming/video-streaming/frontend \
+  packages/media-streaming/music-library/frontend \
+  packages/chess/frontend \
+  packages/one-chat-room/frontend \
+  packages/text-document/frontend \
+  packages/file-share/frontend \
+  packages/social-media-app/frontend
+do
+  mkdir -p "$app_dir/.cert"
+  cp "$cert_dir/key.pem" "$app_dir/.cert/key.pem"
+  cp "$cert_dir/cert.pem" "$app_dir/.cert/cert.pem"
+done
+
+rm -rf "$cert_dir"
 ```
 
-to support the use of `text.test.xyz` so you can interact with the app from the [text-document](./../text-document/) demo.
+The `.cert` directories are ignored by Git. Never commit the generated private
+key. Certificates issued for the previous public-DNS names do not match the new
+names and must be replaced.
 
-To see the domain names you need to support to run all apps, check corrsponding `vite.config.remote.ts` files.'
-
-
+Run `pnpm start-remote` from each frontend directory you need. The music and
+video frontends both use `stream.test:5801`, and the text and filedrop frontends
+both bind port `5803` on the mapped loopback address. Run only one frontend from
+each of those pairs at a time.

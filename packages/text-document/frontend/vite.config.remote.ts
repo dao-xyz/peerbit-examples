@@ -25,7 +25,7 @@ export default defineConfig({
                   key: fs.readFileSync("./.cert/key.pem"),
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
-              host: "text.test.xyz",
+              host: "text.test",
               port: 5803,
           }
         : undefined,

@@ -36,7 +36,7 @@ export default defineConfig({
                   key: fs.readFileSync("./.cert/key.pem"),
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
-              host: "social.test.xyz",
+              host: "social.test",
               port: 6083,
           }
         : undefined,

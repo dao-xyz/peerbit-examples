@@ -24,13 +24,13 @@ export interface CuratedAppUrls {
 const STREAMING_APP = (mode?: string, appUrls?: CuratedAppUrls) =>
     appUrls?.streaming?.trim() ||
     (["development", "staging"].includes(mode ?? "")
-        ? "https://stream.test.xyz:5801"
+        ? "https://stream.test:5801"
         : "https://stream.peerbit.org");
 
 const CHESS_APP = (mode?: string, appUrls?: CuratedAppUrls) =>
     appUrls?.chess?.trim() ||
     (["development", "staging"].includes(mode ?? "")
-        ? "https://chess.test.xyz:5806"
+        ? "https://chess.test:5806"
         : "https://chess.peerbit.org");
 
 // ─────────────────────────────────────────────────────────────

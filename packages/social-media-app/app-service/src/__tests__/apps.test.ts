@@ -252,7 +252,7 @@ describe("index", () => {
         it("Generic Video: valid getStatus", () => {
             if (!videoApp) throw new Error("Video app not found");
             // For development mode the expected URL is from STREAMING_APP(mode)
-            const validUrl = "https://stream.test.xyz:5801";
+            const validUrl = "https://stream.test:5801";
             const status = videoApp.getStatus(validUrl, host);
             expect(status.isReady).to.be.true;
         });
@@ -273,7 +273,7 @@ describe("index", () => {
         it("Chess: valid getStatus", () => {
             if (!chessApp) throw new Error("Chess app not found");
             // For development mode the expected URL is from CHESS_APP(mode)
-            const validUrl = "https://chess.test.xyz:5806";
+            const validUrl = "https://chess.test:5806";
             const status = chessApp.getStatus(validUrl, host);
             expect(status.isReady).to.be.true;
         });

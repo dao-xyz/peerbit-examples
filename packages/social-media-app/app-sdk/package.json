@@ -1,7 +1,7 @@
 {
     "name": "@giga-app/sdk",
     "version": "2.0.1",
-    "homepage": "https://dao-xyz.github.io/peerbit-examples",
+    "homepage": "https://github.com/dao-xyz/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
     "exports": {

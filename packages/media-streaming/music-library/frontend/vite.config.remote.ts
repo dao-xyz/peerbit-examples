@@ -27,7 +27,7 @@ export default defineConfig({
                   key: fs.readFileSync("./.cert/key.pem"),
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
-              host: "stream.test.xyz",
+              host: "stream.test",
           }
         : undefined,
 });

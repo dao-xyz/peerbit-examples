@@ -75,7 +75,7 @@ export default defineConfig({
                   key: fs.readFileSync("./.cert/key.pem"),
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
-              host: "filedrop.test.xyz",
+              host: "filedrop.test",
               port: 5803,
           }
         : undefined,

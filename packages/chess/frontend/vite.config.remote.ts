@@ -26,7 +26,7 @@ export default defineConfig({
                   key: fs.readFileSync("./.cert/key.pem"),
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
-              host: "chess.test.xyz",
+              host: "chess.test",
               port: 5806,
           }
         : undefined,
