@@ -131,6 +131,10 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
+            - name: Self-test two-runner integrity
+              working-directory: packages/file-share/frontend
+              run: node tests/two-runner.bench.mjs self-test
+
             - name: Install Playwright Chromium
               run: pnpm exec playwright install --with-deps chromium
 
@@ -180,6 +184,10 @@ jobs:
 
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
+
+            - name: Self-test two-runner integrity
+              working-directory: packages/file-share/frontend
+              run: node tests/two-runner.bench.mjs self-test
 
             - name: Install Playwright Chromium
               run: pnpm exec playwright install --with-deps chromium
@@ -243,6 +251,111 @@ jobs:
 
                   const writer = load("writer-results", "writer.json");
                   const reader = load("reader-results", "reader.json");
+                  const expectedSizeBytes = Number(process.env.BENCH_FILE_MB) * 1024 * 1024;
+                  const integrityReasons = [];
+                  const requireEqual = (label, left, right) => {
+                    if (typeof left !== "string" || left.length === 0) {
+                      integrityReasons.push(`missing-${label}-left`);
+                    } else if (typeof right !== "string" || right.length === 0) {
+                      integrityReasons.push(`missing-${label}-right`);
+                    } else if (left !== right) {
+                      integrityReasons.push(`${label}-mismatch`);
+                    }
+                  };
+                  const requireSize = (label, value) => {
+                    if (value !== expectedSizeBytes) {
+                      integrityReasons.push(`${label}-size-mismatch`);
+                    }
+                  };
+
+                  if (!Number.isSafeInteger(expectedSizeBytes)) {
+                    integrityReasons.push("invalid-expected-size");
+                  }
+                  requireSize("writer", writer.sizeBytes);
+                  requireSize("writer-source", writer.integrity?.sourceSizeBytes);
+                  requireSize("writer-manifest", writer.manifest?.sizeBytes);
+                  requireSize("reader", reader.sizeBytes);
+                  requireSize("reader-manifest", reader.manifest?.sizeBytes);
+                  requireSize("reader-sink", reader.sink?.sizeBytes);
+                  requireEqual(
+                    "source-writer-manifest-sha256",
+                    writer.integrity?.sourceSha256Base64,
+                    writer.manifest?.finalHash
+                  );
+                  requireEqual(
+                    "writer-reader-manifest-sha256",
+                    writer.manifest?.finalHash,
+                    reader.manifest?.finalHash
+                  );
+                  requireEqual(
+                    "source-download-sha256",
+                    writer.integrity?.sourceSha256Base64,
+                    reader.integrity?.downloadSha256Base64
+                  );
+                  requireEqual(
+                    "writer-reader-source-sha256",
+                    writer.integrity?.sourceSha256Base64,
+                    reader.integrity?.sourceSha256Base64
+                  );
+                  requireEqual(
+                    "source-download-crc32",
+                    writer.integrity?.sourceCrc32Hex,
+                    reader.integrity?.downloadCrc32Hex
+                  );
+                  requireEqual(
+                    "writer-reader-source-crc32",
+                    writer.integrity?.sourceCrc32Hex,
+                    reader.integrity?.sourceCrc32Hex
+                  );
+                  requireEqual(
+                    "writer-reader-program-address",
+                    writer.address,
+                    reader.address
+                  );
+                  requireEqual(
+                    "writer-reader-file-name",
+                    writer.fileName,
+                    reader.fileName
+                  );
+                  requireEqual(
+                    "writer-reader-file-id",
+                    writer.manifest?.fileId,
+                    reader.manifest?.fileId
+                  );
+                  requireEqual(
+                    "writer-reader-writer-peer-hash",
+                    writer.cohort?.writerPeerHash,
+                    reader.cohort?.writerPeerHash
+                  );
+                  requireEqual(
+                    "writer-reader-fixture-mode",
+                    writer.fixture?.mode,
+                    reader.fixture?.mode
+                  );
+                  requireEqual(
+                    "writer-reader-fixture-seed",
+                    writer.fixture?.seed,
+                    reader.fixture?.seed
+                  );
+                  if (writer.integrity?.integrityVerified !== true) {
+                    integrityReasons.push("writer-integrity-not-verified");
+                  }
+                  if (reader.integrity?.integrityVerified !== true) {
+                    integrityReasons.push("reader-integrity-not-verified");
+                  }
+                  if (writer.cohort?.valid !== true || reader.cohort?.valid !== true) {
+                    integrityReasons.push("invalid-runner-cohort");
+                  }
+                  if (reader.topology?.valid !== true) {
+                    integrityReasons.push("invalid-reader-topology");
+                  }
+                  if (reader.sink?.fileBacked !== true) {
+                    integrityReasons.push("reader-sink-not-file-backed");
+                  }
+                  if (reader.writerEnvelope?.valid !== true) {
+                    integrityReasons.push("invalid-writer-envelope");
+                  }
+                  const integrityValid = integrityReasons.length === 0;
 
                   const lines = [
                     "# File-share two-runner benchmark",
@@ -252,6 +365,10 @@ jobs:
                     `- Reader role: \`${process.env.BENCH_READER_ROLE}\``,
                     `- Writer status: \`${writer.status}\``,
                     `- Reader status: \`${reader.status}\``,
+                    `- Integrity: \`${integrityValid ? "verified" : `failed (${integrityReasons.join(", ")})`}\``,
+                    `- Cohort: \`${reader.cohort?.name || "missing"}\``,
+                    `- Reader topology: \`${reader.topology?.valid === true ? "verified" : "invalid"}\``,
+                    `- Download sink: \`${reader.sink?.type || "missing"}\``,
                   ];
 
                   if (writer.status === "passed") {
@@ -279,6 +396,11 @@ jobs:
 
                   if (writer.status !== "passed" || reader.status !== "passed") {
                     throw new Error("Two-runner benchmark did not complete successfully");
+                  }
+                  if (!integrityValid) {
+                    throw new Error(
+                      `Two-runner integrity validation failed: ${integrityReasons.join(", ")}`
+                    );
                   }
 
                   const minUpload = Number(process.env.BENCH_MIN_UPLOAD_MBPS || "0");

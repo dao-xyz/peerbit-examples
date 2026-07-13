@@ -4,6 +4,7 @@ on:
     pull_request:
         paths:
             - ".github/workflows/file-share-ci.yml"
+            - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - "package.json"
             - "pnpm-lock.yaml"
             - "tsconfig.json"
@@ -14,6 +15,7 @@ on:
         branches: [master]
         paths:
             - ".github/workflows/file-share-ci.yml"
+            - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - "package.json"
             - "pnpm-lock.yaml"
             - "tsconfig.json"
@@ -53,6 +55,10 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
+            - name: Self-test two-runner integrity
+              working-directory: packages/file-share/frontend
+              run: node tests/two-runner.bench.mjs self-test
+
             - name: Test file-share library
               run: pnpm --filter @peerbit/please-lib run test
 
@@ -67,6 +73,12 @@ jobs:
 
             - name: Install Playwright Chromium
               run: pnpm exec playwright install --with-deps chromium
+
+            - name: Browser-test two-runner file sink
+              working-directory: packages/file-share/frontend
+              env:
+                  PW_TWO_RUNNER_BROWSER_SELF_TEST: "1"
+              run: node tests/two-runner.bench.mjs self-test
 
             - name: Test persisted offline browser reopen
               env:
