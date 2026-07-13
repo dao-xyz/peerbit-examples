@@ -23,3 +23,7 @@ nginx
 test-results
 .pw-user-data
 .pw-debug
+.wrangler
+.wrangler-config
+.wrangler-dry-run
+tools/wrangler/node_modules

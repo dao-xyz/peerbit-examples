@@ -1,6 +1,6 @@
 {
-    "short_name": "Livestream",
-    "name": "Livestream",
+    "short_name": "Music",
+    "name": "Music library",
     "icons": [],
     "start_url": ".",
     "display": "standalone",

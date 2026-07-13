@@ -1,0 +1,147 @@
+name: Validate and deploy Cloudflare previews
+
+on:
+    pull_request:
+    push:
+        branches: [master]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: cloudflare-examples-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    validate:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        steps:
+            - name: Checkout
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+              with:
+                  node-version: 22.x
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+              with:
+                  run_install: false
+
+            - name: Install workspace dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Validate production bootstrap sources
+              run: node scripts/validate-production-bootstrap.mjs
+
+            - name: Build every frontend
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+              run: |
+                  export SHORT_SHA="${GITHUB_SHA::7}"
+                  pnpm run build
+
+            - name: Prepare and validate Cloudflare assets
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+              run: node scripts/prepare-cloudflare-assets.mjs
+
+            - name: Ensure the build did not mutate source
+              run: git diff --exit-code
+
+            - name: Install locked Wrangler toolchain
+              run: npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
+
+            - name: Validate every Worker bundle
+              run: |
+                  node scripts/render-cloudflare-configs.mjs --mode preview
+                  for config in .wrangler-config/*.jsonc; do
+                      output=".wrangler-dry-run/$(basename "$config" .jsonc)"
+                      tools/wrangler/node_modules/.bin/wrangler deploy \
+                          --config "$config" \
+                          --dry-run \
+                          --outdir "$output"
+                  done
+
+    deploy-preview:
+        if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        needs: validate
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        environment: cloudflare-preview
+        steps:
+            - name: Checkout
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+              with:
+                  node-version: 22.x
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+              with:
+                  run_install: false
+
+            - name: Install and build without deployment credentials
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+              run: |
+                  pnpm install --frozen-lockfile
+                  node scripts/validate-production-bootstrap.mjs
+                  export SHORT_SHA="${GITHUB_SHA::7}"
+                  pnpm run build
+                  node scripts/prepare-cloudflare-assets.mjs
+                  git diff --exit-code
+                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
+                  node scripts/render-cloudflare-configs.mjs --mode preview
+
+            - name: Deploy isolated Cloudflare previews
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  for config in .wrangler-config/*.jsonc; do
+                      tools/wrangler/node_modules/.bin/wrangler deploy --config "$config"
+                  done
+
+            - name: Read Workers preview subdomain
+              id: workers
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+              run: node scripts/cloudflare-account-subdomain.mjs >> "$GITHUB_OUTPUT"
+
+            - name: Verify every Cloudflare preview
+              run: >-
+                  node scripts/verify-cloudflare-sites.mjs
+                  --mode preview
+                  --subdomain "${{ steps.workers.outputs.subdomain }}"
+                  --commit "${{ github.sha }}"
+
+            - name: Install Chromium for runtime smoke tests
+              run: >-
+                  pnpm --dir packages/file-share/frontend exec playwright
+                  install --with-deps chromium
+
+            - name: Verify browser runtime, relay connection, and media ranges
+              env:
+                  PW_CLOUDFLARE_SMOKE: "1"
+                  PW_BASE_URL: https://peerbit-examples-files-preview.${{ steps.workers.outputs.subdomain }}.workers.dev
+                  PW_GIGA_URL: https://peerbit-examples-giga-preview.${{ steps.workers.outputs.subdomain }}.workers.dev
+                  PW_STREAM_URL: https://peerbit-examples-stream-preview.${{ steps.workers.outputs.subdomain }}.workers.dev
+              run: >-
+                  pnpm --dir packages/file-share/frontend exec playwright test
+                  -c playwright.config.ts tests/cloudflare-preview.e2e.spec.ts
+                  --project=chromium --workers=1 --retries=1

@@ -6,7 +6,7 @@ import select from "@inquirer/select";
 import input from "@inquirer/input";
 import events from "events";
 import { JokeBot } from "@giga-app/joke-bot";
-import { BOOTSTRAP_ADDRS, type BootstrapMode } from "@giga-app/network";
+import { type BootstrapMode } from "@giga-app/network";
 
 events.setMaxListeners(100);
 
@@ -230,7 +230,7 @@ export const start = async () => {
         await client.dial("/ip4/127.0.0.1/tcp/8002/ws/p2p/" + localPeerId);
         console.log("Dialed local node", localPeerId);
     } else {
-        await client.bootstrap([...BOOTSTRAP_ADDRS]);
+        await client.bootstrap();
     }
 
     await client.open(new JokeBot(), {
