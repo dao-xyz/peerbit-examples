@@ -2,7 +2,7 @@
     "name": "chat-room",
     "version": "0.0.4",
     "private": true,
-    "homepage": "https://dao-xyz.github.io/peerbit-examples",
+    "homepage": "https://github.com/dao-xyz/peerbit-examples",
     "type": "module",
     "scripts": {
         "dev": "vite",

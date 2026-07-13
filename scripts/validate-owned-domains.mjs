@@ -6,7 +6,24 @@ const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     ".."
 );
-const forbiddenHosts = ["dao" + ".xyz", "giga" + ".place"];
+const forbiddenReferences = [
+    {
+        needle: "dao" + ".xyz",
+        description: "unowned host",
+    },
+    {
+        needle: "giga" + ".place",
+        description: "unowned host",
+    },
+    {
+        needle: "." + "test" + ".xyz",
+        description: "unsafe public-DNS development suffix",
+    },
+    {
+        needle: "dao-xyz.github" + ".io/peerbit-examples",
+        description: "retired GitHub Pages URL",
+    },
+];
 const legalAttributionFiles = new Set([
     "LICENSE",
     "LICENSE-MIT",
@@ -80,9 +97,11 @@ const visit = (absolutePath) => {
         contents = JSON.stringify(manifest);
     }
     contents = contents.toLowerCase();
-    for (const host of forbiddenHosts) {
-        if (contents.includes(host)) {
-            violations.push(`${relativePath}: contains unowned host ${host}`);
+    for (const reference of forbiddenReferences) {
+        if (contents.includes(reference.needle)) {
+            violations.push(
+                `${relativePath}: contains ${reference.description} ${reference.needle}`
+            );
         }
     }
 };
@@ -91,10 +110,10 @@ visit(repoRoot);
 
 if (violations.length > 0) {
     throw new Error(
-        `Unowned domain references found:\n${violations.join("\n")}`
+        `Unsafe or retired domain references found:\n${violations.join("\n")}`
     );
 }
 
 console.log(
-    "Validated that source and generated text assets use owned domains"
+    "Validated that source and generated text assets avoid unsafe and retired project domains"
 );
