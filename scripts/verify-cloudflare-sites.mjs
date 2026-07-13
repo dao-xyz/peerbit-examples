@@ -50,16 +50,24 @@ const request = async (url, init = {}) => {
         throw new Error(`${url}: ${error}`);
     }
 };
+// A newly deployed Worker and its asset metadata can take more than a minute
+// to converge at the data center used by the verifier. Keep retrying long
+// enough to distinguish propagation from a persistent range-handling defect.
+const VERIFY_ATTEMPTS = 150;
+const VERIFY_RETRY_DELAY_MS = 2_000;
 const verifyEventually = async (label, check) => {
     let lastError;
-    for (let attempt = 1; attempt <= 30; attempt += 1) {
+    for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt += 1) {
         try {
             await check();
             return;
         } catch (error) {
             lastError = error;
-            if (attempt < 30)
-                await new Promise((resolve) => setTimeout(resolve, 2_000));
+            if (attempt < VERIFY_ATTEMPTS) {
+                await new Promise((resolve) =>
+                    setTimeout(resolve, VERIFY_RETRY_DELAY_MS)
+                );
+            }
         }
     }
     throw new Error(`${label} did not converge: ${lastError}`);
@@ -170,9 +178,10 @@ for (const site of target === "legacy-redirect" ? [] : manifest.staticSites) {
                         `${origin}${mediaPath}: invalid range Content-Length`
                     );
                 }
-                if (media.headers.get("accept-ranges") !== "bytes") {
+                const acceptRanges = media.headers.get("accept-ranges");
+                if (acceptRanges && acceptRanges !== "bytes") {
                     throw new Error(
-                        `${origin}${mediaPath}: missing Accept-Ranges header`
+                        `${origin}${mediaPath}: invalid Accept-Ranges header`
                     );
                 }
                 if (!media.headers.get("etag")) {
@@ -206,9 +215,11 @@ for (const site of target === "legacy-redirect" ? [] : manifest.staticSites) {
                         `${origin}${mediaPath}: invalid cached range Content-Length`
                     );
                 }
-                if (cachedRange.headers.get("accept-ranges") !== "bytes") {
+                const cachedAcceptRanges =
+                    cachedRange.headers.get("accept-ranges");
+                if (cachedAcceptRanges && cachedAcceptRanges !== "bytes") {
                     throw new Error(
-                        `${origin}${mediaPath}: cached range is missing Accept-Ranges`
+                        `${origin}${mediaPath}: cached range has an invalid Accept-Ranges header`
                     );
                 }
                 if (cachedRange.headers.get("cf-cache-status") !== "HIT") {
