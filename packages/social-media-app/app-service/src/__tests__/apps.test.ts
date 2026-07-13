@@ -1,5 +1,6 @@
 import { CuratedWebApp, getApps } from "../apps.js";
 import { expect } from "chai";
+import { describe, it } from "vitest";
 
 describe("index", () => {
     it("empty search yields all", async () => {
@@ -99,7 +100,25 @@ describe("index", () => {
         });
         const response = await search("che");
         expect(response).to.have.length(1);
-        expect(response[0].url).to.eq("https://chess.dao.xyz");
+        expect(response[0].url).to.eq("https://chess.peerbit.org");
+    });
+
+    it("uses configured app URLs consistently", async () => {
+        const chess = "https://chess-preview.example.invalid";
+        const { curated, search } = getApps({
+            host: "www.host.com",
+            mode: "production",
+            appUrls: { chess },
+        });
+        const chessApp = curated.find(
+            (app) => app.type === "web" && app.manifest?.title === "Chess"
+        ) as CuratedWebApp;
+
+        expect(chessApp.manifest?.url).to.eq(chess);
+        expect(chessApp.getStatus(chess, "www.host.com")).to.deep.eq({
+            isReady: true,
+        });
+        expect((await search("chess"))[0].url).to.eq(chess);
     });
 
     describe("getStatus implementations", () => {

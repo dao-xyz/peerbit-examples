@@ -1,4 +1,4 @@
-const DEFAULT_SHARE_BASE_URL = "https://files.dao.xyz";
+export const DEFAULT_SHARE_BASE_URL = "https://files.peerbit.org";
 
 const SHARE_PATH_PREFIX = "/s/";
 
@@ -41,4 +41,3 @@ export const formatShareUrl = (
     address: string,
     baseUrl = DEFAULT_SHARE_BASE_URL
 ) => `${trimTrailingSlash(baseUrl)}#${SHARE_PATH_PREFIX}${address}`;
-

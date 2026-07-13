@@ -38,6 +38,11 @@ if (outputRelative.startsWith("..") || path.isAbsolute(outputRelative)) {
 }
 
 const allEntries = [...manifest.staticSites, ...manifest.redirects];
+const ownedProductionDomains = ["peerbit.org", "peerchecker.com"];
+const isOwnedProductionDomain = (domain) =>
+    ownedProductionDomains.some(
+        (owned) => domain === owned || domain.endsWith(`.${owned}`)
+    );
 const ids = new Set();
 const workers = new Set();
 const previewWorkers = new Set();
@@ -62,8 +67,41 @@ for (const entry of allEntries) {
     workers.add(entry.worker);
     previewWorkers.add(previewWorker);
     for (const domain of entry.domains) {
+        if (!isOwnedProductionDomain(domain)) {
+            throw new Error(`Production domain is not approved: ${domain}`);
+        }
         if (domains.has(domain)) throw new Error(`Duplicate domain ${domain}`);
         domains.add(domain);
+    }
+    if ("directory" in entry && (entry.script || entry.workerFirst)) {
+        if (
+            !entry.script ||
+            !Array.isArray(entry.workerFirst) ||
+            entry.workerFirst.length === 0 ||
+            entry.workerFirst.some(
+                (pattern) =>
+                    typeof pattern !== "string" || !pattern.startsWith("/")
+            )
+        ) {
+            throw new Error(
+                `${entry.id}: workerFirst requires a script and absolute path patterns`
+            );
+        }
+    }
+}
+
+for (const redirect of manifest.redirects) {
+    const location = new URL(redirect.location);
+    if (
+        location.protocol !== "https:" ||
+        !isOwnedProductionDomain(location.hostname)
+    ) {
+        throw new Error(
+            `Redirect target is not an approved HTTPS domain: ${redirect.location}`
+        );
+    }
+    if (![301, 302, 303, 307, 308].includes(redirect.status)) {
+        throw new Error(`Unsupported redirect status: ${redirect.status}`);
     }
 }
 
@@ -101,10 +139,28 @@ const baseConfig = (entry) => ({
 for (const site of manifest.staticSites) {
     const config = {
         ...baseConfig(site),
+        ...(site.script
+            ? {
+                  main: relativeFromOutput(site.script),
+                  cache: {
+                      enabled: true,
+                      cross_version_cache: false,
+                  },
+                  vars: {
+                      RANGE_MEDIA_PATHS: JSON.stringify(site.workerFirst),
+                  },
+              }
+            : {}),
         assets: {
             directory: relativeFromOutput(site.directory),
             html_handling: "auto-trailing-slash",
             not_found_handling: "none",
+            ...(site.script
+                ? {
+                      binding: "ASSETS",
+                      run_worker_first: site.workerFirst,
+                  }
+                : {}),
         },
     };
     writeFileSync(
@@ -118,6 +174,10 @@ for (const redirect of manifest.redirects) {
     const config = {
         ...baseConfig(redirect),
         main: relativeFromOutput(redirect.script),
+        vars: {
+            CANONICAL_STREAM_URL: redirect.location,
+            REDIRECT_STATUS: String(redirect.status),
+        },
     };
     writeFileSync(
         path.join(outputDirectory, `${redirect.id}.jsonc`),

@@ -21,6 +21,11 @@ on:
                 required: true
                 type: number
                 default: 5
+            base_url:
+                description: Production file-share URL
+                required: true
+                type: string
+                default: https://files.peerbit.org
             reader_cohort:
                 description: Reader benchmark cohort
                 required: true
@@ -83,7 +88,7 @@ jobs:
                   PW_BENCH_SCENARIO: ${{ inputs.scenario }}
                   PW_READER_COHORT: ${{ inputs.reader_cohort }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
-                  PW_BASE_URL: ${{ inputs.scenario == 'prod' && 'https://files.dao.xyz' || '' }}
+                  PW_BASE_URL: ${{ inputs.scenario == 'prod' && inputs.base_url || '' }}
               working-directory: packages/file-share/frontend
               run: |
                   mkdir -p "$GITHUB_WORKSPACE/bench-results"

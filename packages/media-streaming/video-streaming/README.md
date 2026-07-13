@@ -3,7 +3,7 @@
 [<img src="./demo.gif" width="600" />](./packages/live-streaming/)
 
 
-## [Application is live here](https://stream.dao.xyz)
+## [Application is live here](https://stream.peerbit.org)
 
 
 Due to the use of WebCodecs API, this app does not yet work on Firefox ([soon?](https://groups.google.com/a/mozilla.org/g/dev-platform/c/3g0fnn6682A)), and some mobile phones.

@@ -10,7 +10,9 @@ describe("share references", () => {
 
     it("extracts addresses from frontend hash URLs", () => {
         expect(
-            parseShareReference("https://files.dao.xyz/#/s/zb2rhoExampleShare")
+            parseShareReference(
+                "https://files.example.invalid/#/s/zb2rhoExampleShare"
+            )
         ).toBe("zb2rhoExampleShare");
     });
 
@@ -22,11 +24,13 @@ describe("share references", () => {
 
     it("formats canonical share URLs", () => {
         expect(formatShareUrl("zb2rhoExampleShare")).toBe(
-            "https://files.dao.xyz#/s/zb2rhoExampleShare"
+            "https://files.peerbit.org#/s/zb2rhoExampleShare"
         );
         expect(
-            formatShareUrl("zb2rhoExampleShare", "https://files.dao.xyz/")
-        ).toBe("https://files.dao.xyz#/s/zb2rhoExampleShare");
+            formatShareUrl(
+                "zb2rhoExampleShare",
+                "https://files.example.invalid/"
+            )
+        ).toBe("https://files.example.invalid#/s/zb2rhoExampleShare");
     });
 });
-

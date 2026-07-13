@@ -2,7 +2,7 @@
     "name": "videostreaming",
     "version": "0.1.3",
     "private": true,
-    "homepage": "https://stream.dao.xyz",
+    "homepage": "https://stream.peerbit.org",
     "type": "module",
     "scripts": {
         "dev": "vite",

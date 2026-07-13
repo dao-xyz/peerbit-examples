@@ -11,7 +11,11 @@ import path from "path";
 import os from "os";
 import { multiaddr } from "@multiformats/multiaddr";
 import { createPathSource, createPathWriter } from "./io.js";
-import { formatShareUrl, parseShareReference } from "./share-ref.js";
+import {
+    DEFAULT_SHARE_BASE_URL,
+    formatShareUrl,
+    parseShareReference,
+} from "./share-ref.js";
 
 function ensureDirectoryExistence(filePath) {
     const dirname = path.dirname(filePath);
@@ -267,7 +271,9 @@ const cli = async (args?: string[]) => {
                     type: "string",
                     describe:
                         "Base URL used when printing the share link for newly created spaces.",
-                    default: "https://files.dao.xyz",
+                    default:
+                        process.env.PEERBIT_FILE_SHARE_URL?.trim() ||
+                        DEFAULT_SHARE_BASE_URL,
                 });
                 yargs.option("legacy-global", {
                     type: "boolean",

@@ -12,7 +12,11 @@ import {
 } from "./two-runner-integrity.mjs";
 
 const MODE = process.argv[2];
-const BASE_URL = (process.env.PW_BASE_URL || "https://files.dao.xyz").replace(
+const CONFIGURED_BASE_URL = process.env.PW_BASE_URL?.trim();
+if (MODE !== "self-test" && !CONFIGURED_BASE_URL) {
+    throw new Error("PW_BASE_URL is required for two-runner benchmarks");
+}
+const BASE_URL = (CONFIGURED_BASE_URL || "https://example.invalid").replace(
     /\/$/,
     ""
 );
