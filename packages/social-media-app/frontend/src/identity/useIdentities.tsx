@@ -16,11 +16,9 @@ export const IdentitiesContext = React.createContext<IIdentitiesContext>(
 export const useIdentities = () => useContext(IdentitiesContext);
 
 export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
-    // Determine the base URL based on the environment.
-    const baseUrl =
-        import.meta.env.MODE === "development"
-            ? "http://localhost:5173/#/connect?data="
-            : "https://giga.place/#/connect?data=";
+    // Device-connection payloads stay on the origin that created them. This is
+    // both preview-safe and avoids disclosing the fragment to another host.
+    const baseUrl = `${window.location.origin}/#/connect?data=`;
 
     const peerContext = usePeer();
     const { peer, persisted } = peerContext;

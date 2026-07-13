@@ -15,16 +15,23 @@ import {
 } from "@peerbit/document";
 import { AppPreview } from "./remote.js";
 
-// External app URLs based on mode.
-const STREAMING_APP = (mode?: string) =>
-    ["development", "staging"].includes(mode ?? "")
-        ? "https://stream.test.xyz:5801"
-        : "https://stream.dao.xyz";
+export interface CuratedAppUrls {
+    streaming?: string;
+    chess?: string;
+}
 
-const CHESS_APP = (mode?: string) =>
-    ["development", "staging"].includes(mode ?? "")
+// External app URLs based on mode.
+const STREAMING_APP = (mode?: string, appUrls?: CuratedAppUrls) =>
+    appUrls?.streaming?.trim() ||
+    (["development", "staging"].includes(mode ?? "")
+        ? "https://stream.test.xyz:5801"
+        : "https://stream.peerbit.org");
+
+const CHESS_APP = (mode?: string, appUrls?: CuratedAppUrls) =>
+    appUrls?.chess?.trim() ||
+    (["development", "staging"].includes(mode ?? "")
         ? "https://chess.test.xyz:5806"
-        : "https://chess.dao.xyz";
+        : "https://chess.peerbit.org");
 
 // ─────────────────────────────────────────────────────────────
 // Define a common interface for curated apps.
@@ -94,9 +101,10 @@ export const nativeApps: CuratedAppNative[] = [
 
 // ─────────────────────────────────────────────────────────────
 // Web (iframeable) apps – using transformer functions.
-export const curatedWebApps: (mode?: string) => CuratedWebApp[] = (
-    mode?: string
-) => [
+export const curatedWebApps: (
+    mode?: string,
+    appUrls?: CuratedAppUrls
+) => CuratedWebApp[] = (mode?: string, appUrls?: CuratedAppUrls) => [
     // Twitch – already has a getStatus implementation.
     {
         type: "web",
@@ -304,12 +312,12 @@ export const curatedWebApps: (mode?: string) => CuratedWebApp[] = (
         type: "web",
         match: ["video", "stream", "live-stream", "livestream"],
         manifest: new SimpleWebManifest({
-            url: STREAMING_APP(mode),
+            url: STREAMING_APP(mode, appUrls),
             title: "Video",
             icon: "/apps/video.svg",
         }),
         getStatus(url, host) {
-            const expectedUrl = STREAMING_APP(mode);
+            const expectedUrl = STREAMING_APP(mode, appUrls);
             if (url === expectedUrl) {
                 return { isReady: true };
             } else {
@@ -325,12 +333,12 @@ export const curatedWebApps: (mode?: string) => CuratedWebApp[] = (
         type: "web",
         match: ["chess"],
         manifest: new SimpleWebManifest({
-            url: CHESS_APP(mode),
+            url: CHESS_APP(mode, appUrls),
             title: "Chess",
             icon: "/apps/chess.svg",
         }),
         getStatus(url, host) {
-            const expectedUrl = CHESS_APP(mode);
+            const expectedUrl = CHESS_APP(mode, appUrls);
             if (url === expectedUrl) {
                 return { isReady: true };
             } else {
@@ -345,10 +353,11 @@ export const curatedWebApps: (mode?: string) => CuratedWebApp[] = (
 // ─────────────────────────────────────────────────────────────
 // Merge native and web apps.
 const allCuratedApps = (
-    mode?: string
+    mode?: string,
+    appUrls?: CuratedAppUrls
 ): (CuratedAppNative | CuratedWebApp)[] => [
     ...nativeApps,
-    ...curatedWebApps(mode),
+    ...curatedWebApps(mode, appUrls),
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -359,13 +368,14 @@ const getCurated = (properties: {
     maybeUrl?: string;
     host: string;
     mode: string;
+    appUrls?: CuratedAppUrls;
 }): CuratedAppNative | CuratedWebApp | undefined => {
     const lowerQuery = properties.rawInput.trim().toLowerCase();
     if (lowerQuery.length < 2) {
         // TODO do this better so we dont match https:// or www.
         return undefined;
     }
-    return allCuratedApps(properties.mode).find((app) => {
+    return allCuratedApps(properties.mode, properties.appUrls).find((app) => {
         const matches = Array.isArray(app.match) ? app.match : [app.match];
         return matches.some((m) => {
             const lowerM = m.toLowerCase();
@@ -386,11 +396,12 @@ export const getApps = (properties: {
     appService?: AppPreview;
     history?: BrowsingHistory;
     mode?: "development" | "staging" | "production";
+    appUrls?: CuratedAppUrls;
 }): {
     curated: CuratedAppCommon[];
     search: (appOrUrl: string) => Promise<SimpleWebManifest[]>;
 } => {
-    const curated = allCuratedApps(properties.mode);
+    const curated = allCuratedApps(properties.mode, properties.appUrls);
     const search = async (urlOrName: string | undefined) => {
         const result: Map<string, SimpleWebManifest> = new Map();
 
@@ -419,6 +430,7 @@ export const getApps = (properties: {
                 maybeUrl: providedUrl,
                 host: properties.host,
                 mode: properties.mode || "production",
+                appUrls: properties.appUrls,
             });
             if (curatedApp) {
                 if (curatedApp.type === "web") {

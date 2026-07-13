@@ -4,7 +4,7 @@ import { getPeerDialAddresses, withSharePeerHints } from "../src/share-url";
 describe("share URL peer hints", () => {
     it("adds normalized peer addresses before the hash route", () => {
         const href = withSharePeerHints(
-            "https://files.dao.xyz/#/s/space-address",
+            "https://files.example.invalid/#/s/space-address",
             [
                 "/dns4/bootstrap/tcp/4003/wss/p2p/a",
                 " /dns4/bootstrap/tcp/4003/wss/p2p/a ",
@@ -21,7 +21,7 @@ describe("share URL peer hints", () => {
 
     it("does not replace explicit bootstrap URLs", () => {
         const href =
-            "https://files.dao.xyz/?bootstrap=/dns4/local#/s/space-address";
+            "https://files.example.invalid/?bootstrap=/dns4/local#/s/space-address";
 
         expect(
             withSharePeerHints(href, ["/dns4/bootstrap/tcp/4003/wss/p2p/a"], {

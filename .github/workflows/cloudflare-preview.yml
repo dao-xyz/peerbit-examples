@@ -37,7 +37,9 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Validate production bootstrap sources
-              run: node scripts/validate-production-bootstrap.mjs
+              run: |
+                  node scripts/validate-production-bootstrap.mjs
+                  node --test cloudflare/*.test.mjs
 
             - name: Build every frontend
               env:
@@ -51,7 +53,9 @@ jobs:
             - name: Prepare and validate Cloudflare assets
               env:
                   COMMIT_HASH: ${{ github.sha }}
-              run: node scripts/prepare-cloudflare-assets.mjs
+              run: |
+                  node scripts/prepare-cloudflare-assets.mjs
+                  node scripts/validate-owned-domains.mjs
 
             - name: Ensure the build did not mutate source
               run: git diff --exit-code
@@ -106,6 +110,7 @@ jobs:
                   git diff --exit-code
                   npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
                   node scripts/render-cloudflare-configs.mjs --mode preview
+                  node scripts/validate-owned-domains.mjs
 
             - name: Deploy isolated Cloudflare previews
               env:

@@ -29,6 +29,10 @@ interface IApps {
 const allApps = getApps({
     host: window.location.host,
     mode: import.meta.env.MODE as any,
+    appUrls: {
+        streaming: import.meta.env.VITE_STREAMING_APP_URL,
+        chess: import.meta.env.VITE_CHESS_APP_URL,
+    },
 });
 
 export const resolveTrigger = (

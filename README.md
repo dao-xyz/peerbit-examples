@@ -87,21 +87,26 @@ For more complete instructions on how to run a node in a server center that can 
 
 ## Cloudflare hosting
 
-The public frontends are being migrated from S3/CloudFront to asset-only
-Cloudflare Workers. `cloudflare/sites.json` is the source of truth for build
-directories, Worker names, expected titles, and production hostnames.
+The public frontends are hosted with Cloudflare Workers Static Assets, with a
+selective cache Worker in front of the large MP4 fixtures that need byte-range
+support.
+`cloudflare/sites.json` is the source of truth for build directories, Worker
+names, expected titles, and production hostnames under Peerbit-owned domains.
 
 Before a DNS cutover, the Cloudflare workflow deploys isolated `workers.dev`
 previews and verifies their release metadata, cache behavior, headers, 404s,
 legacy stream redirect, browser/WASM startup, real relay connectivity,
-file-share boot, and exact MP4 byte ranges. The current AWS distributions
-remain available as rollback origins until every production hostname has
-passed the same checks.
+file-share boot, and exact MP4 byte ranges. Worker versions and the isolated
+previews are the rollback path; legacy AWS resources are retirement-only and
+must not receive new deployments.
 
 Preview deployments use a Workers-Scripts-only token stored as
 `CLOUDFLARE_PREVIEW_API_TOKEN` in the `cloudflare-preview` GitHub environment.
-Production cutover must use a separate, route-capable credential so preview
-automation can never change a production route.
+Cloudflare includes custom-domain management in that permission, so the GitHub
+environment is restricted to `master`, administrator bypass is disabled, and
+`master` requires a pull request plus the `validate` check. Preview configs
+never render production routes. Production cutover must use a separate reviewed
+environment and credential.
 
 Local validation uses the locked Wrangler toolchain:
 
@@ -117,7 +122,7 @@ for config in .wrangler-config/*.jsonc; do
 done
 ```
 
-Production configs are rendered with `--mode production`. Do not deploy them
-until `dao.xyz` and `giga.place` are active Cloudflare zones with a complete
-Route53 record inventory imported. After cutover, verify all hostnames before
-removing AWS credentials or deleting Route53, CloudFront, or S3 resources.
+Production configs are rendered with `--mode production` and are restricted to
+`peerbit.org` and `peerchecker.com`. Use the separately reviewed production
+environment, verify every hostname, and retain a known-good Worker version
+before deleting any retirement-only AWS resources.

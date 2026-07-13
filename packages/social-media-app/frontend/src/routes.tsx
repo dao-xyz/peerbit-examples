@@ -156,25 +156,3 @@ export function BaseRoutes(props?: { enableEffects?: boolean }) {
         </>
     );
 }
-
-/* ────────────────────────────────────────────────────────────────
- * External app constants
- * ──────────────────────────────────────────────────────────────── */
-
-export const STREAMING_APP = ["development", "staging"].includes(
-    import.meta.env.MODE
-)
-    ? "https://stream.test.xyz:5801/#"
-    : "https://stream.dao.xyz/#";
-
-export const CHAT_APP = ["development", "staging"].includes(
-    import.meta.env.MODE
-)
-    ? "https://chat.test.xyz:5802/#"
-    : "https://chat.dao.xyz/#";
-
-export const TEXT_APP = ["development", "staging"].includes(
-    import.meta.env.MODE
-)
-    ? "https://text.test.xyz:5803/#"
-    : "https://text.dao.xyz/#";

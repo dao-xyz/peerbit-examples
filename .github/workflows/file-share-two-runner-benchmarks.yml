@@ -12,7 +12,7 @@ on:
                 description: Target file-share deployment
                 required: true
                 type: string
-                default: https://files.dao.xyz
+                default: https://files.peerbit.org
             reader_role:
                 description: Reader replication role
                 required: true

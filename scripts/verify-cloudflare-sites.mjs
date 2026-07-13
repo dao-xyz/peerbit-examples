@@ -16,7 +16,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
     const value = process.argv[index + 1];
     if (!key?.startsWith("--") || value == null) {
         throw new Error(
-            "Usage: verify-cloudflare-sites.mjs --mode preview|production [--subdomain NAME] [--commit SHA]"
+            "Usage: verify-cloudflare-sites.mjs --mode preview|production [--subdomain NAME] [--commit SHA] [--target apps|legacy-redirect|all]"
         );
     }
     args.set(key.slice(2), value);
@@ -32,6 +32,10 @@ if (mode === "preview" && !/^[a-z0-9-]+$/i.test(subdomain || "")) {
 const expectedCommit = args.get("commit");
 if (expectedCommit && !/^[0-9a-f]{40}$/i.test(expectedCommit)) {
     throw new Error("--commit must be a full Git commit hash");
+}
+const target = args.get("target") || "all";
+if (!["apps", "legacy-redirect", "all"].includes(target)) {
+    throw new Error("--target must be apps, legacy-redirect, or all");
 }
 
 const request = async (url, init = {}) => {
@@ -65,7 +69,7 @@ const originsFor = (entry) =>
         ? [`https://${entry.worker}-preview.${subdomain}.workers.dev`]
         : entry.domains.map((domain) => `https://${domain}`);
 
-for (const site of manifest.staticSites) {
+for (const site of target === "legacy-redirect" ? [] : manifest.staticSites) {
     for (const origin of originsFor(site)) {
         await verifyEventually(origin, async () => {
             const root = await request(`${origin}/`);
@@ -141,27 +145,94 @@ for (const site of manifest.staticSites) {
             if (hiddenHeaders.status !== 404)
                 throw new Error(`${origin}: _headers is publicly served`);
 
-            if (site.id === "stream") {
-                const media = await request(`${origin}/bird.mp4`, {
+            for (const mediaPath of site.workerFirst || []) {
+                const fixture = readFileSync(
+                    path.join(repoRoot, site.directory, mediaPath)
+                );
+                const media = await request(`${origin}${mediaPath}`, {
                     headers: { Range: "bytes=0-1023" },
                 });
                 if (media.status !== 206) {
                     throw new Error(
-                        `${origin}/bird.mp4: range request returned ${media.status}`
+                        `${origin}${mediaPath}: range request returned ${media.status}`
+                    );
+                }
+                const expectedContentRange = `bytes 0-1023/${fixture.length}`;
+                if (
+                    media.headers.get("content-range") !== expectedContentRange
+                ) {
+                    throw new Error(
+                        `${origin}${mediaPath}: invalid Content-Range header`
+                    );
+                }
+                if (media.headers.get("content-length") !== "1024") {
+                    throw new Error(
+                        `${origin}${mediaPath}: invalid range Content-Length`
+                    );
+                }
+                if (media.headers.get("accept-ranges") !== "bytes") {
+                    throw new Error(
+                        `${origin}${mediaPath}: missing Accept-Ranges header`
+                    );
+                }
+                if (!media.headers.get("etag")) {
+                    throw new Error(`${origin}${mediaPath}: missing ETag`);
+                }
+                const rangeBody = Buffer.from(await media.arrayBuffer());
+                if (!rangeBody.equals(fixture.subarray(0, 1024))) {
+                    throw new Error(
+                        `${origin}${mediaPath}: range body differs from source`
+                    );
+                }
+
+                const cachedRange = await request(`${origin}${mediaPath}`, {
+                    headers: { Range: "bytes=1024-2047" },
+                });
+                if (cachedRange.status !== 206) {
+                    throw new Error(
+                        `${origin}${mediaPath}: second range returned ${cachedRange.status}`
                     );
                 }
                 if (
-                    !/^bytes 0-1023\/\d+$/.test(
-                        media.headers.get("content-range") || ""
-                    )
+                    cachedRange.headers.get("content-range") !==
+                    `bytes 1024-2047/${fixture.length}`
                 ) {
                     throw new Error(
-                        `${origin}/bird.mp4: invalid Content-Range header`
+                        `${origin}${mediaPath}: invalid cached Content-Range header`
                     );
                 }
-                if ((await media.arrayBuffer()).byteLength !== 1024) {
+                if (cachedRange.headers.get("content-length") !== "1024") {
                     throw new Error(
-                        `${origin}/bird.mp4: range body has the wrong size`
+                        `${origin}${mediaPath}: invalid cached range Content-Length`
+                    );
+                }
+                if (cachedRange.headers.get("accept-ranges") !== "bytes") {
+                    throw new Error(
+                        `${origin}${mediaPath}: cached range is missing Accept-Ranges`
+                    );
+                }
+                if (cachedRange.headers.get("cf-cache-status") !== "HIT") {
+                    throw new Error(
+                        `${origin}${mediaPath}: second range was not a cache hit`
+                    );
+                }
+                const cachedBody = Buffer.from(await cachedRange.arrayBuffer());
+                if (!cachedBody.equals(fixture.subarray(1024, 2048))) {
+                    throw new Error(
+                        `${origin}${mediaPath}: cached range differs from source`
+                    );
+                }
+
+                const unsatisfiable = await request(`${origin}${mediaPath}`, {
+                    headers: { Range: `bytes=${fixture.length}-` },
+                });
+                if (
+                    unsatisfiable.status !== 416 ||
+                    unsatisfiable.headers.get("content-range") !==
+                        `bytes */${fixture.length}`
+                ) {
+                    throw new Error(
+                        `${origin}${mediaPath}: invalid unsatisfiable range response`
                     );
                 }
             }
@@ -171,7 +242,7 @@ for (const site of manifest.staticSites) {
     }
 }
 
-for (const redirect of manifest.redirects) {
+for (const redirect of target === "apps" ? [] : manifest.redirects) {
     for (const origin of originsFor(redirect)) {
         await verifyEventually(origin, async () => {
             const response = await request(`${origin}/retired/path?ignored=1`, {
