@@ -17,10 +17,11 @@ import {
 import {
     productionWorkerConfig,
     productionSmokeEnvironment,
-    readAndValidateProductionAttachments,
+    readAndValidateZoneRouteInventory,
     readSingleVersionDeployment,
     readWorkerDomainInventory,
     readWorkerScriptMap,
+    requireExpectedAccountZoneInventorySha256,
     runWranglerVersionUpload,
     withoutCloudflareDeploymentCredentials,
 } from "./deploy-cloudflare-production.mjs";
@@ -228,6 +229,7 @@ const validateProvisioningAttachmentInventory = ({
     entries,
     scripts,
     domains,
+    zoneRouteInventory,
 }) => {
     const expectedByHostname = new Map();
     const expectedProductionWorkers = new Set();
@@ -244,6 +246,9 @@ const validateProvisioningAttachmentInventory = ({
         ...expectedProductionWorkers,
         ...expectedPreviewWorkers,
     ]);
+    const zonesById = new Map(
+        zoneRouteInventory.map((zone) => [zone.zoneId, zone])
+    );
 
     for (const [workerName, metadata] of scripts) {
         const inManagedNamespace = workerName.startsWith(
@@ -257,19 +262,6 @@ const validateProvisioningAttachmentInventory = ({
             }
             throw new Error(
                 `Cloudflare has an unreviewed Worker identity ${workerName} inside the managed namespace`
-            );
-        }
-        const managedRoutes = metadata.routes.filter(({ pattern }) =>
-            routeTargetsManagedAppHostname(pattern)
-        );
-        if (
-            metadata.routes.length > 0 &&
-            (inManagedNamespace ||
-                policyWorkers.has(workerName) ||
-                managedRoutes.length > 0)
-        ) {
-            throw new Error(
-                `${workerName} has unreviewed traditional Worker route attachments`
             );
         }
         if (
@@ -290,7 +282,26 @@ const validateProvisioningAttachmentInventory = ({
         }
     }
 
+    for (const zone of zoneRouteInventory) {
+        for (const route of zone.routes) {
+            if (
+                routeTargetsManagedAppHostname(route.pattern) ||
+                (route.script !== null && policyWorkers.has(route.script))
+            ) {
+                throw new Error(
+                    `${route.script ?? "scriptless route"} has an unreviewed traditional Worker route attachment in ${zone.zoneName}`
+                );
+            }
+        }
+    }
+
     for (const domain of domains) {
+        const domainZone = zonesById.get(domain.zoneId);
+        if (!domainZone || domainZone.zoneName !== domain.zoneName) {
+            throw new Error(
+                `Cloudflare custom domain ${domain.hostname} references a zone outside the authoritative account inventory`
+            );
+        }
         const expectedWorker = expectedByHostname.get(domain.hostname);
         const managedHostname = managedAppHostname(domain.hostname);
         const policyWorker = policyWorkers.has(domain.service);
@@ -890,6 +901,7 @@ export const inspectProductionProvisioning = async ({
     configs,
     artifacts,
     expectedCommit,
+    expectedZoneInventorySha256,
     operations,
     invocationNonce,
     invocationCandidates = new Map(),
@@ -898,6 +910,9 @@ export const inspectProductionProvisioning = async ({
     if (!FULL_GIT_COMMIT.test(expectedCommit || "")) {
         throw new Error("Provisioning requires a full Git commit hash");
     }
+    const expectedZoneFingerprint = requireExpectedAccountZoneInventorySha256(
+        expectedZoneInventorySha256
+    );
     if (!(configs instanceof Map) || configs.size !== entries.length) {
         throw new Error(
             "Provisioning requires every rendered production config"
@@ -934,6 +949,7 @@ export const inspectProductionProvisioning = async ({
             policy,
             artifact,
             artifactManifestDigest: artifact.digest,
+            expectedZoneInventorySha256: expectedZoneFingerprint,
             ...productionWorkerConfig({ site, policy, configs }),
         };
         validateRenderedCloudflareConfig({
@@ -946,9 +962,21 @@ export const inspectProductionProvisioning = async ({
         }
         return plan;
     });
-    const scripts = await readWorkerScriptMap(operations);
+    const scripts = await readWorkerScriptMap(operations, {
+        allowMissingInlineRoutes: true,
+    });
+    const zoneRouteInventory = await readAndValidateZoneRouteInventory({
+        scripts,
+        operations,
+        expectedZoneInventorySha256: expectedZoneFingerprint,
+    });
     const domains = await readWorkerDomainInventory(operations);
-    validateProvisioningAttachmentInventory({ entries, scripts, domains });
+    validateProvisioningAttachmentInventory({
+        entries,
+        scripts,
+        domains,
+        zoneRouteInventory,
+    });
     const activeServiceAttachments = await readActiveServiceAttachmentInventory(
         {
             entries,
@@ -1186,6 +1214,8 @@ export const inspectProductionProvisioning = async ({
         plans,
         previewPlans,
         scripts,
+        expectedZoneInventorySha256: expectedZoneFingerprint,
+        zoneRouteInventory,
         domains,
         activeServiceAttachments,
         queueConsumerInventory,
@@ -1198,6 +1228,7 @@ export const productionProvisioningStateDigest = ({
     inspection,
     expectedCommit,
     accountId,
+    expectedZoneInventorySha256,
 }) => {
     if (!FULL_GIT_COMMIT.test(expectedCommit || "")) {
         throw new Error("Provisioning state digest requires a full Git commit");
@@ -1207,23 +1238,31 @@ export const productionProvisioningStateDigest = ({
             "Provisioning state digest requires an exact Cloudflare account ID"
         );
     }
+    const expectedZoneFingerprint = requireExpectedAccountZoneInventorySha256(
+        expectedZoneInventorySha256
+    );
     const state = {
-        schema: 2,
+        schema: 4,
         expectedCommit: expectedCommit.toLowerCase(),
         accountId: accountId.toLowerCase(),
+        expectedZoneInventorySha256: expectedZoneFingerprint,
         scripts: [...inspection.scripts]
             .map(([workerName, metadata]) => ({
                 workerName,
                 workerTag: nullable(metadata.tag),
-                routes: [...metadata.routes].sort((left, right) =>
-                    left.id.localeCompare(right.id)
-                ),
+                inlineRoutes:
+                    metadata.routes === null
+                        ? null
+                        : [...metadata.routes].sort((left, right) =>
+                              left.id.localeCompare(right.id)
+                          ),
                 tailConsumers: metadata.tailConsumers ?? [],
                 logpush: metadata.logpush ?? false,
             }))
             .sort((left, right) =>
                 left.workerName.localeCompare(right.workerName)
             ),
+        zoneRouteInventory: inspection.zoneRouteInventory,
         domains: [...inspection.domains].sort((left, right) =>
             left.id.localeCompare(right.id)
         ),
@@ -1424,6 +1463,19 @@ const assertSameQueueConsumerInventory = (before, after, phase) => {
     }
 };
 
+const assertSameZoneRouteInventory = (before, after, phase) => {
+    if (
+        after.expectedZoneInventorySha256 !==
+            before.expectedZoneInventorySha256 ||
+        JSON.stringify(after.zoneRouteInventory) !==
+            JSON.stringify(before.zoneRouteInventory)
+    ) {
+        throw new Error(
+            `Cloudflare authoritative account zone or Worker route inventory changed ${phase}`
+        );
+    }
+};
+
 const productionLedgerState = (plan) => ({
     siteId: plan.site.id,
     workerName: plan.workerName,
@@ -1434,6 +1486,7 @@ const productionLedgerState = (plan) => ({
     versionId: plan.versionId,
     versionFingerprint: plan.versionFingerprint,
     artifactManifestDigest: plan.artifactManifestDigest,
+    expectedZoneInventorySha256: plan.expectedZoneInventorySha256,
     active: plan.active,
     domainAttached: plan.domainAttached,
 });
@@ -1480,6 +1533,7 @@ const assertProductionLedger = (
             "versionId",
             "versionFingerprint",
             "artifactManifestDigest",
+            "expectedZoneInventorySha256",
             "active",
             "domainAttached",
         ]) {
@@ -1571,16 +1625,11 @@ const finalVerify = async ({
     expectedCommit,
     operations,
     invocationCandidates,
+    readFencedInspection,
 }) => {
-    const attachmentPlans = entries.map(({ site, policy }) => ({
-        site,
-        policy,
-        ...productionWorkerConfig({ site, policy, configs }),
-    }));
-    const initialScripts = await readAndValidateProductionAttachments({
-        plans: attachmentPlans,
-        operations,
-    });
+    const initialScripts = (
+        await readFencedInspection("at the start of final live verification")
+    ).scripts;
     const identities = new Map();
     const versions = new Map();
     for (const { site, policy } of entries) {
@@ -1659,10 +1708,8 @@ const finalVerify = async ({
         }
     }
 
-    const finalScripts = await readAndValidateProductionAttachments({
-        plans: attachmentPlans,
-        operations,
-    });
+    const finalScripts = (await readFencedInspection("after provisioning"))
+        .scripts;
     for (const { site, policy } of entries) {
         if (
             finalScripts.get(policy.productionWorker)?.tag !==
@@ -1726,6 +1773,7 @@ export const provisionProductionEntries = async ({
     configs,
     artifacts,
     expectedCommit,
+    expectedZoneInventorySha256,
     accountId,
     mode,
     plannedStateDigest,
@@ -1740,6 +1788,9 @@ export const provisionProductionEntries = async ({
             "Provisioning requires the exact Cloudflare account identity"
         );
     }
+    const pinnedZoneInventorySha256 = requireExpectedAccountZoneInventorySha256(
+        expectedZoneInventorySha256
+    );
     const invocationNonce =
         mode === "apply" ? randomBytes(16).toString("hex") : undefined;
     const invocationCandidates = new Map();
@@ -1748,6 +1799,7 @@ export const provisionProductionEntries = async ({
         configs,
         artifacts,
         expectedCommit,
+        expectedZoneInventorySha256: pinnedZoneInventorySha256,
         operations,
         invocationNonce,
         invocationCandidates,
@@ -1757,6 +1809,7 @@ export const provisionProductionEntries = async ({
         inspection: initial,
         expectedCommit,
         accountId,
+        expectedZoneInventorySha256: pinnedZoneInventorySha256,
     });
     if (mode === "apply" && plannedStateDigest == null) {
         throw new Error(
@@ -1806,6 +1859,7 @@ export const provisionProductionEntries = async ({
         });
         assertSamePreviewInventory(initial, inspection, phase);
         assertSameQueueConsumerInventory(initial, inspection, phase);
+        assertSameZoneRouteInventory(initial, inspection, phase);
         if (requirePublicFence) {
             assertAllManagedPublicUrlsDisabled(inspection, phase, {
                 allowProductionWorker,
@@ -2234,6 +2288,7 @@ export const provisionProductionEntries = async ({
         expectedCommit,
         operations,
         invocationCandidates,
+        readFencedInspection,
     });
     const finalInspection = await readFencedInspection(
         "after final live verification"
@@ -2423,6 +2478,7 @@ export const main = async (argv = process.argv.slice(2)) => {
     const runtimeSmokeEnvironment = productionSmokeEnvironment(entries);
     const operations = {
         listWorkerScripts: workersApi.listWorkerScripts,
+        listZoneRouteInventory: workersApi.listZoneRouteInventory,
         listWorkerDomains: workersApi.listWorkerDomains,
         getWorkerSubdomain: workersApi.getWorkerSubdomain,
         listWorkerSchedules: workersApi.listWorkerSchedules,
@@ -2467,6 +2523,8 @@ export const main = async (argv = process.argv.slice(2)) => {
         artifacts,
         expectedCommit,
         accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+        expectedZoneInventorySha256:
+            process.env.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256,
         mode,
         ...(mode === "apply" ? { plannedStateDigest } : {}),
         operations,

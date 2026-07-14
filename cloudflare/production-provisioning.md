@@ -18,6 +18,8 @@ These are the relevant official references:
 - [Versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/)
 - [`wrangler versions upload`](https://developers.cloudflare.com/workers/wrangler/commands/workers/#versions-upload)
 - [Worker scripts API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/)
+- [Zones list API](https://developers.cloudflare.com/api/resources/zones/methods/list/)
+- [Authoritative Worker routes API](https://developers.cloudflare.com/api/resources/workers/subresources/routes/methods/list/)
 - [Worker subdomain API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/)
 - [Worker deployments API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/deployments/)
 - [Worker versions API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/versions/)
@@ -38,8 +40,21 @@ These are the relevant official references:
    the narrowly required Workers Scripts read/write access, including version,
    deployment, subdomain, domain, Cron Trigger schedule, and active script
    content reads, plus **Queue Read** for the separate account-wide Queue
-   consumer inventory. Its existing `CLOUDFLARE_ACCOUNT_ID` variable must
-   identify the reviewed account.
+   consumer inventory. It must also have **Zone Read** and **Workers Routes
+   Read** for **every zone in the account**, not merely `peerbit.org`: the
+   safety fence enumerates the complete account and reads each zone's
+   authoritative traditional-Worker routes. Its existing
+   `CLOUDFLARE_ACCOUNT_ID` variable must identify the reviewed account.
+   The protected environment must also define the exact lowercase 64-hex
+   `CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256` variable. Establish it from an
+   independently verified full dashboard/admin zone inventory, never from the
+   deployment token's permission-filtered `/zones` response. Canonical input is
+   UTF-8 JSON with no trailing newline: an array of exactly
+   `{"zoneId":"<lowercase-id>","zoneName":"<lowercase-name>"}` identities,
+   sorted first by `zoneId` and then by `zoneName` using ascending code-point
+   order. Hash that byte sequence with SHA-256. If the full inventory has not
+   yet been independently established, leave production workflows blocked
+   until this variable is reviewed and set.
 3. Confirm that the `peerbit.org` zone is active in that account. Cloudflare
    cannot attach a Custom Domain over a conflicting CNAME, so resolve any such
    conflict manually before applying.
@@ -67,11 +82,27 @@ For example, for planned commit
 
 The protected environment supplies credentials only to the final read-only
 step. The plan reads the complete Worker and stable custom-domain inventories,
-the live public-subdomain state, deployments, every deployable version ID,
-immutable Worker tags, routes, Tail consumers, Logpush state, Cron schedules,
-active service-binding targets, and every Queue plus its separate consumer
-attachments. The Queue list is paginated and every complete account snapshot
-must be observed twice without change. The digest also binds the exact
+then strictly paginates every zone belonging to the exact account and reads
+the authoritative traditional-Worker routes from every zone. Two complete
+zone-plus-route snapshots must match exactly. The zone query explicitly asks
+for `full`, `partial`, `secondary`, and `internal` zones because Cloudflare's
+default omits internal zones. The Worker-list API's optional
+inline `routes` field is never treated as proof of an empty route set; when it
+is present it must exactly match the authoritative per-zone result. The plan
+hashes the observed canonical zone identities and requires the independently
+configured protected fingerprint to match. This closes the case where every
+API response is HTTP 200 but the token silently sees only a subset of the
+account's zones. Missing, malformed, or mismatched fingerprints fail before
+mutation and are never printed. The expected fingerprint is bound into the
+plan state digest, reviewed receipt, and apply-time invocation ledger; every
+inspection fence recomputes and rechecks it. Zone status, type, and complete
+route inventories remain separately bound as dynamic state in that digest.
+The plan also reads the live public-subdomain state, deployments, every
+deployable version ID, immutable Worker tags, Tail consumers, Logpush state,
+Cron schedules, active service-binding targets, and every Queue plus its
+separate consumer attachments. The Queue list is paginated and every complete
+account snapshot must be observed twice without change. The digest also binds
+the exact
 Cloudflare account ID so an account-variable change cannot reuse a receipt. It
 prints the full planned commit, reviewed
 Worker names, public custom domains, proposed actions, and a canonical
@@ -100,13 +131,16 @@ has no action and is never created. Any unknown `peerbit-examples-*` Worker,
 traditional route, wrong domain owner, split deployment, Tail consumer,
 Logpush attachment, Cron Trigger, queue/service attachment on a managed Worker,
 inbound service binding, Queue consumer attachment targeting any managed
-production or preview Worker, or malformed response blocks the run. Old
+production or preview Worker, a route that references an unknown Worker, any
+inaccessible/incomplete/unstable account zone or route inventory, or malformed
+response blocks the run. Old
 inactive versions are listed as quarantined state: their annotations are never
 accepted as proof that this invocation uploaded them. The inspection records
 every production Worker's existence, immutable Worker tag, active and
 deployable version IDs, subdomain flags, schedules, domain state,
-artifact-manifest digest, and the canonical account Queue-consumer inventory in
-the signed plan receipt and apply-time invocation ledger.
+artifact-manifest digest, the complete canonical account zone-and-route
+inventory, and the canonical account Queue-consumer inventory in the signed
+plan receipt and apply-time invocation ledger.
 
 ## Confirmed apply
 
@@ -131,7 +165,7 @@ apply confirmation to both. The provisioning CLI independently repeats those
 checks and recomputes the canonical account-state digest before dispatching any
 mutation. Any Worker tag, active/deployable version, route, domain, public flag,
 schedule, Tail/Logpush setting, or exposed service-binding drift forces a new
-reviewed plan. Artifact-manifest or Queue-consumer drift does the same. A
+reviewed plan. Artifact-manifest, zone/route, or Queue-consumer drift does the same. A
 mismatch exits nonzero; it is not treated as a skipped deploy.
 
 The workflow rebuilds all seven frontends and assets from the checked-out
@@ -151,10 +185,11 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    responses continue only if that exact GET postcondition is observed.
 3. Rechecks the complete ledger, exact preview identities, zero Cron schedules,
    zero Tail/Logpush attachments, active service-binding inventory, the exact
-   account-wide Queue-consumer inventory, and global false/false public-URL
-   fence before every upload, activation, and domain attachment and after every
-   mutation. A change to an earlier or unrelated site or Queue stops the
-   invocation; it is never accepted as a new baseline.
+   account-wide Queue-consumer inventory, complete authoritative account
+   zone-and-route inventory, and global false/false public-URL fence before
+   every upload, activation, and domain attachment and after every mutation.
+   An added/deleted zone, route drift, or a change to an earlier or unrelated
+   site or Queue stops the invocation; it is never accepted as a new baseline.
 4. Revalidates every artifact manifest immediately before upload, uploads its
    exact prebuilt module with bundling disabled, and uploads one new route-free
    version for every site on every apply. Its tag
@@ -186,7 +221,8 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    policy, verifies the exact served artifact manifest and exhaustively hashes
    every public live asset (including `release.json`) against it, runs the same
    file-share relay and media-range browser smokes, then
-   rereads exact Worker identity, version resource fingerprint, domain, route,
+   rereads exact Worker identity, version resource fingerprint, domain,
+   authoritative account zones/routes,
    schedule, Tail/Logpush, service-binding, Queue-consumer, active-module, and
    subdomain state, including every existing allowlisted preview Worker.
 

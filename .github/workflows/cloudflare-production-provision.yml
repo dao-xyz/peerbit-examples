@@ -252,9 +252,15 @@ jobs:
                   install --with-deps chromium
 
             - name: Plan or provision exact production baseline
+              # The protected token must cover Zone Read and Workers Routes
+              # Read across every account zone, in addition to the narrowly
+              # documented account-level Workers and Queue permissions.
+              # The protected zone fingerprint must be derived independently;
+              # never derive it with this possibly permission-filtered token.
               env:
                   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_API_TOKEN }}
                   CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+                  CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: ${{ vars.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 }}
                   PROVISION_MODE: ${{ inputs.mode }}
                   PROVISION_CONFIRM: ${{ inputs.confirm }}
                   PROVISION_PLANNED_COMMIT: ${{ inputs.planned_commit }}

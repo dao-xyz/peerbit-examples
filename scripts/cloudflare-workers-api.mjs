@@ -10,11 +10,17 @@ const CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
 const CUSTOM_DOMAIN_PAGE_SIZE = 100;
 const MAX_CUSTOM_DOMAIN_PAGES = 1_000;
 const MAX_CUSTOM_DOMAIN_SNAPSHOT_ATTEMPTS = 3;
+const ZONE_PAGE_SIZE = 50;
+const MAX_ZONE_PAGES = 1_000;
+const REQUIRED_ZONE_ROUTE_SNAPSHOTS = 2;
+const MAX_ROUTES_PER_ZONE = 100_000;
 const QUEUE_PAGE_SIZE = 100;
 const MAX_QUEUE_PAGES = 1_000;
 const MAX_QUEUE_SNAPSHOT_ATTEMPTS = 3;
 const CLOUDFLARE_RESOURCE_ID = /^(?=.{1,32}$)[A-Za-z0-9_-]+$/;
 const QUEUE_NAME = /^(?=.{1,63}$)[A-Za-z0-9_-]+$/;
+const ZONE_STATUSES = new Set(["initializing", "pending", "active", "moved"]);
+const ZONE_TYPES = new Set(["full", "partial", "secondary", "internal"]);
 const MAX_DEPLOYABLE_WORKER_VERSIONS = 10_000;
 const WORKERS_DEV_REFERENCE =
     /(?<![a-z0-9-])(?:(?:[a-z][a-z0-9+.-]*:)?\/\/)?(?:[a-z0-9-]+\.)*workers\.dev(?:\.(?![a-z0-9-])|(?![a-z0-9.-]))(?::[0-9]+)?(?:[/?#][^\s<>"']*)?/gi;
@@ -177,6 +183,7 @@ export const createCloudflareWorkersApi = ({
     const scriptsUrl = `${CLOUDFLARE_API_BASE_URL}/accounts/${accountId}/workers/scripts`;
     const domainsUrl = `${CLOUDFLARE_API_BASE_URL}/accounts/${accountId}/workers/domains`;
     const queuesUrl = `${CLOUDFLARE_API_BASE_URL}/accounts/${accountId}/queues`;
+    const zonesUrl = `${CLOUDFLARE_API_BASE_URL}/zones`;
     const secrets = [apiToken, accountId];
     const call = async ({ operation, url, method = "GET", body }) => {
         let response;
@@ -308,7 +315,7 @@ export const createCloudflareWorkersApi = ({
                     (script.tag != null &&
                         (typeof script.tag !== "string" ||
                             script.tag.length === 0)) ||
-                    !Array.isArray(script.routes) ||
+                    (script.routes != null && !Array.isArray(script.routes)) ||
                     (script.tail_consumers != null &&
                         !Array.isArray(script.tail_consumers)) ||
                     (script.logpush != null &&
@@ -325,33 +332,39 @@ export const createCloudflareWorkersApi = ({
                 }
                 const routeIds = new Set();
                 const routePatterns = new Set();
-                const routes = [];
-                for (const route of script.routes) {
-                    if (
-                        typeof route?.id !== "string" ||
-                        route.id.length === 0 ||
-                        routeIds.has(route.id) ||
-                        typeof route.pattern !== "string" ||
-                        route.pattern.length === 0 ||
-                        routePatterns.has(route.pattern) ||
-                        route.script !== script.id
-                    ) {
-                        throw new CloudflareWorkersApiError({
-                            operation: "list account Worker scripts",
-                            status: 200,
-                            cause: new Error(
-                                "Cloudflare returned an invalid or ambiguous Worker route attachment"
-                            ),
-                            secrets,
+                const routes = script.routes == null ? null : [];
+                if (script.routes != null) {
+                    for (const route of script.routes) {
+                        const routeScript = route?.script ?? script.id;
+                        if (
+                            !CLOUDFLARE_RESOURCE_ID.test(route?.id || "") ||
+                            routeIds.has(route.id) ||
+                            typeof route.pattern !== "string" ||
+                            route.pattern.length === 0 ||
+                            route.pattern.trim() !== route.pattern ||
+                            routePatterns.has(route.pattern) ||
+                            routeScript !== script.id
+                        ) {
+                            throw new CloudflareWorkersApiError({
+                                operation: "list account Worker scripts",
+                                status: 200,
+                                cause: new Error(
+                                    "Cloudflare returned an invalid or ambiguous inline Worker route attachment"
+                                ),
+                                secrets,
+                            });
+                        }
+                        routeIds.add(route.id);
+                        routePatterns.add(route.pattern);
+                        routes.push({
+                            id: route.id,
+                            pattern: route.pattern,
+                            script: routeScript,
                         });
                     }
-                    routeIds.add(route.id);
-                    routePatterns.add(route.pattern);
-                    routes.push({
-                        id: route.id,
-                        pattern: route.pattern,
-                        script: route.script,
-                    });
+                    routes.sort((left, right) =>
+                        left.id.localeCompare(right.id)
+                    );
                 }
                 scripts.set(script.id, {
                     tag: script.tag,
@@ -361,6 +374,219 @@ export const createCloudflareWorkersApi = ({
                 });
             }
             return scripts;
+        },
+        listZoneRouteInventory: async () => {
+            const operation =
+                "list stable authoritative account zone and Worker route inventory";
+            const readZoneSnapshot = async () => {
+                const zones = [];
+                const zoneIds = new Set();
+                const zoneNames = new Set();
+                let expectedTotalCount;
+                let expectedTotalPages;
+                let expectedPerPage;
+
+                for (let page = 1; page <= MAX_ZONE_PAGES; page += 1) {
+                    const query = new URLSearchParams({
+                        "account.id": accountId,
+                        page: String(page),
+                        per_page: String(ZONE_PAGE_SIZE),
+                        type: [...ZONE_TYPES].join(","),
+                        order: "name",
+                        direction: "asc",
+                        match: "all",
+                    });
+                    const payload = await call({
+                        operation,
+                        url: `${zonesUrl}?${query}`,
+                    });
+                    const result = payload.result;
+                    const info = payload.result_info;
+                    const validInfo =
+                        Array.isArray(result) &&
+                        info &&
+                        typeof info === "object" &&
+                        Number.isSafeInteger(info.count) &&
+                        info.count >= 0 &&
+                        info.count === result.length &&
+                        Number.isSafeInteger(info.page) &&
+                        info.page === page &&
+                        Number.isSafeInteger(info.per_page) &&
+                        info.per_page > 0 &&
+                        info.per_page <= ZONE_PAGE_SIZE &&
+                        info.count <= info.per_page &&
+                        Number.isSafeInteger(info.total_count) &&
+                        info.total_count >= 0 &&
+                        Number.isSafeInteger(info.total_pages) &&
+                        info.total_pages >= 0 &&
+                        info.total_pages <= MAX_ZONE_PAGES &&
+                        (info.total_count === 0
+                            ? info.total_pages === 0 || info.total_pages === 1
+                            : info.total_pages ===
+                              Math.ceil(info.total_count / info.per_page)) &&
+                        page <= Math.max(info.total_pages, 1);
+                    if (!validInfo) {
+                        invalidResult({
+                            operation,
+                            message:
+                                "Cloudflare returned invalid or ambiguous account-zone pagination",
+                        });
+                    }
+
+                    expectedTotalCount ??= info.total_count;
+                    expectedTotalPages ??= info.total_pages;
+                    expectedPerPage ??= info.per_page;
+                    if (
+                        info.total_count !== expectedTotalCount ||
+                        info.total_pages !== expectedTotalPages ||
+                        info.per_page !== expectedPerPage
+                    ) {
+                        invalidResult({
+                            operation,
+                            message:
+                                "Cloudflare account-zone pagination changed while it was being read",
+                        });
+                    }
+
+                    for (const zone of result) {
+                        const zoneId =
+                            typeof zone?.id === "string"
+                                ? zone.id.toLowerCase()
+                                : undefined;
+                        const zoneName =
+                            typeof zone?.name === "string"
+                                ? zone.name.toLowerCase()
+                                : undefined;
+                        const zoneAccountId =
+                            typeof zone?.account?.id === "string"
+                                ? zone.account.id.toLowerCase()
+                                : undefined;
+                        const zoneType = zone?.type ?? null;
+                        if (
+                            !zoneId ||
+                            !CLOUDFLARE_ACCOUNT_ID.test(zoneId) ||
+                            zone.id !== zoneId ||
+                            zoneIds.has(zoneId) ||
+                            !zoneName ||
+                            !DNS_HOSTNAME.test(zoneName) ||
+                            zone.name !== zoneName ||
+                            zone.name.trim() !== zone.name ||
+                            zoneNames.has(zoneName) ||
+                            zoneAccountId !== accountId.toLowerCase() ||
+                            zone.account.id !== zoneAccountId ||
+                            !ZONE_STATUSES.has(zone.status) ||
+                            (zoneType !== null && !ZONE_TYPES.has(zoneType))
+                        ) {
+                            invalidResult({
+                                operation,
+                                message:
+                                    "Cloudflare returned an invalid, duplicate, or wrong-account zone identity",
+                            });
+                        }
+                        zoneIds.add(zoneId);
+                        zoneNames.add(zoneName);
+                        zones.push({
+                            zoneId,
+                            zoneName,
+                            status: zone.status,
+                            type: zoneType,
+                        });
+                    }
+                    if (page >= info.total_pages) break;
+                }
+
+                if (
+                    expectedTotalCount == null ||
+                    expectedTotalPages == null ||
+                    zones.length !== expectedTotalCount
+                ) {
+                    invalidResult({
+                        operation,
+                        message:
+                            "Cloudflare returned an incomplete account-zone inventory",
+                    });
+                }
+                return zones.sort((left, right) =>
+                    left.zoneId.localeCompare(right.zoneId)
+                );
+            };
+
+            const readFullSnapshot = async () => {
+                const zones = await readZoneSnapshot();
+                const routeIds = new Set();
+                const routePatterns = new Set();
+                for (const zone of zones) {
+                    const payload = await call({
+                        operation,
+                        url: `${zonesUrl}/${zone.zoneId}/workers/routes`,
+                    });
+                    if (
+                        !Array.isArray(payload.result) ||
+                        payload.result.length > MAX_ROUTES_PER_ZONE
+                    ) {
+                        invalidResult({
+                            operation,
+                            message:
+                                "Cloudflare returned an invalid authoritative Worker route list",
+                        });
+                    }
+                    const routes = [];
+                    for (const route of payload.result) {
+                        const script = route?.script ?? null;
+                        if (
+                            !CLOUDFLARE_RESOURCE_ID.test(route?.id || "") ||
+                            routeIds.has(route.id) ||
+                            typeof route.pattern !== "string" ||
+                            route.pattern.length === 0 ||
+                            route.pattern.trim() !== route.pattern ||
+                            routePatterns.has(route.pattern) ||
+                            (script !== null && !WORKER_NAME.test(script))
+                        ) {
+                            invalidResult({
+                                operation,
+                                message:
+                                    "Cloudflare returned an invalid, duplicate, or ambiguous authoritative Worker route",
+                            });
+                        }
+                        routeIds.add(route.id);
+                        routePatterns.add(route.pattern);
+                        routes.push({
+                            id: route.id,
+                            pattern: route.pattern,
+                            script,
+                        });
+                    }
+                    zone.routes = routes.sort((left, right) =>
+                        left.id.localeCompare(right.id)
+                    );
+                }
+                return zones;
+            };
+
+            let previousCanonicalSnapshot;
+            for (
+                let snapshotNumber = 1;
+                snapshotNumber <= REQUIRED_ZONE_ROUTE_SNAPSHOTS;
+                snapshotNumber += 1
+            ) {
+                const snapshot = await readFullSnapshot();
+                const canonicalSnapshot = JSON.stringify(snapshot);
+                if (
+                    snapshotNumber > 1 &&
+                    canonicalSnapshot !== previousCanonicalSnapshot
+                ) {
+                    invalidResult({
+                        operation,
+                        message:
+                            "Cloudflare authoritative zone or Worker route inventory changed between complete snapshots",
+                    });
+                }
+                previousCanonicalSnapshot = canonicalSnapshot;
+                if (snapshotNumber === REQUIRED_ZONE_ROUTE_SNAPSHOTS) {
+                    return snapshot;
+                }
+            }
+            throw new Error("unreachable zone-route snapshot state");
         },
         listWorkerDomains: async () => {
             const operation = "list account Worker custom domains";

@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
     APP_PRODUCTION_SUFFIX,
@@ -41,6 +41,14 @@ const MAX_DIAGNOSTIC_LENGTH = 2_000;
 const VERSION_TAG = /^[A-Za-z0-9_-]{1,100}$/;
 const DNS_HOSTNAME =
     /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const CLOUDFLARE_ACCOUNT_ID = /^[0-9a-f]{32}$/i;
+const CLOUDFLARE_RESOURCE_ID = /^(?=.{1,32}$)[A-Za-z0-9_-]+$/;
+const WORKER_NAME = /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const ZONE_STATUSES = new Set(["initializing", "pending", "active", "moved"]);
+const ZONE_TYPES = new Set(["full", "partial", "secondary", "internal"]);
+const SHA256_DIGEST = /^[0-9a-f]{64}$/;
+const compareCanonicalStrings = (left, right) =>
+    left < right ? -1 : left > right ? 1 : 0;
 const INDETERMINATE_ACTIVATION_OBSERVATIONS = 12;
 const INDETERMINATE_ACTIVATION_DELAY_MS = 2_500;
 
@@ -213,7 +221,10 @@ export const createInvocationVersionTag = ({
     return tag;
 };
 
-export const readWorkerScriptMap = async (operations) => {
+export const readWorkerScriptMap = async (
+    operations,
+    { allowMissingInlineRoutes = false } = {}
+) => {
     const scripts = await operations.listWorkerScripts();
     if (
         !(scripts instanceof Map) ||
@@ -226,17 +237,19 @@ export const readWorkerScriptMap = async (operations) => {
                 (metadata.tag != null &&
                     (typeof metadata.tag !== "string" ||
                         metadata.tag.length === 0)) ||
-                !Array.isArray(metadata.routes) ||
-                metadata.routes.some(
-                    (route) =>
-                        !route ||
-                        typeof route !== "object" ||
-                        typeof route.id !== "string" ||
-                        route.id.length === 0 ||
-                        typeof route.pattern !== "string" ||
-                        route.pattern.length === 0 ||
-                        route.script !== scriptName
-                )
+                (!Array.isArray(metadata.routes) &&
+                    !(allowMissingInlineRoutes && metadata.routes === null)) ||
+                (Array.isArray(metadata.routes) &&
+                    metadata.routes.some(
+                        (route) =>
+                            !route ||
+                            typeof route !== "object" ||
+                            typeof route.id !== "string" ||
+                            route.id.length === 0 ||
+                            typeof route.pattern !== "string" ||
+                            route.pattern.length === 0 ||
+                            route.script !== scriptName
+                    ))
         )
     ) {
         throw new Error(
@@ -244,6 +257,180 @@ export const readWorkerScriptMap = async (operations) => {
         );
     }
     return scripts;
+};
+
+export const requireExpectedAccountZoneInventorySha256 = (value) => {
+    if (typeof value !== "string" || !SHA256_DIGEST.test(value)) {
+        throw new Error(
+            "CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 must be an exact lowercase SHA-256 digest"
+        );
+    }
+    return value;
+};
+
+export const accountZoneInventorySha256 = (inventory) => {
+    if (!Array.isArray(inventory)) {
+        throw new Error(
+            "Cloudflare account zone identity inventory must be an array"
+        );
+    }
+    const zoneIds = new Set();
+    const zoneNames = new Set();
+    const identities = inventory.map((zone) => {
+        if (
+            !zone ||
+            typeof zone !== "object" ||
+            Array.isArray(zone) ||
+            typeof zone.zoneId !== "string" ||
+            !CLOUDFLARE_ACCOUNT_ID.test(zone.zoneId || "") ||
+            zone.zoneId !== zone.zoneId.toLowerCase() ||
+            zoneIds.has(zone.zoneId) ||
+            typeof zone.zoneName !== "string" ||
+            zone.zoneName !== zone.zoneName.toLowerCase() ||
+            zone.zoneName.trim() !== zone.zoneName ||
+            !DNS_HOSTNAME.test(zone.zoneName) ||
+            zoneNames.has(zone.zoneName)
+        ) {
+            throw new Error(
+                "Cloudflare account zone identity inventory is invalid or ambiguous"
+            );
+        }
+        zoneIds.add(zone.zoneId);
+        zoneNames.add(zone.zoneName);
+        return { zoneId: zone.zoneId, zoneName: zone.zoneName };
+    });
+    identities.sort(
+        (left, right) =>
+            compareCanonicalStrings(left.zoneId, right.zoneId) ||
+            compareCanonicalStrings(left.zoneName, right.zoneName)
+    );
+    return createHash("sha256")
+        .update(JSON.stringify(identities), "utf8")
+        .digest("hex");
+};
+
+export const readAndValidateZoneRouteInventory = async ({
+    scripts,
+    operations,
+    expectedZoneInventorySha256,
+}) => {
+    const expectedFingerprint = requireExpectedAccountZoneInventorySha256(
+        expectedZoneInventorySha256
+    );
+    const inventory = await operations.listZoneRouteInventory();
+    if (!Array.isArray(inventory)) {
+        throw new Error(
+            "Cloudflare authoritative zone and Worker route inventory is missing"
+        );
+    }
+    const zoneIds = new Set();
+    const zoneNames = new Set();
+    const routeIds = new Set();
+    const routePatterns = new Set();
+    const authoritativeByScript = new Map();
+    const normalizedZones = [];
+    for (const zone of inventory) {
+        if (
+            !zone ||
+            typeof zone !== "object" ||
+            Array.isArray(zone) ||
+            !CLOUDFLARE_ACCOUNT_ID.test(zone.zoneId || "") ||
+            zone.zoneId !== zone.zoneId.toLowerCase() ||
+            zoneIds.has(zone.zoneId) ||
+            typeof zone.zoneName !== "string" ||
+            zone.zoneName !== zone.zoneName.toLowerCase() ||
+            zone.zoneName.trim() !== zone.zoneName ||
+            !DNS_HOSTNAME.test(zone.zoneName) ||
+            zoneNames.has(zone.zoneName) ||
+            !ZONE_STATUSES.has(zone.status) ||
+            (zone.type !== null && !ZONE_TYPES.has(zone.type)) ||
+            !Array.isArray(zone.routes)
+        ) {
+            throw new Error(
+                "Cloudflare authoritative zone inventory is invalid or ambiguous"
+            );
+        }
+        zoneIds.add(zone.zoneId);
+        zoneNames.add(zone.zoneName);
+        const routes = [];
+        for (const route of zone.routes) {
+            if (
+                !route ||
+                typeof route !== "object" ||
+                Array.isArray(route) ||
+                !CLOUDFLARE_RESOURCE_ID.test(route.id || "") ||
+                routeIds.has(route.id) ||
+                typeof route.pattern !== "string" ||
+                route.pattern.length === 0 ||
+                route.pattern.trim() !== route.pattern ||
+                routePatterns.has(route.pattern) ||
+                (route.script !== null && !WORKER_NAME.test(route.script || ""))
+            ) {
+                throw new Error(
+                    "Cloudflare authoritative Worker route inventory is invalid or ambiguous"
+                );
+            }
+            if (route.script !== null && !scripts.has(route.script)) {
+                throw new Error(
+                    `Cloudflare authoritative Worker route references unknown script ${route.script}`
+                );
+            }
+            routeIds.add(route.id);
+            routePatterns.add(route.pattern);
+            const normalized = {
+                id: route.id,
+                pattern: route.pattern,
+                script: route.script,
+            };
+            routes.push(normalized);
+            if (route.script !== null) {
+                const attached = authoritativeByScript.get(route.script) ?? [];
+                attached.push(normalized);
+                authoritativeByScript.set(route.script, attached);
+            }
+        }
+        normalizedZones.push({
+            zoneId: zone.zoneId,
+            zoneName: zone.zoneName,
+            status: zone.status,
+            type: zone.type,
+            routes: routes.sort((left, right) =>
+                left.id.localeCompare(right.id)
+            ),
+        });
+    }
+
+    for (const [workerName, metadata] of scripts) {
+        const inlineRoutes = metadata.routes;
+        if (inlineRoutes === null) continue;
+        if (!Array.isArray(inlineRoutes)) {
+            throw new Error(
+                `${workerName}: inline Worker route inventory is invalid`
+            );
+        }
+        const authoritative = [...(authoritativeByScript.get(workerName) ?? [])]
+            .map(({ id, pattern, script }) => ({ id, pattern, script }))
+            .sort((left, right) => left.id.localeCompare(right.id));
+        const inline = [...inlineRoutes]
+            .map(({ id, pattern, script }) => ({ id, pattern, script }))
+            .sort((left, right) => left.id.localeCompare(right.id));
+        if (JSON.stringify(inline) !== JSON.stringify(authoritative)) {
+            throw new Error(
+                `${workerName}: inline Worker routes do not exactly match the authoritative per-zone route inventory`
+            );
+        }
+    }
+    const normalizedInventory = normalizedZones.sort((left, right) =>
+        left.zoneId.localeCompare(right.zoneId)
+    );
+    if (
+        accountZoneInventorySha256(normalizedInventory) !== expectedFingerprint
+    ) {
+        throw new Error(
+            "Cloudflare account zone identity inventory does not match the independently reviewed fingerprint"
+        );
+    }
+    return normalizedInventory;
 };
 
 export const readWorkerDomainInventory = async (operations) => {
@@ -306,16 +493,23 @@ export const validateProductionAttachmentInventory = ({
     plans,
     scripts,
     domains,
+    zoneRouteInventory,
 }) => {
     const expectedByHostname = new Map();
     const policyWorkerNames = new Set();
+    const policySiteByWorker = new Map();
     for (const plan of plans) {
         policyWorkerNames.add(plan.workerName);
         policyWorkerNames.add(plan.policy.previewWorker);
+        policySiteByWorker.set(plan.workerName, plan.site.id);
+        policySiteByWorker.set(plan.policy.previewWorker, plan.site.id);
         for (const hostname of plan.policy.productionHostnames) {
             expectedByHostname.set(hostname, plan.workerName);
         }
     }
+    const zonesById = new Map(
+        zoneRouteInventory.map((zone) => [zone.zoneId, zone])
+    );
 
     for (const plan of plans) {
         const metadata = scripts.get(plan.workerName);
@@ -324,14 +518,6 @@ export const validateProductionAttachmentInventory = ({
                 `${plan.site.id}: production Worker ${plan.workerName} disappeared during attachment validation`
             );
         }
-        if (metadata.routes.length !== 0) {
-            throw new Error(
-                `${plan.site.id}: ${plan.workerName} has unreviewed Worker route attachments (${metadata.routes
-                    .map(({ pattern }) => pattern)
-                    .join(", ")})`
-            );
-        }
-
         const expectedHostnames = plan.policy.productionHostnames;
         if (
             !Array.isArray(expectedHostnames) ||
@@ -388,7 +574,7 @@ export const validateProductionAttachmentInventory = ({
         }
     }
 
-    for (const [workerName, metadata] of scripts) {
+    for (const [workerName] of scripts) {
         const policyOwned = policyWorkerNames.has(workerName);
         const inManagedNamespace = workerName.startsWith(
             CLOUDFLARE_WORKER_NAMESPACE_PREFIX
@@ -398,22 +584,38 @@ export const validateProductionAttachmentInventory = ({
                 `Cloudflare has an unreviewed or retired Worker identity ${workerName} inside the ${CLOUDFLARE_WORKER_NAMESPACE_PREFIX} namespace`
             );
         }
-        const managedRoutes = metadata.routes.filter(({ pattern }) =>
-            routeTargetsManagedAppHostname(pattern)
-        );
-        if (
-            metadata.routes.length > 0 &&
-            (policyOwned || inManagedNamespace || managedRoutes.length > 0)
-        ) {
-            throw new Error(
-                `${workerName} has unreviewed Worker route attachments (${metadata.routes
-                    .map(({ pattern }) => pattern)
-                    .join(", ")})`
-            );
+    }
+
+    for (const zone of zoneRouteInventory) {
+        for (const route of zone.routes) {
+            const policyOwned =
+                route.script !== null && policyWorkerNames.has(route.script);
+            const managedWorker =
+                route.script !== null &&
+                route.script.startsWith(CLOUDFLARE_WORKER_NAMESPACE_PREFIX);
+            if (
+                policyOwned ||
+                managedWorker ||
+                routeTargetsManagedAppHostname(route.pattern)
+            ) {
+                const policySite =
+                    route.script === null
+                        ? undefined
+                        : policySiteByWorker.get(route.script);
+                throw new Error(
+                    `${policySite ? `${policySite}: ` : ""}${route.script ?? "scriptless route"} has unreviewed Worker route attachments in ${zone.zoneName}`
+                );
+            }
         }
     }
 
     for (const domain of domains) {
+        const domainZone = zonesById.get(domain.zoneId);
+        if (!domainZone || domainZone.zoneName !== domain.zoneName) {
+            throw new Error(
+                `Cloudflare custom domain ${domain.hostname} references a zone outside the authoritative account inventory`
+            );
+        }
         const expectedWorker = expectedByHostname.get(domain.hostname);
         const managedHostname = managedAppHostname(domain.hostname);
         const policyOwnedWorker = policyWorkerNames.has(domain.service);
@@ -473,12 +675,37 @@ export const readAndValidateProductionAttachments = async ({
     plans,
     operations,
     scripts: providedScripts,
+    expectedZoneInventorySha256,
+    expectedZoneRouteInventory,
 }) => {
-    const scripts = providedScripts ?? (await readWorkerScriptMap(operations));
+    const scripts =
+        providedScripts ??
+        (await readWorkerScriptMap(operations, {
+            allowMissingInlineRoutes: true,
+        }));
+    const zoneRouteInventory = await readAndValidateZoneRouteInventory({
+        scripts,
+        operations,
+        expectedZoneInventorySha256,
+    });
+    if (
+        expectedZoneRouteInventory !== undefined &&
+        JSON.stringify(zoneRouteInventory) !==
+            JSON.stringify(expectedZoneRouteInventory)
+    ) {
+        throw new Error(
+            "Cloudflare authoritative account zone or Worker route inventory changed during production deployment"
+        );
+    }
     const domains = await readWorkerDomainInventory(operations);
-    validateProductionAttachmentInventory({ plans, scripts, domains });
+    validateProductionAttachmentInventory({
+        plans,
+        scripts,
+        domains,
+        zoneRouteInventory,
+    });
     await readAndValidateWorkerSubdomains({ plans, scripts, operations });
-    return scripts;
+    return { scripts, zoneRouteInventory };
 };
 
 export const productionWorkerConfig = ({ site, policy, configs }) => {
@@ -567,7 +794,9 @@ const revalidateRollbackBaseline = async ({
             `${site.id}: production app requires a full rollback release commit`
         );
     }
-    const scripts = await readWorkerScriptMap(operations);
+    const scripts = await readWorkerScriptMap(operations, {
+        allowMissingInlineRoutes: true,
+    });
     const currentTag = requireWorkerTag({
         site,
         workerName,
@@ -640,7 +869,9 @@ const readActiveVersion = async ({ plan, operations }) =>
     );
 
 const readCurrentWorkerTag = async ({ plan, operations }) => {
-    const scripts = await readWorkerScriptMap(operations);
+    const scripts = await readWorkerScriptMap(operations, {
+        allowMissingInlineRoutes: true,
+    });
     return requireWorkerTag({
         site: plan.site,
         workerName: plan.workerName,
@@ -652,12 +883,16 @@ const readFencedActiveVersionLast = async ({
     plan,
     inventoryPlans,
     operations,
+    expectedZoneInventorySha256,
+    expectedZoneRouteInventory,
     expectedWorkerTag,
     phase,
 }) => {
     await readAndValidateProductionAttachments({
         plans: inventoryPlans,
         operations,
+        expectedZoneInventorySha256,
+        expectedZoneRouteInventory,
     });
     const currentTag = await readCurrentWorkerTag({ plan, operations });
     if (currentTag !== expectedWorkerTag) {
@@ -734,6 +969,8 @@ const rollbackExactInvocation = async ({
     plan,
     inventoryPlans,
     operations,
+    expectedZoneInventorySha256,
+    expectedZoneRouteInventory,
     log,
 }) => {
     const { previousVersion, previousCommit, workerTag } = plan.baseline;
@@ -748,6 +985,8 @@ const rollbackExactInvocation = async ({
         plan,
         inventoryPlans,
         operations,
+        expectedZoneInventorySha256,
+        expectedZoneRouteInventory,
         expectedWorkerTag: workerTag,
         phase: "rollback authorization",
     });
@@ -770,6 +1009,8 @@ const rollbackExactInvocation = async ({
             plan,
             inventoryPlans,
             operations,
+            expectedZoneInventorySha256,
+            expectedZoneRouteInventory,
             expectedWorkerTag: workerTag,
             phase: "post-verifier baseline confirmation",
         });
@@ -810,6 +1051,8 @@ const rollbackExactInvocation = async ({
         plan,
         inventoryPlans,
         operations,
+        expectedZoneInventorySha256,
+        expectedZoneRouteInventory,
         expectedWorkerTag: workerTag,
         phase: "final rollback authorization",
     });
@@ -849,6 +1092,12 @@ const rollbackExactInvocation = async ({
             `rollback API selected ${rollbackVersion}, expected ${previousVersion}`
         );
     }
+    await readAndValidateProductionAttachments({
+        plans: inventoryPlans,
+        operations,
+        expectedZoneInventorySha256,
+        expectedZoneRouteInventory,
+    });
     const restoredVersion = await readActiveVersion({ plan, operations });
     if (restoredVersion !== previousVersion) {
         throw new Error(
@@ -869,6 +1118,8 @@ const rollbackExactInvocation = async ({
         plan,
         inventoryPlans,
         operations,
+        expectedZoneInventorySha256,
+        expectedZoneRouteInventory,
         expectedWorkerTag: workerTag,
         phase: "post-verifier rollback confirmation",
     });
@@ -887,6 +1138,7 @@ export const deployProductionEntries = async ({
     deploymentEntries,
     configs,
     expectedCommit,
+    expectedZoneInventorySha256,
     operations,
     log = console.log,
 }) => {
@@ -895,6 +1147,9 @@ export const deployProductionEntries = async ({
             "Production deployment requires a full Git commit hash"
         );
     }
+    const pinnedZoneInventorySha256 = requireExpectedAccountZoneInventorySha256(
+        expectedZoneInventorySha256
+    );
     if (!Array.isArray(selectedEntries) || selectedEntries.length === 0) {
         throw new Error(
             "Production deployment requires a non-empty selected entry set"
@@ -948,7 +1203,9 @@ export const deployProductionEntries = async ({
         }
         return plan;
     });
-    const scripts = await readWorkerScriptMap(operations);
+    const scripts = await readWorkerScriptMap(operations, {
+        allowMissingInlineRoutes: true,
+    });
     const missingPlans = attachmentPlans.filter(
         ({ workerName }) => !scripts.has(workerName)
     );
@@ -960,11 +1217,13 @@ export const deployProductionEntries = async ({
             `Production deploys require pre-provisioned Workers; missing ${missing}. Provision these exact Worker names and their reviewed custom domains from cloudflare/deployment-policy.json in Cloudflare once, then rerun. No deployment was attempted`
         );
     }
-    await readAndValidateProductionAttachments({
-        plans: attachmentPlans,
-        operations,
-        scripts,
-    });
+    const { zoneRouteInventory: expectedZoneRouteInventory } =
+        await readAndValidateProductionAttachments({
+            plans: attachmentPlans,
+            operations,
+            scripts,
+            expectedZoneInventorySha256: pinnedZoneInventorySha256,
+        });
 
     const baselines = new Map();
     for (const plan of plans) {
@@ -999,6 +1258,8 @@ export const deployProductionEntries = async ({
     await readAndValidateProductionAttachments({
         plans: attachmentPlans,
         operations,
+        expectedZoneInventorySha256: pinnedZoneInventorySha256,
+        expectedZoneRouteInventory,
     });
     for (const plan of plans) {
         await revalidateRollbackBaseline({
@@ -1018,6 +1279,8 @@ export const deployProductionEntries = async ({
             await readAndValidateProductionAttachments({
                 plans: attachmentPlans,
                 operations,
+                expectedZoneInventorySha256: pinnedZoneInventorySha256,
+                expectedZoneRouteInventory,
             });
             plan.invocation = validateDeploymentEvidence(
                 await operations.upload({
@@ -1033,6 +1296,8 @@ export const deployProductionEntries = async ({
             await readAndValidateProductionAttachments({
                 plans: attachmentPlans,
                 operations,
+                expectedZoneInventorySha256: pinnedZoneInventorySha256,
+                expectedZoneRouteInventory,
             });
             if (plan.invocation.workerTag !== plan.baseline.workerTag) {
                 throw new Error(
@@ -1067,6 +1332,8 @@ export const deployProductionEntries = async ({
         await readAndValidateProductionAttachments({
             plans: attachmentPlans,
             operations,
+            expectedZoneInventorySha256: pinnedZoneInventorySha256,
+            expectedZoneRouteInventory,
         });
         for (const plan of plans) {
             await revalidateRollbackBaseline({ ...plan, operations });
@@ -1089,6 +1356,8 @@ export const deployProductionEntries = async ({
             await readAndValidateProductionAttachments({
                 plans: attachmentPlans,
                 operations,
+                expectedZoneInventorySha256: pinnedZoneInventorySha256,
+                expectedZoneRouteInventory,
             });
             validateUploadedVersionOwnership({
                 plan,
@@ -1133,6 +1402,12 @@ export const deployProductionEntries = async ({
                 );
             }
             await confirmInvocationActive({ plan, operations });
+            await readAndValidateProductionAttachments({
+                plans: attachmentPlans,
+                operations,
+                expectedZoneInventorySha256: pinnedZoneInventorySha256,
+                expectedZoneRouteInventory,
+            });
             plan.indeterminateActivation = false;
             activatedPlans.push(plan);
             await operations.verify({
@@ -1155,6 +1430,8 @@ export const deployProductionEntries = async ({
             await readAndValidateProductionAttachments({
                 plans: attachmentPlans,
                 operations,
+                expectedZoneInventorySha256: pinnedZoneInventorySha256,
+                expectedZoneRouteInventory,
             });
             await confirmInvocationActive({ plan, operations });
         }
@@ -1179,6 +1456,8 @@ export const deployProductionEntries = async ({
                         plan,
                         inventoryPlans: attachmentPlans,
                         operations,
+                        expectedZoneInventorySha256: pinnedZoneInventorySha256,
+                        expectedZoneRouteInventory,
                         log,
                     })
                 );
@@ -1637,6 +1916,7 @@ export const main = async (argv = process.argv.slice(2)) => {
     });
     const operations = {
         listWorkerScripts: workersApi.listWorkerScripts,
+        listZoneRouteInventory: workersApi.listZoneRouteInventory,
         listWorkerDomains: workersApi.listWorkerDomains,
         getWorkerSubdomain: workersApi.getWorkerSubdomain,
         status: ({ workerName }) => workersApi.getCurrentDeployment(workerName),
@@ -1713,6 +1993,8 @@ export const main = async (argv = process.argv.slice(2)) => {
         deploymentEntries: entries,
         configs,
         expectedCommit,
+        expectedZoneInventorySha256:
+            deploymentEnvironment.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256,
         operations,
     });
 };

@@ -126,26 +126,47 @@ done
 Production configs are rendered with `--mode production`. First-party demo
 Workers are restricted to `*.apps.peerbit.org` and must exactly match the
 deployment policy. Before any upload or promotion, production reads the
-account's Worker route inventory and every page of its custom-domain inventory
-with `Workers Scripts Read`. It accepts the custom-domain inventory only after
-two independently read, canonical complete snapshots match. The account-wide
-check requires every reviewed production Worker, including Workers outside a
-targeted release, to have no traditional routes and exactly its reviewed custom
-domain. It also reads each production Worker's live `workers.dev` and version
+account's complete zone inventory and each zone's authoritative Worker routes,
+plus every page of its custom-domain inventory. The protected token therefore
+needs `Workers Scripts Read`, `Zone Read`, and `Workers Routes Read` across every
+zone in the account. Zone enumeration explicitly includes `full`, `partial`,
+`secondary`, and `internal` zones and accepts the route inventory only after two
+independently read, canonical complete snapshots match. Cloudflare's optional
+inline script-route field is used only as a consistency check when present;
+missing inline routes defer to the authoritative per-zone result. Custom-domain
+zone IDs and names must exist in that same account snapshot. The account-wide
+zone list is permission-filtered, so a successful paginated response is not by
+itself proof that the token can see every zone. The protected environment must
+also define `CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256`, derived independently
+from a full dashboard/admin inventory. Its input is the UTF-8 JSON encoding of
+every expected `{zoneId,zoneName}` object, with exactly those keys, lowercase
+values, no extra whitespace or newline, sorted first by `zoneId` and then by
+`zoneName` using ascending code-point order. Missing, malformed, or mismatched
+fingerprints stop both routine deploys and provisioning before mutation; the
+running transaction rechecks the fingerprint at every attachment fence. Do not
+derive or update this protected value from the deployment token's own `/zones`
+response.
+
+The account-wide check requires every reviewed production Worker, including
+Workers outside a targeted release, to have no traditional routes and exactly
+its reviewed custom domain. It also reads each production Worker's live
+`workers.dev` and version
 Preview URL state, plus that state for every existing allowlisted preview
 Worker, and requires both flags to be disabled. It rejects retired Worker
 identities, unreviewed ownership under `*.apps.peerbit.org`, and traditional
 routes involving the managed namespace; unrelated account Workers and domains
-remain outside this policy. The full read-only policy fence runs immediately
-before and after every inactive upload. Wrangler output is captured rather than
-echoed, and an unexpected `workers.dev` URL fails closed without exposing the
-account subdomain. Production deploys capture every selected app's current 100%
-version, release identity, and immutable Worker identity. They then upload every
-new version without activating it, verify its per-invocation version tag, and
-revalidate every baseline before promoting traffic. Exact versions are promoted
-through Cloudflare's deployments API; that endpoint cannot alter routes or
-custom domains. After every runtime check, all activated apps receive a final
-exact version, version-tag, Worker-tag, public-subdomain, and attachment recheck.
+remain outside this policy. The complete authoritative zone/route snapshot is
+pinned for the transaction, and the full read-only policy fence runs immediately
+before and after every inactive upload and activation. Wrangler output is
+captured rather than echoed, and an unexpected `workers.dev` URL fails closed
+without exposing the account subdomain. Production deploys capture every
+selected app's current 100% version, release identity, and immutable Worker
+identity. They then upload every new version without activating it, verify its
+per-invocation version tag, and revalidate every baseline before promoting
+traffic. Exact versions are promoted through Cloudflare's deployments API; that
+endpoint cannot alter routes or custom domains. After every runtime check, all
+activated apps receive a final exact version, version-tag, Worker-tag,
+public-subdomain, and attachment recheck.
 If a later promotion or verification fails, earlier versions from the invocation
 are unwound in reverse order only while each exact version, version tag, Worker
 identity, and public attachment still match. After the rollback verifier, the
