@@ -90,23 +90,24 @@ For more complete instructions on how to run a node in a server center that can 
 The public frontends are hosted with Cloudflare Workers Static Assets, with a
 selective cache Worker in front of the large MP4 fixtures that need byte-range
 support.
-`cloudflare/sites.json` is the source of truth for build directories, Worker
-names, expected titles, and production hostnames under Peerbit-owned domains.
+`cloudflare/sites.json` is the source of truth for build directories and
+expected titles. Worker identities and production hostnames must also match the
+exact, deliberately duplicated allowlist in
+`cloudflare/deployment-policy.json`. Updating a hostname or Worker therefore
+requires an explicit deployment-policy review; merely adding another
+`peerbit.org` subdomain to the site manifest is rejected.
 
-Before a DNS cutover, the Cloudflare workflow deploys isolated `workers.dev`
-previews and verifies their release metadata, cache behavior, headers, 404s,
-legacy stream redirect, browser/WASM startup, real relay connectivity,
-file-share boot, and exact MP4 byte ranges. Worker versions and the isolated
-previews are the rollback path; legacy AWS resources are retirement-only and
-must not receive new deployments.
+Public preview deployment is disabled. Pull requests and `master` still build
+every app, validate every asset, and dry-run every isolated preview Worker
+bundle without a Cloudflare credential. Preview configs have no routes and
+disable both `workers.dev` and version preview URLs, so Cloudflare account or
+user slugs are never part of a public URL or workflow log. Production runtime
+checks run inside the per-app transactional deploy and trigger rollback on
+failure.
 
-Preview deployments use a Workers-Scripts-only token stored as
-`CLOUDFLARE_PREVIEW_API_TOKEN` in the `cloudflare-preview` GitHub environment.
-Cloudflare includes custom-domain management in that permission, so the GitHub
-environment is restricted to `master`, administrator bypass is disabled, and
-`master` requires a pull request plus the `validate` check. Preview configs
-never render production routes. Production cutover must use a separate reviewed
-environment and credential.
+Preview validation uses no Cloudflare token. This is an authorization boundary,
+not just a naming convention: preview CI cannot mutate any production Worker.
+Production cutover uses a separately reviewed environment and credential.
 
 Local validation uses the locked Wrangler toolchain:
 
@@ -128,8 +129,24 @@ done
 
 Production configs are rendered with `--mode production`. First-party demo
 Workers are restricted to `*.apps.peerbit.org`; the legacy redirect remains on
-`peerchecker.com`. Use the separately reviewed production environment and
-verify every hostname before retiring a known-good Worker version.
+`peerchecker.com`. Both sets must exactly match the deployment policy.
+Production deploys
+run one site at a time: capture its current 100% version, deploy, verify the
+site (including the app-specific Chromium gate where one exists), and only then
+continue. A failed upload or verification automatically restores the captured
+version and verifies it again. Verification child processes do not inherit the
+Cloudflare credential.
+
+Cloudflare version rollback does not revert attached resources. Treat a change
+to the exact hostname policy as a separate provisioning migration with its own
+rollback plan; the routine release workflow is for code/assets on already
+attached hostnames.
+
+The transactional workflow intentionally refuses to create a Worker that has
+no existing deployment, because there would be no version to restore. Seed a
+new production Worker once under direct operator supervision, verify it, then
+use the workflow for all later releases. Use the separately reviewed production
+environment and retain a known-good Worker version.
 
 Giga account auth is intentionally disabled in Cloudflare preview and
 production builds. The workflows do not expose Supabase secrets, require

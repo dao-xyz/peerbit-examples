@@ -16,18 +16,14 @@ for (let index = 2; index < process.argv.length; index += 2) {
     const value = process.argv[index + 1];
     if (!key?.startsWith("--") || value == null) {
         throw new Error(
-            "Usage: verify-cloudflare-sites.mjs --mode preview|production [--subdomain NAME] [--commit SHA] [--target apps|legacy-redirect|all]"
+            "Usage: verify-cloudflare-sites.mjs --mode production [--commit SHA] [--target apps|legacy-redirect|all] [--site ID]"
         );
     }
     args.set(key.slice(2), value);
 }
 const mode = args.get("mode");
-if (mode !== "preview" && mode !== "production") {
-    throw new Error("--mode must be preview or production");
-}
-const subdomain = args.get("subdomain");
-if (mode === "preview" && !/^[a-z0-9-]+$/i.test(subdomain || "")) {
-    throw new Error("Preview verification requires --subdomain");
+if (mode !== "production") {
+    throw new Error("Public preview verification is disabled");
 }
 const expectedCommit = args.get("commit");
 if (expectedCommit && !/^[0-9a-f]{40}$/i.test(expectedCommit)) {
@@ -36,6 +32,18 @@ if (expectedCommit && !/^[0-9a-f]{40}$/i.test(expectedCommit)) {
 const target = args.get("target") || "all";
 if (!["apps", "legacy-redirect", "all"].includes(target)) {
     throw new Error("--target must be apps, legacy-redirect, or all");
+}
+const requestedSite = args.get("site");
+if (requestedSite && args.has("target")) {
+    throw new Error("--site and --target are mutually exclusive");
+}
+const allSites = [...manifest.staticSites, ...manifest.redirects];
+if (
+    requestedSite &&
+    (!/^[a-z0-9-]+$/.test(requestedSite) ||
+        !allSites.some((entry) => entry.id === requestedSite))
+) {
+    throw new Error(`Unknown Cloudflare site: ${requestedSite}`);
 }
 
 const request = async (url, init = {}) => {
@@ -73,11 +81,14 @@ const verifyEventually = async (label, check) => {
     throw new Error(`${label} did not converge: ${lastError}`);
 };
 const originsFor = (entry) =>
-    mode === "preview"
-        ? [`https://${entry.worker}-preview.${subdomain}.workers.dev`]
-        : entry.domains.map((domain) => `https://${domain}`);
+    entry.domains.map((domain) => `https://${domain}`);
 
-for (const site of target === "legacy-redirect" ? [] : manifest.staticSites) {
+const selectedStaticSites = requestedSite
+    ? manifest.staticSites.filter((site) => site.id === requestedSite)
+    : target === "legacy-redirect"
+      ? []
+      : manifest.staticSites;
+for (const site of selectedStaticSites) {
     for (const origin of originsFor(site)) {
         await verifyEventually(origin, async () => {
             const root = await request(`${origin}/`);
@@ -258,7 +269,12 @@ for (const site of target === "legacy-redirect" ? [] : manifest.staticSites) {
     }
 }
 
-for (const redirect of target === "apps" ? [] : manifest.redirects) {
+const selectedRedirects = requestedSite
+    ? manifest.redirects.filter((redirect) => redirect.id === requestedSite)
+    : target === "apps"
+      ? []
+      : manifest.redirects;
+for (const redirect of selectedRedirects) {
     for (const origin of originsFor(redirect)) {
         await verifyEventually(origin, async () => {
             const response = await request(`${origin}/retired/path?ignored=1`, {

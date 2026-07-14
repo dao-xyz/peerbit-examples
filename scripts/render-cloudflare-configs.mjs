@@ -1,14 +1,16 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+    loadCloudflareDeploymentData,
+    validateRenderedCloudflareConfig,
+} from "./cloudflare-deployment-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     ".."
 );
-const manifest = JSON.parse(
-    readFileSync(path.join(repoRoot, "cloudflare/sites.json"), "utf8")
-);
+const { manifest, entries } = loadCloudflareDeploymentData();
 
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -37,7 +39,7 @@ if (outputRelative.startsWith("..") || path.isAbsolute(outputRelative)) {
     );
 }
 
-const allEntries = [...manifest.staticSites, ...manifest.redirects];
+const allEntries = entries.map(({ site }) => site);
 const ownedProductionDomains = ["peerbit.org", "peerchecker.com"];
 const appProductionSuffix = ".apps.peerbit.org";
 const appProductionDomainPattern =
@@ -70,9 +72,6 @@ for (const entry of allEntries) {
     workers.add(entry.worker);
     previewWorkers.add(previewWorker);
     for (const domain of entry.domains) {
-        if (!isOwnedProductionDomain(domain)) {
-            throw new Error(`Production domain is not approved: ${domain}`);
-        }
         if (domains.has(domain)) throw new Error(`Duplicate domain ${domain}`);
         domains.add(domain);
     }
@@ -126,7 +125,6 @@ for (const redirect of manifest.redirects) {
         );
     }
 }
-
 rmSync(outputDirectory, { recursive: true, force: true });
 mkdirSync(outputDirectory, { recursive: true });
 
@@ -137,16 +135,18 @@ const relativeFromOutput = (target) => {
     );
     return relative.split(path.sep).join("/");
 };
+const policyFor = (id) =>
+    entries.find(({ site: entry }) => entry.id === id).policy;
 const baseConfig = (entry) => ({
     $schema: relativeFromOutput(
         "tools/wrangler/node_modules/wrangler/config-schema.json"
     ),
-    // Preview and production deployments must never share a Worker service.
-    // Once custom domains are attached, updating the same service would make a
-    // preview deployment a production change even if no routes were rendered.
+    // Public previews are disabled. The distinct preview Worker identities are
+    // retained for dry-run validation only; workers.dev, version preview URLs,
+    // and routes are all absent in preview mode.
     name: mode === "preview" ? `${entry.worker}-preview` : entry.worker,
     compatibility_date: manifest.compatibilityDate,
-    workers_dev: mode === "preview",
+    workers_dev: false,
     preview_urls: false,
     ...(mode === "production"
         ? {
@@ -185,6 +185,11 @@ for (const site of manifest.staticSites) {
                 : {}),
         },
     };
+    validateRenderedCloudflareConfig({
+        config,
+        policy: policyFor(site.id),
+        mode,
+    });
     writeFileSync(
         path.join(outputDirectory, `${site.id}.jsonc`),
         `${JSON.stringify(config, null, 2)}\n`,
@@ -201,6 +206,11 @@ for (const redirect of manifest.redirects) {
             REDIRECT_STATUS: String(redirect.status),
         },
     };
+    validateRenderedCloudflareConfig({
+        config,
+        policy: policyFor(redirect.id),
+        mode,
+    });
     writeFileSync(
         path.join(outputDirectory, `${redirect.id}.jsonc`),
         `${JSON.stringify(config, null, 2)}\n`,

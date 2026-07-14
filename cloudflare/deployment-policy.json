@@ -1,0 +1,70 @@
+{
+    "schemaVersion": 1,
+    "entries": [
+        {
+            "id": "stream",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-stream",
+            "previewWorker": "peerbit-examples-stream-preview",
+            "productionHostnames": ["stream.peerbit.org"]
+        },
+        {
+            "id": "music",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-music",
+            "previewWorker": "peerbit-examples-music-preview",
+            "productionHostnames": ["music.peerbit.org"]
+        },
+        {
+            "id": "chat",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-chat",
+            "previewWorker": "peerbit-examples-chat-preview",
+            "productionHostnames": ["chat.peerbit.org"]
+        },
+        {
+            "id": "giga",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-giga",
+            "previewWorker": "peerbit-examples-giga-preview",
+            "productionHostnames": ["giga.peerbit.org"]
+        },
+        {
+            "id": "ml",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-ml",
+            "previewWorker": "peerbit-examples-ml-preview",
+            "productionHostnames": ["ml.peerbit.org"]
+        },
+        {
+            "id": "text",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-text",
+            "previewWorker": "peerbit-examples-text-preview",
+            "productionHostnames": ["text.peerbit.org"]
+        },
+        {
+            "id": "files",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-files",
+            "previewWorker": "peerbit-examples-files-preview",
+            "productionHostnames": ["files.peerbit.org"]
+        },
+        {
+            "id": "chess",
+            "kind": "app",
+            "productionWorker": "peerbit-examples-chess",
+            "previewWorker": "peerbit-examples-chess-preview",
+            "productionHostnames": ["chess.peerbit.org"]
+        },
+        {
+            "id": "legacy-stream",
+            "kind": "redirect",
+            "productionWorker": "peerbit-examples-legacy-stream",
+            "previewWorker": "peerbit-examples-legacy-stream-preview",
+            "productionHostnames": ["stream.peerchecker.com"],
+            "redirectLocation": "https://stream.peerbit.org/#/",
+            "redirectStatus": 307
+        }
+    ]
+}
