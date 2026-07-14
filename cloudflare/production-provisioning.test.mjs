@@ -19,11 +19,16 @@ import {
     CLOUDFLARE_ARTIFACT_DIGEST_BINDING,
     artifactBoundVersionMessage,
 } from "../scripts/cloudflare-artifact-manifest.mjs";
+import { accountZoneInventorySha256 } from "../scripts/deploy-cloudflare-production.mjs";
 
 const COMMIT = "a".repeat(40);
 const OTHER_COMMIT = "b".repeat(40);
 const ACCOUNT_ID = "c".repeat(32);
 const ZONE_ID = "d".repeat(32);
+const HIDDEN_ZONE_ID = "e".repeat(32);
+const EXPECTED_ZONE_INVENTORY_SHA256 = accountZoneInventorySha256([
+    { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+]);
 const API_TOKEN = "cloudflare-test-token";
 const LEGACY_NONCE = "1".repeat(32);
 const PLAN_DIGEST = "2".repeat(64);
@@ -85,6 +90,7 @@ const provisionProductionEntriesWithReceipt = (input) =>
     runProvisionProductionEntriesWithReceipt({
         accountId: ACCOUNT_ID,
         artifacts,
+        expectedZoneInventorySha256: EXPECTED_ZONE_INVENTORY_SHA256,
         ...input,
     });
 
@@ -147,6 +153,15 @@ const createHarness = () => {
     const deployments = new Map();
     const versions = new Map();
     const queueConsumerInventory = [];
+    const zoneRouteInventory = [
+        {
+            zoneId: ZONE_ID,
+            zoneName: "peerbit.org",
+            status: "active",
+            type: "full",
+            routes: [],
+        },
+    ];
     const calls = [];
     let uploadGeneration = 0;
 
@@ -258,6 +273,10 @@ const createHarness = () => {
             return new Map(
                 [...scripts].map(([name, metadata]) => [name, clone(metadata)])
             );
+        },
+        listZoneRouteInventory: async () => {
+            calls.push(["list-zone-routes"]);
+            return clone(zoneRouteInventory);
         },
         listWorkerDomains: async () => {
             calls.push(["list-domains"]);
@@ -386,6 +405,7 @@ const createHarness = () => {
         deployments,
         versions,
         queueConsumerInventory,
+        zoneRouteInventory,
         calls,
         operations,
         addWorker,
@@ -591,6 +611,437 @@ test("read-only plan proposes all seven exact targets without mutations", async 
     assert.match(logs.at(-1), /no Cloudflare mutations were dispatched/);
 });
 
+test("provisioning requires the independently reviewed zone fingerprint", async (t) => {
+    for (const fixture of [
+        { name: "missing", value: undefined },
+        { name: "non-string", value: { toString: () => "a".repeat(64) } },
+        { name: "uppercase", value: "A".repeat(64) },
+        { name: "short", value: "a".repeat(63) },
+    ]) {
+        await t.test(fixture.name, async () => {
+            const harness = createHarness();
+            await assert.rejects(
+                provisionProductionEntriesWithReceipt({
+                    entries,
+                    configs,
+                    expectedCommit: COMMIT,
+                    expectedZoneInventorySha256: fixture.value,
+                    mode: "plan",
+                    operations: harness.operations,
+                    log: () => {},
+                }),
+                /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 must be an exact lowercase SHA-256 digest/
+            );
+            assert.deepEqual(mutationCalls(harness.calls), []);
+        });
+    }
+});
+
+test("permission-filtered 200 zone inventory cannot authorize provisioning", async () => {
+    const harness = createHarness();
+    const requests = [];
+    const api = createCloudflareWorkersApi({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        request: async (url, init) => {
+            requests.push({ url, init });
+            const parsed = new URL(url);
+            if (parsed.pathname.endsWith("/zones")) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        result: [
+                            {
+                                id: ZONE_ID,
+                                name: "peerbit.org",
+                                account: { id: ACCOUNT_ID },
+                                status: "active",
+                                type: "full",
+                            },
+                        ],
+                        result_info: {
+                            count: 1,
+                            page: 1,
+                            per_page: 50,
+                            total_count: 1,
+                            total_pages: 1,
+                        },
+                    }),
+                    { status: 200 }
+                );
+            }
+            assert.match(parsed.pathname, /\/workers\/routes$/);
+            return new Response(JSON.stringify({ success: true, result: [] }), {
+                status: 200,
+            });
+        },
+    });
+    harness.operations.listZoneRouteInventory = api.listZoneRouteInventory;
+    const independentlyReviewed = accountZoneInventorySha256([
+        { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+        { zoneId: HIDDEN_ZONE_ID, zoneName: "hidden.example" },
+    ]);
+    let failure;
+    try {
+        await provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256: independentlyReviewed,
+            mode: "plan",
+            operations: harness.operations,
+            log: () => {},
+        });
+    } catch (error) {
+        failure = error;
+    }
+    assert.ok(failure instanceof Error);
+    assert.match(
+        failure.message,
+        /does not match the independently reviewed fingerprint/
+    );
+    assert.doesNotMatch(failure.message, new RegExp(independentlyReviewed));
+    assert.equal(requests.length, 4);
+    assert.ok(requests.every(({ init }) => init.method === "GET"));
+    assert.deepEqual(mutationCalls(harness.calls), []);
+});
+
+test("provisioning rejects a well-formed but wrong zone fingerprint", async () => {
+    const harness = createHarness();
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256: "0".repeat(64),
+            mode: "plan",
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /does not match the independently reviewed fingerprint/
+    );
+    assert.deepEqual(mutationCalls(harness.calls), []);
+});
+
+test("missing inline routes defer to exact authoritative per-zone truth", async () => {
+    const harness = createHarness();
+    const target = entries[0];
+    harness.addWorker({ entry: target });
+    harness.scripts.get(target.policy.productionWorker).routes = null;
+    harness.zoneRouteInventory[0].routes.push({
+        id: "scriptless-route",
+        pattern: "unrelated.example.com/*",
+        script: null,
+    });
+
+    const plan = await provisionProductionEntries({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "plan",
+        operations: harness.operations,
+        log: () => {},
+    });
+    assert.equal(plan.length, entries.length);
+    assert.deepEqual(mutationCalls(harness.calls), []);
+});
+
+test("authoritative hidden routes and inline disagreements fail closed", async (t) => {
+    await t.test("hidden route on managed Worker", async () => {
+        const harness = createHarness();
+        const target = entries[0];
+        harness.addWorker({ entry: target });
+        harness.scripts.get(target.policy.productionWorker).routes = null;
+        harness.zoneRouteInventory[0].routes.push({
+            id: "hidden-managed-route",
+            pattern: "unrelated.example.com/*",
+            script: target.policy.productionWorker,
+        });
+        await assert.rejects(
+            provisionProductionEntries({
+                entries,
+                configs,
+                expectedCommit: COMMIT,
+                mode: "plan",
+                operations: harness.operations,
+                log: () => {},
+            }),
+            /unreviewed traditional Worker route attachment/
+        );
+        assert.deepEqual(mutationCalls(harness.calls), []);
+    });
+
+    await t.test("inline route does not exist authoritatively", async () => {
+        const harness = createHarness();
+        harness.scripts.set("unrelated-worker", {
+            tag: "unrelated-tag",
+            routes: [
+                {
+                    id: "inline-only-route",
+                    pattern: "unrelated.example.com/*",
+                    script: "unrelated-worker",
+                },
+            ],
+            tailConsumers: [],
+            logpush: false,
+        });
+        await assert.rejects(
+            provisionProductionEntries({
+                entries,
+                configs,
+                expectedCommit: COMMIT,
+                mode: "plan",
+                operations: harness.operations,
+                log: () => {},
+            }),
+            /do not exactly match the authoritative per-zone route inventory/
+        );
+        assert.deepEqual(mutationCalls(harness.calls), []);
+    });
+
+    await t.test(
+        "authoritative route references an unknown script",
+        async () => {
+            const harness = createHarness();
+            harness.zoneRouteInventory[0].routes.push({
+                id: "unknown-script-route",
+                pattern: "unrelated.example.com/*",
+                script: "unknown-worker",
+            });
+            await assert.rejects(
+                provisionProductionEntries({
+                    entries,
+                    configs,
+                    expectedCommit: COMMIT,
+                    mode: "plan",
+                    operations: harness.operations,
+                    log: () => {},
+                }),
+                /references unknown script unknown-worker/
+            );
+            assert.deepEqual(mutationCalls(harness.calls), []);
+        }
+    );
+});
+
+test("reviewed fingerprint and state digest bind every authoritative zone and route field", async (t) => {
+    for (const [name, mutate, pattern] of [
+        [
+            "zone ID",
+            (inventory) => (inventory[0].zoneId = "e".repeat(32)),
+            /independently reviewed fingerprint/,
+        ],
+        [
+            "zone name",
+            (inventory) => (inventory[0].zoneName = "changed.org"),
+            /independently reviewed fingerprint/,
+        ],
+        [
+            "zone status",
+            (inventory) => (inventory[0].status = "pending"),
+            /state changed after review/,
+        ],
+        [
+            "zone type",
+            (inventory) => (inventory[0].type = "partial"),
+            /state changed after review/,
+        ],
+        [
+            "route ID",
+            (inventory) => (inventory[0].routes[0].id = "changed-route"),
+            /state changed after review/,
+        ],
+        [
+            "route pattern",
+            (inventory) =>
+                (inventory[0].routes[0].pattern = "changed.example.com/*"),
+            /state changed after review/,
+        ],
+        [
+            "route script",
+            (inventory) => (inventory[0].routes[0].script = "external-worker"),
+            /state changed after review/,
+        ],
+        [
+            "route removal",
+            (inventory) => inventory[0].routes.splice(0),
+            /state changed after review/,
+        ],
+        [
+            "zone addition",
+            (inventory) =>
+                inventory.push({
+                    zoneId: "e".repeat(32),
+                    zoneName: "peerchecker.com",
+                    status: "active",
+                    type: "full",
+                    routes: [],
+                }),
+            /independently reviewed fingerprint/,
+        ],
+    ]) {
+        await t.test(name, async () => {
+            const harness = createHarness();
+            harness.scripts.set("external-worker", {
+                tag: "external-tag",
+                routes: null,
+                tailConsumers: [],
+                logpush: false,
+            });
+            harness.zoneRouteInventory[0].routes.push({
+                id: "scriptless-route",
+                pattern: "unrelated.example.com/*",
+                script: null,
+            });
+            const reviewed = await provisionProductionEntriesWithReceipt({
+                entries,
+                configs,
+                expectedCommit: COMMIT,
+                mode: "plan",
+                operations: harness.operations,
+                log: () => {},
+            });
+            mutate(harness.zoneRouteInventory);
+            await assert.rejects(
+                provisionProductionEntriesWithReceipt({
+                    entries,
+                    configs,
+                    expectedCommit: COMMIT,
+                    mode: "apply",
+                    plannedStateDigest: reviewed.stateDigest,
+                    operations: harness.operations,
+                    log: () => {},
+                }),
+                pattern
+            );
+            assert.deepEqual(mutationCalls(harness.calls), []);
+        });
+    }
+});
+
+test("authoritative route drift after upload trips the invocation fence", async () => {
+    const harness = createHarness();
+    const reviewed = await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "plan",
+        operations: harness.operations,
+        log: () => {},
+    });
+    const upload = harness.operations.upload;
+    harness.operations.upload = async (input) => {
+        const evidence = await upload(input);
+        harness.zoneRouteInventory[0].routes.push({
+            id: "concurrent-scriptless-route",
+            pattern: "concurrent.example.com/*",
+            script: null,
+        });
+        return evidence;
+    };
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            mode: "apply",
+            plannedStateDigest: reviewed.stateDigest,
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /authoritative account zone or Worker route inventory changed|post-upload proof/
+    );
+    assert.equal(
+        harness.calls.some(([name]) => name === "activate"),
+        false
+    );
+});
+
+test("independent zone identity fingerprint is rechecked after upload", async () => {
+    const harness = createHarness();
+    harness.zoneRouteInventory.push({
+        zoneId: HIDDEN_ZONE_ID,
+        zoneName: "hidden.example",
+        status: "active",
+        type: "internal",
+        routes: [],
+    });
+    const expectedZoneInventorySha256 = accountZoneInventorySha256(
+        harness.zoneRouteInventory
+    );
+    const reviewed = await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        expectedZoneInventorySha256,
+        mode: "plan",
+        operations: harness.operations,
+        log: () => {},
+    });
+    const upload = harness.operations.upload;
+    harness.operations.upload = async (input) => {
+        const evidence = await upload(input);
+        harness.zoneRouteInventory.splice(1, 1);
+        return evidence;
+    };
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256,
+            mode: "apply",
+            plannedStateDigest: reviewed.stateDigest,
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /does not match the independently reviewed fingerprint|post-upload proof/
+    );
+    assert.equal(
+        harness.calls.some(([name]) => name === "upload"),
+        true
+    );
+    assert.equal(
+        harness.calls.some(([name]) => name === "activate"),
+        false
+    );
+});
+
+test("reviewed provisioning receipt cannot be reused with a swapped zone fingerprint", async () => {
+    const harness = createHarness();
+    const reviewed = await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "plan",
+        operations: harness.operations,
+        log: () => {},
+    });
+    harness.zoneRouteInventory.push({
+        zoneId: HIDDEN_ZONE_ID,
+        zoneName: "hidden.example",
+        status: "active",
+        type: "internal",
+        routes: [],
+    });
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256: accountZoneInventorySha256(
+                harness.zoneRouteInventory
+            ),
+            mode: "apply",
+            plannedStateDigest: reviewed.stateDigest,
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /state changed after review/
+    );
+    assert.deepEqual(mutationCalls(harness.calls), []);
+});
+
 test("preview planning derives exact policy identities and handles every public flag combination", async () => {
     const harness = createHarness();
     const states = [
@@ -788,6 +1239,7 @@ test("preview identities are independently pinned before every account read", as
                     configs,
                     artifacts,
                     expectedCommit: COMMIT,
+                    expectedZoneInventorySha256: EXPECTED_ZONE_INVENTORY_SHA256,
                     operations: harness.operations,
                 }),
                 /reviewed seven-application allowlist/
@@ -1811,6 +2263,11 @@ test("unexpected namespace, route, domain, and release state fail before preview
                     pattern: "preview.peerbit.org/*",
                     script: preview,
                 });
+                harness.zoneRouteInventory[0].routes.push({
+                    id: "preview-route",
+                    pattern: "preview.peerbit.org/*",
+                    script: preview,
+                });
             },
         ],
         [
@@ -1825,6 +2282,11 @@ test("unexpected namespace, route, domain, and release state fail before preview
                             script: "unrelated-worker",
                         },
                     ],
+                });
+                harness.zoneRouteInventory[0].routes.push({
+                    id: "route-1",
+                    pattern: "files.apps.peerbit.org/*",
+                    script: "unrelated-worker",
                 });
             },
         ],
@@ -2737,6 +3199,426 @@ test("Cloudflare provisioning adapters use exact documented endpoints and bodies
     ]);
 });
 
+test("Worker list preserves absent and null inline routes as non-authoritative", async () => {
+    const api = createCloudflareWorkersApi({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        request: async () =>
+            new Response(
+                JSON.stringify({
+                    success: true,
+                    result: [
+                        { id: "worker-with-omitted-routes", tag: "tag-a" },
+                        {
+                            id: "worker-with-null-routes",
+                            tag: "tag-b",
+                            routes: null,
+                        },
+                        {
+                            id: "worker-with-implicit-route-script",
+                            tag: "tag-c",
+                            routes: [
+                                {
+                                    id: "implicit-inline-route",
+                                    pattern: "example.com/*",
+                                },
+                                {
+                                    id: "null-inline-route",
+                                    pattern: "example.com/null/*",
+                                    script: null,
+                                },
+                            ],
+                        },
+                    ],
+                })
+            ),
+    });
+    assert.deepEqual(
+        [...(await api.listWorkerScripts())],
+        [
+            [
+                "worker-with-omitted-routes",
+                {
+                    tag: "tag-a",
+                    routes: null,
+                    tailConsumers: [],
+                    logpush: false,
+                },
+            ],
+            [
+                "worker-with-null-routes",
+                {
+                    tag: "tag-b",
+                    routes: null,
+                    tailConsumers: [],
+                    logpush: false,
+                },
+            ],
+            [
+                "worker-with-implicit-route-script",
+                {
+                    tag: "tag-c",
+                    routes: [
+                        {
+                            id: "implicit-inline-route",
+                            pattern: "example.com/*",
+                            script: "worker-with-implicit-route-script",
+                        },
+                        {
+                            id: "null-inline-route",
+                            pattern: "example.com/null/*",
+                            script: "worker-with-implicit-route-script",
+                        },
+                    ],
+                    tailConsumers: [],
+                    logpush: false,
+                },
+            ],
+        ]
+    );
+
+    const malformed = createCloudflareWorkersApi({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        request: async () =>
+            new Response(
+                JSON.stringify({
+                    success: true,
+                    result: [{ id: "worker", routes: {} }],
+                })
+            ),
+    });
+    await assert.rejects(
+        malformed.listWorkerScripts(),
+        CloudflareWorkersApiError
+    );
+
+    const substituted = createCloudflareWorkersApi({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        request: async () =>
+            new Response(
+                JSON.stringify({
+                    success: true,
+                    result: [
+                        {
+                            id: "parent-worker",
+                            routes: [
+                                {
+                                    id: "substituted-route",
+                                    pattern: "example.com/*",
+                                    script: "different-worker",
+                                },
+                            ],
+                        },
+                    ],
+                })
+            ),
+    });
+    await assert.rejects(
+        substituted.listWorkerScripts(),
+        CloudflareWorkersApiError
+    );
+});
+
+test("authoritative zone routes paginate the exact account and require two complete stable snapshots", async () => {
+    const OTHER_ZONE_ID = "e".repeat(32);
+    const requests = [];
+    const zone = ({ id, name, status = "active", type = "full" }) => ({
+        id,
+        name,
+        status,
+        type,
+        account: { id: ACCOUNT_ID, name: "redacted-test-account" },
+    });
+    const api = createCloudflareWorkersApi({
+        accountId: ACCOUNT_ID,
+        apiToken: API_TOKEN,
+        request: async (url, init) => {
+            requests.push([url, init.method, init.headers.Authorization]);
+            const parsed = new URL(url);
+            if (parsed.pathname === "/client/v4/zones") {
+                assert.equal(parsed.searchParams.get("account.id"), ACCOUNT_ID);
+                assert.equal(parsed.searchParams.get("per_page"), "50");
+                assert.equal(
+                    parsed.searchParams.get("type"),
+                    "full,partial,secondary,internal"
+                );
+                const page = Number(parsed.searchParams.get("page"));
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        result:
+                            page === 1
+                                ? [zone({ id: ZONE_ID, name: "peerbit.org" })]
+                                : [
+                                      zone({
+                                          id: OTHER_ZONE_ID,
+                                          name: "peerchecker.com",
+                                          status: "pending",
+                                          type: "partial",
+                                      }),
+                                  ],
+                        result_info: {
+                            count: 1,
+                            page,
+                            per_page: 1,
+                            total_count: 2,
+                            total_pages: 2,
+                        },
+                    })
+                );
+            }
+            if (parsed.pathname.endsWith(`/${ZONE_ID}/workers/routes`)) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        result: [
+                            {
+                                id: "scriptless-route",
+                                pattern: "peerbit.org/disabled/*",
+                            },
+                        ],
+                    })
+                );
+            }
+            if (parsed.pathname.endsWith(`/${OTHER_ZONE_ID}/workers/routes`)) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        result: [
+                            {
+                                id: "external-route",
+                                pattern: "peerchecker.com/*",
+                                script: "external-worker",
+                            },
+                        ],
+                    })
+                );
+            }
+            return new Response("not found", { status: 404 });
+        },
+    });
+
+    assert.deepEqual(await api.listZoneRouteInventory(), [
+        {
+            zoneId: ZONE_ID,
+            zoneName: "peerbit.org",
+            status: "active",
+            type: "full",
+            routes: [
+                {
+                    id: "scriptless-route",
+                    pattern: "peerbit.org/disabled/*",
+                    script: null,
+                },
+            ],
+        },
+        {
+            zoneId: OTHER_ZONE_ID,
+            zoneName: "peerchecker.com",
+            status: "pending",
+            type: "partial",
+            routes: [
+                {
+                    id: "external-route",
+                    pattern: "peerchecker.com/*",
+                    script: "external-worker",
+                },
+            ],
+        },
+    ]);
+    assert.equal(requests.length, 8);
+    assert.ok(requests.every(([, method]) => method === "GET"));
+    assert.ok(
+        requests.every(
+            ([, , authorization]) => authorization === `Bearer ${API_TOKEN}`
+        )
+    );
+});
+
+test("authoritative zone-route inventory fails closed on scope, pagination, identity, and drift errors", async (t) => {
+    const zone = (
+        id = ZONE_ID,
+        name = "peerbit.org",
+        account = ACCOUNT_ID
+    ) => ({
+        id,
+        name,
+        status: "active",
+        type: "full",
+        account: { id: account, name: "test-account" },
+    });
+    const zonePage = (zones, overrides = {}) => ({
+        success: true,
+        result: zones,
+        result_info: {
+            count: zones.length,
+            page: 1,
+            per_page: 50,
+            total_count: zones.length,
+            total_pages: zones.length === 0 ? 0 : 1,
+            ...overrides,
+        },
+    });
+    const invoke = (request) =>
+        createCloudflareWorkersApi({
+            accountId: ACCOUNT_ID,
+            apiToken: API_TOKEN,
+            request,
+        }).listZoneRouteInventory();
+
+    await t.test("wrong account", async () => {
+        await assert.rejects(
+            invoke(
+                async () =>
+                    new Response(
+                        JSON.stringify(
+                            zonePage([
+                                zone(ZONE_ID, "peerbit.org", "f".repeat(32)),
+                            ])
+                        )
+                    )
+            ),
+            /wrong-account zone identity/
+        );
+    });
+
+    await t.test("Workers Routes token scope failure", async () => {
+        await assert.rejects(
+            invoke(
+                async (url) =>
+                    new Response(
+                        JSON.stringify(
+                            url.includes("/workers/routes")
+                                ? {
+                                      success: false,
+                                      errors: [
+                                          {
+                                              code: 10000,
+                                              message:
+                                                  "Workers Routes Read is required",
+                                          },
+                                      ],
+                                  }
+                                : zonePage([zone()])
+                        ),
+                        { status: url.includes("/workers/routes") ? 403 : 200 }
+                    )
+            ),
+            (error) =>
+                error instanceof CloudflareWorkersApiError &&
+                error.details.status === 403 &&
+                error.details.indeterminateMutation === false
+        );
+    });
+
+    await t.test("incomplete pagination", async () => {
+        await assert.rejects(
+            invoke(async (url) => {
+                const page = Number(new URL(url).searchParams.get("page"));
+                return new Response(
+                    JSON.stringify(
+                        page === 1
+                            ? zonePage([zone()], {
+                                  per_page: 1,
+                                  total_count: 2,
+                                  total_pages: 2,
+                              })
+                            : zonePage([], {
+                                  page: 2,
+                                  per_page: 1,
+                                  total_count: 2,
+                                  total_pages: 2,
+                              })
+                    )
+                );
+            }),
+            /incomplete account-zone inventory/
+        );
+    });
+
+    for (const direction of ["deleted", "added"]) {
+        await t.test(`${direction} zone between snapshots`, async () => {
+            let zoneReads = 0;
+            await assert.rejects(
+                invoke(async (url) => {
+                    if (url.includes("/workers/routes")) {
+                        return new Response(
+                            JSON.stringify({ success: true, result: [] })
+                        );
+                    }
+                    zoneReads += 1;
+                    const include =
+                        direction === "deleted"
+                            ? zoneReads === 1
+                            : zoneReads > 1;
+                    return new Response(
+                        JSON.stringify(zonePage(include ? [zone()] : []))
+                    );
+                }),
+                /changed between complete snapshots/
+            );
+        });
+    }
+
+    await t.test("route drift between snapshots", async () => {
+        let routeReads = 0;
+        await assert.rejects(
+            invoke(
+                async (url) =>
+                    new Response(
+                        JSON.stringify(
+                            url.includes("/workers/routes")
+                                ? {
+                                      success: true,
+                                      result: [
+                                          {
+                                              id: "route-a",
+                                              pattern: `peerbit.org/${++routeReads}`,
+                                              script: null,
+                                          },
+                                      ],
+                                  }
+                                : zonePage([zone()])
+                        )
+                    )
+            ),
+            /changed between complete snapshots/
+        );
+    });
+
+    await t.test("duplicate route pattern", async () => {
+        await assert.rejects(
+            invoke(
+                async (url) =>
+                    new Response(
+                        JSON.stringify(
+                            url.includes("/workers/routes")
+                                ? {
+                                      success: true,
+                                      result: [
+                                          {
+                                              id: "route-a",
+                                              pattern: "peerbit.org/*",
+                                              script: null,
+                                          },
+                                          {
+                                              id: "route-b",
+                                              pattern: "peerbit.org/*",
+                                              script: null,
+                                          },
+                                      ],
+                                  }
+                                : zonePage([zone()])
+                        )
+                    )
+            ),
+            /duplicate, or ambiguous authoritative Worker route/
+        );
+    });
+});
+
 test("Cron schedule inventory accepts only Cloudflare's exact documented envelope", async (t) => {
     const workerName = entries[0].policy.productionWorker;
     const invoke = async (result) => {
@@ -3360,8 +4242,20 @@ test("inspection exposes only exact policy-derived actions", async () => {
         configs,
         artifacts,
         expectedCommit: COMMIT,
+        expectedZoneInventorySha256: EXPECTED_ZONE_INVENTORY_SHA256,
         operations: harness.operations,
     });
+    assert.equal(
+        inspection.expectedZoneInventorySha256,
+        EXPECTED_ZONE_INVENTORY_SHA256
+    );
+    assert.ok(
+        inspection.plans.every(
+            (plan) =>
+                plan.expectedZoneInventorySha256 ===
+                EXPECTED_ZONE_INVENTORY_SHA256
+        )
+    );
     assert.deepEqual(
         inspection.plans.map(({ site, workerName, hostname }) => [
             site.id,

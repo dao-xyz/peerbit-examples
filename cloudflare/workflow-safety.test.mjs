@@ -44,6 +44,10 @@ test("credentialed production shell receives target and commit through env", () 
         /DEPLOY_TARGET: \$\{\{ inputs\.target \}\}/
     );
     assert.match(productionWorkflow, /DEPLOY_COMMIT: \$\{\{ github\.sha \}\}/);
+    assert.match(
+        productionWorkflow,
+        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
+    );
     assert.match(productionWorkflow, /--target "\$DEPLOY_TARGET"/);
     assert.match(productionWorkflow, /--commit "\$DEPLOY_COMMIT"/);
     assert.doesNotMatch(
@@ -73,7 +77,7 @@ test("Cloudflare workflows carry no Supabase build configuration", () => {
 test("preview hosting is validation-only and has no Cloudflare credentials", () => {
     assert.doesNotMatch(
         previewWorkflow,
-        /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|\$\{\{\s*secrets\./
+        /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256|\$\{\{\s*secrets\./
     );
     assert.doesNotMatch(
         previewWorkflow,
@@ -98,6 +102,11 @@ test("production deployment remains manually gated", () => {
         /inputs\.confirm == 'deploy-peerbit-production'/
     );
     assert.match(productionWorkflow, /environment: cloudflare-production/);
+    assert.match(productionWorkflow, /Zone Read/);
+    assert.match(
+        productionWorkflow,
+        /Workers Routes Read across every account zone/
+    );
     assert.doesNotMatch(productionWorkflow, /initialize_missing_workers/);
 });
 
@@ -168,6 +177,8 @@ test("one-time provisioning is protected, explicit, and serialized with routine 
         /inputs\.confirm == '(?:plan|provision)-peerbit-production'/
     );
     assert.match(provisioningWorkflow, /environment: cloudflare-production/);
+    assert.match(provisioningWorkflow, /Zone Read and Workers Routes/);
+    assert.match(provisioningWorkflow, /Read across every account zone/);
     assert.match(provisioningWorkflow, /group: cloudflare-examples-production/);
     assert.match(
         provisioningWorkflow,
@@ -176,6 +187,10 @@ test("one-time provisioning is protected, explicit, and serialized with routine 
     assert.match(
         provisioningWorkflow,
         /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
     );
     assert.match(provisioningWorkflow, /--mode "\$PROVISION_MODE"/);
     assert.match(provisioningWorkflow, /--commit "\$PROVISION_COMMIT"/);
@@ -392,7 +407,7 @@ test("one-time provisioning rebuilds exact bundles and never invokes Worker dele
             ),
             credentialedProvision
         ),
-        /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID/
+        /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256/
     );
 
     const source = readFileSync(
@@ -401,6 +416,40 @@ test("one-time provisioning rebuilds exact bundles and never invokes Worker dele
     );
     assert.doesNotMatch(source, /method:\s*["']DELETE["']/);
     assert.doesNotMatch(source, /wrangler["'],\s*\[[^\]]*["']delete["']/s);
+});
+
+test("protected zone fingerprint is omitted from every uncredentialed workflow phase", () => {
+    assert.equal(
+        (
+            productionWorkflow.match(
+                /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256:/g
+            ) ?? []
+        ).length,
+        1
+    );
+    assert.equal(
+        (
+            provisioningWorkflow.match(
+                /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256:/g
+            ) ?? []
+        ).length,
+        1
+    );
+    assert.equal(
+        (
+            previewWorkflow.match(
+                /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256:/g
+            ) ?? []
+        ).length,
+        0
+    );
+    assert.doesNotMatch(
+        productionWorkflow.slice(
+            0,
+            productionWorkflow.indexOf("CLOUDFLARE_API_TOKEN:")
+        ),
+        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256/
+    );
 });
 
 test("every action in Cloudflare workflows is pinned to a full commit", () => {

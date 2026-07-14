@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -11,6 +12,7 @@ import {
     validateRenderedCloudflareConfig,
 } from "../scripts/cloudflare-deployment-policy.mjs";
 import {
+    accountZoneInventorySha256,
     createRouteFreeWranglerConfig,
     deployProductionEntries as deployProductionEntriesWithPolicy,
     parseWranglerVersionUploadOutput,
@@ -36,12 +38,17 @@ const OLD_COMMIT = "b".repeat(40);
 const OLD_VERSION = "11111111-1111-4111-8111-111111111111";
 const NEW_VERSION = "22222222-2222-4222-8222-222222222222";
 const ZONE_ID = "e".repeat(32);
+const EXAMPLE_ZONE_ID = "f".repeat(32);
+const EXPECTED_ZONE_INVENTORY_SHA256 = accountZoneInventorySha256([
+    { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+]);
 const WORKER_TAGS = new Map([
     ["files", "files-tag-11111111"],
     ["stream", "stream-tag-22222222"],
 ]);
 const CLOUDFLARE_CREDENTIALS = {
     CLOUDFLARE_ACCOUNT_ID: "account-id-secret",
+    CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: "f".repeat(64),
     CLOUDFLARE_API_TOKEN: "api-token-secret",
     CLOUDFLARE_API_KEY: "api-key-secret",
     CLOUDFLARE_EMAIL: "email-secret",
@@ -78,6 +85,15 @@ const rawWorkerDomain = (id, overrides = {}) => ({
     zone_name: "example.com",
     ...overrides,
 });
+const routineZoneRouteInventory = (routes = []) => [
+    {
+        zoneId: ZONE_ID,
+        zoneName: "peerbit.org",
+        status: "active",
+        type: "full",
+        routes: clone(routes),
+    },
+];
 
 test("production Workers and hostnames are an exact reviewed allowlist", () => {
     const { manifest, policy, entries } = loadCloudflareDeploymentData();
@@ -1113,7 +1129,7 @@ test("custom-domain pagination and API ambiguity fail closed", async () => {
     }
 });
 
-test("attachment inventory source contract is account-scoped and read-only", () => {
+test("attachment inventory source contract uses account-scoped domains and authoritative read-only zone routes", () => {
     const source = readFileSync(
         path.join(repoRoot, "scripts/cloudflare-workers-api.mjs"),
         "utf8"
@@ -1140,8 +1156,34 @@ test("attachment inventory source contract is account-scoped and read-only", () 
     assert.ok(subdomainStart >= 0 && subdomainEnd > subdomainStart);
     assert.match(subdomainInventory, /\/subdomain/);
     assert.doesNotMatch(subdomainInventory, /method\s*:|body\s*:/);
-    assert.match(source, /for \(const route of script\.routes\)/);
-    assert.doesNotMatch(source, /\/zones\/\$\{[^}]+\}\/workers\/routes/);
+    const zoneRoutesStart = source.indexOf("listZoneRouteInventory: async");
+    const zoneRoutesEnd = source.indexOf(
+        "listWorkerDomains: async",
+        zoneRoutesStart
+    );
+    const zoneRoutes = source.slice(zoneRoutesStart, zoneRoutesEnd);
+    assert.ok(zoneRoutesStart >= 0 && zoneRoutesEnd > zoneRoutesStart);
+    assert.match(zoneRoutes, /"account\.id": accountId/);
+    assert.match(zoneRoutes, /per_page: String\(ZONE_PAGE_SIZE\)/);
+    assert.match(
+        zoneRoutes,
+        /\$\{zonesUrl\}\/\$\{zone\.zoneId\}\/workers\/routes/
+    );
+    assert.match(zoneRoutes, /REQUIRED_ZONE_ROUTE_SNAPSHOTS/);
+    assert.doesNotMatch(zoneRoutes, /method\s*:|body\s*:/);
+    assert.match(source, /script\.routes == null \? null : \[\]/);
+    const deploymentSource = readFileSync(
+        path.join(repoRoot, "scripts/deploy-cloudflare-production.mjs"),
+        "utf8"
+    );
+    assert.match(
+        deploymentSource,
+        /listZoneRouteInventory: workersApi\.listZoneRouteInventory/
+    );
+    assert.match(
+        deploymentSource,
+        /readAndValidateZoneRouteInventory\(\{\s*scripts,\s*operations,\s*expectedZoneInventorySha256,\s*\}\)/
+    );
 });
 
 test("Cloudflare Workers API reads versions and changes traffic only through deployments", async () => {
@@ -1511,6 +1553,48 @@ test("production CLI accepts only target and immutable commit", () => {
     );
 });
 
+test("account zone identity fingerprint uses exact canonical sorted identities", () => {
+    const canonical = JSON.stringify([
+        { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+        { zoneId: EXAMPLE_ZONE_ID, zoneName: "example.com" },
+    ]);
+    const expected = createHash("sha256")
+        .update(canonical, "utf8")
+        .digest("hex");
+    assert.equal(
+        accountZoneInventorySha256([
+            {
+                zoneId: EXAMPLE_ZONE_ID,
+                zoneName: "example.com",
+                status: "pending",
+                type: "internal",
+                routes: [{ ignored: true }],
+            },
+            {
+                zoneId: ZONE_ID,
+                zoneName: "peerbit.org",
+                status: "active",
+                type: "full",
+                routes: [],
+            },
+        ]),
+        expected
+    );
+    assert.notEqual(
+        accountZoneInventorySha256([
+            { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+        ]),
+        expected
+    );
+    assert.throws(
+        () =>
+            accountZoneInventorySha256([
+                { zoneId: 1, zoneName: "peerbit.org" },
+            ]),
+        /invalid or ambiguous/
+    );
+});
+
 const fixtureEntries = (ids) =>
     ids.map((id) => ({
         site: { id },
@@ -1525,7 +1609,12 @@ const fixtureEntries = (ids) =>
 const deployProductionEntries = (options) =>
     deployProductionEntriesWithPolicy({
         deploymentEntries: options.selectedEntries,
+        expectedZoneInventorySha256: EXPECTED_ZONE_INVENTORY_SHA256,
         ...options,
+        operations: {
+            listZoneRouteInventory: () => routineZoneRouteInventory(),
+            ...options.operations,
+        },
     });
 const fixtureConfigs = (ids) =>
     new Map(
@@ -1580,6 +1669,7 @@ const createRolloutHarness = (ids) => {
                 ])
             ),
         listWorkerDomains: () => ids.map((id) => workerDomain(id)),
+        listZoneRouteInventory: () => routineZoneRouteInventory(),
         getWorkerSubdomain: (workerName) =>
             structuredClone(subdomains.get(workerName)),
         status: ({ site }) => deployment(current.get(site.id)),
@@ -1631,6 +1721,7 @@ test("account-wide attachment validation requires an explicit non-empty full pol
                 selectedEntries: fixtureEntries(["files"]),
                 configs: fixtureConfigs(["files"]),
                 expectedCommit: COMMIT,
+                expectedZoneInventorySha256: EXPECTED_ZONE_INVENTORY_SHA256,
                 log: () => {},
                 operations: {
                     listWorkerScripts: () => {
@@ -1659,6 +1750,7 @@ test("an empty selected entry set fails before account reads or mutations", asyn
             deploymentEntries: fixtureEntries(["files"]),
             configs: fixtureConfigs(["files"]),
             expectedCommit: COMMIT,
+            expectedZoneInventorySha256: EXPECTED_ZONE_INVENTORY_SHA256,
             log: () => {},
             operations: {
                 listWorkerScripts: () => {
@@ -1672,6 +1764,123 @@ test("an empty selected entry set fails before account reads or mutations", asyn
         /non-empty selected entry set/
     );
     assert.equal(listed, false);
+});
+
+test("routine deploy requires the independently reviewed zone fingerprint", async (t) => {
+    for (const fixture of [
+        { name: "missing", value: undefined },
+        { name: "non-string", value: { toString: () => "a".repeat(64) } },
+        { name: "uppercase", value: "A".repeat(64) },
+        { name: "short", value: "a".repeat(63) },
+    ]) {
+        await t.test(fixture.name, async () => {
+            const harness = createRolloutHarness(["files"]);
+            await assert.rejects(
+                deployProductionEntries({
+                    selectedEntries: fixtureEntries(["files"]),
+                    configs: fixtureConfigs(["files"]),
+                    expectedCommit: COMMIT,
+                    expectedZoneInventorySha256: fixture.value,
+                    log: () => {},
+                    operations: harness.operations,
+                }),
+                /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 must be an exact lowercase SHA-256 digest/
+            );
+            assert.deepEqual(harness.events, []);
+        });
+    }
+});
+
+test("permission-filtered 200 zone inventory cannot authorize routine deploy", async () => {
+    const harness = createRolloutHarness(["files"]);
+    harness.operations.listWorkerScripts = () =>
+        new Map([
+            [
+                "peerbit-examples-files",
+                { tag: WORKER_TAGS.get("files"), routes: null },
+            ],
+        ]);
+    const accountId = "c".repeat(32);
+    const requests = [];
+    const api = createCloudflareWorkersApi({
+        accountId,
+        apiToken: "permission-filtered-token",
+        request: async (url, init) => {
+            requests.push({ url, init });
+            const parsed = new URL(url);
+            if (parsed.pathname.endsWith("/zones")) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        result: [
+                            {
+                                id: ZONE_ID,
+                                name: "peerbit.org",
+                                account: { id: accountId },
+                                status: "active",
+                                type: "full",
+                            },
+                        ],
+                        result_info: {
+                            count: 1,
+                            page: 1,
+                            per_page: 50,
+                            total_count: 1,
+                            total_pages: 1,
+                        },
+                    }),
+                    { status: 200 }
+                );
+            }
+            assert.match(parsed.pathname, /\/workers\/routes$/);
+            return new Response(JSON.stringify({ success: true, result: [] }), {
+                status: 200,
+            });
+        },
+    });
+    harness.operations.listZoneRouteInventory = api.listZoneRouteInventory;
+    const independentlyReviewed = accountZoneInventorySha256([
+        { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+        { zoneId: EXAMPLE_ZONE_ID, zoneName: "hidden.example" },
+    ]);
+    let failure;
+    try {
+        await deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256: independentlyReviewed,
+            log: () => {},
+            operations: harness.operations,
+        });
+    } catch (error) {
+        failure = error;
+    }
+    assert.ok(failure instanceof Error);
+    assert.match(
+        failure.message,
+        /does not match the independently reviewed fingerprint/
+    );
+    assert.doesNotMatch(failure.message, new RegExp(independentlyReviewed));
+    assert.equal(requests.length, 4);
+    assert.ok(requests.every(({ init }) => init.method === "GET"));
+    assert.deepEqual(harness.events, []);
+});
+
+test("routine deploy rejects a well-formed but wrong zone fingerprint", async () => {
+    const harness = createRolloutHarness(["files"]);
+    await assert.rejects(
+        deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256: "0".repeat(64),
+            log: () => {},
+            operations: harness.operations,
+        }),
+        /does not match the independently reviewed fingerprint/
+    );
+    assert.deepEqual(harness.events, []);
 });
 
 test("a missing production Worker fails closed before every mutation", async () => {
@@ -1825,22 +2034,23 @@ test("noncanonical custom-domain hostnames fail closed before upload", async () 
 
 test("traditional Worker routes fail exact attachment validation", async () => {
     const harness = createRolloutHarness(["files"]);
+    const route = {
+        id: "route-legacy",
+        pattern: "peerbit.org/legacy/*",
+        script: "peerbit-examples-files",
+    };
     harness.operations.listWorkerScripts = () =>
         new Map([
             [
                 "peerbit-examples-files",
                 {
                     tag: WORKER_TAGS.get("files"),
-                    routes: [
-                        {
-                            id: "route-legacy",
-                            pattern: "peerbit.org/legacy/*",
-                            script: "peerbit-examples-files",
-                        },
-                    ],
+                    routes: [route],
                 },
             ],
         ]);
+    harness.operations.listZoneRouteInventory = () =>
+        routineZoneRouteInventory([route]);
     await assert.rejects(
         deployProductionEntries({
             selectedEntries: fixtureEntries(["files"]),
@@ -1850,6 +2060,213 @@ test("traditional Worker routes fail exact attachment validation", async () => {
             operations: harness.operations,
         }),
         /unreviewed Worker route attachments/
+    );
+    assert.deepEqual(harness.events, []);
+});
+
+test("routine deploy accepts missing inline routes only through authoritative reconciliation", async () => {
+    const harness = createRolloutHarness(["files"]);
+    harness.operations.listWorkerScripts = () =>
+        new Map([
+            [
+                "peerbit-examples-files",
+                { tag: WORKER_TAGS.get("files"), routes: null },
+            ],
+        ]);
+
+    await deployProductionEntries({
+        selectedEntries: fixtureEntries(["files"]),
+        configs: fixtureConfigs(["files"]),
+        expectedCommit: COMMIT,
+        log: () => {},
+        operations: harness.operations,
+    });
+    assert.equal(harness.current.get("files"), NEW_VERSION);
+});
+
+test("routine deploy rejects hidden authoritative routes and inline disagreement", async (t) => {
+    await t.test("hidden authoritative managed route", async () => {
+        const harness = createRolloutHarness(["files"]);
+        const route = {
+            id: "hidden-route",
+            pattern: "unrelated.example.com/*",
+            script: "peerbit-examples-files",
+        };
+        harness.operations.listWorkerScripts = () =>
+            new Map([
+                [
+                    "peerbit-examples-files",
+                    { tag: WORKER_TAGS.get("files"), routes: null },
+                ],
+            ]);
+        harness.operations.listZoneRouteInventory = () =>
+            routineZoneRouteInventory([route]);
+
+        await assert.rejects(
+            deployProductionEntries({
+                selectedEntries: fixtureEntries(["files"]),
+                configs: fixtureConfigs(["files"]),
+                expectedCommit: COMMIT,
+                log: () => {},
+                operations: harness.operations,
+            }),
+            /files: peerbit-examples-files has unreviewed Worker route attachments/
+        );
+        assert.deepEqual(harness.events, []);
+    });
+
+    await t.test(
+        "inline route absent from authoritative inventory",
+        async () => {
+            const harness = createRolloutHarness(["files"]);
+            harness.operations.listWorkerScripts = () =>
+                new Map([
+                    [
+                        "peerbit-examples-files",
+                        {
+                            tag: WORKER_TAGS.get("files"),
+                            routes: [
+                                {
+                                    id: "inline-only-route",
+                                    pattern: "unrelated.example.com/*",
+                                    script: "peerbit-examples-files",
+                                },
+                            ],
+                        },
+                    ],
+                ]);
+
+            await assert.rejects(
+                deployProductionEntries({
+                    selectedEntries: fixtureEntries(["files"]),
+                    configs: fixtureConfigs(["files"]),
+                    expectedCommit: COMMIT,
+                    log: () => {},
+                    operations: harness.operations,
+                }),
+                /inline Worker routes do not exactly match the authoritative per-zone route inventory/
+            );
+            assert.deepEqual(harness.events, []);
+        }
+    );
+});
+
+test("routine deploy fails closed when authoritative zone-route scope is unavailable", async () => {
+    const harness = createRolloutHarness(["files"]);
+    harness.operations.listZoneRouteInventory = () => {
+        throw new Error(
+            "HTTP 403: token requires Zone Read and Workers Routes Read"
+        );
+    };
+    await assert.rejects(
+        deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            log: () => {},
+            operations: harness.operations,
+        }),
+        /403.*Zone Read and Workers Routes Read/
+    );
+    assert.deepEqual(harness.events, []);
+});
+
+test("routine deploy pins the complete authoritative route inventory across upload fences", async () => {
+    const harness = createRolloutHarness(["files"]);
+    harness.operations.listWorkerScripts = () =>
+        new Map([
+            [
+                "peerbit-examples-files",
+                { tag: WORKER_TAGS.get("files"), routes: null },
+            ],
+        ]);
+    let reads = 0;
+    harness.operations.listZoneRouteInventory = () => {
+        reads += 1;
+        return routineZoneRouteInventory(
+            reads >= 4
+                ? [
+                      {
+                          id: "external-route-drift",
+                          pattern: "unrelated.example.com/*",
+                          script: null,
+                      },
+                  ]
+                : []
+        );
+    };
+
+    await assert.rejects(
+        deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            log: () => {},
+            operations: harness.operations,
+        }),
+        /authoritative account zone or Worker route inventory changed/
+    );
+    assert.equal(harness.events.includes("upload:files"), true);
+    assert.equal(
+        harness.events.some((event) => event.startsWith("activate:")),
+        false
+    );
+});
+
+test("routine deploy rechecks the independent zone identity fingerprint after upload", async () => {
+    const harness = createRolloutHarness(["files"]);
+    const fullInventory = [
+        ...routineZoneRouteInventory(),
+        {
+            zoneId: EXAMPLE_ZONE_ID,
+            zoneName: "hidden.example",
+            status: "active",
+            type: "internal",
+            routes: [],
+        },
+    ];
+    let reads = 0;
+    harness.operations.listZoneRouteInventory = () => {
+        reads += 1;
+        return clone(reads >= 4 ? fullInventory.slice(0, 1) : fullInventory);
+    };
+
+    await assert.rejects(
+        deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            expectedZoneInventorySha256:
+                accountZoneInventorySha256(fullInventory),
+            log: () => {},
+            operations: harness.operations,
+        }),
+        /does not match the independently reviewed fingerprint/
+    );
+    assert.equal(harness.events.includes("upload:files"), true);
+    assert.equal(
+        harness.events.some((event) => event.startsWith("activate:")),
+        false
+    );
+});
+
+test("routine deploy rejects custom domains outside authoritative account zones", async () => {
+    const harness = createRolloutHarness(["files"]);
+    harness.operations.listWorkerDomains = () => [
+        workerDomain("files", {
+            zoneId: EXAMPLE_ZONE_ID,
+            zoneName: "example.com",
+        }),
+    ];
+    await assert.rejects(
+        deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            log: () => {},
+            operations: harness.operations,
+        }),
+        /references a zone outside the authoritative account inventory/
     );
     assert.deepEqual(harness.events, []);
 });
@@ -1920,16 +2337,19 @@ test("a targeted deploy rejects unmanaged ownership of retired app hostnames", a
 
 test("a targeted deploy rejects routes on non-selected policy Workers", async () => {
     const harness = createRolloutHarness(["files", "stream"]);
+    const route = {
+        id: "stream-route",
+        pattern: "unrelated.example.com/*",
+        script: "peerbit-examples-stream",
+    };
     const listWorkerScripts = harness.operations.listWorkerScripts;
     harness.operations.listWorkerScripts = () => {
         const scripts = listWorkerScripts();
-        scripts.get("peerbit-examples-stream").routes.push({
-            id: "stream-route",
-            pattern: "unrelated.example.com/*",
-            script: "peerbit-examples-stream",
-        });
+        scripts.get("peerbit-examples-stream").routes.push(route);
         return scripts;
     };
+    harness.operations.listZoneRouteInventory = () =>
+        routineZoneRouteInventory([route]);
 
     await assert.rejects(
         deployProductionEntries({
@@ -1947,6 +2367,11 @@ test("a targeted deploy rejects routes on non-selected policy Workers", async ()
 
 test("routes targeting the managed app suffix are rejected on unrelated Workers", async () => {
     const harness = createRolloutHarness(["files", "stream"]);
+    const route = {
+        id: "managed-suffix-route",
+        pattern: "retired.apps.peerbit.org./*",
+        script: "unrelated-account-worker",
+    };
     const listWorkerScripts = harness.operations.listWorkerScripts;
     harness.operations.listWorkerScripts = () =>
         new Map([
@@ -1955,16 +2380,12 @@ test("routes targeting the managed app suffix are rejected on unrelated Workers"
                 "unrelated-account-worker",
                 {
                     tag: "unrelated-worker-tag",
-                    routes: [
-                        {
-                            id: "managed-suffix-route",
-                            pattern: "retired.apps.peerbit.org./*",
-                            script: "unrelated-account-worker",
-                        },
-                    ],
+                    routes: [route],
                 },
             ],
         ]);
+    harness.operations.listZoneRouteInventory = () =>
+        routineZoneRouteInventory([route]);
 
     await assert.rejects(
         deployProductionEntries({
@@ -1982,6 +2403,11 @@ test("routes targeting the managed app suffix are rejected on unrelated Workers"
 
 test("unrelated account Workers, routes, and domains remain outside deployment policy", async () => {
     const harness = createRolloutHarness(["files", "stream"]);
+    const route = {
+        id: "unrelated-route",
+        pattern: "unrelated.example.com/*",
+        script: "unrelated-account-worker",
+    };
     const listWorkerScripts = harness.operations.listWorkerScripts;
     harness.operations.listWorkerScripts = () =>
         new Map([
@@ -1990,22 +2416,27 @@ test("unrelated account Workers, routes, and domains remain outside deployment p
                 "unrelated-account-worker",
                 {
                     tag: "unrelated-worker-tag",
-                    routes: [
-                        {
-                            id: "unrelated-route",
-                            pattern: "unrelated.example.com/*",
-                            script: "unrelated-account-worker",
-                        },
-                    ],
+                    routes: [route],
                 },
             ],
         ]);
+    harness.operations.listZoneRouteInventory = () => [
+        ...routineZoneRouteInventory([route]),
+        {
+            zoneId: EXAMPLE_ZONE_ID,
+            zoneName: "example.com",
+            status: "active",
+            type: "full",
+            routes: [],
+        },
+    ];
     harness.operations.listWorkerDomains = () => [
         workerDomain("files"),
         workerDomain("stream"),
         workerDomain("unrelated", {
             hostname: "unrelated.example.com",
             service: "unrelated-account-worker",
+            zoneId: EXAMPLE_ZONE_ID,
             zoneName: "example.com",
         }),
     ];
@@ -2015,6 +2446,10 @@ test("unrelated account Workers, routes, and domains remain outside deployment p
         deploymentEntries: fixtureEntries(["files", "stream"]),
         configs: fixtureConfigs(["files", "stream"]),
         expectedCommit: COMMIT,
+        expectedZoneInventorySha256: accountZoneInventorySha256([
+            { zoneId: ZONE_ID, zoneName: "peerbit.org" },
+            { zoneId: EXAMPLE_ZONE_ID, zoneName: "example.com" },
+        ]),
         log: () => {},
         operations: harness.operations,
     });
@@ -2841,21 +3276,28 @@ test("rollback success requires full policy and active-version confirmation afte
         },
         {
             name: "traditional-route drift",
-            pattern: /unreviewed Worker route attachments/,
+            pattern:
+                /authoritative account zone or Worker route inventory changed/,
             configure: (harness) => {
                 let drifted = false;
                 const listWorkerScripts = harness.operations.listWorkerScripts;
                 harness.operations.listWorkerScripts = () => {
                     const scripts = listWorkerScripts();
-                    if (drifted) {
-                        scripts.get("peerbit-examples-files").routes.push({
-                            id: "rollback-route-drift",
-                            pattern: "files.apps.peerbit.org/*",
-                            script: "peerbit-examples-files",
-                        });
-                    }
+                    scripts.get("peerbit-examples-files").routes = null;
                     return scripts;
                 };
+                harness.operations.listZoneRouteInventory = () =>
+                    routineZoneRouteInventory(
+                        drifted
+                            ? [
+                                  {
+                                      id: "rollback-route-drift",
+                                      pattern: "files.apps.peerbit.org/*",
+                                      script: "peerbit-examples-files",
+                                  },
+                              ]
+                            : []
+                    );
                 return () => {
                     drifted = true;
                 };
