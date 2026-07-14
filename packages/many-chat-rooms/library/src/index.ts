@@ -94,6 +94,7 @@ export class Room extends Program<Args> {
     }
 }
 
+@variant("peerbit_example_many_chat_rooms_room_indexable")
 class RoomIndexable {
     @field({ type: "string" })
     name: string;

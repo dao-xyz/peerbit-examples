@@ -33,7 +33,7 @@ describe("index", () => {
             await platform.posts.put(post);
 
             const result = await platform.getPostAuthor(post.id);
-            expect(result).to.eq(peer.identity.publicKey);
+            expect(result.equals(peer.identity.publicKey)).toBe(true);
             const myPosts = await platform.getMyPosts();
             expect(myPosts).to.have.length(1);
 
@@ -57,6 +57,14 @@ describe("index", () => {
                 })
             );
             expect(foundPost).to.have.length(1);
+
+            const remoteHead = (foundPost[0] as any).__context.head;
+            expect(await viewer.posts.log.log.get(remoteHead)).toBeUndefined();
+            expect(
+                (await viewer.getPostAuthor(post.id)).equals(
+                    peer.identity.publicKey
+                )
+            ).toBe(true);
         });
     });
 
