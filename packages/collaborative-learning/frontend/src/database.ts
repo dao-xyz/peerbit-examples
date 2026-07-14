@@ -2,6 +2,7 @@ import { Program } from "@peerbit/program";
 import { Documents } from "@peerbit/document";
 import { field, variant } from "@dao-xyz/borsh";
 
+@variant("collaborative_learning_model")
 export class Model {
     @field({ type: "string" })
     id: string;

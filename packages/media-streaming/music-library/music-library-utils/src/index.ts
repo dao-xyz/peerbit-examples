@@ -4,6 +4,7 @@ import { Program } from "@peerbit/program";
 import { Documents, DocumentsChange, id } from "@peerbit/document";
 import { MediaStreamDBs } from "@peerbit/media-streaming";
 
+@variant("music_media_stream_dbs_indexable")
 class MediaStreamDBsIndexable {
     @id({ type: fixedArray("u8", 32) })
     id: Uint8Array;
@@ -110,6 +111,7 @@ export class StoraOfLibraries extends Program {
     }
 }
 
+@variant("music_named_item")
 class NamedItem {
     @id({ type: Uint8Array })
     id: Uint8Array;
@@ -157,6 +159,7 @@ export class NamedItems extends Program<ReplicationArgs> {
     }
 }
 
+@variant("music_image_item")
 class ImageItem {
     @id({ type: Uint8Array })
     id: Uint8Array;
@@ -183,6 +186,7 @@ class ImageItem {
     }
 }
 
+@variant("music_indexed_image_item")
 class IndexedImageItem {
     @id({ type: Uint8Array })
     id: Uint8Array;
