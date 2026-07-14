@@ -17,7 +17,6 @@ on:
                     - text
                     - files
                     - chess
-                    - legacy-redirect
                     - all
             confirm:
                 description: Type deploy-peerbit-production
@@ -123,7 +122,6 @@ jobs:
                   node scripts/render-cloudflare-configs.mjs --mode production
 
             - name: Install Chromium for transactional runtime checks
-              if: inputs.target != 'legacy-redirect'
               run: >-
                   pnpm --dir packages/file-share/frontend exec playwright
                   install --with-deps chromium
