@@ -148,6 +148,43 @@ const serve = (directory) =>
 const isFatalConsoleMessage = (message) =>
     FATAL_CONSOLE_PATTERNS.some((pattern) => pattern.test(message));
 
+const assertChatRoomReady = async (page) => {
+    const openRoom = page.getByRole("button", {
+        name: "Open room",
+        exact: true,
+    });
+    await openRoom.waitFor({ state: "visible", timeout: ROOT_TIMEOUT_MS });
+    await page.waitForFunction(
+        () => {
+            const button = [...document.querySelectorAll("button")].find(
+                (candidate) => candidate.textContent?.trim() === "Open room"
+            );
+            return button instanceof HTMLButtonElement && !button.disabled;
+        },
+        undefined,
+        { timeout: ROOT_TIMEOUT_MS }
+    );
+    await openRoom.click();
+    await page.waitForURL((url) => url.hash.startsWith("#/k/"), {
+        timeout: ROOT_TIMEOUT_MS,
+    });
+    await page
+        .getByTestId("chat-room-ready")
+        .waitFor({ state: "visible", timeout: ROOT_TIMEOUT_MS });
+
+    const composer = page.getByRole("textbox", { name: "Send message" });
+    await composer.waitFor({ state: "visible", timeout: ROOT_TIMEOUT_MS });
+    if (!(await composer.isEnabled())) {
+        throw new Error(
+            "chat: room opened without an enabled message composer"
+        );
+    }
+};
+
+const assertSiteReady = async (site, page) => {
+    if (site.id === "chat") await assertChatRoomReady(page);
+};
+
 const smokeSite = async (browser, site, directory) => {
     const { server, origin } = await serve(directory);
     const context = await browser.newContext();
@@ -193,6 +230,7 @@ const smokeSite = async (browser, site, directory) => {
             undefined,
             { timeout: ROOT_TIMEOUT_MS }
         );
+        await assertSiteReady(site, page);
         await page.waitForTimeout(SETTLE_MS);
         if (runtimeErrors.length) {
             throw new Error(

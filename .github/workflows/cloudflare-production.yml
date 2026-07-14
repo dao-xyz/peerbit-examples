@@ -52,7 +52,7 @@ jobs:
               with:
                   run_install: false
 
-            - name: Build and validate every frontend
+            - name: Build every frontend
               env:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
@@ -61,6 +61,17 @@ jobs:
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
+
+            - name: Install locked Chromium for hosted-app validation
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Smoke-test every hosted app
+              run: pnpm run test:hosted-apps
+
+            - name: Validate Cloudflare production bundles
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+              run: |
                   node scripts/prepare-cloudflare-assets.mjs
                   node scripts/validate-owned-domains.mjs
                   git diff --exit-code

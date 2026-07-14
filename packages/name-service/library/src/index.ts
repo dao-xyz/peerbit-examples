@@ -18,6 +18,7 @@ export class Name {
     }
 }
 
+@variant("peerbit_example_name_service_indexed_name")
 class IndexedName {
     @field({ type: Uint8Array })
     id: Uint8Array;

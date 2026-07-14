@@ -38,6 +38,7 @@ export class Post {
     }
 }
 
+@variant("one_chat_room_indexable_post")
 class IndexablePost {
     @field({ type: "string" })
     id: string;
