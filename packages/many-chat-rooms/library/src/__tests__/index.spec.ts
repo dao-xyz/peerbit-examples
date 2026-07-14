@@ -3,6 +3,9 @@ import { waitFor, waitForResolved } from "@peerbit/time";
 import { Lobby, Post, Room } from "../index.js";
 import { expect } from "chai";
 import { afterEach, beforeEach, describe, it } from "vitest";
+import * as fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const loobyConfig = {
     id: new Uint8Array([
@@ -48,6 +51,39 @@ describe("many-chat-rooms", () => {
 
         // Check registry size
         expect(await lobby.rooms.index.getSize()).to.eq(1);
+    });
+
+    it("reopens its room index from persisted state", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-many-chat-rooms-")
+        );
+        const id = new Uint8Array(loobyConfig.id);
+
+        try {
+            const firstPeer = await Peerbit.create({ directory });
+            try {
+                const lobby = await firstPeer.open(new Lobby({ id }), {
+                    args: { replicate: false },
+                });
+                await lobby.rooms.put(new Room({ name: "persisted-room" }));
+            } finally {
+                await firstPeer.stop();
+            }
+
+            const secondPeer = await Peerbit.create({ directory });
+            try {
+                const lobby = await secondPeer.open(new Lobby({ id }), {
+                    args: { replicate: false },
+                });
+                expect(
+                    (await lobby.rooms.index.get("persisted-room"))?.name
+                ).to.eq("persisted-room");
+            } finally {
+                await secondPeer.stop();
+            }
+        } finally {
+            await fs.rm(directory, { recursive: true, force: true });
+        }
     });
 
     it("should peer get same rooms", async () => {
