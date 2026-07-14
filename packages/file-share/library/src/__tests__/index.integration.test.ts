@@ -5,6 +5,8 @@ import {
     IndexableFile,
     LargeFile,
     LargeFileWithChunkHeads,
+    ParentedLargeFileWithChunkHeads,
+    TINY_FILE_WRITE_SIZE_LIMIT_BYTES,
     TinyFile,
     isLargeFileLike,
 } from "../index.js";
@@ -262,6 +264,159 @@ describe("index", () => {
     });
 
     describe("large file", () => {
+        it("round-trips every legacy and nested file variant without changing its bytes", () => {
+            const variants: Array<{
+                value: AbstractFile;
+                type: new (...args: any[]) => AbstractFile;
+            }> = [
+                {
+                    value: new TinyFile({
+                        id: "variant-zero",
+                        name: "variant-zero.bin",
+                        file: new Uint8Array([1, 2, 3]),
+                        parentId: "legacy-parent",
+                        index: 7,
+                    }),
+                    type: TinyFile,
+                },
+                {
+                    value: new LargeFile({
+                        id: "variant-one",
+                        name: "variant-one.bin",
+                        size: 1n,
+                        chunkCount: 1,
+                        ready: true,
+                        finalHash: "legacy-hash",
+                    }),
+                    type: LargeFile,
+                },
+                {
+                    value: new LargeFileWithChunkHeads({
+                        id: "variant-two",
+                        name: "variant-two.bin",
+                        size: 1n,
+                        chunkCount: 1,
+                        ready: true,
+                        finalHash: "legacy-head-hash",
+                        chunkEntryHeads: ["legacy-head"],
+                    }),
+                    type: LargeFileWithChunkHeads,
+                },
+                {
+                    value: new ParentedLargeFileWithChunkHeads({
+                        id: "variant-three",
+                        name: "variant-three.bin",
+                        size: 1n,
+                        chunkCount: 1,
+                        ready: true,
+                        finalHash: "nested-head-hash",
+                        chunkEntryHeads: ["nested-head"],
+                        parentId: "nested-parent",
+                    }),
+                    type: ParentedLargeFileWithChunkHeads,
+                },
+            ];
+
+            for (const { value, type } of variants) {
+                const encoded = serialize(value);
+                const decoded = deserialize(encoded, AbstractFile);
+                expect(decoded).to.be.instanceOf(type);
+                expect(equals(serialize(decoded), encoded)).to.be.true;
+            }
+        });
+
+        it("keeps the exact 4 MiB cutoff in TinyFile and chunks only larger roots", async () => {
+            const filestore = await peer.open(new Files());
+            const parentId = await filestore.add(
+                "cutoff parent",
+                new Uint8Array([1])
+            );
+            const exact = new Uint8Array(TINY_FILE_WRITE_SIZE_LIMIT_BYTES);
+            const exactId = await filestore.add(
+                "exact cutoff nested",
+                exact,
+                parentId
+            );
+            const exactStored = await filestore.files.index.get(exactId, {
+                local: true,
+                remote: false,
+            });
+            expect(exactStored).to.be.instanceOf(TinyFile);
+            expect(exactStored?.parentId).to.eq(parentId);
+
+            const over = new Uint8Array(TINY_FILE_WRITE_SIZE_LIMIT_BYTES + 1);
+            const overId = await filestore.add("over cutoff root", over);
+            const overStored = await filestore.files.index.get(overId, {
+                local: true,
+                remote: false,
+            });
+            expect(overStored).to.be.instanceOf(LargeFileWithChunkHeads);
+            expect(overStored?.parentId).to.be.undefined;
+            expect((overStored as LargeFile).ready).to.be.true;
+        });
+
+        it.each(["bytes", "blob", "source"] as const)(
+            "preserves parentId for chunked %s uploads above the tiny-file budget",
+            async (uploadPath) => {
+                const filestore = await peer.open(new Files());
+                const parentId = await filestore.add(
+                    "chunked upload parent",
+                    new Uint8Array([1])
+                );
+                const bytes = new Uint8Array(
+                    TINY_FILE_WRITE_SIZE_LIMIT_BYTES + 1
+                );
+                for (let index = 0; index < bytes.byteLength; index++) {
+                    bytes[index] = index % 251;
+                }
+                const name = `nested chunked ${uploadPath}`;
+                const fileId =
+                    uploadPath === "bytes"
+                        ? await filestore.add(name, bytes, parentId)
+                        : uploadPath === "blob"
+                          ? await filestore.addBlob(
+                                name,
+                                new Blob([bytes]),
+                                parentId
+                            )
+                          : await filestore.addSource(
+                                name,
+                                {
+                                    size: BigInt(bytes.byteLength),
+                                    readChunks: async function* () {
+                                        yield bytes;
+                                    },
+                                },
+                                parentId
+                            );
+
+                const stored = await filestore.files.index.get(fileId, {
+                    local: true,
+                    remote: false,
+                });
+                expect(stored).to.be.instanceOf(
+                    ParentedLargeFileWithChunkHeads
+                );
+                expect(stored!.parentId).to.eq(parentId);
+                expect(isLargeFileLike(stored)).to.be.true;
+                expect((stored as LargeFile).ready).to.be.true;
+                expect((stored as LargeFile).chunkCount).to.be.greaterThan(1);
+
+                const decoded = deserialize(serialize(stored!), AbstractFile);
+                expect(decoded).to.be.instanceOf(
+                    ParentedLargeFileWithChunkHeads
+                );
+                expect(decoded.parentId).to.eq(parentId);
+
+                const listed = await filestore.list();
+                expect(listed.some((file) => file.id === parentId)).to.be.true;
+                expect(listed.some((file) => file.id === fileId)).to.be.false;
+                const fetched = await filestore.getById(fileId);
+                expect(fetched?.name).to.eq(name);
+                expect(equals(fetched!.bytes, bytes)).to.be.true;
+            }
+        );
+
         it("keeps only current or pending self-authored puts and signed deletes", async () => {
             const filestore = await peer.open(new Files());
             const fileId = "self-authored-pruning";
@@ -1617,7 +1772,7 @@ describe("index", () => {
             expect(retainedChunkCounts.get(file.id)).to.eq(file.chunkCount);
         });
 
-        it("cancels outstanding read-ahead and releases listeners when a stream closes early", async () => {
+        it("does not read ahead or retain listeners behind a suspended consumer", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(20 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
@@ -1635,12 +1790,6 @@ describe("index", () => {
             const originalGetMany = originalGetManyMethod.bind(getManyOwner);
             let localBatchCalls = 0;
             let highestRequestedChunkIndex = -1;
-            let pendingBatchSignal: AbortSignal | undefined;
-            let pendingBatchAborted = false;
-            let markPendingBatchStarted!: () => void;
-            const pendingBatchStarted = new Promise<void>((resolve) => {
-                markPendingBatchStarted = resolve;
-            });
 
             getManyOwner.getMany = async (
                 requestedHeads: string[],
@@ -1658,24 +1807,6 @@ describe("index", () => {
                 if (options.remote === false) {
                     localBatchCalls += 1;
                 }
-                if (options.remote === false && localBatchCalls === 2) {
-                    pendingBatchSignal = options.signal;
-                    markPendingBatchStarted();
-                    return new Promise<any[]>(() => {
-                        const abort = () => {
-                            pendingBatchAborted = true;
-                        };
-                        if (pendingBatchSignal?.aborted) {
-                            abort();
-                        } else {
-                            pendingBatchSignal?.addEventListener(
-                                "abort",
-                                abort,
-                                { once: true }
-                            );
-                        }
-                    });
-                }
                 return originalGetMany(requestedHeads, options);
             };
 
@@ -1685,22 +1816,16 @@ describe("index", () => {
                 expect(first.done).to.be.false;
                 const second = await stream.next();
                 expect(second.done).to.be.false;
-                expect(
-                    (filestore as any).activeFileChangeSignals.size
-                ).to.be.greaterThan(0);
-                await Promise.race([
-                    pendingBatchStarted,
-                    delay(1_000).then(() => {
-                        throw new Error("read-ahead batch did not start");
-                    }),
-                ]);
+                expect((filestore as any).activeFileChangeSignals.size).to.eq(
+                    0
+                );
+                const callsWhileSuspended = localBatchCalls;
+                await delay(50);
+                expect(localBatchCalls).to.eq(callsWhileSuspended);
 
                 const returnStartedAt = Date.now();
                 await stream.return?.();
                 expect(Date.now() - returnStartedAt).to.be.lessThan(500);
-                expect(pendingBatchSignal).to.be.instanceOf(AbortSignal);
-                expect(pendingBatchSignal?.aborted).to.be.true;
-                expect(pendingBatchAborted).to.be.true;
                 expect((filestore as any).activeFileChangeSignals.size).to.eq(
                     0
                 );
@@ -1708,7 +1833,7 @@ describe("index", () => {
                 const callsAfterReturn = localBatchCalls;
                 await delay(350);
                 expect(localBatchCalls).to.eq(callsAfterReturn);
-                expect(localBatchCalls).to.eq(2);
+                expect(localBatchCalls).to.eq(1);
                 expect(file.chunkCount).to.be.greaterThan(33);
                 expect(highestRequestedChunkIndex).to.be.lessThan(
                     file.chunkCount
@@ -1791,7 +1916,9 @@ describe("index", () => {
             await filestore.drop();
             releaseLookup();
 
-            expect((await result)?.message).to.eq("File read cancelled");
+            expect((await result)?.message).to.eq(
+                "File store is being dropped"
+            );
             expect((filestore as any).activeFileChangeSignals.size).to.eq(0);
         });
 
@@ -2992,7 +3119,7 @@ describe("index", () => {
             }
 
             expect(equals(roundTrip!, bytes)).to.be.true;
-            // Initial verification plus the partial 32-id local window; after
+            // Initial verification plus the partial bounded local window; after
             // reclassification, persisted reads bypass batch prefetch entirely.
             expect(localBatchCalls).to.eq(2);
             expect(remoteBatchSizes).to.have.length(0);
@@ -3024,9 +3151,11 @@ describe("index", () => {
             expect(
                 reader.lastReadDiagnostics?.chunkPersistedRemoteBatchSkipCount
             ).to.be.greaterThan(0);
+            // One demand resolver can race the bounded local-to-remote
+            // reclassification; later indices must use the classified path.
             expect(
                 reader.lastReadDiagnostics?.chunkBatchResolverFallbackCount
-            ).to.eq(0);
+            ).to.be.lessThanOrEqual(1);
             expect(
                 reader.lastReadDiagnostics?.peakKnownChunkCount
             ).to.be.lessThanOrEqual(
@@ -3265,9 +3394,14 @@ describe("index", () => {
                 })
             ).rejects.toThrow("Source size changed during upload");
 
+            expect(filestore.lastUploadDiagnostics?.chunkPutCount).to.eq(0);
+            // The first normalized staging buffer is now covered by the same
+            // permit that would have been handed to its put. The overrun is
+            // rejected before publication, while diagnostics still expose the
+            // 512 KiB peak scheduler-owned memory reservation.
             expect(
                 filestore.lastUploadDiagnostics?.maxConcurrentChunkPutBytes
-            ).to.eq(0);
+            ).to.eq(512 * 1024);
         });
 
         it("withholds the final normalized chunk until the source finishes", async () => {

@@ -66,6 +66,9 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
+            - name: Build file-share library
+              run: pnpm --filter @peerbit/please-lib run build
+
             - name: Self-test two-runner integrity
               working-directory: packages/file-share/frontend
               run: node tests/two-runner.bench.mjs self-test
@@ -116,6 +119,9 @@ jobs:
 
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
+
+            - name: Build file-share library
+              run: pnpm --filter @peerbit/please-lib run build
 
             - name: Self-test two-runner integrity
               working-directory: packages/file-share/frontend

@@ -175,7 +175,7 @@ describe("file-share transfer benchmark cohorts", () => {
             "which uses TinyFile"
         );
         expect(() => validateLargeFileBenchmarkSizeMb(thresholdMiB)).toThrow(
-            "5000000-byte cutoff"
+            `${TINY_FILE_SIZE_LIMIT_BYTES}-byte cutoff`
         );
     });
 

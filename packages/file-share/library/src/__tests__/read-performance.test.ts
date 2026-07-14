@@ -1,12 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { PutOperation } from "@peerbit/document";
+import vm from "node:vm";
+import v8 from "node:v8";
 import { concat } from "uint8arrays";
 import { AbstractFile, Files, LargeFile, TinyFile } from "../index.js";
 import {
     adaptRemotePersistedReadAhead,
     getRemotePersistedReadAheadLimit,
 } from "../read-scheduling.js";
+import {
+    FairTransferOwner,
+    FairTransferScheduler,
+} from "../transfer-scheduling.js";
+
+const createDeferred = <Value>() => {
+    let resolve!: (value: Value | PromiseLike<Value>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
+};
+
+const forceGarbageCollection = () => {
+    v8.setFlagsFromString("--expose_gc");
+    return vm.runInNewContext("gc") as () => void;
+};
 
 const createLookupSignal = (onWait?: () => void) => {
     let closed = false;
@@ -45,6 +66,10 @@ const resolveSingleChunk = (
         timeout: 30_000,
         debug,
         persist: files.persistChunkReads,
+        decodeGuard: {
+            run: <Value>(operation: () => Promise<Value>) => operation(),
+            settle: () => undefined,
+        },
     }) as Promise<TinyFile>;
 
 const withHead = <T extends object>(value: T, head: string) => {
@@ -160,6 +185,672 @@ const createPersistedManifestStreamHarness = (chunks: Uint8Array[]) => {
 };
 
 describe("large-file read scheduling", () => {
+    it("clears completed reads before allowing an immediate transfer-id reuse", async () => {
+        const files = new Files();
+        const tiny = new TinyFile({
+            name: "reused-read.bin",
+            file: new Uint8Array([1, 2, 3]),
+        });
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+            await expect(
+                tiny.getFile(files, {
+                    as: "joined",
+                    transferId: "reused-read-transfer",
+                })
+            ).resolves.toEqual(new Uint8Array([1, 2, 3]));
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect(
+                files.getReadDiagnostics("reused-read-transfer")?.transferId
+            ).toBe("reused-read-transfer");
+        }
+    });
+
+    it.each(["manual", "signal"] as const)(
+        "finalizes a %s-cancelled suspended read without iterator.return()",
+        async (mode) => {
+            const files = new Files();
+            const tiny = new TinyFile({
+                name: `suspended-${mode}.bin`,
+                file: new Uint8Array([1, 2, 3]),
+            });
+            const controller = new AbortController();
+            const transferId = `suspended-${mode}`;
+            const iterator = tiny
+                .streamFile(files, {
+                    signal: controller.signal,
+                    transferId,
+                })
+                [Symbol.asyncIterator]();
+
+            expect(await iterator.next()).toMatchObject({ done: false });
+            if (mode === "manual") {
+                expect(
+                    files.cancelTransfer(transferId, new Error("manual stop"))
+                ).toBe(true);
+            } else {
+                controller.abort(new Error("signal stop"));
+            }
+
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 0,
+                activeBytes: 0,
+                queuedCount: 0,
+            });
+            await expect(
+                tiny.getFile(files, {
+                    as: "joined",
+                    transferId,
+                })
+            ).resolves.toEqual(new Uint8Array([1, 2, 3]));
+
+            // Cleanup the deliberately abandoned generator only after proving
+            // cancellation itself released the runtime identity.
+            await iterator.return?.();
+        }
+    );
+
+    it("charges TinyFile writeFile payloads to the shared download budget", async () => {
+        const files = new Files();
+        const bytes = new Uint8Array(1024 * 1024);
+        const tiny = new TinyFile({ name: "charged-write.bin", file: bytes });
+        let releaseWrite!: () => void;
+        let markWriteStarted!: () => void;
+        const writeStarted = new Promise<void>((resolve) => {
+            markWriteStarted = resolve;
+        });
+        const writeReleased = new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+        });
+
+        const writing = tiny.writeFile(files, {
+            write: async () => {
+                markWriteStarted();
+                await writeReleased;
+            },
+        });
+        await writeStarted;
+
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 1,
+            activeBytes: bytes.byteLength,
+        });
+        releaseWrite();
+        await writing;
+        expect(files.getActiveTransfers()).toEqual([]);
+    });
+
+    it("keeps a cancelled write active until original sink work drains", async () => {
+        const files = new Files();
+        const tiny = new TinyFile({
+            name: "blocked-sink.bin",
+            file: new Uint8Array([1]),
+        });
+        let markWriteStarted!: () => void;
+        let releaseWrite!: () => void;
+        let markAbortStarted!: () => void;
+        let releaseAbort!: () => void;
+        const writeStarted = new Promise<void>((resolve) => {
+            markWriteStarted = resolve;
+        });
+        const blockedWrite = new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+        });
+        const abortStarted = new Promise<void>((resolve) => {
+            markAbortStarted = resolve;
+        });
+        const blockedAbort = new Promise<void>((resolve) => {
+            releaseAbort = resolve;
+        });
+        let settled = false;
+        const pending = tiny
+            .writeFile(
+                files,
+                {
+                    write: () => {
+                        markWriteStarted();
+                        return blockedWrite;
+                    },
+                    abort: () => {
+                        markAbortStarted();
+                        return blockedAbort;
+                    },
+                },
+                { transferId: "blocked-sink-write" }
+            )
+            .finally(() => {
+                settled = true;
+            });
+
+        await writeStarted;
+        expect(
+            files.cancelTransfer(
+                "blocked-sink-write",
+                new Error("cancel blocked sink")
+            )
+        ).toBe(true);
+        await abortStarted;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(settled).toBe(false);
+        expect(files.getActiveTransfers()).toEqual([
+            { id: "blocked-sink-write", kind: "read" },
+        ]);
+
+        releaseWrite();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(settled).toBe(false);
+        releaseAbort();
+        await expect(pending).rejects.toThrow("cancel blocked sink");
+        expect(files.getActiveTransfers()).toEqual([]);
+    });
+
+    it("retains all blocked sink credits until each cancelled write drains", async () => {
+        const files = new Files();
+        const sinkBytes = 4 * 1024 * 1024;
+        const releases = new Map<number, () => void>();
+        const started: number[] = [];
+        const writes = Array.from({ length: 8 }, (_, index) => {
+            const blocked = createDeferred<void>();
+            releases.set(index, () => blocked.resolve());
+            return new TinyFile({
+                name: `blocked-four-mib-${index}.bin`,
+                file: new Uint8Array(sinkBytes),
+            })
+                .writeFile(
+                    files,
+                    {
+                        write: async () => {
+                            started.push(index);
+                            await blocked.promise;
+                        },
+                    },
+                    { transferId: `blocked-four-mib-${index}` }
+                )
+                .then(
+                    () => ({ status: "fulfilled" as const }),
+                    (reason) => ({ status: "rejected" as const, reason })
+                );
+        });
+
+        await vi.waitFor(() => {
+            expect(started).toHaveLength(4);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 4,
+                activeBytes: 4 * sinkBytes,
+                queuedCount: 4,
+            });
+        });
+
+        const firstWave = [...started];
+        for (const index of firstWave) {
+            expect(
+                files.cancelTransfer(
+                    `blocked-four-mib-${index}`,
+                    new Error(`cancel blocked sink ${index}`)
+                )
+            ).toBe(true);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 4,
+            activeBytes: 4 * sinkBytes,
+            queuedCount: 4,
+        });
+
+        for (const index of firstWave) {
+            releases.get(index)!();
+        }
+        await vi.waitFor(() => expect(started).toHaveLength(8));
+
+        const secondWave = started.filter(
+            (index) => !firstWave.includes(index)
+        );
+        for (const index of secondWave) {
+            expect(
+                files.cancelTransfer(
+                    `blocked-four-mib-${index}`,
+                    new Error(`cancel blocked sink ${index}`)
+                )
+            ).toBe(true);
+            releases.get(index)!();
+        }
+
+        const settled = await Promise.all(writes);
+        expect(settled.every(({ status }) => status === "rejected")).toBe(true);
+        expect(files.getActiveTransfers()).toEqual([]);
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 0,
+            activeBytes: 0,
+            queuedCount: 0,
+            peakCount: 4,
+            peakBytes: 4 * sinkBytes,
+        });
+    });
+
+    it("shares download bytes across 32 suspended file consumers", async () => {
+        const files = new Files();
+        const chunkSize = 1024 * 1024;
+        const iterators = Array.from({ length: 32 }, (_, index) =>
+            new TinyFile({
+                name: `aggregate-read-${index}.bin`,
+                file: new Uint8Array(chunkSize),
+            })
+                .streamFile(files, { transferId: `aggregate-read-${index}` })
+                [Symbol.asyncIterator]()
+        );
+        const firstReads = iterators.map((iterator) => iterator.next());
+
+        await vi.waitFor(() => {
+            const snapshot = files.getTransferSchedulerDiagnostics().download;
+            expect(snapshot.activeCount).toBe(16);
+            expect(snapshot.activeBytes).toBe(16 * chunkSize);
+            expect(snapshot.queuedCount).toBe(16);
+        });
+
+        const firstWave = await Promise.all(firstReads.slice(0, 16));
+        expect(firstWave.every(({ done }) => done === false)).toBe(true);
+        // A yielded chunk retains its lease; the second wave cannot resolve
+        // until demand resumes the first wave's generators.
+        expect(
+            files.getTransferSchedulerDiagnostics().download.queuedCount
+        ).toBe(16);
+
+        const firstWaveFinished = Promise.all(
+            iterators.slice(0, 16).map((iterator) => iterator.next())
+        );
+        const secondWave = await Promise.all(firstReads.slice(16));
+        expect(secondWave.every(({ done }) => done === false)).toBe(true);
+        expect(
+            files.getTransferSchedulerDiagnostics().download.activeBytes
+        ).toBe(16 * chunkSize);
+
+        await firstWaveFinished;
+        await Promise.all(
+            iterators.slice(16).map((iterator) => iterator.next())
+        );
+        expect(files.getActiveTransfers()).toEqual([]);
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 0,
+            activeBytes: 0,
+            queuedCount: 0,
+            peakCount: 16,
+            peakBytes: 16 * chunkSize,
+        });
+    });
+
+    it.each(["getById", "getByName"] as const)(
+        "races cancellation through an uncooperative initial %s search",
+        async (method) => {
+            const files = new Files();
+            let observedSignal: AbortSignal | undefined;
+            let markSearchStarted!: () => void;
+            const searchStarted = new Promise<void>((resolve) => {
+                markSearchStarted = resolve;
+            });
+            (files.files.index as any).search = vi.fn(
+                async (
+                    _request: unknown,
+                    options: { signal?: AbortSignal }
+                ) => {
+                    observedSignal = options.signal;
+                    markSearchStarted();
+                    return await new Promise<never>(() => {});
+                }
+            );
+            const controller = new AbortController();
+            const pending = files[method]("cancelled-search", {
+                as: "joined",
+                signal: controller.signal,
+                transferId: `cancelled-${method}`,
+            });
+            await searchStarted;
+            controller.abort(new Error("cancel initial search"));
+
+            await expect(pending).rejects.toThrow("cancel initial search");
+            expect(observedSignal).toBeInstanceOf(AbortSignal);
+            expect(observedSignal).not.toBe(controller.signal);
+            expect(observedSignal?.aborted).toBe(true);
+            expect(observedSignal?.reason).toBe(controller.signal.reason);
+            expect(files.getActiveTransfers()).toEqual([]);
+        }
+    );
+
+    it.each(["getById", "getByName"] as const)(
+        "cancels the initial %s search by transferId and permits reuse",
+        async (method) => {
+            const files = new Files();
+            let markSearchStarted!: () => void;
+            const searchStarted = new Promise<void>((resolve) => {
+                markSearchStarted = resolve;
+            });
+            (files.files.index as any).search = vi.fn(async () => {
+                markSearchStarted();
+                return await new Promise<never>(() => {});
+            });
+            const transferId = `lookup-${method}`;
+            const pending = files[method]("blocked-search", {
+                as: "joined",
+                transferId,
+            });
+            await searchStarted;
+
+            expect(files.getActiveTransfers()).toEqual([
+                { id: transferId, kind: "read" },
+            ]);
+            expect(
+                files.cancelTransfer(transferId, new Error("cancel lookup"))
+            ).toBe(true);
+            await expect(pending).rejects.toThrow("cancel lookup");
+            expect(files.getActiveTransfers()).toEqual([]);
+
+            (files.files.index as any).search = vi.fn(async () => []);
+            await expect(
+                files[method]("missing", {
+                    as: "joined",
+                    transferId,
+                })
+            ).resolves.toBeUndefined();
+        }
+    );
+
+    it("cancels a never-settling readiness search and immediately reuses its transfer id", async () => {
+        const files = new Files();
+        const pending = new LargeFile({
+            id: "never-ready",
+            name: "never-ready.bin",
+            size: 1n,
+            chunkCount: 1,
+            ready: false,
+        });
+        const searchStarted = createDeferred<void>();
+        (files as any).getReadPeerHints = async () => undefined;
+        (files.files.index as any).search = async () => {
+            searchStarted.resolve();
+            return await new Promise<never>(() => {});
+        };
+        const transferId = "never-ready-transfer";
+        const iterator = pending
+            .streamFile(files, { transferId })
+            [Symbol.asyncIterator]();
+        const next = iterator.next();
+        await searchStarted.promise;
+
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 1,
+            activeBytes: 5_000_000,
+        });
+        expect(
+            files.cancelTransfer(transferId, new Error("cancel ready probe"))
+        ).toBe(true);
+        await expect(next).rejects.toThrow("cancel ready probe");
+        expect(files.getActiveTransfers()).toEqual([]);
+
+        await expect(
+            new TinyFile({
+                name: "ready-id-reuse.bin",
+                file: new Uint8Array([1]),
+            }).getFile(files, { as: "joined", transferId })
+        ).resolves.toEqual(new Uint8Array([1]));
+        // The uncooperative decoder still owns its pessimistic reservation,
+        // even though the cancelled runtime identity is already reusable.
+        expect(
+            files.getTransferSchedulerDiagnostics().download.activeBytes
+        ).toBe(5_000_000);
+    });
+
+    it("keeps a cancelled chunk lookup charged until its delayed oversized result settles", async () => {
+        const files = new Files();
+        files.persistChunkReads = false;
+        const file = new LargeFile({
+            id: "delayed-chunk",
+            name: "delayed-chunk.bin",
+            size: 1n,
+            chunkCount: 1,
+            ready: true,
+        });
+        (file as any).waitUntilReady = async () => file;
+        (files as any).getReadPeerHints = async () => undefined;
+        (files.files.index as any).search = async () => [];
+        const getStarted = createDeferred<void>();
+        const delayedGet = createDeferred<TinyFile | undefined>();
+        (files.files.index as any).get = async () => {
+            getStarted.resolve();
+            return delayedGet.promise;
+        };
+
+        const transferId = "delayed-chunk-transfer";
+        const iterator = file
+            .streamFile(files, { transferId })
+            [Symbol.asyncIterator]();
+        const next = iterator.next();
+        await getStarted.promise;
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 1,
+            activeBytes: 5_000_000,
+        });
+
+        expect(
+            files.cancelTransfer(transferId, new Error("cancel delayed chunk"))
+        ).toBe(true);
+        await expect(next).rejects.toThrow("cancel delayed chunk");
+        expect(files.getActiveTransfers()).toEqual([]);
+        expect(
+            files.getTransferSchedulerDiagnostics().download.activeBytes
+        ).toBe(5_000_000);
+
+        await expect(
+            new TinyFile({
+                name: "delayed-id-reuse.bin",
+                file: new Uint8Array([9]),
+            }).getFile(files, { as: "joined", transferId })
+        ).resolves.toEqual(new Uint8Array([9]));
+        delayedGet.resolve(
+            new TinyFile({
+                id: `${file.id}:0`,
+                name: `${file.name}/0`,
+                file: new Uint8Array(5_000_000),
+                parentId: file.id,
+                index: 0,
+            })
+        );
+        await vi.waitFor(() =>
+            expect(
+                files.getTransferSchedulerDiagnostics().download.activeBytes
+            ).toBe(0)
+        );
+        expect(files.getActiveTransfers()).toEqual([]);
+    });
+
+    it("admits at most three concurrent legacy-sized decoded chunk candidates", async () => {
+        const files = new Files();
+        files.persistChunkReads = false;
+        const largeFiles = Array.from(
+            { length: 8 },
+            (_, index) =>
+                new LargeFile({
+                    id: `adversarial-candidate-${index}`,
+                    name: `adversarial-candidate-${index}.bin`,
+                    size: 512n * 1024n,
+                    chunkCount: 1,
+                    ready: true,
+                })
+        );
+        for (const file of largeFiles) {
+            (file as any).waitUntilReady = async () => file;
+        }
+        const filesByChunkId = new Map(
+            largeFiles.map((file) => [`${file.id}:0`, file])
+        );
+        const lookupGate = createDeferred<void>();
+        let activeLookups = 0;
+        let peakLookups = 0;
+        let searchCalls = 0;
+        const queryValues = (query: any): string[] => {
+            if (Array.isArray(query)) {
+                return query.flatMap(queryValues);
+            }
+            if (Array.isArray(query?.or)) {
+                return query.or.flatMap(queryValues);
+            }
+            const value = query?.value?.value ?? query?.value;
+            return typeof value === "string" ? [value] : [];
+        };
+        (files as any).getReadPeerHints = async () => undefined;
+        (files.files.index as any).search = async (request: any) => {
+            const chunkId = queryValues(request.query).find((value) =>
+                filesByChunkId.has(value)
+            );
+            if (!chunkId) {
+                throw new Error("missing exact adversarial chunk query");
+            }
+            searchCalls += 1;
+            activeLookups += 1;
+            peakLookups = Math.max(peakLookups, activeLookups);
+            await lookupGate.promise;
+            const parent = filesByChunkId.get(chunkId)!;
+            try {
+                return [
+                    new TinyFile({
+                        id: chunkId,
+                        name: `${parent.name}/0`,
+                        file: new Uint8Array(5_000_000),
+                        parentId: parent.id,
+                        index: 0,
+                    }),
+                ];
+            } finally {
+                activeLookups -= 1;
+            }
+        };
+
+        const reads = largeFiles.map((file, index) =>
+            file
+                .streamFile(files, {
+                    transferId: `adversarial-candidate-${index}`,
+                })
+                [Symbol.asyncIterator]()
+                .next()
+        );
+        await vi.waitFor(() => {
+            expect(searchCalls).toBe(3);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 3,
+                activeBytes: 15_000_000,
+                queuedCount: 5,
+            });
+        });
+        lookupGate.resolve();
+
+        const settled = await Promise.allSettled(reads);
+        expect(settled.every(({ status }) => status === "rejected")).toBe(true);
+        expect(searchCalls).toBe(8);
+        expect(peakLookups).toBe(3);
+        expect(files.getActiveTransfers()).toEqual([]);
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 0,
+            activeBytes: 0,
+            queuedCount: 0,
+            peakCount: 3,
+            peakBytes: 15_000_000,
+        });
+    });
+
+    it("drops transfer-owned payload references when a large iterator is abandoned", async () => {
+        const files = new Files();
+        files.persistChunkReads = false;
+        const file = new LargeFile({
+            id: "abandoned-large-iterator",
+            name: "abandoned-large-iterator.bin",
+            size: 512n * 1024n,
+            chunkCount: 1,
+            ready: true,
+        });
+        (file as any).waitUntilReady = async () => file;
+        (files as any).getReadPeerHints = async () => undefined;
+        (files.files.index as any).search = async () => [];
+        let payloadReference: WeakRef<Uint8Array> | undefined;
+        (file as any).resolveChunk = async () => {
+            const payload = new Uint8Array(512 * 1024);
+            payload[0] = 1;
+            payloadReference = new WeakRef(payload);
+            return new TinyFile({
+                id: `${file.id}:0`,
+                name: `${file.name}/0`,
+                file: payload,
+                parentId: file.id,
+                index: 0,
+            });
+        };
+
+        const transferId = "abandoned-large-transfer";
+        const iterator = file
+            .streamFile(files, { transferId })
+            [Symbol.asyncIterator]();
+        await iterator.next();
+        expect(payloadReference?.deref()).toBeInstanceOf(Uint8Array);
+        expect(
+            files.cancelTransfer(transferId, new Error("abandon iterator"))
+        ).toBe(true);
+        expect(files.getActiveTransfers()).toEqual([]);
+        expect(files.getTransferSchedulerDiagnostics().download).toMatchObject({
+            activeCount: 0,
+            activeBytes: 0,
+            queuedCount: 0,
+        });
+
+        const gc = forceGarbageCollection();
+        for (let attempt = 0; attempt < 20; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            gc();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            if (payloadReference?.deref() == null) {
+                break;
+            }
+        }
+        expect(payloadReference?.deref()).toBeUndefined();
+
+        // Deliberately do not invoke iterator.return(): cancellation must be
+        // sufficient for identity, permit, and payload cleanup.
+        await expect(
+            new TinyFile({
+                name: "abandoned-id-reuse.bin",
+                file: new Uint8Array([2]),
+            }).getFile(files, { as: "joined", transferId })
+        ).resolves.toEqual(new Uint8Array([2]));
+        void iterator;
+    });
+
+    it("rejects oversized large-file chunks while retaining legacy TinyFile reads", async () => {
+        const legacyBytes = new Uint8Array(5_000_000);
+        const legacyTiny = new TinyFile({
+            name: "legacy-tiny.bin",
+            file: legacyBytes,
+        });
+        const files = new Files();
+        await expect(
+            legacyTiny.getFile(files, { as: "joined" })
+        ).resolves.toHaveLength(legacyBytes.byteLength);
+
+        const { file, files: chunkFiles } = createStreamHarness(
+            BigInt(legacyBytes.byteLength),
+            [legacyBytes]
+        );
+        const iterator = file.streamFile(chunkFiles)[Symbol.asyncIterator]();
+        await expect(iterator.next()).rejects.toThrow(
+            "exceeding its 524288-byte transfer reservation"
+        );
+        expect(
+            chunkFiles.getTransferSchedulerDiagnostics().download.peakBytes
+        ).toBe(5_000_000);
+    });
+
     it("rejects a short stream even when no final hash is declared", async () => {
         const { file, files } = createStreamHarness(3n, [
             new Uint8Array([1, 2]),
@@ -178,7 +869,9 @@ describe("large-file read scheduling", () => {
         ]);
         const iterator = file.streamFile(files)[Symbol.asyncIterator]();
 
-        await expect(iterator.next()).rejects.toThrow("Expected 1 bytes");
+        await expect(iterator.next()).rejects.toThrow(
+            "exceeding its 1-byte transfer reservation"
+        );
     });
 
     it("rejects a positive-size manifest with zero chunks", async () => {
@@ -186,7 +879,7 @@ describe("large-file read scheduling", () => {
         const iterator = file.streamFile(files)[Symbol.asyncIterator]();
 
         await expect(iterator.next()).rejects.toThrow(
-            "Expected 1 bytes, got 0"
+            "impossible size/chunk-count geometry"
         );
     });
 
@@ -351,6 +1044,22 @@ describe("large-file read scheduling", () => {
         expect((files as any).activeFileChangeSignals.size).toBe(0);
     });
 
+    it("does not register an already-aborted file-change signal", () => {
+        const files = new Files();
+        const controller = new AbortController();
+        controller.abort(new Error("already cancelled"));
+
+        const signal = files.createFileChangeSignal(
+            () => true,
+            controller.signal
+        );
+
+        expect(signal.isClosed).toBe(true);
+        expect((files as any).activeFileChangeSignals.size).toBe(0);
+        signal.close();
+        expect((files as any).activeFileChangeSignals.size).toBe(0);
+    });
+
     it("bounds, grows, and backs off persisted remote read-ahead", () => {
         expect(getRemotePersistedReadAheadLimit(512 * 1024 * 512, 512)).toBe(8);
         expect(getRemotePersistedReadAheadLimit(2 * 1024 * 1024 * 10, 10)).toBe(
@@ -395,8 +1104,8 @@ describe("large-file read scheduling", () => {
 
         expect(roundTrip).toEqual(concat(chunks));
         expect(perIndexGets).toEqual([]);
-        expect(getMany).toHaveBeenCalledTimes(4);
-        expect(getMany.mock.calls.every(([heads]) => heads.length <= 8)).toBe(
+        expect(getMany).toHaveBeenCalledTimes(6);
+        expect(getMany.mock.calls.every(([heads]) => heads.length <= 3)).toBe(
             true
         );
         const diagnostics = files.lastReadDiagnostics!;
@@ -404,7 +1113,7 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.readAheadLimit).toBe(8);
         expect(diagnostics.readAheadPeak).toBe(8);
         expect(diagnostics.maxInFlightChunks).toBe(8);
-        expect(diagnostics.maxManifestHeadBatchSize).toBe(8);
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
         expect(diagnostics.chunkManifestHeadBatchAcceptedCount).toBe(9);
     });
 
@@ -672,10 +1381,10 @@ describe("large-file read scheduling", () => {
                     : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             );
             expect(getMany).toHaveBeenCalledTimes(2);
-            expect(getMany.mock.calls[0]![0]).toEqual(heads.slice(0, 8));
+            expect(getMany.mock.calls[0]![0]).toEqual(heads.slice(0, 3));
             expect(getMany.mock.calls[0]![1].remote).toBe(false);
             expect(getMany.mock.calls[1]![0]).toEqual(
-                mode === "error" ? heads.slice(1, 8) : heads.slice(0, 8)
+                mode === "error" ? heads.slice(1, 3) : heads.slice(0, 3)
             );
             expect(getMany.mock.calls[1]![1].remote.replicate).toBe(true);
 
@@ -685,10 +1394,14 @@ describe("large-file read scheduling", () => {
             expect(diagnostics.chunkManifestHeadRemoteBatchQueryCount).toBe(1);
             expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
             expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(mode);
-            expect(diagnostics.chunkManifestHeadBatchDisabledSkipCount).toBe(1);
+            // The pessimistic decoder reservation caps the speculative batch
+            // at three chunks. Once the
+            // consumer resumes, three bounded scheduling windows record all
+            // seven disabled tail probes before fallback completes.
+            expect(diagnostics.chunkManifestHeadBatchDisabledSkipCount).toBe(3);
             expect(
                 diagnostics.chunkManifestHeadBatchDisabledSkippedIndexCount
-            ).toBe(2);
+            ).toBe(7);
             expect(diagnostics.chunkManifestHeadBatchErrorCount).toBe(
                 mode === "error" ? 1 : 0
             );
@@ -705,7 +1418,7 @@ describe("large-file read scheduling", () => {
                 mode === "error" ? 1 : 0
             );
             expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(
-                mode === "zero-accepted" ? 8 : 0
+                mode === "zero-accepted" ? 3 : 0
             );
         });
     }
@@ -822,10 +1535,15 @@ describe("large-file read scheduling", () => {
         );
         (files.files.log.log as any).getMany = getMany;
 
-        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        const controller = new AbortController();
+        const iterator = file
+            .streamFile(files, { signal: controller.signal })
+            [Symbol.asyncIterator]();
         try {
             const first = await iterator.next();
             expect(first).toEqual({ done: false, value: new Uint8Array([1]) });
+            // The first pessimistically bounded window can start the next
+            // remote manifest lookup while its accepted chunk is suspended.
             await Promise.race([
                 remoteStarted,
                 new Promise((_, reject) =>
@@ -840,6 +1558,7 @@ describe("large-file read scheduling", () => {
             ]);
 
             const returnStartedAt = Date.now();
+            controller.abort(new Error("cancel pending remote read"));
             await iterator.return?.();
             expect(Date.now() - returnStartedAt).toBeLessThan(500);
             expect(remoteSignal).toBeInstanceOf(AbortSignal);
@@ -1280,6 +1999,11 @@ describe("large-file read scheduling", () => {
         };
 
         const diagnostics = { waitUntilReadyAttempts: 0 };
+        const owner = new FairTransferOwner(
+            new FairTransferScheduler(8, 16 * 1024 * 1024),
+            "pending-deadline",
+            signal.abortSignal
+        );
         try {
             expect(
                 await (pending as any).waitUntilReadyWithSignal(
@@ -1288,11 +2012,13 @@ describe("large-file read scheduling", () => {
                     {
                         timeout: 30_000,
                         persist: true,
+                        owner,
                     },
                     diagnostics
                 )
             ).toBe(ready);
         } finally {
+            owner.finish();
             vi.useRealTimers();
         }
 
