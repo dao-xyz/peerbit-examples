@@ -196,3 +196,12 @@ no existing deployment, because there would be no version to restore. Seed a
 new production Worker once under direct operator supervision, verify it, then
 use the workflow for all later releases. Use the separately reviewed production
 environment and retain a known-good Worker version.
+
+The auditable, idempotent first-deploy procedure is documented in
+[`cloudflare/production-provisioning.md`](./cloudflare/production-provisioning.md).
+Its manual workflow has a read-only plan and a separately confirmed apply; it
+independently pins all seven production and preview identities, maintains one
+invocation-wide production ledger, proves every existing managed public URL is
+disabled before and throughout deployment mutations, attaches custom domains
+last, and leaves retired Worker cleanup as an independent explicitly approved
+operation.

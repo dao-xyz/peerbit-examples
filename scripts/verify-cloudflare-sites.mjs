@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+    loadCloudflareDeploymentData,
+    validateRenderedCloudflareConfigSet,
+} from "./cloudflare-deployment-policy.mjs";
+import {
+    loadCloudflareArtifactManifest,
+    verifyLiveCloudflareArtifact,
+} from "./cloudflare-artifact-manifest.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -16,7 +24,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
     const value = process.argv[index + 1];
     if (!key?.startsWith("--") || value == null) {
         throw new Error(
-            "Usage: verify-cloudflare-sites.mjs --mode production [--commit SHA] [--target apps|all] [--site ID]"
+            "Usage: verify-cloudflare-sites.mjs --mode production [--commit SHA] [--target apps|all] [--site ID] [--artifact-manifest-digest SHA256]"
         );
     }
     args.set(key.slice(2), value);
@@ -28,6 +36,13 @@ if (mode !== "production") {
 const expectedCommit = args.get("commit");
 if (expectedCommit && !/^[0-9a-f]{40}$/i.test(expectedCommit)) {
     throw new Error("--commit must be a full Git commit hash");
+}
+const expectedArtifactDigest = args.get("artifact-manifest-digest");
+if (
+    expectedArtifactDigest != null &&
+    !/^[0-9a-f]{64}$/.test(expectedArtifactDigest)
+) {
+    throw new Error("--artifact-manifest-digest must be a SHA-256 digest");
 }
 const target = args.get("target") || "all";
 if (!["apps", "all"].includes(target)) {
@@ -86,6 +101,33 @@ const originsFor = (entry) =>
 const selectedStaticSites = requestedSite
     ? manifest.staticSites.filter((site) => site.id === requestedSite)
     : manifest.staticSites;
+let expectedArtifact;
+if (expectedArtifactDigest) {
+    if (!requestedSite || !expectedCommit) {
+        throw new Error(
+            "Artifact verification requires one --site and an exact --commit"
+        );
+    }
+    const { entries } = loadCloudflareDeploymentData();
+    const entry = entries.find(({ site }) => site.id === requestedSite);
+    const configs = validateRenderedCloudflareConfigSet({
+        directory: path.join(repoRoot, ".wrangler-config"),
+        entries,
+        mode: "production",
+    });
+    const rendered = configs.get(requestedSite);
+    expectedArtifact = loadCloudflareArtifactManifest({
+        ...entry,
+        configFile: rendered.file,
+        renderedConfig: rendered.config,
+        expectedCommit,
+    });
+    if (expectedArtifact.digest !== expectedArtifactDigest) {
+        throw new Error(
+            `${requestedSite}: artifact receipt does not match the reviewed manifest`
+        );
+    }
+}
 for (const site of selectedStaticSites) {
     for (const origin of originsFor(site)) {
         await verifyEventually(origin, async () => {
@@ -166,6 +208,14 @@ for (const site of selectedStaticSites) {
             const hiddenHeaders = await request(`${origin}/_headers`);
             if (hiddenHeaders.status !== 404)
                 throw new Error(`${origin}: _headers is publicly served`);
+
+            if (expectedArtifact) {
+                await verifyLiveCloudflareArtifact({
+                    origin,
+                    artifact: expectedArtifact,
+                    request,
+                });
+            }
 
             for (const mediaPath of site.workerFirst || []) {
                 const fixture = readFileSync(

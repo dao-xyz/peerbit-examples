@@ -554,6 +554,10 @@ test("Cloudflare Workers API lists the configured account exactly", async () => 
                             id: workerName,
                             tag: WORKER_TAGS.get("files"),
                             routes: [],
+                            tail_consumers: [
+                                { service: "tail-consumer-worker" },
+                            ],
+                            logpush: true,
                         },
                         {
                             id: "unrelated-account-worker",
@@ -570,10 +574,23 @@ test("Cloudflare Workers API lists the configured account exactly", async () => 
     assert.deepEqual(
         [...(await api.listWorkerScripts())],
         [
-            [workerName, { tag: WORKER_TAGS.get("files"), routes: [] }],
+            [
+                workerName,
+                {
+                    tag: WORKER_TAGS.get("files"),
+                    routes: [],
+                    tailConsumers: [{ service: "tail-consumer-worker" }],
+                    logpush: true,
+                },
+            ],
             [
                 "unrelated-account-worker",
-                { tag: "unrelated-worker-tag", routes: [] },
+                {
+                    tag: "unrelated-worker-tag",
+                    routes: [],
+                    tailConsumers: [],
+                    logpush: false,
+                },
             ],
         ]
     );

@@ -1,0 +1,269 @@
+name: Provision Cloudflare production once
+
+on:
+    workflow_dispatch:
+        inputs:
+            mode:
+                description: Read-only plan or confirmed one-time provisioning
+                required: true
+                type: choice
+                default: plan
+                options:
+                    - plan
+                    - apply
+            planned_commit:
+                description: Exact 40-character commit reviewed by plan and apply
+                required: true
+                type: string
+            planned_state_digest:
+                description: Use 64 zeroes for plan; use the exact PLAN_STATE_SHA256 emitted by the reviewed plan for apply
+                required: true
+                type: string
+            confirm:
+                description: Plan phrase binds the commit; apply phrase binds both commit and planned state digest
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+concurrency:
+    group: cloudflare-examples-production
+    cancel-in-progress: false
+
+jobs:
+    validate:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        steps:
+            - name: Validate SHA-bound dispatch receipt
+              env:
+                  PROVISION_MODE: ${{ inputs.mode }}
+                  PROVISION_CONFIRM: ${{ inputs.confirm }}
+                  PROVISION_PLANNED_COMMIT: ${{ inputs.planned_commit }}
+                  PROVISION_PLANNED_STATE_DIGEST: ${{ inputs.planned_state_digest }}
+                  PROVISION_COMMIT: ${{ github.sha }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+                      echo "Provisioning is permitted only from master" >&2
+                      exit 1
+                  fi
+                  if [[ ! "$PROVISION_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] ||
+                     [[ ! "$PROVISION_PLANNED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                      echo "Both checked-out and planned commits must be full SHA-1 values" >&2
+                      exit 1
+                  fi
+                  planned_commit="$(printf '%s' "$PROVISION_PLANNED_COMMIT" | tr '[:upper:]' '[:lower:]')"
+                  checked_out_commit="$(printf '%s' "$PROVISION_COMMIT" | tr '[:upper:]' '[:lower:]')"
+                  if [[ "$planned_commit" != "$checked_out_commit" ]]; then
+                      echo "Planned commit receipt does not match the checked-out commit" >&2
+                      exit 1
+                  fi
+                  if [[ ! "$PROVISION_PLANNED_STATE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+                      echo "Planned state digest must be a lowercase SHA-256 value" >&2
+                      exit 1
+                  fi
+                  state_sentinel="$(printf '0%.0s' {1..64})"
+                  case "$PROVISION_MODE" in
+                      plan)
+                          [[ "$PROVISION_PLANNED_STATE_DIGEST" == "$state_sentinel" ]] || {
+                              echo "Plan requires the 64-zero state sentinel" >&2; exit 1;
+                          }
+                          confirmation="plan-peerbit-production-${planned_commit}"
+                          ;;
+                      apply)
+                          [[ "$PROVISION_PLANNED_STATE_DIGEST" != "$state_sentinel" ]] || {
+                              echo "Apply requires the reviewed nonzero state digest" >&2; exit 1;
+                          }
+                          confirmation="provision-peerbit-production-${planned_commit}-${PROVISION_PLANNED_STATE_DIGEST}"
+                          ;;
+                      *) echo "Provisioning mode must be plan or apply" >&2; exit 1 ;;
+                  esac
+                  if [[ "$PROVISION_CONFIRM" != "$confirmation" ]]; then
+                      echo "Confirmation is not bound to the exact planned commit and state" >&2
+                      exit 1
+                  fi
+
+            - name: Checkout
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+              with:
+                  node-version: 22.x
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+              with:
+                  run_install: false
+
+            - name: Build and test every production source
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+              run: |
+                  pnpm install --frozen-lockfile
+                  npm ci --no-audit --no-fund --prefix tools/wrangler
+                  node scripts/validate-wrangler-toolchain.mjs
+                  node scripts/validate-production-bootstrap.mjs
+                  node --test cloudflare/*.test.mjs
+                  export SHORT_SHA="${GITHUB_SHA::7}"
+                  pnpm run build
+
+            - name: Install locked Chromium for hosted-app validation
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Smoke-test every hosted app
+              run: pnpm run test:hosted-apps
+
+            - name: Validate exact route-free production bundles
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+              run: |
+                  node scripts/prepare-cloudflare-assets.mjs
+                  node scripts/validate-owned-domains.mjs
+                  git diff --exit-code
+                  node scripts/render-cloudflare-configs.mjs --mode production
+                  rm -rf .wrangler-dry-run
+                  for config in .wrangler-config/*.jsonc; do
+                      output="$PWD/.wrangler-dry-run/$(basename "$config" .jsonc)"
+                      tools/wrangler/node_modules/.bin/wrangler versions upload \
+                          --config "$config" \
+                          --dry-run \
+                          --outdir "$output"
+                  done
+                  node scripts/create-cloudflare-artifact-manifests.mjs
+
+    provision:
+        needs: validate
+        if: always()
+        runs-on: ubuntu-24.04
+        timeout-minutes: 90
+        environment: cloudflare-production
+        steps:
+            - name: Validate SHA-bound dispatch receipt
+              env:
+                  PROVISION_MODE: ${{ inputs.mode }}
+                  PROVISION_CONFIRM: ${{ inputs.confirm }}
+                  PROVISION_PLANNED_COMMIT: ${{ inputs.planned_commit }}
+                  PROVISION_PLANNED_STATE_DIGEST: ${{ inputs.planned_state_digest }}
+                  PROVISION_COMMIT: ${{ github.sha }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+                      echo "Provisioning is permitted only from master" >&2
+                      exit 1
+                  fi
+                  if [[ ! "$PROVISION_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] ||
+                     [[ ! "$PROVISION_PLANNED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                      echo "Both checked-out and planned commits must be full SHA-1 values" >&2
+                      exit 1
+                  fi
+                  planned_commit="$(printf '%s' "$PROVISION_PLANNED_COMMIT" | tr '[:upper:]' '[:lower:]')"
+                  checked_out_commit="$(printf '%s' "$PROVISION_COMMIT" | tr '[:upper:]' '[:lower:]')"
+                  if [[ "$planned_commit" != "$checked_out_commit" ]]; then
+                      echo "Planned commit receipt does not match the checked-out commit" >&2
+                      exit 1
+                  fi
+                  if [[ ! "$PROVISION_PLANNED_STATE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+                      echo "Planned state digest must be a lowercase SHA-256 value" >&2
+                      exit 1
+                  fi
+                  state_sentinel="$(printf '0%.0s' {1..64})"
+                  case "$PROVISION_MODE" in
+                      plan)
+                          [[ "$PROVISION_PLANNED_STATE_DIGEST" == "$state_sentinel" ]] || {
+                              echo "Plan requires the 64-zero state sentinel" >&2; exit 1;
+                          }
+                          confirmation="plan-peerbit-production-${planned_commit}"
+                          ;;
+                      apply)
+                          [[ "$PROVISION_PLANNED_STATE_DIGEST" != "$state_sentinel" ]] || {
+                              echo "Apply requires the reviewed nonzero state digest" >&2; exit 1;
+                          }
+                          confirmation="provision-peerbit-production-${planned_commit}-${PROVISION_PLANNED_STATE_DIGEST}"
+                          ;;
+                      *) echo "Provisioning mode must be plan or apply" >&2; exit 1 ;;
+                  esac
+                  if [[ "$PROVISION_CONFIRM" != "$confirmation" ]]; then
+                      echo "Confirmation is not bound to the exact planned commit and state" >&2
+                      exit 1
+                  fi
+
+            - name: Require successful source validation
+              env:
+                  VALIDATE_RESULT: ${{ needs.validate.result }}
+              run: |
+                  if [[ "$VALIDATE_RESULT" != "success" ]]; then
+                      echo "Source validation did not succeed" >&2
+                      exit 1
+                  fi
+
+            - name: Checkout
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+              with:
+                  node-version: 22.x
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+              with:
+                  run_install: false
+
+            - name: Rebuild reviewed inputs without deployment credentials
+              env:
+                  COMMIT_HASH: ${{ github.sha }}
+              run: |
+                  pnpm install --frozen-lockfile
+                  npm ci --no-audit --no-fund --prefix tools/wrangler
+                  node scripts/validate-wrangler-toolchain.mjs
+                  node scripts/validate-production-bootstrap.mjs
+                  node --test cloudflare/*.test.mjs
+                  export SHORT_SHA="${GITHUB_SHA::7}"
+                  pnpm run build
+                  node scripts/prepare-cloudflare-assets.mjs
+                  node scripts/validate-owned-domains.mjs
+                  git diff --exit-code
+                  node scripts/render-cloudflare-configs.mjs --mode production
+                  rm -rf .wrangler-dry-run
+                  for config in .wrangler-config/*.jsonc; do
+                      output="$PWD/.wrangler-dry-run/$(basename "$config" .jsonc)"
+                      tools/wrangler/node_modules/.bin/wrangler versions upload \
+                          --config "$config" \
+                          --dry-run \
+                          --outdir "$output"
+                  done
+                  node scripts/create-cloudflare-artifact-manifests.mjs
+
+            - name: Install Chromium for live baseline checks
+              if: inputs.mode == 'apply'
+              run: >-
+                  pnpm --dir packages/file-share/frontend exec playwright
+                  install --with-deps chromium
+
+            - name: Plan or provision exact production baseline
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+                  PROVISION_MODE: ${{ inputs.mode }}
+                  PROVISION_CONFIRM: ${{ inputs.confirm }}
+                  PROVISION_PLANNED_COMMIT: ${{ inputs.planned_commit }}
+                  PROVISION_PLANNED_STATE_DIGEST: ${{ inputs.planned_state_digest }}
+                  PROVISION_COMMIT: ${{ github.sha }}
+              run: >-
+                  node scripts/provision-cloudflare-production.mjs
+                  --mode "$PROVISION_MODE"
+                  --commit "$PROVISION_COMMIT"
+                  --planned-commit "$PROVISION_PLANNED_COMMIT"
+                  --planned-state-digest "$PROVISION_PLANNED_STATE_DIGEST"
+                  --confirm "$PROVISION_CONFIRM"

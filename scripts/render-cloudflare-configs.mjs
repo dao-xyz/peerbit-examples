@@ -143,6 +143,10 @@ const baseConfig = (entry) => ({
     compatibility_date: manifest.compatibilityDate,
     workers_dev: false,
     preview_urls: false,
+    // Keep dry-run output and the eventual exact-version multipart upload to
+    // one reviewed ES module. Wrangler otherwise emits a linked source map to
+    // --outdir by default even when source-map upload is not requested.
+    upload_source_maps: false,
     ...(mode === "production"
         ? {
               routes: entry.domains.map((domain) => ({
