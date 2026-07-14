@@ -2,7 +2,7 @@ import { Peerbit } from "peerbit";
 import { Name, Names } from "../index.js";
 import { Ed25519Keypair, PreHash } from "@peerbit/crypto";
 import { randomBytes } from "@peerbit/crypto";
-import { describe, beforeAll, afterAll, test, expect } from "vitest";
+import { describe, beforeAll, afterAll, test, it, expect } from "vitest";
 
 describe("index", () => {
     let peer: Peerbit;

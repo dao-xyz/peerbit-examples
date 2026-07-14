@@ -2,6 +2,7 @@ import { Peerbit } from "peerbit";
 import { waitFor, waitForResolved } from "@peerbit/time";
 import { Lobby, Post, Room } from "../index.js";
 import { expect } from "chai";
+import { afterEach, beforeEach, describe, it } from "vitest";
 
 const loobyConfig = {
     id: new Uint8Array([

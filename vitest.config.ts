@@ -32,7 +32,7 @@ const NODE = defineConfig({
         exclude: [
             "**/src/__tests__/**/*.dom.test.ts",
             "**/src/__tests__/**/*.dom.spec.ts",
-            "node_modules",
+            "**/node_modules/**",
             "**/frontend/**",
             "**/*.timestamp-*.mjs",
         ],
@@ -65,7 +65,11 @@ const JSDOM = defineConfig({
             "**/src/__tests__/**/*.dom.test.ts",
             "**/src/__tests__/**/*.dom.spec.ts",
         ],
-        exclude: ["node_modules", "**/frontend/**", "**/*.timestamp-*.mjs"],
+        exclude: [
+            "**/node_modules/**",
+            "**/frontend/**",
+            "**/*.timestamp-*.mjs",
+        ],
         setupFiles: ["vitest.setup.ts", "vitest.setup.dom.ts"],
     },
 });
