@@ -23,13 +23,6 @@
             "productionHostnames": ["chat.apps.peerbit.org"]
         },
         {
-            "id": "giga",
-            "kind": "app",
-            "productionWorker": "peerbit-examples-giga",
-            "previewWorker": "peerbit-examples-giga-preview",
-            "productionHostnames": ["giga.apps.peerbit.org"]
-        },
-        {
             "id": "ml",
             "kind": "app",
             "productionWorker": "peerbit-examples-ml",

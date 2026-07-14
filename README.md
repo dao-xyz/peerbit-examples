@@ -113,11 +113,7 @@ Local validation uses the locked Wrangler toolchain:
 
 ```sh
 pnpm install --frozen-lockfile
-export VITE_SUPABASE_AUTH_ENABLED=false
-unset VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY
-node scripts/validate-cloudflare-account-auth.mjs
 pnpm run build
-node scripts/validate-cloudflare-account-auth.mjs --dist packages/social-media-app/frontend/dist
 node scripts/validate-production-bootstrap.mjs
 node scripts/prepare-cloudflare-assets.mjs
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
@@ -147,11 +143,3 @@ no existing deployment, because there would be no version to restore. Seed a
 new production Worker once under direct operator supervision, verify it, then
 use the workflow for all later releases. Use the separately reviewed production
 environment and retain a known-good Worker version.
-
-Giga account auth is intentionally disabled in Cloudflare preview and
-production builds. The workflows do not expose Supabase secrets, require
-`VITE_SUPABASE_AUTH_ENABLED=false`, reject any Supabase URL or publishable key
-in the built assets, publish the disabled state in `release.json`, and smoke-test
-that the deployed UI has no account entry or Supabase traffic. Enabling auth
-requires a separate reviewed change after a Peerbit-owned auth project is
-provisioned; the retired project has no users or data to migrate.

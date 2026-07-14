@@ -1,5 +1,4 @@
 ---
-"@giga-app/app-service": patch
 "@peerbit/please": patch
 ---
 

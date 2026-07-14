@@ -9,11 +9,11 @@ export default defineConfig({
     plugins: [react(), peerbit(), tailwindcss()],
     optimizeDeps: {
         esbuildOptions: {
-            target: "esnext",
+            target: "es2022",
         },
     },
     build: {
-        target: "esnext",
+        target: "es2022",
     },
 
     define: {

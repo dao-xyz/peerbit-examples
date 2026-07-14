@@ -1,8 +1,6 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
-const IGNORE_UNHANDLED =
-    process.env.NEWS_BOT_SMOKE_PROD === "1" ||
-    process.env.VITEST_IGNORE_UNHANDLED_ERRORS === "1";
+const IGNORE_UNHANDLED = process.env.VITEST_IGNORE_UNHANDLED_ERRORS === "1";
 const SHARED = {
     isolate: false,
     sequence: { concurrent: false, shuffle: false } as const,

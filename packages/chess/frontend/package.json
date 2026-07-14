@@ -13,7 +13,6 @@
         "deploy": "pnpm run build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@giga-app/sdk": "workspace:*",
         "@peerbit/document-react": "^1.0.45",
         "@peerbit/react": "^1.1.24",
         "@radix-ui/react-popover": "^1.0.7",
@@ -35,6 +34,7 @@
     "devDependencies": {
         "@peerbit/vite": "^2.0.7",
         "@tailwindcss/postcss": "^4.0.14",
+        "@tailwindcss/vite": "4.1.18",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",
         "@vitejs/plugin-react": "^5",

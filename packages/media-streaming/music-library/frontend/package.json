@@ -18,7 +18,6 @@
         "./src/hrtime.js": "./src/hrtime.browser.js"
     },
     "dependencies": {
-        "@giga-app/sdk": "workspace:*",
         "@peerbit/document": "^13.1.0",
         "@peerbit/document-react": "^1.0.45",
         "@peerbit/media-streaming": "workspace:*",
@@ -44,6 +43,7 @@
     "devDependencies": {
         "@peerbit/vite": "^2.0.7",
         "@tailwindcss/postcss": "^4.0.14",
+        "@tailwindcss/vite": "4.1.18",
         "@types/audioworklet": "^0.0.70",
         "@types/dom-mediacapture-transform": "^0.1.10",
         "@types/dom-webcodecs": "^0.1.11",

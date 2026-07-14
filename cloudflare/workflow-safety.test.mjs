@@ -28,10 +28,9 @@ test("credentialed production shell receives target and commit through env", () 
     );
 });
 
-test("Cloudflare workflows explicitly disable account auth and carry no credentials", () => {
+test("Cloudflare workflows carry no Supabase build configuration", () => {
     for (const workflow of [previewWorkflow, productionWorkflow]) {
-        assert.match(workflow, /VITE_SUPABASE_AUTH_ENABLED: "false"/);
-        assert.doesNotMatch(workflow, /^\s*VITE_SUPABASE_(?:URL|ANON_KEY):/m);
+        assert.doesNotMatch(workflow, /VITE_SUPABASE_/);
     }
 });
 

@@ -1,7 +1,0 @@
-{
-    "watch": ["src"],
-    "ext": "ts",
-    "ignore": ["src/__tests__/**"],
-    "exec": "node --loader ts-node/esm ./src/bin.ts --local",
-    "stdin": false
-}

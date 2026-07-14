@@ -34,7 +34,6 @@ export const productionSmokeEnvironment = (entries) => {
     };
     return {
         PW_BASE_URL: originFor("files"),
-        PW_GIGA_URL: originFor("giga"),
         PW_STREAM_URL: originFor("stream"),
     };
 };
@@ -309,10 +308,6 @@ export const main = async (argv = process.argv.slice(2)) => {
     );
     const verifier = path.join(repoRoot, "scripts/verify-cloudflare-sites.mjs");
     const runtimeSmokeNames = new Map([
-        [
-            "giga",
-            "Giga loads JS/WASM and opens a public program over the relay",
-        ],
         ["files", "file-share boots and connects to an authoritative relay"],
         ["stream", "streaming preview serves exact MP4 byte ranges"],
     ]);
