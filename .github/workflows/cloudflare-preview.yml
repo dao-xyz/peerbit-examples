@@ -36,6 +36,9 @@ jobs:
             - name: Install workspace dependencies
               run: pnpm install --frozen-lockfile
 
+            - name: Install locked Wrangler toolchain
+              run: npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
+
             - name: Validate production bootstrap sources
               run: |
                   node scripts/validate-production-bootstrap.mjs
@@ -64,15 +67,12 @@ jobs:
             - name: Ensure the build did not mutate source
               run: git diff --exit-code
 
-            - name: Install locked Wrangler toolchain
-              run: npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
-
             - name: Validate every Worker bundle
               run: |
                   node scripts/render-cloudflare-configs.mjs --mode preview
                   for config in .wrangler-config/*.jsonc; do
                       output=".wrangler-dry-run/$(basename "$config" .jsonc)"
-                      tools/wrangler/node_modules/.bin/wrangler deploy \
+                      tools/wrangler/node_modules/.bin/wrangler versions upload \
                           --config "$config" \
                           --dry-run \
                           --outdir "$output"

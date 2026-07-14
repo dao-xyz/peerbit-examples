@@ -22,7 +22,6 @@ on:
                 description: Type deploy-peerbit-production
                 required: true
                 type: string
-
 permissions:
     contents: read
 
@@ -56,6 +55,7 @@ jobs:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
                   pnpm install --frozen-lockfile
+                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
                   node scripts/validate-production-bootstrap.mjs
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
@@ -74,11 +74,10 @@ jobs:
                   node scripts/prepare-cloudflare-assets.mjs
                   node scripts/validate-owned-domains.mjs
                   git diff --exit-code
-                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
                   node scripts/render-cloudflare-configs.mjs --mode production
                   for config in .wrangler-config/*.jsonc; do
                       output=".wrangler-dry-run/$(basename "$config" .jsonc)"
-                      tools/wrangler/node_modules/.bin/wrangler deploy \
+                      tools/wrangler/node_modules/.bin/wrangler versions upload \
                           --config "$config" \
                           --dry-run \
                           --outdir "$output"
@@ -111,6 +110,7 @@ jobs:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
                   pnpm install --frozen-lockfile
+                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
                   node scripts/validate-production-bootstrap.mjs
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
@@ -118,7 +118,6 @@ jobs:
                   node scripts/prepare-cloudflare-assets.mjs
                   node scripts/validate-owned-domains.mjs
                   git diff --exit-code
-                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
                   node scripts/render-cloudflare-configs.mjs --mode production
 
             - name: Install Chromium for transactional runtime checks

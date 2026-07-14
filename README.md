@@ -119,19 +119,72 @@ node scripts/prepare-cloudflare-assets.mjs
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
 node scripts/render-cloudflare-configs.mjs --mode preview
 for config in .wrangler-config/*.jsonc; do
-    tools/wrangler/node_modules/.bin/wrangler deploy --config "$config" --dry-run
+    tools/wrangler/node_modules/.bin/wrangler versions upload --config "$config" --dry-run
 done
 ```
 
 Production configs are rendered with `--mode production`. First-party demo
-Workers are restricted to `*.apps.peerbit.org`; the legacy redirect remains on
-`peerchecker.com`. Both sets must exactly match the deployment policy.
-Production deploys run one site at a time: capture its current 100% version and
-release identity, deploy, verify the site (including the app-specific Chromium
-gate where one exists), and only then continue. A failed upload or verification
-automatically restores the captured version and verifies the captured release
-identity again. Verification child processes do not inherit the Cloudflare
-credential.
+Workers are restricted to `*.apps.peerbit.org` and must exactly match the
+deployment policy. Before any upload or promotion, production reads the
+account's Worker route inventory and every page of its custom-domain inventory
+with `Workers Scripts Read`. It accepts the custom-domain inventory only after
+two independently read, canonical complete snapshots match. The account-wide
+check requires every reviewed production Worker, including Workers outside a
+targeted release, to have no traditional routes and exactly its reviewed custom
+domain. It also reads each production Worker's live `workers.dev` and version
+Preview URL state, plus that state for every existing allowlisted preview
+Worker, and requires both flags to be disabled. It rejects retired Worker
+identities, unreviewed ownership under `*.apps.peerbit.org`, and traditional
+routes involving the managed namespace; unrelated account Workers and domains
+remain outside this policy. The full read-only policy fence runs immediately
+before and after every inactive upload. Wrangler output is captured rather than
+echoed, and an unexpected `workers.dev` URL fails closed without exposing the
+account subdomain. Production deploys capture every selected app's current 100%
+version, release identity, and immutable Worker identity. They then upload every
+new version without activating it, verify its per-invocation version tag, and
+revalidate every baseline before promoting traffic. Exact versions are promoted
+through Cloudflare's deployments API; that endpoint cannot alter routes or
+custom domains. After every runtime check, all activated apps receive a final
+exact version, version-tag, Worker-tag, public-subdomain, and attachment recheck.
+If a later promotion or verification fails, earlier versions from the invocation
+are unwound in reverse order only while each exact version, version tag, Worker
+identity, and public attachment still match. After the rollback verifier, the
+workflow repeats the full account policy and Worker-tag checks, then reads the
+active deployment last before reporting success. Verification child processes
+do not inherit the Cloudflare credential.
+
+Cloudflare's deployments API does not currently expose an atomic
+compare-and-swap precondition for the active version. The workflow revalidates
+ownership immediately before every promotion and rollback and refuses
+automatic recovery after an observed external change, but an external
+deployment in the final interval between that read and Cloudflare accepting the
+deployment POST cannot be eliminated client-side. Serialize production
+deployments through the protected GitHub environment and inspect Cloudflare
+manually if the workflow reports an ownership race.
+
+The public-subdomain API has the same unavoidable last-read interval: an
+external actor can enable `workers.dev` or Preview URLs after the final GET but
+before Cloudflare accepts a version upload. The route-free upload config sets
+both options to false, captured Wrangler output refuses to print an unexpected
+Preview URL, and the workflow rereads live state immediately afterward, but
+Cloudflare does not expose an atomic upload precondition for these settings.
+
+A deployment POST can also be accepted even when Cloudflare returns an error or
+an unusable response. Once Create Deployment has been dispatched, every
+response failure—including 4xx/5xx responses, malformed or empty bodies, and
+invalid exact-version success evidence—is therefore treated as indeterminate.
+Local validation before dispatch remains determinate. The workflow observes a
+bounded settlement window instead of trusting one baseline read, verifies the
+baseline, reads it once more, and rolls back if this invocation's tagged version
+appears. If it never appears during that window, the workflow still does not
+declare the baseline safe, because the POST could land later. Automatic
+recovery remains disabled and the workflow preserves both the primary and
+recovery diagnostics for manual inspection.
+
+A rollback POST has the same response and visibility ambiguity. Once it is
+dispatched, a later read or verifier failure is reported as failed confirmation
+of a possibly applied rollback, not as a refused rollback. Operators must inspect
+the exact active version and public attachment state before retrying.
 
 Cloudflare version rollback does not revert attached resources. Treat a change
 to the exact hostname policy as a separate provisioning migration with its own

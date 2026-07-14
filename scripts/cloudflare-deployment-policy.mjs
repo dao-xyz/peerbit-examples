@@ -12,6 +12,7 @@ const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
 export const APP_PRODUCTION_SUFFIX = ".apps.peerbit.org";
 export const APP_PRODUCTION_HOSTNAME_PATTERN =
     /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.apps\.peerbit\.org$/;
+export const CLOUDFLARE_WORKER_NAMESPACE_PREFIX = "peerbit-examples-";
 
 export const resolveCloudflareConfigOutputDirectory = ({
     output,
@@ -107,6 +108,16 @@ export const validateCloudflareDeploymentPolicy = (manifest, policy) => {
         }
         if (!/^[a-z0-9-]{1,63}$/.test(entry.previewWorker || "")) {
             throw new Error(`${entry.id}: invalid preview Worker`);
+        }
+        if (
+            !entry.productionWorker.startsWith(
+                CLOUDFLARE_WORKER_NAMESPACE_PREFIX
+            ) ||
+            !entry.previewWorker.startsWith(CLOUDFLARE_WORKER_NAMESPACE_PREFIX)
+        ) {
+            throw new Error(
+                `${entry.id}: Worker identities must stay inside the reviewed ${CLOUDFLARE_WORKER_NAMESPACE_PREFIX} namespace`
+            );
         }
         if (entry.productionWorker === entry.previewWorker) {
             throw new Error(
