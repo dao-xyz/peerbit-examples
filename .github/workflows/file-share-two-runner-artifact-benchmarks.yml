@@ -1,5 +1,7 @@
-name: File Share Two-Runner Benchmarks
+name: File Share Two-Runner Artifact Benchmarks
 
+# Keep this path distinct from the retired issue-coordination workflow. Old
+# branch refs still contain that workflow and must never share this workflow ID.
 on:
     workflow_dispatch:
         inputs:
