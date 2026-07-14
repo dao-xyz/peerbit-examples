@@ -1,7 +1,7 @@
 {
     "private": true,
     "name": "@dao-xyz/peerbit-examples",
-    "author": "dao.xyz",
+    "author": "Peerbit contributors",
     "repository": "https://github.com/@dao-xyz/peerbit-node",
     "license": "Apache-2.0",
     "type": "module",

@@ -1,7 +1,7 @@
 {
     "name": "@peerbit/blog-sdk",
     "version": "2.0.1",
-    "author": "dao.xyz",
+    "author": "Peerbit contributors",
     "repository": "https://github.com/dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
     "type": "module",
