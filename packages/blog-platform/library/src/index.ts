@@ -168,13 +168,17 @@ export class BlogPosts extends Program<Args> {
                     return true; // Anyone can query
                 },
                 type: PostIndexable,
-                transform: async (post, ctx) => {
+                includeIndexed: true,
+                transform: (post, ctx, facts) => {
+                    const author = facts?.entryPublicKeys?.[0];
+                    if (!author) {
+                        throw new Error("Missing signer for indexed blog post");
+                    }
                     return new PostIndexable(
                         post,
                         ctx.created,
                         ctx.modified,
-                        (await this.posts.log.log.get(ctx.head))!.signatures[0]
-                            .publicKey
+                        author
                     );
                 },
             },
@@ -228,12 +232,21 @@ export class BlogPosts extends Program<Args> {
     }
 
     async getPostAuthor(id: string) {
-        // TODO typechecking
-        const head = (await this.posts.index.getDetailed(id))![0].results[0]
-            .context.head;
-        const key = (await this.posts.log.log.get(head))!.signatures[0]
-            .publicKey;
-        return key;
+        const responses = await this.posts.index.getDetailed(id, {
+            resolve: false,
+        });
+        for (const response of responses ?? []) {
+            for (const result of response.results) {
+                const entry = result.entries.find(
+                    (candidate) => candidate.hash === result.context.head
+                );
+                const author = entry?.signatures[0]?.publicKey;
+                if (author) {
+                    return author;
+                }
+            }
+        }
+        throw new Error(`Post author not found: ${id}`);
     }
 
     async getAlias(publicKey: PublicSignKey) {
