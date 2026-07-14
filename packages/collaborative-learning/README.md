@@ -1,7 +1,7 @@
 # P2P Model learning
 ![demo](./demo.gif)
 
-Live demo: https://ml.peerbit.org/
+Live demo: https://ml.apps.peerbit.org/
 
 This project uses Peerbit to share model weights between peers. 
 

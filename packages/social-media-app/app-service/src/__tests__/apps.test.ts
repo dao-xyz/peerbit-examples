@@ -100,7 +100,7 @@ describe("index", () => {
         });
         const response = await search("che");
         expect(response).to.have.length(1);
-        expect(response[0].url).to.eq("https://chess.peerbit.org");
+        expect(response[0].url).to.eq("https://chess.apps.peerbit.org");
     });
 
     it("uses configured app URLs consistently", async () => {

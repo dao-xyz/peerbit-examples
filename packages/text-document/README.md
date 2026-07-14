@@ -2,7 +2,7 @@
 
 ![demo](./demo.gif)
 
-Live demo https://text.peerbit.org
+Live demo https://text.apps.peerbit.org
 
 THIS DEMO IS FLAKY.
 

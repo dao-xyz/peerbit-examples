@@ -6,6 +6,19 @@ const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     ".."
 );
+const retiredDirectAppHosts = [
+    "stream",
+    "music",
+    "chat",
+    "giga",
+    "ml",
+    "text",
+    "files",
+    "chess",
+].map((label) => ({
+    needle: `${label}.${"peerbit" + ".org"}`,
+    description: "retired direct app origin",
+}));
 const forbiddenReferences = [
     {
         needle: "dao" + ".xyz",
@@ -23,6 +36,7 @@ const forbiddenReferences = [
         needle: "dao-xyz.github" + ".io/peerbit-examples",
         description: "retired GitHub Pages URL",
     },
+    ...retiredDirectAppHosts,
 ];
 const legalAttributionFiles = new Set([
     "LICENSE",

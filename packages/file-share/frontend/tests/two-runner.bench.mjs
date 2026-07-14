@@ -1,5 +1,13 @@
 import fs from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+    mkdir,
+    mkdtemp,
+    readFile,
+    rm,
+    stat,
+    writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
     createCrc32,
@@ -38,9 +46,6 @@ const RUN_ID = process.env.GITHUB_RUN_ID
     ? `${process.env.GITHUB_RUN_ID}-attempt-${process.env.GITHUB_RUN_ATTEMPT || "1"}`
     : `local-${Date.now()}`;
 const COORDINATION_FILE = process.env.COORDINATION_FILE;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY;
-const COORDINATION_ISSUE = process.env.COORDINATION_ISSUE;
 const TEST_HOOK_TIMEOUT_MS = Number(
     process.env.PW_TEST_HOOK_TIMEOUT_MS || "60000"
 );
@@ -493,27 +498,6 @@ const expectSavedViaPicker = async (
     return await Promise.race([streamedSave, dialogFailure, pageErrorFailure]);
 };
 
-const marker = (kind) =>
-    `<!-- file-share-two-runner run:${RUN_ID} kind:${kind} -->`;
-
-const parseEventBody = (body) => {
-    const match = body.match(
-        /^<!-- file-share-two-runner run:(.+?) kind:(.+?) -->\n```json\n([\s\S]*?)\n```$/m
-    );
-    if (!match) {
-        return null;
-    }
-    try {
-        return {
-            runId: match[1],
-            kind: match[2],
-            payload: JSON.parse(match[3]),
-        };
-    } catch {
-        return null;
-    }
-};
-
 const countObjectKeys = (value) =>
     value && typeof value === "object" && !Array.isArray(value)
         ? Object.keys(value).length
@@ -645,80 +629,24 @@ const minimalCoordinationPayload = (payload) => {
     };
 };
 
-const essentialCoordinationPayload = (payload) => {
-    if (!payload || typeof payload !== "object") {
-        return payload;
-    }
-    return {
-        status: payload.status,
-        role: payload.role,
-        readerRole: payload.readerRole,
-        scenario: payload.scenario,
-        baseURL: payload.baseURL,
-        shareUrl: payload.shareUrl,
-        address: payload.address,
-        fileName: payload.fileName,
-        fileSizeMb: payload.fileSizeMb,
-        sizeBytes: payload.sizeBytes,
-        fixture: payload.fixture,
-        manifest: payload.manifest,
-        integrity: payload.integrity,
-        cohort: payload.cohort,
-        topology: payload.topology,
-        sink: payload.sink,
-        uploadDurationMs: payload.uploadDurationMs,
-        uploadMbps: payload.uploadMbps,
-        downloadDurationMs: payload.downloadDurationMs,
-        downloadMbps: payload.downloadMbps,
-        listingWaitMs: payload.listingWaitMs,
-        writerDiagnostics: payload.writerDiagnostics
-            ? {
-                  programAddress: payload.writerDiagnostics.programAddress,
-                  peerHash: payload.writerDiagnostics.peerHash,
-                  peerAddresses: tail(payload.writerDiagnostics.peerAddresses),
-              }
-            : undefined,
-        failure: compactFailure(payload.failure),
-    };
-};
-
-const lastResortCoordinationPayload = (payload) => ({
-    status: "failed",
-    role: payload?.role,
-    readerRole: payload?.readerRole,
-    scenario: payload?.scenario,
-    fileName:
-        typeof payload?.fileName === "string"
-            ? payload.fileName.slice(0, 512)
-            : undefined,
-    sizeBytes: payload?.sizeBytes,
-    failure: {
-        message:
-            compactFailure(payload?.failure)?.message ??
-            "Coordination payload exceeded the safe GitHub comment budget",
-    },
+const createCoordinationEvent = (kind, payload) => ({
+    runId: RUN_ID,
+    kind,
+    payload: minimalCoordinationPayload(payload),
 });
 
-const MAX_COORDINATION_BODY_BYTES = 60_000;
-
-const makeCoordinationBody = (kind, payload) =>
-    `${marker(kind)}\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
-
-const createCoordinationBody = (kind, payload) => {
-    for (const selectPayload of [
-        compactCoordinationPayload,
-        minimalCoordinationPayload,
-        essentialCoordinationPayload,
-        lastResortCoordinationPayload,
-    ]) {
-        const body = makeCoordinationBody(kind, selectPayload(payload));
-        if (Buffer.byteLength(body, "utf8") <= MAX_COORDINATION_BODY_BYTES) {
-            return body;
-        }
+const parseCoordinationEvent = (text, expectedKind) => {
+    const event = JSON.parse(text);
+    if (
+        !event ||
+        event.runId !== RUN_ID ||
+        event.kind !== expectedKind ||
+        !event.payload ||
+        typeof event.payload !== "object"
+    ) {
+        throw new Error(`Invalid ${expectedKind} coordination artifact`);
     }
-    throw new Error(
-        "Unable to fit the coordination event within the GitHub comment budget"
-    );
+    return event;
 };
 
 const createFileCoordinator = (filePath) => ({
@@ -756,84 +684,96 @@ const createFileCoordinator = (filePath) => ({
     },
 });
 
-const githubRequestWithResponse = async (url, init = {}) => {
-    if (!GITHUB_TOKEN || !GITHUB_REPOSITORY || !COORDINATION_ISSUE) {
-        throw new Error("Missing GitHub coordination environment");
-    }
-    const response = await fetch(url, {
-        ...init,
-        headers: {
-            Accept: "application/vnd.github+json",
-            Authorization: `Bearer ${GITHUB_TOKEN}`,
-            "X-GitHub-Api-Version": "2022-11-28",
-            ...(init.headers || {}),
-        },
-    });
-    if (!response.ok) {
-        throw new Error(
-            `GitHub coordination request failed (${response.status}): ${await response.text()}`
-        );
-    }
-    if (response.status === 204) {
-        return { body: null, headers: response.headers };
-    }
-    return { body: await response.json(), headers: response.headers };
-};
+const coordinationArtifactName = (kind) =>
+    `file-share-two-runner-coordination-${RUN_ID}-${kind}`;
 
-const githubRequest = async (url, init = {}) => {
-    const { body } = await githubRequestWithResponse(url, init);
-    return body;
-};
+const selectNewestCoordinationArtifact = (kinds, artifacts) =>
+    kinds
+        .map((kind) => ({
+            kind,
+            artifact: artifacts.find(
+                (artifact) => artifact.name === coordinationArtifactName(kind)
+            ),
+        }))
+        .filter(({ artifact }) => artifact)
+        .sort((left, right) => {
+            const leftCreatedAt = left.artifact.createdAt?.getTime() ?? 0;
+            const rightCreatedAt = right.artifact.createdAt?.getTime() ?? 0;
+            return (
+                rightCreatedAt - leftCreatedAt ||
+                right.artifact.id - left.artifact.id
+            );
+        })[0];
 
-const getLinkHeaderUrl = (linkHeader, rel) => {
-    if (!linkHeader) {
-        return undefined;
-    }
-    for (const part of linkHeader.split(",")) {
-        const match = part.trim().match(/^<([^>]+)>;\s*rel="([^"]+)"$/);
-        if (match?.[2] === rel) {
-            return match[1];
-        }
-    }
-    return undefined;
-};
-
-const listRecentIssueComments = async (commentsUrl) => {
-    const firstPageUrl = `${commentsUrl}?per_page=100`;
-    const firstPage = await githubRequestWithResponse(firstPageUrl);
-    const lastPageUrl = getLinkHeaderUrl(firstPage.headers.get("link"), "last");
-    if (lastPageUrl && lastPageUrl !== firstPageUrl) {
-        return await githubRequest(lastPageUrl);
-    }
-    return firstPage.body ?? [];
-};
-
-const isTrustedGithubActionsComment = (comment) =>
-    comment?.user?.login === "github-actions[bot]" &&
-    comment?.user?.type === "Bot";
-
-const createGithubCoordinator = () => {
-    const issueUrl = `https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${COORDINATION_ISSUE}/comments`;
+const createArtifactCoordinator = async () => {
+    const { DefaultArtifactClient } = await import("@actions/artifact");
+    const artifactClient = new DefaultArtifactClient();
     return {
         async publish(kind, payload) {
-            const body = createCoordinationBody(kind, payload);
-            await githubRequest(issueUrl, {
-                method: "POST",
-                body: JSON.stringify({ body }),
-            });
+            const directory = await mkdtemp(
+                path.join(tmpdir(), "peerbit-two-runner-event-")
+            );
+            const eventPath = path.join(directory, "event.json");
+            try {
+                await writeFile(
+                    eventPath,
+                    `${JSON.stringify(createCoordinationEvent(kind, payload))}\n`
+                );
+                const uploaded = await artifactClient.uploadArtifact(
+                    coordinationArtifactName(kind),
+                    [eventPath],
+                    directory,
+                    { retentionDays: 1, compressionLevel: 0 }
+                );
+                if (!uploaded.id) {
+                    throw new Error(
+                        `GitHub did not return an artifact id for ${kind}`
+                    );
+                }
+            } finally {
+                await rm(directory, { recursive: true, force: true }).catch(
+                    () => {}
+                );
+            }
         },
         async waitForAny(kinds, timeoutMs) {
             const deadline = Date.now() + timeoutMs;
             while (Date.now() < deadline) {
-                const comments = await listRecentIssueComments(issueUrl);
-                const parsed = comments
-                    .filter(isTrustedGithubActionsComment)
-                    .map((comment) => parseEventBody(comment.body))
-                    .filter(Boolean)
-                    .filter((event) => event.runId === RUN_ID)
-                    .filter((event) => kinds.includes(event.kind));
-                if (parsed.length > 0) {
-                    return parsed[parsed.length - 1];
+                const listed = await artifactClient.listArtifacts({
+                    latest: true,
+                });
+                const candidate = selectNewestCoordinationArtifact(
+                    kinds,
+                    listed.artifacts
+                );
+                if (candidate) {
+                    const { kind, artifact: found } = candidate;
+                    const name = coordinationArtifactName(kind);
+
+                    const directory = await mkdtemp(
+                        path.join(tmpdir(), "peerbit-two-runner-event-")
+                    );
+                    try {
+                        await artifactClient.downloadArtifact(found.id, {
+                            path: directory,
+                        });
+                        const event = parseCoordinationEvent(
+                            await readFile(
+                                path.join(directory, "event.json"),
+                                "utf8"
+                            ),
+                            kind
+                        );
+                        await artifactClient
+                            .deleteArtifact(name)
+                            .catch(() => {});
+                        return event;
+                    } finally {
+                        await rm(directory, {
+                            recursive: true,
+                            force: true,
+                        }).catch(() => {});
+                    }
                 }
                 await new Promise((resolve) =>
                     setTimeout(resolve, POLL_INTERVAL_MS)
@@ -846,11 +786,11 @@ const createGithubCoordinator = () => {
     };
 };
 
-const createCoordinator = () => {
+const createCoordinator = async () => {
     if (COORDINATION_FILE) {
         return createFileCoordinator(COORDINATION_FILE);
     }
-    return createGithubCoordinator();
+    return await createArtifactCoordinator();
 };
 
 const createFailure = (error) => ({
@@ -1593,14 +1533,6 @@ const runSelfTest = async () => {
             throw new Error(message);
         }
     };
-    const linkHeader =
-        '<https://api.github.com/repos/o/r/issues/1/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repos/o/r/issues/1/comments?per_page=100&page=5>; rel="last"';
-    if (
-        getLinkHeaderUrl(linkHeader, "last") !==
-        "https://api.github.com/repos/o/r/issues/1/comments?per_page=100&page=5"
-    ) {
-        throw new Error("Expected GitHub Link header last page to parse");
-    }
     const payload = {
         status: "passed",
         role: "reader",
@@ -1639,6 +1571,25 @@ const runSelfTest = async () => {
     if (compactReadDiagnostics(undefined) === undefined) {
         throw new Error("Expected undefined diagnostics to compact to object");
     }
+    const newestCoordination = selectNewestCoordinationArtifact(
+        ["writer-ready", "writer-failed"],
+        [
+            {
+                name: coordinationArtifactName("writer-ready"),
+                id: 10,
+                createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            },
+            {
+                name: coordinationArtifactName("writer-failed"),
+                id: 11,
+                createdAt: new Date("2026-01-01T00:00:01.000Z"),
+            },
+        ]
+    );
+    assert(
+        newestCoordination?.kind === "writer-failed",
+        "Newest coordination artifact was not selected"
+    );
 
     const crc32 = createCrc32();
     crc32.update(new TextEncoder().encode("1234"));
@@ -1842,14 +1793,17 @@ const runSelfTest = async () => {
                 `${label} coordination payload dropped integrity evidence`
             );
         }
+        const artifactEvent = parseCoordinationEvent(
+            JSON.stringify(
+                createCoordinationEvent("writer-ready", coordinationPayload)
+            ),
+            "writer-ready"
+        );
         assert(
-            isTrustedGithubActionsComment({
-                user: { login: "github-actions[bot]", type: "Bot" },
-            }) &&
-                !isTrustedGithubActionsComment({
-                    user: { login: "untrusted-user", type: "User" },
-                }),
-            "GitHub coordination comment authentication failed"
+            artifactEvent.payload.integrity.sourceSha256Base64 ===
+                first.fixture.sourceSha256Base64 &&
+                artifactEvent.payload.readerPageEvents === undefined,
+            "Artifact coordination event did not round-trip safely"
         );
         const envelopeAddress = "zb2rh-self-test-address";
         assert(
@@ -1906,17 +1860,16 @@ const runSelfTest = async () => {
                     60_000,
             "Minimal coordination payload exceeded its UTF-8 byte budget"
         );
-        const boundedBody = createCoordinationBody(
-            "reader-failed",
-            noisyPayload
+        const boundedEvent = parseCoordinationEvent(
+            JSON.stringify(
+                createCoordinationEvent("reader-failed", noisyPayload)
+            ),
+            "reader-failed"
         );
-        const boundedEvent = parseEventBody(boundedBody);
         assert(
-            Buffer.byteLength(boundedBody, "utf8") <=
-                MAX_COORDINATION_BODY_BYTES &&
-                boundedEvent?.kind === "reader-failed" &&
-                boundedEvent?.payload?.failure?.message,
-            "Final coordination body fallback is not bounded or parseable"
+            boundedEvent.kind === "reader-failed" &&
+                boundedEvent.payload.failure.message.length <= 2_000,
+            "Artifact coordination payload was not bounded or parseable"
         );
         if (process.env.PW_TWO_RUNNER_BROWSER_SELF_TEST === "1") {
             await runBrowserSinkSelfTest(firstBytes, first.fixture);
@@ -1945,7 +1898,7 @@ const main = async () => {
         await runSelfTest();
         return;
     }
-    const coordinator = createCoordinator();
+    const coordinator = await createCoordinator();
     if (MODE === "writer") {
         await runWriter(coordinator);
         return;

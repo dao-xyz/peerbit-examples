@@ -122,7 +122,7 @@ for config in .wrangler-config/*.jsonc; do
 done
 ```
 
-Production configs are rendered with `--mode production` and are restricted to
-`peerbit.org` and `peerchecker.com`. Use the separately reviewed production
-environment, verify every hostname, and retain a known-good Worker version
-before deleting any retirement-only AWS resources.
+Production configs are rendered with `--mode production`. First-party demo
+Workers are restricted to `*.apps.peerbit.org`; the legacy redirect remains on
+`peerchecker.com`. Use the separately reviewed production environment and
+verify every hostname before retiring a known-good Worker version.

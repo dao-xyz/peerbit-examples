@@ -9,21 +9,21 @@
             "title": "Livestream",
             "script": "cloudflare/cached-static-assets.mjs",
             "workerFirst": ["/bird.mp4", "/noise.mp4"],
-            "domains": ["stream.peerbit.org"]
+            "domains": ["stream.apps.peerbit.org"]
         },
         {
             "id": "music",
             "worker": "peerbit-examples-music",
             "directory": "packages/media-streaming/music-library/frontend/dist",
             "title": "Music library",
-            "domains": ["music.peerbit.org"]
+            "domains": ["music.apps.peerbit.org"]
         },
         {
             "id": "chat",
             "worker": "peerbit-examples-chat",
             "directory": "packages/one-chat-room/frontend/dist",
             "title": "Chat",
-            "domains": ["chat.peerbit.org"]
+            "domains": ["chat.apps.peerbit.org"]
         },
         {
             "id": "giga",
@@ -32,35 +32,35 @@
             "title": "Giga",
             "script": "cloudflare/cached-static-assets.mjs",
             "workerFirst": ["/turtle720.mp4"],
-            "domains": ["giga.peerbit.org"]
+            "domains": ["giga.apps.peerbit.org"]
         },
         {
             "id": "ml",
             "worker": "peerbit-examples-ml",
             "directory": "packages/collaborative-learning/frontend/dist",
             "title": "Collaborative learning demo",
-            "domains": ["ml.peerbit.org"]
+            "domains": ["ml.apps.peerbit.org"]
         },
         {
             "id": "text",
             "worker": "peerbit-examples-text",
             "directory": "packages/text-document/frontend/dist",
             "title": "Text",
-            "domains": ["text.peerbit.org"]
+            "domains": ["text.apps.peerbit.org"]
         },
         {
             "id": "files",
             "worker": "peerbit-examples-files",
             "directory": "packages/file-share/frontend/dist",
             "title": "Filedrop",
-            "domains": ["files.peerbit.org"]
+            "domains": ["files.apps.peerbit.org"]
         },
         {
             "id": "chess",
             "worker": "peerbit-examples-chess",
             "directory": "packages/chess/frontend/dist",
             "title": "Chess",
-            "domains": ["chess.peerbit.org"]
+            "domains": ["chess.apps.peerbit.org"]
         }
     ],
     "redirects": [
@@ -69,7 +69,7 @@
             "worker": "peerbit-examples-legacy-stream",
             "script": "cloudflare/stream-peerchecker-redirect.mjs",
             "domains": ["stream.peerchecker.com"],
-            "location": "https://stream.peerbit.org/#/",
+            "location": "https://stream.apps.peerbit.org/#/",
             "status": 307
         }
     ]

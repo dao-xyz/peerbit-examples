@@ -24,7 +24,7 @@ describe("share references", () => {
 
     it("formats canonical share URLs", () => {
         expect(formatShareUrl("zb2rhoExampleShare")).toBe(
-            "https://files.peerbit.org#/s/zb2rhoExampleShare"
+            "https://files.apps.peerbit.org#/s/zb2rhoExampleShare"
         );
         expect(
             formatShareUrl(

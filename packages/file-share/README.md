@@ -10,7 +10,7 @@ In the library folder you can find all code that is handling the file data.
 
 In the frontend folder you can find a React application using the library as a dependency.
 
-The hosted application is available at [files.peerbit.org](https://files.peerbit.org).
+The hosted application is available at [files.apps.peerbit.org](https://files.apps.peerbit.org).
 
 
 ## CLI

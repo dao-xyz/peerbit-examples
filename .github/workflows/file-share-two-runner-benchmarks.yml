@@ -8,11 +8,6 @@ on:
                 required: true
                 type: number
                 default: 512
-            base_url:
-                description: Target file-share deployment
-                required: true
-                type: string
-                default: https://files.peerbit.org
             reader_role:
                 description: Reader replication role
                 required: true
@@ -39,75 +34,13 @@ on:
 
 permissions:
     contents: read
-    issues: write
+
+env:
+    FILE_SHARE_BENCHMARK_BASE_URL: https://files.apps.peerbit.org
 
 jobs:
-    coordinator:
-        runs-on: ubuntu-22.04
-        outputs:
-            issue_number: ${{ steps.issue.outputs.issue_number }}
-        steps:
-            - name: Ensure coordination issue
-              id: issue
-              env:
-                  GITHUB_TOKEN: ${{ github.token }}
-                  GITHUB_REPOSITORY: ${{ github.repository }}
-              run: |
-                  node --input-type=commonjs <<'NODE'
-                  const fs = require("node:fs");
-
-                  (async () => {
-                    const token = process.env.GITHUB_TOKEN;
-                    const repo = process.env.GITHUB_REPOSITORY;
-                    const title = "File Share Benchmark Coordination";
-
-                    const request = async (url, init = {}) => {
-                      const response = await fetch(url, {
-                        ...init,
-                        headers: {
-                          Accept: "application/vnd.github+json",
-                          Authorization: `Bearer ${token}`,
-                          "X-GitHub-Api-Version": "2022-11-28",
-                          ...(init.headers || {}),
-                        },
-                      });
-                      if (!response.ok) {
-                        throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
-                      }
-                      return await response.json();
-                    };
-
-                    const search = await request(
-                      `https://api.github.com/search/issues?q=${encodeURIComponent(`repo:${repo} is:issue "${title}" in:title`)}`
-                    );
-                    const existing = search.items.find((item) => item.title === title);
-                    let issueNumber = existing?.number;
-
-                    if (!issueNumber) {
-                      const created = await request(
-                        `https://api.github.com/repos/${repo}/issues`,
-                        {
-                          method: "POST",
-                          body: JSON.stringify({
-                            title,
-                            body:
-                              "This issue is used by the on-demand two-runner file-share benchmark workflow as a coordination channel. Each benchmark run posts run-id scoped comments here.",
-                          }),
-                        }
-                      );
-                      issueNumber = created.number;
-                    }
-
-                    fs.appendFileSync(process.env.GITHUB_OUTPUT, `issue_number=${issueNumber}\n`);
-                  })().catch((error) => {
-                    console.error(error);
-                    process.exit(1);
-                  });
-                  NODE
-
     writer:
         runs-on: ubuntu-22.04
-        needs: coordinator
         timeout-minutes: 90
         concurrency:
             group: file-share-two-runner-writer-${{ github.ref_name }}-${{ inputs.file_mb }}
@@ -141,10 +74,7 @@ jobs:
             - name: Run writer benchmark
               working-directory: packages/file-share/frontend
               env:
-                  GITHUB_TOKEN: ${{ github.token }}
-                  GITHUB_REPOSITORY: ${{ github.repository }}
-                  COORDINATION_ISSUE: ${{ needs.coordinator.outputs.issue_number }}
-                  PW_BASE_URL: ${{ inputs.base_url }}
+                  PW_BASE_URL: ${{ env.FILE_SHARE_BENCHMARK_BASE_URL }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
                   PW_UPLOAD_TIMEOUT_MS: ${{ inputs.listing_timeout_ms }}
                   PW_RESULT_FILE: ${{ github.workspace }}/bench-results/writer.json
@@ -158,10 +88,10 @@ jobs:
               with:
                   name: file-share-two-runner-writer-${{ github.run_id }}
                   path: bench-results
+                  retention-days: 7
 
     reader:
         runs-on: ubuntu-22.04
-        needs: coordinator
         timeout-minutes: 90
         concurrency:
             group: file-share-two-runner-reader-${{ github.ref_name }}-${{ inputs.file_mb }}
@@ -195,10 +125,7 @@ jobs:
             - name: Run reader benchmark
               working-directory: packages/file-share/frontend
               env:
-                  GITHUB_TOKEN: ${{ github.token }}
-                  GITHUB_REPOSITORY: ${{ github.repository }}
-                  COORDINATION_ISSUE: ${{ needs.coordinator.outputs.issue_number }}
-                  PW_BASE_URL: ${{ inputs.base_url }}
+                  PW_BASE_URL: ${{ env.FILE_SHARE_BENCHMARK_BASE_URL }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
                   PW_READER_ROLE: ${{ inputs.reader_role }}
                   PW_UPLOAD_TIMEOUT_MS: ${{ inputs.listing_timeout_ms }}
@@ -213,11 +140,11 @@ jobs:
               with:
                   name: file-share-two-runner-reader-${{ github.run_id }}
                   path: bench-results
+                  retention-days: 7
 
     summarize:
         runs-on: ubuntu-22.04
         needs:
-            - coordinator
             - writer
             - reader
         if: always()
@@ -237,7 +164,7 @@ jobs:
             - name: Summarize results
               env:
                   BENCH_FILE_MB: ${{ inputs.file_mb }}
-                  BENCH_BASE_URL: ${{ inputs.base_url }}
+                  BENCH_BASE_URL: ${{ env.FILE_SHARE_BENCHMARK_BASE_URL }}
                   BENCH_READER_ROLE: ${{ inputs.reader_role }}
                   BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
                   BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
