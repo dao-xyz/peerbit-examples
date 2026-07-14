@@ -30,6 +30,7 @@
             "worker": "peerbit-examples-giga",
             "directory": "packages/social-media-app/frontend/dist",
             "title": "Giga",
+            "accountAuth": "disabled",
             "script": "cloudflare/cached-static-assets.mjs",
             "workerFirst": ["/turtle720.mp4"],
             "domains": ["giga.apps.peerbit.org"]

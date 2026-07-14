@@ -7,9 +7,11 @@ const TEST_EMAIL = process.env.TEST_EMAIL;
 const TEST_PASSWORD = process.env.TEST_PASSWORD;
 
 const missingEnv =
-    !TEST_EMAIL?.trim() || !TEST_PASSWORD?.trim()
-        ? "Set TEST_EMAIL and TEST_PASSWORD in packages/social-media-app/frontend/.env (not VITE_)."
-        : undefined;
+    process.env.VITE_SUPABASE_AUTH_ENABLED !== "true"
+        ? "Set VITE_SUPABASE_AUTH_ENABLED=true to run Supabase auth tests."
+        : !TEST_EMAIL?.trim() || !TEST_PASSWORD?.trim()
+          ? "Set TEST_EMAIL and TEST_PASSWORD in packages/social-media-app/frontend/.env (not VITE_)."
+          : undefined;
 
 async function openProfileMenu(page: Page) {
     const area = page.getByTestId("header-profile-area");

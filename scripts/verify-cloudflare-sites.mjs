@@ -109,6 +109,11 @@ for (const site of target === "legacy-redirect" ? [] : manifest.staticSites) {
             const release = await releaseResponse.json();
             if (release.site !== site.id)
                 throw new Error(`${origin}: wrong release site id`);
+            if (site.accountAuth && release.accountAuth !== site.accountAuth) {
+                throw new Error(
+                    `${origin}: expected account auth ${site.accountAuth}, found ${release.accountAuth}`
+                );
+            }
             if (expectedCommit && release.commit !== expectedCommit) {
                 throw new Error(
                     `${origin}: expected release ${expectedCommit}, found ${release.commit}`

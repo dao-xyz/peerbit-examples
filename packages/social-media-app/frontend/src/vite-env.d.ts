@@ -4,6 +4,7 @@ interface ImportMeta {
 }
 
 interface ImportMetaEnv {
+    readonly VITE_SUPABASE_AUTH_ENABLED?: "true" | "false";
     readonly VITE_SUPABASE_URL?: string;
     readonly VITE_SUPABASE_ANON_KEY?: string;
     readonly VITE_STREAMING_APP_URL?: string;

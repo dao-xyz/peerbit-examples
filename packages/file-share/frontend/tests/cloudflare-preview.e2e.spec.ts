@@ -44,11 +44,10 @@ test.describe("Cloudflare preview runtime smoke", () => {
                 return;
             }
             if (/\.(?:m?js)(?:\?|$)/.test(url)) javascript.add(url);
+            const contentType = response.headers()["content-type"];
             if (
                 /\.wasm(?:\?|$)/.test(url) &&
-                response
-                    .headers()
-                    ["content-type"]?.startsWith("application/wasm")
+                contentType?.startsWith("application/wasm")
             ) {
                 wasm.add(url);
             }
@@ -91,6 +90,38 @@ test.describe("Cloudflare preview runtime smoke", () => {
         );
     });
 
+    test("Giga exposes no account auth or Supabase traffic", async ({
+        page,
+    }) => {
+        test.setTimeout(180_000);
+        const origin = requiredUrl("PW_GIGA_URL");
+        const supabaseRequests: string[] = [];
+        page.on("request", (request) => {
+            const url = new URL(request.url());
+            if (
+                url.hostname.endsWith(".supabase.co") ||
+                url.hostname.endsWith(".supabase.in")
+            ) {
+                supabaseRequests.push(request.url());
+            }
+        });
+
+        await page.goto(`${origin}/?ephemeral=true&bootstrap=offline#/auth`, {
+            waitUntil: "domcontentloaded",
+            timeout: 120_000,
+        });
+        await expect(page).toHaveURL(/#\/$/, { timeout: 120_000 });
+        await expect(page.getByLabel("Email")).toHaveCount(0);
+
+        const profile = page.getByTestId("header-profile-area");
+        await expect(profile).toBeVisible({ timeout: 120_000 });
+        await profile.locator("button").first().click();
+        await expect(
+            page.getByRole("menuitem", { name: /^(?:Sign in|Account)$/ })
+        ).toHaveCount(0);
+        expect(supabaseRequests).toEqual([]);
+    });
+
     test("file-share boots and connects to an authoritative relay", async ({
         page,
         request,
@@ -123,7 +154,7 @@ test.describe("Cloudflare preview runtime smoke", () => {
                             const hooks = (window as any)
                                 .__peerbitFileShareTestHooks;
                             return hooks?.getDiagnostics
-                                ? await hooks.getDiagnostics()
+                                ? hooks.getDiagnostics()
                                 : null;
                         });
                         return Boolean(
