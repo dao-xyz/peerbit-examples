@@ -130,12 +130,12 @@ done
 Production configs are rendered with `--mode production`. First-party demo
 Workers are restricted to `*.apps.peerbit.org`; the legacy redirect remains on
 `peerchecker.com`. Both sets must exactly match the deployment policy.
-Production deploys
-run one site at a time: capture its current 100% version, deploy, verify the
-site (including the app-specific Chromium gate where one exists), and only then
-continue. A failed upload or verification automatically restores the captured
-version and verifies it again. Verification child processes do not inherit the
-Cloudflare credential.
+Production deploys run one site at a time: capture its current 100% version and
+release identity, deploy, verify the site (including the app-specific Chromium
+gate where one exists), and only then continue. A failed upload or verification
+automatically restores the captured version and verifies the captured release
+identity again. Verification child processes do not inherit the Cloudflare
+credential.
 
 Cloudflare version rollback does not revert attached resources. Treat a change
 to the exact hostname policy as a separate provisioning migration with its own

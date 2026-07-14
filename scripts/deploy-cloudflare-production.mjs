@@ -10,6 +10,77 @@ import {
 
 const VERSION_ID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FULL_GIT_COMMIT = /^[0-9a-f]{40}$/i;
+
+const productionOrigin = ({ site, policy }) => {
+    if (
+        policy.kind !== "app" ||
+        !Array.isArray(policy.productionHostnames) ||
+        policy.productionHostnames.length !== 1
+    ) {
+        throw new Error(
+            `${site.id}: app verification requires exactly one production hostname`
+        );
+    }
+    return `https://${policy.productionHostnames[0]}`;
+};
+
+export const productionSmokeEnvironment = (entries) => {
+    const byId = new Map(entries.map((entry) => [entry.site.id, entry]));
+    const originFor = (id) => {
+        const entry = byId.get(id);
+        if (!entry) throw new Error(`Missing runtime smoke site ${id}`);
+        return productionOrigin(entry);
+    };
+    return {
+        PW_BASE_URL: originFor("files"),
+        PW_GIGA_URL: originFor("giga"),
+        PW_STREAM_URL: originFor("stream"),
+    };
+};
+
+export const readBaselineReleaseCommit = async ({
+    site,
+    policy,
+    request = fetch,
+}) => {
+    if (policy.kind === "redirect") return undefined;
+
+    const releaseUrl = `${productionOrigin({ site, policy })}/release.json`;
+    let response;
+    try {
+        response = await request(releaseUrl, {
+            signal: AbortSignal.timeout(15_000),
+        });
+    } catch (error) {
+        throw new Error(
+            `${site.id}: could not read rollback release metadata: ${error}`
+        );
+    }
+    if (response.status !== 200) {
+        throw new Error(
+            `${site.id}: rollback release metadata returned HTTP ${response.status}`
+        );
+    }
+
+    let release;
+    try {
+        release = await response.json();
+    } catch (error) {
+        throw new Error(
+            `${site.id}: rollback release metadata is not valid JSON: ${error}`
+        );
+    }
+    if (release?.site !== site.id) {
+        throw new Error(`${site.id}: rollback release metadata has wrong site`);
+    }
+    if (!FULL_GIT_COMMIT.test(release.commit || "")) {
+        throw new Error(
+            `${site.id}: rollback release metadata requires a full Git commit hash`
+        );
+    }
+    return release.commit;
+};
 
 export const readSingleVersionDeployment = (deployment, siteId) => {
     if (!deployment || !Array.isArray(deployment.versions)) {
@@ -36,7 +107,7 @@ export const deployProductionEntries = async ({
     operations,
     log = console.log,
 }) => {
-    if (!/^[0-9a-f]{40}$/i.test(expectedCommit || "")) {
+    if (!FULL_GIT_COMMIT.test(expectedCommit || "")) {
         throw new Error(
             "Production deployment requires a full Git commit hash"
         );
@@ -53,9 +124,25 @@ export const deployProductionEntries = async ({
             previousDeployment,
             site.id
         );
+        const previousCommit = await operations.readReleaseCommit({
+            site,
+            policy,
+        });
+        if (
+            policy.kind === "app" &&
+            !FULL_GIT_COMMIT.test(previousCommit || "")
+        ) {
+            throw new Error(
+                `${site.id}: production app requires a full rollback release commit`
+            );
+        }
         let deployedVersion;
 
-        log(`${site.id}: rollback baseline ${previousVersion}`);
+        log(
+            `${site.id}: rollback baseline ${previousVersion}${
+                previousCommit ? ` at ${previousCommit}` : ""
+            }`
+        );
         try {
             await operations.deploy({
                 configFile: file,
@@ -120,7 +207,11 @@ export const deployProductionEntries = async ({
                         `${site.id}: rollback restored ${restoredVersion}, expected ${previousVersion}`
                     );
                 }
-                await operations.verify({ site, policy });
+                await operations.verify({
+                    site,
+                    policy,
+                    expectedCommit: previousCommit,
+                });
                 log(`${site.id}: previous version restored and verified`);
             } catch (error) {
                 rollbackError = error;
@@ -225,6 +316,7 @@ export const main = async (argv = process.argv.slice(2)) => {
         ["files", "file-share boots and connects to an authoritative relay"],
         ["stream", "streaming preview serves exact MP4 byte ranges"],
     ]);
+    const runtimeSmokeEnv = productionSmokeEnvironment(entries);
     const operations = {
         status: ({ configFile }) =>
             JSON.parse(
@@ -255,6 +347,7 @@ export const main = async (argv = process.argv.slice(2)) => {
                 "--message",
                 `automatic rollback after failed ${site.id} verification`,
             ]),
+        readReleaseCommit: readBaselineReleaseCommit,
         verify: ({ site, expectedCommit: commit }) => {
             runInherited(
                 process.execPath,
@@ -290,9 +383,7 @@ export const main = async (argv = process.argv.slice(2)) => {
                     {
                         ...verificationEnvironment,
                         PW_CLOUDFLARE_SMOKE: "1",
-                        PW_BASE_URL: "https://files.peerbit.org",
-                        PW_GIGA_URL: "https://giga.peerbit.org",
-                        PW_STREAM_URL: "https://stream.peerbit.org",
+                        ...runtimeSmokeEnv,
                     }
                 );
             }
