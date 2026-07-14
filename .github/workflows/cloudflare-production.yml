@@ -55,7 +55,8 @@ jobs:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
                   pnpm install --frozen-lockfile
-                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
+                  npm ci --no-audit --no-fund --prefix tools/wrangler
+                  node scripts/validate-wrangler-toolchain.mjs
                   node scripts/validate-production-bootstrap.mjs
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
@@ -110,7 +111,8 @@ jobs:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
                   pnpm install --frozen-lockfile
-                  npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
+                  npm ci --no-audit --no-fund --prefix tools/wrangler
+                  node scripts/validate-wrangler-toolchain.mjs
                   node scripts/validate-production-bootstrap.mjs
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"

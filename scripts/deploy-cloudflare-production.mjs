@@ -24,6 +24,12 @@ import {
     isIndeterminateCloudflareMutationError,
     redactCloudflareCredentials,
 } from "./cloudflare-workers-api.mjs";
+import {
+    CLOUDFLARE_ARTIFACT_DIGEST_BINDING,
+    artifactBoundVersionMessage,
+    revalidateCloudflareArtifactManifest,
+    validateCloudflareArtifactDeploymentConfig,
+} from "./cloudflare-artifact-manifest.mjs";
 
 const VERSION_ID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -207,7 +213,7 @@ export const createInvocationVersionTag = ({
     return tag;
 };
 
-const readWorkerScriptMap = async (operations) => {
+export const readWorkerScriptMap = async (operations) => {
     const scripts = await operations.listWorkerScripts();
     if (
         !(scripts instanceof Map) ||
@@ -240,7 +246,7 @@ const readWorkerScriptMap = async (operations) => {
     return scripts;
 };
 
-const readWorkerDomainInventory = async (operations) => {
+export const readWorkerDomainInventory = async (operations) => {
     const domains = await operations.listWorkerDomains();
     const ids = new Set();
     const hostnames = new Set();
@@ -296,7 +302,11 @@ const routeTargetsManagedAppHostname = (pattern) => {
     return managedAppHostname(authority);
 };
 
-const validateProductionAttachmentInventory = ({ plans, scripts, domains }) => {
+export const validateProductionAttachmentInventory = ({
+    plans,
+    scripts,
+    domains,
+}) => {
     const expectedByHostname = new Map();
     const policyWorkerNames = new Set();
     for (const plan of plans) {
@@ -423,7 +433,7 @@ const validateProductionAttachmentInventory = ({ plans, scripts, domains }) => {
     }
 };
 
-const readAndValidateWorkerSubdomains = async ({
+export const readAndValidateWorkerSubdomains = async ({
     plans,
     scripts,
     operations,
@@ -459,7 +469,7 @@ const readAndValidateWorkerSubdomains = async ({
     }
 };
 
-const readAndValidateProductionAttachments = async ({
+export const readAndValidateProductionAttachments = async ({
     plans,
     operations,
     scripts: providedScripts,
@@ -471,7 +481,7 @@ const readAndValidateProductionAttachments = async ({
     return scripts;
 };
 
-const productionWorkerConfig = ({ site, policy, configs }) => {
+export const productionWorkerConfig = ({ site, policy, configs }) => {
     if (policy.id !== site.id) {
         throw new Error(
             `${site.id}: Cloudflare policy identity does not match site`
@@ -1356,6 +1366,7 @@ export const createRouteFreeWranglerConfig = ({
     configFile,
     renderedConfig,
     workerName,
+    artifact,
     root = repoRoot,
 }) => {
     if (
@@ -1394,7 +1405,29 @@ export const createRouteFreeWranglerConfig = ({
     const privateConfig = structuredClone(renderedConfig);
     delete privateConfig.$schema;
     delete privateConfig.routes;
-    if ("main" in privateConfig) {
+    if (artifact) {
+        revalidateCloudflareArtifactManifest(artifact);
+        validateCloudflareArtifactDeploymentConfig({
+            artifact,
+            renderedConfig,
+        });
+        if (
+            artifact.workerName !== workerName ||
+            artifact.siteId == null ||
+            artifact.manifest?.deploymentConfig?.name !== workerName
+        ) {
+            throw new Error(
+                `${workerName}: reviewed deployment artifact identity is invalid`
+            );
+        }
+        privateConfig.main = artifact.moduleFile;
+        privateConfig.no_bundle = true;
+        privateConfig.find_additional_modules = false;
+        privateConfig.vars = {
+            ...(privateConfig.vars ?? {}),
+            [CLOUDFLARE_ARTIFACT_DIGEST_BINDING]: artifact.digest,
+        };
+    } else if ("main" in privateConfig) {
         privateConfig.main = resolveTemporaryConfigPath({
             configFile,
             value: privateConfig.main,
@@ -1430,6 +1463,7 @@ export const runWranglerVersionUpload = ({
     expectedCommit,
     workerName,
     versionTag,
+    artifact,
     environment = deploymentEnvironment,
     runtime = {},
 }) => {
@@ -1453,10 +1487,12 @@ export const runWranglerVersionUpload = ({
     const privateConfigFile = path.join(outputDirectory, "deploy.json");
     const outputFile = path.join(outputDirectory, "deploy.ndjson");
     try {
+        if (artifact) revalidateCloudflareArtifactManifest(artifact);
         const privateConfig = createRouteFreeWranglerConfig({
             configFile,
             renderedConfig,
             workerName,
+            artifact,
         });
         writeTemporaryConfig(
             privateConfigFile,
@@ -1477,10 +1513,17 @@ export const runWranglerVersionUpload = ({
                     "--config",
                     privateConfigFile,
                     "--strict",
+                    ...(artifact ? ["--no-bundle"] : []),
                     "--tag",
                     versionTag,
                     "--message",
-                    `peerbit-examples ${site.id} ${expectedCommit}`,
+                    artifact
+                        ? artifactBoundVersionMessage({
+                              siteId: site.id,
+                              expectedCommit,
+                              artifactManifestDigest: artifact.digest,
+                          })
+                        : `peerbit-examples ${site.id} ${expectedCommit}`,
                 ],
                 {
                     ...environment,
@@ -1509,6 +1552,9 @@ export const runWranglerVersionUpload = ({
                 outputExists(outputFile) ? readOutput(outputFile, "utf8") : "",
                 workerName
             );
+            if (artifact) {
+                deploymentEvidence.artifactManifestDigest = artifact.digest;
+            }
         } catch (error) {
             if (!commandError) throw error;
         }

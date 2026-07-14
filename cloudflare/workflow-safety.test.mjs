@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +10,33 @@ const readWorkflow = (name) =>
 
 const previewWorkflow = readWorkflow("cloudflare-preview.yml");
 const productionWorkflow = readWorkflow("cloudflare-production.yml");
+const provisioningWorkflow = readWorkflow(
+    "cloudflare-production-provision.yml"
+);
+
+const receiptValidationScripts = () => {
+    const stepMarker =
+        "            - name: Validate SHA-bound dispatch receipt";
+    const runMarker = "              run: |\n";
+    return provisioningWorkflow
+        .split(stepMarker)
+        .slice(1)
+        .map((block) => {
+            const source = block.split(runMarker, 2)[1];
+            assert.equal(typeof source, "string");
+            const lines = [];
+            for (const line of source.split("\n")) {
+                if (line.startsWith("                  ")) {
+                    lines.push(line.slice(18));
+                } else if (line.length === 0) {
+                    lines.push("");
+                } else {
+                    break;
+                }
+            }
+            return lines.join("\n");
+        });
+};
 
 test("credentialed production shell receives target and commit through env", () => {
     assert.match(
@@ -33,7 +61,11 @@ test("credentialed production shell receives target and commit through env", () 
 });
 
 test("Cloudflare workflows carry no Supabase build configuration", () => {
-    for (const workflow of [previewWorkflow, productionWorkflow]) {
+    for (const workflow of [
+        previewWorkflow,
+        productionWorkflow,
+        provisioningWorkflow,
+    ]) {
         assert.doesNotMatch(workflow, /VITE_SUPABASE_/);
     }
 });
@@ -70,14 +102,317 @@ test("production deployment remains manually gated", () => {
 });
 
 test("locked Wrangler is installed before its source contract tests", () => {
-    for (const workflow of [previewWorkflow, productionWorkflow]) {
+    for (const workflow of [
+        previewWorkflow,
+        productionWorkflow,
+        provisioningWorkflow,
+    ]) {
         const install = workflow.indexOf(
-            "npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler"
+            "npm ci --no-audit --no-fund --prefix tools/wrangler"
+        );
+        const toolchain = workflow.indexOf(
+            "node scripts/validate-wrangler-toolchain.mjs"
         );
         const safetyTests = workflow.indexOf(
             "node --test cloudflare/*.test.mjs"
         );
         assert.ok(install >= 0);
-        assert.ok(safetyTests > install);
+        assert.ok(toolchain > install);
+        assert.ok(safetyTests > toolchain);
+    }
+});
+
+test("one-time provisioning is protected, explicit, and serialized with routine deploys", () => {
+    assert.match(provisioningWorkflow, /^on:\n\s+workflow_dispatch:/m);
+    assert.doesNotMatch(provisioningWorkflow, /^\s+(?:push|pull_request):/m);
+    assert.match(
+        provisioningWorkflow,
+        /planned_commit:\n\s+description:[^\n]+\n\s+required: true\n\s+type: string/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /planned_state_digest:\n\s+description:[^\n]+\n\s+required: true\n\s+type: string/
+    );
+    assert.equal(
+        (
+            provisioningWorkflow.match(
+                /- name: Validate SHA-bound dispatch receipt/g
+            ) ?? []
+        ).length,
+        2
+    );
+    assert.match(provisioningWorkflow, /if: always\(\)/);
+    assert.match(
+        provisioningWorkflow,
+        /\[\[ ! "\$PROVISION_PLANNED_COMMIT" =~ \^\[0-9a-fA-F\]\{40\}\$ \]\]/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /if \[\[ "\$planned_commit" != "\$checked_out_commit" \]\]/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /"\$PROVISION_CONFIRM" != "\$confirmation"/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /VALIDATE_RESULT: \$\{\{ needs\.validate\.result \}\}/
+    );
+    assert.equal(
+        (provisioningWorkflow.match(/ref: \$\{\{ github\.sha \}\}/g) ?? [])
+            .length,
+        2
+    );
+    assert.doesNotMatch(
+        provisioningWorkflow,
+        /inputs\.confirm == '(?:plan|provision)-peerbit-production'/
+    );
+    assert.match(provisioningWorkflow, /environment: cloudflare-production/);
+    assert.match(provisioningWorkflow, /group: cloudflare-examples-production/);
+    assert.match(
+        provisioningWorkflow,
+        /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_PRODUCTION_API_TOKEN \}\}/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/
+    );
+    assert.match(provisioningWorkflow, /--mode "\$PROVISION_MODE"/);
+    assert.match(provisioningWorkflow, /--commit "\$PROVISION_COMMIT"/);
+    assert.match(
+        provisioningWorkflow,
+        /--planned-commit "\$PROVISION_PLANNED_COMMIT"/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /--planned-state-digest "\$PROVISION_PLANNED_STATE_DIGEST"/
+    );
+    assert.match(provisioningWorkflow, /--confirm "\$PROVISION_CONFIRM"/);
+    assert.doesNotMatch(
+        provisioningWorkflow,
+        /--(?:mode|commit|planned-commit|planned-state-digest|confirm)[^\n]*\$\{\{/
+    );
+});
+
+test("both provisioning jobs reject adversarial commit receipts with a nonzero step", () => {
+    const commit = "a".repeat(40);
+    const otherCommit = "b".repeat(40);
+    const sentinel = "0".repeat(64);
+    const digest = "1".repeat(64);
+    const receiptScripts = receiptValidationScripts();
+    assert.equal(receiptScripts.length, 2);
+    const cases = [
+        {
+            name: "valid plan",
+            mode: "plan",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: `plan-peerbit-production-${commit}`,
+            stateDigest: sentinel,
+            ref: "refs/heads/master",
+            succeeds: true,
+        },
+        {
+            name: "valid uppercase receipt",
+            mode: "apply",
+            plannedCommit: commit.toUpperCase(),
+            checkedOutCommit: commit,
+            confirm: `provision-peerbit-production-${commit}-${digest}`,
+            stateDigest: digest,
+            ref: "refs/heads/master",
+            succeeds: true,
+        },
+        {
+            name: "short receipt",
+            mode: "apply",
+            plannedCommit: commit.slice(0, 12),
+            checkedOutCommit: commit,
+            confirm: `provision-peerbit-production-${commit}`,
+            stateDigest: digest,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "different planned commit",
+            mode: "apply",
+            plannedCommit: otherCommit,
+            checkedOutCommit: commit,
+            confirm: `provision-peerbit-production-${otherCommit}`,
+            stateDigest: digest,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "generic confirmation",
+            mode: "apply",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: "provision-peerbit-production",
+            stateDigest: digest,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "plan with nonzero state receipt",
+            mode: "plan",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: `plan-peerbit-production-${commit}`,
+            stateDigest: digest,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "apply with plan sentinel",
+            mode: "apply",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: `provision-peerbit-production-${commit}-${sentinel}`,
+            stateDigest: sentinel,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "confirmation bound to another commit",
+            mode: "plan",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: `plan-peerbit-production-${otherCommit}`,
+            stateDigest: sentinel,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "non-master ref",
+            mode: "plan",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: `plan-peerbit-production-${commit}`,
+            stateDigest: sentinel,
+            ref: "refs/heads/not-master",
+            succeeds: false,
+        },
+        {
+            name: "invalid mode",
+            mode: "destroy",
+            plannedCommit: commit,
+            checkedOutCommit: commit,
+            confirm: `plan-peerbit-production-${commit}`,
+            stateDigest: sentinel,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+        {
+            name: "malformed checked-out commit",
+            mode: "plan",
+            plannedCommit: commit,
+            checkedOutCommit: "not-a-commit",
+            confirm: `plan-peerbit-production-${commit}`,
+            stateDigest: sentinel,
+            ref: "refs/heads/master",
+            succeeds: false,
+        },
+    ];
+
+    for (const [jobIndex, script] of receiptScripts.entries()) {
+        const jobName = jobIndex === 0 ? "validate" : "provision";
+        for (const input of cases) {
+            const result = spawnSync("bash", ["-c", script], {
+                encoding: "utf8",
+                env: {
+                    ...process.env,
+                    GITHUB_REF: input.ref,
+                    PROVISION_MODE: input.mode,
+                    PROVISION_CONFIRM: input.confirm,
+                    PROVISION_PLANNED_COMMIT: input.plannedCommit,
+                    PROVISION_PLANNED_STATE_DIGEST: input.stateDigest,
+                    PROVISION_COMMIT: input.checkedOutCommit,
+                },
+            });
+            assert.equal(
+                result.status === 0,
+                input.succeeds,
+                `${jobName}/${input.name}: ${result.stderr}`
+            );
+        }
+    }
+});
+
+test("one-time provisioning rebuilds exact bundles and never invokes Worker delete", () => {
+    assert.match(
+        provisioningWorkflow,
+        /node scripts\/render-cloudflare-configs\.mjs --mode production/
+    );
+    assert.match(provisioningWorkflow, /wrangler versions upload/);
+    assert.match(provisioningWorkflow, /--dry-run/);
+    assert.equal(
+        (
+            provisioningWorkflow.match(
+                /node scripts\/create-cloudflare-artifact-manifests\.mjs/g
+            ) ?? []
+        ).length,
+        2
+    );
+    assert.equal(
+        (
+            provisioningWorkflow.match(
+                /output="\$PWD\/\.wrangler-dry-run\/\$\(basename "\$config" \.jsonc\)"/g
+            ) ?? []
+        ).length,
+        2
+    );
+    assert.equal(
+        (provisioningWorkflow.match(/--outdir "\$output"/g) ?? []).length,
+        2
+    );
+    assert.match(
+        provisioningWorkflow,
+        /node scripts\/provision-cloudflare-production\.mjs/
+    );
+    assert.match(
+        provisioningWorkflow,
+        /Install Chromium for live baseline checks\n\s+if: inputs\.mode == 'apply'/
+    );
+    assert.doesNotMatch(
+        provisioningWorkflow,
+        /wrangler delete|workers\/scripts\/.*DELETE/
+    );
+    const lastManifest = provisioningWorkflow.lastIndexOf(
+        "node scripts/create-cloudflare-artifact-manifests.mjs"
+    );
+    const credentialedProvision = provisioningWorkflow.indexOf(
+        "CLOUDFLARE_API_TOKEN:"
+    );
+    assert.ok(lastManifest >= 0);
+    assert.ok(credentialedProvision > lastManifest);
+    assert.doesNotMatch(
+        provisioningWorkflow.slice(
+            provisioningWorkflow.indexOf(
+                "- name: Rebuild reviewed inputs without deployment credentials"
+            ),
+            credentialedProvision
+        ),
+        /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID/
+    );
+
+    const source = readFileSync(
+        path.join(repoRoot, "scripts/provision-cloudflare-production.mjs"),
+        "utf8"
+    );
+    assert.doesNotMatch(source, /method:\s*["']DELETE["']/);
+    assert.doesNotMatch(source, /wrangler["'],\s*\[[^\]]*["']delete["']/s);
+});
+
+test("every action in Cloudflare workflows is pinned to a full commit", () => {
+    for (const workflow of [
+        previewWorkflow,
+        productionWorkflow,
+        provisioningWorkflow,
+    ]) {
+        const uses = workflow.match(/^\s+-?\s*uses:\s*([^\s#]+)/gm) ?? [];
+        assert.ok(uses.length > 0);
+        for (const line of uses) {
+            assert.match(line, /@[0-9a-f]{40}$/i);
+        }
     }
 });

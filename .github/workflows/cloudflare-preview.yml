@@ -37,7 +37,9 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Install locked Wrangler toolchain
-              run: npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
+              run: |
+                  npm ci --no-audit --no-fund --prefix tools/wrangler
+                  node scripts/validate-wrangler-toolchain.mjs
 
             - name: Validate production bootstrap sources
               run: |
