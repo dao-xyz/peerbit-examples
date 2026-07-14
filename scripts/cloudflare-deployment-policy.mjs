@@ -9,6 +9,28 @@ export const repoRoot = path.resolve(
 
 const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
 
+export const APP_PRODUCTION_SUFFIX = ".apps.peerbit.org";
+export const APP_PRODUCTION_HOSTNAME_PATTERN =
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.apps\.peerbit\.org$/;
+
+export const resolveCloudflareConfigOutputDirectory = ({
+    output,
+    root = repoRoot,
+}) => {
+    const outputDirectory = path.resolve(root, output ?? ".wrangler-config");
+    const outputRelative = path.relative(root, outputDirectory);
+    if (
+        outputRelative.length === 0 ||
+        outputRelative.startsWith("..") ||
+        path.isAbsolute(outputRelative)
+    ) {
+        throw new Error(
+            "Generated Wrangler configs must use a non-root directory inside the repository"
+        );
+    }
+    return { outputDirectory, outputRelative };
+};
+
 export const loadCloudflareDeploymentData = ({
     manifestFile = path.join(repoRoot, "cloudflare/sites.json"),
     policyFile = path.join(repoRoot, "cloudflare/deployment-policy.json"),
@@ -77,6 +99,9 @@ export const validateCloudflareDeploymentPolicy = (manifest, policy) => {
         if (policies.has(entry.id)) {
             throw new Error(`Duplicate deployment policy id ${entry.id}`);
         }
+        if (entry.kind !== "app" && entry.kind !== "redirect") {
+            throw new Error(`${entry.id}: deployment kind is unsupported`);
+        }
         if (!/^[a-z0-9-]{1,63}$/.test(entry.productionWorker || "")) {
             throw new Error(`${entry.id}: invalid production Worker`);
         }
@@ -116,6 +141,14 @@ export const validateCloudflareDeploymentPolicy = (manifest, policy) => {
         }
         for (const hostname of entry.productionHostnames) {
             assertHostname(hostname, `${entry.id}: ${hostname}`);
+            if (
+                entry.kind === "app" &&
+                !APP_PRODUCTION_HOSTNAME_PATTERN.test(hostname)
+            ) {
+                throw new Error(
+                    `${entry.id}: app production hostname must use one label under *${APP_PRODUCTION_SUFFIX}`
+                );
+            }
             if (productionHostnames.has(hostname)) {
                 throw new Error(
                     `${entry.id}: duplicate production hostname ${hostname}`
@@ -180,6 +213,11 @@ export const validateCloudflareDeploymentPolicy = (manifest, policy) => {
             ) {
                 throw new Error(
                     `${entry.id}: redirect must use an allowlisted HTTPS production hostname`
+                );
+            }
+            if (!APP_PRODUCTION_HOSTNAME_PATTERN.test(redirectUrl.hostname)) {
+                throw new Error(
+                    `${entry.id}: redirect target must use one label under *${APP_PRODUCTION_SUFFIX}`
                 );
             }
             if (![301, 302, 303, 307, 308].includes(allowed.redirectStatus)) {

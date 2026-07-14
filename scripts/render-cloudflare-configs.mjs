@@ -2,7 +2,10 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+    APP_PRODUCTION_HOSTNAME_PATTERN,
+    APP_PRODUCTION_SUFFIX,
     loadCloudflareDeploymentData,
+    resolveCloudflareConfigOutputDirectory,
     validateRenderedCloudflareConfig,
 } from "./cloudflare-deployment-policy.mjs";
 
@@ -28,22 +31,14 @@ const mode = args.get("mode");
 if (mode !== "preview" && mode !== "production") {
     throw new Error("--mode must be preview or production");
 }
-const outputDirectory = path.resolve(
-    repoRoot,
-    args.get("output") || ".wrangler-config"
-);
-const outputRelative = path.relative(repoRoot, outputDirectory);
-if (outputRelative.startsWith("..") || path.isAbsolute(outputRelative)) {
-    throw new Error(
-        "Generated Wrangler configs must stay inside the repository"
-    );
-}
+const { outputDirectory, outputRelative } =
+    resolveCloudflareConfigOutputDirectory({
+        root: repoRoot,
+        output: args.get("output"),
+    });
 
 const allEntries = entries.map(({ site }) => site);
 const ownedProductionDomains = ["peerbit.org", "peerchecker.com"];
-const appProductionSuffix = ".apps.peerbit.org";
-const appProductionDomainPattern =
-    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.apps\.peerbit\.org$/;
 const isOwnedProductionDomain = (domain) =>
     ownedProductionDomains.some(
         (owned) => domain === owned || domain.endsWith(`.${owned}`)
@@ -109,9 +104,9 @@ for (const redirect of manifest.redirects) {
 
 for (const site of manifest.staticSites) {
     for (const domain of site.domains) {
-        if (!appProductionDomainPattern.test(domain)) {
+        if (!APP_PRODUCTION_HOSTNAME_PATTERN.test(domain)) {
             throw new Error(
-                `Static app domain must use one label under *${appProductionSuffix}: ${domain}`
+                `Static app domain must use one label under *${APP_PRODUCTION_SUFFIX}: ${domain}`
             );
         }
     }
@@ -119,9 +114,9 @@ for (const site of manifest.staticSites) {
 
 for (const redirect of manifest.redirects) {
     const location = new URL(redirect.location);
-    if (!location.hostname.endsWith(appProductionSuffix)) {
+    if (!APP_PRODUCTION_HOSTNAME_PATTERN.test(location.hostname)) {
         throw new Error(
-            `Legacy redirect target must use *${appProductionSuffix}: ${redirect.location}`
+            `Legacy redirect target must use one label under *${APP_PRODUCTION_SUFFIX}: ${redirect.location}`
         );
     }
 }

@@ -2,18 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
     loadCloudflareDeploymentData,
+    repoRoot,
+    resolveCloudflareConfigOutputDirectory,
     selectCloudflareDeploymentEntries,
     validateCloudflareDeploymentPolicy,
     validateRenderedCloudflareConfig,
 } from "../scripts/cloudflare-deployment-policy.mjs";
 import {
     deployProductionEntries,
+    productionSmokeEnvironment,
+    readBaselineReleaseCommit,
     readSingleVersionDeployment,
     withoutCloudflareDeploymentCredentials,
 } from "../scripts/deploy-cloudflare-production.mjs";
 
 const clone = (value) => structuredClone(value);
 const COMMIT = "a".repeat(40);
+const OLD_COMMIT = "b".repeat(40);
 const OLD_VERSION = "11111111-1111-4111-8111-111111111111";
 const NEW_VERSION = "22222222-2222-4222-8222-222222222222";
 const deployment = (versionId, percentage = 100) => ({
@@ -33,7 +38,7 @@ test("production Workers and hostnames are an exact reviewed allowlist", () => {
                 kind: "app",
                 productionWorker: "peerbit-examples-files",
                 previewWorker: "peerbit-examples-files-preview",
-                productionHostnames: ["files.peerbit.org"],
+                productionHostnames: ["files.apps.peerbit.org"],
             },
         ]
     );
@@ -44,7 +49,24 @@ test("production Workers and hostnames are an exact reviewed allowlist", () => {
     ];
     assert.throws(
         () => validateCloudflareDeploymentPolicy(widened, policy),
-        /must exactly equal \["files\.peerbit\.org"\]/
+        /must exactly equal \["files\.apps\.peerbit\.org"\]/
+    );
+});
+
+test("policy and manifest cannot jointly move an app outside apps.peerbit.org", () => {
+    const { manifest, policy } = loadCloudflareDeploymentData();
+    const changedManifest = clone(manifest);
+    changedManifest.staticSites.find(({ id }) => id === "files").domains = [
+        "files.example.com",
+    ];
+    const changedPolicy = clone(policy);
+    changedPolicy.entries.find(({ id }) => id === "files").productionHostnames =
+        ["files.example.com"];
+
+    assert.throws(
+        () =>
+            validateCloudflareDeploymentPolicy(changedManifest, changedPolicy),
+        /one label under \*\.apps\.peerbit\.org/
     );
 });
 
@@ -65,6 +87,33 @@ test("public previews are disabled", () => {
     }
 });
 
+test("renderer output cannot resolve to the repository root", () => {
+    assert.throws(
+        () =>
+            resolveCloudflareConfigOutputDirectory({
+                root: repoRoot,
+                output: ".",
+            }),
+        /non-root directory inside the repository/
+    );
+    assert.throws(
+        () =>
+            resolveCloudflareConfigOutputDirectory({
+                root: repoRoot,
+                output: "",
+            }),
+        /non-root directory inside the repository/
+    );
+    assert.throws(
+        () =>
+            resolveCloudflareConfigOutputDirectory({
+                root: repoRoot,
+                output: "../outside",
+            }),
+        /non-root directory inside the repository/
+    );
+});
+
 test("redirects cannot leave the exact production hostname allowlist", () => {
     const { manifest, policy } = loadCloudflareDeploymentData();
     const redirected = clone(policy);
@@ -75,6 +124,19 @@ test("redirects cannot leave the exact production hostname allowlist", () => {
     assert.throws(
         () => validateCloudflareDeploymentPolicy(changedManifest, redirected),
         /allowlisted HTTPS production hostname/
+    );
+});
+
+test("legacy redirects must target the exact first-party app namespace", () => {
+    const { manifest, policy } = loadCloudflareDeploymentData();
+    const redirected = clone(policy);
+    const legacy = redirected.entries.find(({ id }) => id === "legacy-stream");
+    legacy.redirectLocation = "https://stream.peerchecker.com/";
+    const changedManifest = clone(manifest);
+    changedManifest.redirects[0].location = legacy.redirectLocation;
+    assert.throws(
+        () => validateCloudflareDeploymentPolicy(changedManifest, redirected),
+        /one label under \*\.apps\.peerbit\.org/
     );
 });
 
@@ -178,6 +240,48 @@ test("verification children do not receive Cloudflare deployment credentials", (
     );
 });
 
+test("runtime smoke origins come from the exact production policy", () => {
+    const { entries } = loadCloudflareDeploymentData();
+    assert.deepEqual(productionSmokeEnvironment(entries), {
+        PW_BASE_URL: "https://files.apps.peerbit.org",
+        PW_GIGA_URL: "https://giga.apps.peerbit.org",
+        PW_STREAM_URL: "https://stream.apps.peerbit.org",
+    });
+});
+
+test("captures a full baseline release commit from the production app", async () => {
+    const { entries } = loadCloudflareDeploymentData();
+    const { site, policy } = entries.find(
+        ({ site: entry }) => entry.id === "files"
+    );
+    let requestedUrl;
+    const commit = await readBaselineReleaseCommit({
+        site,
+        policy,
+        request: async (url) => {
+            requestedUrl = url;
+            return {
+                status: 200,
+                json: async () => ({ site: "files", commit: OLD_COMMIT }),
+            };
+        },
+    });
+    assert.equal(requestedUrl, "https://files.apps.peerbit.org/release.json");
+    assert.equal(commit, OLD_COMMIT);
+
+    await assert.rejects(
+        readBaselineReleaseCommit({
+            site,
+            policy,
+            request: async () => ({
+                status: 200,
+                json: async () => ({ site: "files", commit: "short" }),
+            }),
+        }),
+        /full Git commit hash/
+    );
+});
+
 const fixtureEntries = (ids) =>
     ids.map((id) => ({
         site: { id },
@@ -199,22 +303,42 @@ test("production deploys and verifies each app before touching the next", async 
         log: () => {},
         operations: {
             status: ({ site }) => deployment(current.get(site.id)),
+            readReleaseCommit: () => OLD_COMMIT,
             deploy: ({ site }) => {
                 events.push(`deploy:${site.id}`);
                 current.set(site.id, NEW_VERSION);
             },
             verify: ({ site, expectedCommit }) => {
-                events.push(`verify:${site.id}:${Boolean(expectedCommit)}`);
+                events.push(`verify:${site.id}:${expectedCommit}`);
             },
             rollback: () => assert.fail("rollback must not run"),
         },
     });
     assert.deepEqual(events, [
         "deploy:files",
-        "verify:files:true",
+        `verify:files:${COMMIT}`,
         "deploy:giga",
-        "verify:giga:true",
+        `verify:giga:${COMMIT}`,
     ]);
+});
+
+test("an app deploy is blocked without a baseline release commit", async () => {
+    await assert.rejects(
+        deployProductionEntries({
+            selectedEntries: fixtureEntries(["files"]),
+            configs: fixtureConfigs(["files"]),
+            expectedCommit: COMMIT,
+            log: () => {},
+            operations: {
+                status: () => deployment(OLD_VERSION),
+                readReleaseCommit: () => undefined,
+                deploy: () => assert.fail("deploy must not run"),
+                verify: () => assert.fail("verify must not run"),
+                rollback: () => assert.fail("rollback must not run"),
+            },
+        }),
+        /requires a full rollback release commit/
+    );
 });
 
 test("failed verification restores and verifies the previous version", async () => {
@@ -229,12 +353,13 @@ test("failed verification restores and verifies the previous version", async () 
             log: () => {},
             operations: {
                 status: () => deployment(current),
+                readReleaseCommit: () => OLD_COMMIT,
                 deploy: ({ site }) => {
                     events.push(`deploy:${site.id}`);
                     current = NEW_VERSION;
                 },
                 verify: ({ site, expectedCommit }) => {
-                    events.push(`verify:${site.id}:${Boolean(expectedCommit)}`);
+                    events.push(`verify:${site.id}:${expectedCommit}`);
                     if (firstVerification) {
                         firstVerification = false;
                         throw new Error("runtime smoke failed");
@@ -251,9 +376,9 @@ test("failed verification restores and verifies the previous version", async () 
     assert.equal(current, OLD_VERSION);
     assert.deepEqual(events, [
         "deploy:files",
-        "verify:files:true",
+        `verify:files:${COMMIT}`,
         `rollback:files:${OLD_VERSION}`,
-        "verify:files:false",
+        `verify:files:${OLD_COMMIT}`,
     ]);
 });
 
@@ -267,16 +392,17 @@ test("a deploy failure that changed nothing does not create a rollback", async (
             log: () => {},
             operations: {
                 status: () => deployment(OLD_VERSION),
+                readReleaseCommit: () => OLD_COMMIT,
                 deploy: () => {
                     events.push("deploy");
                     throw new Error("upload rejected");
                 },
                 verify: ({ expectedCommit }) =>
-                    events.push(`verify:${Boolean(expectedCommit)}`),
+                    events.push(`verify:${expectedCommit}`),
                 rollback: () => events.push("rollback"),
             },
         }),
         /automatic rollback to .* succeeded/
     );
-    assert.deepEqual(events, ["deploy", "verify:false"]);
+    assert.deepEqual(events, ["deploy", `verify:${OLD_COMMIT}`]);
 });
