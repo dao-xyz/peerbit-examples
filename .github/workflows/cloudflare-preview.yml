@@ -37,22 +37,16 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Validate production bootstrap sources
-              env:
-                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   node scripts/validate-production-bootstrap.mjs
-                  node scripts/validate-cloudflare-account-auth.mjs
                   node --test cloudflare/*.test.mjs
 
             - name: Build every frontend
               env:
                   COMMIT_HASH: ${{ github.sha }}
-                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
-                  node scripts/validate-cloudflare-account-auth.mjs \
-                      --dist packages/social-media-app/frontend/dist
 
             - name: Prepare and validate Cloudflare assets
               env:

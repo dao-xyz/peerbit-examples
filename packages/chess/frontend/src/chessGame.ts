@@ -25,6 +25,7 @@ export class Move {
     }
 }
 
+@variant("chess_indexable_move")
 class IndexableMove {
     @field({ type: "string" })
     id: string;
@@ -176,6 +177,7 @@ export class ChessGame extends Program {
         });
     }
 }
+@variant("chess_lobby_message")
 abstract class LobbyMessage {
     @id({ type: fixedArray("u8", 32) })
     id: Uint8Array;

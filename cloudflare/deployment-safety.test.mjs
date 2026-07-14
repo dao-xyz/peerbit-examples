@@ -27,7 +27,7 @@ const deployment = (versionId, percentage = 100) => ({
 
 test("production Workers and hostnames are an exact reviewed allowlist", () => {
     const { manifest, policy, entries } = loadCloudflareDeploymentData();
-    assert.equal(entries.length, 9);
+    assert.equal(entries.length, 8);
     assert.deepEqual(
         selectCloudflareDeploymentEntries(entries, "files").map(
             ({ policy: entry }) => entry
@@ -244,7 +244,6 @@ test("runtime smoke origins come from the exact production policy", () => {
     const { entries } = loadCloudflareDeploymentData();
     assert.deepEqual(productionSmokeEnvironment(entries), {
         PW_BASE_URL: "https://files.apps.peerbit.org",
-        PW_GIGA_URL: "https://giga.apps.peerbit.org",
         PW_STREAM_URL: "https://stream.apps.peerbit.org",
     });
 });
@@ -294,11 +293,11 @@ test("production deploys and verifies each app before touching the next", async 
     const events = [];
     const current = new Map([
         ["files", OLD_VERSION],
-        ["giga", OLD_VERSION],
+        ["stream", OLD_VERSION],
     ]);
     await deployProductionEntries({
-        selectedEntries: fixtureEntries(["files", "giga"]),
-        configs: fixtureConfigs(["files", "giga"]),
+        selectedEntries: fixtureEntries(["files", "stream"]),
+        configs: fixtureConfigs(["files", "stream"]),
         expectedCommit: COMMIT,
         log: () => {},
         operations: {
@@ -317,8 +316,8 @@ test("production deploys and verifies each app before touching the next", async 
     assert.deepEqual(events, [
         "deploy:files",
         `verify:files:${COMMIT}`,
-        "deploy:giga",
-        `verify:giga:${COMMIT}`,
+        "deploy:stream",
+        `verify:stream:${COMMIT}`,
     ]);
 });
 
@@ -347,8 +346,8 @@ test("failed verification restores and verifies the previous version", async () 
     let firstVerification = true;
     await assert.rejects(
         deployProductionEntries({
-            selectedEntries: fixtureEntries(["files", "giga"]),
-            configs: fixtureConfigs(["files", "giga"]),
+            selectedEntries: fixtureEntries(["files", "stream"]),
+            configs: fixtureConfigs(["files", "stream"]),
             expectedCommit: COMMIT,
             log: () => {},
             operations: {

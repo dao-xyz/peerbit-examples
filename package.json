@@ -37,7 +37,6 @@
         "clean": "pnpm -r run clean",
         "build": "pnpm -r --sort --workspace-concurrency=1 run build",
         "build-node": "if [ -d ./packages/node ]; then (cd ./packages/node && pnpm run build); else echo \"packages/node not present\"; fi",
-        "dev:prod": "pnpm --filter @giga-app/interface-frontend run dev:prod",
         "pub": "pnpm changeset publish",
         "version-packages": "pnpm changeset version && pnpm install --lockfile-only",
         "release:packages": "node scripts/release-packages.mjs",
@@ -67,10 +66,7 @@
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint:fix": "eslint --fix --ext .ts . && pnpm run fmt",
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}",
-        "postinstall": "node scripts/postinstall.mjs",
-        "e2e:placeholderDelay": "pnpm --filter @giga-app/interface run build && cd packages/social-media-app/frontend && npx playwright test tests/placeholderDelay.spec.ts --reporter=line --timeout=70000",
-        "test:frontend:unit": "vitest run -c packages/social-media-app/frontend/vitest.config.ts",
-        "prefetch:update": "pnpm --filter @giga-app/interface-frontend run build"
+        "postinstall": "node scripts/postinstall.mjs"
     },
     "devDependencies": {
         "@changesets/cli": "^2.29.7",

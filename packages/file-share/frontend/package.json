@@ -46,6 +46,7 @@
         "@peerbit/vite": "^2.0.7",
         "@playwright/test": "^1.58.0",
         "@tailwindcss/postcss": "^4.0.14",
+        "@tailwindcss/vite": "4.1.18",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",
         "@vitejs/plugin-react": "^5",

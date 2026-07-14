@@ -2,7 +2,6 @@ import { HashRouter, Routes, Route } from "react-router";
 import HomePage from "./HomePage";
 import ChessLobby from "./ChessLobby";
 import { PeerProvider } from "@peerbit/react";
-import { AppProvider } from "@giga-app/sdk";
 import "./index.css";
 import ChessGamePage from "./ChessGamePage";
 
@@ -32,21 +31,13 @@ export const App = () => {
                     import.meta.env.MODE === "development" ? "local" : "remote",
             }}
         >
-            <AppProvider navigation="emit-all" theme={{ useClasses: true }}>
-                <HashRouter basename="/">
-                    <Routes>
-                        <Route path="/" element={<HomePage />} />
-                        <Route
-                            path="/lobby/:address"
-                            element={<ChessLobby />}
-                        />
-                        <Route
-                            path="/game/:address"
-                            element={<ChessGamePage />}
-                        />
-                    </Routes>
-                </HashRouter>
-            </AppProvider>
+            <HashRouter basename="/">
+                <Routes>
+                    <Route path="/" element={<HomePage />} />
+                    <Route path="/lobby/:address" element={<ChessLobby />} />
+                    <Route path="/game/:address" element={<ChessGamePage />} />
+                </Routes>
+            </HashRouter>
         </PeerProvider>
     );
 };

@@ -1,7 +1,6 @@
 import { HashRouter } from "react-router";
 import { Content } from "./Content";
 import { PeerProvider } from "@peerbit/react";
-import { AppProvider } from "@giga-app/sdk";
 
 import "./index.css";
 document.documentElement.classList.add("dark");
@@ -17,11 +16,9 @@ export const App = () => {
                     import.meta.env.MODE === "development" ? "local" : "remote",
             }}
         >
-            <AppProvider navigation="emit-all">
-                <HashRouter basename="/">
-                    <Content />
-                </HashRouter>
-            </AppProvider>
+            <HashRouter basename="/">
+                <Content />
+            </HashRouter>
         </PeerProvider>
     );
 };
