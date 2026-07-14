@@ -48,6 +48,12 @@ jobs:
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
 
+            - name: Install Playwright Chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Smoke-test every hosted frontend
+              run: pnpm run test:hosted-apps
+
             - name: Prepare and validate Cloudflare assets
               env:
                   COMMIT_HASH: ${{ github.sha }}

@@ -47,6 +47,7 @@
         "test:vitest": "pnpm run build && vitest run",
         "test:vitest:watch": "vitest",
         "test:vitest:quick": "vitest run",
+        "test:hosted-apps": "node scripts/validate-hosted-app-runtime.mjs",
         "vitest": "vitest",
         "shared-fs:install:macos": "scripts/install-shared-fs-macos.sh",
         "scaleway:start": "node scripts/github-scaleway-runner.mjs start",
@@ -71,6 +72,7 @@
     "devDependencies": {
         "@changesets/cli": "^2.29.7",
         "@peerbit/stream-interface": "^6.0.11",
+        "@playwright/test": "1.58.0",
         "@testing-library/dom": "10.4.1",
         "@testing-library/react": "16.3.0",
         "@types/chai": "^4.3.18",

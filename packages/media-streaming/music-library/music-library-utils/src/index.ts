@@ -4,6 +4,7 @@ import { Program } from "@peerbit/program";
 import { Documents, DocumentsChange, id } from "@peerbit/document";
 import { MediaStreamDBs } from "@peerbit/media-streaming";
 
+@variant("music_media_stream_dbs_indexable")
 class MediaStreamDBsIndexable {
     @id({ type: fixedArray("u8", 32) })
     id: Uint8Array;
@@ -123,17 +124,31 @@ class NamedItem {
     }
 }
 
+@variant("music_named_item_indexable")
+class NamedItemIndexable {
+    @id({ type: Uint8Array })
+    id: Uint8Array;
+
+    @field({ type: "string" })
+    name: string;
+
+    constructor(props: NamedItem) {
+        this.id = props.id;
+        this.name = props.name;
+    }
+}
+
 type ReplicationArgs = { replicate?: boolean };
 
 /* ─────────────── program ─────────────── */
 @variant("named-items")
 export class NamedItems extends Program<ReplicationArgs> {
     @field({ type: Documents })
-    documents: Documents<NamedItem>;
+    documents: Documents<NamedItem, NamedItemIndexable>;
 
     constructor(props?: { id?: Uint8Array }) {
         super();
-        this.documents = new Documents<NamedItem>({
+        this.documents = new Documents<NamedItem, NamedItemIndexable>({
             id:
                 props?.id ??
                 sha256Sync(new TextEncoder().encode("named-items")),
@@ -151,7 +166,7 @@ export class NamedItems extends Program<ReplicationArgs> {
             keep: "self",
             replicate: args?.replicate ? { factor: 1 } : false,
             index: {
-                type: NamedItem,
+                type: NamedItemIndexable,
             },
         });
     }
@@ -183,6 +198,7 @@ class ImageItem {
     }
 }
 
+@variant("music_indexed_image_item")
 class IndexedImageItem {
     @id({ type: Uint8Array })
     id: Uint8Array;

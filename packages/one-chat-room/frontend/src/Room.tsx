@@ -250,7 +250,19 @@ export const Room = () => {
             <CircularProgress size={20} />
         </Box>
     ) : (
-        <Grid container direction="column" sx={{ height: "100vh" }}>
+        <Grid
+            container
+            direction="column"
+            sx={{ height: "100vh" }}
+            data-testid={
+                room.program &&
+                !room.program.closed &&
+                names.program &&
+                !names.program.closed
+                    ? "chat-room-ready"
+                    : undefined
+            }
+        >
             <Grid
                 item
                 container

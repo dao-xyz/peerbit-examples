@@ -7,11 +7,11 @@ export default defineConfig({
     plugins: [react(), peerbit()],
     optimizeDeps: {
         esbuildOptions: {
-            target: "esnext",
+            target: "es2022",
         },
     },
     build: {
-        target: "esnext",
+        target: "es2022",
     },
     define: {
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
