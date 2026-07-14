@@ -46,7 +46,15 @@ test("credentialed production shell receives target and commit through env", () 
     assert.match(productionWorkflow, /DEPLOY_COMMIT: \$\{\{ github\.sha \}\}/);
     assert.match(
         productionWorkflow,
-        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
+        /CLOUDFLARE_ACCOUNT_ID: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ID \}\}/
+    );
+    assert.match(
+        productionWorkflow,
+        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
+    );
+    assert.doesNotMatch(
+        productionWorkflow,
+        /vars\.(?:CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256)/
     );
     assert.match(productionWorkflow, /--target "\$DEPLOY_TARGET"/);
     assert.match(productionWorkflow, /--commit "\$DEPLOY_COMMIT"/);
@@ -186,11 +194,15 @@ test("one-time provisioning is protected, explicit, and serialized with routine 
     );
     assert.match(
         provisioningWorkflow,
-        /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/
+        /CLOUDFLARE_ACCOUNT_ID: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ID \}\}/
     );
     assert.match(
         provisioningWorkflow,
-        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
+        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
+    );
+    assert.doesNotMatch(
+        provisioningWorkflow,
+        /vars\.(?:CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256)/
     );
     assert.match(provisioningWorkflow, /--mode "\$PROVISION_MODE"/);
     assert.match(provisioningWorkflow, /--commit "\$PROVISION_COMMIT"/);

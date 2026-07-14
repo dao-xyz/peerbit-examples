@@ -44,9 +44,11 @@ These are the relevant official references:
    Read** for **every zone in the account**, not merely `peerbit.org`: the
    safety fence enumerates the complete account and reads each zone's
    authoritative traditional-Worker routes. Its existing
-   `CLOUDFLARE_ACCOUNT_ID` variable must identify the reviewed account.
-   The protected environment must also define the exact lowercase 64-hex
-   `CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256` variable. Establish it from an
+   `CLOUDFLARE_ACCOUNT_ID` secret must identify the reviewed account. The
+   protected environment must also define the exact lowercase 64-hex
+   `CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256` secret. Keeping both as
+   environment secrets prevents the Actions runner from printing their raw
+   values in its initial environment header. Establish the fingerprint from an
    independently verified full dashboard/admin zone inventory, never from the
    deployment token's permission-filtered `/zones` response. Canonical input is
    UTF-8 JSON with no trailing newline: an array of exactly
@@ -54,7 +56,7 @@ These are the relevant official references:
    sorted first by `zoneId` and then by `zoneName` using ascending code-point
    order. Hash that byte sequence with SHA-256. If the full inventory has not
    yet been independently established, leave production workflows blocked
-   until this variable is reviewed and set.
+   until this secret is reviewed and set.
 3. Confirm that the `peerbit.org` zone is active in that account. Cloudflare
    cannot attach a Custom Domain over a conflicting CNAME, so resolve any such
    conflict manually before applying.

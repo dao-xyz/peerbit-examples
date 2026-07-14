@@ -12,32 +12,37 @@
 ## Examples
 
 ### [Chat room](./packages/one-chat-room/)
+
 [<img src="./packages/one-chat-room/demo.gif" width="600" />](./packages/one-chat-room/)
 
-
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
+
 [<img src="./packages/many-chat-rooms/demo.gif" width="600" />](./packages/many-chat-rooms/)
 
 ### [Blog platform](./packages/blog-platform/)
+
 [<img src="./packages/blog-platform/demo-cli.gif" width="600" />](./packages/blog-platform/)
 
-
 ### [Collaborative text document](./packages/text-document/)
+
 [<img src="./packages/text-document/demo.gif" width="600" />](./packages/text-document/)
 
-
 ### [Sync files](./packages/file-share/)
+
 #### [React app](./packages/file-share/)
+
 [<img src="./packages/file-share/demo-frontend.gif" width="600" />](./packages/file-share/)
+
 #### [CLI](./packages/file-share/)
+
 [<img src="./packages/file-share/demo-cli.gif" width="600" />](./packages/file-share/)
 
-
 ### [Video streaming](./packages/media-streaming/video-streaming)
+
 [<img src="./packages/media-streaming/video-streaming/demo.gif" width="600" />](./packages/media-streaming/video-streaming/)
 
-
 ### [Collaborative machine learning](./packages/collaborative-learning/)
+
 [<img src="./packages/collaborative-learning/demo.gif" width="600" />](./packages/collaborative-learning/)
 
 ## Requirements
@@ -47,13 +52,13 @@
 ## How to run the examples
 
 1.
+
 ```sh
 yarn
 yarn build
 ```
 
-2.
-Go into an example. If it is a frontend app, you can run it locally (if you have a node running (see below)) with
+2.  Go into an example. If it is a frontend app, you can run it locally (if you have a node running (see below)) with
 
 ```sh
 yarn start
@@ -66,17 +71,19 @@ yarn start-remote
 ```
 
 ## How to setup a local relay node
+
 (This is just a basic libp2p-js node)
 
-1.
-Install Node >= 16
+1.  Install Node >= 16
 
-2.
-Install CLI
+2.  Install CLI
+
 ```sh
 npm install -g @peerbit/server
 ```
+
 3.
+
 ```sh
 peerbit start
 ```
@@ -127,9 +134,12 @@ Production configs are rendered with `--mode production`. First-party demo
 Workers are restricted to `*.apps.peerbit.org` and must exactly match the
 deployment policy. Before any upload or promotion, production reads the
 account's complete zone inventory and each zone's authoritative Worker routes,
-plus every page of its custom-domain inventory. The protected token therefore
-needs `Workers Scripts Read`, `Zone Read`, and `Workers Routes Read` across every
-zone in the account. Zone enumeration explicitly includes `full`, `partial`,
+plus its account-wide custom-domain collection. Cloudflare defines that domain
+endpoint as a single complete collection, so production requests its bare URL,
+validates any optional completeness metadata, and accepts it only after two
+identical canonical reads. The protected token therefore needs `Workers Scripts
+Read`, `Zone Read`, and `Workers Routes Read` across every zone in the account.
+Zone enumeration explicitly includes `full`, `partial`,
 `secondary`, and `internal` zones and accepts the route inventory only after two
 independently read, canonical complete snapshots match. Cloudflare's optional
 inline script-route field is used only as a consistency check when present;
@@ -137,7 +147,8 @@ missing inline routes defer to the authoritative per-zone result. Custom-domain
 zone IDs and names must exist in that same account snapshot. The account-wide
 zone list is permission-filtered, so a successful paginated response is not by
 itself proof that the token can see every zone. The protected environment must
-also define `CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256`, derived independently
+store the account ID and `CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256` as masked
+environment secrets. The fingerprint is derived independently
 from a full dashboard/admin inventory. Its input is the UTF-8 JSON encoding of
 every expected `{zoneId,zoneName}` object, with exactly those keys, lowercase
 values, no extra whitespace or newline, sorted first by `zoneId` and then by
