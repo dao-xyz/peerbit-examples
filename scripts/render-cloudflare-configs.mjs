@@ -39,6 +39,9 @@ if (outputRelative.startsWith("..") || path.isAbsolute(outputRelative)) {
 
 const allEntries = [...manifest.staticSites, ...manifest.redirects];
 const ownedProductionDomains = ["peerbit.org", "peerchecker.com"];
+const appProductionSuffix = ".apps.peerbit.org";
+const appProductionDomainPattern =
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.apps\.peerbit\.org$/;
 const isOwnedProductionDomain = (domain) =>
     ownedProductionDomains.some(
         (owned) => domain === owned || domain.endsWith(`.${owned}`)
@@ -102,6 +105,25 @@ for (const redirect of manifest.redirects) {
     }
     if (![301, 302, 303, 307, 308].includes(redirect.status)) {
         throw new Error(`Unsupported redirect status: ${redirect.status}`);
+    }
+}
+
+for (const site of manifest.staticSites) {
+    for (const domain of site.domains) {
+        if (!appProductionDomainPattern.test(domain)) {
+            throw new Error(
+                `Static app domain must use one label under *${appProductionSuffix}: ${domain}`
+            );
+        }
+    }
+}
+
+for (const redirect of manifest.redirects) {
+    const location = new URL(redirect.location);
+    if (!location.hostname.endsWith(appProductionSuffix)) {
+        throw new Error(
+            `Legacy redirect target must use *${appProductionSuffix}: ${redirect.location}`
+        );
     }
 }
 

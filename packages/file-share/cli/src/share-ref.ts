@@ -1,4 +1,4 @@
-export const DEFAULT_SHARE_BASE_URL = "https://files.peerbit.org";
+export const DEFAULT_SHARE_BASE_URL = "https://files.apps.peerbit.org";
 
 const SHARE_PATH_PREFIX = "/s/";
 

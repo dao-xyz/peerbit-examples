@@ -163,9 +163,9 @@ jobs:
               if: inputs.target != 'legacy-redirect'
               env:
                   PW_CLOUDFLARE_SMOKE: "1"
-                  PW_BASE_URL: https://files.peerbit.org
-                  PW_GIGA_URL: https://giga.peerbit.org
-                  PW_STREAM_URL: https://stream.peerbit.org
+                  PW_BASE_URL: https://files.apps.peerbit.org
+                  PW_GIGA_URL: https://giga.apps.peerbit.org
+                  PW_STREAM_URL: https://stream.apps.peerbit.org
               run: >-
                   pnpm --dir packages/file-share/frontend exec playwright test
                   -c playwright.config.ts tests/cloudflare-preview.e2e.spec.ts
