@@ -9,7 +9,7 @@ const CUSTOM_DOMAIN_PAGE_SIZE = 100;
 const MAX_CUSTOM_DOMAIN_PAGES = 1_000;
 const MAX_CUSTOM_DOMAIN_SNAPSHOT_ATTEMPTS = 3;
 const WORKERS_DEV_REFERENCE =
-    /(?<![a-z0-9-])(?:(?:[a-z][a-z0-9+.-]*:)?\/\/)?(?:[a-z0-9-]+\.)*workers\.dev(?![a-z0-9.-])(?::[0-9]+)?(?:[/?#][^\s<>"']*)?/gi;
+    /(?<![a-z0-9-])(?:(?:[a-z][a-z0-9+.-]*:)?\/\/)?(?:[a-z0-9-]+\.)*workers\.dev(?:\.(?![a-z0-9-])|(?![a-z0-9.-]))(?::[0-9]+)?(?:[/?#][^\s<>"']*)?/gi;
 const WORKERS_DEV_REDACTION = "[REDACTED_WORKERS_DEV_REFERENCE]";
 
 const redactText = (value, secrets, { maxLength } = {}) => {

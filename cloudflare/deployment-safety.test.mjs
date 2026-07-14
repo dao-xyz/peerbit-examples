@@ -699,34 +699,64 @@ test("Worker subdomain API failures redact complete workers.dev references", asy
     const accountId = "d".repeat(32);
     const apiToken = "redact-this-token";
     const longTail = "x".repeat(600);
+    const httpError = (reference) =>
+        new Response(
+            JSON.stringify({
+                success: false,
+                errors: [
+                    {
+                        code: 10000,
+                        message: `${reference} token ${apiToken} account ${accountId} ${longTail}`,
+                    },
+                ],
+            }),
+            { status: 403 }
+        );
     const fixtures = [
         {
             name: "HTTP error payload",
             reference:
                 "https://v-worker.private-account-slug.workers.dev/path?x=1",
-            request: (reference) =>
-                new Response(
-                    JSON.stringify({
-                        success: false,
-                        errors: [
-                            {
-                                code: 10000,
-                                message: `${reference} token ${apiToken} account ${accountId} ${longTail}`,
-                            },
-                        ],
-                    }),
-                    { status: 403 }
-                ),
+            privateParts: ["v-worker", "private-account-slug", "/path?x=1"],
+            request: httpError,
         },
         {
             name: "mixed-case transport error",
             reference:
                 "HTTPS://V-WorKer.Private-Account-Slug.WoRkErS.DeV:8787/Private-Path?Secret-Query=1#Private-Fragment",
+            privateParts: [
+                "v-worker",
+                "private-account-slug",
+                "8787",
+                "private-path",
+                "secret-query",
+                "private-fragment",
+            ],
             request: (reference) => {
                 throw new Error(
                     `${reference} token ${apiToken} account ${accountId} ${longTail}`
                 );
             },
+        },
+        {
+            name: "terminal dot before URL path",
+            reference:
+                "https://v-worker.private-account-slug.workers.dev./path?x=1#f",
+            privateParts: ["v-worker", "private-account-slug", "/path?x=1#f"],
+            request: httpError,
+        },
+        {
+            name: "bare hostname with terminal dot",
+            reference: "v-worker.private-account-slug.workers.dev.",
+            privateParts: ["v-worker", "private-account-slug"],
+            request: httpError,
+        },
+        {
+            name: "terminal dot before numeric port",
+            reference:
+                "https://v-worker.private-account-slug.workers.dev.:8787/path",
+            privateParts: ["v-worker", "private-account-slug", "8787", "/path"],
+            request: httpError,
         },
     ];
 
@@ -751,12 +781,7 @@ test("Worker subdomain API failures redact complete workers.dev references", asy
             assert.doesNotMatch(normalizedMessage, /workers\.dev/i);
             for (const privateValue of [
                 fixture.reference,
-                "v-worker",
-                "private-account-slug",
-                "8787",
-                "private-path",
-                "secret-query",
-                "private-fragment",
+                ...fixture.privateParts,
                 apiToken,
                 accountId,
             ]) {
@@ -769,6 +794,47 @@ test("Worker subdomain API failures redact complete workers.dev references", asy
             }
             assert.equal(failure.details.indeterminateMutation, false);
         });
+    }
+});
+
+test("Worker subdomain API diagnostics preserve non-workers.dev boundaries", async () => {
+    const visibleReferences = [
+        "notworkers.dev",
+        "workers.dev.evil",
+        "workers.dev-example.com",
+        "workers.devil",
+    ];
+    const api = createCloudflareWorkersApi({
+        accountId: "d".repeat(32),
+        apiToken: "test-token_123",
+        request: async () =>
+            new Response(
+                JSON.stringify({
+                    success: false,
+                    errors: [
+                        {
+                            message: visibleReferences.join(" "),
+                        },
+                    ],
+                }),
+                { status: 400 }
+            ),
+    });
+    let failure;
+    try {
+        await api.getWorkerSubdomain("peerbit-examples-files");
+    } catch (error) {
+        failure = error;
+    }
+
+    assert.ok(failure instanceof CloudflareWorkersApiError);
+    const normalizedMessage = failure.details.errors[0].message;
+    assert.doesNotMatch(
+        normalizedMessage,
+        /\[REDACTED_WORKERS_DEV_REFERENCE\]/
+    );
+    for (const reference of visibleReferences) {
+        assert.equal(normalizedMessage.includes(reference), true);
     }
 });
 
