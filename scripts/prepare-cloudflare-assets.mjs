@@ -107,7 +107,11 @@ for (const site of manifest.staticSites) {
     writeFileSync(path.join(canonicalOutput, "_headers"), HEADERS, "utf8");
     writeFileSync(
         path.join(canonicalOutput, "release.json"),
-        `${JSON.stringify({ commit, site: site.id })}\n`,
+        `${JSON.stringify({
+            commit,
+            site: site.id,
+            ...(site.accountAuth ? { accountAuth: site.accountAuth } : {}),
+        })}\n`,
         "utf8"
     );
 

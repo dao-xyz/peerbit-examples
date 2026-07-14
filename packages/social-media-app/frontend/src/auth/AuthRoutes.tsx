@@ -1,8 +1,12 @@
 import { Navigate, Route, Routes } from "react-router";
 import { AuthScreen } from "./AuthScreen";
 import { UpdatePasswordScreen } from "./UpdatePasswordScreen";
+import { useAuth } from "./useAuth";
 
 export const AuthRoutes = () => {
+    const auth = useAuth();
+    if (!auth.enabled) return <Navigate to="/" replace />;
+
     return (
         <Routes>
             <Route path="/" element={<AuthScreen mode="sign-in" />} />

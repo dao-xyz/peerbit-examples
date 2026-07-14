@@ -146,21 +146,23 @@ export const Header = (props: HeaderProps) => {
                                                 >
                                                     Share Profile
                                                 </DropdownMenu.Item> */}
-                                                <DropdownMenu.Item
-                                                    className="menu-item"
-                                                    onSelect={() =>
-                                                        navigate(AUTH, {})
-                                                    }
-                                                >
-                                                    <div className="flex items-center gap-2">
-                                                        <MdSwitchAccount />
-                                                        <span>
-                                                            {auth.user
-                                                                ? "Account"
-                                                                : "Sign in"}
-                                                        </span>
-                                                    </div>
-                                                </DropdownMenu.Item>
+                                                {auth.enabled && (
+                                                    <DropdownMenu.Item
+                                                        className="menu-item"
+                                                        onSelect={() =>
+                                                            navigate(AUTH, {})
+                                                        }
+                                                    >
+                                                        <div className="flex items-center gap-2">
+                                                            <MdSwitchAccount />
+                                                            <span>
+                                                                {auth.user
+                                                                    ? "Account"
+                                                                    : "Sign in"}
+                                                            </span>
+                                                        </div>
+                                                    </DropdownMenu.Item>
+                                                )}
                                                 <DropdownMenu.Item
                                                     className="menu-item"
                                                     onSelect={() =>

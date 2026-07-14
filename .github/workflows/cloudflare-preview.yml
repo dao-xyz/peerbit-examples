@@ -37,18 +37,22 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Validate production bootstrap sources
+              env:
+                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   node scripts/validate-production-bootstrap.mjs
+                  node scripts/validate-cloudflare-account-auth.mjs
                   node --test cloudflare/*.test.mjs
 
             - name: Build every frontend
               env:
                   COMMIT_HASH: ${{ github.sha }}
-                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
+                  node scripts/validate-cloudflare-account-auth.mjs \
+                      --dist packages/social-media-app/frontend/dist
 
             - name: Prepare and validate Cloudflare assets
               env:
@@ -99,13 +103,15 @@ jobs:
             - name: Install and build without deployment credentials
               env:
                   COMMIT_HASH: ${{ github.sha }}
-                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   pnpm install --frozen-lockfile
                   node scripts/validate-production-bootstrap.mjs
+                  node scripts/validate-cloudflare-account-auth.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
+                  node scripts/validate-cloudflare-account-auth.mjs \
+                      --dist packages/social-media-app/frontend/dist
                   node scripts/prepare-cloudflare-assets.mjs
                   git diff --exit-code
                   npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler

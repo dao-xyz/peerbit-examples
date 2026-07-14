@@ -49,14 +49,16 @@ jobs:
             - name: Build and validate every frontend
               env:
                   COMMIT_HASH: ${{ github.sha }}
-                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   pnpm install --frozen-lockfile
                   node scripts/validate-production-bootstrap.mjs
+                  node scripts/validate-cloudflare-account-auth.mjs
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
+                  node scripts/validate-cloudflare-account-auth.mjs \
+                      --dist packages/social-media-app/frontend/dist
                   node scripts/prepare-cloudflare-assets.mjs
                   node scripts/validate-owned-domains.mjs
                   git diff --exit-code
@@ -95,14 +97,16 @@ jobs:
             - name: Rebuild without deployment credentials
               env:
                   COMMIT_HASH: ${{ github.sha }}
-                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+                  VITE_SUPABASE_AUTH_ENABLED: "false"
               run: |
                   pnpm install --frozen-lockfile
                   node scripts/validate-production-bootstrap.mjs
+                  node scripts/validate-cloudflare-account-auth.mjs
                   node --test cloudflare/*.test.mjs
                   export SHORT_SHA="${GITHUB_SHA::7}"
                   pnpm run build
+                  node scripts/validate-cloudflare-account-auth.mjs \
+                      --dist packages/social-media-app/frontend/dist
                   node scripts/prepare-cloudflare-assets.mjs
                   node scripts/validate-owned-domains.mjs
                   git diff --exit-code
