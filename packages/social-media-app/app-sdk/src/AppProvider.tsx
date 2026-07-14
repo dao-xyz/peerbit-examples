@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { usePeer } from "@peerbit/react";
 import { IframeNavigationEmitter } from "./navigation-emitter";
-import { AppClient, AppMessage } from "./client-host";
+import { AppClient, resolveParentOrigin } from "./client-host";
 
 export interface AppProviderProps {
     children: React.ReactNode;
@@ -16,7 +16,8 @@ export interface AppProviderProps {
      */
     navigation?: "emit-all" | "none";
     /**
-     * Optional override for targetOrigin if not available in PeerContext.
+     * Optional parent origin override. When omitted, the embedding origin is
+     * derived from document.referrer. Wildcard origins are not accepted.
      */
     targetOrigin?: string;
 
@@ -68,9 +69,13 @@ export const AppProvider = ({
 }: AppProviderProps) => {
     const peerContext = usePeer();
 
-    // `@peerbit/react` no longer exposes iframe proxy targetOrigin on the peer context.
-    // Keep a simple override for embedding use-cases.
-    const targetOrigin = targetOriginProp || "*";
+    // `@peerbit/react` no longer exposes iframe proxy targetOrigin on the peer
+    // context. The referrer contains the embedding origin under the iframe's
+    // strict-origin-when-cross-origin policy.
+    const targetOrigin = resolveParentOrigin(
+        targetOriginProp,
+        window.parent === window ? "" : document.referrer
+    );
 
     // Create a ref for an AppClient instance to send events.
     const statusClientRef = useRef<AppClient | null>(null);
@@ -83,40 +88,38 @@ export const AppProvider = ({
     // Manage theme state sent by the parent.
     const [theme, setTheme] = useState<"light" | "dark">("light");
 
-    // Initialize our status client and emit the initial loading state.
+    // Initialize one authenticated message channel for all parent events.
     useEffect(() => {
-        if (targetOrigin && !statusClientRef.current) {
-            statusClientRef.current = new AppClient({
-                targetOrigin,
-                onResize: () => {
-                    // No-op for status events.
-                },
-                useThemeClasses: themeOptions?.useClasses,
-            });
+        if (!targetOrigin) {
+            statusClientRef.current = null;
+            return;
         }
-        if (statusClientRef.current) {
-            statusClientRef.current.send({
-                type: "loading",
-                state: peerContext.loading ? "loading" : "loaded",
-            });
-        }
-    }, [targetOrigin, peerContext.loading]);
 
-    // Listen for preview events from the parent.
-    useEffect(() => {
-        const handleEvent = (event: MessageEvent) => {
-            const data = event.data as AppMessage;
-            if (data.type === "preview") {
-                setPreviewState(data.state);
-            } else if (data.type === "theme") {
-                setTheme(data.theme);
+        const client = new AppClient({
+            targetOrigin,
+            onResize: () => {
+                // No-op for status events.
+            },
+            onPreview: (event) => setPreviewState(event.data.state),
+            onTheme: (event) => setTheme(event.data.theme),
+            useThemeClasses: themeOptions?.useClasses,
+        });
+        statusClientRef.current = client;
+        return () => {
+            client.stop();
+            if (statusClientRef.current === client) {
+                statusClientRef.current = null;
             }
         };
-        window.addEventListener("message", handleEvent);
-        return () => {
-            window.removeEventListener("message", handleEvent);
-        };
-    }, []);
+    }, [targetOrigin, themeOptions?.useClasses]);
+
+    // Emit loading changes only after the authenticated channel exists.
+    useEffect(() => {
+        statusClientRef.current?.send({
+            type: "loading",
+            state: peerContext.loading ? "loading" : "loaded",
+        });
+    }, [targetOrigin, peerContext.loading, themeOptions?.useClasses]);
 
     const setLoading = (loading: boolean) => {
         if (statusClientRef.current) {

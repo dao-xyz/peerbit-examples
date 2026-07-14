@@ -9,15 +9,28 @@ import { useNavigate } from "react-router";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";
-import { HostProvider as GigaHost, HostProvider, useHost } from "@giga-app/sdk";
+import {
+    HostProvider,
+    NavigationEvent,
+    normalizeMatchingAppOrigin,
+    resolveIframeCapabilities,
+    useHost,
+} from "@giga-app/sdk";
 import { useCanvas } from "../canvas/CanvasWrapper";
 import { StaticMarkdownText } from "@giga-app/interface";
 import { useThemeContext } from "../theme/useTheme";
+
+// Scripts and same-origin are required by the curated Peerbit apps for
+// storage, media capture, and the authenticated postMessage channel. Omitted
+// capabilities include top navigation, downloads, pointer lock, and modals.
+const IFRAME_SANDBOX =
+    "allow-forms allow-popups allow-presentation allow-same-origin allow-scripts";
 
 const ThemedIframe = (properties: {
     src: string;
     onLoad: (evt: SyntheticEvent<HTMLIFrameElement, Event>) => void;
     iframeRef: React.RefObject<HTMLIFrameElement>;
+    permissions?: readonly string[];
 }) => {
     const { send, ready } = useHost();
     const { theme } = useThemeContext();
@@ -42,7 +55,13 @@ const ThemedIframe = (properties: {
                 border: 0,
             }}
             src={properties.src || undefined}
-            allow="camera; microphone;  display-capture; fullscreen; autoplay; clipboard-write;"
+            allow={
+                properties.permissions?.length
+                    ? properties.permissions.join("; ")
+                    : undefined
+            }
+            sandbox={IFRAME_SANDBOX}
+            referrerPolicy="strict-origin-when-cross-origin"
         ></iframe>
     );
 };
@@ -202,11 +221,75 @@ export const Frame = (properties: {
 
     const onResize = useCallback(() => {}, []);
 
+    const onIframeNavigate = useCallback(
+        async (evt: NavigationEvent) => {
+            await mutate(
+                (element) => {
+                    const currentUrl = (element.content as IFrameContent).src;
+                    if (currentUrl === evt.to) {
+                        return false;
+                    }
+                    (element.content as IFrameContent).src = evt.to;
+                    return true;
+                },
+                {
+                    filter(rect) {
+                        return rect.idString === properties.element.idString;
+                    },
+                }
+            );
+        },
+        [mutate, properties.element.idString]
+    );
+
     const renderContent = ({ previewLines }: { previewLines?: number }) => {
         // For iframes, continue to use the iframe as before.
         if (properties.element.content instanceof IFrameContent) {
-            const src = (properties.element.content as IFrameContent).src;
+            const iframeContent = properties.element.content;
+            const src = iframeContent.src;
+
+            let targetOrigin: string;
+            try {
+                // This check must happen before resolving any privileged
+                // capabilities or rendering the browser-controlled source.
+                targetOrigin = normalizeMatchingAppOrigin(
+                    src,
+                    iframeContent.orgSrc
+                );
+            } catch {
+                return (
+                    <div
+                        role="alert"
+                        className="p-4 border rounded-md flex flex-col items-center justify-center"
+                    >
+                        <p className="font-medium mb-2 text-center">
+                            This embedded app was blocked because its current
+                            URL does not match its original app origin.
+                        </p>
+                        <p className="text-sm italic mb-2">
+                            Current URL: {src}
+                        </p>
+                    </div>
+                );
+            }
+
             const curatedWebApp = getCuratedWebApp(src);
+            const originalCuratedWebApp = getCuratedWebApp(
+                iframeContent.orgSrc
+            );
+            // Both the immutable original source and the URL the browser will
+            // load must independently satisfy the same exact embed policy.
+            // Fuzzy search matches are never a trust decision.
+            const trustedCuratedWebApp =
+                curatedWebApp === originalCuratedWebApp
+                    ? originalCuratedWebApp
+                    : undefined;
+            const capabilities = resolveIframeCapabilities({
+                trusted: trustedCuratedWebApp !== undefined,
+                permissions: trustedCuratedWebApp?.iframePermissions,
+                resizerRequested: iframeContent.resizer,
+                resizerAllowed: trustedCuratedWebApp?.iframeResizer,
+            });
             if (curatedWebApp) {
                 const status = curatedWebApp.getStatus(
                     src,
@@ -219,35 +302,17 @@ export const Frame = (properties: {
 
             return (
                 <HostProvider
-                    iframeOriginalSource={properties.element.content.orgSrc}
-                    onNavigate={async (evt) => {
-                        await mutate(
-                            (element) => {
-                                const currentUrl = (
-                                    element.content as IFrameContent
-                                ).src;
-                                if (currentUrl === evt.to) {
-                                    return false;
-                                }
-                                (element.content as IFrameContent).src = evt.to;
-                                return true;
-                            },
-                            {
-                                filter(rect) {
-                                    return (
-                                        rect.idString ===
-                                        properties.element.idString
-                                    );
-                                },
-                            }
-                        );
-                    }}
+                    iframeOriginalSource={targetOrigin}
+                    iframeSource={src}
+                    onNavigate={onIframeNavigate}
+                    enableResizer={capabilities.resizer}
                 >
                     {(iframeRef) => (
                         <ThemedIframe
                             iframeRef={iframeRef}
                             onLoad={properties.onLoad}
                             src={src}
+                            permissions={capabilities.permissions}
                         ></ThemedIframe>
                     )}
                 </HostProvider>

@@ -1,7 +1,8 @@
 import React, {
+    useCallback,
     createContext,
     useContext,
-    useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
@@ -11,6 +12,7 @@ import {
     AppMessage,
     ResizeMessage,
     NavigationEvent,
+    normalizeMatchingAppOrigin,
 } from "./client-host";
 import IFrameResizer from "./IFrameResizer";
 import { useHostRegistry } from "./HostRegistryProvider"; // import the registry hook
@@ -35,6 +37,19 @@ export interface HostProviderProps {
      * The original source of the iframe. Before any navigation.
      */
     iframeOriginalSource: string;
+
+    /**
+     * The URL currently rendered by the iframe. Supplying it lets the host
+     * reject an origin mismatch and reset readiness for document navigations.
+     * It defaults to iframeOriginalSource for backwards compatibility.
+     */
+    iframeSource?: string;
+
+    /**
+     * Enable iframe-resizer only after the host has explicitly trusted the
+     * embedded app and its child integration.
+     */
+    enableResizer?: boolean;
 }
 
 export interface HostContextType {
@@ -61,51 +76,85 @@ export const useHost = () => {
 
 export const HostProvider: React.FC<HostProviderProps> = ({
     iframeOriginalSource,
+    iframeSource,
     children,
     onResize,
     onNavigate,
+    enableResizer = false,
 }) => {
     const iframeRef = useRef<HTMLIFrameElement | null>(null);
     const hostRef = useRef<AppHost | null>(null);
     const { registerHost, unregisterHost } = useHostRegistry();
-    const registeredFn = useRef<((args: any) => any) | undefined>(undefined);
-    const [ready, setReady] = useState(false);
+    const currentSource = iframeSource ?? iframeOriginalSource;
+    const targetOrigin = normalizeMatchingAppOrigin(
+        currentSource,
+        iframeOriginalSource
+    );
+    const documentUrl = new URL(currentSource);
+    // A fragment navigation retains the same Window/document and readiness.
+    documentUrl.hash = "";
+    const documentSource = documentUrl.href;
+    const configuration = useMemo(
+        () => ({
+            targetOrigin,
+            documentSource,
+            onResize,
+            onNavigate,
+            enableResizer,
+        }),
+        [targetOrigin, documentSource, onResize, onNavigate, enableResizer]
+    );
+    const [activeHost, setActiveHost] = useState<{
+        configuration: typeof configuration;
+        host: AppHost;
+        send: (message: AppMessage) => void;
+    } | null>(null);
+    const [readyHost, setReadyHost] = useState<AppHost | null>(null);
 
-    useEffect(() => {
-        if (!iframeRef.current) return;
-        hostRef.current = new AppHost({
-            iframeOriginalSource,
-            iframe: iframeRef.current,
+    // Install and tear down the authenticated listener in the layout phase.
+    // React destroys the prior layout effect before descendants can emit
+    // messages for the newly committed source, closing the passive-effect
+    // window where a departing document could reach stale callbacks.
+    useLayoutEffect(() => {
+        const iframe = iframeRef.current;
+        if (!iframe) return;
+
+        const host = new AppHost({
+            iframeOriginalSource: configuration.targetOrigin,
+            iframe,
             onResize:
-                onResize ||
+                configuration.onResize ||
                 ((message) => console.log("AppHost resize:", message)),
             onNavigate:
-                onNavigate ||
+                configuration.onNavigate ||
                 ((message) => console.log("AppHost navigate:", message)),
             onReady: () => {
-                setReady(true);
+                if (hostRef.current === host) {
+                    setReadyHost(host);
+                }
             },
         });
-        // Register this host's send function.
-        if (hostRef.current) {
-            registeredFn.current = hostRef.current.send.bind(hostRef.current);
-            registerHost(registeredFn.current);
-        }
+        const send = host.send.bind(host);
+        hostRef.current = host;
+        registerHost(send);
+        setActiveHost({ configuration, host, send });
 
         return () => {
-            if (hostRef.current) {
-                registeredFn.current && unregisterHost(registeredFn.current);
-                hostRef.current.stop();
+            unregisterHost(send);
+            host.stop();
+            if (hostRef.current === host) {
                 hostRef.current = null;
             }
         };
-    }, [iframeRef.current]);
+    }, [configuration, registerHost, unregisterHost]);
 
-    const send = hostRef.current
-        ? (message: AppMessage) => {
-              hostRef.current?.send(message);
-          }
-        : undefined;
+    // A prop change invalidates the old host during render, before effects run.
+    // This prevents children from observing stale readiness or sending through
+    // the previous origin/callback configuration.
+    const currentHost =
+        activeHost?.configuration === configuration ? activeHost : undefined;
+    const send = currentHost?.send;
+    const ready = currentHost !== undefined && readyHost === currentHost.host;
 
     const context = useMemo(() => {
         return {
@@ -114,21 +163,32 @@ export const HostProvider: React.FC<HostProviderProps> = ({
         };
     }, [send, ready]);
 
+    const handleResizerResize = useCallback(
+        (evt: { height: number; width: number }) => {
+            onResize?.({
+                height: evt.height,
+                width: evt.width,
+                type: "size",
+            });
+        },
+        [onResize]
+    );
+
+    const iframe = children(iframeRef);
+
     return (
         <HostContext.Provider value={context}>
-            <IFrameResizer
-                license="GPLv3"
-                iframeRef={iframeRef}
-                onResize={(evt) => {
-                    onResize?.({
-                        height: evt.height,
-                        width: evt.width,
-                        type: "size",
-                    });
-                }}
-            >
-                {children(iframeRef)}
-            </IFrameResizer>
+            {enableResizer ? (
+                <IFrameResizer
+                    license="GPLv3"
+                    iframeRef={iframeRef}
+                    onResize={handleResizerResize}
+                >
+                    {iframe}
+                </IFrameResizer>
+            ) : (
+                iframe
+            )}
         </HostContext.Provider>
     );
 };

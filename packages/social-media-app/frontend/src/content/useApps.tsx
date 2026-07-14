@@ -69,12 +69,6 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
             ) as CuratedAppNative[],
         []
     );
-    const allCuratedWebApps = useMemo(
-        () =>
-            allApps.curated.filter((x) => x.type === "web") as CuratedWebApp[],
-        []
-    );
-
     const { peer } = usePeer();
     const [, forceUpdate] = useReducer((x) => x + 1, 0);
     // Ensure AppPreview is included in the bundle by assigning it to our ref.
@@ -94,8 +88,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
             history: historyDB,
             getCuratedNativeApp: (url: string) =>
                 nativeApps.find((x) => x.manifest.url === url),
-            getCuratedWebApp: (url: string) =>
-                allCuratedWebApps.find((x) => x.manifest.url === url),
+            getCuratedWebApp: allApps.resolveCuratedWebApp,
             search,
             resolve: async (url: string) => {
                 // Check our current list first.
@@ -114,7 +107,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                 return undefined;
             },
         }),
-        [apps, historyDB, nativeApps, allCuratedWebApps]
+        [apps, historyDB, nativeApps, search]
     );
 
     return <AppContext.Provider value={memo}>{children}</AppContext.Provider>;

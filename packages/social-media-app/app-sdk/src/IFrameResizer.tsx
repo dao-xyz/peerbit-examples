@@ -30,7 +30,10 @@ const IFrameResizer: React.FC<IFrameResizerProps> = ({
                          `[iframe-resizer/react][${iframe?.id}] Resized to ${data.height}px`
                      ); */
                 },
-                onClosed: () => {
+                // The child "close" protocol is only a request. It can be
+                // spoofed by another same-origin window, so never let it
+                // remove React-owned DOM.
+                onBeforeClose: () => {
                     /*  console.warn(
                          `[iframe-resizer/react][${iframe?.id}] Close event ignored. To remove the iframe update your React component.`
                      ); */
@@ -44,7 +47,7 @@ const IFrameResizer: React.FC<IFrameResizerProps> = ({
                 instance.iFrameResizer.disconnect()
             );
         };
-    }, []);
+    }, [iframeRef, license, onResize]);
 
     return <>{children}</>;
 };

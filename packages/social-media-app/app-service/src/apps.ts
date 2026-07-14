@@ -59,6 +59,19 @@ export interface CuratedAppNative extends CuratedAppCommon {
 // Define a common interface for curated apps.
 export interface CuratedWebApp extends CuratedAppCommon {
     type: "web";
+    /** Permissions Policy features granted to this app's iframe. */
+    iframePermissions?: readonly CuratedWebAppPermission[];
+    /**
+     * Whether this first-party app is known to bundle the iframe-resizer child
+     * protocol. Persisted IFrameContent metadata is only a request; the host
+     * must also grant this capability from the curated registry.
+     */
+    iframeResizer?: boolean;
+    /**
+     * Match an iframe URL using this app's exact embed policy. Search matching
+     * is deliberately fuzzy for usability; capability matching must not be.
+     */
+    isTrustedIframeUrl?: (url: string, host: string) => boolean;
     //  transformer function to turn the raw query (and host) into a URL (and optional title)
     transformer?: (
         query: string,
@@ -69,6 +82,143 @@ export interface CuratedWebApp extends CuratedAppCommon {
         host: string
     ) => { isReady: true } | { isReady: false; info: string };
 }
+
+export type CuratedWebAppPermission =
+    | "autoplay"
+    | "camera"
+    | "clipboard-write"
+    | "display-capture"
+    | "encrypted-media"
+    | "fullscreen"
+    | "microphone"
+    | "picture-in-picture";
+
+const USERNAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+const parseThirdPartyEmbedUrl = (
+    value: string,
+    expectedHostname: string
+): URL | undefined => {
+    try {
+        const url = new URL(value);
+        if (
+            url.protocol !== "https:" ||
+            url.hostname !== expectedHostname ||
+            url.port !== "" ||
+            url.username !== "" ||
+            url.password !== ""
+        ) {
+            return undefined;
+        }
+        return url;
+    } catch {
+        return undefined;
+    }
+};
+
+const hasExactSearchEntries = (
+    url: URL,
+    expected: readonly (readonly [string, string])[]
+): boolean => {
+    const actual = [...url.searchParams.entries()];
+    return (
+        actual.length === expected.length &&
+        expected.every(
+            ([expectedKey, expectedValue]) =>
+                actual.filter(
+                    ([key, value]) =>
+                        key === expectedKey && value === expectedValue
+                ).length === 1
+        )
+    );
+};
+
+const isTrustedTwitchIframeUrl = (value: string, host: string): boolean => {
+    const url = parseThirdPartyEmbedUrl(value, "player.twitch.tv");
+    if (!url || url.pathname !== "/" || url.hash !== "") {
+        return false;
+    }
+    const channel = url.searchParams.get("channel");
+    return (
+        channel !== null &&
+        USERNAME_PATTERN.test(channel) &&
+        hasExactSearchEntries(url, [
+            ["channel", channel],
+            ["parent", host],
+        ])
+    );
+};
+
+const isTrustedKickIframeUrl = (value: string): boolean => {
+    const url = parseThirdPartyEmbedUrl(value, "player.kick.com");
+    if (!url || url.hash !== "") {
+        return false;
+    }
+    const pathMatch = /^\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
+    return (
+        pathMatch !== null &&
+        USERNAME_PATTERN.test(pathMatch[1]) &&
+        hasExactSearchEntries(url, [["autoplay", "true"]])
+    );
+};
+
+const isTrustedFigJamIframeUrl = (value: string): boolean => {
+    const url = parseThirdPartyEmbedUrl(value, "embed.figma.com");
+    if (!url || url.hash !== "") {
+        return false;
+    }
+
+    // FigJam's human-readable slug is cosmetic. Trusted embed URLs omit it so
+    // encoded path separators and dot segments never enter the allowlist.
+    const pathMatch = /^\/board\/([A-Za-z0-9_-]{1,128})$/.exec(url.pathname);
+    if (!pathMatch) {
+        return false;
+    }
+
+    const nodeIds = url.searchParams.getAll("node-id");
+    const expected: [string, string][] = [["embed-host", "share"]];
+    if (
+        nodeIds.length === 1 &&
+        nodeIds[0].length > 0 &&
+        nodeIds[0].length <= 256
+    ) {
+        expected.push(["node-id", nodeIds[0]]);
+    } else if (nodeIds.length !== 0) {
+        return false;
+    }
+    return hasExactSearchEntries(url, expected);
+};
+
+const isTrustedYouTubeIframeUrl = (value: string): boolean => {
+    const url = parseThirdPartyEmbedUrl(value, "www.youtube.com");
+    if (!url || url.search !== "" || url.hash !== "") {
+        return false;
+    }
+    const pathMatch = /^\/embed\/([A-Za-z0-9_-]{1,128})$/.exec(url.pathname);
+    return pathMatch !== null && YOUTUBE_VIDEO_ID_PATTERN.test(pathMatch[1]);
+};
+
+const isExactConfiguredIframeUrl = (
+    value: string,
+    expectedValue: string
+): boolean => {
+    try {
+        const valueUrl = new URL(value);
+        const expectedUrl = new URL(expectedValue);
+        return (
+            valueUrl.protocol === "https:" &&
+            valueUrl.username === "" &&
+            valueUrl.password === "" &&
+            expectedUrl.protocol === "https:" &&
+            expectedUrl.username === "" &&
+            expectedUrl.password === "" &&
+            valueUrl.href === expectedUrl.href
+        );
+    } catch {
+        return false;
+    }
+};
 
 // ─────────────────────────────────────────────────────────────
 // Native apps – note the addition of isNative in the manifest.
@@ -105,10 +255,12 @@ export const curatedWebApps: (
     mode?: string,
     appUrls?: CuratedAppUrls
 ) => CuratedWebApp[] = (mode?: string, appUrls?: CuratedAppUrls) => [
-    // Twitch – already has a getStatus implementation.
+    // Twitch
     {
         type: "web",
         match: ["https://twitch.tv/", "https://www.twitch.tv/", "twitch"],
+        iframePermissions: ["autoplay", "fullscreen", "picture-in-picture"],
+        isTrustedIframeUrl: isTrustedTwitchIframeUrl,
         transformer: (query: string, host: string) => {
             const lower = query.toLowerCase();
             let channel = "";
@@ -127,7 +279,10 @@ export const curatedWebApps: (
                 return { url: "https://twitch.tv" };
             } else {
                 return {
-                    url: `https://player.twitch.tv/?channel=${channel}&parent=${host}`,
+                    url: `https://player.twitch.tv/?${new URLSearchParams({
+                        channel,
+                        parent: host,
+                    })}`,
                     title: `Twitch Channel ${channel}`,
                 };
             }
@@ -140,10 +295,7 @@ export const curatedWebApps: (
             icon: "https://assets.twitch.tv/assets/favicon-32-e29e246c157142c94346.png",
         }),
         getStatus(url, host) {
-            if (
-                url.startsWith("https://player.twitch.tv/?channel=") &&
-                url.endsWith(`&parent=${host}`)
-            ) {
+            if (isTrustedTwitchIframeUrl(url, host)) {
                 return { isReady: true };
             } else {
                 return {
@@ -157,6 +309,8 @@ export const curatedWebApps: (
     {
         type: "web",
         match: ["https://kick.com", "https://www.kick.com", "kick"],
+        iframePermissions: ["autoplay", "fullscreen", "picture-in-picture"],
+        isTrustedIframeUrl: isTrustedKickIframeUrl,
         transformer: (query: string) => {
             const lower = query.toLowerCase();
             let username = "";
@@ -167,50 +321,67 @@ export const curatedWebApps: (
             ];
             for (const prefix of prefixes) {
                 if (lower.startsWith(prefix)) {
-                    username = query.substring(prefix.length).trim();
+                    username = query
+                        .substring(prefix.length)
+                        .trim()
+                        .replace(/^\/+|\/+$/g, "");
                     break;
                 }
             }
-            return { url: `https://player.kick.com/${username}?autoplay=true` };
+            return {
+                url: `https://player.kick.com/${encodeURIComponent(
+                    username
+                )}?autoplay=true`,
+            };
         },
         manifest: new SimpleWebManifest({
             url: "https://kick.com",
             title: "Kick",
             icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Kick_logo.svg/200px-Kick_logo.svg.png",
         }),
-        getStatus(url, host) {
-            try {
-                const urlObj = new URL(url);
-                // Remove leading/trailing slashes from the pathname.
-                const username = urlObj.pathname.replace(/^\/+|\/+$/g, "");
-                if (!username) {
-                    return {
-                        isReady: false,
-                        info: "No username provided. Please provide a valid Kick username. Example: https://player.kick.com/yourUsername?autoplay=true",
-                    };
-                }
+        getStatus(url) {
+            if (isTrustedKickIframeUrl(url)) {
                 return { isReady: true };
-            } catch (e) {
-                return {
-                    isReady: false,
-                    info: "Invalid URL format for Kick. Example: https://player.kick.com/yourUsername?autoplay=true",
-                };
             }
+            return {
+                isReady: false,
+                info: "Invalid Kick embed URL. Please provide a single valid username. Example: https://player.kick.com/yourUsername?autoplay=true",
+            };
         },
     },
     // FigJam (Figma board)
     {
         type: "web",
         match: ["https://www.figma.com/board/", "figma", "figjam"],
+        iframePermissions: ["clipboard-write", "fullscreen"],
+        isTrustedIframeUrl: isTrustedFigJamIframeUrl,
         transformer: (query: string) => {
             try {
                 const urlObj = new URL(query);
-                const pathname = urlObj.pathname; // e.g., /board/UVuAdACJVPBgW7XOqxiDWv/GigaJam
+                const pathMatch =
+                    /^\/board\/([A-Za-z0-9_-]{1,128})(?:\/[^/]*)?$/.exec(
+                        urlObj.pathname
+                    );
+                if (
+                    urlObj.protocol !== "https:" ||
+                    urlObj.hostname !== "www.figma.com" ||
+                    urlObj.port !== "" ||
+                    urlObj.username !== "" ||
+                    urlObj.password !== "" ||
+                    !pathMatch
+                ) {
+                    return { url: query };
+                }
+                const boardId = pathMatch[1];
                 const nodeId = urlObj.searchParams.get("node-id");
-                const search = nodeId
-                    ? `?node-id=${nodeId}&embed-host=share`
-                    : "";
-                return { url: `https://embed.figma.com${pathname}${search}` };
+                const search = new URLSearchParams();
+                if (nodeId) {
+                    search.set("node-id", nodeId);
+                }
+                search.set("embed-host", "share");
+                return {
+                    url: `https://embed.figma.com/board/${boardId}?${search}`,
+                };
             } catch (e) {
                 return { url: query };
             }
@@ -221,10 +392,8 @@ export const curatedWebApps: (
             metaDescription: "Figma FigJam Board",
             icon: "https://static.figma.com/app/icon/1/favicon.svg",
         }),
-        getStatus(url, host) {
-            const prefix = "https://embed.figma.com/board/";
-            // If the URL is exactly the prefix, it's missing board details and is invalid.
-            if (url.startsWith(prefix) && url.length > prefix.length) {
+        getStatus(url) {
+            if (isTrustedFigJamIframeUrl(url)) {
                 return { isReady: true };
             } else {
                 return {
@@ -235,26 +404,40 @@ export const curatedWebApps: (
         },
     },
     // YouTube
-    // YouTube
     {
         type: "web",
         match: [
             "https://www.youtube.com/watch?v=",
             "https://youtube.com/watch?v=",
         ],
+        iframePermissions: [
+            "autoplay",
+            "encrypted-media",
+            "fullscreen",
+            "picture-in-picture",
+        ],
+        isTrustedIframeUrl: isTrustedYouTubeIframeUrl,
         transformer: (query: string) => {
-            const prefixes = [
-                "https://www.youtube.com/watch?v=",
-                "https://youtube.com/watch?v=",
-            ];
-            for (const prefix of prefixes) {
-                if (query.startsWith(prefix)) {
+            try {
+                const url = new URL(query);
+                if (
+                    url.protocol === "https:" &&
+                    (url.hostname === "www.youtube.com" ||
+                        url.hostname === "youtube.com") &&
+                    url.port === "" &&
+                    url.username === "" &&
+                    url.password === "" &&
+                    url.pathname === "/watch"
+                ) {
+                    const videoId = url.searchParams.get("v") ?? "";
                     return {
-                        url: `https://www.youtube.com/embed/${query.substring(
-                            prefix.length
+                        url: `https://www.youtube.com/embed/${encodeURIComponent(
+                            videoId
                         )}`,
                     };
                 }
+            } catch {
+                // Return the input so getStatus can surface the validation error.
             }
             return { url: query };
         },
@@ -264,41 +447,8 @@ export const curatedWebApps: (
             metaDescription: "YouTube videos",
             icon: "https://www.gstatic.com/youtube/img/branding/favicon/favicon_144x144_v2.png",
         }),
-        getStatus(url, host) {
-            // Handle YouTube watch URLs
-            if (url.startsWith("https://www.youtube.com/watch?v=")) {
-                const id = url.substring(
-                    "https://www.youtube.com/watch?v=".length
-                );
-                if (id.trim().length === 0) {
-                    return {
-                        isReady: false,
-                        info: "Invalid YouTube video URL. Missing video id. Example: https://www.youtube.com/watch?v=VIDEO_ID",
-                    };
-                }
-                return { isReady: true };
-            }
-            if (url.startsWith("https://youtube.com/watch?v=")) {
-                const id = url.substring("https://youtube.com/watch?v=".length);
-                if (id.trim().length === 0) {
-                    return {
-                        isReady: false,
-                        info: "Invalid YouTube video URL. Missing video id. Example: https://youtube.com/watch?v=VIDEO_ID",
-                    };
-                }
-                return { isReady: true };
-            }
-            // Handle embed URLs
-            if (url.startsWith("https://www.youtube.com/embed/")) {
-                const id = url.substring(
-                    "https://www.youtube.com/embed/".length
-                );
-                if (id.trim().length === 0) {
-                    return {
-                        isReady: false,
-                        info: "Invalid YouTube video URL. Missing video id. Example: https://www.youtube.com/embed/VIDEO_ID",
-                    };
-                }
+        getStatus(url) {
+            if (isTrustedYouTubeIframeUrl(url)) {
                 return { isReady: true };
             }
             return {
@@ -311,6 +461,20 @@ export const curatedWebApps: (
     {
         type: "web",
         match: ["video", "stream", "live-stream", "livestream"],
+        // Streaming deliberately retains the capture capabilities it uses.
+        iframePermissions: [
+            "autoplay",
+            "camera",
+            "clipboard-write",
+            "display-capture",
+            "fullscreen",
+            "microphone",
+        ],
+        // The owned streaming frontend renders @giga-app/sdk's AppProvider,
+        // which bundles @iframe-resizer/child.
+        iframeResizer: true,
+        isTrustedIframeUrl: (url) =>
+            isExactConfiguredIframeUrl(url, STREAMING_APP(mode, appUrls)),
         manifest: new SimpleWebManifest({
             url: STREAMING_APP(mode, appUrls),
             title: "Video",
@@ -318,7 +482,7 @@ export const curatedWebApps: (
         }),
         getStatus(url, host) {
             const expectedUrl = STREAMING_APP(mode, appUrls);
-            if (url === expectedUrl) {
+            if (isExactConfiguredIframeUrl(url, expectedUrl)) {
                 return { isReady: true };
             } else {
                 return {
@@ -332,6 +496,12 @@ export const curatedWebApps: (
     {
         type: "web",
         match: ["chess"],
+        iframePermissions: [],
+        // The owned chess frontend renders @giga-app/sdk's AppProvider, which
+        // bundles @iframe-resizer/child.
+        iframeResizer: true,
+        isTrustedIframeUrl: (url) =>
+            isExactConfiguredIframeUrl(url, CHESS_APP(mode, appUrls)),
         manifest: new SimpleWebManifest({
             url: CHESS_APP(mode, appUrls),
             title: "Chess",
@@ -339,7 +509,7 @@ export const curatedWebApps: (
         }),
         getStatus(url, host) {
             const expectedUrl = CHESS_APP(mode, appUrls);
-            if (url === expectedUrl) {
+            if (isExactConfiguredIframeUrl(url, expectedUrl)) {
                 return { isReady: true };
             } else {
                 return {
@@ -359,6 +529,19 @@ const allCuratedApps = (
     ...nativeApps,
     ...curatedWebApps(mode, appUrls),
 ];
+
+/**
+ * Resolve a browser-controlled iframe URL against the exact policies of the
+ * curated registry. This is intentionally separate from fuzzy search matching.
+ */
+export const resolveCuratedWebApp = (properties: {
+    apps: readonly CuratedWebApp[];
+    url: string;
+    host: string;
+}): CuratedWebApp | undefined =>
+    properties.apps.find((app) =>
+        app.isTrustedIframeUrl?.(properties.url, properties.host)
+    );
 
 // ─────────────────────────────────────────────────────────────
 // Helper to find a matching curated app.
@@ -400,8 +583,12 @@ export const getApps = (properties: {
 }): {
     curated: CuratedAppCommon[];
     search: (appOrUrl: string) => Promise<SimpleWebManifest[]>;
+    resolveCuratedWebApp: (url: string) => CuratedWebApp | undefined;
 } => {
     const curated = allCuratedApps(properties.mode, properties.appUrls);
+    const curatedWeb = curated.filter(
+        (app): app is CuratedWebApp => app.type === "web"
+    );
     const search = async (urlOrName: string | undefined) => {
         const result: Map<string, SimpleWebManifest> = new Map();
 
@@ -517,5 +704,14 @@ export const getApps = (properties: {
         }
         return [...result.values()];
     };
-    return { search, curated };
+    return {
+        search,
+        curated,
+        resolveCuratedWebApp: (url) =>
+            resolveCuratedWebApp({
+                apps: curatedWeb,
+                url,
+                host: properties.host,
+            }),
+    };
 };
