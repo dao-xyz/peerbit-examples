@@ -8,9 +8,12 @@ const CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
 const CUSTOM_DOMAIN_PAGE_SIZE = 100;
 const MAX_CUSTOM_DOMAIN_PAGES = 1_000;
 const MAX_CUSTOM_DOMAIN_SNAPSHOT_ATTEMPTS = 3;
+const WORKERS_DEV_REFERENCE =
+    /(?<![a-z0-9-])(?:(?:[a-z][a-z0-9+.-]*:)?\/\/)?(?:[a-z0-9-]+\.)*workers\.dev(?![a-z0-9.-])(?::[0-9]+)?(?:[/?#][^\s<>"']*)?/gi;
+const WORKERS_DEV_REDACTION = "[REDACTED_WORKERS_DEV_REFERENCE]";
 
 const redactText = (value, secrets, { maxLength } = {}) => {
-    let text = value instanceof Error ? value.message : String(value);
+    const text = value instanceof Error ? value.message : String(value);
     const orderedSecrets = [
         ...new Set(
             secrets.filter(
@@ -18,10 +21,25 @@ const redactText = (value, secrets, { maxLength } = {}) => {
             )
         ),
     ].sort((left, right) => right.length - left.length);
-    for (const secret of orderedSecrets) {
-        text = text.replaceAll(secret, "[REDACTED]");
+    const redactSecrets = (segment) => {
+        let result = segment;
+        for (const secret of orderedSecrets) {
+            result = result.replaceAll(secret, "[REDACTED]");
+        }
+        return result;
+    };
+    const redacted = [];
+    let cursor = 0;
+    for (const match of text.matchAll(WORKERS_DEV_REFERENCE)) {
+        redacted.push(redactSecrets(text.slice(cursor, match.index)));
+        redacted.push(WORKERS_DEV_REDACTION);
+        cursor = match.index + match[0].length;
     }
-    return Number.isSafeInteger(maxLength) ? text.slice(0, maxLength) : text;
+    redacted.push(redactSecrets(text.slice(cursor)));
+    const result = redacted.join("");
+    return Number.isSafeInteger(maxLength)
+        ? result.slice(0, maxLength)
+        : result;
 };
 
 const normalizedErrors = ({ payload, cause, secrets }) => {

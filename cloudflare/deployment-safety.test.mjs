@@ -695,6 +695,83 @@ test("Worker subdomain API ambiguity and authorization failures fail closed", as
     }
 });
 
+test("Worker subdomain API failures redact complete workers.dev references", async (t) => {
+    const accountId = "d".repeat(32);
+    const apiToken = "redact-this-token";
+    const longTail = "x".repeat(600);
+    const fixtures = [
+        {
+            name: "HTTP error payload",
+            reference:
+                "https://v-worker.private-account-slug.workers.dev/path?x=1",
+            request: (reference) =>
+                new Response(
+                    JSON.stringify({
+                        success: false,
+                        errors: [
+                            {
+                                code: 10000,
+                                message: `${reference} token ${apiToken} account ${accountId} ${longTail}`,
+                            },
+                        ],
+                    }),
+                    { status: 403 }
+                ),
+        },
+        {
+            name: "mixed-case transport error",
+            reference:
+                "HTTPS://V-WorKer.Private-Account-Slug.WoRkErS.DeV:8787/Private-Path?Secret-Query=1#Private-Fragment",
+            request: (reference) => {
+                throw new Error(
+                    `${reference} token ${apiToken} account ${accountId} ${longTail}`
+                );
+            },
+        },
+    ];
+
+    for (const fixture of fixtures) {
+        await t.test(fixture.name, async () => {
+            const api = createCloudflareWorkersApi({
+                accountId,
+                apiToken,
+                request: async () => fixture.request(fixture.reference),
+            });
+            let failure;
+            try {
+                await api.getWorkerSubdomain("peerbit-examples-files");
+            } catch (error) {
+                failure = error;
+            }
+
+            assert.ok(failure instanceof CloudflareWorkersApiError);
+            const normalizedMessage = failure.details.errors[0].message;
+            assert.match(failure.message, /\[REDACTED_WORKERS_DEV_REFERENCE\]/);
+            assert.match(failure.message, /\[REDACTED\]/);
+            assert.doesNotMatch(normalizedMessage, /workers\.dev/i);
+            for (const privateValue of [
+                fixture.reference,
+                "v-worker",
+                "private-account-slug",
+                "8787",
+                "private-path",
+                "secret-query",
+                "private-fragment",
+                apiToken,
+                accountId,
+            ]) {
+                assert.equal(
+                    failure.message
+                        .toLowerCase()
+                        .includes(privateValue.toLowerCase()),
+                    false
+                );
+            }
+            assert.equal(failure.details.indeterminateMutation, false);
+        });
+    }
+});
+
 test("Cloudflare Workers API exhausts read-only custom-domain pagination", async () => {
     const accountId = "c".repeat(32);
     const apiToken = "test-token_123";
@@ -1963,7 +2040,7 @@ test("a public-subdomain flip is caught immediately before a later upload", asyn
             log: () => {},
             operations: harness.operations,
         }),
-        /Inactive Worker version upload phase failed.*peerbit-examples-stream: workers\.dev and Worker Preview URLs must both be disabled/is
+        /Inactive Worker version upload phase failed.*peerbit-examples-stream: \[REDACTED_WORKERS_DEV_REFERENCE\] and Worker Preview URLs must both be disabled/is
     );
     assert.deepEqual(harness.events, ["upload:files"]);
 });
@@ -2223,7 +2300,7 @@ test("final success and rollback fencing include public subdomain state", async 
     assert.ok(failure instanceof Error);
     assert.match(
         failure.message,
-        /production rollout failed.*workers\.dev and Worker Preview URLs must both be disabled/is
+        /production rollout failed.*\[REDACTED_WORKERS_DEV_REFERENCE\] and Worker Preview URLs must both be disabled/is
     );
     assert.match(failure.message, /automatic rollback refused/);
     assert.equal(harness.current.get("files"), NEW_VERSION);
@@ -2704,7 +2781,7 @@ test("rollback success requires full policy and active-version confirmation afte
         {
             name: "public-subdomain drift",
             pattern:
-                /workers\.dev and Worker Preview URLs must both be disabled/,
+                /\[REDACTED_WORKERS_DEV_REFERENCE\] and Worker Preview URLs must both be disabled/,
             configure: (harness) => () => {
                 harness.subdomains.set("peerbit-examples-files", {
                     enabled: false,
