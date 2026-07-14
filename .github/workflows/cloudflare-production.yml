@@ -10,13 +10,20 @@ on:
                 default: apps
                 options:
                     - apps
+                    - stream
+                    - music
+                    - chat
+                    - giga
+                    - ml
+                    - text
+                    - files
+                    - chess
                     - legacy-redirect
                     - all
             confirm:
-                description: Confirm this production deployment
+                description: Type deploy-peerbit-production
                 required: true
-                type: boolean
-                default: false
+                type: string
 
 permissions:
     contents: read
@@ -27,7 +34,7 @@ concurrency:
 
 jobs:
     validate:
-        if: github.ref == 'refs/heads/master' && inputs.confirm
+        if: github.ref == 'refs/heads/master' && inputs.confirm == 'deploy-peerbit-production'
         runs-on: ubuntu-24.04
         timeout-minutes: 30
         steps:
@@ -73,10 +80,10 @@ jobs:
                   done
 
     deploy-production:
-        if: github.ref == 'refs/heads/master' && inputs.confirm
+        if: github.ref == 'refs/heads/master' && inputs.confirm == 'deploy-peerbit-production'
         needs: validate
         runs-on: ubuntu-24.04
-        timeout-minutes: 45
+        timeout-minutes: 90
         environment: cloudflare-production
         steps:
             - name: Checkout
@@ -113,64 +120,23 @@ jobs:
                   npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler
                   node scripts/render-cloudflare-configs.mjs --mode production
 
-            - name: Deploy selected production target
-              env:
-                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_API_TOKEN }}
-                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-                  DEPLOY_TARGET: ${{ inputs.target }}
-              run: |
-                  case "$DEPLOY_TARGET" in
-                      apps)
-                          for config in .wrangler-config/*.jsonc; do
-                              if [ "$(basename "$config")" = "legacy-stream.jsonc" ]; then
-                                  continue
-                              fi
-                              tools/wrangler/node_modules/.bin/wrangler deploy --config "$config"
-                          done
-                          ;;
-                      legacy-redirect)
-                          tools/wrangler/node_modules/.bin/wrangler deploy \
-                              --config .wrangler-config/legacy-stream.jsonc
-                          ;;
-                      all)
-                          for config in .wrangler-config/*.jsonc; do
-                              if [ "$(basename "$config")" = "legacy-stream.jsonc" ]; then
-                                  continue
-                              fi
-                              tools/wrangler/node_modules/.bin/wrangler deploy --config "$config"
-                          done
-                          tools/wrangler/node_modules/.bin/wrangler deploy \
-                              --config .wrangler-config/legacy-stream.jsonc
-                          ;;
-                      *)
-                          echo "Unsupported deployment target: $DEPLOY_TARGET" >&2
-                          exit 1
-                          ;;
-                  esac
-
-            - name: Verify selected production target
-              env:
-                  DEPLOY_TARGET: ${{ inputs.target }}
-              run: >-
-                  node scripts/verify-cloudflare-sites.mjs
-                  --mode production
-                  --target "$DEPLOY_TARGET"
-                  --commit "${{ github.sha }}"
-
-            - name: Install Chromium for production runtime smoke tests
+            - name: Install Chromium for transactional runtime checks
               if: inputs.target != 'legacy-redirect'
               run: >-
                   pnpm --dir packages/file-share/frontend exec playwright
                   install --with-deps chromium
 
-            - name: Verify production browser runtime and media ranges
-              if: inputs.target != 'legacy-redirect'
+            - name: Deploy, verify, and roll back each selected target
               env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+                  DEPLOY_TARGET: ${{ inputs.target }}
+                  DEPLOY_COMMIT: ${{ github.sha }}
                   PW_CLOUDFLARE_SMOKE: "1"
                   PW_BASE_URL: https://files.apps.peerbit.org
                   PW_GIGA_URL: https://giga.apps.peerbit.org
                   PW_STREAM_URL: https://stream.apps.peerbit.org
               run: >-
-                  pnpm --dir packages/file-share/frontend exec playwright test
-                  -c playwright.config.ts tests/cloudflare-preview.e2e.spec.ts
-                  --project=chromium --workers=1 --retries=1
+                  node scripts/deploy-cloudflare-production.mjs
+                  --target "$DEPLOY_TARGET"
+                  --commit "$DEPLOY_COMMIT"
