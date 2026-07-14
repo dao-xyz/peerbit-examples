@@ -282,7 +282,7 @@ const parseArgs = (argv) => {
         const value = argv[index + 1];
         if (!key?.startsWith("--") || value == null) {
             throw new Error(
-                "Usage: deploy-cloudflare-production.mjs --target ID|apps|legacy-redirect|all --commit SHA"
+                "Usage: deploy-cloudflare-production.mjs --target ID|apps|all --commit SHA"
             );
         }
         args.set(key.slice(2), value);

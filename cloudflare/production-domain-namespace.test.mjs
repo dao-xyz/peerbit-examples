@@ -52,24 +52,7 @@ test("keeps first-party apps in the apps.peerbit.org namespace", () => {
             );
         }
 
-        const legacy = manifest.redirects.find(
-            (redirect) => redirect.id === "legacy-stream"
-        );
-        assert.ok(legacy);
-        assert.equal(legacy.location, "https://stream.apps.peerbit.org/#/");
-        const legacyConfig = JSON.parse(
-            readFileSync(path.join(output, "legacy-stream.jsonc"), "utf8")
-        );
-        assert.deepEqual(legacyConfig.routes, [
-            {
-                pattern: "stream.peerchecker.com",
-                custom_domain: true,
-            },
-        ]);
-        assert.equal(
-            legacyConfig.vars.CANONICAL_STREAM_URL,
-            "https://stream.apps.peerbit.org/#/"
-        );
+        assert.deepEqual(manifest.redirects, []);
     } finally {
         rmSync(temporaryRoot, { recursive: true, force: true });
     }

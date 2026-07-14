@@ -319,11 +319,7 @@ export const validateRenderedCloudflareConfigSet = ({
 
 export const selectCloudflareDeploymentEntries = (entries, target) => {
     const appEntries = entries.filter(({ policy }) => policy.kind === "app");
-    const redirectEntries = entries.filter(
-        ({ policy }) => policy.kind === "redirect"
-    );
     if (target === "apps") return appEntries;
-    if (target === "legacy-redirect") return redirectEntries;
     if (target === "all") return entries;
     const selected = entries.filter(({ site }) => site.id === target);
     if (selected.length !== 1) {

@@ -27,7 +27,7 @@ const deployment = (versionId, percentage = 100) => ({
 
 test("production Workers and hostnames are an exact reviewed allowlist", () => {
     const { manifest, policy, entries } = loadCloudflareDeploymentData();
-    assert.equal(entries.length, 8);
+    assert.equal(entries.length, 7);
     assert.deepEqual(
         selectCloudflareDeploymentEntries(entries, "files").map(
             ({ policy: entry }) => entry
@@ -114,29 +114,12 @@ test("renderer output cannot resolve to the repository root", () => {
     );
 });
 
-test("redirects cannot leave the exact production hostname allowlist", () => {
-    const { manifest, policy } = loadCloudflareDeploymentData();
-    const redirected = clone(policy);
-    const legacy = redirected.entries.find(({ id }) => id === "legacy-stream");
-    legacy.redirectLocation = "https://example.com/collect";
-    const changedManifest = clone(manifest);
-    changedManifest.redirects[0].location = legacy.redirectLocation;
+test("retired peerchecker redirects cannot be selected for deployment", () => {
+    const { manifest, entries } = loadCloudflareDeploymentData();
+    assert.deepEqual(manifest.redirects, []);
     assert.throws(
-        () => validateCloudflareDeploymentPolicy(changedManifest, redirected),
-        /allowlisted HTTPS production hostname/
-    );
-});
-
-test("legacy redirects must target the exact first-party app namespace", () => {
-    const { manifest, policy } = loadCloudflareDeploymentData();
-    const redirected = clone(policy);
-    const legacy = redirected.entries.find(({ id }) => id === "legacy-stream");
-    legacy.redirectLocation = "https://stream.peerchecker.com/";
-    const changedManifest = clone(manifest);
-    changedManifest.redirects[0].location = legacy.redirectLocation;
-    assert.throws(
-        () => validateCloudflareDeploymentPolicy(changedManifest, redirected),
-        /one label under \*\.apps\.peerbit\.org/
+        () => selectCloudflareDeploymentEntries(entries, "legacy-redirect"),
+        /Unsupported Cloudflare deployment target/
     );
 });
 

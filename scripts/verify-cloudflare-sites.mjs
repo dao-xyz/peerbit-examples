@@ -16,7 +16,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
     const value = process.argv[index + 1];
     if (!key?.startsWith("--") || value == null) {
         throw new Error(
-            "Usage: verify-cloudflare-sites.mjs --mode production [--commit SHA] [--target apps|legacy-redirect|all] [--site ID]"
+            "Usage: verify-cloudflare-sites.mjs --mode production [--commit SHA] [--target apps|all] [--site ID]"
         );
     }
     args.set(key.slice(2), value);
@@ -30,8 +30,8 @@ if (expectedCommit && !/^[0-9a-f]{40}$/i.test(expectedCommit)) {
     throw new Error("--commit must be a full Git commit hash");
 }
 const target = args.get("target") || "all";
-if (!["apps", "legacy-redirect", "all"].includes(target)) {
-    throw new Error("--target must be apps, legacy-redirect, or all");
+if (!["apps", "all"].includes(target)) {
+    throw new Error("--target must be apps or all");
 }
 const requestedSite = args.get("site");
 if (requestedSite && args.has("target")) {
@@ -85,9 +85,7 @@ const originsFor = (entry) =>
 
 const selectedStaticSites = requestedSite
     ? manifest.staticSites.filter((site) => site.id === requestedSite)
-    : target === "legacy-redirect"
-      ? []
-      : manifest.staticSites;
+    : manifest.staticSites;
 for (const site of selectedStaticSites) {
     for (const origin of originsFor(site)) {
         await verifyEventually(origin, async () => {

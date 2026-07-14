@@ -49,15 +49,6 @@
             "productionWorker": "peerbit-examples-chess",
             "previewWorker": "peerbit-examples-chess-preview",
             "productionHostnames": ["chess.apps.peerbit.org"]
-        },
-        {
-            "id": "legacy-stream",
-            "kind": "redirect",
-            "productionWorker": "peerbit-examples-legacy-stream",
-            "previewWorker": "peerbit-examples-legacy-stream-preview",
-            "productionHostnames": ["stream.peerchecker.com"],
-            "redirectLocation": "https://stream.apps.peerbit.org/#/",
-            "redirectStatus": 307
         }
     ]
 }

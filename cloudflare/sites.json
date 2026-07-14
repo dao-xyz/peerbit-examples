@@ -54,14 +54,5 @@
             "domains": ["chess.apps.peerbit.org"]
         }
     ],
-    "redirects": [
-        {
-            "id": "legacy-stream",
-            "worker": "peerbit-examples-legacy-stream",
-            "script": "cloudflare/stream-peerchecker-redirect.mjs",
-            "domains": ["stream.peerchecker.com"],
-            "location": "https://stream.apps.peerbit.org/#/",
-            "status": 307
-        }
-    ]
+    "redirects": []
 }
