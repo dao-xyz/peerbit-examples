@@ -26,6 +26,10 @@ test("credentialed production shell receives target and commit through env", () 
         productionWorkflow,
         /--commit[^\n]*\$\{\{[^\n]*github\.sha/
     );
+    assert.doesNotMatch(
+        productionWorkflow,
+        /initialize_missing_workers|INITIALIZE_MISSING_WORKERS|initialize-missing-workers/
+    );
 });
 
 test("Cloudflare workflows carry no Supabase build configuration", () => {
@@ -44,6 +48,14 @@ test("preview hosting is validation-only and has no Cloudflare credentials", () 
         /environment:\s*cloudflare-production/
     );
     assert.match(previewWorkflow, /--dry-run/);
+    assert.match(previewWorkflow, /wrangler versions upload/);
+});
+
+test("every CI bundle check exercises the inactive versions-upload path", () => {
+    for (const workflow of [previewWorkflow, productionWorkflow]) {
+        assert.match(workflow, /wrangler versions upload/);
+        assert.doesNotMatch(workflow, /wrangler deploy\s*\\\s*\n\s*--config/);
+    }
 });
 
 test("production deployment remains manually gated", () => {
@@ -54,4 +66,18 @@ test("production deployment remains manually gated", () => {
         /inputs\.confirm == 'deploy-peerbit-production'/
     );
     assert.match(productionWorkflow, /environment: cloudflare-production/);
+    assert.doesNotMatch(productionWorkflow, /initialize_missing_workers/);
+});
+
+test("locked Wrangler is installed before its source contract tests", () => {
+    for (const workflow of [previewWorkflow, productionWorkflow]) {
+        const install = workflow.indexOf(
+            "npm ci --ignore-scripts --no-audit --no-fund --prefix tools/wrangler"
+        );
+        const safetyTests = workflow.indexOf(
+            "node --test cloudflare/*.test.mjs"
+        );
+        assert.ok(install >= 0);
+        assert.ok(safetyTests > install);
+    }
 });
