@@ -7,8 +7,6 @@ const DNS_HOSTNAME =
 const VERSION_ID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
-const CUSTOM_DOMAIN_PAGE_SIZE = 100;
-const MAX_CUSTOM_DOMAIN_PAGES = 1_000;
 const MAX_CUSTOM_DOMAIN_SNAPSHOT_ATTEMPTS = 3;
 const ZONE_PAGE_SIZE = 50;
 const MAX_ZONE_PAGES = 1_000;
@@ -594,112 +592,103 @@ export const createCloudflareWorkersApi = ({
                 const domains = [];
                 const domainIds = new Set();
                 const hostnames = new Set();
-                let expectedTotalCount;
-                let expectedTotalPages;
-                let expectedPerPage;
-
-                for (let page = 1; page <= MAX_CUSTOM_DOMAIN_PAGES; page += 1) {
-                    const payload = await call({
+                const payload = await call({
+                    operation,
+                    url: domainsUrl,
+                });
+                const result = payload.result;
+                const info = payload.result_info;
+                if (!Array.isArray(result)) {
+                    invalidResult({
                         operation,
-                        url: `${domainsUrl}?page=${page}&per_page=${CUSTOM_DOMAIN_PAGE_SIZE}`,
+                        message:
+                            "Cloudflare returned an invalid custom-domain inventory",
                     });
-                    const result = payload.result;
-                    const info = payload.result_info;
-                    const validInfo =
-                        Array.isArray(result) &&
-                        info &&
-                        typeof info === "object" &&
-                        Number.isSafeInteger(info.count) &&
-                        info.count >= 0 &&
-                        info.count === result.length &&
-                        Number.isSafeInteger(info.page) &&
-                        info.page === page &&
-                        Number.isSafeInteger(info.per_page) &&
-                        info.per_page > 0 &&
-                        info.count <= info.per_page &&
-                        Number.isSafeInteger(info.total_count) &&
-                        info.total_count >= 0 &&
-                        Number.isSafeInteger(info.total_pages) &&
-                        info.total_pages >= 0 &&
-                        info.total_pages <= MAX_CUSTOM_DOMAIN_PAGES &&
-                        (info.total_count === 0
-                            ? info.total_pages === 0 || info.total_pages === 1
-                            : info.total_pages ===
-                              Math.ceil(info.total_count / info.per_page)) &&
-                        page <= Math.max(info.total_pages, 1);
-                    if (!validInfo) {
-                        invalidResult({
-                            operation,
-                            message:
-                                "Cloudflare returned invalid or ambiguous custom-domain pagination",
-                        });
-                    }
+                }
 
-                    expectedTotalCount ??= info.total_count;
-                    expectedTotalPages ??= info.total_pages;
-                    expectedPerPage ??= info.per_page;
+                if (info !== undefined) {
+                    const allowedInfoKeys = new Set([
+                        "count",
+                        "page",
+                        "per_page",
+                        "total_count",
+                        "total_pages",
+                    ]);
+                    const validInfoObject =
+                        info !== null &&
+                        typeof info === "object" &&
+                        !Array.isArray(info) &&
+                        Object.keys(info).every((key) =>
+                            allowedInfoKeys.has(key)
+                        );
+                    const validOptionalInteger = (key, predicate) =>
+                        !(key in info) ||
+                        (Number.isSafeInteger(info[key]) &&
+                            predicate(info[key]));
                     if (
-                        info.total_count !== expectedTotalCount ||
-                        info.total_pages !== expectedTotalPages ||
-                        info.per_page !== expectedPerPage
+                        !validInfoObject ||
+                        !validOptionalInteger(
+                            "count",
+                            (value) => value === result.length
+                        ) ||
+                        !validOptionalInteger("page", (value) => value === 1) ||
+                        !validOptionalInteger(
+                            "per_page",
+                            (value) => value > 0 && value >= result.length
+                        ) ||
+                        !validOptionalInteger(
+                            "total_count",
+                            (value) => value === result.length
+                        ) ||
+                        !validOptionalInteger("total_pages", (value) =>
+                            result.length === 0
+                                ? value === 0 || value === 1
+                                : value === 1
+                        )
                     ) {
                         invalidResult({
                             operation,
                             message:
-                                "Cloudflare custom-domain pagination changed while it was being read",
+                                "Cloudflare returned invalid or ambiguous custom-domain completeness metadata",
                         });
                     }
-
-                    for (const domain of result) {
-                        const hostname =
-                            typeof domain?.hostname === "string"
-                                ? domain.hostname.toLowerCase()
-                                : undefined;
-                        if (
-                            typeof domain?.id !== "string" ||
-                            domain.id.length === 0 ||
-                            domainIds.has(domain.id) ||
-                            !hostname ||
-                            !DNS_HOSTNAME.test(hostname) ||
-                            domain.hostname.trim() !== domain.hostname ||
-                            hostnames.has(hostname) ||
-                            !WORKER_NAME.test(domain.service || "") ||
-                            typeof domain.environment !== "string" ||
-                            domain.environment.length === 0 ||
-                            !CLOUDFLARE_ACCOUNT_ID.test(domain.zone_id || "") ||
-                            typeof domain.zone_name !== "string" ||
-                            domain.zone_name.length === 0
-                        ) {
-                            invalidResult({
-                                operation,
-                                message:
-                                    "Cloudflare returned an invalid or ambiguous custom-domain attachment",
-                            });
-                        }
-                        domainIds.add(domain.id);
-                        hostnames.add(hostname);
-                        domains.push({
-                            id: domain.id,
-                            hostname,
-                            service: domain.service,
-                            environment: domain.environment,
-                            zoneId: domain.zone_id,
-                            zoneName: domain.zone_name.toLowerCase(),
-                        });
-                    }
-
-                    if (page >= info.total_pages) break;
                 }
 
-                if (
-                    expectedTotalCount == null ||
-                    expectedTotalPages == null ||
-                    domains.length !== expectedTotalCount
-                ) {
-                    invalidResult({
-                        operation,
-                        message:
-                            "Cloudflare returned an incomplete custom-domain inventory",
+                for (const domain of result) {
+                    const hostname =
+                        typeof domain?.hostname === "string"
+                            ? domain.hostname.toLowerCase()
+                            : undefined;
+                    if (
+                        typeof domain?.id !== "string" ||
+                        domain.id.length === 0 ||
+                        domainIds.has(domain.id) ||
+                        !hostname ||
+                        !DNS_HOSTNAME.test(hostname) ||
+                        domain.hostname.trim() !== domain.hostname ||
+                        hostnames.has(hostname) ||
+                        !WORKER_NAME.test(domain.service || "") ||
+                        typeof domain.environment !== "string" ||
+                        domain.environment.length === 0 ||
+                        !CLOUDFLARE_ACCOUNT_ID.test(domain.zone_id || "") ||
+                        typeof domain.zone_name !== "string" ||
+                        domain.zone_name.length === 0
+                    ) {
+                        invalidResult({
+                            operation,
+                            message:
+                                "Cloudflare returned an invalid or ambiguous custom-domain attachment",
+                        });
+                    }
+                    domainIds.add(domain.id);
+                    hostnames.add(hostname);
+                    domains.push({
+                        id: domain.id,
+                        hostname,
+                        service: domain.service,
+                        environment: domain.environment,
+                        zoneId: domain.zone_id,
+                        zoneName: domain.zone_name.toLowerCase(),
                     });
                 }
                 return domains.sort((left, right) =>

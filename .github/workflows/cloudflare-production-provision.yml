@@ -259,8 +259,8 @@ jobs:
               # never derive it with this possibly permission-filtered token.
               env:
                   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_API_TOKEN }}
-                  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-                  CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: ${{ vars.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+                  CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: ${{ secrets.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 }}
                   PROVISION_MODE: ${{ inputs.mode }}
                   PROVISION_CONFIRM: ${{ inputs.confirm }}
                   PROVISION_PLANNED_COMMIT: ${{ inputs.planned_commit }}

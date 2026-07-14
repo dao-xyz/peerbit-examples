@@ -871,7 +871,7 @@ test("Worker subdomain API diagnostics preserve non-workers.dev boundaries", asy
     }
 });
 
-test("Cloudflare Workers API exhausts read-only custom-domain pagination", async () => {
+test("Cloudflare Workers API reads the complete custom-domain collection without unsupported pagination", async () => {
     const accountId = "c".repeat(32);
     const apiToken = "test-token_123";
     const requests = [];
@@ -898,17 +898,15 @@ test("Cloudflare Workers API exhausts read-only custom-domain pagination", async
         apiToken,
         request: async (url, init) => {
             requests.push({ url, init });
-            const page = Number(new URL(url).searchParams.get("page"));
             return new Response(
                 JSON.stringify({
                     success: true,
-                    result: [rawDomains[page - 1]],
+                    result: rawDomains,
                     result_info: {
-                        count: 1,
-                        page,
-                        per_page: 1,
+                        count: 2,
+                        page: 1,
+                        per_page: 50,
                         total_count: 2,
-                        total_pages: 2,
                     },
                 }),
                 { status: 200 }
@@ -924,19 +922,11 @@ test("Cloudflare Workers API exhausts read-only custom-domain pagination", async
         requests.map(({ url, init }) => [url, init.method]),
         [
             [
-                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/domains?page=1&per_page=100`,
+                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/domains`,
                 "GET",
             ],
             [
-                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/domains?page=2&per_page=100`,
-                "GET",
-            ],
-            [
-                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/domains?page=1&per_page=100`,
-                "GET",
-            ],
-            [
-                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/domains?page=2&per_page=100`,
+                `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/domains`,
                 "GET",
             ],
         ]
@@ -947,46 +937,81 @@ test("Cloudflare Workers API exhausts read-only custom-domain pagination", async
     }
 });
 
-test("custom-domain pagination discards a constant-total hybrid snapshot", async () => {
+test("custom-domain inventory accepts omitted and consistent optional completeness metadata", async () => {
+    const rawDomain = rawWorkerDomain("alpha");
+    const fixtures = [
+        { result: [] },
+        { result: [], result_info: { total_pages: 0 } },
+        { result: [], result_info: { total_pages: 1 } },
+        { result: [rawDomain], result_info: {} },
+        { result: [rawDomain], result_info: { count: 1 } },
+        {
+            result: [rawDomain],
+            result_info: {
+                count: 1,
+                page: 1,
+                per_page: 50,
+                total_count: 1,
+            },
+        },
+        {
+            result: [rawDomain],
+            result_info: {
+                count: 1,
+                page: 1,
+                per_page: 50,
+                total_count: 1,
+                total_pages: 1,
+            },
+        },
+    ];
+
+    for (const fixture of fixtures) {
+        let requests = 0;
+        const api = createCloudflareWorkersApi({
+            accountId: "c".repeat(32),
+            apiToken: "test-token_123",
+            request: async () => {
+                requests += 1;
+                return new Response(
+                    JSON.stringify({ success: true, ...fixture }),
+                    { status: 200 }
+                );
+            },
+        });
+        assert.deepEqual(
+            (await api.listWorkerDomains()).map(({ id }) => id),
+            fixture.result.map(({ id }) => id)
+        );
+        assert.equal(requests, 2);
+    }
+});
+
+test("custom-domain inventory discards a changing first snapshot", async () => {
     const accountId = "c".repeat(32);
     const apiToken = "test-token_123";
     const alpha = rawWorkerDomain("alpha");
     const bravo = rawWorkerDomain("bravo");
     const charlie = rawWorkerDomain("charlie");
-    const delta = rawWorkerDomain("delta");
-    const echo = rawWorkerDomain("echo");
     const snapshots = [
-        [
-            [alpha, bravo],
-            [delta, echo],
-        ],
-        [
-            [bravo, charlie],
-            [delta, echo],
-        ],
-        [
-            [bravo, charlie],
-            [delta, echo],
-        ],
+        [alpha, bravo],
+        [bravo, charlie],
+        [bravo, charlie],
     ];
     let requests = 0;
     const api = createCloudflareWorkersApi({
         accountId,
         apiToken,
-        request: async (url) => {
-            const page = Number(new URL(url).searchParams.get("page"));
-            const snapshot = snapshots[Math.floor(requests / 2)];
+        request: async () => {
+            const snapshot = snapshots[requests];
             requests += 1;
             return new Response(
                 JSON.stringify({
                     success: true,
-                    result: snapshot[page - 1],
+                    result: snapshot,
                     result_info: {
                         count: 2,
-                        page,
-                        per_page: 2,
-                        total_count: 4,
-                        total_pages: 2,
+                        total_count: 2,
                     },
                 }),
                 { status: 200 }
@@ -996,47 +1021,35 @@ test("custom-domain pagination discards a constant-total hybrid snapshot", async
 
     assert.deepEqual(
         (await api.listWorkerDomains()).map(({ id }) => id),
-        ["domain-bravo", "domain-charlie", "domain-delta", "domain-echo"]
+        ["domain-bravo", "domain-charlie"]
     );
-    assert.equal(requests, 6);
+    assert.equal(requests, 3);
 });
 
-test("custom-domain pagination fails closed when complete snapshots keep churning", async () => {
+test("custom-domain inventory fails closed when complete snapshots keep churning", async () => {
     const accountId = "c".repeat(32);
     const apiToken = "test-token_123";
     const alpha = rawWorkerDomain("alpha");
     const bravo = rawWorkerDomain("bravo");
     const charlie = rawWorkerDomain("charlie");
-    const delta = rawWorkerDomain("delta");
-    const echo = rawWorkerDomain("echo");
     const snapshots = [
-        [
-            [alpha, bravo],
-            [delta, echo],
-        ],
-        [
-            [bravo, charlie],
-            [delta, echo],
-        ],
+        [alpha, bravo],
+        [bravo, charlie],
     ];
     let requests = 0;
     const api = createCloudflareWorkersApi({
         accountId,
         apiToken,
-        request: async (url) => {
-            const page = Number(new URL(url).searchParams.get("page"));
-            const snapshot = snapshots[Math.floor(requests / 2) % 2];
+        request: async () => {
+            const snapshot = snapshots[requests % 2];
             requests += 1;
             return new Response(
                 JSON.stringify({
                     success: true,
-                    result: snapshot[page - 1],
+                    result: snapshot,
                     result_info: {
                         count: 2,
-                        page,
-                        per_page: 2,
-                        total_count: 4,
-                        total_pages: 2,
+                        total_count: 2,
                     },
                 }),
                 { status: 200 }
@@ -1048,12 +1061,59 @@ test("custom-domain pagination fails closed when complete snapshots keep churnin
         api.listWorkerDomains(),
         /did not remain stable across complete snapshots/
     );
-    assert.equal(requests, 6);
+    assert.equal(requests, 3);
 });
 
-test("custom-domain pagination and API ambiguity fail closed", async () => {
+test("custom-domain API and completeness ambiguity fail closed", async () => {
     const accountId = "c".repeat(32);
     const apiToken = "test-token_123";
+    const rawDomain = rawWorkerDomain("alpha");
+    const payloads = [
+        { success: true, result: {} },
+        { success: true, result: [rawDomain], result_info: null },
+        {
+            success: true,
+            result: [rawDomain],
+            result_info: { cursor: "unexpected-continuation" },
+        },
+        {
+            success: true,
+            result: [rawDomain],
+            result_info: { count: 2 },
+        },
+        {
+            success: true,
+            result: [rawDomain],
+            result_info: { page: 2 },
+        },
+        {
+            success: true,
+            result: [rawDomain, rawWorkerDomain("bravo")],
+            result_info: { per_page: 1 },
+        },
+        {
+            success: true,
+            result: [rawDomain],
+            result_info: { total_count: 2 },
+        },
+        {
+            success: true,
+            result: [rawDomain],
+            result_info: { total_pages: 2 },
+        },
+        {
+            success: true,
+            result: [rawDomain, rawDomain],
+        },
+        {
+            success: true,
+            result: [
+                rawWorkerDomain("retired", {
+                    hostname: "retired.apps.peerbit.org.",
+                }),
+            ],
+        },
+    ];
     const responses = [
         () =>
             new Response(
@@ -1063,55 +1123,10 @@ test("custom-domain pagination and API ambiguity fail closed", async () => {
                 }),
                 { status: 403 }
             ),
-        () =>
-            new Response(JSON.stringify({ success: true, result: [] }), {
-                status: 200,
-            }),
-        (url) => {
-            const page = Number(new URL(url).searchParams.get("page"));
-            return new Response(
-                JSON.stringify({
-                    success: true,
-                    result: [
-                        {
-                            id: "domain-" + page,
-                            hostname: "duplicate.apps.peerbit.org",
-                            service: "peerbit-examples-files",
-                            environment: "production",
-                            zone_id: ZONE_ID,
-                            zone_name: "peerbit.org",
-                        },
-                    ],
-                    result_info: {
-                        count: 1,
-                        page,
-                        per_page: 1,
-                        total_count: 2,
-                        total_pages: 2,
-                    },
-                }),
-                { status: 200 }
-            );
-        },
-        () =>
-            new Response(
-                JSON.stringify({
-                    success: true,
-                    result: [
-                        rawWorkerDomain("retired", {
-                            hostname: "retired.apps.peerbit.org.",
-                        }),
-                    ],
-                    result_info: {
-                        count: 1,
-                        page: 1,
-                        per_page: 100,
-                        total_count: 1,
-                        total_pages: 1,
-                    },
-                }),
-                { status: 200 }
-            ),
+        ...payloads.map(
+            (payload) => () =>
+                new Response(JSON.stringify(payload), { status: 200 })
+        ),
     ];
 
     for (const request of responses) {
@@ -1140,13 +1155,14 @@ test("attachment inventory source contract uses account-scoped domains and autho
     );
     const domainsStart = source.indexOf("listWorkerDomains: async");
     const domainsEnd = source.indexOf(
-        "getCurrentDeployment: async",
+        "getWorkerSubdomain: async",
         domainsStart
     );
     const domainInventory = source.slice(domainsStart, domainsEnd);
     assert.ok(domainsStart >= 0 && domainsEnd > domainsStart);
-    assert.match(domainInventory, /domainsUrl/);
+    assert.match(domainInventory, /url:\s*domainsUrl/);
     assert.doesNotMatch(domainInventory, /method\s*:|body\s*:/);
+    assert.doesNotMatch(domainInventory, /url:\s*`\$\{domainsUrl\}\?/);
     const subdomainStart = source.indexOf("getWorkerSubdomain: async");
     const subdomainEnd = source.indexOf(
         "getCurrentDeployment: async",
