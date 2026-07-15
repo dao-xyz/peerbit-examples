@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findStaticPeercheckerRelayHost } from "./static-relay-policy.mjs";
+import { findForbiddenStaticPeercheckerHost } from "./static-relay-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -40,10 +40,10 @@ for (const [file, fragments] of productionRules) {
 }
 
 const source = [...productionSources.values()].join("\n");
-const retiredRelayHost = findStaticPeercheckerRelayHost(source);
-if (retiredRelayHost) {
+const forbiddenStaticHost = findForbiddenStaticPeercheckerHost(source);
+if (forbiddenStaticHost) {
     throw new Error(
-        `Production source references retired relay ${retiredRelayHost}`
+        `Production source contains forbidden direct peerchecker host pin ${forbiddenStaticHost}`
     );
 }
 
