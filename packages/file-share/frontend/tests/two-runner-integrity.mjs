@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { TINY_FILE_WRITE_SIZE_LIMIT_BYTES } from "@peerbit/please-lib";
 import { createCipheriv, createHash, randomUUID } from "node:crypto";
 import { open, mkdtemp, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const MEBIBYTE_BYTES = 1024 * 1024;
-const TINY_FILE_SIZE_LIMIT_BYTES = 5_000_000;
+const TINY_FILE_SIZE_LIMIT_BYTES = TINY_FILE_WRITE_SIZE_LIMIT_BYTES;
 const FIXTURE_CHUNK_BYTES = MEBIBYTE_BYTES;
 const DEFAULT_FIXTURE_SEED = "peerbit-file-share-v1";
 const CRC32_INITIAL_STATE = 0xffffffff;

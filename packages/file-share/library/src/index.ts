@@ -29,6 +29,17 @@ import {
     getRemotePersistedReadAheadLimit,
     REMOTE_PERSISTED_READ_AHEAD_MIN,
 } from "./read-scheduling.js";
+import {
+    FairTransferOwner,
+    FairTransferScheduler,
+    TransferCancelledError,
+    getAbortReason,
+    raceWithSignal,
+    throwIfAborted,
+    type TransferLane,
+    type TransferPermit,
+    type TransferSchedulerSnapshot,
+} from "./transfer-scheduling.js";
 
 type RuntimeOpenProfileSample = {
     label: string;
@@ -257,25 +268,75 @@ const shouldRetryChunkLookupWithoutHints = (
     );
 };
 
-type FileReadOptions = {
+export type FileReadOptions = {
     timeout?: number;
     progress?: (progress: number) => any;
+    signal?: AbortSignal;
+    /** A caller-selected stable key for cancellation and diagnostics. */
+    transferId?: string;
 };
 
-type FileReadDiagnostics = Record<string, any>;
+export type FileWriteOptions = {
+    progress?: (progress: number) => void;
+    signal?: AbortSignal;
+    /** A caller-selected stable key for cancellation and diagnostics. */
+    transferId?: string;
+};
+
+type FileWriteProgressOrOptions =
+    | ((progress: number) => void)
+    | FileWriteOptions;
+
+const normalizeFileWriteOptions = (
+    parentIdOrOptions: string | FileWriteOptions | undefined,
+    progressOrOptions: FileWriteProgressOrOptions | undefined,
+    options: FileWriteOptions | undefined
+) => {
+    const parentId =
+        typeof parentIdOrOptions === "string" ? parentIdOrOptions : undefined;
+    const inlineOptions =
+        typeof parentIdOrOptions === "object"
+            ? parentIdOrOptions
+            : typeof progressOrOptions === "object"
+              ? progressOrOptions
+              : undefined;
+    const progress =
+        typeof progressOrOptions === "function"
+            ? progressOrOptions
+            : (options?.progress ?? inlineOptions?.progress);
+    return {
+        ...inlineOptions,
+        ...options,
+        parentId,
+        progress,
+    };
+};
+
+export type FileReadDiagnostics = Record<string, any>;
 
 type FileReadDiagnosticsContext = {
     diagnostics?: FileReadDiagnostics;
 };
 
+type FileReadTransferContext = {
+    transfer: ActiveFileTransfer;
+    /** The caller already holds the exact large-chunk payload reservation. */
+    payloadPermitHeld?: boolean;
+    /** Record top-level TinyFile diagnostics while inheriting a lookup transfer. */
+    recordTinyDiagnostics?: boolean;
+};
+
 const FILE_READ_DIAGNOSTICS_CONTEXT = Symbol("file-read-diagnostics-context");
+const FILE_READ_TRANSFER_CONTEXT = Symbol("file-read-transfer-context");
 
 type InternalFileReadOptions = FileReadOptions & {
     [FILE_READ_DIAGNOSTICS_CONTEXT]?: FileReadDiagnosticsContext;
+    [FILE_READ_TRANSFER_CONTEXT]?: FileReadTransferContext;
 };
 
 type EffectiveFileReadOptions = FileReadOptions & {
     persist: boolean;
+    owner: FairTransferOwner;
 };
 
 type ChunkReadContext = {
@@ -337,11 +398,41 @@ export abstract class AbstractFile {
         const internalProperties = properties as
             | InternalFileReadOptions
             | undefined;
+        const transferContext =
+            internalProperties?.[FILE_READ_TRANSFER_CONTEXT];
+        const inheritedTransfer = transferContext?.transfer;
+        const transfer =
+            inheritedTransfer ??
+            beginFileTransfer(
+                files,
+                "read",
+                properties?.signal,
+                properties?.transferId,
+                true
+            );
+        const ownsTransfer = inheritedTransfer == null;
         const diagnosticsContext =
             internalProperties?.[FILE_READ_DIAGNOSTICS_CONTEXT] ?? {};
         const streamProperties: InternalFileReadOptions = {
             ...properties,
+            signal: transfer.owner.signal,
+            transferId: transfer.id,
             [FILE_READ_DIAGNOSTICS_CONTEXT]: diagnosticsContext,
+            [FILE_READ_TRANSFER_CONTEXT]: { transfer },
+        };
+        const runSinkOperation = <T>(
+            operation: () => PromiseLike<T> | T,
+            label: string,
+            failOnReject = true
+        ) => {
+            let original: Promise<T>;
+            try {
+                original = Promise.resolve(operation());
+            } catch (error) {
+                original = Promise.reject(error);
+            }
+            const tracked = transfer.owner.track(original, failOnReject);
+            return raceWithSignal(tracked, transfer.owner.signal, label);
         };
         let chunkIndex = 0;
         try {
@@ -353,23 +444,41 @@ export abstract class AbstractFile {
                 if (debug) {
                     (debug.chunkWriteStartedAt ||= {})[chunkIndex] = Date.now();
                 }
-                await writable.write(chunk);
+                transfer.owner.throwIfFailed();
+                await runSinkOperation(
+                    () => writable.write(chunk),
+                    "File write cancelled"
+                );
                 if (debug) {
                     (debug.chunkWriteFinishedAt ||= {})[chunkIndex] =
                         Date.now();
                 }
                 chunkIndex++;
             }
-            await writable.close?.();
+            transfer.owner.throwIfFailed();
+            if (writable.close) {
+                await runSinkOperation(
+                    () => writable.close!(),
+                    "File write cancelled"
+                );
+            }
         } catch (error) {
             if (writable.abort) {
                 try {
-                    await writable.abort(error);
+                    await runSinkOperation(
+                        () => writable.abort!(error),
+                        "File sink abort cancelled",
+                        false
+                    );
                 } catch {
                     // Ignore writable cleanup failures.
                 }
             }
             throw error;
+        } finally {
+            if (ownsTransfer) {
+                await transfer.finish();
+            }
         }
     }
 
@@ -418,7 +527,9 @@ class FileReadCancelledError extends Error {
 class FileChangeSignal {
     private version = 0;
     private closed = false;
+    private closeReason: unknown;
     private abortController = new AbortController();
+    private removeExternalAbort?: () => void;
     private waiters = new Set<(changed: boolean) => void>();
     private readonly listener = (
         event: CustomEvent<DocumentsChange<AbstractFile, IndexableFile>>
@@ -443,9 +554,19 @@ class FileChangeSignal {
             IndexableFile
         >["events"],
         private readonly predicate: FileChangePredicate,
-        private readonly onClose?: () => void
+        private readonly onClose?: (signal: FileChangeSignal) => void,
+        externalSignal?: AbortSignal
     ) {
         this.events.addEventListener("change", this.listener);
+        if (externalSignal) {
+            const onAbort = () => this.close(getAbortReason(externalSignal));
+            externalSignal.addEventListener("abort", onAbort, { once: true });
+            this.removeExternalAbort = () =>
+                externalSignal.removeEventListener("abort", onAbort);
+            if (externalSignal.aborted) {
+                onAbort();
+            }
+        }
     }
 
     snapshot() {
@@ -462,7 +583,7 @@ class FileChangeSignal {
 
     throwIfClosed() {
         if (this.closed) {
-            throw new FileReadCancelledError();
+            throw this.closeReason ?? new FileReadCancelledError();
         }
     }
 
@@ -475,7 +596,6 @@ class FileChangeSignal {
         }
 
         return new Promise<boolean>((resolve) => {
-            let timer: ReturnType<typeof setTimeout> | undefined;
             let settled = false;
             const finish = (changed: boolean) => {
                 if (settled) {
@@ -490,7 +610,7 @@ class FileChangeSignal {
             };
 
             this.waiters.add(finish);
-            timer = setTimeout(() => finish(false), timeoutMs);
+            const timer = setTimeout(() => finish(false), timeoutMs);
 
             // Keep this check even though JavaScript runs synchronously here:
             // alternate EventTarget implementations may dispatch re-entrantly
@@ -503,21 +623,26 @@ class FileChangeSignal {
         });
     }
 
-    close() {
+    close(reason?: unknown) {
         if (this.closed) {
             return;
         }
         this.closed = true;
-        this.abortController.abort(new FileReadCancelledError());
+        this.closeReason = reason ?? new FileReadCancelledError();
+        this.abortController.abort(this.closeReason);
+        this.removeExternalAbort?.();
         this.events.removeEventListener("change", this.listener);
         for (const finish of [...this.waiters]) {
             finish(false);
         }
-        this.onClose?.();
+        this.onClose?.(this);
     }
 }
 
-const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
+// Existing TinyFile values up to 5 MB remain readable. New writes above the
+// hard 4 MiB aggregate transfer budget use the chunked representation so an
+// atomic TinyFile publication can never exceed that budget.
+const TINY_FILE_SIZE_LIMIT = 5 * 1e6;
 const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
 const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
@@ -529,13 +654,76 @@ const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_CHANGE_WAIT_FALLBACK_MS = 250;
 const LARGE_FILE_CHUNK_PUT_CONCURRENCY = 8;
 const LARGE_FILE_CHUNK_PUT_BYTE_LIMIT = 4 * 1024 * 1024;
+const LARGE_FILE_DOWNLOAD_BYTE_LIMIT =
+    LARGE_FILE_PERSISTED_READ_AHEAD * MAX_LARGE_FILE_SEGMENT_SIZE;
+const LARGE_FILE_DECODE_RESERVATION_BYTES = TINY_FILE_SIZE_LIMIT;
+const LARGE_FILE_DECODE_BATCH_LIMIT = Math.max(
+    1,
+    Math.floor(
+        LARGE_FILE_DOWNLOAD_BYTE_LIMIT / LARGE_FILE_DECODE_RESERVATION_BYTES
+    )
+);
+export const TINY_FILE_WRITE_SIZE_LIMIT_BYTES = Math.min(
+    TINY_FILE_SIZE_LIMIT,
+    LARGE_FILE_CHUNK_PUT_BYTE_LIMIT
+);
 const LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS = 5_000;
 const LARGE_FILE_MAX_CHUNK_ATTEMPT_TIMEOUT_MS = 45_000;
 const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS = 5_000;
 const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_SCALE_MIN_BYTES = 1 * 1024 * 1024;
 const LARGE_FILE_REMOTE_CHUNK_MIN_BYTES_PER_SECOND = 128 * 1024;
-const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
+const TINY_FILE_UPLOAD_SIZE_LIMIT_BIGINT = BigInt(
+    TINY_FILE_WRITE_SIZE_LIMIT_BYTES
+);
 const ADAPTIVE_SYNC_SIMPLE_ENTRY_BUDGET = 128;
+
+const shrinkTransferPermitToBytes = (
+    permit: TransferPermit,
+    retainedBytes: number
+) => {
+    if (
+        !Number.isSafeInteger(retainedBytes) ||
+        retainedBytes < 0 ||
+        retainedBytes > permit.bytes
+    ) {
+        throw new RangeError("Invalid retained transfer byte count");
+    }
+    const releasedBytes = permit.bytes - retainedBytes;
+    if (releasedBytes > 0) {
+        permit.release(0, releasedBytes);
+    }
+};
+
+const withPessimisticDecodeReservation = async <Value, Result>(
+    owner: FairTransferOwner,
+    signal: AbortSignal,
+    lane: TransferLane,
+    operation: () => PromiseLike<Value> | Value,
+    consume: (value: Value) => PromiseLike<Result> | Result,
+    cancellationLabel: string
+): Promise<Result> => {
+    const permit = await owner.acquire(
+        LARGE_FILE_DECODE_RESERVATION_BYTES,
+        lane
+    );
+    const original = Promise.resolve().then(operation);
+    let detached = false;
+    try {
+        const value = await raceWithSignal(original, signal, cancellationLabel);
+        throwIfAborted(signal, cancellationLabel);
+        return await consume(value);
+    } catch (error) {
+        if (signal.aborted) {
+            detached = true;
+            owner.detachLeaseUntilSettled(permit, original);
+        }
+        throw error;
+    } finally {
+        if (!detached) {
+            permit.release();
+        }
+    }
+};
 
 const getAdaptiveSyncPriority = (entry: { wallTime?: bigint | number }) => {
     const wallTime = Number(entry.wallTime);
@@ -566,108 +754,6 @@ const getChunkCount = (
     size: number | bigint,
     chunkSize = LARGE_FILE_SEGMENT_SIZE
 ) => Math.ceil(Number(size) / chunkSize);
-
-type InFlightWork = {
-    bytes: number;
-    promise: Promise<void>;
-};
-
-class BoundedAsyncWorkQueue {
-    private inFlight = new Set<InFlightWork>();
-    private inFlightBytes = 0;
-    private failed = false;
-    private failure: unknown;
-    private rejectFailureSignal!: (error: unknown) => void;
-    readonly failureSignal: Promise<never>;
-    peakCount = 0;
-    peakBytes = 0;
-
-    constructor(
-        readonly countLimit: number,
-        readonly byteLimit: number
-    ) {
-        this.failureSignal = new Promise<never>((_resolve, reject) => {
-            this.rejectFailureSignal = reject;
-        });
-        void this.failureSignal.catch(() => undefined);
-    }
-
-    private hasCapacity(bytes: number) {
-        return (
-            this.inFlight.size < this.countLimit &&
-            (this.inFlightBytes === 0 ||
-                this.inFlightBytes + bytes <= this.byteLimit)
-        );
-    }
-
-    throwIfFailed() {
-        if (this.failed) {
-            throw this.failure;
-        }
-    }
-
-    private async waitForCapacity(bytes: number) {
-        while (!this.hasCapacity(bytes)) {
-            this.throwIfFailed();
-            await Promise.race(
-                [...this.inFlight].map((work) =>
-                    work.promise.catch(() => undefined)
-                )
-            );
-        }
-        this.throwIfFailed();
-    }
-
-    async enqueue(bytes: number, task: () => Promise<void>) {
-        await this.waitForCapacity(bytes);
-        const work = {
-            bytes,
-            promise: Promise.resolve(),
-        } as InFlightWork;
-        this.inFlight.add(work);
-        this.inFlightBytes += bytes;
-        this.peakCount = Math.max(this.peakCount, this.inFlight.size);
-        this.peakBytes = Math.max(this.peakBytes, this.inFlightBytes);
-
-        let taskPromise: Promise<void>;
-        try {
-            // Invoke synchronously after reserving capacity so callers can copy
-            // reusable source buffers inside the reservation.
-            taskPromise = Promise.resolve(task());
-        } catch (error) {
-            taskPromise = Promise.reject(error);
-        }
-        work.promise = taskPromise
-            .catch((error) => {
-                if (!this.failed) {
-                    this.failed = true;
-                    this.failure = error;
-                    this.rejectFailureSignal(error);
-                }
-                throw error;
-            })
-            .finally(() => {
-                this.inFlight.delete(work);
-                this.inFlightBytes -= bytes;
-            });
-        // Callers intentionally do not await individual tasks. Attach a
-        // handler now while preserving the stored rejection for drain().
-        void work.promise.catch(() => undefined);
-    }
-
-    async settle() {
-        while (this.inFlight.size > 0) {
-            await Promise.allSettled(
-                [...this.inFlight].map((work) => work.promise)
-            );
-        }
-    }
-
-    async drain() {
-        await this.settle();
-        this.throwIfFailed();
-    }
-}
 
 const getChunkByteLength = (
     size: number | bigint,
@@ -731,69 +817,128 @@ const getContextHead = (value: unknown) =>
         : undefined;
 const isBlobLike = (value: Uint8Array | Blob): value is Blob =>
     typeof Blob !== "undefined" && value instanceof Blob;
-const readBlobChunk = async (blob: Blob, index: number, chunkSize: number) =>
-    new Uint8Array(
-        await blob
-            .slice(
-                getChunkStart(index, chunkSize),
-                getChunkEnd(index, blob.size, chunkSize)
-            )
-            .arrayBuffer()
-    );
-const readBlobSequentialChunks = async function* (
-    blob: Blob,
-    chunkSize: number
-): AsyncIterable<Uint8Array> {
+const createBlobChunkReader = (blob: Blob) => {
     if (typeof blob.stream !== "function") {
-        for (
-            let index = 0;
-            index < getChunkCount(blob.size, chunkSize);
-            index++
-        ) {
-            yield readBlobChunk(blob, index, chunkSize);
-        }
-        return;
-    }
-
-    const reader = blob.stream().getReader();
-    let pending = new Uint8Array(chunkSize);
-    let pendingOffset = 0;
-
-    try {
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                break;
-            }
-            if (!value || value.byteLength === 0) {
-                continue;
-            }
-
-            let offset = 0;
-            while (offset < value.byteLength) {
-                const available = chunkSize - pendingOffset;
-                const take = Math.min(available, value.byteLength - offset);
-                pending.set(
-                    value.subarray(offset, offset + take),
-                    pendingOffset
+        let offset = 0;
+        return {
+            read: async (expectedBytes: number) => {
+                const output = new Uint8Array(
+                    await blob
+                        .slice(offset, offset + expectedBytes)
+                        .arrayBuffer()
                 );
-                pendingOffset += take;
-                offset += take;
-
-                if (pendingOffset === chunkSize) {
-                    yield pending;
-                    pending = new Uint8Array(chunkSize);
-                    pendingOffset = 0;
+                if (output.byteLength !== expectedBytes) {
+                    throw new Error(
+                        `Blob ended after ${output.byteLength}/${expectedBytes} staged bytes`
+                    );
                 }
-            }
-        }
-
-        if (pendingOffset > 0) {
-            yield pending.slice(0, pendingOffset);
-        }
-    } finally {
-        reader.releaseLock();
+                offset += output.byteLength;
+                return output;
+            },
+            close: (_reason?: unknown) => undefined,
+        };
     }
+    const reader = blob.stream().getReader();
+    let buffered: Uint8Array | undefined;
+    let bufferedOffset = 0;
+    let readPending = false;
+    let released = false;
+    let closed = false;
+    let closeReason: unknown;
+    const releaseLock = () => {
+        if (released) {
+            return;
+        }
+        released = true;
+        try {
+            reader.releaseLock();
+        } catch {
+            // A cancellation may still be unwinding an in-flight read.
+        }
+    };
+
+    return {
+        read: async (expectedBytes: number) => {
+            if (closed) {
+                throw closeReason;
+            }
+            // addChunkedFile invokes this method only after reserving
+            // expectedBytes, so both this allocation and every copy into it
+            // are covered by the same permit later handed to the put task.
+            const output = new Uint8Array(expectedBytes);
+            let outputOffset = 0;
+            while (outputOffset < output.byteLength) {
+                if (buffered && bufferedOffset < buffered.byteLength) {
+                    const take = Math.min(
+                        buffered.byteLength - bufferedOffset,
+                        output.byteLength - outputOffset
+                    );
+                    output.set(
+                        buffered.subarray(
+                            bufferedOffset,
+                            bufferedOffset + take
+                        ),
+                        outputOffset
+                    );
+                    bufferedOffset += take;
+                    outputOffset += take;
+                    if (bufferedOffset === buffered.byteLength) {
+                        buffered = undefined;
+                        bufferedOffset = 0;
+                    }
+                    continue;
+                }
+
+                readPending = true;
+                let next: ReadableStreamReadResult<Uint8Array>;
+                try {
+                    next = await reader.read();
+                } finally {
+                    readPending = false;
+                }
+                if (closed) {
+                    throw closeReason;
+                }
+                if (next.done) {
+                    throw new Error(
+                        `Blob stream ended after ${outputOffset}/${expectedBytes} staged bytes`
+                    );
+                }
+                if (!(next.value instanceof Uint8Array)) {
+                    throw new Error(
+                        "Blob stream yielded a non-Uint8Array chunk"
+                    );
+                }
+                if (next.value.byteLength === 0) {
+                    continue;
+                }
+                buffered = next.value;
+                bufferedOffset = 0;
+            }
+            return output;
+        },
+        close: (reason?: unknown) => {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            closeReason =
+                reason ?? new TransferCancelledError("Blob reader closed");
+            buffered = undefined;
+            bufferedOffset = 0;
+            if (!readPending) {
+                releaseLock();
+                return;
+            }
+            try {
+                void Promise.resolve(reader.cancel(reason))
+                    .finally(releaseLock)
+                    .catch(() => undefined);
+            } catch {
+                releaseLock();
+            }
+        },
+    };
 };
 const ensureSourceSize = (actual: bigint, expected: bigint) => {
     if (actual !== expected) {
@@ -801,6 +946,51 @@ const ensureSourceSize = (actual: bigint, expected: bigint) => {
             `Source size changed during upload. Expected ${expected} bytes, got ${actual}`
         );
     }
+};
+
+type LargeFileChunkGeometry = {
+    id: string;
+    size: bigint;
+    chunkCount: number;
+};
+
+const validateLargeFileManifestGeometry = (file: LargeFileChunkGeometry) => {
+    if (!Number.isSafeInteger(file.chunkCount) || file.chunkCount < 0) {
+        throw new Error(`File ${file.id} has an invalid chunk count`);
+    }
+    if (file.size === 0n) {
+        if (file.chunkCount !== 0) {
+            throw new Error(`Empty file ${file.id} must not declare chunks`);
+        }
+        return;
+    }
+    if (file.chunkCount === 0 || BigInt(file.chunkCount) > file.size) {
+        throw new Error(
+            `File ${file.id} has an impossible size/chunk-count geometry`
+        );
+    }
+};
+
+const getLargeFileChunkReservationBytes = (file: LargeFileChunkGeometry) =>
+    Number(
+        file.size < BigInt(MAX_LARGE_FILE_SEGMENT_SIZE)
+            ? file.size
+            : BigInt(MAX_LARGE_FILE_SEGMENT_SIZE)
+    );
+
+const validateLargeFileChunkPayload = (
+    file: LargeFileChunkGeometry,
+    chunk: TinyFile,
+    index: number
+) => {
+    const actualBytes = chunk.file.byteLength;
+    const reservedBytes = getLargeFileChunkReservationBytes(file);
+    if (actualBytes <= 0 || actualBytes > reservedBytes) {
+        throw new Error(
+            `Chunk ${index + 1}/${file.chunkCount} for file ${file.id} has ${actualBytes} bytes, exceeding its ${reservedBytes}-byte transfer reservation`
+        );
+    }
+    return chunk;
 };
 
 @variant(0) // for versioning purposes
@@ -849,14 +1039,99 @@ export class TinyFile extends AbstractFile {
     }
 
     async *streamFile(
-        _files: Files,
+        files: Files,
         properties?: FileReadOptions
     ): AsyncIterable<Uint8Array> {
-        if (sha256Base64Sync(this.file) !== this.hash) {
-            throw new Error("Hash does not match the file content");
+        const internalProperties = properties as
+            | InternalFileReadOptions
+            | undefined;
+        const transferContext =
+            internalProperties?.[FILE_READ_TRANSFER_CONTEXT];
+        const inheritedTransfer = transferContext?.transfer;
+        const transfer =
+            inheritedTransfer ??
+            beginFileTransfer(
+                files,
+                "read",
+                properties?.signal,
+                properties?.transferId
+            );
+        const ownsTransfer = inheritedTransfer == null;
+        const diagnostics =
+            ownsTransfer || transferContext?.recordTinyDiagnostics
+                ? {
+                      transferId: transfer.id,
+                      fileId: this.id,
+                      fileName: this.name,
+                      sizeBytes: this.file.byteLength,
+                      startedAt: Date.now(),
+                      finishedAt: null as number | null,
+                      failureAt: null as number | null,
+                      failureMessage: null as string | null,
+                      aggregatePeakChunks: 0,
+                      aggregatePeakBytes: 0,
+                  }
+                : undefined;
+        if (diagnostics) {
+            recordReadDiagnostics(files, transfer.id, diagnostics);
         }
-        properties?.progress?.(1);
-        yield this.file;
+        let permit: TransferPermit | undefined;
+        let removeCancellationCleanup: (() => void) | undefined;
+        try {
+            transfer.owner.throwIfFailed();
+            if (this.file.byteLength > TINY_FILE_SIZE_LIMIT) {
+                throw new Error(
+                    `TinyFile ${this.id} exceeds the legacy ${TINY_FILE_SIZE_LIMIT}-byte payload limit`
+                );
+            }
+            if (sha256Base64Sync(this.file) !== this.hash) {
+                throw new Error("Hash does not match the file content");
+            }
+            if (!transferContext?.payloadPermitHeld) {
+                permit = await transfer.owner.acquire(
+                    this.file.byteLength,
+                    "local"
+                );
+                removeCancellationCleanup =
+                    transfer.owner.addCancellationCleanup(() => {
+                        if (!permit) {
+                            return;
+                        }
+                        transfer.owner.releaseLeaseAfterTasksSettle(permit);
+                        permit = undefined;
+                    });
+            }
+            transfer.owner.throwIfFailed();
+            properties?.progress?.(1);
+            transfer.readSuspended = true;
+            try {
+                yield this.file;
+            } finally {
+                transfer.readSuspended = false;
+            }
+            transfer.owner.throwIfFailed();
+            if (diagnostics) {
+                diagnostics.finishedAt = Date.now();
+            }
+        } catch (error) {
+            if (diagnostics) {
+                diagnostics.failureAt = Date.now();
+                diagnostics.failureMessage = getErrorMessage(error);
+            }
+            throw error;
+        } finally {
+            removeCancellationCleanup?.();
+            permit?.release();
+            if (diagnostics) {
+                const snapshot =
+                    getFileTransferRuntime(files).downloadScheduler.snapshot;
+                diagnostics.aggregatePeakChunks = snapshot.peakCount;
+                diagnostics.aggregatePeakBytes = snapshot.peakBytes;
+            }
+            if (ownsTransfer) {
+                await transfer.finish();
+            }
+        }
     }
 
     async delete(): Promise<void> {}
@@ -949,7 +1224,11 @@ export class LargeFile extends AbstractFile {
             ) {
                 const changeVersion = changeSignal.snapshot();
                 const before = chunks.size;
-                const remoteFrom = await files.getReadPeerHints();
+                const remoteFrom = await raceWithSignal(
+                    files.getReadPeerHints(),
+                    changeSignal.abortSignal,
+                    "File read cancelled"
+                );
                 changeSignal.throwIfClosed();
                 const results = await files.files.index.search(
                     new SearchRequest({
@@ -1012,6 +1291,13 @@ export class LargeFile extends AbstractFile {
             timeout?: number;
             debug?: Record<string, any>;
             persist: boolean;
+            decodeGuard: {
+                run<Value>(
+                    operation: () => PromiseLike<Value> | Value,
+                    cancellationLabel: string
+                ): Promise<Value>;
+                settle(retainedBytes: number): void;
+            };
         }
     ): Promise<TinyFile> {
         const totalTimeout =
@@ -1039,17 +1325,23 @@ export class LargeFile extends AbstractFile {
         const materializeLocalChunk = async (
             resolvedBy: string
         ): Promise<TinyFile | undefined> => {
-            const chunk = await files.files.index.get(chunkId, {
-                local: true,
-                remote: false,
-                signal: changeSignal.abortSignal,
-            });
+            const chunk = await properties.decodeGuard.run(
+                () =>
+                    files.files.index.get(chunkId, {
+                        local: true,
+                        remote: false,
+                        signal: changeSignal.abortSignal,
+                    }),
+                "Local chunk lookup cancelled"
+            );
             changeSignal.throwIfClosed();
             if (
                 chunk instanceof TinyFile &&
                 chunk.parentId === this.id &&
                 chunk.index === index
             ) {
+                validateLargeFileChunkPayload(this, chunk, index);
+                properties.decodeGuard.settle(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
                 if (properties.persist) {
                     files.retainResolvedChunk(chunk, properties.persist);
@@ -1068,39 +1360,43 @@ export class LargeFile extends AbstractFile {
                 ((properties.debug.chunkIndexedSearches ||= {})[index] =
                     ((properties.debug.chunkIndexedSearches ||= {})[index] ??
                         0) + 1);
-            const chunks = await files.files.index.search(
-                new SearchRequest({
-                    query: [
-                        new StringMatch({
-                            key: "parentId",
-                            value: this.id,
-                            caseInsensitive: false,
-                            method: StringMatchMethod.exact,
+            const chunks = await properties.decodeGuard.run(
+                () =>
+                    files.files.index.search(
+                        new SearchRequest({
+                            query: [
+                                new StringMatch({
+                                    key: "parentId",
+                                    value: this.id,
+                                    caseInsensitive: false,
+                                    method: StringMatchMethod.exact,
+                                }),
+                                new StringMatch({
+                                    key: "name",
+                                    value: `${this.name}/${index}`,
+                                    caseInsensitive: false,
+                                    method: StringMatchMethod.exact,
+                                }),
+                            ],
+                            fetch: 1,
                         }),
-                        new StringMatch({
-                            key: "name",
-                            value: `${this.name}/${index}`,
-                            caseInsensitive: false,
-                            method: StringMatchMethod.exact,
-                        }),
-                    ],
-                    fetch: 1,
-                }),
-                {
-                    local: true,
-                    signal: changeSignal.abortSignal,
-                    remote: {
-                        timeout,
-                        // Legacy chunk ids are resolved by parent/name. Once a
-                        // persisted local row materializes, do not keep waiting
-                        // on an unavailable writer during offline rereads.
-                        strategy: "fallback" as any,
-                        throwOnMissing: false,
-                        retryMissingResponses: false,
-                        replicate: properties.persist,
-                        from: remoteFrom,
-                    },
-                } as any
+                        {
+                            local: true,
+                            signal: changeSignal.abortSignal,
+                            remote: {
+                                timeout,
+                                // Legacy chunk ids are resolved by parent/name. Once a
+                                // persisted local row materializes, do not keep waiting
+                                // on an unavailable writer during offline rereads.
+                                strategy: "fallback" as any,
+                                throwOnMissing: false,
+                                retryMissingResponses: false,
+                                replicate: properties.persist,
+                                from: remoteFrom,
+                            },
+                        } as any
+                    ),
+                "Indexed chunk lookup cancelled"
             );
             changeSignal.throwIfClosed();
             const chunk = (chunks as unknown[]).find(
@@ -1110,6 +1406,8 @@ export class LargeFile extends AbstractFile {
                     candidate.index === index
             );
             if (chunk) {
+                validateLargeFileChunkPayload(this, chunk, index);
+                properties.decodeGuard.settle(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
                 if (properties.persist) {
                     files.retainResolvedChunk(chunk, properties.persist);
@@ -1128,35 +1426,39 @@ export class LargeFile extends AbstractFile {
                 ((properties.debug.chunkResolvedSearches ||= {})[index] =
                     ((properties.debug.chunkResolvedSearches ||= {})[index] ??
                         0) + 1);
-            const chunks = await files.files.index.search(
-                new SearchRequest({
-                    query: [
-                        new StringMatch({
-                            key: "parentId",
-                            value: this.id,
-                            caseInsensitive: false,
-                            method: StringMatchMethod.exact,
+            const chunks = await properties.decodeGuard.run(
+                () =>
+                    files.files.index.search(
+                        new SearchRequest({
+                            query: [
+                                new StringMatch({
+                                    key: "parentId",
+                                    value: this.id,
+                                    caseInsensitive: false,
+                                    method: StringMatchMethod.exact,
+                                }),
+                                new StringMatch({
+                                    key: "name",
+                                    value: `${this.name}/${index}`,
+                                    caseInsensitive: false,
+                                    method: StringMatchMethod.exact,
+                                }),
+                            ],
+                            fetch: 1,
                         }),
-                        new StringMatch({
-                            key: "name",
-                            value: `${this.name}/${index}`,
-                            caseInsensitive: false,
-                            method: StringMatchMethod.exact,
-                        }),
-                    ],
-                    fetch: 1,
-                }),
-                {
-                    local: false,
-                    signal: changeSignal.abortSignal,
-                    remote: {
-                        timeout,
-                        throwOnMissing: false,
-                        retryMissingResponses: false,
-                        replicate: false,
-                        from: remoteFrom,
-                    },
-                } as any
+                        {
+                            local: false,
+                            signal: changeSignal.abortSignal,
+                            remote: {
+                                timeout,
+                                throwOnMissing: false,
+                                retryMissingResponses: false,
+                                replicate: false,
+                                from: remoteFrom,
+                            },
+                        } as any
+                    ),
+                "Resolved chunk lookup cancelled"
             );
             changeSignal.throwIfClosed();
             const chunk = (chunks as unknown[]).find(
@@ -1166,6 +1468,8 @@ export class LargeFile extends AbstractFile {
                     candidate.index === index
             );
             if (chunk) {
+                validateLargeFileChunkPayload(this, chunk, index);
+                properties.decodeGuard.settle(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
                 if (properties.persist) {
                     files.retainResolvedChunk(chunk, properties.persist);
@@ -1181,21 +1485,25 @@ export class LargeFile extends AbstractFile {
             replicate: boolean,
             timeout: number
         ): Promise<TinyFile | undefined> => {
-            const chunk = await files.files.index.get(chunkId, {
-                local: true,
-                signal: changeSignal.abortSignal,
-                remote: {
-                    timeout,
-                    // Exact chunk reads must still ask the hinted remote when
-                    // a local indexed row exists but its payload blocks are no
-                    // longer materializable locally.
-                    strategy: "always" as any,
-                    throwOnMissing: false,
-                    retryMissingResponses: false,
-                    replicate,
-                    from: remoteFrom,
-                },
-            });
+            const chunk = await properties.decodeGuard.run(
+                () =>
+                    files.files.index.get(chunkId, {
+                        local: true,
+                        signal: changeSignal.abortSignal,
+                        remote: {
+                            timeout,
+                            // Exact chunk reads must still ask the hinted remote when
+                            // a local indexed row exists but its payload blocks are no
+                            // longer materializable locally.
+                            strategy: "always" as any,
+                            throwOnMissing: false,
+                            retryMissingResponses: false,
+                            replicate,
+                            from: remoteFrom,
+                        },
+                    }),
+                "Direct chunk lookup cancelled"
+            );
             changeSignal.throwIfClosed();
 
             if (
@@ -1203,6 +1511,8 @@ export class LargeFile extends AbstractFile {
                 chunk.parentId === this.id &&
                 chunk.index === index
             ) {
+                validateLargeFileChunkPayload(this, chunk, index);
+                properties.decodeGuard.settle(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
                 if (properties.persist) {
                     files.retainResolvedChunk(chunk, properties.persist);
@@ -1230,16 +1540,20 @@ export class LargeFile extends AbstractFile {
             properties?.debug &&
                 ((properties.debug.chunkManifestHeads ||= {})[index] = head);
 
-            const entry = await files.files.log.log.get(head, {
-                remote: {
-                    timeout,
-                    throwOnMissing: false,
-                    retryMissingResponses: false,
-                    replicate: properties.persist,
-                    from: remoteFrom,
-                    signal: changeSignal.abortSignal,
-                } as any,
-            });
+            const entry = await properties.decodeGuard.run(
+                () =>
+                    files.files.log.log.get(head, {
+                        remote: {
+                            timeout,
+                            throwOnMissing: false,
+                            retryMissingResponses: false,
+                            replicate: properties.persist,
+                            from: remoteFrom,
+                            signal: changeSignal.abortSignal,
+                        } as any,
+                    }),
+                "Manifest-head chunk lookup cancelled"
+            );
             changeSignal.throwIfClosed();
             if (!entry) {
                 properties?.debug &&
@@ -1250,7 +1564,10 @@ export class LargeFile extends AbstractFile {
                 return;
             }
 
-            const operation = await entry.getPayloadValue();
+            const operation = await properties.decodeGuard.run(
+                () => entry.getPayloadValue(),
+                "Manifest-head payload decode cancelled"
+            );
             changeSignal.throwIfClosed();
             if (!isPutOperation(operation)) {
                 return;
@@ -1263,6 +1580,8 @@ export class LargeFile extends AbstractFile {
                 chunk.parentId === this.id &&
                 chunk.index === index
             ) {
+                validateLargeFileChunkPayload(this, chunk, index);
+                properties.decodeGuard.settle(chunk.file.byteLength);
                 if (properties.persist) {
                     files.retainChunkEntryHead(head, this.id, chunk.id);
                 }
@@ -1346,7 +1665,11 @@ export class LargeFile extends AbstractFile {
                     ((properties.debug.chunkRetryableErrors ||= {})[index] =
                         getErrorMessage(error));
             }
-            const candidateReadPeerHints = await files.getReadPeerHints();
+            const candidateReadPeerHints = await raceWithSignal(
+                files.getReadPeerHints(),
+                changeSignal.abortSignal,
+                "File read cancelled"
+            );
             changeSignal.throwIfClosed();
             if (candidateReadPeerHints) {
                 readContext.lastReadPeerHints = candidateReadPeerHints;
@@ -1537,7 +1860,11 @@ export class LargeFile extends AbstractFile {
                 const sourceHints =
                     remoteFrom ??
                     readContext.lastReadPeerHints ??
-                    (await files.getReadPeerHints());
+                    (await raceWithSignal(
+                        files.getReadPeerHints(),
+                        changeSignal.abortSignal,
+                        "File read cancelled"
+                    ));
                 changeSignal.throwIfClosed();
                 const remoteSources = sourceHints
                     ? [undefined, sourceHints]
@@ -1650,7 +1977,8 @@ export class LargeFile extends AbstractFile {
         }
 
         const changeSignal = files.createFileChangeSignal(
-            (file) => file.id === this.id
+            (file) => file.id === this.id,
+            properties.signal
         );
         try {
             return await this.waitUntilReadyWithSignal(
@@ -1678,7 +2006,11 @@ export class LargeFile extends AbstractFile {
         while (!changeSignal.isClosed && Date.now() < deadline) {
             const changeVersion = changeSignal.snapshot();
             debug.waitUntilReadyAttempts += 1;
-            const remoteFrom = await files.getReadPeerHints();
+            const remoteFrom = await raceWithSignal(
+                files.getReadPeerHints(),
+                changeSignal.abortSignal,
+                "File read cancelled"
+            );
             changeSignal.throwIfClosed();
             const request = new SearchRequest({
                 query: new StringMatch({
@@ -1687,7 +2019,7 @@ export class LargeFile extends AbstractFile {
                     caseInsensitive: false,
                     method: StringMatchMethod.exact,
                 }),
-                fetch: 0xffffffff,
+                fetch: 1,
             });
             const pickLatest = (matches: AbstractFile[]) => {
                 const largeMatches = matches.filter(isLargeFileLike);
@@ -1707,13 +2039,20 @@ export class LargeFile extends AbstractFile {
                 (file as any).chunkEntryHeads.some(
                     (head: unknown) => typeof head === "string"
                 );
-            const localMatches = await files.files.index.search(request, {
-                local: true,
-                remote: false,
-                signal: changeSignal.abortSignal,
-            } as any);
+            const localLatest = await withPessimisticDecodeReservation(
+                properties.owner,
+                changeSignal.abortSignal,
+                "local",
+                () =>
+                    files.files.index.search(request, {
+                        local: true,
+                        remote: false,
+                        signal: changeSignal.abortSignal,
+                    } as any),
+                pickLatest,
+                "File readiness lookup cancelled"
+            );
             changeSignal.throwIfClosed();
-            const localLatest = pickLatest(localMatches);
             const thisCandidate = toReadableLargeFile(this) ?? this;
             const localCandidate = toReadableLargeFile(localLatest);
             const readinessCandidate =
@@ -1750,21 +2089,29 @@ export class LargeFile extends AbstractFile {
                 const remaining = attemptDeadline - Date.now();
                 return remaining > 0 ? Math.max(1, Math.floor(remaining)) : 0;
             };
-            let remoteMatches: AbstractFile[] = [];
+            let remoteLatest: AbstractFile | undefined;
             const remoteSearchTimeout = getRemainingAttemptTimeout();
             if (remoteSearchTimeout > 0) {
                 try {
-                    remoteMatches = await files.files.index.search(request, {
-                        local: false,
-                        signal: changeSignal.abortSignal,
-                        remote: {
-                            timeout: remoteSearchTimeout,
-                            throwOnMissing: false,
-                            retryMissingResponses: true,
-                            replicate: properties.persist,
-                            from: remoteFrom,
-                        },
-                    } as any);
+                    remoteLatest = await withPessimisticDecodeReservation(
+                        properties.owner,
+                        changeSignal.abortSignal,
+                        "remote",
+                        () =>
+                            files.files.index.search(request, {
+                                local: false,
+                                signal: changeSignal.abortSignal,
+                                remote: {
+                                    timeout: remoteSearchTimeout,
+                                    throwOnMissing: false,
+                                    retryMissingResponses: true,
+                                    replicate: properties.persist,
+                                    from: remoteFrom,
+                                },
+                            } as any),
+                        pickLatest,
+                        "File readiness lookup cancelled"
+                    );
                     changeSignal.throwIfClosed();
                 } catch (error) {
                     changeSignal.throwIfClosed();
@@ -1775,7 +2122,6 @@ export class LargeFile extends AbstractFile {
                     }
                 }
             }
-            const remoteLatest = pickLatest(remoteMatches);
             let remoteReady = toReadableLargeFile(remoteLatest);
             if (debug?.lastReadyProbe && isLargeFileLike(remoteLatest)) {
                 debug.lastReadyProbe.ready = remoteLatest.ready;
@@ -1790,27 +2136,28 @@ export class LargeFile extends AbstractFile {
             const directGetTimeout = getRemainingAttemptTimeout();
             if (directGetTimeout > 0) {
                 try {
-                    const directRemote = await files.files.index.get(this.id, {
-                        local: false,
-                        signal: changeSignal.abortSignal,
-                        remote: {
-                            timeout: directGetTimeout,
-                            strategy: "always" as any,
-                            throwOnMissing: false,
-                            retryMissingResponses: true,
-                            replicate: properties.persist,
-                            from: remoteFrom,
-                        },
-                    });
+                    const directReady = await withPessimisticDecodeReservation(
+                        properties.owner,
+                        changeSignal.abortSignal,
+                        "remote",
+                        () =>
+                            files.files.index.get(this.id, {
+                                local: false,
+                                signal: changeSignal.abortSignal,
+                                remote: {
+                                    timeout: directGetTimeout,
+                                    strategy: "always" as any,
+                                    throwOnMissing: false,
+                                    retryMissingResponses: true,
+                                    replicate: properties.persist,
+                                    from: remoteFrom,
+                                },
+                            }),
+                        toReadableLargeFile,
+                        "File readiness lookup cancelled"
+                    );
                     changeSignal.throwIfClosed();
-                    const directReady = toReadableLargeFile(directRemote);
                     const directReadySource = "ready-manifest-get";
-                    if (
-                        debug?.lastReadyProbe &&
-                        isLargeFileLike(directRemote)
-                    ) {
-                        debug.lastReadyProbe.ready = directRemote.ready;
-                    }
                     if (debug?.lastReadyProbe && directReady) {
                         debug.lastReadyProbe.ready = directReady.ready;
                     }
@@ -1844,9 +2191,11 @@ export class LargeFile extends AbstractFile {
                     hasChunkEntryHeads(remoteReady))
                     ? remoteReady
                     : readinessCandidate;
-            const localChunkIndexRowCount = await files
-                .countLocalChunks(countCandidate)
-                .catch(() => 0);
+            const localChunkIndexRowCount = await raceWithSignal(
+                files.countLocalChunks(countCandidate).catch(() => 0),
+                changeSignal.abortSignal,
+                "File readiness lookup cancelled"
+            );
             changeSignal.throwIfClosed();
             if (debug?.lastReadyProbe) {
                 debug.lastReadyProbe.localChunkIndexRowCount =
@@ -1881,15 +2230,33 @@ export class LargeFile extends AbstractFile {
         files: Files,
         properties?: FileReadOptions
     ): AsyncIterable<Uint8Array> {
+        const internalProperties = properties as
+            | InternalFileReadOptions
+            | undefined;
+        const inheritedTransfer =
+            internalProperties?.[FILE_READ_TRANSFER_CONTEXT]?.transfer;
+        const transfer =
+            inheritedTransfer ??
+            beginFileTransfer(
+                files,
+                "read",
+                properties?.signal,
+                properties?.transferId
+            );
+        const ownsTransfer = inheritedTransfer == null;
         // Keep one immutable read policy for the entire stream. Role changes can
         // update the program default concurrently, but must not switch an
         // in-flight read between persisted and non-persisted scheduling paths.
         const persistChunkReads = files.persistChunkReads;
         const effectiveProperties: EffectiveFileReadOptions = {
             ...properties,
+            signal: transfer.owner.signal,
+            transferId: transfer.id,
             persist: persistChunkReads,
+            owner: transfer.owner,
         };
         const debug = {
+            transferId: transfer.id,
             fileId: this.id,
             fileName: this.name,
             persistChunkReads,
@@ -1980,235 +2347,352 @@ export class LargeFile extends AbstractFile {
                 type: string;
                 message: string;
             } | null,
+            failureAt: null as number | null,
+            failureMessage: null as string | null,
+            aggregatePeakChunks: 0,
+            aggregatePeakBytes: 0,
         };
-        const diagnosticsContext = (
-            properties as InternalFileReadOptions | undefined
-        )?.[FILE_READ_DIAGNOSTICS_CONTEXT];
+        const diagnosticsContext =
+            internalProperties?.[FILE_READ_DIAGNOSTICS_CONTEXT];
         if (diagnosticsContext) {
             diagnosticsContext.diagnostics = debug;
         }
-        files.lastReadDiagnostics = debug;
-        if (persistChunkReads) {
-            files.retainFileRead(this);
-        }
-        const resolvedFile = await this.waitUntilReady(
-            files,
-            effectiveProperties,
-            debug
-        );
-        debug.waitUntilReadyResolvedAt = Date.now();
-        debug.waitUntilReadyResolvedReady = resolvedFile.ready;
-        if (persistChunkReads) {
-            files.retainFileRead(resolvedFile);
-        }
-
-        properties?.progress?.(0);
-
-        let processed = 0n;
-        const hasher = resolvedFile.finalHash ? new SHA256() : undefined;
-        const knownChunks = new Map<number, TinyFile>();
-        const readContext: ChunkReadContext = {
-            fileChangeSignals: new Set(),
-        };
-        const initialReadPeerHints = await files.getReadPeerHints();
-        if (initialReadPeerHints) {
-            readContext.lastReadPeerHints = initialReadPeerHints;
-            debug.initialReadPeerHints = initialReadPeerHints;
-        }
-        if (persistChunkReads) {
-            const [
-                initialLocalChunkIndexRowCount,
-                initialLocalChunkBlockCount,
-            ] = await Promise.all([
-                files.countLocalChunks(resolvedFile).catch(() => null),
-                files.countLocalChunkBlocks(resolvedFile).catch(() => null),
-            ]);
-            debug.initialLocalChunkIndexRowCount =
-                initialLocalChunkIndexRowCount;
-            debug.initialLocalChunkCount = initialLocalChunkIndexRowCount;
-            debug.initialLocalChunkBlockCount =
-                initialLocalChunkBlockCount ?? null;
-        }
-        const remoteReadAheadLimit = getRemotePersistedReadAheadLimit(
-            resolvedFile.size,
-            resolvedFile.chunkCount
-        );
-        const localReadAheadLimit = Math.min(
-            resolvedFile.chunkCount,
-            LARGE_FILE_PERSISTED_READ_AHEAD
-        );
-        const manifestChunkEntryHeads = (
-            resolvedFile as { chunkEntryHeads?: unknown }
-        ).chunkEntryHeads;
-        const hasCompleteChunkEntryHeads =
-            Array.isArray(manifestChunkEntryHeads) &&
-            manifestChunkEntryHeads.length === resolvedFile.chunkCount &&
-            manifestChunkEntryHeads.every(
-                (head: unknown) => typeof head === "string"
+        recordReadDiagnostics(files, transfer.id, debug);
+        try {
+            if (persistChunkReads) {
+                files.retainFileRead(this);
+            }
+            const resolvedFile = await transfer.owner.track(
+                this.waitUntilReady(files, effectiveProperties, debug)
             );
-        let isRemotePersistedRead =
-            persistChunkReads &&
-            debug.initialLocalChunkBlockCount !== resolvedFile.chunkCount &&
-            (debug.initialLocalChunkIndexRowCount == null ||
-                debug.initialLocalChunkIndexRowCount < resolvedFile.chunkCount);
-        let isAdaptiveRemoteRead = !persistChunkReads || isRemotePersistedRead;
-        let readAheadLimit = isAdaptiveRemoteRead
-            ? remoteReadAheadLimit
-            : localReadAheadLimit;
-        // A count can be stale when local index rows outlive their payloads.
-        // Probe a small exact batch before granting the 32-chunk local window.
-        let localReadAheadVerified =
-            !persistChunkReads || isRemotePersistedRead;
-        let usesLegacyLocalChunkIds = false;
-        let readAhead = isAdaptiveRemoteRead
-            ? Math.min(
-                  resolvedFile.chunkCount,
-                  persistChunkReads
-                      ? hasCompleteChunkEntryHeads
-                          ? readAheadLimit
-                          : REMOTE_PERSISTED_READ_AHEAD_MIN
-                      : LARGE_FILE_OBSERVER_READ_AHEAD,
-                  readAheadLimit
-              )
-            : Math.min(
-                  resolvedFile.chunkCount,
-                  REMOTE_PERSISTED_READ_AHEAD_MIN,
-                  readAheadLimit
-              );
-        const batchPromisesByIndex = new Map<number, Promise<void>>();
-        const batchAttemptedIndices = new Set<number>();
-        const intentionallySkippedBatchIndices = new Set<number>();
-        const skipPersistedRemoteBatch = (indices: number[]) => {
-            debug.chunkPersistedRemoteBatchSkipCount += 1;
-            debug.chunkPersistedRemoteBatchSkippedIndexCount += indices.length;
-            for (const index of indices) {
-                intentionallySkippedBatchIndices.add(index);
+            debug.waitUntilReadyResolvedAt = Date.now();
+            debug.waitUntilReadyResolvedReady = resolvedFile.ready;
+            validateLargeFileManifestGeometry(resolvedFile);
+            if (persistChunkReads) {
+                files.retainFileRead(resolvedFile);
             }
-        };
-        const reclassifyAsRemotePersistedRead = () => {
-            if (!persistChunkReads || isRemotePersistedRead) {
-                return;
-            }
-            isRemotePersistedRead = true;
-            isAdaptiveRemoteRead = true;
-            localReadAheadVerified = false;
-            readAheadLimit = remoteReadAheadLimit;
-            readAhead = hasCompleteChunkEntryHeads
-                ? readAheadLimit
-                : Math.min(readAhead, readAheadLimit);
-            debug.chunkBatchRemoteReclassificationCount += 1;
-            debug.readAhead = readAhead;
-            debug.readAheadLimit = readAheadLimit;
-            debug.readAheadSource = "persisted-remote-adaptive";
-        };
-        const verifyLocalReadAhead = () => {
-            if (
-                !persistChunkReads ||
-                isRemotePersistedRead ||
-                localReadAheadVerified
-            ) {
-                return;
-            }
-            localReadAheadVerified = true;
-            readAheadLimit = localReadAheadLimit;
-            readAhead = readAheadLimit;
-            debug.readAhead = readAhead;
-            debug.readAheadLimit = readAheadLimit;
-            debug.readAheadPeak = Math.max(debug.readAheadPeak, readAhead);
-        };
-        const updateKnownChunkPeak = () => {
-            debug.peakKnownChunkCount = Math.max(
-                debug.peakKnownChunkCount,
-                knownChunks.size
+
+            properties?.progress?.(0);
+
+            let processed = 0n;
+            const hasher = resolvedFile.finalHash ? new SHA256() : undefined;
+            const knownChunks = new Map<number, TinyFile>();
+            const readContext: ChunkReadContext = {
+                fileChangeSignals: new Set(),
+            };
+            const initialReadPeerHints = await transfer.owner.track(
+                raceWithSignal(
+                    files.getReadPeerHints(),
+                    transfer.owner.signal,
+                    "File read cancelled"
+                )
             );
-        };
-        let manifestHeadBatchDisabled = false;
-        const disableManifestHeadBatch = (reason: string) => {
-            manifestHeadBatchDisabled = true;
-            debug.chunkManifestHeadBatchDisabled = true;
-            debug.chunkManifestHeadBatchDisabledReason ??= reason;
-        };
-        type ManifestHeadEntry =
-            | {
-                  getPayloadValue: () => Promise<Operation>;
-              }
-            | undefined;
-        type ManifestHeadRemote =
-            | false
-            | {
-                  timeout: number;
-                  replicate: true;
-                  from: string[] | undefined;
-                  signal: AbortSignal;
-              };
-        const readManifestHeadEntries = async (
-            heads: string[],
-            remote: ManifestHeadRemote,
-            changeSignal: FileChangeSignal
-        ): Promise<ManifestHeadEntry[]> => {
-            const signal = changeSignal.abortSignal;
-            const abortableRead = (
-                read: () => Promise<ManifestHeadEntry[]> | ManifestHeadEntry[]
-            ) =>
-                new Promise<ManifestHeadEntry[]>((resolve, reject) => {
-                    let settled = false;
-                    const finish = (settle: () => void) => {
-                        if (settled) {
-                            return;
-                        }
-                        settled = true;
-                        signal.removeEventListener("abort", abort);
-                        settle();
-                    };
-                    const abort = () =>
-                        finish(() =>
-                            reject(
-                                signal.reason ?? new FileReadCancelledError()
-                            )
-                        );
-
-                    signal.addEventListener("abort", abort, { once: true });
-                    if (signal.aborted) {
-                        abort();
-                        return;
-                    }
-
-                    try {
-                        Promise.resolve(read()).then(
-                            (entries) => finish(() => resolve(entries)),
-                            (error) => finish(() => reject(error))
-                        );
-                    } catch (error) {
-                        finish(() => reject(error));
-                    }
-                });
-            const log = files.files.log.log as any;
-            if (typeof log.getMany === "function") {
-                return abortableRead(() =>
-                    log.getMany(heads, { remote, signal })
+            if (initialReadPeerHints) {
+                readContext.lastReadPeerHints = initialReadPeerHints;
+                debug.initialReadPeerHints = initialReadPeerHints;
+            }
+            if (persistChunkReads) {
+                const [
+                    initialLocalChunkIndexRowCount,
+                    initialLocalChunkBlockCount,
+                ] = await transfer.owner.track(
+                    raceWithSignal(
+                        Promise.all([
+                            files
+                                .countLocalChunks(resolvedFile)
+                                .catch(() => null),
+                            files
+                                .countLocalChunkBlocks(resolvedFile)
+                                .catch(() => null),
+                        ]),
+                        transfer.owner.signal,
+                        "File read cancelled"
+                    )
                 );
+                debug.initialLocalChunkIndexRowCount =
+                    initialLocalChunkIndexRowCount;
+                debug.initialLocalChunkCount = initialLocalChunkIndexRowCount;
+                debug.initialLocalChunkBlockCount =
+                    initialLocalChunkBlockCount ?? null;
             }
+            const remoteReadAheadLimit = getRemotePersistedReadAheadLimit(
+                resolvedFile.size,
+                resolvedFile.chunkCount
+            );
+            const localReadAheadLimit = Math.min(
+                resolvedFile.chunkCount,
+                LARGE_FILE_PERSISTED_READ_AHEAD
+            );
+            const manifestChunkEntryHeads = (
+                resolvedFile as { chunkEntryHeads?: unknown }
+            ).chunkEntryHeads;
+            const hasCompleteChunkEntryHeads =
+                Array.isArray(manifestChunkEntryHeads) &&
+                manifestChunkEntryHeads.length === resolvedFile.chunkCount &&
+                manifestChunkEntryHeads.every(
+                    (head: unknown) => typeof head === "string"
+                );
+            let isRemotePersistedRead =
+                persistChunkReads &&
+                debug.initialLocalChunkBlockCount !== resolvedFile.chunkCount &&
+                (debug.initialLocalChunkIndexRowCount == null ||
+                    debug.initialLocalChunkIndexRowCount <
+                        resolvedFile.chunkCount);
+            let isAdaptiveRemoteRead =
+                !persistChunkReads || isRemotePersistedRead;
+            let readAheadLimit = isAdaptiveRemoteRead
+                ? remoteReadAheadLimit
+                : localReadAheadLimit;
+            // A count can be stale when local index rows outlive their payloads.
+            // Probe a small exact batch before granting the 32-chunk local window.
+            let localReadAheadVerified =
+                !persistChunkReads || isRemotePersistedRead;
+            let usesLegacyLocalChunkIds = false;
+            let readAhead = isAdaptiveRemoteRead
+                ? Math.min(
+                      resolvedFile.chunkCount,
+                      persistChunkReads
+                          ? hasCompleteChunkEntryHeads
+                              ? readAheadLimit
+                              : REMOTE_PERSISTED_READ_AHEAD_MIN
+                          : LARGE_FILE_OBSERVER_READ_AHEAD,
+                      readAheadLimit
+                  )
+                : Math.min(
+                      resolvedFile.chunkCount,
+                      REMOTE_PERSISTED_READ_AHEAD_MIN,
+                      readAheadLimit
+                  );
+            const batchPromisesByIndex = new Map<number, Promise<void>>();
+            const batchAttemptedIndices = new Set<number>();
+            const intentionallySkippedBatchIndices = new Set<number>();
+            type ScheduledChunk = {
+                chunkFile: TinyFile;
+                permit: TransferPermit;
+            };
+            const inFlightChunks = new Map<number, Promise<ScheduledChunk>>();
+            const chunkPermitsByIndex = new Map<number, TransferPermit>();
+            const decodeOperationsByIndex = new Map<
+                number,
+                Set<Promise<unknown>>
+            >();
+            let readGenerationActive = true;
+            let suspendedPayload: Uint8Array | undefined;
+            const throwIfReadGenerationInactive = () => {
+                if (!readGenerationActive) {
+                    throw getAbortReason(transfer.owner.signal);
+                }
+                transfer.owner.throwIfFailed();
+            };
+            const releaseChunkPermit = (index: number) => {
+                chunkPermitsByIndex.get(index)?.release();
+                chunkPermitsByIndex.delete(index);
+            };
+            const settleChunkPermit = (
+                index: number,
+                retainedBytes: number
+            ) => {
+                const permit = chunkPermitsByIndex.get(index);
+                if (!permit) {
+                    throw new Error(
+                        `Missing decode reservation for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                    );
+                }
+                shrinkTransferPermitToBytes(permit, retainedBytes);
+            };
+            const detachChunkPermitUntilSettled = (
+                index: number,
+                operation: PromiseLike<unknown> | unknown
+            ) => {
+                const permit = chunkPermitsByIndex.get(index);
+                if (!permit) {
+                    return;
+                }
+                chunkPermitsByIndex.delete(index);
+                transfer.owner.detachLeaseUntilSettled(permit, operation);
+            };
+            const runChunkDecodeOperation = async <Value>(
+                indices: number[],
+                changeSignal: FileChangeSignal,
+                operation: () => PromiseLike<Value> | Value,
+                cancellationLabel: string
+            ): Promise<Value> => {
+                throwIfReadGenerationInactive();
+                changeSignal.throwIfClosed();
+                for (const index of indices) {
+                    if (!chunkPermitsByIndex.has(index)) {
+                        throw new Error(
+                            `Missing pessimistic decode reservation for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                        );
+                    }
+                }
+                const original = Promise.resolve().then(operation);
+                for (const index of indices) {
+                    let operations = decodeOperationsByIndex.get(index);
+                    if (!operations) {
+                        operations = new Set();
+                        decodeOperationsByIndex.set(index, operations);
+                    }
+                    operations.add(original);
+                }
+                try {
+                    const value = await raceWithSignal(
+                        original,
+                        changeSignal.abortSignal,
+                        cancellationLabel
+                    );
+                    throwIfReadGenerationInactive();
+                    changeSignal.throwIfClosed();
+                    return value;
+                } catch (error) {
+                    if (
+                        !readGenerationActive ||
+                        changeSignal.abortSignal.aborted
+                    ) {
+                        for (const index of indices) {
+                            detachChunkPermitUntilSettled(index, original);
+                        }
+                    }
+                    throw error;
+                } finally {
+                    for (const index of indices) {
+                        const operations = decodeOperationsByIndex.get(index);
+                        operations?.delete(original);
+                        if (operations?.size === 0) {
+                            decodeOperationsByIndex.delete(index);
+                        }
+                    }
+                }
+            };
+            const cleanupReadState = (reason?: unknown) => {
+                if (!readGenerationActive) {
+                    return;
+                }
+                readGenerationActive = false;
+                suspendedPayload = undefined;
+                for (const signal of readContext.fileChangeSignals ?? []) {
+                    signal.close(
+                        reason ?? getAbortReason(transfer.owner.signal)
+                    );
+                }
+                readContext.fileChangeSignals?.clear();
+                for (const [index, permit] of chunkPermitsByIndex) {
+                    const operations = decodeOperationsByIndex.get(index);
+                    if (operations && operations.size > 0) {
+                        chunkPermitsByIndex.delete(index);
+                        transfer.owner.detachLeaseUntilSettled(
+                            permit,
+                            Promise.allSettled([...operations])
+                        );
+                    } else {
+                        transfer.owner.releaseLeaseAfterTasksSettle(permit);
+                    }
+                }
+                chunkPermitsByIndex.clear();
+                decodeOperationsByIndex.clear();
+                inFlightChunks.clear();
+                knownChunks.clear();
+                batchPromisesByIndex.clear();
+                batchAttemptedIndices.clear();
+                intentionallySkippedBatchIndices.clear();
+                debug.finalKnownChunkCount = knownChunks.size;
+            };
+            const removeReadCancellationCleanup =
+                transfer.owner.addCancellationCleanup((reason) =>
+                    cleanupReadState(reason)
+                );
+            const skipPersistedRemoteBatch = (indices: number[]) => {
+                debug.chunkPersistedRemoteBatchSkipCount += 1;
+                debug.chunkPersistedRemoteBatchSkippedIndexCount +=
+                    indices.length;
+                for (const index of indices) {
+                    intentionallySkippedBatchIndices.add(index);
+                }
+            };
+            const reclassifyAsRemotePersistedRead = () => {
+                if (!persistChunkReads || isRemotePersistedRead) {
+                    return;
+                }
+                isRemotePersistedRead = true;
+                isAdaptiveRemoteRead = true;
+                localReadAheadVerified = false;
+                readAheadLimit = remoteReadAheadLimit;
+                readAhead = hasCompleteChunkEntryHeads
+                    ? readAheadLimit
+                    : Math.min(readAhead, readAheadLimit);
+                debug.chunkBatchRemoteReclassificationCount += 1;
+                debug.readAhead = readAhead;
+                debug.readAheadLimit = readAheadLimit;
+                debug.readAheadSource = "persisted-remote-adaptive";
+            };
+            const verifyLocalReadAhead = () => {
+                if (
+                    !persistChunkReads ||
+                    isRemotePersistedRead ||
+                    localReadAheadVerified
+                ) {
+                    return;
+                }
+                localReadAheadVerified = true;
+                readAheadLimit = localReadAheadLimit;
+                readAhead = readAheadLimit;
+                debug.readAhead = readAhead;
+                debug.readAheadLimit = readAheadLimit;
+                debug.readAheadPeak = Math.max(debug.readAheadPeak, readAhead);
+            };
+            const updateKnownChunkPeak = () => {
+                debug.peakKnownChunkCount = Math.max(
+                    debug.peakKnownChunkCount,
+                    knownChunks.size
+                );
+            };
+            let manifestHeadBatchDisabled = false;
+            const disableManifestHeadBatch = (reason: string) => {
+                manifestHeadBatchDisabled = true;
+                debug.chunkManifestHeadBatchDisabled = true;
+                debug.chunkManifestHeadBatchDisabledReason ??= reason;
+            };
+            type ManifestHeadEntry =
+                | {
+                      getPayloadValue: () => Promise<Operation>;
+                  }
+                | undefined;
+            type ManifestHeadRemote =
+                | false
+                | {
+                      timeout: number;
+                      replicate: true;
+                      from: string[] | undefined;
+                      signal: AbortSignal;
+                  };
+            const readManifestHeadEntries = async (
+                heads: string[],
+                remote: ManifestHeadRemote,
+                changeSignal: FileChangeSignal
+            ): Promise<ManifestHeadEntry[]> => {
+                const signal = changeSignal.abortSignal;
+                const log = files.files.log.log as any;
+                if (typeof log.getMany === "function") {
+                    return log.getMany(heads, { remote, signal });
+                }
 
-            const entryIndex = log.entryIndex;
-            if (typeof entryIndex?.getMany === "function") {
-                return abortableRead(() =>
-                    entryIndex.getMany(heads, {
+                const entryIndex = log.entryIndex;
+                if (typeof entryIndex?.getMany === "function") {
+                    return entryIndex.getMany(heads, {
                         type: "full",
                         ignoreMissing: true,
                         remote,
                         signal,
-                    })
-                );
-            }
+                    });
+                }
 
-            if (typeof log.get !== "function") {
-                throw new Error("Log does not support manifest-head reads");
-            }
-            const batchSize = Math.max(
-                1,
-                Math.min(8, remoteReadAheadLimit || 1)
-            );
-            return abortableRead(async () => {
+                if (typeof log.get !== "function") {
+                    throw new Error("Log does not support manifest-head reads");
+                }
+                const batchSize = Math.max(
+                    1,
+                    Math.min(8, remoteReadAheadLimit || 1)
+                );
                 const entries: ManifestHeadEntry[] = [];
                 for (
                     let offset = 0;
@@ -2220,725 +2704,931 @@ export class LargeFile extends AbstractFile {
                         ...(await Promise.all(
                             heads
                                 .slice(offset, offset + batchSize)
-                                .map((head) => log.get(head, { remote }))
+                                .map((head) =>
+                                    log.get(head, { remote, signal })
+                                )
                         ))
                     );
                 }
                 return entries;
-            });
-        };
-        const queryPersistedManifestHeadBatch = async (
-            indices: number[],
-            from: string[] | undefined,
-            changeSignal: FileChangeSignal,
-            fetchRemotelyMissing = true
-        ) => {
-            if (indices.length === 0) {
-                return indices;
-            }
-            changeSignal.throwIfClosed();
-            if (manifestHeadBatchDisabled) {
-                debug.chunkManifestHeadBatchDisabledSkipCount += 1;
-                debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
-                    indices.length;
-                return indices;
-            }
-
-            const heads = (resolvedFile as { chunkEntryHeads?: unknown })
-                .chunkEntryHeads;
-            const requested = indices.flatMap((index) => {
-                const head = Array.isArray(heads) ? heads[index] : undefined;
-                return typeof head === "string" ? [{ head, index }] : [];
-            });
-            if (requested.length === 0) {
-                return indices;
-            }
-
-            debug.chunkManifestHeadBatchQueryCount += 1;
-            debug.chunkManifestHeadBatchRequestedIndexCount += requested.length;
-            debug.maxManifestHeadBatchSize = Math.max(
-                debug.maxManifestHeadBatchSize,
-                requested.length
-            );
-            const attemptTimeout = Math.min(
-                LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS,
-                Math.max(
-                    1,
-                    properties?.timeout ??
-                        LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS
-                )
-            );
-            debug.chunkManifestHeadBatchAttemptTimeoutMs = attemptTimeout;
-            debug.activeManifestHeadBatches += 1;
-            debug.maxConcurrentManifestHeadBatches = Math.max(
-                debug.maxConcurrentManifestHeadBatches,
-                debug.activeManifestHeadBatches
-            );
-
-            let accepted = 0;
-            const acceptEntries = async (
-                candidates: typeof requested,
-                entries: ManifestHeadEntry[],
-                phase: "local" | "remote"
-            ) => {
-                const missing: typeof requested = [];
-                for (const [
-                    position,
-                    { head, index },
-                ] of candidates.entries()) {
-                    const entry = entries[position];
-                    if (!entry) {
-                        missing.push({ head, index });
-                        continue;
-                    }
-
-                    let operation: Operation;
-                    try {
-                        operation = await entry.getPayloadValue();
-                        changeSignal.throwIfClosed();
-                    } catch (error) {
-                        changeSignal.throwIfClosed();
-                        debug.chunkManifestHeadBatchInvalidCount += 1;
-                        (debug.chunkManifestHeadBatchInvalidErrors ||= []).push(
-                            {
-                                index,
-                                message: getErrorMessage(error),
-                            }
-                        );
-                        continue;
-                    }
-                    if (!isPutOperation(operation)) {
-                        debug.chunkManifestHeadBatchInvalidCount += 1;
-                        continue;
-                    }
-
-                    let chunk: AbstractFile;
-                    try {
-                        chunk = files.files.index.valueEncoding.decoder(
-                            operation.data
-                        );
-                    } catch (error) {
-                        debug.chunkManifestHeadBatchInvalidCount += 1;
-                        (debug.chunkManifestHeadBatchInvalidErrors ||= []).push(
-                            {
-                                index,
-                                message: getErrorMessage(error),
-                            }
-                        );
-                        continue;
-                    }
-                    if (
-                        !(chunk instanceof TinyFile) ||
-                        chunk.parentId !== resolvedFile.id ||
-                        chunk.index !== index
-                    ) {
-                        debug.chunkManifestHeadBatchInvalidCount += 1;
-                        continue;
-                    }
-
-                    if (persistChunkReads) {
-                        files.retainChunkEntryHead(
-                            head,
-                            resolvedFile.id,
-                            chunk.id
-                        );
-                    }
-                    knownChunks.set(index, chunk);
-                    if (persistChunkReads) {
-                        files.retainResolvedChunk(chunk, persistChunkReads);
-                    }
-                    debug.chunkManifestHeadBatchResolved[index] = head;
-                    accepted += 1;
-                    debug.chunkManifestHeadBatchAcceptedCount += 1;
-                    debug.prefetchedChunkCount += 1;
-                    if (phase === "local") {
-                        debug.chunkManifestHeadLocalBatchAcceptedCount += 1;
-                    } else {
-                        debug.chunkManifestHeadRemoteBatchAcceptedCount += 1;
-                    }
-                }
-                return missing;
             };
+            const queryPersistedManifestHeadBatch = async (
+                indices: number[],
+                from: string[] | undefined,
+                changeSignal: FileChangeSignal,
+                fetchRemotelyMissing = true
+            ) => {
+                if (indices.length === 0) {
+                    return indices;
+                }
+                changeSignal.throwIfClosed();
+                if (manifestHeadBatchDisabled) {
+                    debug.chunkManifestHeadBatchDisabledSkipCount += 1;
+                    debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
+                        indices.length;
+                    return indices;
+                }
 
-            try {
-                debug.chunkManifestHeadLocalBatchQueryCount += 1;
-                const localEntries = await readManifestHeadEntries(
-                    requested.map(({ head }) => head),
-                    false,
-                    changeSignal
-                );
-                changeSignal.throwIfClosed();
-                const remotelyMissing = await acceptEntries(
-                    requested,
-                    localEntries,
-                    "local"
-                );
-                if (fetchRemotelyMissing && remotelyMissing.length > 0) {
-                    debug.chunkManifestHeadRemoteBatchQueryCount += 1;
-                    const remoteEntries = await readManifestHeadEntries(
-                        remotelyMissing.map(({ head }) => head),
-                        {
-                            timeout: attemptTimeout,
-                            replicate: true,
-                            from,
-                            signal: changeSignal.abortSignal,
-                        },
-                        changeSignal
-                    );
-                    changeSignal.throwIfClosed();
-                    const stillMissing = await acceptEntries(
-                        remotelyMissing,
-                        remoteEntries,
-                        "remote"
-                    );
-                    debug.chunkManifestHeadBatchMissingCount +=
-                        stillMissing.length;
+                const heads = (resolvedFile as { chunkEntryHeads?: unknown })
+                    .chunkEntryHeads;
+                const requested = indices.flatMap((index) => {
+                    const head = Array.isArray(heads)
+                        ? heads[index]
+                        : undefined;
+                    return typeof head === "string" ? [{ head, index }] : [];
+                });
+                if (requested.length === 0) {
+                    return indices;
                 }
-            } catch (error) {
-                changeSignal.throwIfClosed();
-                debug.chunkManifestHeadBatchErrorCount += 1;
-                debug.chunkManifestHeadBatchErrors.push(getErrorMessage(error));
-                disableManifestHeadBatch("error");
-                return indices.filter((index) => !knownChunks.has(index));
-            } finally {
-                debug.activeManifestHeadBatches -= 1;
-            }
 
-            if (accepted === 0 && fetchRemotelyMissing) {
-                disableManifestHeadBatch("zero-accepted");
-            } else if (accepted < requested.length) {
-                debug.chunkManifestHeadBatchPartialCount += 1;
-            }
-            return indices.filter((index) => !knownChunks.has(index));
-        };
-        const queryChunkBatch = async (
-            indices: number[],
-            from: string[] | undefined,
-            remote: boolean,
-            fallback: boolean,
-            changeSignal: FileChangeSignal
-        ) => {
-            if (indices.length === 0) {
-                return [];
-            }
-            changeSignal.throwIfClosed();
-            debug.chunkBatchQueryCount += 1;
-            if (remote) {
-                debug.maxRemoteChunkBatchSize = Math.max(
-                    debug.maxRemoteChunkBatchSize,
-                    indices.length
+                debug.chunkManifestHeadBatchQueryCount += 1;
+                debug.chunkManifestHeadBatchRequestedIndexCount +=
+                    requested.length;
+                debug.maxManifestHeadBatchSize = Math.max(
+                    debug.maxManifestHeadBatchSize,
+                    requested.length
                 );
-                debug.activeRemoteChunkBatches += 1;
-                debug.maxConcurrentRemoteChunkBatches = Math.max(
-                    debug.maxConcurrentRemoteChunkBatches,
-                    debug.activeRemoteChunkBatches
+                const attemptTimeout = Math.min(
+                    LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS,
+                    Math.max(
+                        1,
+                        properties?.timeout ??
+                            LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS
+                    )
                 );
-            }
-            const requested = new Map(
-                indices.map((index) => [
-                    getChunkId(resolvedFile.id, index),
-                    index,
-                ])
-            );
-            let results: AbstractFile[];
-            try {
-                const totalTimeout =
-                    properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
-                const batchAttemptTimeout = Math.min(
-                    getChunkLookupAttemptTimeout(
-                        resolvedFile.size,
-                        resolvedFile.chunkCount,
-                        indices[0],
-                        totalTimeout
-                    ),
-                    LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS
+                debug.chunkManifestHeadBatchAttemptTimeoutMs = attemptTimeout;
+                debug.activeManifestHeadBatches += 1;
+                debug.maxConcurrentManifestHeadBatches = Math.max(
+                    debug.maxConcurrentManifestHeadBatches,
+                    debug.activeManifestHeadBatches
                 );
-                if (remote) {
-                    debug.chunkBatchAttemptTimeoutMs = batchAttemptTimeout;
-                }
-                results = await files.files.index.search(
-                    new SearchRequest({
-                        query: new Or(
-                            [...requested.keys()].map(
-                                (id) =>
-                                    new StringMatch({
-                                        key: "id",
-                                        value: id,
-                                        caseInsensitive: false,
-                                        method: StringMatchMethod.exact,
-                                    })
-                            )
-                        ),
-                        fetch: indices.length,
-                    }),
-                    remote
-                        ? ({
-                              local: false,
-                              signal: changeSignal.abortSignal,
-                              remote: {
-                                  timeout: batchAttemptTimeout,
-                                  throwOnMissing: false,
-                                  retryMissingResponses: false,
-                                  replicate: persistChunkReads,
-                                  from,
-                              },
-                          } as any)
-                        : ({
-                              local: true,
-                              remote: false,
-                              signal: changeSignal.abortSignal,
-                          } as any)
-                );
-                changeSignal.throwIfClosed();
-            } catch (error) {
-                changeSignal.throwIfClosed();
-                debug.chunkBatchErrorCount += 1;
-                (debug.chunkBatchErrors ||= []).push(getErrorMessage(error));
-                return indices.filter((index) => !knownChunks.has(index));
-            } finally {
-                if (remote) {
-                    debug.activeRemoteChunkBatches -= 1;
-                }
-            }
 
-            let accepted = 0;
-            for (const candidate of results) {
-                const expectedIndex = requested.get(candidate.id);
-                if (
-                    expectedIndex == null ||
-                    !(candidate instanceof TinyFile) ||
-                    candidate.parentId !== resolvedFile.id ||
-                    candidate.index !== expectedIndex ||
-                    candidate.id !== getChunkId(resolvedFile.id, expectedIndex)
-                ) {
-                    continue;
-                }
-                if (!knownChunks.has(expectedIndex)) {
-                    knownChunks.set(expectedIndex, candidate);
-                    if (persistChunkReads) {
-                        files.retainResolvedChunk(candidate, persistChunkReads);
-                    }
-                    accepted += 1;
-                }
-            }
-            debug.chunkBatchResultCount += accepted;
-            if (fallback) {
-                debug.chunkBatchFallbackResultCount += accepted;
-            }
-            debug.prefetchedChunkCount += accepted;
-            return indices.filter((index) => !knownChunks.has(index));
-        };
-        const queryLocalIndexedChunkBatch = async (
-            indices: number[],
-            changeSignal: FileChangeSignal
-        ) => {
-            const missing: number[] = [];
-            for (const index of indices) {
-                changeSignal.throwIfClosed();
-                debug.chunkLocalIndexedBatchQueryCount += 1;
-                try {
-                    const results = await files.files.index.search(
-                        new SearchRequest({
-                            query: [
-                                new StringMatch({
-                                    key: "parentId",
-                                    value: resolvedFile.id,
-                                    caseInsensitive: false,
-                                    method: StringMatchMethod.exact,
-                                }),
-                                new StringMatch({
-                                    key: "name",
-                                    value: `${resolvedFile.name}/${index}`,
-                                    caseInsensitive: false,
-                                    method: StringMatchMethod.exact,
-                                }),
-                            ],
-                            fetch: 1,
-                        }),
-                        {
-                            local: true,
-                            remote: false,
-                            signal: changeSignal.abortSignal,
-                        } as any
-                    );
-                    changeSignal.throwIfClosed();
-                    const chunk = (results as unknown[]).find(
-                        (candidate): candidate is TinyFile =>
-                            candidate instanceof TinyFile &&
-                            candidate.parentId === resolvedFile.id &&
-                            candidate.index === index
-                    );
-                    if (chunk) {
+                let accepted = 0;
+                const acceptEntries = async (
+                    candidates: typeof requested,
+                    entries: ManifestHeadEntry[],
+                    phase: "local" | "remote"
+                ) => {
+                    const missing: typeof requested = [];
+                    for (const [
+                        position,
+                        { head, index },
+                    ] of candidates.entries()) {
+                        const entry = entries[position];
+                        if (!entry) {
+                            missing.push({ head, index });
+                            continue;
+                        }
+
+                        let operation: Operation;
+                        try {
+                            operation = await runChunkDecodeOperation(
+                                [index],
+                                changeSignal,
+                                () => entry.getPayloadValue(),
+                                "Manifest-head payload decode cancelled"
+                            );
+                            changeSignal.throwIfClosed();
+                        } catch (error) {
+                            changeSignal.throwIfClosed();
+                            debug.chunkManifestHeadBatchInvalidCount += 1;
+                            (debug.chunkManifestHeadBatchInvalidErrors ||=
+                                []).push({
+                                index,
+                                message: getErrorMessage(error),
+                            });
+                            continue;
+                        }
+                        if (!isPutOperation(operation)) {
+                            debug.chunkManifestHeadBatchInvalidCount += 1;
+                            continue;
+                        }
+
+                        let chunk: AbstractFile;
+                        try {
+                            chunk = files.files.index.valueEncoding.decoder(
+                                operation.data
+                            );
+                        } catch (error) {
+                            debug.chunkManifestHeadBatchInvalidCount += 1;
+                            (debug.chunkManifestHeadBatchInvalidErrors ||=
+                                []).push({
+                                index,
+                                message: getErrorMessage(error),
+                            });
+                            continue;
+                        }
+                        if (
+                            !(chunk instanceof TinyFile) ||
+                            chunk.parentId !== resolvedFile.id ||
+                            chunk.index !== index
+                        ) {
+                            debug.chunkManifestHeadBatchInvalidCount += 1;
+                            continue;
+                        }
+
+                        try {
+                            validateLargeFileChunkPayload(
+                                resolvedFile,
+                                chunk,
+                                index
+                            );
+                            settleChunkPermit(index, chunk.file.byteLength);
+                        } catch (error) {
+                            debug.chunkManifestHeadBatchInvalidCount += 1;
+                            (debug.chunkManifestHeadBatchInvalidErrors ||=
+                                []).push({
+                                index,
+                                message: getErrorMessage(error),
+                            });
+                            continue;
+                        }
+
+                        if (persistChunkReads) {
+                            files.retainChunkEntryHead(
+                                head,
+                                resolvedFile.id,
+                                chunk.id
+                            );
+                        }
                         knownChunks.set(index, chunk);
                         if (persistChunkReads) {
                             files.retainResolvedChunk(chunk, persistChunkReads);
                         }
-                        debug.chunkLocalIndexedBatchResultCount += 1;
-                    } else {
-                        missing.push(index);
+                        debug.chunkManifestHeadBatchResolved[index] = head;
+                        accepted += 1;
+                        debug.chunkManifestHeadBatchAcceptedCount += 1;
+                        debug.prefetchedChunkCount += 1;
+                        if (phase === "local") {
+                            debug.chunkManifestHeadLocalBatchAcceptedCount += 1;
+                        } else {
+                            debug.chunkManifestHeadRemoteBatchAcceptedCount += 1;
+                        }
                     }
+                    return missing;
+                };
+
+                try {
+                    debug.chunkManifestHeadLocalBatchQueryCount += 1;
+                    const localEntries = await runChunkDecodeOperation(
+                        requested.map(({ index }) => index),
+                        changeSignal,
+                        () =>
+                            readManifestHeadEntries(
+                                requested.map(({ head }) => head),
+                                false,
+                                changeSignal
+                            ),
+                        "Manifest-head batch lookup cancelled"
+                    );
+                    changeSignal.throwIfClosed();
+                    const remotelyMissing = await acceptEntries(
+                        requested,
+                        localEntries,
+                        "local"
+                    );
+                    if (fetchRemotelyMissing && remotelyMissing.length > 0) {
+                        debug.chunkManifestHeadRemoteBatchQueryCount += 1;
+                        const remoteEntries = await runChunkDecodeOperation(
+                            remotelyMissing.map(({ index }) => index),
+                            changeSignal,
+                            () =>
+                                readManifestHeadEntries(
+                                    remotelyMissing.map(({ head }) => head),
+                                    {
+                                        timeout: attemptTimeout,
+                                        replicate: true,
+                                        from,
+                                        signal: changeSignal.abortSignal,
+                                    },
+                                    changeSignal
+                                ),
+                            "Manifest-head remote batch lookup cancelled"
+                        );
+                        changeSignal.throwIfClosed();
+                        const stillMissing = await acceptEntries(
+                            remotelyMissing,
+                            remoteEntries,
+                            "remote"
+                        );
+                        debug.chunkManifestHeadBatchMissingCount +=
+                            stillMissing.length;
+                    }
+                } catch (error) {
+                    changeSignal.throwIfClosed();
+                    debug.chunkManifestHeadBatchErrorCount += 1;
+                    debug.chunkManifestHeadBatchErrors.push(
+                        getErrorMessage(error)
+                    );
+                    disableManifestHeadBatch("error");
+                    return indices.filter((index) => !knownChunks.has(index));
+                } finally {
+                    debug.activeManifestHeadBatches -= 1;
+                }
+
+                if (accepted === 0 && fetchRemotelyMissing) {
+                    disableManifestHeadBatch("zero-accepted");
+                } else if (accepted < requested.length) {
+                    debug.chunkManifestHeadBatchPartialCount += 1;
+                }
+                return indices.filter((index) => !knownChunks.has(index));
+            };
+            const queryChunkBatch = async (
+                indices: number[],
+                from: string[] | undefined,
+                remote: boolean,
+                fallback: boolean,
+                changeSignal: FileChangeSignal
+            ) => {
+                if (indices.length === 0) {
+                    return [];
+                }
+                changeSignal.throwIfClosed();
+                debug.chunkBatchQueryCount += 1;
+                if (remote) {
+                    debug.maxRemoteChunkBatchSize = Math.max(
+                        debug.maxRemoteChunkBatchSize,
+                        indices.length
+                    );
+                    debug.activeRemoteChunkBatches += 1;
+                    debug.maxConcurrentRemoteChunkBatches = Math.max(
+                        debug.maxConcurrentRemoteChunkBatches,
+                        debug.activeRemoteChunkBatches
+                    );
+                }
+                const requested = new Map(
+                    indices.map((index) => [
+                        getChunkId(resolvedFile.id, index),
+                        index,
+                    ])
+                );
+                let results: AbstractFile[];
+                try {
+                    const totalTimeout =
+                        properties?.timeout ??
+                        LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
+                    const batchAttemptTimeout = Math.min(
+                        getChunkLookupAttemptTimeout(
+                            resolvedFile.size,
+                            resolvedFile.chunkCount,
+                            indices[0],
+                            totalTimeout
+                        ),
+                        LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS
+                    );
+                    if (remote) {
+                        debug.chunkBatchAttemptTimeoutMs = batchAttemptTimeout;
+                    }
+                    results = await runChunkDecodeOperation(
+                        indices,
+                        changeSignal,
+                        () =>
+                            files.files.index.search(
+                                new SearchRequest({
+                                    query: new Or(
+                                        [...requested.keys()].map(
+                                            (id) =>
+                                                new StringMatch({
+                                                    key: "id",
+                                                    value: id,
+                                                    caseInsensitive: false,
+                                                    method: StringMatchMethod.exact,
+                                                })
+                                        )
+                                    ),
+                                    fetch: indices.length,
+                                }),
+                                remote
+                                    ? ({
+                                          local: false,
+                                          signal: changeSignal.abortSignal,
+                                          remote: {
+                                              timeout: batchAttemptTimeout,
+                                              throwOnMissing: false,
+                                              retryMissingResponses: false,
+                                              replicate: persistChunkReads,
+                                              from,
+                                          },
+                                      } as any)
+                                    : ({
+                                          local: true,
+                                          remote: false,
+                                          signal: changeSignal.abortSignal,
+                                      } as any)
+                            ),
+                        "Chunk batch lookup cancelled"
+                    );
+                    changeSignal.throwIfClosed();
                 } catch (error) {
                     changeSignal.throwIfClosed();
                     debug.chunkBatchErrorCount += 1;
                     (debug.chunkBatchErrors ||= []).push(
                         getErrorMessage(error)
                     );
-                    missing.push(index);
+                    return indices.filter((index) => !knownChunks.has(index));
+                } finally {
+                    if (remote) {
+                        debug.activeRemoteChunkBatches -= 1;
+                    }
                 }
-            }
-            return missing;
-        };
-        const prefetchChunkBatch = async (
-            indices: number[],
-            changeSignal: FileChangeSignal
-        ) => {
-            changeSignal.throwIfClosed();
-            const hintedFrom =
-                readContext.lastReadPeerHints ??
-                (await files.getReadPeerHints());
-            changeSignal.throwIfClosed();
-            if (hintedFrom) {
-                readContext.lastReadPeerHints = hintedFrom;
-            }
-            if (persistChunkReads && isRemotePersistedRead) {
-                const boundedIndices = indices.slice(0, remoteReadAheadLimit);
-                const deferred = indices.slice(remoteReadAheadLimit);
-                for (const index of deferred) {
-                    batchAttemptedIndices.delete(index);
+
+                let accepted = 0;
+                for (const candidate of results) {
+                    const expectedIndex = requested.get(candidate.id);
+                    if (
+                        expectedIndex == null ||
+                        !(candidate instanceof TinyFile) ||
+                        candidate.parentId !== resolvedFile.id ||
+                        candidate.index !== expectedIndex ||
+                        candidate.id !==
+                            getChunkId(resolvedFile.id, expectedIndex)
+                    ) {
+                        continue;
+                    }
+                    if (!knownChunks.has(expectedIndex)) {
+                        validateLargeFileChunkPayload(
+                            resolvedFile,
+                            candidate,
+                            expectedIndex
+                        );
+                        settleChunkPermit(
+                            expectedIndex,
+                            candidate.file.byteLength
+                        );
+                        knownChunks.set(expectedIndex, candidate);
+                        if (persistChunkReads) {
+                            files.retainResolvedChunk(
+                                candidate,
+                                persistChunkReads
+                            );
+                        }
+                        accepted += 1;
+                    }
                 }
-                const missing = await queryPersistedManifestHeadBatch(
-                    boundedIndices,
-                    hintedFrom,
+                debug.chunkBatchResultCount += accepted;
+                if (fallback) {
+                    debug.chunkBatchFallbackResultCount += accepted;
+                }
+                debug.prefetchedChunkCount += accepted;
+                return indices.filter((index) => !knownChunks.has(index));
+            };
+            const queryLocalIndexedChunkBatch = async (
+                indices: number[],
+                changeSignal: FileChangeSignal
+            ) => {
+                const missing: number[] = [];
+                for (const index of indices) {
+                    changeSignal.throwIfClosed();
+                    debug.chunkLocalIndexedBatchQueryCount += 1;
+                    try {
+                        const results = await runChunkDecodeOperation(
+                            [index],
+                            changeSignal,
+                            () =>
+                                files.files.index.search(
+                                    new SearchRequest({
+                                        query: [
+                                            new StringMatch({
+                                                key: "parentId",
+                                                value: resolvedFile.id,
+                                                caseInsensitive: false,
+                                                method: StringMatchMethod.exact,
+                                            }),
+                                            new StringMatch({
+                                                key: "name",
+                                                value: `${resolvedFile.name}/${index}`,
+                                                caseInsensitive: false,
+                                                method: StringMatchMethod.exact,
+                                            }),
+                                        ],
+                                        fetch: 1,
+                                    }),
+                                    {
+                                        local: true,
+                                        remote: false,
+                                        signal: changeSignal.abortSignal,
+                                    } as any
+                                ),
+                            "Local indexed chunk lookup cancelled"
+                        );
+                        changeSignal.throwIfClosed();
+                        const chunk = (results as unknown[]).find(
+                            (candidate): candidate is TinyFile =>
+                                candidate instanceof TinyFile &&
+                                candidate.parentId === resolvedFile.id &&
+                                candidate.index === index
+                        );
+                        if (chunk) {
+                            validateLargeFileChunkPayload(
+                                resolvedFile,
+                                chunk,
+                                index
+                            );
+                            settleChunkPermit(index, chunk.file.byteLength);
+                            knownChunks.set(index, chunk);
+                            if (persistChunkReads) {
+                                files.retainResolvedChunk(
+                                    chunk,
+                                    persistChunkReads
+                                );
+                            }
+                            debug.chunkLocalIndexedBatchResultCount += 1;
+                        } else {
+                            missing.push(index);
+                        }
+                    } catch (error) {
+                        changeSignal.throwIfClosed();
+                        debug.chunkBatchErrorCount += 1;
+                        (debug.chunkBatchErrors ||= []).push(
+                            getErrorMessage(error)
+                        );
+                        missing.push(index);
+                    }
+                }
+                return missing;
+            };
+            const prefetchChunkBatch = async (
+                indices: number[],
+                changeSignal: FileChangeSignal
+            ) => {
+                changeSignal.throwIfClosed();
+                const hintedFrom =
+                    readContext.lastReadPeerHints ??
+                    (await raceWithSignal(
+                        files.getReadPeerHints(),
+                        changeSignal.abortSignal,
+                        "File read cancelled"
+                    ));
+                changeSignal.throwIfClosed();
+                if (hintedFrom) {
+                    readContext.lastReadPeerHints = hintedFrom;
+                }
+                if (persistChunkReads && isRemotePersistedRead) {
+                    const boundedIndices = indices.slice(
+                        0,
+                        remoteReadAheadLimit
+                    );
+                    const deferred = indices.slice(remoteReadAheadLimit);
+                    for (const index of deferred) {
+                        releaseChunkPermit(index);
+                        batchAttemptedIndices.delete(index);
+                    }
+                    const missing = await queryPersistedManifestHeadBatch(
+                        boundedIndices,
+                        hintedFrom,
+                        changeSignal
+                    );
+                    skipPersistedRemoteBatch(missing);
+                    updateKnownChunkPeak();
+                    return [...missing, ...deferred];
+                }
+                if (
+                    persistChunkReads &&
+                    !isRemotePersistedRead &&
+                    debug.initialLocalChunkBlockCount ===
+                        resolvedFile.chunkCount
+                ) {
+                    // Exact manifest heads are authoritative even when the
+                    // Documents index has not rebuilt its chunk rows yet. Decode
+                    // those local blocks directly before considering any remote
+                    // fallback or shrinking the read-ahead window.
+                    const missing = await queryPersistedManifestHeadBatch(
+                        indices,
+                        hintedFrom,
+                        changeSignal,
+                        false
+                    );
+                    if (missing.length === 0) {
+                        verifyLocalReadAhead();
+                        updateKnownChunkPeak();
+                        return missing;
+                    }
+                }
+                let missing = await queryChunkBatch(
+                    indices,
+                    undefined,
+                    false,
+                    false,
                     changeSignal
                 );
-                skipPersistedRemoteBatch(missing);
-                updateKnownChunkPeak();
-                return [...missing, ...deferred];
-            }
-            if (
-                persistChunkReads &&
-                !isRemotePersistedRead &&
-                debug.initialLocalChunkBlockCount === resolvedFile.chunkCount
-            ) {
-                // Exact manifest heads are authoritative even when the
-                // Documents index has not rebuilt its chunk rows yet. Decode
-                // those local blocks directly before considering any remote
-                // fallback or shrinking the read-ahead window.
-                const missing = await queryPersistedManifestHeadBatch(
-                    indices,
-                    hintedFrom,
-                    changeSignal,
-                    false
-                );
+                if (
+                    missing.length > 0 &&
+                    persistChunkReads &&
+                    !isRemotePersistedRead &&
+                    (!localReadAheadVerified || usesLegacyLocalChunkIds)
+                ) {
+                    const before = missing.length;
+                    missing = await queryLocalIndexedChunkBatch(
+                        missing,
+                        changeSignal
+                    );
+                    if (missing.length < before) {
+                        usesLegacyLocalChunkIds = true;
+                    }
+                    if (missing.length === 0) {
+                        // Legacy ids cannot use the 32-id deterministic query, so
+                        // retain a small local window and resolve by indexed fields.
+                        localReadAheadVerified = true;
+                        updateKnownChunkPeak();
+                        return missing;
+                    }
+                }
                 if (missing.length === 0) {
                     verifyLocalReadAhead();
                     updateKnownChunkPeak();
                     return missing;
                 }
-            }
-            let missing = await queryChunkBatch(
-                indices,
-                undefined,
-                false,
-                false,
-                changeSignal
-            );
-            if (
-                missing.length > 0 &&
-                persistChunkReads &&
-                !isRemotePersistedRead &&
-                (!localReadAheadVerified || usesLegacyLocalChunkIds)
-            ) {
-                const before = missing.length;
-                missing = await queryLocalIndexedChunkBatch(
-                    missing,
-                    changeSignal
-                );
-                if (missing.length < before) {
-                    usesLegacyLocalChunkIds = true;
-                }
-                if (missing.length === 0) {
-                    // Legacy ids cannot use the 32-id deterministic query, so
-                    // retain a small local window and resolve by indexed fields.
-                    localReadAheadVerified = true;
+                if (persistChunkReads && isRemotePersistedRead) {
+                    skipPersistedRemoteBatch(missing);
                     updateKnownChunkPeak();
                     return missing;
                 }
-            }
-            if (missing.length === 0) {
-                verifyLocalReadAhead();
-                updateKnownChunkPeak();
-                return missing;
-            }
-            if (persistChunkReads && isRemotePersistedRead) {
-                skipPersistedRemoteBatch(missing);
-                updateKnownChunkPeak();
-                return missing;
-            }
-            const wasVerifiedLocalRead =
-                persistChunkReads && !isRemotePersistedRead;
-            reclassifyAsRemotePersistedRead();
-            const boundedIndices = indices.slice(0, remoteReadAheadLimit);
-            const deferred = indices.slice(remoteReadAheadLimit);
-            let evictedLocalResults = 0;
-            // A batch may have been assembled under the former 32-chunk local
-            // window. Discard payload-bearing results outside the new network
-            // budget and unlock them for a later bounded local-first batch.
-            for (const index of deferred) {
-                if (wasVerifiedLocalRead && knownChunks.delete(index)) {
-                    evictedLocalResults += 1;
+                const wasVerifiedLocalRead =
+                    persistChunkReads && !isRemotePersistedRead;
+                reclassifyAsRemotePersistedRead();
+                const boundedIndices = indices.slice(0, remoteReadAheadLimit);
+                const deferred = indices.slice(remoteReadAheadLimit);
+                let evictedLocalResults = 0;
+                // A batch may have been assembled under the former 32-chunk local
+                // window. Discard payload-bearing results outside the new network
+                // budget and unlock them for a later bounded local-first batch.
+                for (const index of deferred) {
+                    if (wasVerifiedLocalRead && knownChunks.delete(index)) {
+                        evictedLocalResults += 1;
+                    }
+                    releaseChunkPermit(index);
+                    batchAttemptedIndices.delete(index);
                 }
-                batchAttemptedIndices.delete(index);
-            }
-            debug.chunkBatchResultCount -= evictedLocalResults;
-            debug.prefetchedChunkCount -= evictedLocalResults;
-            missing = boundedIndices.filter((index) => !knownChunks.has(index));
-            if (persistChunkReads && isRemotePersistedRead) {
-                missing = await queryPersistedManifestHeadBatch(
-                    missing,
-                    hintedFrom,
-                    changeSignal
+                debug.chunkBatchResultCount -= evictedLocalResults;
+                debug.prefetchedChunkCount -= evictedLocalResults;
+                missing = boundedIndices.filter(
+                    (index) => !knownChunks.has(index)
                 );
-                skipPersistedRemoteBatch(missing);
+                if (persistChunkReads && isRemotePersistedRead) {
+                    missing = await queryPersistedManifestHeadBatch(
+                        missing,
+                        hintedFrom,
+                        changeSignal
+                    );
+                    skipPersistedRemoteBatch(missing);
+                    updateKnownChunkPeak();
+                    return [...missing, ...deferred];
+                }
+                if (missing.length > 0) {
+                    missing = await queryChunkBatch(
+                        missing,
+                        hintedFrom,
+                        true,
+                        false,
+                        changeSignal
+                    );
+                }
+                if (hintedFrom && missing.length > 0) {
+                    debug.chunkBatchFallbackCount += 1;
+                    missing = await queryChunkBatch(
+                        missing,
+                        undefined,
+                        true,
+                        true,
+                        changeSignal
+                    );
+                }
                 updateKnownChunkPeak();
                 return [...missing, ...deferred];
-            }
-            if (missing.length > 0) {
-                missing = await queryChunkBatch(
-                    missing,
-                    hintedFrom,
-                    true,
-                    false,
-                    changeSignal
+            };
+            const acquireChunkPermits = async (indices: number[]) => {
+                const missingPermits = indices.filter(
+                    (index) => !chunkPermitsByIndex.has(index)
                 );
-            }
-            if (hintedFrom && missing.length > 0) {
-                debug.chunkBatchFallbackCount += 1;
-                missing = await queryChunkBatch(
-                    missing,
-                    undefined,
-                    true,
-                    true,
-                    changeSignal
-                );
-            }
-            updateKnownChunkPeak();
-            return [...missing, ...deferred];
-        };
-        const prefetchBatchForIndex = (
-            index: number,
-            changeSignal: FileChangeSignal
-        ) => {
-            if (knownChunks.has(index)) {
-                return Promise.resolve();
-            }
-            const existing = batchPromisesByIndex.get(index);
-            if (existing) {
-                return existing;
-            }
-            if (batchAttemptedIndices.has(index)) {
-                return Promise.resolve();
-            }
-            const indices: number[] = [];
-            for (
-                let candidate = index;
-                candidate <
-                Math.min(
-                    resolvedFile.chunkCount,
-                    index + Math.max(readAhead, 1)
-                );
-                candidate++
-            ) {
-                if (!knownChunks.has(candidate)) {
-                    indices.push(candidate);
-                    batchAttemptedIndices.add(candidate);
+                if (missingPermits.length === 0) {
+                    return;
                 }
-            }
-            if (indices.length === 0) {
-                return Promise.resolve();
-            }
-            let pending: Promise<void>;
-            pending = prefetchChunkBatch(indices, changeSignal)
-                .then(() => undefined)
-                .finally(() => {
+                const lane: TransferLane =
+                    isAdaptiveRemoteRead || !localReadAheadVerified
+                        ? "remote"
+                        : "local";
+                if (missingPermits.length > LARGE_FILE_DECODE_BATCH_LIMIT) {
+                    throw new Error(
+                        `Decode batch exceeds the bounded ${LARGE_FILE_DECODE_BATCH_LIMIT}-candidate limit`
+                    );
+                }
+                const permits = await transfer.owner.acquireBatch(
+                    LARGE_FILE_DECODE_RESERVATION_BYTES,
+                    missingPermits.length,
+                    lane
+                );
+                for (const [offset, index] of missingPermits.entries()) {
+                    chunkPermitsByIndex.set(index, permits[offset]!);
+                }
+            };
+            const prefetchBatchForIndex = (
+                index: number,
+                changeSignal: FileChangeSignal
+            ) => {
+                if (knownChunks.has(index)) {
+                    return Promise.resolve();
+                }
+                const existing = batchPromisesByIndex.get(index);
+                if (existing) {
+                    return existing;
+                }
+                if (batchAttemptedIndices.has(index)) {
+                    return Promise.resolve();
+                }
+                const indices: number[] = [];
+                const lane: TransferLane =
+                    isAdaptiveRemoteRead || !localReadAheadVerified
+                        ? "remote"
+                        : "local";
+                const activeInLane =
+                    getFileTransferRuntime(files).downloadScheduler.snapshot
+                        .activeByLane[lane] ?? 0;
+                const laneLimit =
+                    lane === "remote"
+                        ? remoteReadAheadLimit
+                        : LARGE_FILE_PERSISTED_READ_AHEAD;
+                const batchSize = Math.min(
+                    Math.max(readAhead, 1),
+                    LARGE_FILE_CHUNK_PUT_CONCURRENCY,
+                    LARGE_FILE_DECODE_BATCH_LIMIT,
+                    Math.max(1, laneLimit - activeInLane)
+                );
+                for (
+                    let candidate = index;
+                    candidate <
+                    Math.min(resolvedFile.chunkCount, index + batchSize);
+                    candidate++
+                ) {
+                    if (!knownChunks.has(candidate)) {
+                        indices.push(candidate);
+                        batchAttemptedIndices.add(candidate);
+                    }
+                }
+                if (indices.length === 0) {
+                    return Promise.resolve();
+                }
+                const pending: Promise<void> = (async () => {
+                    await acquireChunkPermits(indices);
+                    await prefetchChunkBatch(indices, changeSignal);
+                })().finally(() => {
                     for (const candidate of indices) {
                         if (batchPromisesByIndex.get(candidate) === pending) {
                             batchPromisesByIndex.delete(candidate);
                         }
                     }
                 });
-            for (const candidate of indices) {
-                batchPromisesByIndex.set(candidate, pending);
-            }
-            return pending;
-        };
-        const inFlightChunks = new Map<number, Promise<TinyFile>>();
-        const resolveChunkWithReadAhead = (index: number) => {
-            const cached = inFlightChunks.get(index);
-            if (cached) {
-                return cached;
-            }
-            const pending = (async () => {
-                debug.chunkResolveStartedAt[index] = Date.now();
-                const chunkId = getChunkId(resolvedFile.id, index);
-                const changeSignal = files.createFileChangeSignal(
-                    (file) =>
-                        file.id === chunkId ||
-                        (file instanceof TinyFile &&
-                            file.parentId === resolvedFile.id &&
-                            file.index === index)
-                );
-                readContext.fileChangeSignals!.add(changeSignal);
-                try {
-                    await prefetchBatchForIndex(index, changeSignal);
-                    while (
-                        !knownChunks.has(index) &&
-                        !batchAttemptedIndices.has(index)
-                    ) {
-                        await prefetchBatchForIndex(index, changeSignal);
-                    }
-                    const intentionallySkippedBatch =
-                        intentionallySkippedBatchIndices.delete(index);
-                    if (!knownChunks.has(index) && !intentionallySkippedBatch) {
-                        debug.chunkBatchResolverFallbackCount += 1;
-                    }
-                    const chunk = await resolvedFile.resolveChunk(
-                        files,
-                        index,
-                        knownChunks,
-                        readContext,
-                        changeSignal,
-                        {
-                            timeout: properties?.timeout,
-                            debug,
-                            persist: persistChunkReads,
-                        }
-                    );
-                    updateKnownChunkPeak();
-                    return chunk;
-                } finally {
-                    changeSignal.close();
-                    readContext.fileChangeSignals!.delete(changeSignal);
-                    debug.chunkResolveFinishedAt[index] = Date.now();
+                for (const candidate of indices) {
+                    batchPromisesByIndex.set(candidate, pending);
                 }
-            })();
-            inFlightChunks.set(index, pending);
-            return pending;
-        };
-
-        debug.readAhead = readAhead;
-        debug.readAheadInitial = readAhead;
-        debug.readAheadLimit = readAheadLimit;
-        debug.readAheadPeak = readAhead;
-        debug.readAheadSource = persistChunkReads
-            ? isRemotePersistedRead
-                ? "persisted-remote-adaptive"
-                : "persisted-local"
-            : "observer-adaptive";
-
-        let nextChunkToSchedule = 0;
-        const fillReadAhead = () => {
-            // One resolver can still issue a 32-id local query. Keeping only
-            // that resolver active lets a partial local miss reclassify the
-            // stream before any deferred index can start a remote RPC.
-            const schedulerLimit = isAdaptiveRemoteRead ? readAhead : 1;
-            while (
-                nextChunkToSchedule < resolvedFile.chunkCount &&
-                inFlightChunks.size < schedulerLimit
-            ) {
-                const index = nextChunkToSchedule++;
-                void resolveChunkWithReadAhead(index).catch(() => undefined);
-            }
-            debug.maxInFlightChunks = Math.max(
-                debug.maxInFlightChunks,
-                inFlightChunks.size
-            );
-        };
-
-        try {
-            fillReadAhead();
-
-            for (let index = 0; index < resolvedFile.chunkCount; index++) {
-                const demandStartedAt = Date.now();
-                const chunkFile = await resolveChunkWithReadAhead(index);
-                const demandWaitMs = Date.now() - demandStartedAt;
-                inFlightChunks.delete(index);
-                if (isAdaptiveRemoteRead) {
-                    const attempts = debug.chunkAttempts[index] ?? 1;
-                    const adaptedReadAhead = adaptRemotePersistedReadAhead(
-                        readAhead,
-                        readAheadLimit,
-                        { demandWaitMs, attempts }
-                    );
-                    if (adaptedReadAhead !== readAhead) {
-                        debug.readAheadChanges.push({
-                            index,
-                            from: readAhead,
-                            to: adaptedReadAhead,
-                            demandWaitMs,
-                            attempts,
-                        });
-                        readAhead = adaptedReadAhead;
-                        debug.readAhead = readAhead;
-                        debug.readAheadPeak = Math.max(
-                            debug.readAheadPeak,
-                            readAhead
+                return pending;
+            };
+            const resolveChunkWithReadAhead = (index: number) => {
+                const cached = inFlightChunks.get(index);
+                if (cached) {
+                    return cached;
+                }
+                const pending = transfer.owner.track(
+                    (async () => {
+                        debug.chunkResolveStartedAt[index] = Date.now();
+                        const chunkId = getChunkId(resolvedFile.id, index);
+                        const changeSignal = files.createFileChangeSignal(
+                            (file) =>
+                                file.id === chunkId ||
+                                (file instanceof TinyFile &&
+                                    file.parentId === resolvedFile.id &&
+                                    file.index === index),
+                            transfer.owner.signal
                         );
+                        readContext.fileChangeSignals!.add(changeSignal);
+                        try {
+                            await prefetchBatchForIndex(index, changeSignal);
+                            while (
+                                !knownChunks.has(index) &&
+                                !batchAttemptedIndices.has(index)
+                            ) {
+                                await prefetchBatchForIndex(
+                                    index,
+                                    changeSignal
+                                );
+                            }
+                            const intentionallySkippedBatch =
+                                intentionallySkippedBatchIndices.delete(index);
+                            if (
+                                !knownChunks.has(index) &&
+                                !intentionallySkippedBatch
+                            ) {
+                                debug.chunkBatchResolverFallbackCount += 1;
+                            }
+                            if (!chunkPermitsByIndex.has(index)) {
+                                await acquireChunkPermits([index]);
+                            }
+                            const permit = chunkPermitsByIndex.get(index)!;
+                            const chunk = await resolvedFile.resolveChunk(
+                                files,
+                                index,
+                                knownChunks,
+                                readContext,
+                                changeSignal,
+                                {
+                                    timeout: properties?.timeout,
+                                    debug,
+                                    persist: persistChunkReads,
+                                    decodeGuard: {
+                                        run: (operation, cancellationLabel) =>
+                                            runChunkDecodeOperation(
+                                                [index],
+                                                changeSignal,
+                                                operation,
+                                                cancellationLabel
+                                            ),
+                                        settle: (retainedBytes) =>
+                                            settleChunkPermit(
+                                                index,
+                                                retainedBytes
+                                            ),
+                                    },
+                                }
+                            );
+                            validateLargeFileChunkPayload(
+                                resolvedFile,
+                                chunk,
+                                index
+                            );
+                            settleChunkPermit(index, chunk.file.byteLength);
+                            updateKnownChunkPeak();
+                            return { chunkFile: chunk, permit };
+                        } catch (error) {
+                            releaseChunkPermit(index);
+                            throw error;
+                        } finally {
+                            changeSignal.close();
+                            readContext.fileChangeSignals!.delete(changeSignal);
+                            debug.chunkResolveFinishedAt[index] = Date.now();
+                        }
+                    })()
+                );
+                inFlightChunks.set(index, pending);
+                return pending;
+            };
+
+            debug.readAhead = readAhead;
+            debug.readAheadInitial = readAhead;
+            debug.readAheadLimit = readAheadLimit;
+            debug.readAheadPeak = readAhead;
+            debug.readAheadSource = persistChunkReads
+                ? isRemotePersistedRead
+                    ? "persisted-remote-adaptive"
+                    : "persisted-local"
+                : "observer-adaptive";
+
+            let nextChunkToSchedule = 0;
+            const fillReadAhead = () => {
+                // One resolver can still issue a 32-id local query. Keeping only
+                // that resolver active lets a partial local miss reclassify the
+                // stream before any deferred index can start a remote RPC.
+                const schedulerLimit = isAdaptiveRemoteRead ? readAhead : 1;
+                while (
+                    nextChunkToSchedule < resolvedFile.chunkCount &&
+                    inFlightChunks.size < schedulerLimit
+                ) {
+                    const index = nextChunkToSchedule++;
+                    void resolveChunkWithReadAhead(index).catch(
+                        () => undefined
+                    );
+                }
+                debug.maxInFlightChunks = Math.max(
+                    debug.maxInFlightChunks,
+                    inFlightChunks.size
+                );
+            };
+
+            try {
+                fillReadAhead();
+
+                for (let index = 0; index < resolvedFile.chunkCount; index++) {
+                    let scheduledChunk: ScheduledChunk | undefined;
+                    try {
+                        const demandStartedAt = Date.now();
+                        scheduledChunk = await resolveChunkWithReadAhead(index);
+                        const demandWaitMs = Date.now() - demandStartedAt;
+                        if (isAdaptiveRemoteRead) {
+                            const attempts = debug.chunkAttempts[index] ?? 1;
+                            const adaptedReadAhead =
+                                adaptRemotePersistedReadAhead(
+                                    readAhead,
+                                    readAheadLimit,
+                                    { demandWaitMs, attempts }
+                                );
+                            if (adaptedReadAhead !== readAhead) {
+                                debug.readAheadChanges.push({
+                                    index,
+                                    from: readAhead,
+                                    to: adaptedReadAhead,
+                                    demandWaitMs,
+                                    attempts,
+                                });
+                                readAhead = adaptedReadAhead;
+                                debug.readAhead = readAhead;
+                                debug.readAheadPeak = Math.max(
+                                    debug.readAheadPeak,
+                                    readAhead
+                                );
+                            }
+                        }
+                        fillReadAhead();
+                        if (!scheduledChunk.chunkFile) {
+                            throw new Error(
+                                `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`
+                            );
+                        }
+                        debug.chunkMaterializeStartedAt[index] = Date.now();
+                        let chunk: Uint8Array | undefined =
+                            await transfer.owner.track(
+                                scheduledChunk.chunkFile.getFile(files, {
+                                    as: "joined",
+                                    timeout: properties?.timeout,
+                                    signal: transfer.owner.signal,
+                                    transferId: transfer.id,
+                                    [FILE_READ_TRANSFER_CONTEXT]: {
+                                        transfer,
+                                        payloadPermitHeld: true,
+                                    },
+                                } as InternalFileReadOptions & {
+                                    as: "joined";
+                                })
+                            );
+                        debug.chunkMaterializeFinishedAt[index] = Date.now();
+                        if (!chunk) {
+                            throw new Error(
+                                `Chunk ${index + 1}/${resolvedFile.chunkCount} materialized without bytes`
+                            );
+                        }
+                        const nextProcessed =
+                            processed + BigInt(chunk.byteLength);
+                        if (nextProcessed > resolvedFile.size) {
+                            throw new Error(
+                                `File size does not match the expected size. Expected ${resolvedFile.size} bytes, got at least ${nextProcessed}`
+                            );
+                        }
+                        debug.chunkHashStartedAt[index] = Date.now();
+                        hasher?.update(chunk);
+                        debug.chunkHashFinishedAt[index] = Date.now();
+                        processed = nextProcessed;
+                        properties?.progress?.(
+                            Number(processed) /
+                                Math.max(Number(resolvedFile.size), 1)
+                        );
+                        transfer.owner.throwIfFailed();
+                        inFlightChunks.delete(index);
+                        knownChunks.delete(index);
+                        scheduledChunk = undefined;
+                        suspendedPayload = chunk;
+                        chunk = undefined;
+                        transfer.readSuspended = true;
+                        try {
+                            yield suspendedPayload!;
+                        } finally {
+                            transfer.readSuspended = false;
+                            suspendedPayload = undefined;
+                        }
+                        transfer.owner.throwIfFailed();
+                    } finally {
+                        releaseChunkPermit(index);
+                        inFlightChunks.delete(index);
+                        knownChunks.delete(index);
                     }
                 }
-                fillReadAhead();
-                if (!chunkFile) {
-                    throw new Error(
-                        `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`
-                    );
-                }
-                debug.chunkMaterializeStartedAt[index] = Date.now();
-                const chunk = await chunkFile.getFile(files, {
-                    as: "joined",
-                    timeout: properties?.timeout,
-                });
-                debug.chunkMaterializeFinishedAt[index] = Date.now();
-                const nextProcessed = processed + BigInt(chunk.byteLength);
-                if (nextProcessed > resolvedFile.size) {
-                    throw new Error(
-                        `File size does not match the expected size. Expected ${resolvedFile.size} bytes, got at least ${nextProcessed}`
-                    );
-                }
-                debug.chunkHashStartedAt[index] = Date.now();
-                hasher?.update(chunk);
-                debug.chunkHashFinishedAt[index] = Date.now();
-                processed = nextProcessed;
-                properties?.progress?.(
-                    Number(processed) / Math.max(Number(resolvedFile.size), 1)
-                );
-                yield chunk;
-                knownChunks.delete(index);
-            }
 
-            if (processed !== resolvedFile.size) {
-                throw new Error(
-                    `File size does not match the expected size. Expected ${resolvedFile.size} bytes, got ${processed}`
-                );
+                if (processed !== resolvedFile.size) {
+                    throw new Error(
+                        `File size does not match the expected size. Expected ${resolvedFile.size} bytes, got ${processed}`
+                    );
+                }
+                if (
+                    hasher &&
+                    toBase64(hasher.digest()) !== resolvedFile.finalHash
+                ) {
+                    throw new Error(
+                        "File hash does not match the expected content"
+                    );
+                }
+                debug.finishedAt = Date.now();
+            } finally {
+                removeReadCancellationCleanup();
+                cleanupReadState();
             }
-            if (
-                hasher &&
-                toBase64(hasher.digest()) !== resolvedFile.finalHash
-            ) {
-                throw new Error(
-                    "File hash does not match the expected content"
-                );
-            }
-            debug.finishedAt = Date.now();
+        } catch (error) {
+            debug.failureAt = Date.now();
+            debug.failureMessage = getErrorMessage(error);
+            throw error;
         } finally {
-            for (const signal of readContext.fileChangeSignals ?? []) {
-                signal.close();
+            const snapshot =
+                getFileTransferRuntime(files).downloadScheduler.snapshot;
+            debug.aggregatePeakChunks = snapshot.peakCount;
+            debug.aggregatePeakBytes = snapshot.peakBytes;
+            if (ownsTransfer) {
+                await transfer.finish();
             }
-            readContext.fileChangeSignals?.clear();
-            knownChunks.clear();
-            batchPromisesByIndex.clear();
-            batchAttemptedIndices.clear();
-            intentionallySkippedBatchIndices.clear();
-            debug.finalKnownChunkCount = knownChunks.size;
         }
     }
 }
@@ -2998,9 +3688,74 @@ export class LargeFileWithChunkHeads extends AbstractFile {
     }
 }
 
-const toLargeFileDelegate = (
-    value: LargeFile | LargeFileWithChunkHeads
-): LargeFile => {
+/**
+ * Chunked representation for the public parentId write API. A distinct variant
+ * preserves the byte-for-byte decoding contract of the legacy root-only
+ * LargeFile variants while allowing new writes above the TinyFile budget to
+ * remain nested and indexable under their parent.
+ */
+@variant(3)
+export class ParentedLargeFileWithChunkHeads extends AbstractFile {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: "string" })
+    name: string;
+
+    @field({ type: "u64" })
+    size: bigint;
+
+    @field({ type: "u32" })
+    chunkCount: number;
+
+    @field({ type: "bool" })
+    ready: boolean;
+
+    @field({ type: option("string") })
+    finalHash?: string;
+
+    @field({ type: vec("string") })
+    chunkEntryHeads: string[];
+
+    @field({ type: "string" })
+    parentId: string;
+
+    constructor(properties: {
+        id?: string;
+        name: string;
+        size: bigint;
+        chunkCount: number;
+        ready?: boolean;
+        finalHash?: string;
+        chunkEntryHeads?: string[];
+        parentId: string;
+    }) {
+        super();
+        this.id = properties.id || createUploadId();
+        this.name = properties.name;
+        this.size = properties.size;
+        this.chunkCount = properties.chunkCount;
+        this.ready = properties.ready ?? false;
+        this.finalHash = properties.finalHash;
+        this.chunkEntryHeads = properties.chunkEntryHeads ?? [];
+        this.parentId = properties.parentId;
+    }
+
+    streamFile(files: Files, properties?: FileReadOptions) {
+        return toLargeFileDelegate(this).streamFile(files, properties);
+    }
+
+    delete(files: Files) {
+        return toLargeFileDelegate(this).delete(files);
+    }
+}
+
+type LargeFileValue =
+    | LargeFile
+    | LargeFileWithChunkHeads
+    | ParentedLargeFileWithChunkHeads;
+
+const toLargeFileDelegate = (value: LargeFileValue): LargeFile => {
     const file = new LargeFile({
         id: value.id,
         name: value.name,
@@ -3020,6 +3775,13 @@ const toLargeFileDelegate = (
             (head): head is string => typeof head === "string"
         );
     }
+    if (value.parentId != null) {
+        Object.defineProperty(file, "parentId", {
+            configurable: true,
+            enumerable: true,
+            value: value.parentId,
+        });
+    }
     return file;
 };
 
@@ -3031,7 +3793,6 @@ export const isLargeFileLike = (value: unknown): value is LargeFile => {
         value instanceof LargeFile ||
         (value != null &&
             typeof value === "object" &&
-            file.parentId == null &&
             typeof file.id === "string" &&
             typeof file.name === "string" &&
             typeof file.size === "bigint" &&
@@ -3040,7 +3801,9 @@ export const isLargeFileLike = (value: unknown): value is LargeFile => {
     );
 };
 
-const getCompleteChunkEntryHeads = (file: LargeFile): string[] | undefined => {
+const getCompleteChunkEntryHeads = (
+    file: LargeFileValue
+): string[] | undefined => {
     const candidateHeads = (file as LargeFile & { chunkEntryHeads?: unknown })
         .chunkEntryHeads;
     return Array.isArray(candidateHeads) &&
@@ -3112,7 +3875,8 @@ type OpenDiagnostics = {
     runtimeProfileSamples?: RuntimeOpenProfileSample[];
 };
 
-type UploadDiagnostics = {
+export type UploadDiagnostics = {
+    transferId: string;
     uploadId: string;
     fileName: string;
     sizeBytes: number;
@@ -3140,6 +3904,308 @@ type UploadDiagnostics = {
     finishedAt: number | null;
     failureAt: number | null;
     failureMessage: string | null;
+    aggregatePeakChunkPuts: number;
+    aggregatePeakChunkPutBytes: number;
+};
+
+type FileTransferKind = "read" | "upload";
+
+type ActiveFileTransfer = {
+    id: string;
+    kind: FileTransferKind;
+    owner: FairTransferOwner;
+    drainOnShutdown: boolean;
+    readSuspended: boolean;
+    done: Promise<void>;
+    finish: () => Promise<void>;
+};
+
+const FILE_TRANSFER_DIAGNOSTIC_HISTORY_LIMIT = 128;
+class FileTransferRuntime {
+    state: "open" | "closing" | "closed" = "open";
+    uploadScheduler = this.createUploadScheduler();
+    downloadScheduler = this.createDownloadScheduler();
+    readonly active = new Map<string, ActiveFileTransfer>();
+    readonly uploadDiagnostics = new Map<string, UploadDiagnostics>();
+    readonly readDiagnostics = new Map<string, FileReadDiagnostics>();
+    shutdownPromise?: Promise<void>;
+
+    private createUploadScheduler() {
+        return new FairTransferScheduler(
+            LARGE_FILE_CHUNK_PUT_CONCURRENCY,
+            LARGE_FILE_CHUNK_PUT_BYTE_LIMIT
+        );
+    }
+
+    private createDownloadScheduler() {
+        return new FairTransferScheduler(
+            LARGE_FILE_PERSISTED_READ_AHEAD,
+            LARGE_FILE_DOWNLOAD_BYTE_LIMIT,
+            {
+                remote: getRemotePersistedReadAheadLimit(
+                    BigInt(LARGE_FILE_CHUNK_PUT_BYTE_LIMIT),
+                    LARGE_FILE_CHUNK_PUT_CONCURRENCY
+                ),
+                local: LARGE_FILE_PERSISTED_READ_AHEAD,
+            }
+        );
+    }
+
+    reopen() {
+        if (this.active.size !== 0) {
+            throw new Error("Cannot reopen while file transfers are active");
+        }
+        const uploadSnapshot = this.uploadScheduler.snapshot;
+        if (
+            uploadSnapshot.activeCount === 0 &&
+            uploadSnapshot.activeBytes === 0
+        ) {
+            this.uploadScheduler = this.createUploadScheduler();
+        } else {
+            this.uploadScheduler.reopen();
+        }
+        const downloadSnapshot = this.downloadScheduler.snapshot;
+        if (
+            downloadSnapshot.activeCount === 0 &&
+            downloadSnapshot.activeBytes === 0
+        ) {
+            this.downloadScheduler = this.createDownloadScheduler();
+        } else {
+            this.downloadScheduler.reopen();
+        }
+        this.state = "open";
+        this.shutdownPromise = undefined;
+    }
+}
+
+const fileTransferRuntimes = new WeakMap<Files, FileTransferRuntime>();
+
+const getFileTransferRuntime = (files: Files) => {
+    let runtime = fileTransferRuntimes.get(files);
+    if (!runtime) {
+        runtime = new FileTransferRuntime();
+        fileTransferRuntimes.set(files, runtime);
+    }
+    return runtime;
+};
+
+const createTransferId = (kind: FileTransferKind) =>
+    `${kind}-${toBase64URL(randomBytes(16))}`;
+
+const beginFileTransfer = (
+    files: Files,
+    kind: FileTransferKind,
+    signal?: AbortSignal,
+    requestedId?: string,
+    drainOnShutdown = kind === "upload"
+) => {
+    const runtime = getFileTransferRuntime(files);
+    if (runtime.state !== "open") {
+        throw new TransferCancelledError(
+            runtime.state === "closing"
+                ? "File store is closing"
+                : "File store is closed"
+        );
+    }
+    throwIfAborted(signal);
+    const id = requestedId?.trim() || createTransferId(kind);
+    if (runtime.active.has(id)) {
+        throw new Error(`File transfer '${id}' is already active`);
+    }
+    const scheduler =
+        kind === "upload" ? runtime.uploadScheduler : runtime.downloadScheduler;
+    const owner = new FairTransferOwner(scheduler, id, signal);
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
+    });
+    let finishStarted = false;
+    let finishCompleted = false;
+    const completeFinish = () => {
+        if (finishCompleted) {
+            return;
+        }
+        finishCompleted = true;
+        owner.finish();
+        if (runtime.active.get(id) === transfer) {
+            runtime.active.delete(id);
+        }
+        resolveDone();
+    };
+    const transfer: ActiveFileTransfer = {
+        id,
+        kind,
+        owner,
+        drainOnShutdown,
+        readSuspended: false,
+        done,
+        finish: () => {
+            if (finishStarted) {
+                return done;
+            }
+            finishStarted = true;
+            owner.cancel(
+                new TransferCancelledError("File transfer has finished")
+            );
+            if (owner.taskCount === 0 && owner.leaseCount === 0) {
+                completeFinish();
+            } else {
+                void owner.waitForIdle().then(completeFinish);
+            }
+            return done;
+        },
+    };
+    runtime.active.set(id, transfer);
+    if (kind === "read") {
+        const finishAbortedRead = () => {
+            void transfer.finish();
+        };
+        owner.signal.addEventListener("abort", finishAbortedRead, {
+            once: true,
+        });
+        if (owner.signal.aborted) {
+            finishAbortedRead();
+        }
+    }
+    return transfer;
+};
+
+const recordBoundedDiagnostic = <T>(
+    diagnostics: Map<string, T>,
+    id: string,
+    value: T
+) => {
+    diagnostics.delete(id);
+    diagnostics.set(id, value);
+    while (diagnostics.size > FILE_TRANSFER_DIAGNOSTIC_HISTORY_LIMIT) {
+        const oldest = diagnostics.keys().next().value as string | undefined;
+        if (oldest == null) {
+            break;
+        }
+        diagnostics.delete(oldest);
+    }
+};
+
+const recordUploadDiagnostics = (
+    files: Files,
+    transferId: string,
+    diagnostics: UploadDiagnostics
+) => {
+    files.lastUploadDiagnostics = diagnostics;
+    recordBoundedDiagnostic(
+        getFileTransferRuntime(files).uploadDiagnostics,
+        transferId,
+        diagnostics
+    );
+};
+
+const recordReadDiagnostics = (
+    files: Files,
+    transferId: string,
+    diagnostics: FileReadDiagnostics
+) => {
+    files.lastReadDiagnostics = diagnostics;
+    recordBoundedDiagnostic(
+        getFileTransferRuntime(files).readDiagnostics,
+        transferId,
+        diagnostics
+    );
+};
+
+const createUploadDiagnostics = (properties: {
+    transferId: string;
+    uploadId: string;
+    fileName: string;
+    sizeBytes: number;
+    chunkSize: number;
+    chunkCount: number;
+}): UploadDiagnostics => ({
+    ...properties,
+    startedAt: Date.now(),
+    manifestStartedAt: null,
+    manifestFinishedAt: null,
+    firstChunkStartedAt: null,
+    firstChunkFinishedAt: null,
+    lastChunkFinishedAt: null,
+    chunkPutCount: 0,
+    chunkReadTotalMs: 0,
+    chunkReadMaxMs: 0,
+    chunkPutTotalMs: 0,
+    chunkPutMaxMs: 0,
+    chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
+    chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
+    maxConcurrentChunkPuts: 0,
+    maxConcurrentChunkPutBytes: 0,
+    slowestChunkIndex: null,
+    slowestChunkPutMs: null,
+    readyManifestStartedAt: null,
+    readyManifestFinishedAt: null,
+    finishedAt: null,
+    failureAt: null,
+    failureMessage: null,
+    aggregatePeakChunkPuts: 0,
+    aggregatePeakChunkPutBytes: 0,
+});
+
+const recordSinglePutCompletion = (
+    diagnostics: UploadDiagnostics,
+    startedAt: number,
+    finishedAt: number
+) => {
+    const duration = finishedAt - startedAt;
+    diagnostics.firstChunkStartedAt = startedAt;
+    diagnostics.firstChunkFinishedAt = finishedAt;
+    diagnostics.lastChunkFinishedAt = finishedAt;
+    diagnostics.chunkPutCount = 1;
+    diagnostics.chunkPutTotalMs = duration;
+    diagnostics.chunkPutMaxMs = duration;
+    diagnostics.slowestChunkIndex = 0;
+    diagnostics.slowestChunkPutMs = duration;
+};
+
+const updateUploadSchedulerDiagnostics = (
+    files: Files,
+    diagnostics: UploadDiagnostics,
+    owner: FairTransferOwner
+) => {
+    const ownerSnapshot = owner.snapshot;
+    const aggregateSnapshot =
+        getFileTransferRuntime(files).uploadScheduler.snapshot;
+    diagnostics.maxConcurrentChunkPuts = ownerSnapshot.peakCount;
+    diagnostics.maxConcurrentChunkPutBytes = ownerSnapshot.peakBytes;
+    diagnostics.aggregatePeakChunkPuts = aggregateSnapshot.peakCount;
+    diagnostics.aggregatePeakChunkPutBytes = aggregateSnapshot.peakBytes;
+};
+
+const shutdownFileTransfers = (
+    files: Files,
+    reason: unknown
+): Promise<void> => {
+    const runtime = getFileTransferRuntime(files);
+    if (runtime.shutdownPromise) {
+        return runtime.shutdownPromise;
+    }
+    runtime.state = "closing";
+    runtime.uploadScheduler.close(reason);
+    runtime.downloadScheduler.close(reason);
+    const transfers = [...runtime.active.values()];
+    for (const transfer of transfers) {
+        transfer.owner.cancel(reason);
+    }
+    runtime.shutdownPromise = (async () => {
+        await Promise.allSettled(
+            transfers.map(async (transfer) => {
+                if (transfer.drainOnShutdown || !transfer.readSuspended) {
+                    await transfer.done;
+                } else {
+                    await transfer.owner.waitForIdle();
+                    await transfer.finish();
+                }
+            })
+        );
+        runtime.state = "closed";
+    })();
+    return runtime.shutdownPromise;
 };
 
 @variant("files")
@@ -3175,7 +4241,7 @@ export class Files extends Program<Args> {
     private pendingAuthoredDocumentIds = new Map<string, number>();
     private activeFileChangeSignals = new Set<FileChangeSignal>();
     private fileMutationTails = new Map<string, Promise<void>>();
-    private pendingLargeFileDeletions = new Map<string, LargeFile>();
+    private pendingLargeFileDeletions = new Map<string, LargeFileValue>();
 
     constructor(
         properties: {
@@ -3200,6 +4266,47 @@ export class Files extends Program<Args> {
             ),
         });
         this.persistChunkReads = true;
+    }
+
+    /** Cancel one active read or upload without affecting sibling transfers. */
+    cancelTransfer(
+        transferId: string,
+        reason: unknown = new TransferCancelledError()
+    ) {
+        const transfer = getFileTransferRuntime(this).active.get(transferId);
+        if (!transfer) {
+            return false;
+        }
+        transfer.owner.cancel(reason);
+        if (transfer.kind === "read") {
+            void transfer.finish();
+        }
+        return true;
+    }
+
+    getActiveTransfers() {
+        return [...getFileTransferRuntime(this).active.values()].map(
+            ({ id, kind }) => ({ id, kind })
+        );
+    }
+
+    getUploadDiagnostics(transferId: string) {
+        return getFileTransferRuntime(this).uploadDiagnostics.get(transferId);
+    }
+
+    getReadDiagnostics(transferId: string) {
+        return getFileTransferRuntime(this).readDiagnostics.get(transferId);
+    }
+
+    getTransferSchedulerDiagnostics(): {
+        upload: TransferSchedulerSnapshot;
+        download: TransferSchedulerSnapshot;
+    } {
+        const runtime = getFileTransferRuntime(this);
+        return {
+            upload: runtime.uploadScheduler.snapshot,
+            download: runtime.downloadScheduler.snapshot,
+        };
     }
 
     retainChunkRead(chunkId: string, fileId?: string) {
@@ -3435,6 +4542,7 @@ export class Files extends Program<Args> {
                     : true;
             return (
                 current.name === target.name &&
+                current.parentId === target.parentId &&
                 current.size === target.size &&
                 current.chunkCount === target.chunkCount &&
                 current.ready === target.ready &&
@@ -3464,7 +4572,7 @@ export class Files extends Program<Args> {
     }
 
     private async cleanupFailedUploadIfCurrent(
-        target: LargeFile,
+        target: LargeFileValue,
         expectedHead: string | undefined,
         chunkEntryHeads: string[],
         expectedChunkCount: number
@@ -3559,9 +4667,9 @@ export class Files extends Program<Args> {
     }
 
     private async commitReadyManifest(
-        pendingFile: LargeFile,
+        pendingFile: LargeFileValue,
         pendingPut: { entry: { hash: string } },
-        readyFile: LargeFileWithChunkHeads
+        readyFile: LargeFileWithChunkHeads | ParentedLargeFileWithChunkHeads
     ) {
         await this.withFileMutation(readyFile.id, async () => {
             const pendingHead = pendingPut.entry.hash;
@@ -3985,13 +5093,22 @@ export class Files extends Program<Args> {
         this.releaseFileRetention(file);
     }
 
-    createFileChangeSignal(predicate: FileChangePredicate) {
+    createFileChangeSignal(
+        predicate: FileChangePredicate,
+        externalSignal?: AbortSignal
+    ) {
         this.activeFileChangeSignals ??= new Set();
-        let signal: FileChangeSignal;
-        signal = new FileChangeSignal(this.files.events, predicate, () => {
-            this.activeFileChangeSignals.delete(signal);
-        });
-        this.activeFileChangeSignals.add(signal);
+        const signal = new FileChangeSignal(
+            this.files.events,
+            predicate,
+            (closedSignal) => {
+                this.activeFileChangeSignals.delete(closedSignal);
+            },
+            externalSignal
+        );
+        if (!signal.isClosed) {
+            this.activeFileChangeSignals.add(signal);
+        }
         return signal;
     }
 
@@ -4130,7 +5247,7 @@ export class Files extends Program<Args> {
 
             if (
                 (file instanceof TinyFile && !isLargeFileChunk(file)) ||
-                (isLargeFileLike(file) && file.parentId == null)
+                isLargeFileLike(file)
             ) {
                 this.retainFileRead(file);
                 this.retainChunkEntryHead(entry.hash, file.id, file.id);
@@ -4146,19 +5263,84 @@ export class Files extends Program<Args> {
     async add(
         name: string,
         file: Uint8Array | Blob,
-        parentId?: string,
-        progress?: (progress: number) => void
+        parentIdOrOptions?: string | FileWriteOptions,
+        progressOrOptions?: FileWriteProgressOrOptions,
+        options?: FileWriteOptions
     ) {
+        const normalized = normalizeFileWriteOptions(
+            parentIdOrOptions,
+            progressOrOptions,
+            options
+        );
+        const { parentId, progress } = normalized;
         if (isBlobLike(file)) {
-            return this.addBlob(name, file, parentId, progress);
+            return this.addBlob(name, file, parentId, progress, normalized);
         }
 
         progress?.(0);
-        if (BigInt(file.byteLength) <= TINY_FILE_SIZE_LIMIT_BIGINT) {
-            const tinyFile = new TinyFile({ name, file, parentId });
-            await this.putAuthoredFile(tinyFile);
-            progress?.(1);
-            return tinyFile.id;
+        if (BigInt(file.byteLength) <= TINY_FILE_UPLOAD_SIZE_LIMIT_BIGINT) {
+            const transfer = beginFileTransfer(
+                this,
+                "upload",
+                normalized.signal,
+                normalized.transferId
+            );
+            const diagnostics = createUploadDiagnostics({
+                transferId: transfer.id,
+                uploadId: transfer.id,
+                fileName: name,
+                sizeBytes: file.byteLength,
+                chunkSize: file.byteLength,
+                chunkCount: 1,
+            });
+            recordUploadDiagnostics(this, transfer.id, diagnostics);
+            let fileId: string | undefined;
+            try {
+                await transfer.owner.enqueue(file.byteLength, async () => {
+                    transfer.owner.throwIfFailed();
+                    // Copy caller-owned bytes only after their aggregate byte
+                    // reservation is granted. The stored value can no longer
+                    // be mutated by the caller while publication is pending.
+                    const stableBytes = new Uint8Array(file);
+                    const tinyFile = new TinyFile({
+                        name,
+                        file: stableBytes,
+                        parentId,
+                    });
+                    diagnostics.uploadId = tinyFile.id;
+                    const putStartedAt = Date.now();
+                    await this.putAuthoredFile(tinyFile);
+                    const putFinishedAt = Date.now();
+                    recordSinglePutCompletion(
+                        diagnostics,
+                        putStartedAt,
+                        putFinishedAt
+                    );
+                    fileId = tinyFile.id;
+                });
+                await transfer.owner.drain();
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+                diagnostics.finishedAt = Date.now();
+                progress?.(1);
+                return fileId!;
+            } catch (error) {
+                await transfer.owner.settle();
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+                diagnostics.failureAt = Date.now();
+                diagnostics.failureMessage = getErrorMessage(error);
+                throw error;
+            } finally {
+                await transfer.owner.settle();
+                await transfer.finish();
+            }
         }
 
         const chunkSize = getLargeFileSegmentSize(file.byteLength);
@@ -4174,317 +5356,586 @@ export class Files extends Program<Args> {
                 ),
             chunkSize,
             parentId,
-            progress
+            progress,
+            normalized
         );
     }
 
     async addBlob(
         name: string,
         file: Blob,
-        parentId?: string,
-        progress?: (progress: number) => void
+        parentIdOrOptions?: string | FileWriteOptions,
+        progressOrOptions?: FileWriteProgressOrOptions,
+        options?: FileWriteOptions
     ) {
+        const normalized = normalizeFileWriteOptions(
+            parentIdOrOptions,
+            progressOrOptions,
+            options
+        );
+        const { parentId, progress } = normalized;
         progress?.(0);
-        if (BigInt(file.size) <= TINY_FILE_SIZE_LIMIT_BIGINT) {
-            const tinyFile = new TinyFile({
-                name,
-                file: new Uint8Array(await file.arrayBuffer()),
-                parentId,
+        if (BigInt(file.size) <= TINY_FILE_UPLOAD_SIZE_LIMIT_BIGINT) {
+            const transfer = beginFileTransfer(
+                this,
+                "upload",
+                normalized.signal,
+                normalized.transferId
+            );
+            const diagnostics = createUploadDiagnostics({
+                transferId: transfer.id,
+                uploadId: transfer.id,
+                fileName: name,
+                sizeBytes: file.size,
+                chunkSize: file.size,
+                chunkCount: 1,
             });
-            await this.putAuthoredFile(tinyFile);
-            progress?.(1);
-            return tinyFile.id;
+            recordUploadDiagnostics(this, transfer.id, diagnostics);
+            let fileId: string | undefined;
+            let stagingPermit: TransferPermit | undefined;
+            let stagingOperation: Promise<ArrayBuffer> | undefined;
+            let stagingPermitDetached = false;
+            let stagingPermitHandedOff = false;
+            try {
+                stagingPermit = await transfer.owner.acquire(file.size);
+                const readStartedAt = Date.now();
+                stagingOperation = Promise.resolve().then(() =>
+                    file.arrayBuffer()
+                );
+                const bytes = new Uint8Array(
+                    await raceWithSignal(
+                        stagingOperation,
+                        transfer.owner.signal,
+                        "Blob upload cancelled"
+                    )
+                );
+                transfer.owner.throwIfFailed();
+                ensureSourceSize(BigInt(bytes.byteLength), BigInt(file.size));
+                const readFinishedAt = Date.now();
+                diagnostics.chunkReadTotalMs = readFinishedAt - readStartedAt;
+                diagnostics.chunkReadMaxMs = diagnostics.chunkReadTotalMs;
+
+                transfer.owner.enqueueWithPermit(stagingPermit, async () => {
+                    const tinyFile = new TinyFile({
+                        name,
+                        file: bytes,
+                        parentId,
+                    });
+                    diagnostics.uploadId = tinyFile.id;
+                    const putStartedAt = Date.now();
+                    await this.putAuthoredFile(tinyFile);
+                    const putFinishedAt = Date.now();
+                    recordSinglePutCompletion(
+                        diagnostics,
+                        putStartedAt,
+                        putFinishedAt
+                    );
+                    fileId = tinyFile.id;
+                });
+                stagingPermitHandedOff = true;
+                await transfer.owner.drain();
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+                diagnostics.finishedAt = Date.now();
+                progress?.(1);
+                return fileId!;
+            } catch (error) {
+                if (
+                    stagingPermit &&
+                    stagingOperation &&
+                    !stagingPermitHandedOff &&
+                    transfer.owner.signal.aborted
+                ) {
+                    stagingPermitDetached = true;
+                    transfer.owner.detachLeaseUntilSettled(
+                        stagingPermit,
+                        stagingOperation
+                    );
+                }
+                await transfer.owner.settle();
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+                diagnostics.failureAt = Date.now();
+                diagnostics.failureMessage = getErrorMessage(error);
+                throw error;
+            } finally {
+                if (
+                    stagingPermit &&
+                    !stagingPermitHandedOff &&
+                    !stagingPermitDetached
+                ) {
+                    stagingPermit.release();
+                }
+                await transfer.owner.settle();
+                await transfer.finish();
+            }
         }
 
-        return this.addSource(
-            name,
-            {
-                size: BigInt(file.size),
-                readChunks: (chunkSize) =>
-                    readBlobSequentialChunks(file, chunkSize),
-            },
-            parentId,
-            progress
-        );
+        const chunkSize = getLargeFileSegmentSize(file.size);
+        const blobReader = createBlobChunkReader(file);
+        try {
+            return await this.addChunkedFile(
+                name,
+                BigInt(file.size),
+                (index) =>
+                    blobReader.read(
+                        getChunkEnd(index, file.size, chunkSize) -
+                            getChunkStart(index, chunkSize)
+                    ),
+                chunkSize,
+                parentId,
+                progress,
+                normalized,
+                true
+            );
+        } finally {
+            blobReader.close(getAbortReason(normalized.signal));
+        }
     }
 
     async addSource(
         name: string,
         source: ReReadableChunkSource,
-        parentId?: string,
-        progress?: (progress: number) => void
+        parentIdOrOptions?: string | FileWriteOptions,
+        progressOrOptions?: FileWriteProgressOrOptions,
+        options?: FileWriteOptions
     ) {
+        const normalized = normalizeFileWriteOptions(
+            parentIdOrOptions,
+            progressOrOptions,
+            options
+        );
+        const { parentId, progress } = normalized;
         progress?.(0);
-        if (source.size <= TINY_FILE_SIZE_LIMIT_BIGINT) {
-            const chunks: Uint8Array[] = [];
-            let processed = 0n;
-            for await (const chunk of source.readChunks(TINY_FILE_SIZE_LIMIT)) {
-                if (!(chunk instanceof Uint8Array)) {
-                    throw new Error("Source yielded a non-Uint8Array chunk");
-                }
-                if (chunk.byteLength === 0) {
-                    continue;
-                }
-                const nextProcessed = processed + BigInt(chunk.byteLength);
-                if (nextProcessed > source.size) {
-                    ensureSourceSize(nextProcessed, source.size);
-                }
-                // Sources are allowed to reuse their yielded buffer. Take a
-                // stable copy before requesting the next chunk.
-                const stableChunk = new Uint8Array(chunk);
-                chunks.push(stableChunk);
-                processed = nextProcessed;
-            }
-            ensureSourceSize(processed, source.size);
-            const tinyFile = new TinyFile({
-                name,
-                file: chunks.length === 0 ? new Uint8Array(0) : concat(chunks),
-                parentId,
+        if (source.size <= TINY_FILE_UPLOAD_SIZE_LIMIT_BIGINT) {
+            const transfer = beginFileTransfer(
+                this,
+                "upload",
+                normalized.signal,
+                normalized.transferId
+            );
+            const sizeBytes = Number(source.size);
+            const diagnostics = createUploadDiagnostics({
+                transferId: transfer.id,
+                uploadId: transfer.id,
+                fileName: name,
+                sizeBytes,
+                chunkSize: sizeBytes,
+                chunkCount: 1,
             });
-            await this.putAuthoredFile(tinyFile);
-            progress?.(1);
-            return tinyFile.id;
-        }
-
-        if (parentId) {
-            throw new Error("Unexpected that a LargeFile to have a parent");
+            recordUploadDiagnostics(this, transfer.id, diagnostics);
+            let fileId: string | undefined;
+            try {
+                await transfer.owner.enqueue(sizeBytes, async () => {
+                    // One declared-size buffer is allocated only after the
+                    // shared permit is granted. Copying each yield directly
+                    // also supports sources that reuse their output buffer.
+                    const bytes = new Uint8Array(sizeBytes);
+                    let processed = 0n;
+                    let iterator: AsyncIterator<Uint8Array> | undefined;
+                    let iteratorDone = false;
+                    const readStartedAt = Date.now();
+                    try {
+                        const chunks = source.readChunks(
+                            TINY_FILE_WRITE_SIZE_LIMIT_BYTES
+                        );
+                        iterator = chunks[Symbol.asyncIterator]();
+                        for (;;) {
+                            const next = await Promise.race([
+                                iterator.next(),
+                                transfer.owner.failureSignal,
+                            ]);
+                            if (next.done) {
+                                iteratorDone = true;
+                                break;
+                            }
+                            const chunk = next.value;
+                            transfer.owner.throwIfFailed();
+                            if (!(chunk instanceof Uint8Array)) {
+                                throw new Error(
+                                    "Source yielded a non-Uint8Array chunk"
+                                );
+                            }
+                            if (chunk.byteLength === 0) {
+                                continue;
+                            }
+                            const nextProcessed =
+                                processed + BigInt(chunk.byteLength);
+                            if (nextProcessed > source.size) {
+                                ensureSourceSize(nextProcessed, source.size);
+                            }
+                            bytes.set(chunk, Number(processed));
+                            processed = nextProcessed;
+                        }
+                    } finally {
+                        if (!iteratorDone) {
+                            try {
+                                const returned = iterator?.return?.();
+                                if (returned) {
+                                    void Promise.resolve(returned).catch(
+                                        () => undefined
+                                    );
+                                }
+                            } catch {
+                                // Best-effort cancellation of an arbitrary
+                                // source whose current next() may stay blocked.
+                            }
+                        }
+                    }
+                    ensureSourceSize(processed, source.size);
+                    const readFinishedAt = Date.now();
+                    diagnostics.chunkReadTotalMs =
+                        readFinishedAt - readStartedAt;
+                    diagnostics.chunkReadMaxMs = diagnostics.chunkReadTotalMs;
+                    transfer.owner.throwIfFailed();
+                    const tinyFile = new TinyFile({
+                        name,
+                        file: bytes,
+                        parentId,
+                    });
+                    diagnostics.uploadId = tinyFile.id;
+                    const putStartedAt = Date.now();
+                    await this.putAuthoredFile(tinyFile);
+                    const putFinishedAt = Date.now();
+                    recordSinglePutCompletion(
+                        diagnostics,
+                        putStartedAt,
+                        putFinishedAt
+                    );
+                    fileId = tinyFile.id;
+                });
+                await transfer.owner.drain();
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+                diagnostics.finishedAt = Date.now();
+                progress?.(1);
+                return fileId!;
+            } catch (error) {
+                await transfer.owner.settle();
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+                diagnostics.failureAt = Date.now();
+                diagnostics.failureMessage = getErrorMessage(error);
+                throw error;
+            } finally {
+                await transfer.owner.settle();
+                await transfer.finish();
+            }
         }
 
         const size = source.size;
         const chunkSize = getLargeFileSegmentSize(size);
         const uploadId = createUploadId();
         const expectedChunkCount = getChunkCount(size, chunkSize);
-        const diagnostics: UploadDiagnostics = {
-            uploadId,
-            fileName: name,
-            sizeBytes: Number(size),
-            chunkSize,
-            chunkCount: expectedChunkCount,
-            startedAt: Date.now(),
-            manifestStartedAt: null,
-            manifestFinishedAt: null,
-            firstChunkStartedAt: null,
-            firstChunkFinishedAt: null,
-            lastChunkFinishedAt: null,
-            chunkPutCount: 0,
-            chunkReadTotalMs: 0,
-            chunkReadMaxMs: 0,
-            chunkPutTotalMs: 0,
-            chunkPutMaxMs: 0,
-            chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-            chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
-            maxConcurrentChunkPuts: 0,
-            maxConcurrentChunkPutBytes: 0,
-            slowestChunkIndex: null,
-            slowestChunkPutMs: null,
-            readyManifestStartedAt: null,
-            readyManifestFinishedAt: null,
-            finishedAt: null,
-            failureAt: null,
-            failureMessage: null,
-        };
-        this.lastUploadDiagnostics = diagnostics;
-        const manifest = new LargeFile({
-            id: uploadId,
-            name,
-            size,
-            chunkCount: expectedChunkCount,
-            ready: false,
-        });
-
-        let pendingManifest:
-            | Awaited<ReturnType<typeof this.putAuthoredFile>>
-            | undefined;
-        let pendingManifestHead: string | undefined;
-        const hasher = new SHA256();
-        const putQueue = new BoundedAsyncWorkQueue(
-            LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-            LARGE_FILE_CHUNK_PUT_BYTE_LIMIT
+        const transfer = beginFileTransfer(
+            this,
+            "upload",
+            normalized.signal,
+            normalized.transferId ?? uploadId
         );
-        const updateQueueDiagnostics = () => {
-            diagnostics.maxConcurrentChunkPuts = putQueue.peakCount;
-            diagnostics.maxConcurrentChunkPutBytes = putQueue.peakBytes;
-        };
-        let chunkCount = 0;
-        const chunkEntryHeads: string[] = [];
-        let sourceIterator: AsyncIterator<Uint8Array> | undefined;
-        let sourceIteratorDone = false;
         try {
-            diagnostics.manifestStartedAt = Date.now();
-            pendingManifest = await this.putAuthoredFile(
-                manifest,
-                undefined,
-                (entryHead) => {
-                    pendingManifestHead ??= entryHead;
-                }
-            );
-            pendingManifestHead = pendingManifest.entry.hash;
-            diagnostics.manifestFinishedAt = Date.now();
-            // Iterator construction belongs inside the guarded region: a
-            // source may throw synchronously before yielding its first chunk.
-            sourceIterator = source
-                .readChunks(chunkSize)
-                [Symbol.asyncIterator]();
-            let readBytes = 0n;
-            let committedBytes = 0n;
-            const normalizedChunk = new Uint8Array(chunkSize);
-            let normalizedChunkLength = 0;
-            const enqueueNormalizedChunk = async (chunkBytes: Uint8Array) => {
-                hasher.update(chunkBytes);
-                const chunkIndex = chunkCount;
-                await putQueue.enqueue(chunkBytes.byteLength, async () => {
-                    // The normalizer reuses its one-chunk buffer. Copy only
-                    // after queue capacity is reserved and before it is reused.
-                    const stableChunkBytes = new Uint8Array(chunkBytes);
-                    const chunk = new TinyFile({
-                        name: name + "/" + chunkIndex,
-                        file: stableChunkBytes,
-                        parentId: uploadId,
-                        index: chunkIndex,
-                    });
-                    const putStartedAt = Date.now();
-                    diagnostics.firstChunkStartedAt ??= putStartedAt;
-                    const appended = await this.putAuthoredFile(
-                        chunk,
-                        undefined,
-                        (entryHead) => {
-                            chunkEntryHeads[chunkIndex] ??= entryHead;
-                        }
-                    );
-                    chunkEntryHeads[chunkIndex] = appended.entry.hash;
-                    const putFinishedAt = Date.now();
-                    const putDurationMs = putFinishedAt - putStartedAt;
-                    diagnostics.firstChunkFinishedAt ??= putFinishedAt;
-                    diagnostics.lastChunkFinishedAt = putFinishedAt;
-                    diagnostics.chunkPutCount += 1;
-                    diagnostics.chunkPutTotalMs += putDurationMs;
-                    diagnostics.chunkPutMaxMs = Math.max(
-                        diagnostics.chunkPutMaxMs,
-                        putDurationMs
-                    );
-                    if (
-                        diagnostics.slowestChunkPutMs == null ||
-                        putDurationMs > diagnostics.slowestChunkPutMs
-                    ) {
-                        diagnostics.slowestChunkPutMs = putDurationMs;
-                        diagnostics.slowestChunkIndex = chunkIndex;
-                    }
-                    committedBytes += BigInt(stableChunkBytes.byteLength);
-                    progress?.(
-                        Math.min(
-                            Number(committedBytes) / Math.max(Number(size), 1),
-                            1
-                        )
-                    );
-                });
-                chunkCount += 1;
-                updateQueueDiagnostics();
+            const diagnostics: UploadDiagnostics = {
+                transferId: transfer.id,
+                uploadId,
+                fileName: name,
+                sizeBytes: Number(size),
+                chunkSize,
+                chunkCount: expectedChunkCount,
+                startedAt: Date.now(),
+                manifestStartedAt: null,
+                manifestFinishedAt: null,
+                firstChunkStartedAt: null,
+                firstChunkFinishedAt: null,
+                lastChunkFinishedAt: null,
+                chunkPutCount: 0,
+                chunkReadTotalMs: 0,
+                chunkReadMaxMs: 0,
+                chunkPutTotalMs: 0,
+                chunkPutMaxMs: 0,
+                chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
+                chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
+                maxConcurrentChunkPuts: 0,
+                maxConcurrentChunkPutBytes: 0,
+                slowestChunkIndex: null,
+                slowestChunkPutMs: null,
+                readyManifestStartedAt: null,
+                readyManifestFinishedAt: null,
+                finishedAt: null,
+                failureAt: null,
+                failureMessage: null,
+                aggregatePeakChunkPuts: 0,
+                aggregatePeakChunkPutBytes: 0,
             };
-            while (true) {
-                const next = await Promise.race([
-                    sourceIterator.next(),
-                    putQueue.failureSignal,
-                ]);
-                if (next.done) {
-                    sourceIteratorDone = true;
-                    break;
-                }
-                const sourceBytes = next.value;
-                putQueue.throwIfFailed();
-                if (!(sourceBytes instanceof Uint8Array)) {
-                    throw new Error("Source yielded a non-Uint8Array chunk");
-                }
-                if (sourceBytes.byteLength === 0) {
-                    continue;
-                }
-                const nextReadBytes =
-                    readBytes + BigInt(sourceBytes.byteLength);
-                if (nextReadBytes > source.size) {
-                    ensureSourceSize(nextReadBytes, source.size);
-                }
-                readBytes = nextReadBytes;
+            recordUploadDiagnostics(this, transfer.id, diagnostics);
+            const manifest: LargeFileValue = parentId
+                ? new ParentedLargeFileWithChunkHeads({
+                      id: uploadId,
+                      name,
+                      size,
+                      chunkCount: expectedChunkCount,
+                      ready: false,
+                      parentId,
+                  })
+                : new LargeFile({
+                      id: uploadId,
+                      name,
+                      size,
+                      chunkCount: expectedChunkCount,
+                      ready: false,
+                  });
 
-                let sourceOffset = 0;
-                while (sourceOffset < sourceBytes.byteLength) {
-                    // Keep the newest normalized chunk unpublished until more
-                    // data or iterator completion proves whether it is final.
-                    if (normalizedChunkLength === chunkSize) {
-                        await enqueueNormalizedChunk(normalizedChunk);
-                        normalizedChunkLength = 0;
-                    }
-                    const take = Math.min(
-                        chunkSize - normalizedChunkLength,
-                        sourceBytes.byteLength - sourceOffset
-                    );
-                    normalizedChunk.set(
-                        sourceBytes.subarray(sourceOffset, sourceOffset + take),
-                        normalizedChunkLength
-                    );
-                    normalizedChunkLength += take;
-                    sourceOffset += take;
-                }
-                if (
-                    normalizedChunkLength === chunkSize &&
-                    readBytes < source.size
-                ) {
-                    await enqueueNormalizedChunk(normalizedChunk);
-                    normalizedChunkLength = 0;
-                }
-            }
-            ensureSourceSize(readBytes, source.size);
-            if (normalizedChunkLength > 0) {
-                await enqueueNormalizedChunk(
-                    normalizedChunk.subarray(0, normalizedChunkLength)
+            let pendingManifest:
+                | Awaited<ReturnType<typeof this.putAuthoredFile>>
+                | undefined;
+            let pendingManifestHead: string | undefined;
+            const hasher = new SHA256();
+            const putQueue = transfer.owner;
+            const updateQueueDiagnostics = () => {
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
                 );
-            }
-            await putQueue.drain();
-            updateQueueDiagnostics();
-            diagnostics.readyManifestStartedAt = Date.now();
-            const readyManifest = new LargeFileWithChunkHeads({
-                id: uploadId,
-                name,
-                size,
-                chunkCount,
-                ready: true,
-                finalHash: toBase64(hasher.digest()),
-                chunkEntryHeads,
-            });
-            await this.commitReadyManifest(
-                manifest,
-                pendingManifest,
-                readyManifest
-            );
-            diagnostics.readyManifestFinishedAt = Date.now();
-            diagnostics.chunkCount = chunkCount;
-        } catch (error) {
-            if (!sourceIteratorDone) {
-                try {
-                    const returned = sourceIterator?.return?.();
-                    if (returned) {
-                        void Promise.resolve(returned).catch(() => undefined);
+            };
+            let chunkCount = 0;
+            const chunkEntryHeads: string[] = [];
+            let sourceIterator: AsyncIterator<Uint8Array> | undefined;
+            let sourceIteratorDone = false;
+            let normalizedChunk: Uint8Array | undefined;
+            let normalizedChunkPermit: TransferPermit | undefined;
+            try {
+                diagnostics.manifestStartedAt = Date.now();
+                pendingManifest = await transfer.owner.track(
+                    this.putAuthoredFile(manifest, undefined, (entryHead) => {
+                        pendingManifestHead ??= entryHead;
+                    })
+                );
+                transfer.owner.throwIfFailed();
+                pendingManifestHead = pendingManifest.entry.hash;
+                diagnostics.manifestFinishedAt = Date.now();
+                // Iterator construction belongs inside the guarded region: a
+                // source may throw synchronously before yielding its first chunk.
+                const sourceChunks = source.readChunks(chunkSize);
+                sourceIterator = sourceChunks[Symbol.asyncIterator]();
+                let readBytes = 0n;
+                let committedBytes = 0n;
+                let normalizedChunkLength = 0;
+                const allocateNormalizedChunk = async () => {
+                    const permit = await putQueue.acquire(chunkSize);
+                    try {
+                        normalizedChunk = new Uint8Array(chunkSize);
+                        normalizedChunkPermit = permit;
+                    } catch (error) {
+                        permit.release();
+                        throw error;
                     }
-                } catch {
-                    // Best-effort cancellation; cleanup must not wait on a
-                    // source whose current next() is blocked.
-                }
-            }
-            await putQueue.settle();
-            updateQueueDiagnostics();
-            diagnostics.failureAt = Date.now();
-            diagnostics.failureMessage =
-                error instanceof Error ? error.message : String(error);
-            await this.cleanupFailedUploadIfCurrent(
-                manifest,
-                pendingManifest?.entry.hash ?? pendingManifestHead,
-                chunkEntryHeads,
-                Math.max(expectedChunkCount, chunkCount)
-            );
-            throw error;
-        }
+                };
+                const enqueueNormalizedChunk = (length: number) => {
+                    if (!normalizedChunk || !normalizedChunkPermit) {
+                        throw new Error("Missing normalized chunk staging");
+                    }
+                    const chunkIndex = chunkCount;
+                    const stableChunkBytes =
+                        length === normalizedChunk.byteLength
+                            ? normalizedChunk
+                            : normalizedChunk.subarray(0, length);
+                    const stableChunkPermit = normalizedChunkPermit;
+                    normalizedChunk = undefined;
+                    normalizedChunkPermit = undefined;
+                    normalizedChunkLength = 0;
+                    putQueue.enqueueWithPermit(stableChunkPermit, async () => {
+                        // Hash the scheduler-owned bytes that will actually be
+                        // published. Queue callbacks begin synchronously in FIFO
+                        // enqueue order, preserving the file's chunk order.
+                        hasher.update(stableChunkBytes);
+                        const chunk = new TinyFile({
+                            name: name + "/" + chunkIndex,
+                            file: stableChunkBytes,
+                            parentId: uploadId,
+                            index: chunkIndex,
+                        });
+                        const putStartedAt = Date.now();
+                        diagnostics.firstChunkStartedAt ??= putStartedAt;
+                        const appended = await this.putAuthoredFile(
+                            chunk,
+                            undefined,
+                            (entryHead) => {
+                                chunkEntryHeads[chunkIndex] ??= entryHead;
+                            }
+                        );
+                        chunkEntryHeads[chunkIndex] = appended.entry.hash;
+                        const putFinishedAt = Date.now();
+                        const putDurationMs = putFinishedAt - putStartedAt;
+                        diagnostics.firstChunkFinishedAt ??= putFinishedAt;
+                        diagnostics.lastChunkFinishedAt = putFinishedAt;
+                        diagnostics.chunkPutCount += 1;
+                        diagnostics.chunkPutTotalMs += putDurationMs;
+                        diagnostics.chunkPutMaxMs = Math.max(
+                            diagnostics.chunkPutMaxMs,
+                            putDurationMs
+                        );
+                        if (
+                            diagnostics.slowestChunkPutMs == null ||
+                            putDurationMs > diagnostics.slowestChunkPutMs
+                        ) {
+                            diagnostics.slowestChunkPutMs = putDurationMs;
+                            diagnostics.slowestChunkIndex = chunkIndex;
+                        }
+                        committedBytes += BigInt(stableChunkBytes.byteLength);
+                        progress?.(
+                            Math.min(
+                                Number(committedBytes) /
+                                    Math.max(Number(size), 1),
+                                1
+                            )
+                        );
+                    });
+                    chunkCount += 1;
+                    updateQueueDiagnostics();
+                };
+                await allocateNormalizedChunk();
+                for (;;) {
+                    const next = await Promise.race([
+                        sourceIterator.next(),
+                        putQueue.failureSignal,
+                    ]);
+                    if (next.done) {
+                        sourceIteratorDone = true;
+                        break;
+                    }
+                    const sourceBytes = next.value;
+                    putQueue.throwIfFailed();
+                    if (!(sourceBytes instanceof Uint8Array)) {
+                        throw new Error(
+                            "Source yielded a non-Uint8Array chunk"
+                        );
+                    }
+                    if (sourceBytes.byteLength === 0) {
+                        continue;
+                    }
+                    const nextReadBytes =
+                        readBytes + BigInt(sourceBytes.byteLength);
+                    if (nextReadBytes > source.size) {
+                        ensureSourceSize(nextReadBytes, source.size);
+                    }
+                    readBytes = nextReadBytes;
 
-        diagnostics.finishedAt = Date.now();
-        progress?.(1);
-        return uploadId;
+                    let sourceOffset = 0;
+                    while (sourceOffset < sourceBytes.byteLength) {
+                        // Keep the newest normalized chunk unpublished until more
+                        // data or iterator completion proves whether it is final.
+                        if (normalizedChunkLength === chunkSize) {
+                            enqueueNormalizedChunk(normalizedChunkLength);
+                            await allocateNormalizedChunk();
+                        }
+                        const take = Math.min(
+                            chunkSize - normalizedChunkLength,
+                            sourceBytes.byteLength - sourceOffset
+                        );
+                        normalizedChunk!.set(
+                            sourceBytes.subarray(
+                                sourceOffset,
+                                sourceOffset + take
+                            ),
+                            normalizedChunkLength
+                        );
+                        normalizedChunkLength += take;
+                        sourceOffset += take;
+                    }
+                    if (
+                        normalizedChunkLength === chunkSize &&
+                        readBytes < source.size
+                    ) {
+                        enqueueNormalizedChunk(normalizedChunkLength);
+                        await allocateNormalizedChunk();
+                    }
+                }
+                ensureSourceSize(readBytes, source.size);
+                if (normalizedChunkLength > 0) {
+                    enqueueNormalizedChunk(normalizedChunkLength);
+                } else {
+                    normalizedChunkPermit?.release();
+                    normalizedChunkPermit = undefined;
+                    normalizedChunk = undefined;
+                }
+                await putQueue.drain();
+                updateQueueDiagnostics();
+                diagnostics.readyManifestStartedAt = Date.now();
+                const readyProperties = {
+                    id: uploadId,
+                    name,
+                    size,
+                    chunkCount,
+                    ready: true,
+                    finalHash: toBase64(hasher.digest()),
+                    chunkEntryHeads,
+                };
+                const readyManifest = parentId
+                    ? new ParentedLargeFileWithChunkHeads({
+                          ...readyProperties,
+                          parentId,
+                      })
+                    : new LargeFileWithChunkHeads(readyProperties);
+                await transfer.owner.track(
+                    this.commitReadyManifest(
+                        manifest,
+                        pendingManifest,
+                        readyManifest
+                    )
+                );
+                transfer.owner.throwIfFailed();
+                diagnostics.readyManifestFinishedAt = Date.now();
+                diagnostics.chunkCount = chunkCount;
+            } catch (error) {
+                normalizedChunkPermit?.release();
+                normalizedChunkPermit = undefined;
+                normalizedChunk = undefined;
+                if (!sourceIteratorDone) {
+                    try {
+                        const returned = sourceIterator?.return?.();
+                        if (returned) {
+                            void Promise.resolve(returned).catch(
+                                () => undefined
+                            );
+                        }
+                    } catch {
+                        // Best-effort cancellation; cleanup must not wait on a
+                        // source whose current next() is blocked.
+                    }
+                }
+                await putQueue.settle();
+                updateQueueDiagnostics();
+                diagnostics.failureAt = Date.now();
+                diagnostics.failureMessage =
+                    error instanceof Error ? error.message : String(error);
+                await this.cleanupFailedUploadIfCurrent(
+                    manifest,
+                    pendingManifest?.entry.hash ?? pendingManifestHead,
+                    chunkEntryHeads,
+                    Math.max(expectedChunkCount, chunkCount)
+                );
+                throw error;
+            }
+
+            diagnostics.finishedAt = Date.now();
+            progress?.(1);
+            return uploadId;
+        } finally {
+            await transfer.owner.settle();
+            await transfer.finish();
+        }
     }
 
     private async cleanupChunkedUpload(
@@ -4582,170 +6033,240 @@ export class Files extends Program<Args> {
         getChunk: (index: number) => Promise<Uint8Array>,
         chunkSize: number,
         parentId?: string,
-        progress?: (progress: number) => void
+        progress?: (progress: number) => void,
+        options?: FileWriteOptions,
+        chunkBytesOwned = false
     ) {
-        if (parentId) {
-            throw new Error("Unexpected that a LargeFile to have a parent");
-        }
-
         const uploadId = createUploadId();
         const chunkCount = getChunkCount(size, chunkSize);
-        const diagnostics: UploadDiagnostics = {
-            uploadId,
-            fileName: name,
-            sizeBytes: Number(size),
-            chunkSize,
-            chunkCount,
-            startedAt: Date.now(),
-            manifestStartedAt: null,
-            manifestFinishedAt: null,
-            firstChunkStartedAt: null,
-            firstChunkFinishedAt: null,
-            lastChunkFinishedAt: null,
-            chunkPutCount: 0,
-            chunkReadTotalMs: 0,
-            chunkReadMaxMs: 0,
-            chunkPutTotalMs: 0,
-            chunkPutMaxMs: 0,
-            chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-            chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
-            maxConcurrentChunkPuts: 0,
-            maxConcurrentChunkPutBytes: 0,
-            slowestChunkIndex: null,
-            slowestChunkPutMs: null,
-            readyManifestStartedAt: null,
-            readyManifestFinishedAt: null,
-            finishedAt: null,
-            failureAt: null,
-            failureMessage: null,
-        };
-        this.lastUploadDiagnostics = diagnostics;
-        const manifest = new LargeFile({
-            id: uploadId,
-            name,
-            size,
-            chunkCount,
-            ready: false,
-        });
-
-        let pendingManifest:
-            | Awaited<ReturnType<typeof this.putAuthoredFile>>
-            | undefined;
-        let pendingManifestHead: string | undefined;
-        const hasher = new SHA256();
-        const putQueue = new BoundedAsyncWorkQueue(
-            LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-            LARGE_FILE_CHUNK_PUT_BYTE_LIMIT
+        const transfer = beginFileTransfer(
+            this,
+            "upload",
+            options?.signal,
+            options?.transferId ?? uploadId
         );
-        const chunkEntryHeads: string[] = [];
-        const updateQueueDiagnostics = () => {
-            diagnostics.maxConcurrentChunkPuts = putQueue.peakCount;
-            diagnostics.maxConcurrentChunkPutBytes = putQueue.peakBytes;
-        };
         try {
-            diagnostics.manifestStartedAt = Date.now();
-            pendingManifest = await this.putAuthoredFile(
-                manifest,
-                undefined,
-                (entryHead) => {
-                    pendingManifestHead ??= entryHead;
-                }
-            );
-            pendingManifestHead = pendingManifest.entry.hash;
-            diagnostics.manifestFinishedAt = Date.now();
-            let committedBytes = 0;
-            for (let i = 0; i < chunkCount; i++) {
-                putQueue.throwIfFailed();
-                const readStartedAt = Date.now();
-                const chunkBytes = await getChunk(i);
-                putQueue.throwIfFailed();
-                const readFinishedAt = Date.now();
-                diagnostics.chunkReadTotalMs += readFinishedAt - readStartedAt;
-                diagnostics.chunkReadMaxMs = Math.max(
-                    diagnostics.chunkReadMaxMs,
-                    readFinishedAt - readStartedAt
-                );
-                hasher.update(chunkBytes);
-                await putQueue.enqueue(chunkBytes.byteLength, async () => {
-                    // Reserve queue capacity before allocating the stable
-                    // per-chunk copy counted by the byte limit.
-                    const stableChunkBytes = new Uint8Array(chunkBytes);
-                    const chunk = new TinyFile({
-                        name: name + "/" + i,
-                        file: stableChunkBytes,
-                        parentId: uploadId,
-                        index: i,
-                    });
-                    const putStartedAt = Date.now();
-                    diagnostics.firstChunkStartedAt ??= putStartedAt;
-                    const appended = await this.putAuthoredFile(
-                        chunk,
-                        undefined,
-                        (entryHead) => {
-                            chunkEntryHeads[i] ??= entryHead;
-                        }
-                    );
-                    chunkEntryHeads[i] = appended.entry.hash;
-                    const putFinishedAt = Date.now();
-                    const putDurationMs = putFinishedAt - putStartedAt;
-                    diagnostics.firstChunkFinishedAt ??= putFinishedAt;
-                    diagnostics.lastChunkFinishedAt = putFinishedAt;
-                    diagnostics.chunkPutCount += 1;
-                    diagnostics.chunkPutTotalMs += putDurationMs;
-                    diagnostics.chunkPutMaxMs = Math.max(
-                        diagnostics.chunkPutMaxMs,
-                        putDurationMs
-                    );
-                    if (
-                        diagnostics.slowestChunkPutMs == null ||
-                        putDurationMs > diagnostics.slowestChunkPutMs
-                    ) {
-                        diagnostics.slowestChunkPutMs = putDurationMs;
-                        diagnostics.slowestChunkIndex = i;
-                    }
-                    committedBytes += stableChunkBytes.byteLength;
-                    progress?.(
-                        Math.min(committedBytes / Math.max(Number(size), 1), 1)
-                    );
-                });
-                updateQueueDiagnostics();
-            }
-            await putQueue.drain();
-            updateQueueDiagnostics();
-            diagnostics.readyManifestStartedAt = Date.now();
-            const readyManifest = new LargeFileWithChunkHeads({
-                id: uploadId,
-                name,
-                size,
+            const diagnostics: UploadDiagnostics = {
+                transferId: transfer.id,
+                uploadId,
+                fileName: name,
+                sizeBytes: Number(size),
+                chunkSize,
                 chunkCount,
-                ready: true,
-                finalHash: toBase64(hasher.digest()),
-                chunkEntryHeads,
-            });
-            await this.commitReadyManifest(
-                manifest,
-                pendingManifest,
-                readyManifest
-            );
-            diagnostics.readyManifestFinishedAt = Date.now();
-        } catch (error) {
-            await putQueue.settle();
-            updateQueueDiagnostics();
-            diagnostics.failureAt = Date.now();
-            diagnostics.failureMessage =
-                error instanceof Error ? error.message : String(error);
-            await this.cleanupFailedUploadIfCurrent(
-                manifest,
-                pendingManifest?.entry.hash ?? pendingManifestHead,
-                chunkEntryHeads,
-                chunkCount
-            );
-            throw error;
-        }
+                startedAt: Date.now(),
+                manifestStartedAt: null,
+                manifestFinishedAt: null,
+                firstChunkStartedAt: null,
+                firstChunkFinishedAt: null,
+                lastChunkFinishedAt: null,
+                chunkPutCount: 0,
+                chunkReadTotalMs: 0,
+                chunkReadMaxMs: 0,
+                chunkPutTotalMs: 0,
+                chunkPutMaxMs: 0,
+                chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
+                chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
+                maxConcurrentChunkPuts: 0,
+                maxConcurrentChunkPutBytes: 0,
+                slowestChunkIndex: null,
+                slowestChunkPutMs: null,
+                readyManifestStartedAt: null,
+                readyManifestFinishedAt: null,
+                finishedAt: null,
+                failureAt: null,
+                failureMessage: null,
+                aggregatePeakChunkPuts: 0,
+                aggregatePeakChunkPutBytes: 0,
+            };
+            recordUploadDiagnostics(this, transfer.id, diagnostics);
+            const manifest: LargeFileValue = parentId
+                ? new ParentedLargeFileWithChunkHeads({
+                      id: uploadId,
+                      name,
+                      size,
+                      chunkCount,
+                      ready: false,
+                      parentId,
+                  })
+                : new LargeFile({
+                      id: uploadId,
+                      name,
+                      size,
+                      chunkCount,
+                      ready: false,
+                  });
 
-        diagnostics.finishedAt = Date.now();
-        progress?.(1);
-        return uploadId;
+            let pendingManifest:
+                | Awaited<ReturnType<typeof this.putAuthoredFile>>
+                | undefined;
+            let pendingManifestHead: string | undefined;
+            const hasher = new SHA256();
+            const putQueue = transfer.owner;
+            const chunkEntryHeads: string[] = [];
+            const updateQueueDiagnostics = () => {
+                updateUploadSchedulerDiagnostics(
+                    this,
+                    diagnostics,
+                    transfer.owner
+                );
+            };
+            try {
+                diagnostics.manifestStartedAt = Date.now();
+                pendingManifest = await transfer.owner.track(
+                    this.putAuthoredFile(manifest, undefined, (entryHead) => {
+                        pendingManifestHead ??= entryHead;
+                    })
+                );
+                transfer.owner.throwIfFailed();
+                pendingManifestHead = pendingManifest.entry.hash;
+                diagnostics.manifestFinishedAt = Date.now();
+                let committedBytes = 0;
+                for (let i = 0; i < chunkCount; i++) {
+                    putQueue.throwIfFailed();
+                    const expectedChunkBytes =
+                        getChunkEnd(i, size, chunkSize) -
+                        getChunkStart(i, chunkSize);
+                    let stagingPermit: TransferPermit | undefined =
+                        await putQueue.acquire(expectedChunkBytes);
+                    const readStartedAt = Date.now();
+                    const originalChunkRead = Promise.resolve().then(() =>
+                        getChunk(i)
+                    );
+                    try {
+                        const chunkBytes = await transfer.owner.track(
+                            raceWithSignal(
+                                originalChunkRead,
+                                transfer.owner.signal,
+                                "Chunk staging cancelled"
+                            )
+                        );
+                        putQueue.throwIfFailed();
+                        if (chunkBytes.byteLength !== expectedChunkBytes) {
+                            throw new Error(
+                                `Chunk ${i + 1}/${chunkCount} changed size during staging`
+                            );
+                        }
+                        const readFinishedAt = Date.now();
+                        diagnostics.chunkReadTotalMs +=
+                            readFinishedAt - readStartedAt;
+                        diagnostics.chunkReadMaxMs = Math.max(
+                            diagnostics.chunkReadMaxMs,
+                            readFinishedAt - readStartedAt
+                        );
+                        const stableChunkBytes = chunkBytesOwned
+                            ? chunkBytes
+                            : new Uint8Array(chunkBytes);
+                        const putPermit = stagingPermit;
+                        stagingPermit = undefined;
+                        putQueue.enqueueWithPermit(putPermit, async () => {
+                            // Hash the scheduler-owned bytes that will actually be
+                            // published. Queue callbacks begin synchronously in FIFO
+                            // enqueue order, preserving the file's chunk order.
+                            hasher.update(stableChunkBytes);
+                            const chunk = new TinyFile({
+                                name: name + "/" + i,
+                                file: stableChunkBytes,
+                                parentId: uploadId,
+                                index: i,
+                            });
+                            const putStartedAt = Date.now();
+                            diagnostics.firstChunkStartedAt ??= putStartedAt;
+                            const appended = await this.putAuthoredFile(
+                                chunk,
+                                undefined,
+                                (entryHead) => {
+                                    chunkEntryHeads[i] ??= entryHead;
+                                }
+                            );
+                            chunkEntryHeads[i] = appended.entry.hash;
+                            const putFinishedAt = Date.now();
+                            const putDurationMs = putFinishedAt - putStartedAt;
+                            diagnostics.firstChunkFinishedAt ??= putFinishedAt;
+                            diagnostics.lastChunkFinishedAt = putFinishedAt;
+                            diagnostics.chunkPutCount += 1;
+                            diagnostics.chunkPutTotalMs += putDurationMs;
+                            diagnostics.chunkPutMaxMs = Math.max(
+                                diagnostics.chunkPutMaxMs,
+                                putDurationMs
+                            );
+                            if (
+                                diagnostics.slowestChunkPutMs == null ||
+                                putDurationMs > diagnostics.slowestChunkPutMs
+                            ) {
+                                diagnostics.slowestChunkPutMs = putDurationMs;
+                                diagnostics.slowestChunkIndex = i;
+                            }
+                            committedBytes += stableChunkBytes.byteLength;
+                            progress?.(
+                                Math.min(
+                                    committedBytes / Math.max(Number(size), 1),
+                                    1
+                                )
+                            );
+                        });
+                    } catch (error) {
+                        if (transfer.owner.signal.aborted && stagingPermit) {
+                            transfer.owner.detachLeaseUntilSettled(
+                                stagingPermit,
+                                originalChunkRead
+                            );
+                            stagingPermit = undefined;
+                        }
+                        throw error;
+                    } finally {
+                        stagingPermit?.release();
+                    }
+                    updateQueueDiagnostics();
+                }
+                await putQueue.drain();
+                updateQueueDiagnostics();
+                diagnostics.readyManifestStartedAt = Date.now();
+                const readyProperties = {
+                    id: uploadId,
+                    name,
+                    size,
+                    chunkCount,
+                    ready: true,
+                    finalHash: toBase64(hasher.digest()),
+                    chunkEntryHeads,
+                };
+                const readyManifest = parentId
+                    ? new ParentedLargeFileWithChunkHeads({
+                          ...readyProperties,
+                          parentId,
+                      })
+                    : new LargeFileWithChunkHeads(readyProperties);
+                await transfer.owner.track(
+                    this.commitReadyManifest(
+                        manifest,
+                        pendingManifest,
+                        readyManifest
+                    )
+                );
+                transfer.owner.throwIfFailed();
+                diagnostics.readyManifestFinishedAt = Date.now();
+            } catch (error) {
+                await putQueue.settle();
+                updateQueueDiagnostics();
+                diagnostics.failureAt = Date.now();
+                diagnostics.failureMessage =
+                    error instanceof Error ? error.message : String(error);
+                await this.cleanupFailedUploadIfCurrent(
+                    manifest,
+                    pendingManifest?.entry.hash ?? pendingManifestHead,
+                    chunkEntryHeads,
+                    chunkCount
+                );
+                throw error;
+            }
+
+            diagnostics.finishedAt = Date.now();
+            progress?.(1);
+            return uploadId;
+        } finally {
+            await transfer.owner.settle();
+            await transfer.finish();
+        }
     }
 
     private async removeFileUnlocked(file: AbstractFile) {
@@ -4845,7 +6366,7 @@ export class Files extends Program<Args> {
                             caseInsensitive: false,
                             method: StringMatchMethod.exact,
                         }),
-                        fetch: 0xffffffff,
+                        fetch: 1,
                     }),
                     {
                         local: false,
@@ -4931,7 +6452,7 @@ export class Files extends Program<Args> {
                                 caseInsensitive: false,
                                 method: StringMatchMethod.exact,
                             }),
-                            fetch: 0xffffffff,
+                            fetch: 1,
                         }),
                         {
                             local: true,
@@ -4958,7 +6479,7 @@ export class Files extends Program<Args> {
         return deduplicateListedRoots(resolvedRoots);
     }
 
-    async countLocalChunks(parent: LargeFile): Promise<number> {
+    async countLocalChunks(parent: LargeFileValue): Promise<number> {
         const count = await this.files.index.index.count(
             new SearchRequest({
                 query: new StringMatch({ key: "parentId", value: parent.id }),
@@ -4978,7 +6499,7 @@ export class Files extends Program<Args> {
      * every chunk, so block locality cannot be measured by this fast path.
      */
     async countLocalChunkBlocks(
-        parent: LargeFile
+        parent: LargeFileValue
     ): Promise<number | undefined> {
         const candidateHeads = getCompleteChunkEntryHeads(parent);
         if (!candidateHeads) {
@@ -5099,6 +6620,144 @@ export class Files extends Program<Args> {
         return hashes.length > 0 ? hashes : undefined;
     }
 
+    private async getByField<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
+    >(
+        key: "id" | "name",
+        value: string,
+        properties?: { as: OutputType } & FileReadOptions
+    ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
+        const transfer = beginFileTransfer(
+            this,
+            "read",
+            properties?.signal,
+            properties?.transferId
+        );
+        let decodePermit: TransferPermit | undefined;
+        try {
+            const request = new SearchRequest({
+                query: [new StringMatch({ key, value })],
+                fetch: 1,
+            });
+            const searchWithReservation = async (
+                lane: TransferLane,
+                options: unknown
+            ) => {
+                decodePermit = await transfer.owner.acquire(
+                    LARGE_FILE_DECODE_RESERVATION_BYTES,
+                    lane
+                );
+                const originalSearch = Promise.resolve().then(() =>
+                    this.files.index.search(request, options as any)
+                );
+                try {
+                    return await transfer.owner.track(
+                        raceWithSignal(
+                            originalSearch,
+                            transfer.owner.signal,
+                            "File lookup cancelled"
+                        )
+                    );
+                } catch (error) {
+                    if (transfer.owner.signal.aborted && decodePermit) {
+                        transfer.owner.detachLeaseUntilSettled(
+                            decodePermit,
+                            originalSearch
+                        );
+                        decodePermit = undefined;
+                    }
+                    throw error;
+                }
+            };
+            let results = await searchWithReservation("local", {
+                local: true,
+                remote: false,
+                signal: transfer.owner.signal,
+            });
+            if (!results[0]) {
+                decodePermit?.release();
+                decodePermit = undefined;
+                results = await searchWithReservation("remote", {
+                    local: false,
+                    signal: transfer.owner.signal,
+                    remote: {
+                        timeout: properties?.timeout ?? 10 * 1000,
+                        throwOnMissing: false,
+                    },
+                });
+            }
+            transfer.owner.throwIfFailed();
+            const result = results[0];
+            if (!result) {
+                return;
+            }
+            const resultPermit = decodePermit;
+            if (!resultPermit) {
+                throw new Error("Missing file metadata decode reservation");
+            }
+
+            const isTinyResult = result instanceof TinyFile;
+            if (isTinyResult) {
+                if (result.file.byteLength > TINY_FILE_SIZE_LIMIT) {
+                    throw new Error(
+                        `TinyFile ${result.id} exceeds the legacy ${TINY_FILE_SIZE_LIMIT}-byte payload limit`
+                    );
+                }
+                shrinkTransferPermitToBytes(
+                    resultPermit,
+                    result.file.byteLength
+                );
+            } else {
+                resultPermit.release();
+                decodePermit = undefined;
+            }
+
+            const inheritedProperties = {
+                ...properties,
+                signal: transfer.owner.signal,
+                transferId: transfer.id,
+                [FILE_READ_TRANSFER_CONTEXT]: {
+                    transfer,
+                    recordTinyDiagnostics: true,
+                    payloadPermitHeld: isTinyResult,
+                },
+            } as InternalFileReadOptions & { as: OutputType };
+            const originalRead = Promise.resolve(
+                result.getFile(this, inheritedProperties)
+            );
+            let file: Output;
+            try {
+                file = (await transfer.owner.track(
+                    raceWithSignal(
+                        originalRead,
+                        transfer.owner.signal,
+                        "File read cancelled"
+                    )
+                )) as Output;
+            } catch (error) {
+                if (transfer.owner.signal.aborted && decodePermit) {
+                    transfer.owner.detachLeaseUntilSettled(
+                        decodePermit,
+                        originalRead
+                    );
+                    decodePermit = undefined;
+                }
+                throw error;
+            }
+            return file
+                ? {
+                      id: result.id,
+                      name: result.name,
+                      bytes: file,
+                  }
+                : undefined;
+        } finally {
+            decodePermit?.release();
+            await transfer.finish();
+        }
+    }
+
     /**
      * Get by name
      * @param id
@@ -5109,31 +6768,9 @@ export class Files extends Program<Args> {
         Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         id: string,
-        properties?: { as: OutputType }
+        properties?: { as: OutputType } & FileReadOptions
     ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
-        const results = await this.files.index.search(
-            new SearchRequest({
-                query: [new StringMatch({ key: "id", value: id })],
-                fetch: 0xffffffff,
-            }),
-            {
-                local: true,
-                remote: {
-                    timeout: 10 * 1000,
-                },
-            }
-        );
-
-        for (const result of results) {
-            const file = await result.getFile(this, properties);
-            if (file) {
-                return {
-                    id: result.id,
-                    name: result.name,
-                    bytes: file as Output,
-                };
-            }
-        }
+        return this.getByField("id", id, properties);
     }
 
     /**
@@ -5146,31 +6783,9 @@ export class Files extends Program<Args> {
         Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         name: string,
-        properties?: { as: OutputType }
+        properties?: { as: OutputType } & FileReadOptions
     ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
-        const results = await this.files.index.search(
-            new SearchRequest({
-                query: [new StringMatch({ key: "name", value: name })],
-                fetch: 0xffffffff,
-            }),
-            {
-                local: true,
-                remote: {
-                    timeout: 10 * 1000,
-                },
-            }
-        );
-
-        for (const result of results) {
-            const file = await result.getFile(this, properties);
-            if (file) {
-                return {
-                    id: result.id,
-                    name: result.name,
-                    bytes: file as Output,
-                };
-            }
-        }
+        return this.getByField("name", name, properties);
     }
 
     private clearFileRuntimeState() {
@@ -5194,23 +6809,36 @@ export class Files extends Program<Args> {
     }
 
     async close(from?: Program): Promise<boolean> {
+        await shutdownFileTransfers(
+            this,
+            new TransferCancelledError("File store is closing")
+        );
         const closed = await super.close(from);
         if (closed) {
             this.clearFileRuntimeState();
+        } else {
+            getFileTransferRuntime(this).reopen();
         }
         return closed;
     }
 
     async drop(from?: Program): Promise<boolean> {
+        await shutdownFileTransfers(
+            this,
+            new TransferCancelledError("File store is being dropped")
+        );
         const dropped = await super.drop(from);
         if (dropped) {
             this.clearFileRuntimeState();
+        } else {
+            getFileTransferRuntime(this).reopen();
         }
         return dropped;
     }
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        getFileTransferRuntime(this).reopen();
         const runtimeProfileStartIndex =
             getRuntimeOpenProfilerState().samples.length;
         const openDiagnostics: OpenDiagnostics = {

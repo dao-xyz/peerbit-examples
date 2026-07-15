@@ -5,6 +5,7 @@ on:
         paths:
             - ".github/workflows/file-share-ci.yml"
             - ".github/workflows/file-share-two-runner-benchmarks.yml"
+            - ".github/workflows/file-share-two-runner-artifact-benchmarks.yml"
             - "package.json"
             - "pnpm-lock.yaml"
             - "tsconfig.json"
@@ -16,6 +17,7 @@ on:
         paths:
             - ".github/workflows/file-share-ci.yml"
             - ".github/workflows/file-share-two-runner-benchmarks.yml"
+            - ".github/workflows/file-share-two-runner-artifact-benchmarks.yml"
             - "package.json"
             - "pnpm-lock.yaml"
             - "tsconfig.json"
@@ -55,15 +57,15 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
+            - name: Build file-share library
+              run: pnpm --filter @peerbit/please-lib run build
+
             - name: Self-test two-runner integrity
               working-directory: packages/file-share/frontend
               run: node tests/two-runner.bench.mjs self-test
 
             - name: Test file-share library
               run: pnpm --filter @peerbit/please-lib run test
-
-            - name: Build file-share library
-              run: pnpm --filter @peerbit/please-lib run build
 
             - name: Test file-share frontend
               run: pnpm --filter file-share run test:unit

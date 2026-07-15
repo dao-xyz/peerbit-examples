@@ -1,3 +1,5 @@
+import { TINY_FILE_WRITE_SIZE_LIMIT_BYTES } from "@peerbit/please-lib";
+
 export const READER_COHORTS = [
     "live-replicator",
     "cold-observer",
@@ -6,7 +8,7 @@ export const READER_COHORTS = [
 
 export type ReaderCohort = (typeof READER_COHORTS)[number];
 
-export const TINY_FILE_SIZE_LIMIT_BYTES = 5_000_000;
+export const TINY_FILE_SIZE_LIMIT_BYTES = TINY_FILE_WRITE_SIZE_LIMIT_BYTES;
 const MEBIBYTE_BYTES = 1024 * 1024;
 
 export const validateLargeFileBenchmarkSizeMb = (fileSizeMb: number) => {
