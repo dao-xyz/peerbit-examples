@@ -35,6 +35,17 @@ const requireResultNumber = (value, label, { minimum } = {}) => {
     return value;
 };
 
+const requireResultNonNegativeSafeInteger = (value, label) => {
+    if (
+        typeof value !== "number" ||
+        !Number.isSafeInteger(value) ||
+        value < 0
+    ) {
+        throw new Error(`${label} must be a non-negative safe integer`);
+    }
+    return value;
+};
+
 const requireMatchingString = (left, right, label, pattern) => {
     if (
         typeof left !== "string" ||
@@ -68,7 +79,7 @@ const deriveDemandWaitSumBounds = ({ sampleCount, percentiles, tails }) => {
             .filter(({ count }) => count > 0)
             .map(({ threshold, count }) => ({
                 startRank: sampleCount - count + 1,
-                value: threshold,
+                value: threshold + 1,
             })),
     ];
     const upperBounds = [
@@ -311,11 +322,11 @@ const requireResultEvidence = (
     ) {
         throw new Error(`${label} did not prove per-source byte coverage`);
     }
-    const demandWaitSampleCount = readTransfer.demandWait?.sampleCount;
-    if (
-        !Number.isSafeInteger(demandWaitSampleCount) ||
-        demandWaitSampleCount !== readTransfer.chunkCount
-    ) {
+    const demandWaitSampleCount = requireResultNonNegativeSafeInteger(
+        readTransfer.demandWait?.sampleCount,
+        `${label} demand-wait sample count`
+    );
+    if (demandWaitSampleCount !== readTransfer.chunkCount) {
         throw new Error(
             `${label} did not prove per-chunk demand-wait coverage`
         );
@@ -375,30 +386,29 @@ const requireResultEvidence = (
         `${label} library stream-wall duration`,
         { minimum: Number.MIN_VALUE }
     );
-    const demandWaitSumMs = requireResultNumber(
+    const demandWaitSumMs = requireResultNonNegativeSafeInteger(
         readTransfer.demandWait?.sumMs,
-        `${label} demand-wait sum`,
-        { minimum: 0 }
+        `${label} demand-wait sum`
     );
-    const demandWaitP50Ms = requireResultNumber(
+    const demandWaitP50Ms = requireResultNonNegativeSafeInteger(
         readTransfer.demandWait?.p50Ms,
-        `${label} demand-wait p50`,
-        { minimum: 0 }
+        `${label} demand-wait p50`
     );
-    const demandWaitP95Ms = requireResultNumber(
+    const demandWaitP95Ms = requireResultNonNegativeSafeInteger(
         readTransfer.demandWait?.p95Ms,
-        `${label} demand-wait p95`,
-        { minimum: 0 }
+        `${label} demand-wait p95`
     );
-    const demandWaitP99Ms = requireResultNumber(
+    const demandWaitP99Ms = requireResultNonNegativeSafeInteger(
         readTransfer.demandWait?.p99Ms,
-        `${label} demand-wait p99`,
-        { minimum: 0 }
+        `${label} demand-wait p99`
     );
-    const demandWaitMaxMs = requireResultNumber(
+    const demandWaitMaxMs = requireResultNonNegativeSafeInteger(
         readTransfer.demandWait?.maxMs,
-        `${label} demand-wait max`,
-        { minimum: 0 }
+        `${label} demand-wait max`
+    );
+    const stagedDemandWaitSumMs = requireResultNonNegativeSafeInteger(
+        readTransfer.stages?.demandWaitMs,
+        `${label} staged demand-wait sum`
     );
     const demandWaitPercentiles = [
         { percentile: 50, value: demandWaitP50Ms },
@@ -481,11 +491,7 @@ const requireResultEvidence = (
             libraryStreamWallMs,
             { minimum: Number.MIN_VALUE }
         ) ||
-        !resultNumbersMatch(
-            readTransfer.stages?.demandWaitMs,
-            demandWaitSumMs,
-            { minimum: 0 }
-        ) ||
+        stagedDemandWaitSumMs !== demandWaitSumMs ||
         !resultNumbersMatch(
             streamReadExclusiveMs + sinkWriteAwaitMs,
             libraryStreamWallMs

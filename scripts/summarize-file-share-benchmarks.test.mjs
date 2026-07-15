@@ -174,16 +174,16 @@ test("accepts equivalent floating-point read-stage durations", () => {
     result.libraryStreamDurationMs = 0.3;
     result.readTransfer.demandWait = {
         ...result.readTransfer.demandWait,
-        sumMs: 0.1,
-        p50Ms: 0.04,
-        p95Ms: 0.06,
-        p99Ms: 0.06,
-        maxMs: 0.06,
+        sumMs: 0,
+        p50Ms: 0,
+        p95Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
     };
     result.readTransfer.stages = {
         ...result.readTransfer.stages,
         libraryStreamWallMs: 0.3,
-        demandWaitMs: 0.1,
+        demandWaitMs: 0,
     };
 
     const summary = summarizeBenchmarkResults([result], {
@@ -253,6 +253,64 @@ test("fails closed on inconsistent demand-wait summary evidence", () => {
     assert.throws(
         () => summarizeBenchmarkResults([tailConstrainedResult], options),
         /inconsistent demand-wait sum/
+    );
+    const strictTailBoundaryResult = withDemandWait({
+        sampleCount: 4,
+        sumMs: 3_000,
+        p50Ms: 0,
+        p95Ms: 2_000,
+        p99Ms: 2_000,
+        maxMs: 2_000,
+        over1sCount: 2,
+    });
+    strictTailBoundaryResult.readTransfer.chunkCount = 4;
+    strictTailBoundaryResult.readTransfer.sources.cached.chunkCount = 2;
+    strictTailBoundaryResult.readTransfer.sources.local.chunkCount = 2;
+    assert.throws(
+        () => summarizeBenchmarkResults([strictTailBoundaryResult], options),
+        /inconsistent demand-wait sum/
+    );
+    strictTailBoundaryResult.readTransfer.demandWait.sumMs = 3_001;
+    strictTailBoundaryResult.readTransfer.stages.demandWaitMs = 3_001;
+    assert.doesNotThrow(() =>
+        summarizeBenchmarkResults([strictTailBoundaryResult], options)
+    );
+    for (const demandWait of [
+        { sumMs: 1_000.5 },
+        { p50Ms: 100.5 },
+        { p95Ms: 900.5 },
+        { p99Ms: 900.5 },
+        { maxMs: 900.5 },
+        { sumMs: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [withDemandWait(demandWait)],
+                    options
+                ),
+            /demand-wait .* must be a non-negative safe integer/
+        );
+    }
+    for (const demandWait of [
+        { sampleCount: 1.5 },
+        { over1sCount: 0.5 },
+        { over5sCount: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [withDemandWait(demandWait)],
+                    options
+                ),
+            /safe integer/
+        );
+    }
+    const fractionalStagedSumResult = withDemandWait({});
+    fractionalStagedSumResult.readTransfer.stages.demandWaitMs = 1_000.5;
+    assert.throws(
+        () => summarizeBenchmarkResults([fractionalStagedSumResult], options),
+        /staged demand-wait sum must be a non-negative safe integer/
     );
     assert.throws(
         () =>
