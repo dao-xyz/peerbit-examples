@@ -2334,6 +2334,8 @@ export class LargeFile extends AbstractFile {
             chunkAttempts: {} as Record<number, number>,
             chunkHints: {} as Record<number, string[] | null>,
             chunkResolved: {} as Record<number, string>,
+            chunkByteLength: {} as Record<number, number>,
+            chunkDemandWaitMs: {} as Record<number, number>,
             chunkResolveStartedAt: {} as Record<number, number>,
             chunkResolveFinishedAt: {} as Record<number, number>,
             chunkMaterializeStartedAt: {} as Record<number, number>,
@@ -2342,6 +2344,7 @@ export class LargeFile extends AbstractFile {
             chunkHashFinishedAt: {} as Record<number, number>,
             chunkWriteStartedAt: {} as Record<number, number>,
             chunkWriteFinishedAt: {} as Record<number, number>,
+            computedFinalHash: null as string | null,
             chunkFailure: null as {
                 index: number;
                 type: string;
@@ -3511,6 +3514,7 @@ export class LargeFile extends AbstractFile {
                         const demandStartedAt = Date.now();
                         scheduledChunk = await resolveChunkWithReadAhead(index);
                         const demandWaitMs = Date.now() - demandStartedAt;
+                        debug.chunkDemandWaitMs[index] = demandWaitMs;
                         if (isAdaptiveRemoteRead) {
                             const attempts = debug.chunkAttempts[index] ?? 1;
                             const adaptedReadAhead =
@@ -3563,6 +3567,7 @@ export class LargeFile extends AbstractFile {
                                 `Chunk ${index + 1}/${resolvedFile.chunkCount} materialized without bytes`
                             );
                         }
+                        debug.chunkByteLength[index] = chunk.byteLength;
                         const nextProcessed =
                             processed + BigInt(chunk.byteLength);
                         if (nextProcessed > resolvedFile.size) {
@@ -3604,9 +3609,13 @@ export class LargeFile extends AbstractFile {
                         `File size does not match the expected size. Expected ${resolvedFile.size} bytes, got ${processed}`
                     );
                 }
+                const computedFinalHash = hasher
+                    ? toBase64(hasher.digest())
+                    : null;
+                debug.computedFinalHash = computedFinalHash;
                 if (
-                    hasher &&
-                    toBase64(hasher.digest()) !== resolvedFile.finalHash
+                    computedFinalHash &&
+                    computedFinalHash !== resolvedFile.finalHash
                 ) {
                     throw new Error(
                         "File hash does not match the expected content"

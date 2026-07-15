@@ -1006,12 +1006,15 @@ describe("large-file read scheduling", () => {
             fileName: file.name,
             startedAt: expect.any(Number),
             finishedAt: expect.any(Number),
+            chunkByteLength: { 0: 1 },
+            chunkDemandWaitMs: { 0: expect.any(Number) },
             chunkMaterializeStartedAt: { 0: expect.any(Number) },
             chunkMaterializeFinishedAt: { 0: expect.any(Number) },
             chunkHashStartedAt: { 0: expect.any(Number) },
             chunkHashFinishedAt: { 0: expect.any(Number) },
             chunkWriteStartedAt: { 0: expect.any(Number) },
             chunkWriteFinishedAt: { 0: expect.any(Number) },
+            computedFinalHash: null,
         });
     });
 

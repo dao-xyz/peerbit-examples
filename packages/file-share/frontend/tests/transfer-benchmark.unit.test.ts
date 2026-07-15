@@ -4,9 +4,11 @@ import {
     classifyReaderCohort,
     classifyReaderTopology,
     getBrowserDialablePeerAddresses,
+    resolveBenchmarkDownloadSink,
     resolveCompatibleIndexRowCount,
     resolveReaderCohort,
     stopSamplerAtCompletion,
+    summarizeReadTransferDiagnostics,
     TINY_FILE_SIZE_LIMIT_BYTES,
     validateLargeFileBenchmarkSizeMb,
     validateJsHeapMeasurement,
@@ -48,6 +50,92 @@ const readyTopology = (
 });
 
 describe("file-share transfer benchmark cohorts", () => {
+    it("uses the browser-local hash sink by default and validates overrides", () => {
+        expect(resolveBenchmarkDownloadSink()).toBe("hash-only");
+        expect(resolveBenchmarkDownloadSink("opfs")).toBe("opfs");
+        expect(resolveBenchmarkDownloadSink("node-file")).toBe("node-file");
+        expect(() => resolveBenchmarkDownloadSink("browser-download")).toThrow(
+            "Unsupported PW_DOWNLOAD_SINK"
+        );
+        expect(() => resolveBenchmarkDownloadSink("unknown")).toThrow(
+            "Unsupported PW_DOWNLOAD_SINK"
+        );
+    });
+
+    it("summarizes per-source bytes, demand tails, and sink-exclusive read time", () => {
+        const record = (values: number[]) =>
+            Object.fromEntries(values.map((value, index) => [index, value]));
+        const summary = summarizeReadTransferDiagnostics(
+            {
+                startedAt: 1_000,
+                finishedAt: 31_000,
+                chunkResolved: {
+                    0: "cached",
+                    1: "cached",
+                    2: "local",
+                    3: "manifest-head-get",
+                },
+                chunkByteLength: record([4, 4, 4, 2]),
+                chunkDemandWaitMs: record([0, 1_001, 5_001, 10_001]),
+                chunkWriteStartedAt: record([10, 20, 30, 40]),
+                chunkWriteFinishedAt: record([110, 120, 130, 140]),
+                chunkMaterializeStartedAt: record([1, 2, 3, 4]),
+                chunkMaterializeFinishedAt: record([2, 3, 4, 5]),
+                chunkHashStartedAt: record([5, 6, 7, 8]),
+                chunkHashFinishedAt: record([6, 7, 8, 9]),
+            },
+            14
+        );
+
+        expect(summary.sources).toEqual({
+            cached: { chunkCount: 2, bytes: 8 },
+            local: { chunkCount: 1, bytes: 4 },
+            "manifest-head-get": { chunkCount: 1, bytes: 2 },
+        });
+        expect(summary.demandWait).toMatchObject({
+            sumMs: 16_003,
+            p50Ms: 1_001,
+            p95Ms: 10_001,
+            p99Ms: 10_001,
+            maxMs: 10_001,
+            over1sCount: 3,
+            over5sCount: 2,
+            over10sCount: 1,
+        });
+        expect(summary.stages).toMatchObject({
+            libraryStreamWallMs: 30_000,
+            sinkWriteAwaitMs: 400,
+            streamReadExclusiveMs: 29_600,
+            materializeMs: 4,
+            contentHashMs: 4,
+        });
+    });
+
+    it("fails closed when read attribution omits bytes or exact coverage", () => {
+        const diagnostics = {
+            startedAt: 1,
+            finishedAt: 2,
+            chunkResolved: { 0: "cached" },
+            chunkByteLength: { 0: 4 },
+            chunkDemandWaitMs: { 0: 0 },
+            chunkWriteStartedAt: { 0: 1 },
+            chunkWriteFinishedAt: { 0: 1 },
+            chunkMaterializeStartedAt: { 0: 1 },
+            chunkMaterializeFinishedAt: { 0: 1 },
+            chunkHashStartedAt: { 0: 1 },
+            chunkHashFinishedAt: { 0: 1 },
+        };
+        expect(() => summarizeReadTransferDiagnostics(diagnostics, 5)).toThrow(
+            "covered 4 bytes, expected 5"
+        );
+        expect(() =>
+            summarizeReadTransferDiagnostics(
+                { ...diagnostics, chunkByteLength: {} },
+                4
+            )
+        ).toThrow("chunkByteLength[0]");
+    });
+
     it("prefers explicit index-row diagnostics and rejects alias drift", () => {
         expect(resolveCompatibleIndexRowCount(7, 7, "post-read")).toBe(7);
         expect(resolveCompatibleIndexRowCount(null, 6, "post-read")).toBe(6);

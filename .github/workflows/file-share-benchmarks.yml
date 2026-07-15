@@ -30,6 +30,15 @@ on:
                     - live-replicator
                     - cold-observer
                     - cold-persisted-read
+            download_sink:
+                description: Browser output sink (hash-only isolates Peerbit transfer; OPFS measures native browser persistence)
+                required: true
+                type: choice
+                default: hash-only
+                options:
+                    - hash-only
+                    - opfs
+                    - node-file
             min_upload_mbps:
                 description: Fail if median upload throughput is below this value (0 disables)
                 required: true
@@ -52,7 +61,7 @@ jobs:
         runs-on: ubuntu-22.04
         timeout-minutes: 180
         concurrency:
-            group: file-share-bench-${{ github.ref_name }}-${{ inputs.scenario }}-${{ inputs.file_mb }}
+            group: file-share-bench-${{ github.ref_name }}-${{ inputs.scenario }}-${{ inputs.file_mb }}-${{ inputs.download_sink }}
             cancel-in-progress: false
 
         steps:
@@ -85,6 +94,7 @@ jobs:
                   PW_BENCH: "1"
                   PW_BENCH_SCENARIO: ${{ inputs.scenario }}
                   PW_READER_COHORT: ${{ inputs.reader_cohort }}
+                  PW_DOWNLOAD_SINK: ${{ inputs.download_sink }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
                   PW_BASE_URL: ${{ inputs.scenario == 'prod' && env.FILE_SHARE_BENCHMARK_BASE_URL || '' }}
               working-directory: packages/file-share/frontend
@@ -100,6 +110,7 @@ jobs:
               env:
                   BENCH_SCENARIO: ${{ inputs.scenario }}
                   BENCH_READER_COHORT: ${{ inputs.reader_cohort }}
+                  BENCH_DOWNLOAD_SINK: ${{ inputs.download_sink }}
                   BENCH_FILE_MB: ${{ inputs.file_mb }}
                   BENCH_RUNS: ${{ inputs.runs }}
                   BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
