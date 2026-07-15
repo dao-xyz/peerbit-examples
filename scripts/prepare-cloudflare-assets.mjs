@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findStaticPeercheckerRelayHost } from "./static-relay-policy.mjs";
+import { findForbiddenStaticPeercheckerHost } from "./static-relay-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -137,10 +137,10 @@ for (const site of manifest.staticSites) {
             searchable += readFileSync(file.path, "utf8");
         }
     }
-    const retiredRelayHost = findStaticPeercheckerRelayHost(searchable);
-    if (retiredRelayHost) {
+    const forbiddenStaticHost = findForbiddenStaticPeercheckerHost(searchable);
+    if (forbiddenStaticHost) {
         throw new Error(
-            `${site.id}: build still references retired relay ${retiredRelayHost}`
+            `${site.id}: build contains forbidden direct peerchecker host pin ${forbiddenStaticHost}`
         );
     }
     if (!searchable.includes("bootstrap.peerbit.org/bootstrap")) {
