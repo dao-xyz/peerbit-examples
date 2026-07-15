@@ -684,6 +684,7 @@ export const Drop = () => {
                 setPersistChunkReads: (persist: boolean) => boolean;
                 getLightweightSnapshot: () => Record<string, unknown>;
                 getTopologySnapshot: () => Promise<Record<string, unknown>>;
+                getStorageSnapshot: () => Promise<Record<string, unknown>>;
                 getDiagnostics: () => Promise<Record<string, unknown>>;
                 shutdown: () => Promise<void>;
             };
@@ -784,6 +785,62 @@ export const Drop = () => {
                         peerHash && replicatorHashes
                             ? replicatorHashes.includes(peerHash)
                             : null,
+                };
+            },
+            getStorageSnapshot: async () => {
+                const activeProgram =
+                    program && !program.closed ? program : undefined;
+                const [peerbitLogUsage, originStorageEstimate] =
+                    await Promise.allSettled([
+                        activeProgram
+                            ? activeProgram.files.log.getMemoryUsage()
+                            : Promise.reject(
+                                  new Error("File-share program is not ready")
+                              ),
+                        navigator.storage?.estimate
+                            ? navigator.storage.estimate()
+                            : Promise.reject(
+                                  new Error(
+                                      "navigator.storage.estimate is unavailable"
+                                  )
+                              ),
+                    ]);
+                const estimate =
+                    originStorageEstimate.status === "fulfilled"
+                        ? (originStorageEstimate.value as StorageEstimate & {
+                              usageDetails?: Record<string, number>;
+                          })
+                        : undefined;
+                const errorMessage = (error: unknown) =>
+                    error instanceof Error ? error.message : String(error);
+                return {
+                    capturedAt: Date.now(),
+                    origin: window.location.origin,
+                    peerbitLog: {
+                        api: "SharedLog.getMemoryUsage",
+                        scope: "file-share-log-logical-usage",
+                        available: peerbitLogUsage.status === "fulfilled",
+                        usageBytes:
+                            peerbitLogUsage.status === "fulfilled"
+                                ? peerbitLogUsage.value
+                                : null,
+                        error:
+                            peerbitLogUsage.status === "rejected"
+                                ? errorMessage(peerbitLogUsage.reason)
+                                : null,
+                    },
+                    backingStorage: {
+                        api: "navigator.storage.estimate",
+                        scope: "browser-origin-aggregate",
+                        available: originStorageEstimate.status === "fulfilled",
+                        usageBytes: estimate?.usage ?? null,
+                        quotaBytes: estimate?.quota ?? null,
+                        usageDetails: estimate?.usageDetails ?? null,
+                        error:
+                            originStorageEstimate.status === "rejected"
+                                ? errorMessage(originStorageEstimate.reason)
+                                : null,
+                    },
                 };
             },
             getDiagnostics: async () => {

@@ -12,11 +12,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { startBootstrapPeer } from "./bootstrapPeer";
 import {
-    armDownloadedFile,
     armSavedViaPicker,
     crc32SavedViaPicker,
     createCrc32,
     createSyntheticFileOnDisk,
+    installHashOnlyMockSaveFilePicker,
+    installMockSaveFilePicker,
     installNodeBackedMockSaveFilePicker,
     rootUrl,
     sha256AndCrc32File,
@@ -34,9 +35,11 @@ import {
     classifyReaderTopology,
     getBrowserDialablePeerAddresses,
     getLegacyReaderRole,
+    resolveBenchmarkDownloadSink,
     resolveCompatibleIndexRowCount,
     resolveReaderCohort,
     stopSamplerAtCompletion,
+    summarizeReadTransferDiagnostics,
     validateHostRssMeasurement,
     validateJsHeapMeasurement,
     validateLargeFileBenchmarkSizeMb,
@@ -54,6 +57,9 @@ const READER_COHORT = resolveReaderCohort(
     process.env.PW_READER_ROLE
 );
 const LEGACY_READER_ROLE = getLegacyReaderRole(READER_COHORT);
+const DOWNLOAD_SINK = resolveBenchmarkDownloadSink(
+    process.env.PW_DOWNLOAD_SINK
+);
 const ADAPTIVE_REPLICATION_ROLE = createFileShareReplicationRole({ cpuMax: 1 });
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "1024");
 const FILE_SIZE_BYTES = ENABLED
@@ -86,7 +92,6 @@ const JS_HEAP_SAMPLE_INTERVAL_MS =
     requestedJsHeapSampleIntervalMs >= 100
         ? requestedJsHeapSampleIntervalMs
         : 500;
-const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000;
 
 if (!["local", "prod"].includes(SCENARIO)) {
     throw new Error(`Unsupported PW_BENCH_SCENARIO='${SCENARIO}'`);
@@ -175,6 +180,65 @@ const getTopologySnapshot = async (page: Page) => {
     })) as ReaderTopologyEvidence;
 };
 
+type PageStorageSnapshot = {
+    role: "reader" | "writer";
+    capturedAt: number;
+    origin: string;
+    peerbitLog: {
+        api: string;
+        scope: string;
+        available: boolean;
+        usageBytes: number | null;
+        error: string | null;
+    };
+    backingStorage: {
+        api: string;
+        scope: string;
+        available: boolean;
+        usageBytes: number | null;
+        quotaBytes: number | null;
+        usageDetails: Record<string, number> | null;
+        error: string | null;
+    };
+};
+
+const getStorageSnapshot = async (
+    page: Page,
+    role: PageStorageSnapshot["role"]
+) => {
+    const snapshot = await page.evaluate(async () => {
+        const hooks = (window as any).__peerbitFileShareTestHooks;
+        if (!hooks?.getStorageSnapshot) {
+            throw new Error(
+                "Missing __peerbitFileShareTestHooks.getStorageSnapshot"
+            );
+        }
+        return hooks.getStorageSnapshot();
+    });
+    return { role, ...snapshot } as PageStorageSnapshot;
+};
+
+const storageDelta = (
+    before: PageStorageSnapshot,
+    after: PageStorageSnapshot
+) => ({
+    role: before.role,
+    definition:
+        "after-primary-sink-completion-minus-before-upload; browser backing storage is an origin-wide estimate",
+    before,
+    after,
+    peerbitLogUsageDeltaBytes:
+        before.peerbitLog.usageBytes != null &&
+        after.peerbitLog.usageBytes != null
+            ? after.peerbitLog.usageBytes - before.peerbitLog.usageBytes
+            : null,
+    backingStorageUsageDeltaBytes:
+        before.backingStorage.usageBytes != null &&
+        after.backingStorage.usageBytes != null
+            ? after.backingStorage.usageBytes - before.backingStorage.usageBytes
+            : null,
+});
+
 type ReaderTopologyReadiness = {
     cohort: ReaderCohort;
     expectedSelfInReplicatorSet: boolean;
@@ -257,9 +321,9 @@ const waitForReaderTopology = async (
     );
 };
 
-type ReaderJsHeapMeasurement = {
+type PageJsHeapMeasurement = {
     memoryKind: "javascript-heap";
-    scope: "reader-renderer";
+    scope: "reader-renderer" | "writer-renderer";
     metric: "JSHeapUsedSize";
     unit: "bytes";
     sampleIntervalMs: number;
@@ -274,21 +338,22 @@ type ReaderJsHeapMeasurement = {
     samplingErrors: string[];
 };
 
-type ReaderJsHeapSampler = {
-    stop: () => Promise<ReaderJsHeapMeasurement>;
-    snapshot: () => ReaderJsHeapMeasurement;
+type PageJsHeapSampler = {
+    stop: () => Promise<PageJsHeapMeasurement>;
+    snapshot: () => PageJsHeapMeasurement;
 };
 
 const getErrorMessage = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
 
-const startReaderJsHeapSampler = async (
+const startPageJsHeapSampler = async (
     context: BrowserContext,
-    page: Page
-): Promise<ReaderJsHeapSampler> => {
-    const measurement: ReaderJsHeapMeasurement = {
+    page: Page,
+    scope: PageJsHeapMeasurement["scope"]
+): Promise<PageJsHeapSampler> => {
+    const measurement: PageJsHeapMeasurement = {
         memoryKind: "javascript-heap",
-        scope: "reader-renderer",
+        scope,
         metric: "JSHeapUsedSize",
         unit: "bytes",
         sampleIntervalMs: JS_HEAP_SAMPLE_INTERVAL_MS,
@@ -302,7 +367,7 @@ const startReaderJsHeapSampler = async (
         peakBytes: null,
         samplingErrors: [],
     };
-    const snapshot = (): ReaderJsHeapMeasurement => ({
+    const snapshot = (): PageJsHeapMeasurement => ({
         ...measurement,
         samplingErrors: [...measurement.samplingErrors],
     });
@@ -311,7 +376,7 @@ const startReaderJsHeapSampler = async (
     let timer: ReturnType<typeof setTimeout> | undefined;
     let activeSample: Promise<void> | undefined;
     let stopped = false;
-    let stopPromise: Promise<ReaderJsHeapMeasurement> | undefined;
+    let stopPromise: Promise<PageJsHeapMeasurement> | undefined;
 
     const takeSample = async () => {
         if (!session) {
@@ -400,6 +465,8 @@ type HostRssMeasurement = {
     memoryKind: "resident-set-size";
     scope: "chromium-processes-and-playwright-node";
     metric: "RSS";
+    attribution: "aggregate-rss-with-chromium-process-role-groups";
+    attributionLimitations: string;
     unit: "bytes";
     sampleIntervalMs: number;
     startedAt: number;
@@ -417,6 +484,9 @@ type HostRssMeasurement = {
     startBrowserProcessCount: number | null;
     endBrowserProcessCount: number | null;
     peakBrowserProcessCount: number | null;
+    startBrowserRoleBytes: Record<string, number> | null;
+    endBrowserRoleBytes: Record<string, number> | null;
+    peakBrowserRoleBytes: Record<string, number>;
     samplingErrors: string[];
 };
 
@@ -433,21 +503,30 @@ const readProcessRssBytes = async (processIds: number[]) => {
     }
     const { stdout } = await execFileAsync(
         "ps",
-        ["-o", "rss=", "-p", processIds.join(",")],
+        ["-o", "pid=,rss=", "-p", processIds.join(",")],
         { maxBuffer: 1024 * 1024 }
     );
-    const rssKiB = String(stdout)
+    const processBytes = new Map<number, number>();
+    const rows = String(stdout)
         .trim()
-        .split(/\s+/)
+        .split(/\n+/)
         .filter(Boolean)
-        .map((value) => Number(value));
-    if (
-        rssKiB.length === 0 ||
-        rssKiB.some((value) => !Number.isFinite(value) || value < 0)
-    ) {
+        .map((line) => line.trim().split(/\s+/).map(Number));
+    for (const [processId, rssKiB] of rows) {
+        if (
+            !Number.isSafeInteger(processId) ||
+            processId <= 0 ||
+            !Number.isFinite(rssKiB) ||
+            rssKiB < 0
+        ) {
+            throw new Error("ps did not return valid Chromium RSS values");
+        }
+        processBytes.set(processId, rssKiB * 1024);
+    }
+    if (processBytes.size === 0) {
         throw new Error("ps did not return valid Chromium RSS values");
     }
-    return rssKiB.reduce((sum, value) => sum + value, 0) * 1024;
+    return processBytes;
 };
 
 const startHostRssSampler = async (
@@ -457,6 +536,9 @@ const startHostRssSampler = async (
         memoryKind: "resident-set-size",
         scope: "chromium-processes-and-playwright-node",
         metric: "RSS",
+        attribution: "aggregate-rss-with-chromium-process-role-groups",
+        attributionLimitations:
+            "Chromium renderer RSS is grouped by process role and cannot be assigned reliably to the reader or writer page; per-page attribution uses CDP JS heap instead. RSS is not PSS or USS.",
         unit: "bytes",
         sampleIntervalMs: JS_HEAP_SAMPLE_INTERVAL_MS,
         startedAt: Date.now(),
@@ -474,6 +556,9 @@ const startHostRssSampler = async (
         startBrowserProcessCount: null,
         endBrowserProcessCount: null,
         peakBrowserProcessCount: null,
+        startBrowserRoleBytes: null,
+        endBrowserRoleBytes: null,
+        peakBrowserRoleBytes: {},
         samplingErrors: [],
     };
     const snapshot = (): HostRssMeasurement => ({
@@ -505,22 +590,43 @@ const startHostRssSampler = async (
                         )
                 ),
             ];
-            const [browserBytes, nodeBytes] = await Promise.all([
+            const [browserProcessBytes, nodeBytes] = await Promise.all([
                 readProcessRssBytes(processIds),
                 Promise.resolve(process.memoryUsage().rss),
             ]);
+            const browserRoleBytes: Record<string, number> = {};
+            for (const process of processInfo) {
+                const bytes = browserProcessBytes.get(Number(process.id));
+                if (bytes == null) {
+                    continue;
+                }
+                const role = process.type || "unknown";
+                browserRoleBytes[role] = (browserRoleBytes[role] ?? 0) + bytes;
+            }
+            const browserBytes = [...browserProcessBytes.values()].reduce(
+                (total, bytes) => total + bytes,
+                0
+            );
             const capturedAt = Date.now();
             const combinedBytes = browserBytes + nodeBytes;
             if (measurement.sampleCount === 0) {
                 measurement.firstSampleAt = capturedAt;
                 measurement.startBrowserBytes = browserBytes;
                 measurement.startNodeBytes = nodeBytes;
-                measurement.startBrowserProcessCount = processIds.length;
+                measurement.startBrowserProcessCount = browserProcessBytes.size;
+                measurement.startBrowserRoleBytes = { ...browserRoleBytes };
             }
             measurement.lastSampleAt = capturedAt;
             measurement.endBrowserBytes = browserBytes;
             measurement.endNodeBytes = nodeBytes;
-            measurement.endBrowserProcessCount = processIds.length;
+            measurement.endBrowserProcessCount = browserProcessBytes.size;
+            measurement.endBrowserRoleBytes = { ...browserRoleBytes };
+            for (const [role, bytes] of Object.entries(browserRoleBytes)) {
+                measurement.peakBrowserRoleBytes[role] = Math.max(
+                    measurement.peakBrowserRoleBytes[role] ?? 0,
+                    bytes
+                );
+            }
             measurement.peakBrowserBytes = Math.max(
                 measurement.peakBrowserBytes ?? browserBytes,
                 browserBytes
@@ -534,8 +640,8 @@ const startHostRssSampler = async (
                 combinedBytes
             );
             measurement.peakBrowserProcessCount = Math.max(
-                measurement.peakBrowserProcessCount ?? processIds.length,
-                processIds.length
+                measurement.peakBrowserProcessCount ?? browserProcessBytes.size,
+                browserProcessBytes.size
             );
             measurement.sampleCount += 1;
         } catch (error) {
@@ -885,42 +991,49 @@ const getListedFile = (
 const createFixtureResult = ({
     fixture,
     manifestFinalHash,
+    libraryComputedSha256Base64,
     downloadSha256Base64,
     downloadCrc32Hex,
     downloadCompleted,
-    usesStreamingDownload,
+    sink,
 }: {
     fixture: SyntheticFixtureMetadata;
     manifestFinalHash: string | null;
+    libraryComputedSha256Base64: string | null;
     downloadSha256Base64: string | null;
     downloadCrc32Hex: string | null;
     downloadCompleted: boolean;
-    usesStreamingDownload: boolean;
+    sink: typeof DOWNLOAD_SINK;
 }) => {
     const sourceManifestMatch = fixture.sha256Base64
         ? fixture.sha256Base64 === manifestFinalHash
         : null;
-    const directDownloadHashMatch = fixture.sha256Base64
-        ? downloadSha256Base64 == null
+    const directDownloadHashMatch =
+        fixture.sha256Base64 && sink === "node-file"
+            ? downloadSha256Base64 == null
+                ? null
+                : fixture.sha256Base64 === downloadSha256Base64
+            : null;
+    const libraryStreamSha256Match = fixture.sha256Base64
+        ? libraryComputedSha256Base64 == null
             ? null
-            : fixture.sha256Base64 === downloadSha256Base64
+            : fixture.sha256Base64 === libraryComputedSha256Base64
         : null;
     const libraryDownloadFinalHashVerified = fixture.sha256Base64
-        ? downloadCompleted
+        ? downloadCompleted && libraryStreamSha256Match === true
         : null;
     const crc32Match =
         fixture.crc32Hex != null && downloadCrc32Hex != null
             ? fixture.crc32Hex === downloadCrc32Hex
             : false;
-    const streamingReadbackCrc32Match = usesStreamingDownload
-        ? crc32Match
-        : null;
+    const streamingReadbackCrc32Match = crc32Match;
     const integrityVerified = fixture.sha256Base64
         ? sourceManifestMatch === true &&
           libraryDownloadFinalHashVerified === true &&
-          directDownloadHashMatch === true &&
+          libraryStreamSha256Match === true &&
+          (sink !== "node-file" || directDownloadHashMatch === true) &&
           crc32Match === true &&
-          (!usesStreamingDownload || streamingReadbackCrc32Match === true)
+          streamingReadbackCrc32Match === true
         : null;
 
     return {
@@ -928,19 +1041,23 @@ const createFixtureResult = ({
         seed: fixture.seed,
         sourceSha256Base64: fixture.sha256Base64,
         manifestFinalHash,
+        libraryComputedSha256Base64,
         downloadSha256Base64,
         sourceCrc32Hex: fixture.crc32Hex,
         downloadCrc32Hex,
         crc32Match,
         streamingReadbackCrc32Match,
         sourceManifestMatch,
+        libraryStreamSha256Match,
         directDownloadHashMatch,
         libraryDownloadFinalHashVerified,
         integrityVerified,
         verification: fixture.sha256Base64
-            ? usesStreamingDownload
+            ? sink === "node-file"
                 ? "source-manifest-library-stream-and-node-file-sha256-crc32"
-                : "source-manifest-library-and-browser-download-sha256-crc32"
+                : sink === "opfs"
+                  ? "source-manifest-library-stream-sha256-and-opfs-readback-crc32"
+                  : "source-manifest-library-stream-sha256-and-hash-only-crc32"
             : "missing",
     };
 };
@@ -1027,6 +1144,7 @@ test.describe("file-share transfer benchmark", () => {
         let readyDownloadClick: ReadyDownloadClick | undefined;
         let sinkResult: DownloadSinkResult | undefined;
         let manifestFinalHash: string | null = null;
+        let libraryComputedSha256Base64: string | null = null;
         let downloadSha256Base64: string | null = null;
         let downloadCrc32Hex: string | null = null;
         let downloadCompleted = false;
@@ -1034,14 +1152,27 @@ test.describe("file-share transfer benchmark", () => {
         let nodeSinkController:
             | Awaited<ReturnType<typeof installNodeBackedMockSaveFilePicker>>
             | undefined;
-        let usesStreamingDownload = false;
         let fixtureResult: ReturnType<typeof createFixtureResult> | undefined;
         let cohortResult: ReturnType<typeof createCohortResult> | undefined;
+        let readTransfer:
+            | ReturnType<typeof summarizeReadTransferDiagnostics>
+            | undefined;
+        let storageBefore:
+            | { writer: PageStorageSnapshot; reader: PageStorageSnapshot }
+            | undefined;
+        let storageAfter:
+            | { writer: PageStorageSnapshot; reader: PageStorageSnapshot }
+            | undefined;
         let readerPeerHints: ReaderPeerHintEvidence | undefined;
         const readerTopologyReadiness = createReaderTopologyReadiness();
-        let readerJsHeapSampler: ReaderJsHeapSampler | undefined;
-        let readerJsHeap: ReaderJsHeapMeasurement | undefined;
+        let readerJsHeapSampler: PageJsHeapSampler | undefined;
+        let readerJsHeap: PageJsHeapMeasurement | undefined;
         let readerJsHeapValidation:
+            | ReturnType<typeof validateJsHeapMeasurement>
+            | undefined;
+        let writerJsHeapSampler: PageJsHeapSampler | undefined;
+        let writerJsHeap: PageJsHeapMeasurement | undefined;
+        let writerJsHeapValidation:
             | ReturnType<typeof validateJsHeapMeasurement>
             | undefined;
         let hostRssSampler: HostRssSampler | undefined;
@@ -1072,8 +1203,6 @@ test.describe("file-share transfer benchmark", () => {
                 throw new Error("Benchmark fixture is missing its source hash");
             }
 
-            usesStreamingDownload =
-                FILE_SIZE_BYTES >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
             bootstrap = usesLocalBootstrap
                 ? await startBootstrapPeer()
                 : undefined;
@@ -1087,7 +1216,7 @@ test.describe("file-share transfer benchmark", () => {
             const readerPage = await readerContext.newPage();
             writer = writerPage;
             reader = readerPage;
-            if (usesStreamingDownload) {
+            if (DOWNLOAD_SINK === "node-file") {
                 nodeSinkController = await installNodeBackedMockSaveFilePicker(
                     readerPage,
                     {
@@ -1095,6 +1224,13 @@ test.describe("file-share transfer benchmark", () => {
                         expectedSizeBytes: FILE_SIZE_BYTES,
                     }
                 );
+            } else if (DOWNLOAD_SINK === "hash-only") {
+                await installHashOnlyMockSaveFilePicker(readerPage, {
+                    expectedName: fileName,
+                    expectedSizeBytes: FILE_SIZE_BYTES,
+                });
+            } else if (DOWNLOAD_SINK === "opfs") {
+                await installMockSaveFilePicker(readerPage);
             }
 
             logStage("create-space");
@@ -1189,21 +1325,23 @@ test.describe("file-share transfer benchmark", () => {
                 state: "attached",
                 timeout: 60_000,
             });
+            const [writerStorageBefore, readerStorageBefore] =
+                await Promise.all([
+                    getStorageSnapshot(writerPage, "writer"),
+                    getStorageSnapshot(readerPage, "reader"),
+                ]);
+            storageBefore = {
+                writer: writerStorageBefore,
+                reader: readerStorageBefore,
+            };
 
             logStage("arm-download-sink-and-ready-click");
-            const sinkCompletion = usesStreamingDownload
-                ? armSavedViaPicker(
-                      readerPage,
-                      fileName,
-                      FILE_SIZE_MB,
-                      DOWNLOAD_TIMEOUT_MS
-                  )
-                : armDownloadedFile(
-                      readerPage,
-                      fileName,
-                      FILE_SIZE_MB,
-                      DOWNLOAD_TIMEOUT_MS
-                  );
+            const sinkCompletion = armSavedViaPicker(
+                readerPage,
+                fileName,
+                FILE_SIZE_MB,
+                DOWNLOAD_TIMEOUT_MS
+            );
             const readyDownload = armReadyManifestDownload(readerPage, {
                 fileName,
                 expectedProgramAddress: address,
@@ -1212,33 +1350,49 @@ test.describe("file-share transfer benchmark", () => {
                 timeout: UPLOAD_TIMEOUT_MS,
             });
 
-            readerJsHeapSampler = await startReaderJsHeapSampler(
+            readerJsHeapSampler = await startPageJsHeapSampler(
                 readerContext,
-                readerPage
+                readerPage,
+                "reader-renderer"
+            );
+            writerJsHeapSampler = await startPageJsHeapSampler(
+                writerContext,
+                writerPage,
+                "writer-renderer"
             );
             hostRssSampler = await startHostRssSampler(browser);
             const activeReaderJsHeapSampler = readerJsHeapSampler;
+            const activeWriterJsHeapSampler = writerJsHeapSampler;
             const activeHostRssSampler = hostRssSampler;
             const measuredSinkCompletion = stopSamplerAtCompletion(
                 sinkCompletion,
                 {
                     stop: async () => {
-                        const [readerJsHeapMeasurement, hostRssMeasurement] =
-                            await Promise.all([
-                                activeReaderJsHeapSampler.stop(),
-                                activeHostRssSampler.stop(),
-                            ]);
+                        const [
+                            readerJsHeapMeasurement,
+                            writerJsHeapMeasurement,
+                            hostRssMeasurement,
+                        ] = await Promise.all([
+                            activeReaderJsHeapSampler.stop(),
+                            activeWriterJsHeapSampler.stop(),
+                            activeHostRssSampler.stop(),
+                        ]);
                         return {
                             readerJsHeapMeasurement,
+                            writerJsHeapMeasurement,
                             hostRssMeasurement,
                         };
                     },
                 }
             ).then(({ result, measurement }) => {
                 readerJsHeap = measurement.readerJsHeapMeasurement;
+                writerJsHeap = measurement.writerJsHeapMeasurement;
                 hostRss = measurement.hostRssMeasurement;
                 if (readerJsHeapSampler === activeReaderJsHeapSampler) {
                     readerJsHeapSampler = undefined;
+                }
+                if (writerJsHeapSampler === activeWriterJsHeapSampler) {
+                    writerJsHeapSampler = undefined;
                 }
                 if (hostRssSampler === activeHostRssSampler) {
                     hostRssSampler = undefined;
@@ -1267,6 +1421,12 @@ test.describe("file-share transfer benchmark", () => {
                     `Invalid reader JS heap measurement: ${readerJsHeapValidation.validationReasons.join(", ")}`
                 );
             }
+            writerJsHeapValidation = validateJsHeapMeasurement(writerJsHeap);
+            if (!writerJsHeapValidation.valid) {
+                throw new Error(
+                    `Invalid writer JS heap measurement: ${writerJsHeapValidation.validationReasons.join(", ")}`
+                );
+            }
             hostRssValidation = validateHostRssMeasurement(hostRss);
             if (!hostRssValidation.valid) {
                 throw new Error(
@@ -1281,10 +1441,18 @@ test.describe("file-share transfer benchmark", () => {
                 writerLightweightSnapshotAfterSink,
                 writerDiagnosticsAfterDownload,
                 readerDiagnosticsAfterDownload,
+                storageAfter,
             ] = await Promise.all([
                 getLightweightSnapshot(writerPage),
                 getDiagnostics(writerPage).catch(() => undefined),
                 getDiagnostics(readerPage).catch(() => undefined),
+                Promise.all([
+                    getStorageSnapshot(writerPage, "writer"),
+                    getStorageSnapshot(readerPage, "reader"),
+                ]).then(([writerStorageAfter, readerStorageAfter]) => ({
+                    writer: writerStorageAfter,
+                    reader: readerStorageAfter,
+                })),
             ]);
             if (sinkResult.downloadPath) {
                 logStage("verify-downloaded-file-digests");
@@ -1293,13 +1461,20 @@ test.describe("file-share transfer benchmark", () => {
                 );
                 downloadSha256Base64 = digests.sha256Base64;
                 downloadCrc32Hex = digests.crc32Hex;
-            } else if (usesStreamingDownload) {
-                logStage("verify-streaming-sink-crc32");
+            } else {
+                logStage("verify-browser-sink-crc32");
                 downloadCrc32Hex = await crc32SavedViaPicker(
                     readerPage,
                     fileName
                 );
             }
+            const read = asRecord(
+                readerDiagnosticsAfterDownload?.lastReadDiagnostics
+            );
+            libraryComputedSha256Base64 =
+                typeof read?.computedFinalHash === "string"
+                    ? read.computedFinalHash
+                    : null;
             if (sinkResult.downloadPath && downloadSha256Base64 == null) {
                 downloadSha256Base64 = await sha256FileBase64(
                     sinkResult.downloadPath
@@ -1314,10 +1489,11 @@ test.describe("file-share transfer benchmark", () => {
             fixtureResult = createFixtureResult({
                 fixture: fixtureFile.fixture,
                 manifestFinalHash,
+                libraryComputedSha256Base64,
                 downloadSha256Base64,
                 downloadCrc32Hex,
                 downloadCompleted,
-                usesStreamingDownload,
+                sink: DOWNLOAD_SINK,
             });
             if (fixtureResult.integrityVerified !== true) {
                 throw new Error(
@@ -1336,8 +1512,12 @@ test.describe("file-share transfer benchmark", () => {
                 );
             }
 
-            const read = asRecord(
-                readerDiagnosticsAfterDownload?.lastReadDiagnostics
+            if (!read) {
+                throw new Error("Missing completed library read diagnostics");
+            }
+            readTransfer = summarizeReadTransferDiagnostics(
+                read,
+                FILE_SIZE_BYTES
             );
             const libraryStreamStartedAt = asNumber(read?.startedAt);
             const libraryStreamFinishedAt = asNumber(read?.finishedAt);
@@ -1366,6 +1546,15 @@ test.describe("file-share transfer benchmark", () => {
                 0,
                 uploadFinishedToReadyVisibleMs
             );
+            if (!storageBefore || !storageAfter) {
+                throw new Error("Missing benchmark storage attribution");
+            }
+            const storageAttribution = {
+                definition:
+                    "Per-page Peerbit logical log usage plus browser origin-wide navigator.storage.estimate snapshots; OPFS sink bytes are included in reader backing storage when that sink is selected.",
+                writer: storageDelta(storageBefore.writer, storageAfter.writer),
+                reader: storageDelta(storageBefore.reader, storageAfter.reader),
+            };
 
             const result = {
                 status: "passed",
@@ -1376,21 +1565,37 @@ test.describe("file-share transfer benchmark", () => {
                 shareUrl: shareUrl.toString(),
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
+                requestedSink: DOWNLOAD_SINK,
                 sink: sinkResult.sink,
                 downloadMode: sinkResult.sink,
+                sinkWriteCalls: sinkResult.sinkWriteCalls,
+                sinkWriteDurationMs: sinkResult.sinkWriteDurationMs,
+                sinkWriteDurationDefinition:
+                    "sum of browser writable.write wall-clock durations; library read diagnostics provide the authoritative awaited sink-write interval",
                 sinkServerWriteCalls: sinkResult.serverWriteCalls,
                 sinkServerWriteDurationMs: sinkResult.serverWriteDurationMs,
                 sinkServerWriteDurationDefinition:
-                    "loopback-request-body-receive-and-node-filesystem-write-only",
+                    sinkResult.sink === "node-file"
+                        ? "loopback-request-body-receive-and-node-filesystem-write-only"
+                        : null,
                 sizeBytes: sinkResult.size,
                 fixture: fixtureResult,
                 readerCohortValidation: cohortResult,
                 readerPeerHints,
                 readerTopologyReadiness,
+                readTransfer,
+                storageAttribution,
                 readerJsHeap,
                 readerJsHeapValidation,
+                writerJsHeap,
+                writerJsHeapValidation,
                 hostRss,
                 hostRssValidation,
+                memoryAttribution: {
+                    readerPage: readerJsHeap,
+                    writerPage: writerJsHeap,
+                    hostAggregate: hostRss,
+                },
                 timings: {
                     uploadDurationMs,
                     uploadStartedToReadyVisibleMs,
@@ -1400,6 +1605,9 @@ test.describe("file-share transfer benchmark", () => {
                     libraryStreamDurationMs,
                     clickToLibraryStreamStartMs,
                     libraryStreamEndToSinkCompleteMs,
+                    streamReadExclusiveMs:
+                        readTransfer.stages.streamReadExclusiveMs,
+                    sinkWriteAwaitMs: readTransfer.stages.sinkWriteAwaitMs,
                 },
                 uploadDurationMs,
                 uploadStartedToReadyVisibleMs,
@@ -1409,6 +1617,9 @@ test.describe("file-share transfer benchmark", () => {
                 libraryStreamDurationMs,
                 clickToLibraryStreamStartMs,
                 libraryStreamEndToSinkCompleteMs,
+                streamReadExclusiveMs:
+                    readTransfer.stages.streamReadExclusiveMs,
+                sinkWriteAwaitMs: readTransfer.stages.sinkWriteAwaitMs,
                 readerReadyManifestVisibleAt: readyDownloadClick.capturedAt,
                 readyManifestVisibilityLagMs,
                 readyManifestVisibilityOffsetFromUploadFinishedMs:
@@ -1443,6 +1654,18 @@ test.describe("file-share transfer benchmark", () => {
                     clickToSinkCompleteMs
                 ),
                 downloadMbps: toMbps(sinkResult.size, clickToSinkCompleteMs),
+                streamReadExclusiveMiBps: toMiBPerSecond(
+                    sinkResult.size,
+                    readTransfer.stages.streamReadExclusiveMs
+                ),
+                streamReadExclusiveMbps: toMbps(
+                    sinkResult.size,
+                    readTransfer.stages.streamReadExclusiveMs
+                ),
+                libraryStreamWallMbps: toMbps(
+                    sinkResult.size,
+                    readTransfer.stages.libraryStreamWallMs
+                ),
                 startedAt: uploadStartedAt,
                 finishedAt: sinkResult.sinkCompletedAt,
             };
@@ -1453,6 +1676,10 @@ test.describe("file-share transfer benchmark", () => {
             if (readerJsHeapSampler) {
                 readerJsHeap = await readerJsHeapSampler.stop();
                 readerJsHeapSampler = undefined;
+            }
+            if (writerJsHeapSampler) {
+                writerJsHeap = await writerJsHeapSampler.stop();
+                writerJsHeapSampler = undefined;
             }
             if (hostRssSampler) {
                 hostRss = await hostRssSampler.stop();
@@ -1475,6 +1702,7 @@ test.describe("file-share transfer benchmark", () => {
                 shareUrl: shareUrl?.toString(),
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
+                requestedSink: DOWNLOAD_SINK,
                 sink: sinkResult?.sink,
                 fixture:
                     fixtureResult ??
@@ -1482,10 +1710,11 @@ test.describe("file-share transfer benchmark", () => {
                         ? createFixtureResult({
                               fixture: preparedFile.fixture,
                               manifestFinalHash,
+                              libraryComputedSha256Base64,
                               downloadSha256Base64,
                               downloadCrc32Hex,
                               downloadCompleted,
-                              usesStreamingDownload,
+                              sink: DOWNLOAD_SINK,
                           })
                         : {
                               requestedMode: FIXTURE_MODE,
@@ -1500,6 +1729,8 @@ test.describe("file-share transfer benchmark", () => {
                 readerTopologyReadiness,
                 readerJsHeap,
                 readerJsHeapValidation,
+                writerJsHeap,
+                writerJsHeapValidation,
                 hostRss,
                 hostRssValidation,
                 readyDownloadClick,
@@ -1528,6 +1759,12 @@ test.describe("file-share transfer benchmark", () => {
                     .stop()
                     .catch(() => readerJsHeapSampler?.snapshot());
                 readerJsHeapSampler = undefined;
+            }
+            if (writerJsHeapSampler) {
+                writerJsHeap = await writerJsHeapSampler
+                    .stop()
+                    .catch(() => writerJsHeapSampler?.snapshot());
+                writerJsHeapSampler = undefined;
             }
             if (hostRssSampler) {
                 hostRss = await hostRssSampler

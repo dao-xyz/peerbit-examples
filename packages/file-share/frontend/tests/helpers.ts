@@ -383,16 +383,18 @@ export async function setSeedMode(page: Page, seeded: boolean) {
 }
 
 export type DownloadSinkResult = {
-    sink: "browser-download" | "opfs" | "node-file";
+    sink: "browser-download" | "hash-only" | "opfs" | "node-file";
     size: number;
     sinkCompletedAt: number;
     downloadPath?: string;
+    sinkWriteCalls?: number;
+    sinkWriteDurationMs?: number;
     serverWriteCalls?: number;
     serverWriteDurationMs?: number;
     cleanup: () => Promise<void>;
 };
 
-type MockSavedFileSink = "opfs" | "node-file";
+type MockSavedFileSink = "hash-only" | "opfs" | "node-file";
 
 type NodeBackedSinkSession = {
     id: string;
@@ -822,7 +824,7 @@ export async function installNodeBackedMockSaveFilePicker(
 
         await page.addInitScript(
             ({ endpoint }) => {
-                type SavedFile = {
+                type ServerSavedFile = {
                     name: string;
                     size: number;
                     completedAt: number;
@@ -830,6 +832,10 @@ export async function installNodeBackedMockSaveFilePicker(
                     sink: "node-file";
                     serverWriteCalls: number;
                     serverWriteDurationMs: number;
+                };
+                type SavedFile = ServerSavedFile & {
+                    sinkWriteCalls: number;
+                    sinkWriteDurationMs: number;
                 };
                 const savedFiles: SavedFile[] = [];
                 const activeStorageNames = new Map<string, string>();
@@ -961,6 +967,8 @@ export async function installNodeBackedMockSaveFilePicker(
                                     );
                                 }
                                 writableCreated = true;
+                                let sinkWriteCalls = 0;
+                                let sinkWriteDurationMs = 0;
                                 return {
                                     write: async (data: Uint8Array) => {
                                         if (writableClosed) {
@@ -968,13 +976,20 @@ export async function installNodeBackedMockSaveFilePicker(
                                                 "Cannot write to a closed benchmark sink"
                                             );
                                         }
-                                        await request(
-                                            `write/${encodeURIComponent(storageName)}`,
-                                            {
-                                                method: "POST",
-                                                body: data as unknown as BodyInit,
-                                            }
-                                        );
+                                        const startedAt = performance.now();
+                                        try {
+                                            await request(
+                                                `write/${encodeURIComponent(storageName)}`,
+                                                {
+                                                    method: "POST",
+                                                    body: data as unknown as BodyInit,
+                                                }
+                                            );
+                                        } finally {
+                                            sinkWriteCalls += 1;
+                                            sinkWriteDurationMs +=
+                                                performance.now() - startedAt;
+                                        }
                                     },
                                     close: async () => {
                                         if (writableClosed) {
@@ -982,12 +997,17 @@ export async function installNodeBackedMockSaveFilePicker(
                                                 "Benchmark sink is already closed"
                                             );
                                         }
-                                        const saved = await request<SavedFile>(
-                                            `close/${encodeURIComponent(storageName)}`,
-                                            { method: "POST" }
-                                        );
+                                        const saved =
+                                            await request<ServerSavedFile>(
+                                                `close/${encodeURIComponent(storageName)}`,
+                                                { method: "POST" }
+                                            );
                                         writableClosed = true;
-                                        savedFiles.push(saved);
+                                        savedFiles.push({
+                                            ...saved,
+                                            sinkWriteCalls,
+                                            sinkWriteDurationMs,
+                                        });
                                         activeStorageNames.delete(name);
                                     },
                                     abort: async () => {
@@ -1048,6 +1068,213 @@ export async function installNodeBackedMockSaveFilePicker(
     }
 }
 
+/**
+ * Installs a browser-local sink that validates byte count and CRC32 while
+ * discarding each chunk immediately. It intentionally performs no network or
+ * filesystem I/O, so the benchmark's primary transfer timing is not paced by
+ * a loopback request per chunk. The file-share library independently computes
+ * and verifies the full-stream SHA-256 before this sink closes.
+ */
+export async function installHashOnlyMockSaveFilePicker(
+    page: Page,
+    options: NodeBackedMockSaveFilePickerOptions
+) {
+    if (
+        !Number.isSafeInteger(options.expectedSizeBytes) ||
+        options.expectedSizeBytes < 0
+    ) {
+        throw new Error(
+            `Invalid hash-only benchmark sink size: ${options.expectedSizeBytes}`
+        );
+    }
+    if (!options.expectedName || options.expectedName.length > 4096) {
+        throw new Error("Invalid hash-only benchmark sink file name");
+    }
+
+    await page.addInitScript(({ expectedName, expectedSizeBytes }) => {
+        type SavedFile = {
+            name: string;
+            size: number;
+            completedAt: number;
+            storageName: string;
+            sink: "hash-only";
+            crc32Hex: string;
+            sinkWriteCalls: number;
+            sinkWriteDurationMs: number;
+        };
+        const savedFiles: SavedFile[] = [];
+        const active = new Map<string, { aborted: boolean; closed: boolean }>();
+        let sequence = 0;
+        const crc32InitialState = 0xffffffff;
+        const crc32Table = (() => {
+            const table = new Uint32Array(256);
+            for (let index = 0; index < table.length; index++) {
+                let value = index;
+                for (let bit = 0; bit < 8; bit++) {
+                    value =
+                        value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+                }
+                table[index] = value >>> 0;
+            }
+            return table;
+        })();
+        const updateCrc32 = (state: number, bytes: Uint8Array) => {
+            let next = state >>> 0;
+            for (const byte of bytes) {
+                next = crc32Table[(next ^ byte) & 0xff] ^ (next >>> 8);
+            }
+            return next >>> 0;
+        };
+        const formatCrc32 = (state: number) =>
+            ((state ^ crc32InitialState) >>> 0).toString(16).padStart(8, "0");
+
+        Object.defineProperty(
+            window,
+            "__peerbitStreamingDownloadThresholdBytes",
+            {
+                value: 1,
+                configurable: true,
+                enumerable: false,
+                writable: true,
+            }
+        );
+        Object.defineProperty(window, "__mockSavedFiles", {
+            value: savedFiles,
+            configurable: true,
+            enumerable: false,
+            writable: false,
+        });
+        Object.defineProperty(window, "__cleanupMockSavedFile", {
+            configurable: true,
+            enumerable: false,
+            writable: false,
+            value: async (name: string) => {
+                for (const [storageName, state] of active) {
+                    if (storageName.startsWith(`${name}:`)) {
+                        state.aborted = true;
+                        active.delete(storageName);
+                    }
+                }
+                for (let index = savedFiles.length - 1; index >= 0; index--) {
+                    if (savedFiles[index].name === name) {
+                        savedFiles.splice(index, 1);
+                    }
+                }
+            },
+        });
+        Object.defineProperty(window, "__crc32MockSavedFile", {
+            configurable: true,
+            enumerable: false,
+            writable: false,
+            value: async (name: string) => {
+                const saved = [...savedFiles]
+                    .reverse()
+                    .find((file) => file.name === name);
+                if (!saved) {
+                    throw new Error(
+                        `No completed hash-only sink named "${name}"`
+                    );
+                }
+                return saved.crc32Hex;
+            },
+        });
+        Object.defineProperty(window, "showSaveFilePicker", {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value: async (pickerOptions?: { suggestedName?: string }) => {
+                const name = pickerOptions?.suggestedName ?? "download.bin";
+                if (name !== expectedName) {
+                    throw new Error(
+                        `Unexpected benchmark sink name: expected "${expectedName}", received "${name}"`
+                    );
+                }
+                const storageName = `${name}:${sequence++}`;
+                const state = { aborted: false, closed: false };
+                active.set(storageName, state);
+                let writableCreated = false;
+                return {
+                    createWritable: async () => {
+                        if (writableCreated) {
+                            throw new Error(
+                                "Hash-only benchmark sink writable already created"
+                            );
+                        }
+                        writableCreated = true;
+                        let size = 0;
+                        let crc32State = crc32InitialState;
+                        let sinkWriteCalls = 0;
+                        let sinkWriteDurationMs = 0;
+                        const assertOpen = () => {
+                            if (state.aborted) {
+                                throw new Error(
+                                    "Hash-only benchmark sink was aborted"
+                                );
+                            }
+                            if (state.closed) {
+                                throw new Error(
+                                    "Hash-only benchmark sink is already closed"
+                                );
+                            }
+                        };
+                        return {
+                            write: async (data: Uint8Array) => {
+                                assertOpen();
+                                if (!(data instanceof Uint8Array)) {
+                                    throw new Error(
+                                        "Hash-only benchmark sink requires Uint8Array chunks"
+                                    );
+                                }
+                                if (
+                                    size + data.byteLength >
+                                    expectedSizeBytes
+                                ) {
+                                    throw new Error(
+                                        `Hash-only benchmark sink exceeds expected size ${expectedSizeBytes}`
+                                    );
+                                }
+                                const startedAt = performance.now();
+                                crc32State = updateCrc32(crc32State, data);
+                                size += data.byteLength;
+                                sinkWriteCalls += 1;
+                                sinkWriteDurationMs +=
+                                    performance.now() - startedAt;
+                            },
+                            close: async () => {
+                                assertOpen();
+                                if (size !== expectedSizeBytes) {
+                                    throw new Error(
+                                        `Hash-only benchmark sink size mismatch: expected ${expectedSizeBytes}, received ${size}`
+                                    );
+                                }
+                                state.closed = true;
+                                active.delete(storageName);
+                                savedFiles.push({
+                                    name,
+                                    size,
+                                    completedAt: Date.now(),
+                                    storageName,
+                                    sink: "hash-only",
+                                    crc32Hex: formatCrc32(crc32State),
+                                    sinkWriteCalls,
+                                    sinkWriteDurationMs,
+                                });
+                            },
+                            abort: async () => {
+                                if (state.closed || state.aborted) {
+                                    return;
+                                }
+                                state.aborted = true;
+                                active.delete(storageName);
+                            },
+                        };
+                    },
+                };
+            },
+        });
+    }, options);
+}
+
 export async function installMockSaveFilePicker(page: Page) {
     await page.addInitScript(() => {
         type SavedFile = {
@@ -1056,6 +1283,8 @@ export async function installMockSaveFilePicker(page: Page) {
             completedAt: number;
             storageName: string;
             sink: "opfs";
+            sinkWriteCalls: number;
+            sinkWriteDurationMs: number;
         };
         const savedFiles: SavedFile[] = [];
         const activeStorageNames = new Map<string, string>();
@@ -1198,9 +1427,18 @@ export async function installMockSaveFilePicker(page: Page) {
                 return {
                     createWritable: async () => {
                         const writable = await fileHandle.createWritable();
+                        let sinkWriteCalls = 0;
+                        let sinkWriteDurationMs = 0;
                         return {
                             write: async (data: Uint8Array) => {
-                                await writable.write(data);
+                                const startedAt = performance.now();
+                                try {
+                                    await writable.write(data);
+                                } finally {
+                                    sinkWriteCalls += 1;
+                                    sinkWriteDurationMs +=
+                                        performance.now() - startedAt;
+                                }
                             },
                             close: async () => {
                                 await writable.close();
@@ -1211,6 +1449,8 @@ export async function installMockSaveFilePicker(page: Page) {
                                     completedAt: Date.now(),
                                     storageName,
                                     sink: "opfs",
+                                    sinkWriteCalls,
+                                    sinkWriteDurationMs,
                                 });
                                 activeStorageNames.delete(name);
                             },
@@ -1282,6 +1522,8 @@ export function armSavedViaPicker(
                                 completedAt: number;
                                 storageName: string;
                                 sink: MockSavedFileSink;
+                                sinkWriteCalls: number;
+                                sinkWriteDurationMs: number;
                                 serverWriteCalls?: number;
                                 serverWriteDurationMs?: number;
                             }>;
@@ -1327,6 +1569,8 @@ export function armSavedViaPicker(
             downloadPath,
             size: saved.size,
             sinkCompletedAt: saved.completedAt,
+            sinkWriteCalls: saved.sinkWriteCalls,
+            sinkWriteDurationMs: saved.sinkWriteDurationMs,
             serverWriteCalls: saved.serverWriteCalls,
             serverWriteDurationMs: saved.serverWriteDurationMs,
             cleanup: async () => {

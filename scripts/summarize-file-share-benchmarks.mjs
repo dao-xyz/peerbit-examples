@@ -2,6 +2,8 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+const SUPPORTED_DOWNLOAD_SINKS = new Set(["hash-only", "opfs", "node-file"]);
+
 const requireFiniteNumber = (value, label, { minimum } = {}) => {
     const number = Number(value);
     if (!Number.isFinite(number) || (minimum != null && number < minimum)) {
@@ -44,6 +46,19 @@ const requireMatchingString = (left, right, label, pattern) => {
     }
 };
 
+const requireMatchingResultNumber = (value, expected, label) => {
+    const number = requireResultNumber(value, label, {
+        minimum: Number.MIN_VALUE,
+    });
+    const tolerance = Math.max(1e-9, Math.abs(expected) * 1e-12);
+    if (Math.abs(number - expected) > tolerance) {
+        throw new Error(`${label} did not match exact bytes and duration`);
+    }
+    return number;
+};
+
+const throughputMbps = (bytes, durationMs) => (bytes * 8) / (durationMs * 1000);
+
 export const median = (values) => {
     if (values.length === 0) {
         throw new Error("median requires at least one value");
@@ -69,7 +84,7 @@ export const nearestRankPercentile = (values, percentile) => {
 const requireResultEvidence = (
     result,
     index,
-    { scenario, readerCohort, fileSizeMb }
+    { scenario, readerCohort, downloadSink, fileSizeMb }
 ) => {
     const label = `run ${index + 1}`;
     if (result?.status !== "passed") {
@@ -90,6 +105,16 @@ const requireResultEvidence = (
     if (Number(result.fileSizeMb) !== fileSizeMb) {
         throw new Error(
             `${label} used unexpected file size '${result.fileSizeMb}'`
+        );
+    }
+    if (!SUPPORTED_DOWNLOAD_SINKS.has(downloadSink)) {
+        throw new Error(
+            `Unsupported benchmark download sink '${downloadSink}'`
+        );
+    }
+    if (result.sink !== downloadSink || result.requestedSink !== downloadSink) {
+        throw new Error(
+            `${label} used unexpected download sink '${result.sink}'`
         );
     }
     const expectedSizeBytes = fileSizeMb * 1024 * 1024;
@@ -115,10 +140,26 @@ const requireResultEvidence = (
     );
     requireMatchingString(
         fixture.sourceSha256Base64,
-        fixture.downloadSha256Base64,
-        `${label} source/download SHA-256`,
+        fixture.libraryComputedSha256Base64,
+        `${label} source/library-stream SHA-256`,
         /^[A-Za-z0-9+/]{43}=$/
     );
+    if (downloadSink === "node-file") {
+        requireMatchingString(
+            fixture.sourceSha256Base64,
+            fixture.downloadSha256Base64,
+            `${label} source/node-file SHA-256`,
+            /^[A-Za-z0-9+/]{43}=$/
+        );
+        if (fixture.directDownloadHashMatch !== true) {
+            throw new Error(`${label} did not prove node-file SHA-256`);
+        }
+    } else if (
+        fixture.downloadSha256Base64 != null ||
+        fixture.directDownloadHashMatch != null
+    ) {
+        throw new Error(`${label} claimed an unavailable sink SHA-256`);
+    }
     requireMatchingString(
         fixture.sourceCrc32Hex,
         fixture.downloadCrc32Hex,
@@ -128,15 +169,13 @@ const requireResultEvidence = (
     if (fixture.crc32Match !== true) {
         throw new Error(`${label} did not prove download CRC-32`);
     }
-    if (expectedSizeBytes >= 250_000_000) {
-        if (fixture.streamingReadbackCrc32Match !== true) {
-            throw new Error(`${label} did not prove streaming CRC-32`);
-        }
+    if (fixture.streamingReadbackCrc32Match !== true) {
+        throw new Error(`${label} did not prove browser-sink CRC-32`);
     }
     if (
         fixture?.integrityVerified !== true ||
         fixture.sourceManifestMatch !== true ||
-        fixture.directDownloadHashMatch !== true ||
+        fixture.libraryStreamSha256Match !== true ||
         fixture.libraryDownloadFinalHashVerified !== true
     ) {
         throw new Error(`${label} did not prove end-to-end transfer integrity`);
@@ -150,35 +189,187 @@ const requireResultEvidence = (
     if (result.readerJsHeapValidation?.valid !== true) {
         throw new Error(`${label} did not prove a valid reader heap sample`);
     }
+    if (result.writerJsHeapValidation?.valid !== true) {
+        throw new Error(`${label} did not prove a valid writer heap sample`);
+    }
     if (result.hostRssValidation?.valid !== true) {
         throw new Error(`${label} did not prove a valid host RSS sample`);
     }
 
+    const readTransfer = result.readTransfer;
+    if (
+        readTransfer?.totalBytes !== expectedSizeBytes ||
+        !Number.isSafeInteger(readTransfer?.chunkCount) ||
+        readTransfer.chunkCount <= 0
+    ) {
+        throw new Error(`${label} did not prove exact read-source coverage`);
+    }
+    const sourceEntries = Object.entries(readTransfer.sources ?? {});
+    let sourceChunkCount = 0;
+    let sourceByteCount = 0;
+    for (const [sourceName, source] of sourceEntries) {
+        if (
+            sourceName.length === 0 ||
+            !Number.isSafeInteger(source?.chunkCount) ||
+            source.chunkCount <= 0 ||
+            !Number.isSafeInteger(source?.bytes) ||
+            source.bytes <= 0
+        ) {
+            throw new Error(`${label} contained invalid per-source evidence`);
+        }
+        sourceChunkCount += source.chunkCount;
+        sourceByteCount += source.bytes;
+    }
+    if (
+        sourceEntries.length === 0 ||
+        sourceChunkCount !== readTransfer.chunkCount ||
+        sourceByteCount !== expectedSizeBytes
+    ) {
+        throw new Error(`${label} did not prove per-source byte coverage`);
+    }
+    const demandWaitSampleCount = readTransfer.demandWait?.sampleCount;
+    if (
+        !Number.isSafeInteger(demandWaitSampleCount) ||
+        demandWaitSampleCount !== readTransfer.chunkCount
+    ) {
+        throw new Error(
+            `${label} did not prove per-chunk demand-wait coverage`
+        );
+    }
+    const requireDemandWaitCount = (value, valueLabel) => {
+        if (
+            !Number.isSafeInteger(value) ||
+            value < 0 ||
+            value > demandWaitSampleCount
+        ) {
+            throw new Error(
+                `${valueLabel} must be a safe integer between 0 and the demand-wait sample count`
+            );
+        }
+        return value;
+    };
+    const demandWaitOver1sCount = requireDemandWaitCount(
+        readTransfer.demandWait?.over1sCount,
+        `${label} demand waits over 1s`
+    );
+    const demandWaitOver5sCount = requireDemandWaitCount(
+        readTransfer.demandWait?.over5sCount,
+        `${label} demand waits over 5s`
+    );
+    const demandWaitOver10sCount = requireDemandWaitCount(
+        readTransfer.demandWait?.over10sCount,
+        `${label} demand waits over 10s`
+    );
+    if (
+        demandWaitOver10sCount > demandWaitOver5sCount ||
+        demandWaitOver5sCount > demandWaitOver1sCount
+    ) {
+        throw new Error(`${label} contained inconsistent demand-wait tails`);
+    }
+    const uploadDurationMs = requireResultNumber(
+        result.uploadDurationMs,
+        `${label} upload duration`,
+        { minimum: Number.MIN_VALUE }
+    );
+    const clickToSinkDurationMs = requireResultNumber(
+        result.downloadDurationMs,
+        `${label} click-to-sink duration`,
+        { minimum: Number.MIN_VALUE }
+    );
+    const streamReadExclusiveMs = requireResultNumber(
+        readTransfer.stages?.streamReadExclusiveMs,
+        `${label} sink-exclusive stream-read duration`,
+        { minimum: Number.MIN_VALUE }
+    );
+    const sinkWriteAwaitMs = requireResultNumber(
+        readTransfer.stages?.sinkWriteAwaitMs,
+        `${label} awaited sink-write duration`,
+        { minimum: 0 }
+    );
+    const libraryStreamWallMs = requireResultNumber(
+        readTransfer.stages?.libraryStreamWallMs,
+        `${label} library stream-wall duration`,
+        { minimum: Number.MIN_VALUE }
+    );
+    const demandWaitSumMs = requireResultNumber(
+        readTransfer.demandWait?.sumMs,
+        `${label} demand-wait sum`,
+        { minimum: 0 }
+    );
+    if (
+        result.streamReadExclusiveMs !== streamReadExclusiveMs ||
+        result.sinkWriteAwaitMs !== sinkWriteAwaitMs ||
+        result.libraryStreamDurationMs !== libraryStreamWallMs ||
+        readTransfer.stages?.demandWaitMs !== demandWaitSumMs ||
+        streamReadExclusiveMs + sinkWriteAwaitMs !== libraryStreamWallMs ||
+        clickToSinkDurationMs < libraryStreamWallMs
+    ) {
+        throw new Error(`${label} contained inconsistent read-stage durations`);
+    }
+    const uploadMbps = throughputMbps(expectedSizeBytes, uploadDurationMs);
+    const downloadMbps = throughputMbps(
+        expectedSizeBytes,
+        streamReadExclusiveMs
+    );
+    const clickToSinkMbps = throughputMbps(
+        expectedSizeBytes,
+        clickToSinkDurationMs
+    );
+    requireMatchingResultNumber(
+        result.uploadMbps,
+        uploadMbps,
+        `${label} upload Mbps`
+    );
+    requireMatchingResultNumber(
+        result.streamReadExclusiveMbps,
+        downloadMbps,
+        `${label} sink-exclusive stream-read Mbps`
+    );
+    requireMatchingResultNumber(
+        result.downloadMbps,
+        clickToSinkMbps,
+        `${label} click-to-sink Mbps`
+    );
+    const optionalFiniteNumber = (value, valueLabel) =>
+        value == null
+            ? null
+            : requireResultNumber(value, valueLabel, {
+                  minimum: Number.NEGATIVE_INFINITY,
+              });
+
     return {
-        uploadMbps: requireResultNumber(
-            result.uploadMbps,
-            `${label} upload Mbps`,
-            {
-                minimum: Number.MIN_VALUE,
-            }
+        uploadMbps,
+        downloadMbps,
+        clickToSinkMbps,
+        uploadSeconds: uploadDurationMs / 1000,
+        downloadSeconds: streamReadExclusiveMs / 1000,
+        clickToSinkSeconds: clickToSinkDurationMs / 1000,
+        sinkWriteSeconds: sinkWriteAwaitMs / 1000,
+        demandWaitSumSeconds: demandWaitSumMs / 1000,
+        demandWaitP50Ms: requireResultNumber(
+            readTransfer.demandWait?.p50Ms,
+            `${label} demand-wait p50`,
+            { minimum: 0 }
         ),
-        downloadMbps: requireResultNumber(
-            result.downloadMbps,
-            `${label} download Mbps`,
-            { minimum: Number.MIN_VALUE }
+        demandWaitP95Ms: requireResultNumber(
+            readTransfer.demandWait?.p95Ms,
+            `${label} demand-wait p95`,
+            { minimum: 0 }
         ),
-        uploadSeconds:
-            requireResultNumber(
-                result.uploadDurationMs,
-                `${label} upload duration`,
-                { minimum: Number.MIN_VALUE }
-            ) / 1000,
-        downloadSeconds:
-            requireResultNumber(
-                result.downloadDurationMs,
-                `${label} download duration`,
-                { minimum: Number.MIN_VALUE }
-            ) / 1000,
+        demandWaitP99Ms: requireResultNumber(
+            readTransfer.demandWait?.p99Ms,
+            `${label} demand-wait p99`,
+            { minimum: 0 }
+        ),
+        demandWaitMaxMs: requireResultNumber(
+            readTransfer.demandWait?.maxMs,
+            `${label} demand-wait max`,
+            { minimum: 0 }
+        ),
+        demandWaitOver1sCount,
+        demandWaitOver5sCount,
+        demandWaitOver10sCount,
+        sources: readTransfer.sources,
         discoverySeconds:
             requireResultNumber(
                 result.discoveryLagMs,
@@ -190,17 +381,38 @@ const requireResultEvidence = (
             `${label} reader peak heap`,
             { minimum: Number.MIN_VALUE }
         ),
+        writerPeakHeapBytes: requireResultNumber(
+            result.writerJsHeap?.peakBytes,
+            `${label} writer peak heap`,
+            { minimum: Number.MIN_VALUE }
+        ),
         peakCombinedRssBytes: requireResultNumber(
             result.hostRss?.peakCombinedBytes,
             `${label} peak combined RSS`,
             { minimum: Number.MIN_VALUE }
+        ),
+        readerPeerbitLogDeltaBytes: optionalFiniteNumber(
+            result.storageAttribution?.reader?.peerbitLogUsageDeltaBytes,
+            `${label} reader Peerbit log storage delta`
+        ),
+        writerPeerbitLogDeltaBytes: optionalFiniteNumber(
+            result.storageAttribution?.writer?.peerbitLogUsageDeltaBytes,
+            `${label} writer Peerbit log storage delta`
+        ),
+        readerBackingStorageDeltaBytes: optionalFiniteNumber(
+            result.storageAttribution?.reader?.backingStorageUsageDeltaBytes,
+            `${label} reader backing-storage delta`
+        ),
+        writerBackingStorageDeltaBytes: optionalFiniteNumber(
+            result.storageAttribution?.writer?.backingStorageUsageDeltaBytes,
+            `${label} writer backing-storage delta`
         ),
     };
 };
 
 export const summarizeBenchmarkResults = (
     results,
-    { expectedRuns, scenario, readerCohort, fileSizeMb }
+    { expectedRuns, scenario, readerCohort, downloadSink, fileSizeMb }
 ) => {
     const runs = requirePositiveInteger(
         expectedRuns,
@@ -219,16 +431,38 @@ export const summarizeBenchmarkResults = (
         requireResultEvidence(result, index, {
             scenario,
             readerCohort,
+            downloadSink,
             fileSizeMb: size,
         })
     );
     const values = (key) => evidence.map((sample) => sample[key]);
     const average = (samples) =>
         samples.reduce((sum, sample) => sum + sample, 0) / samples.length;
+    const sum = (samples) =>
+        samples.reduce((total, sample) => total + sample, 0);
+    const optionalMedian = (samples) => {
+        const available = samples.filter((sample) => sample != null);
+        return {
+            availableRuns: available.length,
+            median: available.length > 0 ? median(available) : null,
+        };
+    };
+    const aggregateSources = {};
+    for (const sample of evidence) {
+        for (const [source, sourceEvidence] of Object.entries(sample.sources)) {
+            const aggregate = (aggregateSources[source] ??= {
+                chunkCount: 0,
+                bytes: 0,
+            });
+            aggregate.chunkCount += sourceEvidence.chunkCount;
+            aggregate.bytes += sourceEvidence.bytes;
+        }
+    }
 
     return {
         scenario,
         readerCohort,
+        downloadSink,
         fileSizeMb: size,
         runs,
         medianUploadMbps: median(values("uploadMbps")),
@@ -242,6 +476,22 @@ export const summarizeBenchmarkResults = (
             values("downloadSeconds"),
             95
         ),
+        medianClickToSinkSeconds: median(values("clickToSinkSeconds")),
+        medianClickToSinkMbps: median(values("clickToSinkMbps")),
+        medianSinkWriteSeconds: median(values("sinkWriteSeconds")),
+        medianDemandWaitSumSeconds: median(values("demandWaitSumSeconds")),
+        medianDemandWaitP50Ms: median(values("demandWaitP50Ms")),
+        medianDemandWaitP95Ms: median(values("demandWaitP95Ms")),
+        medianDemandWaitP99Ms: median(values("demandWaitP99Ms")),
+        medianDemandWaitMaxMs: median(values("demandWaitMaxMs")),
+        totalDemandWaitOver1sCount: sum(values("demandWaitOver1sCount")),
+        totalDemandWaitOver5sCount: sum(values("demandWaitOver5sCount")),
+        totalDemandWaitOver10sCount: sum(values("demandWaitOver10sCount")),
+        sources: Object.fromEntries(
+            Object.entries(aggregateSources).sort(([left], [right]) =>
+                left.localeCompare(right)
+            )
+        ),
         medianDiscoverySeconds: median(values("discoverySeconds")),
         p95DiscoverySeconds: nearestRankPercentile(
             values("discoverySeconds"),
@@ -252,6 +502,11 @@ export const summarizeBenchmarkResults = (
             values("readerPeakHeapBytes"),
             95
         ),
+        medianWriterPeakHeapBytes: median(values("writerPeakHeapBytes")),
+        p95WriterPeakHeapBytes: nearestRankPercentile(
+            values("writerPeakHeapBytes"),
+            95
+        ),
         medianPeakCombinedRssBytes: median(values("peakCombinedRssBytes")),
         p95PeakCombinedRssBytes: nearestRankPercentile(
             values("peakCombinedRssBytes"),
@@ -259,6 +514,20 @@ export const summarizeBenchmarkResults = (
         ),
         averageUploadMbps: average(values("uploadMbps")),
         averageDownloadMbps: average(values("downloadMbps")),
+        storageAttribution: {
+            readerPeerbitLogDeltaBytes: optionalMedian(
+                values("readerPeerbitLogDeltaBytes")
+            ),
+            writerPeerbitLogDeltaBytes: optionalMedian(
+                values("writerPeerbitLogDeltaBytes")
+            ),
+            readerBackingStorageDeltaBytes: optionalMedian(
+                values("readerBackingStorageDeltaBytes")
+            ),
+            writerBackingStorageDeltaBytes: optionalMedian(
+                values("writerBackingStorageDeltaBytes")
+            ),
+        },
         rawResults: results,
     };
 };
@@ -266,18 +535,33 @@ export const summarizeBenchmarkResults = (
 const toMiB = (bytes) => bytes / (1024 * 1024);
 
 export const formatBenchmarkSummary = (summary) => {
+    const formatStorage = (measurement) =>
+        measurement.median == null
+            ? `unavailable (0/${summary.runs} runs)`
+            : `${toMiB(measurement.median).toFixed(2)} MiB (${measurement.availableRuns}/${summary.runs} runs)`;
     const lines = [
         "# File-share benchmark",
         "",
         `- Scenario: \`${summary.scenario}\``,
         `- Reader cohort: \`${summary.readerCohort}\``,
+        `- Download sink: \`${summary.downloadSink}\``,
         `- File size: \`${summary.fileSizeMb} MiB\``,
         `- Runs: \`${summary.runs}\``,
         `- Upload: p50 \`${summary.medianUploadSeconds.toFixed(2)}s\` at \`${summary.medianUploadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95UploadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05UploadMbps.toFixed(2)} Mbps\``,
         `- Discovery lag: p50 \`${summary.medianDiscoverySeconds.toFixed(2)}s\`; p95 \`${summary.p95DiscoverySeconds.toFixed(2)}s\``,
-        `- Download: p50 \`${summary.medianDownloadSeconds.toFixed(2)}s\` at \`${summary.medianDownloadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95DownloadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05DownloadMbps.toFixed(2)} Mbps\``,
+        `- Peerbit stream read (sink waits excluded): p50 \`${summary.medianDownloadSeconds.toFixed(2)}s\` at \`${summary.medianDownloadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95DownloadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05DownloadMbps.toFixed(2)} Mbps\``,
+        `- Click to sink complete: p50 \`${summary.medianClickToSinkSeconds.toFixed(2)}s\` at \`${summary.medianClickToSinkMbps.toFixed(2)} Mbps\`; awaited sink writes p50 \`${summary.medianSinkWriteSeconds.toFixed(2)}s\``,
+        `- Chunk demand wait: p50 \`${summary.medianDemandWaitP50Ms.toFixed(0)}ms\`, p95 \`${summary.medianDemandWaitP95Ms.toFixed(0)}ms\`, p99 \`${summary.medianDemandWaitP99Ms.toFixed(0)}ms\`, max p50 \`${summary.medianDemandWaitMaxMs.toFixed(0)}ms\`; totals over 1s/5s/10s: \`${summary.totalDemandWaitOver1sCount}/${summary.totalDemandWaitOver5sCount}/${summary.totalDemandWaitOver10sCount}\``,
         `- Reader peak JS heap: p50 \`${toMiB(summary.medianReaderPeakHeapBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95ReaderPeakHeapBytes).toFixed(2)} MiB\``,
+        `- Writer peak JS heap: p50 \`${toMiB(summary.medianWriterPeakHeapBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95WriterPeakHeapBytes).toFixed(2)} MiB\``,
         `- Host peak combined RSS (Chromium + Playwright Node): p50 \`${toMiB(summary.medianPeakCombinedRssBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95PeakCombinedRssBytes).toFixed(2)} MiB\``,
+        `- Per-source totals: ${Object.entries(summary.sources)
+            .map(
+                ([source, evidence]) =>
+                    `\`${source}\`=${evidence.chunkCount} chunks/${toMiB(evidence.bytes).toFixed(2)} MiB`
+            )
+            .join(", ")}`,
+        `- Storage deltas (p50 when available): reader Peerbit log ${formatStorage(summary.storageAttribution.readerPeerbitLogDeltaBytes)}, writer Peerbit log ${formatStorage(summary.storageAttribution.writerPeerbitLogDeltaBytes)}, reader origin backing storage ${formatStorage(summary.storageAttribution.readerBackingStorageDeltaBytes)}, writer origin backing storage ${formatStorage(summary.storageAttribution.writerBackingStorageDeltaBytes)}`,
         "",
         "## Raw runs",
         "",
@@ -285,7 +569,7 @@ export const formatBenchmarkSummary = (summary) => {
 
     summary.rawResults.forEach((result, index) => {
         lines.push(
-            `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, download=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s (${Number(result.downloadMbps).toFixed(2)} Mbps), reader-peak-heap=${toMiB(Number(result.readerJsHeap.peakBytes)).toFixed(2)} MiB, peak-combined-rss=${toMiB(Number(result.hostRss.peakCombinedBytes)).toFixed(2)} MiB`
+            `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, stream-read=${(Number(result.streamReadExclusiveMs) / 1000).toFixed(2)}s (${Number(result.streamReadExclusiveMbps).toFixed(2)} Mbps), sink-wait=${(Number(result.sinkWriteAwaitMs) / 1000).toFixed(2)}s, click-to-sink=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s, demand-p95=${Number(result.readTransfer.demandWait.p95Ms).toFixed(0)}ms, reader/writer-peak-heap=${toMiB(Number(result.readerJsHeap.peakBytes)).toFixed(2)}/${toMiB(Number(result.writerJsHeap.peakBytes)).toFixed(2)} MiB, peak-combined-rss=${toMiB(Number(result.hostRss.peakCombinedBytes)).toFixed(2)} MiB`
         );
     });
     return `${lines.join("\n")}\n`;
@@ -321,6 +605,7 @@ export const runBenchmarkSummary = ({ environment = process.env } = {}) => {
         expectedRuns,
         scenario: environment.BENCH_SCENARIO,
         readerCohort: environment.BENCH_READER_COHORT,
+        downloadSink: environment.BENCH_DOWNLOAD_SINK,
         fileSizeMb: environment.BENCH_FILE_MB,
     });
     writeFileSync(

@@ -8,6 +8,20 @@ export const READER_COHORTS = [
 
 export type ReaderCohort = (typeof READER_COHORTS)[number];
 
+export const DOWNLOAD_SINKS = ["hash-only", "opfs", "node-file"] as const;
+
+export type BenchmarkDownloadSink = (typeof DOWNLOAD_SINKS)[number];
+
+export const resolveBenchmarkDownloadSink = (
+    value?: string
+): BenchmarkDownloadSink => {
+    const sink = value?.trim() || "hash-only";
+    if ((DOWNLOAD_SINKS as readonly string[]).includes(sink)) {
+        return sink as BenchmarkDownloadSink;
+    }
+    throw new Error(`Unsupported PW_DOWNLOAD_SINK='${value}'`);
+};
+
 export const TINY_FILE_SIZE_LIMIT_BYTES = TINY_FILE_WRITE_SIZE_LIMIT_BYTES;
 const MEBIBYTE_BYTES = 1024 * 1024;
 
@@ -433,5 +447,182 @@ export const classifyReaderCohort = (
         postReadLocalChunkIndexRowCount: evidence.postReadLocalChunkCount,
         classificationBasis,
         validationReasons,
+    };
+};
+
+type ReadDiagnostics = Record<string, unknown>;
+
+const requireFiniteDiagnosticNumber = (value: unknown, label: string) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        throw new Error(`${label} must be a non-negative finite number`);
+    }
+    return value;
+};
+
+const requireDiagnosticRecord = (
+    diagnostics: ReadDiagnostics,
+    name: string
+) => {
+    const value = diagnostics[name];
+    if (value == null || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`Missing ${name} read diagnostics`);
+    }
+    return value as Record<string, unknown>;
+};
+
+const nearestRank = (values: number[], percentile: number) => {
+    const sorted = [...values].sort((left, right) => left - right);
+    return sorted[Math.ceil((percentile / 100) * sorted.length) - 1];
+};
+
+const sum = (values: number[]) =>
+    values.reduce((total, value) => total + value, 0);
+
+/**
+ * Converts the per-chunk library diagnostics into stable benchmark evidence.
+ * `streamReadExclusiveMs` removes time spent awaiting the configured output
+ * sink from the library stream wall clock; it still includes manifest-ready
+ * waiting, chunk demand, materialization, hashing, and scheduler bookkeeping.
+ */
+export const summarizeReadTransferDiagnostics = (
+    diagnostics: ReadDiagnostics,
+    expectedSizeBytes: number
+) => {
+    const sources = requireDiagnosticRecord(diagnostics, "chunkResolved");
+    const indices = Object.keys(sources)
+        .map((value) => Number(value))
+        .sort((left, right) => left - right);
+    if (
+        indices.length === 0 ||
+        indices.some(
+            (value, position) =>
+                !Number.isSafeInteger(value) || value !== position
+        )
+    ) {
+        throw new Error(
+            "chunkResolved read diagnostics must contain contiguous chunk indices"
+        );
+    }
+
+    const readNumberSeries = (name: string) => {
+        const record = requireDiagnosticRecord(diagnostics, name);
+        return indices.map((index) =>
+            requireFiniteDiagnosticNumber(record[index], `${name}[${index}]`)
+        );
+    };
+    const readDurationSeries = (startedName: string, finishedName: string) => {
+        const started = readNumberSeries(startedName);
+        const finished = readNumberSeries(finishedName);
+        return finished.map((value, index) => {
+            if (value < started[index]) {
+                throw new Error(
+                    `${finishedName}[${index}] preceded ${startedName}[${index}]`
+                );
+            }
+            return value - started[index];
+        });
+    };
+
+    const chunkBytes = readNumberSeries("chunkByteLength");
+    if (
+        chunkBytes.some((value) => !Number.isSafeInteger(value) || value <= 0)
+    ) {
+        throw new Error(
+            "chunkByteLength diagnostics must be positive integers"
+        );
+    }
+    const totalBytes = sum(chunkBytes);
+    if (totalBytes !== expectedSizeBytes) {
+        throw new Error(
+            `Read diagnostics covered ${totalBytes} bytes, expected ${expectedSizeBytes}`
+        );
+    }
+
+    const demandWaitMs = readNumberSeries("chunkDemandWaitMs");
+    const sinkWriteMs = readDurationSeries(
+        "chunkWriteStartedAt",
+        "chunkWriteFinishedAt"
+    );
+    const materializeMs = readDurationSeries(
+        "chunkMaterializeStartedAt",
+        "chunkMaterializeFinishedAt"
+    );
+    const hashMs = readDurationSeries(
+        "chunkHashStartedAt",
+        "chunkHashFinishedAt"
+    );
+    const libraryStreamStartedAt = requireFiniteDiagnosticNumber(
+        diagnostics.startedAt,
+        "read startedAt"
+    );
+    const libraryStreamFinishedAt = requireFiniteDiagnosticNumber(
+        diagnostics.finishedAt,
+        "read finishedAt"
+    );
+    if (libraryStreamFinishedAt < libraryStreamStartedAt) {
+        throw new Error("read finishedAt preceded startedAt");
+    }
+    const libraryStreamWallMs =
+        libraryStreamFinishedAt - libraryStreamStartedAt;
+    const sinkWriteAwaitMs = sum(sinkWriteMs);
+    const streamReadExclusiveMs = Math.max(
+        0,
+        libraryStreamWallMs - sinkWriteAwaitMs
+    );
+    const demandWaitSumMs = sum(demandWaitMs);
+    const materializeSumMs = sum(materializeMs);
+    const hashSumMs = sum(hashMs);
+
+    const sourceSummary: Record<string, { chunkCount: number; bytes: number }> =
+        {};
+    for (const [position, index] of indices.entries()) {
+        const source = sources[index];
+        if (typeof source !== "string" || source.length === 0) {
+            throw new Error(`chunkResolved[${index}] is missing its source`);
+        }
+        const current = (sourceSummary[source] ??= {
+            chunkCount: 0,
+            bytes: 0,
+        });
+        current.chunkCount += 1;
+        current.bytes += chunkBytes[position];
+    }
+
+    return {
+        chunkCount: indices.length,
+        totalBytes,
+        sources: Object.fromEntries(
+            Object.entries(sourceSummary).sort(([left], [right]) =>
+                left.localeCompare(right)
+            )
+        ),
+        demandWait: {
+            definition:
+                "wall-clock time each sequential stream consumer awaited its scheduled chunk",
+            sampleCount: demandWaitMs.length,
+            sumMs: demandWaitSumMs,
+            p50Ms: nearestRank(demandWaitMs, 50),
+            p95Ms: nearestRank(demandWaitMs, 95),
+            p99Ms: nearestRank(demandWaitMs, 99),
+            maxMs: Math.max(...demandWaitMs),
+            over1sCount: demandWaitMs.filter((value) => value > 1_000).length,
+            over5sCount: demandWaitMs.filter((value) => value > 5_000).length,
+            over10sCount: demandWaitMs.filter((value) => value > 10_000).length,
+        },
+        stages: {
+            libraryStreamWallMs,
+            sinkWriteAwaitMs,
+            streamReadExclusiveMs,
+            demandWaitMs: demandWaitSumMs,
+            materializeMs: materializeSumMs,
+            contentHashMs: hashSumMs,
+            otherStreamReadMs: Math.max(
+                0,
+                streamReadExclusiveMs -
+                    demandWaitSumMs -
+                    materializeSumMs -
+                    hashSumMs
+            ),
+        },
     };
 };

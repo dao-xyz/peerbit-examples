@@ -12,6 +12,38 @@ In the frontend folder you can find a React application using the library as a d
 
 The hosted application is available at [files.apps.peerbit.org](https://files.apps.peerbit.org).
 
+### Transfer benchmark
+
+The `File Share Benchmarks` workflow uploads deterministic AES-CTR fixture
+bytes and requires matching source, manifest, library-stream SHA-256, and sink
+CRC-32 evidence. Its default `hash-only` download sink computes CRC-32 in the
+reader page and discards each chunk immediately. This is the primary Peerbit
+measurement because it does not add one loopback HTTP request or filesystem
+write for every 512 KiB chunk.
+
+Choose `opfs` to measure the same transfer with browser-native Origin Private
+File System persistence. `node-file` is retained as a diagnostic comparison
+with the older loopback HTTP sink. Compare sinks in separate workflow runs; a
+second read in the same browser would measure a warmed reader.
+
+Each result keeps click-to-sink timing but reports sink-exclusive stream time as
+the primary download throughput. It also records awaited sink-write time,
+per-source chunk and byte totals, chunk demand-wait p50/p95/p99/max and long-wait
+counts, reader and writer JS heap, Chromium RSS grouped by process role, Peerbit
+logical log usage, and `navigator.storage.estimate()` snapshots. Browser origin
+storage is an estimate (and includes the OPFS output for the `opfs` sink), while
+renderer RSS cannot be assigned reliably to one page; the result schema labels
+both limitations explicitly.
+
+For a local focused run after building `@peerbit/please-lib`:
+
+```sh
+cd packages/file-share/frontend
+PW_BENCH=1 PW_BENCH_SCENARIO=local PW_READER_COHORT=live-replicator \
+  PW_DOWNLOAD_SINK=hash-only PW_FILE_MB=256 \
+  npx playwright test -c playwright.config.ts tests/transfer.bench.e2e.spec.ts \
+  --project chromium
+```
 
 ## CLI
 

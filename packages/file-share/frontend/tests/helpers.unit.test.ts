@@ -7,6 +7,7 @@ import {
     crc32SavedViaPicker,
     createCrc32,
     createSyntheticFileOnDisk,
+    installHashOnlyMockSaveFilePicker,
     installMockSaveFilePicker,
     installNodeBackedMockSaveFilePicker,
     sha256AndCrc32File,
@@ -270,6 +271,10 @@ describe("synthetic on-disk fixtures", () => {
             expect(await crc32SavedViaPicker(page, "crc32-readback.bin")).toBe(
                 "cbf43926"
             );
+            expect((window as any).__mockSavedFiles[0]).toMatchObject({
+                sink: "opfs",
+                sinkWriteCalls: 2,
+            });
             expect(readbackStreamCount).toBe(1);
         } finally {
             if (storageDescriptor) {
@@ -285,6 +290,43 @@ describe("synthetic on-disk fixtures", () => {
                     Reflect.deleteProperty(window, key);
                 }
             }
+        }
+    });
+
+    it("hashes and discards benchmark bytes without network or storage I/O", async () => {
+        const descriptors = snapshotMockPickerWindow();
+        const { page } = createInitScriptPage();
+        const fileName = "hash-only.bin";
+        try {
+            await installHashOnlyMockSaveFilePicker(page, {
+                expectedName: fileName,
+                expectedSizeBytes: 9,
+            });
+            const handle = await (window as any).showSaveFilePicker({
+                suggestedName: fileName,
+            });
+            const writable = await handle.createWritable();
+            await writable.write(new TextEncoder().encode("1234"));
+            await writable.write(new TextEncoder().encode("56789"));
+            await writable.close();
+
+            expect((window as any).__mockSavedFiles).toEqual([
+                expect.objectContaining({
+                    name: fileName,
+                    size: 9,
+                    sink: "hash-only",
+                    crc32Hex: "cbf43926",
+                    sinkWriteCalls: 2,
+                }),
+            ]);
+            expect(await crc32SavedViaPicker(page, fileName)).toBe("cbf43926");
+            await expect(writable.write(new Uint8Array([0]))).rejects.toThrow(
+                "closed"
+            );
+            await (window as any).__cleanupMockSavedFile(fileName);
+            expect((window as any).__mockSavedFiles).toEqual([]);
+        } finally {
+            restoreMockPickerWindow(descriptors);
         }
     });
 
@@ -313,8 +355,10 @@ describe("synthetic on-disk fixtures", () => {
                 name: fileName,
                 size: 9,
                 sink: "node-file",
+                sinkWriteCalls: 2,
                 serverWriteCalls: 2,
             });
+            expect(saved.sinkWriteDurationMs).toBeGreaterThanOrEqual(0);
             expect(saved.serverWriteDurationMs).toBeGreaterThanOrEqual(0);
             const storedPath = `${controller.directory}/${saved.storageName}`;
             expect((await readFile(storedPath)).toString()).toBe("123456789");
