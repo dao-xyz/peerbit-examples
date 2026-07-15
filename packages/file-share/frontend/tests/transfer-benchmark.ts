@@ -74,6 +74,56 @@ export const validateJsHeapMeasurement = (
     };
 };
 
+export type HostRssMeasurementSummary = {
+    sampleCount: number;
+    startBrowserBytes: number | null;
+    endBrowserBytes: number | null;
+    peakBrowserBytes: number | null;
+    startNodeBytes: number | null;
+    endNodeBytes: number | null;
+    peakNodeBytes: number | null;
+    peakCombinedBytes: number | null;
+    samplingErrors: string[];
+};
+
+export const validateHostRssMeasurement = (
+    measurement: HostRssMeasurementSummary | null | undefined
+) => {
+    const validationReasons: string[] = [];
+    if (measurement == null) {
+        validationReasons.push("missing-host-rss-measurement");
+        return { valid: false, validationReasons };
+    }
+    if (
+        !Number.isFinite(measurement.sampleCount) ||
+        measurement.sampleCount <= 0
+    ) {
+        validationReasons.push("invalid-host-rss-sample-count");
+    }
+    for (const [name, value] of [
+        ["start-browser", measurement.startBrowserBytes],
+        ["end-browser", measurement.endBrowserBytes],
+        ["peak-browser", measurement.peakBrowserBytes],
+        ["start-node", measurement.startNodeBytes],
+        ["end-node", measurement.endNodeBytes],
+        ["peak-node", measurement.peakNodeBytes],
+        ["peak-combined", measurement.peakCombinedBytes],
+    ] as const) {
+        if (!isFiniteHeapByteValue(value) || value === 0) {
+            validationReasons.push(`invalid-host-rss-${name}-bytes`);
+        }
+    }
+    if (!Array.isArray(measurement.samplingErrors)) {
+        validationReasons.push("invalid-host-rss-sampling-errors");
+    } else if (measurement.samplingErrors.length > 0) {
+        validationReasons.push("host-rss-sampling-errors");
+    }
+    return {
+        valid: validationReasons.length === 0,
+        validationReasons,
+    };
+};
+
 const BROWSER_DIAL_TRANSPORT =
     /\/(?:ws|wss|webrtc|webrtc-direct|webtransport)(?:\/|$)/;
 

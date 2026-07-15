@@ -13,6 +13,7 @@ const productionWorkflow = readWorkflow("cloudflare-production.yml");
 const provisioningWorkflow = readWorkflow(
     "cloudflare-production-provision.yml"
 );
+const fileShareCiWorkflow = readWorkflow("file-share-ci.yml");
 
 const pinnedWorkflowActions = new Map([
     ["actions/checkout", "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"],
@@ -62,6 +63,25 @@ test("every remote workflow action is pinned to its reviewed commit", () => {
     }
 
     assert.deepEqual(observedActions, new Set(pinnedWorkflowActions.keys()));
+});
+
+test("file-share CI tracks both the active benchmark and retired workflow sentinel", () => {
+    assert.match(
+        readWorkflow("file-share-two-runner-artifact-benchmarks.yml"),
+        /^name: File Share Two-Runner Artifact Benchmarks$/m
+    );
+    for (const workflowPath of [
+        ".github/workflows/file-share-benchmarks.yml",
+        ".github/workflows/file-share-two-runner-artifact-benchmarks.yml",
+        ".github/workflows/file-share-two-runner-benchmarks.yml",
+        "scripts/summarize-file-share-benchmarks*.mjs",
+    ]) {
+        assert.equal(
+            fileShareCiWorkflow.split(`- "${workflowPath}"`).length - 1,
+            2,
+            `${workflowPath} must trigger file-share CI for pull requests and master pushes`
+        );
+    }
 });
 
 const receiptValidationScripts = () => {
