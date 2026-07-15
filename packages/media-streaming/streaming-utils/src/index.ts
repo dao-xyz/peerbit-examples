@@ -425,9 +425,11 @@ export abstract class TrackSource {
             });
         } else {
             await this.endPreviousLivestreamSubscription();
+            // Keep the sender's full range fixed so intersecting live
+            // subscriptions participate in chunk leader selection.
             await this.chunks.log.replicate(
                 args === "streamer" || args === "all"
-                    ? { factor: 1 }
+                    ? { factor: 1, strict: true }
                     : (args ?? { factor: 1 })
             );
             return;
