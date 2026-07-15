@@ -165,6 +165,93 @@ test("summarizes throughput, latency, JS heap, and host RSS tails", () => {
     assert.equal(summary.p95PeakCombinedRssBytes, 640 * 1024 * 1024);
 });
 
+test("accepts equivalent floating-point read-stage durations", () => {
+    const result = validResult({
+        downloadDurationMs: 0.3,
+        streamReadExclusiveMs: 0.1,
+        sinkWriteAwaitMs: 0.2,
+    });
+    result.libraryStreamDurationMs = 0.3;
+    result.readTransfer.demandWait = {
+        ...result.readTransfer.demandWait,
+        sumMs: 0.1,
+        p50Ms: 0.04,
+        p95Ms: 0.06,
+        p99Ms: 0.06,
+        maxMs: 0.06,
+    };
+    result.readTransfer.stages = {
+        ...result.readTransfer.stages,
+        libraryStreamWallMs: 0.3,
+        demandWaitMs: 0.1,
+    };
+
+    const summary = summarizeBenchmarkResults([result], {
+        expectedRuns: 1,
+        scenario: "local",
+        readerCohort: "live-replicator",
+        downloadSink: "hash-only",
+        fileSizeMb: 256,
+    });
+
+    assert.equal(summary.medianDownloadSeconds, 0.0001);
+});
+
+test("fails closed on inconsistent demand-wait summary evidence", () => {
+    const options = {
+        expectedRuns: 1,
+        scenario: "local",
+        readerCohort: "live-replicator",
+        downloadSink: "hash-only",
+        fileSizeMb: 256,
+    };
+    const withDemandWait = (demandWait) => {
+        const result = validResult();
+        result.readTransfer.demandWait = {
+            ...result.readTransfer.demandWait,
+            ...demandWait,
+        };
+        result.readTransfer.stages.demandWaitMs =
+            result.readTransfer.demandWait.sumMs;
+        return result;
+    };
+
+    for (const demandWait of [{ p50Ms: 901, p95Ms: 900 }, { p95Ms: 899 }]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [withDemandWait(demandWait)],
+                    options
+                ),
+            /inconsistent demand-wait percentiles/
+        );
+    }
+    for (const sumMs of [899, 1_801]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults([withDemandWait({ sumMs })], options),
+            /inconsistent demand-wait sum/
+        );
+    }
+    assert.throws(
+        () =>
+            summarizeBenchmarkResults(
+                [
+                    withDemandWait({
+                        sumMs: 2_002,
+                        p50Ms: 1_001,
+                        p95Ms: 1_001,
+                        p99Ms: 1_001,
+                        maxMs: 1_001,
+                        over1sCount: 0,
+                    }),
+                ],
+                options
+            ),
+        /inconsistent demand-wait tails/
+    );
+});
+
 test("fails closed on missing samples or unverifiable result evidence", () => {
     const options = {
         expectedRuns: 2,

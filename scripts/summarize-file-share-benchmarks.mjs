@@ -46,12 +46,22 @@ const requireMatchingString = (left, right, label, pattern) => {
     }
 };
 
+const resultNumberTolerance = (left, right) =>
+    Math.max(1e-9, Math.max(Math.abs(left), Math.abs(right)) * 1e-12);
+
+const resultNumbersMatch = (left, right, { minimum } = {}) =>
+    typeof left === "number" &&
+    Number.isFinite(left) &&
+    typeof right === "number" &&
+    Number.isFinite(right) &&
+    (minimum == null || (left >= minimum && right >= minimum)) &&
+    Math.abs(left - right) <= resultNumberTolerance(left, right);
+
 const requireMatchingResultNumber = (value, expected, label) => {
     const number = requireResultNumber(value, label, {
         minimum: Number.MIN_VALUE,
     });
-    const tolerance = Math.max(1e-9, Math.abs(expected) * 1e-12);
-    if (Math.abs(number - expected) > tolerance) {
+    if (!resultNumbersMatch(number, expected)) {
         throw new Error(`${label} did not match exact bytes and duration`);
     }
     return number;
@@ -296,13 +306,105 @@ const requireResultEvidence = (
         `${label} demand-wait sum`,
         { minimum: 0 }
     );
+    const demandWaitP50Ms = requireResultNumber(
+        readTransfer.demandWait?.p50Ms,
+        `${label} demand-wait p50`,
+        { minimum: 0 }
+    );
+    const demandWaitP95Ms = requireResultNumber(
+        readTransfer.demandWait?.p95Ms,
+        `${label} demand-wait p95`,
+        { minimum: 0 }
+    );
+    const demandWaitP99Ms = requireResultNumber(
+        readTransfer.demandWait?.p99Ms,
+        `${label} demand-wait p99`,
+        { minimum: 0 }
+    );
+    const demandWaitMaxMs = requireResultNumber(
+        readTransfer.demandWait?.maxMs,
+        `${label} demand-wait max`,
+        { minimum: 0 }
+    );
+    const demandWaitPercentiles = [
+        { percentile: 50, value: demandWaitP50Ms },
+        { percentile: 95, value: demandWaitP95Ms },
+        { percentile: 99, value: demandWaitP99Ms },
+        { percentile: 100, value: demandWaitMaxMs },
+    ].map(({ percentile, value }) => ({
+        rank: Math.ceil((percentile / 100) * demandWaitSampleCount),
+        value,
+    }));
+    for (let index = 1; index < demandWaitPercentiles.length; index++) {
+        const previous = demandWaitPercentiles[index - 1];
+        const current = demandWaitPercentiles[index];
+        if (
+            previous.value - current.value >
+                resultNumberTolerance(previous.value, current.value) ||
+            (previous.rank === current.rank &&
+                !resultNumbersMatch(previous.value, current.value))
+        ) {
+            throw new Error(
+                `${label} contained inconsistent demand-wait percentiles`
+            );
+        }
+    }
+    const maximumDemandWaitSumMs = demandWaitMaxMs * demandWaitSampleCount;
     if (
-        result.streamReadExclusiveMs !== streamReadExclusiveMs ||
-        result.sinkWriteAwaitMs !== sinkWriteAwaitMs ||
-        result.libraryStreamDurationMs !== libraryStreamWallMs ||
-        readTransfer.stages?.demandWaitMs !== demandWaitSumMs ||
-        streamReadExclusiveMs + sinkWriteAwaitMs !== libraryStreamWallMs ||
-        clickToSinkDurationMs < libraryStreamWallMs
+        !Number.isFinite(maximumDemandWaitSumMs) ||
+        demandWaitMaxMs - demandWaitSumMs >
+            resultNumberTolerance(demandWaitMaxMs, demandWaitSumMs) ||
+        demandWaitSumMs - maximumDemandWaitSumMs >
+            resultNumberTolerance(demandWaitSumMs, maximumDemandWaitSumMs)
+    ) {
+        throw new Error(`${label} contained an inconsistent demand-wait sum`);
+    }
+    for (const { threshold, count } of [
+        { threshold: 1_000, count: demandWaitOver1sCount },
+        { threshold: 5_000, count: demandWaitOver5sCount },
+        { threshold: 10_000, count: demandWaitOver10sCount },
+    ]) {
+        for (const percentile of demandWaitPercentiles) {
+            const minimumOverThreshold =
+                percentile.value > threshold
+                    ? demandWaitSampleCount - percentile.rank + 1
+                    : 0;
+            const maximumOverThreshold =
+                percentile.value <= threshold
+                    ? demandWaitSampleCount - percentile.rank
+                    : demandWaitSampleCount;
+            if (count < minimumOverThreshold || count > maximumOverThreshold) {
+                throw new Error(
+                    `${label} contained inconsistent demand-wait tails`
+                );
+            }
+        }
+    }
+    if (
+        !resultNumbersMatch(
+            result.streamReadExclusiveMs,
+            streamReadExclusiveMs,
+            { minimum: Number.MIN_VALUE }
+        ) ||
+        !resultNumbersMatch(result.sinkWriteAwaitMs, sinkWriteAwaitMs, {
+            minimum: 0,
+        }) ||
+        !resultNumbersMatch(
+            result.libraryStreamDurationMs,
+            libraryStreamWallMs,
+            { minimum: Number.MIN_VALUE }
+        ) ||
+        !resultNumbersMatch(
+            readTransfer.stages?.demandWaitMs,
+            demandWaitSumMs,
+            { minimum: 0 }
+        ) ||
+        !resultNumbersMatch(
+            streamReadExclusiveMs + sinkWriteAwaitMs,
+            libraryStreamWallMs
+        ) ||
+        libraryStreamWallMs - clickToSinkDurationMs >
+            resultNumberTolerance(libraryStreamWallMs, clickToSinkDurationMs)
     ) {
         throw new Error(`${label} contained inconsistent read-stage durations`);
     }
@@ -346,26 +448,10 @@ const requireResultEvidence = (
         clickToSinkSeconds: clickToSinkDurationMs / 1000,
         sinkWriteSeconds: sinkWriteAwaitMs / 1000,
         demandWaitSumSeconds: demandWaitSumMs / 1000,
-        demandWaitP50Ms: requireResultNumber(
-            readTransfer.demandWait?.p50Ms,
-            `${label} demand-wait p50`,
-            { minimum: 0 }
-        ),
-        demandWaitP95Ms: requireResultNumber(
-            readTransfer.demandWait?.p95Ms,
-            `${label} demand-wait p95`,
-            { minimum: 0 }
-        ),
-        demandWaitP99Ms: requireResultNumber(
-            readTransfer.demandWait?.p99Ms,
-            `${label} demand-wait p99`,
-            { minimum: 0 }
-        ),
-        demandWaitMaxMs: requireResultNumber(
-            readTransfer.demandWait?.maxMs,
-            `${label} demand-wait max`,
-            { minimum: 0 }
-        ),
+        demandWaitP50Ms,
+        demandWaitP95Ms,
+        demandWaitP99Ms,
+        demandWaitMaxMs,
         demandWaitOver1sCount,
         demandWaitOver5sCount,
         demandWaitOver10sCount,
