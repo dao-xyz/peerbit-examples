@@ -116,25 +116,20 @@ const deriveDemandWaitSumBounds = ({ sampleCount, percentiles, tails }) => {
                 ? sortedSegmentStarts[index + 1] - 1
                 : sampleCount;
         const length = endRank - startRank + 1;
-        let lower = Math.max(
+        const lower = Math.max(
             ...lowerBounds
                 .filter((bound) => bound.startRank <= startRank)
                 .map((bound) => bound.value)
         );
-        let upper = Math.min(
+        const upper = Math.min(
             ...upperBounds
                 .filter((bound) => bound.endRank >= startRank)
                 .map((bound) => bound.value)
         );
         if (lower > upper) {
-            if (lower - upper > resultNumberTolerance(lower, upper)) {
-                throw new Error(
-                    "demand-wait percentiles and tails described no feasible samples"
-                );
-            }
-            const equivalentValue = lower / 2 + upper / 2;
-            lower = equivalentValue;
-            upper = equivalentValue;
+            throw new Error(
+                "demand-wait percentiles and tails described no feasible samples"
+            );
         }
         minimum += length * lower;
         maximum += length * upper;
@@ -423,10 +418,8 @@ const requireResultEvidence = (
         const previous = demandWaitPercentiles[index - 1];
         const current = demandWaitPercentiles[index];
         if (
-            previous.value - current.value >
-                resultNumberTolerance(previous.value, current.value) ||
-            (previous.rank === current.rank &&
-                !resultNumbersMatch(previous.value, current.value))
+            previous.value > current.value ||
+            (previous.rank === current.rank && previous.value !== current.value)
         ) {
             throw new Error(
                 `${label} contained inconsistent demand-wait percentiles`
@@ -470,10 +463,8 @@ const requireResultEvidence = (
     if (
         !Number.isFinite(minimumDemandWaitSumMs) ||
         !Number.isFinite(maximumDemandWaitSumMs) ||
-        minimumDemandWaitSumMs - demandWaitSumMs >
-            resultNumberTolerance(minimumDemandWaitSumMs, demandWaitSumMs) ||
-        demandWaitSumMs - maximumDemandWaitSumMs >
-            resultNumberTolerance(demandWaitSumMs, maximumDemandWaitSumMs)
+        minimumDemandWaitSumMs > demandWaitSumMs ||
+        demandWaitSumMs > maximumDemandWaitSumMs
     ) {
         throw new Error(`${label} contained an inconsistent demand-wait sum`);
     }

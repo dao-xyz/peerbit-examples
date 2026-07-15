@@ -226,6 +226,21 @@ test("fails closed on inconsistent demand-wait summary evidence", () => {
             /inconsistent demand-wait percentiles/
         );
     }
+    assert.throws(
+        () =>
+            summarizeBenchmarkResults(
+                [
+                    withDemandWait({
+                        p50Ms: 1_000_000_000_000_000,
+                        p95Ms: 999_999_999_999_999,
+                        p99Ms: 999_999_999_999_999,
+                        maxMs: 999_999_999_999_999,
+                    }),
+                ],
+                options
+            ),
+        /inconsistent demand-wait percentiles/
+    );
     for (const sumMs of [899, 900, 1_001, 1_801]) {
         assert.throws(
             () =>
@@ -274,6 +289,25 @@ test("fails closed on inconsistent demand-wait summary evidence", () => {
     strictTailBoundaryResult.readTransfer.stages.demandWaitMs = 3_001;
     assert.doesNotThrow(() =>
         summarizeBenchmarkResults([strictTailBoundaryResult], options)
+    );
+    const exactLargeSumResult = withDemandWait({
+        sumMs: 1_999_999_999_999,
+        p50Ms: 1_000_000_000_000,
+        p95Ms: 1_000_000_000_000,
+        p99Ms: 1_000_000_000_000,
+        maxMs: 1_000_000_000_000,
+        over1sCount: 2,
+        over5sCount: 2,
+        over10sCount: 2,
+    });
+    assert.throws(
+        () => summarizeBenchmarkResults([exactLargeSumResult], options),
+        /inconsistent demand-wait sum/
+    );
+    exactLargeSumResult.readTransfer.demandWait.sumMs = 2_000_000_000_000;
+    exactLargeSumResult.readTransfer.stages.demandWaitMs = 2_000_000_000_000;
+    assert.doesNotThrow(() =>
+        summarizeBenchmarkResults([exactLargeSumResult], options)
     );
     for (const demandWait of [
         { sumMs: 1_000.5 },
