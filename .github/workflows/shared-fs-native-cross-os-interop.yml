@@ -94,7 +94,7 @@ jobs:
             runs_on: ${{ steps.labels.outputs.runs_on }}
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Compute runner labels
               id: labels
@@ -150,7 +150,7 @@ jobs:
 
             - name: Preserve runner state
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: scaleway-macos-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
                   path: tmp/processes/github-scaleway-runner.json
@@ -163,7 +163,7 @@ jobs:
 
             - name: Upload provisioning timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-macos-provision-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/provision-macos.json
@@ -180,7 +180,7 @@ jobs:
             runs_on: ${{ steps.labels.outputs.runs_on }}
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Compute runner labels
               id: labels
@@ -239,7 +239,7 @@ jobs:
 
             - name: Preserve runner state
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: scaleway-windows-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
                   path: tmp/processes/github-scaleway-windows-runner.json
@@ -252,7 +252,7 @@ jobs:
 
             - name: Upload provisioning timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-provision-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/provision-windows.json
@@ -266,22 +266,22 @@ jobs:
         timeout-minutes: 60
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Setup pnpm
-              uses: pnpm/action-setup@v5
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
               with:
                   run_install: false
 
             - name: Setup Node
-              uses: actions/setup-node@v5
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
                   cache: pnpm
                   cache-dependency-path: pnpm-lock.yaml
 
             - name: Setup Go
-              uses: actions/setup-go@v6
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
               with:
                   go-version: "1.24.x"
                   cache-dependency-path: packages/shared-fs/native/go.sum
@@ -366,7 +366,7 @@ jobs:
                   exit 1
 
             - name: Upload shared filesystem address
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-address
                   path: shared-fs-native-address/address.txt
@@ -388,7 +388,7 @@ jobs:
 
             - name: Upload Linux timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-linux-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/*.json
@@ -405,22 +405,22 @@ jobs:
         timeout-minutes: 60
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Setup pnpm
-              uses: pnpm/action-setup@v5
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
               with:
                   run_install: false
 
             - name: Setup Node
-              uses: actions/setup-node@v5
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
                   cache: pnpm
                   cache-dependency-path: pnpm-lock.yaml
 
             - name: Setup Go
-              uses: actions/setup-go@v6
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
               with:
                   go-version: "1.24.x"
                   cache: false
@@ -470,7 +470,7 @@ jobs:
                   node scripts/wait-github-artifact.mjs shared-fs-native-address
 
             - name: Download seed address
-              uses: actions/download-artifact@v8
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
                   name: shared-fs-native-address
                   path: shared-fs-native-address
@@ -500,7 +500,7 @@ jobs:
 
             - name: Upload macOS timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-macos-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/*.json
@@ -517,21 +517,21 @@ jobs:
         timeout-minutes: 60
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Setup pnpm
-              uses: pnpm/action-setup@v5
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
               with:
                   run_install: false
 
             - name: Setup Node
-              uses: actions/setup-node@v5
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
                   package-manager-cache: false
 
             - name: Setup Go
-              uses: actions/setup-go@v6
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
               with:
                   go-version: "1.24.x"
                   cache: false
@@ -639,7 +639,7 @@ jobs:
                   node scripts/wait-github-artifact.mjs shared-fs-native-address
 
             - name: Download seed address
-              uses: actions/download-artifact@v8
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
                   name: shared-fs-native-address
                   path: shared-fs-native-address
@@ -669,7 +669,7 @@ jobs:
 
             - name: Upload Windows timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-windows-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/*.json
@@ -686,10 +686,10 @@ jobs:
         timeout-minutes: 20
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Restore runner state
-              uses: actions/download-artifact@v8
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               continue-on-error: true
               with:
                   name: scaleway-macos-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
@@ -731,7 +731,7 @@ jobs:
 
             - name: Upload cleanup timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-macos-cleanup-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/cleanup-macos.json
@@ -748,10 +748,10 @@ jobs:
         timeout-minutes: 20
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Restore runner state
-              uses: actions/download-artifact@v8
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               continue-on-error: true
               with:
                   name: scaleway-windows-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
@@ -793,7 +793,7 @@ jobs:
 
             - name: Upload cleanup timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-cleanup-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/cleanup-windows.json
@@ -810,7 +810,7 @@ jobs:
         timeout-minutes: 10
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
             - name: Check native runner resource limits
               shell: bash
@@ -826,7 +826,7 @@ jobs:
 
             - name: Download native timing artifacts
               if: always()
-              uses: actions/download-artifact@v8
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               continue-on-error: true
               with:
                   pattern: shared-fs-native-*timing-${{ github.run_id }}-${{ github.run_attempt }}
@@ -843,7 +843,7 @@ jobs:
 
             - name: Upload aggregate native timing
               if: always()
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-native-aggregate-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-timing/summary.md
