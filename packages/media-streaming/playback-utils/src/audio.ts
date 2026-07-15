@@ -26,9 +26,21 @@ const url_worklet = URL.createObjectURL(
                     constructor() {
                         super();
 
-                        // external “flush”
+                        // external drain/terminal flush
                         this.port.onmessage = (ev: MessageEvent<any>) => {
-                            if (ev.data === "flush") this.emit(true);
+                            const legacyFlush = ev.data === "flush";
+                            const taggedFlush = ev.data?.eventType === "flush";
+                            if (legacyFlush || taggedFlush) {
+                                const terminal =
+                                    legacyFlush || ev.data.terminal === true;
+                                this.emit(true, terminal);
+                                if (legacyFlush) return;
+                                this.port.postMessage({
+                                    eventType: "flush-ack",
+                                    requestId: ev.data.requestId,
+                                    terminal,
+                                });
+                            }
                         };
                     }
 
@@ -91,8 +103,9 @@ const url_worklet = URL.createObjectURL(
                     }
 
                     /** PCM32 → PCM16 and post Message */
-                    private emit(forceLast = false): void {
-                        if (!forceLast && this.bufLen < this.MIN_CHUNK) return;
+                    private emit(force = false, last = false): void {
+                        if (this.buf.length === 0) return;
+                        if (!force && this.bufLen < this.MIN_CHUNK) return;
 
                         const ch = this.buf[0].length;
                         const merged =
@@ -113,7 +126,7 @@ const url_worklet = URL.createObjectURL(
                             timestamp: Math.round(
                                 (this.written / this.SR) * 1e6
                             ),
-                            last: forceLast,
+                            last,
                         };
 
                         // copy header + payload
@@ -140,7 +153,7 @@ const url_worklet = URL.createObjectURL(
 
                         this.buf.push(inp.map((c) => new Float32Array(c)));
                         this.bufLen += 128 * inp.length;
-                        this.emit(false);
+                        this.emit(false, false);
 
                         return true; // keep processor alive
                     }
@@ -157,10 +170,26 @@ const url_worklet = URL.createObjectURL(
     )
 );
 
-import { AudioStreamDB, Chunk, Track } from "@peerbit/media-streaming";
-import PDefer, { DeferredPromise } from "p-defer";
-import PQueue from "p-queue";
-import { delay } from "@peerbit/time";
+import type { AudioStreamDB, Chunk, Track } from "@peerbit/media-streaming";
+
+type DeferredPromise<T> = {
+    promise: Promise<T>;
+    resolve: (value?: T | PromiseLike<T>) => void;
+    reject: (reason?: unknown) => void;
+};
+
+const createDeferred = <T>(): DeferredPromise<T> => {
+    let resolve!: (value?: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((promiseResolve, promiseReject) => {
+        resolve = (value) => promiseResolve(value as T | PromiseLike<T>);
+        reject = promiseReject;
+    });
+    return { promise, resolve, reject };
+};
+
+const delay = (milliseconds: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
 /* —————————————————————————————————————————— */
 /*  TYPE HELPERS                                                               */
@@ -179,7 +208,7 @@ export interface WAVEncoderEvents {
         length: number;
     }): void;
 
-    /** media element reached “ended” (real-time only) */
+    /** source reached its terminal end after final chunk delivery */
     onEnded?(): void;
 }
 
@@ -246,20 +275,390 @@ export class WAVEncoder {
     private mediaEl?: HTMLMediaElement;
     private ownsMedia = false;
     private objURL?: string;
+    private nextFlushRequestId = 0;
+    private lifecycleGeneration = 0;
+    private activePort?: MessagePort;
+    private activePortListener?: (event: MessageEvent) => void;
+    private endedElement?: HTMLMediaElement;
+    private endedListener?: () => void;
+    private offlineAbortController?: AbortController;
+    private offlineProducer?: Promise<void>;
+    private offlineDelivery?: DeferredPromise<void>;
+    private offlineProducerPort?: MessagePort;
+    private elementPreparationAbortController?: AbortController;
+    private pendingFlushes = new Set<{
+        port: MessagePort;
+        listener: (event: MessageEvent) => void;
+        requestId: number;
+        terminal: boolean;
+        resolve: (value?: void | PromiseLike<void>) => void;
+        reject: (reason?: unknown) => void;
+    }>();
+    private terminalFlush?: {
+        port: MessagePort;
+        generation: number;
+        promise: Promise<void>;
+    };
+    private retirementDrain: Promise<void> = Promise.resolve();
+    private retiredContexts = new Set<AudioContext>();
+    private retiredProducers = new Set<Promise<void>>();
+
+    private isGenerationActive(generation: number) {
+        return generation === this.lifecycleGeneration;
+    }
+
+    private hasPendingTerminalFlush(port: MessagePort) {
+        for (const pending of this.pendingFlushes) {
+            if (pending.port === port && pending.terminal) return true;
+        }
+        return false;
+    }
+
+    private settlePendingFlush(port: MessagePort, requestId: number) {
+        for (const pending of this.pendingFlushes) {
+            if (pending.port !== port || pending.requestId !== requestId) {
+                continue;
+            }
+            pending.port.removeEventListener("message", pending.listener);
+            this.pendingFlushes.delete(pending);
+            pending.resolve(undefined);
+            return true;
+        }
+        return false;
+    }
+
+    private settlePendingTerminalFlushes(port: MessagePort) {
+        let settled = false;
+        for (const pending of [...this.pendingFlushes]) {
+            if (pending.port !== port || !pending.terminal) continue;
+            pending.port.removeEventListener("message", pending.listener);
+            this.pendingFlushes.delete(pending);
+            pending.resolve(undefined);
+            settled = true;
+        }
+        return settled;
+    }
+
+    private installPortListener(
+        port: MessagePort,
+        generation: number,
+        handlers: WAVEncoderEvents,
+        offlineDelivery?: DeferredPromise<void>
+    ) {
+        let terminalNotified = false;
+        const notifyTerminal = () => {
+            if (terminalNotified) return;
+            terminalNotified = true;
+            handlers.onEnded?.();
+        };
+        const forward = (event: MessageEvent) => {
+            if (
+                !this.isGenerationActive(generation) ||
+                this.activePort !== port
+            ) {
+                return;
+            }
+            if (event.data?.audioBuffer) {
+                if (event.data.last === true) {
+                    // The worklet posts terminal data before its acknowledgement.
+                    // Completing the terminal request now lets onChunk safely
+                    // destroy or re-initialize the encoder without turning an
+                    // already-delivered finish into a rejection.
+                    this.settlePendingTerminalFlushes(port);
+                }
+                handlers.onChunk?.(event.data);
+                if (
+                    event.data.last === true &&
+                    !this.hasPendingTerminalFlush(port)
+                ) {
+                    notifyTerminal();
+                }
+            }
+            if (event.data?.eventType === "offline-complete") {
+                offlineDelivery?.resolve(undefined);
+                notifyTerminal();
+            }
+            if (
+                event.data?.eventType === "flush-ack" &&
+                event.data?.terminal === true
+            ) {
+                // Settle the terminal request before notifying user code. The
+                // callback is allowed to destroy or re-initialize the encoder
+                // without invalidating an acknowledgement already delivered by
+                // the worklet.
+                this.settlePendingFlush(port, event.data.requestId);
+                // A terminal flush can have no residual buffered data. In that
+                // case the acknowledgement is the only terminal notification.
+                // Ignore an old/mismatched acknowledgement while a newer
+                // terminal request still owns completion.
+                if (!this.hasPendingTerminalFlush(port)) {
+                    notifyTerminal();
+                }
+            }
+        };
+        this.activePort = port;
+        this.activePortListener = forward;
+        this.port = port;
+        port.start();
+        port.addEventListener("message", forward);
+    }
+
+    private async requestWorkletFlush(options: {
+        port: MessagePort;
+        generation: number;
+        terminal: boolean;
+        timeout?: number;
+    }) {
+        const { port, generation, terminal } = options;
+        if (
+            !this.isGenerationActive(generation) ||
+            this.activePort !== port ||
+            !this.node
+        ) {
+            throw new Error("Audio worklet is no longer active");
+        }
+
+        const flushed = createDeferred<void>();
+        const requestId = ++this.nextFlushRequestId;
+        const listener = (event: MessageEvent) => {
+            if (
+                event.data?.eventType === "flush-ack" &&
+                event.data?.requestId === requestId
+            ) {
+                flushed.resolve(undefined);
+            }
+        };
+        const pending = {
+            port,
+            listener,
+            requestId,
+            terminal,
+            resolve: flushed.resolve,
+            reject: flushed.reject,
+        };
+        this.pendingFlushes.add(pending);
+        port.addEventListener("message", listener);
+
+        const requestedTimeout = options.timeout;
+        const timeout =
+            requestedTimeout == null
+                ? 2_000
+                : Number.isFinite(requestedTimeout)
+                  ? Math.max(0, requestedTimeout)
+                  : 2_000;
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        try {
+            port.postMessage({
+                eventType: "flush",
+                requestId,
+                terminal,
+            });
+            await Promise.race([
+                flushed.promise,
+                new Promise<never>((_resolve, reject) => {
+                    timeoutHandle = setTimeout(
+                        () =>
+                            reject(
+                                new Error(
+                                    `Timed out waiting for audio worklet flush after ${timeout} ms`
+                                )
+                            ),
+                        timeout
+                    );
+                }),
+            ]);
+        } finally {
+            if (timeoutHandle !== undefined) {
+                clearTimeout(timeoutHandle);
+            }
+            port.removeEventListener("message", listener);
+            this.pendingFlushes.delete(pending);
+        }
+    }
+
+    private requestTerminalWorkletFlush(options: {
+        port: MessagePort;
+        generation: number;
+        timeout?: number;
+    }) {
+        const current = this.terminalFlush;
+        if (
+            current?.port === options.port &&
+            current.generation === options.generation
+        ) {
+            return current.promise;
+        }
+
+        const promise = this.requestWorkletFlush({
+            ...options,
+            terminal: true,
+        }).finally(() => {
+            if (this.terminalFlush?.promise === promise) {
+                this.terminalFlush = undefined;
+            }
+        });
+        this.terminalFlush = {
+            port: options.port,
+            generation: options.generation,
+            promise,
+        };
+        return promise;
+    }
+
+    private async drainRetiredResources() {
+        const failures: unknown[] = [];
+        const producers = [...this.retiredProducers];
+        const producerResults = await Promise.allSettled(producers);
+        for (let i = 0; i < producerResults.length; i++) {
+            const result = producerResults[i];
+            // A producer promise is terminal and cannot be rerun. Any
+            // retryable AudioContext cleanup it owns is retained separately.
+            this.retiredProducers.delete(producers[i]);
+            if (result.status === "rejected") {
+                failures.push(result.reason);
+            }
+        }
+
+        // Snapshot after producers settle: an offline producer can discover a
+        // failed temporary-context close while it is draining.
+        const contexts = [...this.retiredContexts];
+        const contextResults = await Promise.allSettled(
+            contexts.map((context) =>
+                context.state === "closed"
+                    ? Promise.resolve()
+                    : Promise.resolve().then(() => context.close())
+            )
+        );
+        for (let i = 0; i < contextResults.length; i++) {
+            const result = contextResults[i];
+            if (result.status === "fulfilled") {
+                this.retiredContexts.delete(contexts[i]);
+            } else {
+                failures.push(result.reason);
+            }
+        }
+
+        if (failures.length === 1) {
+            throw failures[0];
+        }
+        if (failures.length > 1) {
+            throw new AggregateError(
+                failures,
+                "Failed to retire WAV encoder resources"
+            );
+        }
+    }
+
+    private retireCurrentResources() {
+        const activePort = this.activePort;
+        const activePortListener = this.activePortListener;
+        const endedElement = this.endedElement;
+        const endedListener = this.endedListener;
+        const offlineAbortController = this.offlineAbortController;
+        const offlineProducer = this.offlineProducer;
+        const offlineDelivery = this.offlineDelivery;
+        const offlineProducerPort = this.offlineProducerPort;
+        const elementPreparationAbortController =
+            this.elementPreparationAbortController;
+        const context = this.ctx;
+        const sourceNode = this.srcNode;
+        const workletNode = this.node;
+        const mediaElement = this.mediaEl;
+        const ownsMedia = this.ownsMedia;
+        const objectUrl = this.objURL;
+
+        if (context) {
+            this.retiredContexts.add(context);
+        }
+        if (offlineProducer) {
+            this.retiredProducers.add(offlineProducer);
+        }
+
+        this.activePort = undefined;
+        this.activePortListener = undefined;
+        this.endedElement = undefined;
+        this.endedListener = undefined;
+        this.offlineAbortController = undefined;
+        this.offlineProducer = undefined;
+        this.offlineDelivery = undefined;
+        this.offlineProducerPort = undefined;
+        this.elementPreparationAbortController = undefined;
+        this.terminalFlush = undefined;
+        this.ctx = undefined;
+        this.srcNode = undefined;
+        this.node = undefined;
+        this.mediaEl = undefined;
+        this.ownsMedia = false;
+        this.objURL = undefined;
+
+        elementPreparationAbortController?.abort();
+        offlineAbortController?.abort();
+        offlineDelivery?.resolve(undefined);
+        if (activePort && activePortListener) {
+            activePort.removeEventListener("message", activePortListener);
+        }
+        if (endedElement && endedListener) {
+            endedElement.removeEventListener("ended", endedListener);
+        }
+        for (const pending of [...this.pendingFlushes]) {
+            pending.port.removeEventListener("message", pending.listener);
+            pending.reject(
+                new Error("WAVEncoder was retired before its flush completed")
+            );
+            this.pendingFlushes.delete(pending);
+        }
+
+        try {
+            mediaElement?.pause();
+        } catch {
+            // A detached media element can already be unable to pause.
+        }
+        try {
+            sourceNode?.disconnect();
+        } catch {
+            // The source can already be disconnected by finish.
+        }
+        try {
+            workletNode?.disconnect();
+        } catch {
+            // The worklet can already be disconnected.
+        }
+        activePort?.close();
+        if (offlineProducerPort !== activePort) {
+            offlineProducerPort?.close();
+        }
+        if (ownsMedia && mediaElement) {
+            mediaElement.remove();
+        }
+        if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+        }
+
+        const previousDrain = this.retirementDrain;
+        const nextDrain = previousDrain
+            .catch(() => {})
+            .then(() => this.drainRetiredResources());
+        // Keep ignored lifecycle calls from becoming unhandled rejections while
+        // preserving the rejecting promise for callers that await it.
+        void nextDrain.catch(() => {});
+        this.retirementDrain = nextDrain;
+        return nextDrain;
+    }
 
     /* ---------------------------------- init ------------------------ */
 
     async init(src: WAVEncoderSource, handlers: WAVEncoderEvents = {}) {
-        console.log("DESTORY PREV?");
+        const generation = ++this.lifecycleGeneration;
         this.initializing?.reject(new Error("Reset"));
-        await this.destroy(); // clean slate
-        this.initializing = PDefer<void>();
-        console.log("READY!");
-
-        const forward = (ev: MessageEvent) => {
-            if (ev.data?.audioBuffer) handlers.onChunk?.(ev.data);
-            if (ev.data?.last) handlers.onEnded?.();
-        };
+        await this.retireCurrentResources();
+        if (!this.isGenerationActive(generation)) {
+            throw new Error("WAVEncoder initialization was superseded");
+        }
+        const initializing = createDeferred<void>();
+        // Consumers may choose not to await the public initialization handle;
+        // lifecycle supersession must not become an unhandled rejection.
+        void initializing.promise.catch(() => {});
+        this.initializing = initializing;
 
         try {
             /* ── real-time branch ───────────────────────────────────────── */
@@ -268,53 +667,148 @@ export class WAVEncoder {
                     this.mediaEl = src.element;
                     this.ownsMedia = false;
                 } else {
-                    this.mediaEl = await this._prepareElementFromFile(src.file);
+                    const preparationAbortController = new AbortController();
+                    this.elementPreparationAbortController =
+                        preparationAbortController;
+                    let prepared: {
+                        element: HTMLAudioElement;
+                        url: string;
+                    };
+                    try {
+                        prepared = await this._prepareElementFromFile(
+                            src.file,
+                            preparationAbortController.signal
+                        );
+                    } finally {
+                        if (
+                            this.elementPreparationAbortController ===
+                            preparationAbortController
+                        ) {
+                            this.elementPreparationAbortController = undefined;
+                        }
+                    }
+                    if (!this.isGenerationActive(generation)) {
+                        try {
+                            prepared.element.pause();
+                        } catch {
+                            // A superseded provisional element can already be
+                            // unable to pause.
+                        }
+                        prepared.element.remove();
+                        URL.revokeObjectURL(prepared.url);
+                        throw new Error(
+                            "WAVEncoder initialization was superseded"
+                        );
+                    }
+                    this.mediaEl = prepared.element;
+                    this.objURL = prepared.url;
                     this.ownsMedia = true;
                 }
 
                 this.ctx = new AudioContext();
                 await this.ctx.audioWorklet.addModule(url_worklet);
+                if (!this.isGenerationActive(generation)) {
+                    throw new Error("WAVEncoder initialization was superseded");
+                }
 
                 this.srcNode = this.ctx.createMediaElementSource(this.mediaEl!);
                 this.node = new AudioWorkletNode(
                     this.ctx,
                     "convert-bits-processor"
                 );
+                const port = this.node.port;
+                this.installPortListener(port, generation, handlers);
+                const element = this.mediaEl;
                 const flushOnEnded = () => {
-                    /* the worklet listens for "flush" and calls emitChunk(true) */
-                    this.port.postMessage("flush");
-                    this.mediaEl!.removeEventListener("ended", flushOnEnded);
+                    element.removeEventListener("ended", flushOnEnded);
+                    if (
+                        !this.isGenerationActive(generation) ||
+                        this.activePort !== port
+                    ) {
+                        return;
+                    }
+                    void this.requestTerminalWorkletFlush({
+                        port,
+                        generation,
+                    }).catch((error) => {
+                        if (this.isGenerationActive(generation)) {
+                            console.error(
+                                "Failed to flush an ended audio stream",
+                                error
+                            );
+                        }
+                    });
                 };
-                this.mediaEl.addEventListener("ended", flushOnEnded);
+                this.endedElement = element;
+                this.endedListener = flushOnEnded;
+                element.addEventListener("ended", flushOnEnded);
 
                 this.srcNode.connect(this.node);
                 this.node.connect(this.ctx.destination);
 
-                this.port = this.node.port;
-                this.port.start();
-                this.port.addEventListener("message", forward);
-
-                this.initializing.resolve();
+                initializing.resolve(undefined);
                 return;
             }
 
             /* ── offline / file branch  without using element (fastest) ──────────────────────────────────── */
             // this path seems to be glitchy broken when we deploy our site and might lead to issues when decoding wierd file formats
             const { port1, port2 } = new MessageChannel();
-            this.port = port1;
-            this.port.start();
-            this.port.addEventListener("message", forward);
+            const offlineDelivery = createDeferred<void>();
+            const offlineAbortController = new AbortController();
+            this.offlineDelivery = offlineDelivery;
+            this.offlineAbortController = offlineAbortController;
+            this.offlineProducerPort = port2;
+            this.installPortListener(
+                port1,
+                generation,
+                handlers,
+                offlineDelivery
+            );
 
-            (async () => {
+            const producer = (async () => {
                 /* 1️⃣  Decode with a short-lived context */
                 const tmpCtx = new AudioContext();
                 const DEVICE_SR = tmpCtx.sampleRate; // device sample-rate
-                const srcBuf = await tmpCtx.decodeAudioData(
-                    await src.file.arrayBuffer()
-                );
+                let srcBuf!: AudioBuffer;
+                let decodeFailure: unknown;
+                try {
+                    const encoded = await src.file.arrayBuffer();
+                    if (
+                        !offlineAbortController.signal.aborted &&
+                        this.isGenerationActive(generation)
+                    ) {
+                        srcBuf = await tmpCtx.decodeAudioData(encoded);
+                    }
+                } catch (error) {
+                    decodeFailure = error;
+                }
+                try {
+                    if (tmpCtx.state !== "closed") {
+                        await tmpCtx.close();
+                    }
+                } catch (error) {
+                    // decodeAudioData cannot be aborted. If its temporary
+                    // context fails to close, transfer ownership to the
+                    // serialized retirement drain for a later retry.
+                    this.retiredContexts.add(tmpCtx);
+                    if (!offlineAbortController.signal.aborted) {
+                        decodeFailure = decodeFailure
+                            ? new AggregateError(
+                                  [decodeFailure, error],
+                                  "Failed to decode and close offline audio"
+                              )
+                            : error;
+                    }
+                }
+                if (
+                    offlineAbortController.signal.aborted ||
+                    !this.isGenerationActive(generation)
+                ) {
+                    return;
+                }
+                if (decodeFailure) throw decodeFailure;
                 const inSR = srcBuf.sampleRate;
                 const channels = srcBuf.numberOfChannels;
-                await tmpCtx.close();
 
                 const TARGET_SR = inSR === DEVICE_SR ? inSR : 48_000;
                 let pcmBuf: AudioBuffer;
@@ -341,6 +835,12 @@ export class WAVEncoder {
                     pcmBuf = await offCtx.startRendering(); // resampled buffer
                     /* OfflineAudioContext needs no close(); GC will collect it */
                 }
+                if (
+                    offlineAbortController.signal.aborted ||
+                    !this.isGenerationActive(generation)
+                ) {
+                    return;
+                }
 
                 /* 3️⃣  Chunk & stream */
                 const CHUNK_FRAMES = Math.floor(0.1 * TARGET_SR); // 100 ms
@@ -351,6 +851,12 @@ export class WAVEncoder {
                 let yieldC = 0; // macro-task back-pressure
 
                 for (let p = 0; p < pcmBuf.length; p += CHUNK_FRAMES) {
+                    if (
+                        offlineAbortController.signal.aborted ||
+                        !this.isGenerationActive(generation)
+                    ) {
+                        return;
+                    }
                     const len = Math.min(CHUNK_FRAMES, pcmBuf.length - p);
 
                     /* zero-copy view into original channel data -------------------- */
@@ -388,11 +894,31 @@ export class WAVEncoder {
                         await delay(0); // let UI breathe
                     }
                 }
-            })(); // fire-and-forget – encoder keeps running
+                if (
+                    offlineAbortController.signal.aborted ||
+                    !this.isGenerationActive(generation)
+                ) {
+                    return;
+                }
+                port2.postMessage({
+                    eventType: "offline-complete",
+                    generation,
+                });
+                await offlineDelivery.promise;
+            })().finally(() => {
+                port2.close();
+            });
+            // Retain the producer error for finish/destroy while preventing a
+            // fire-and-forget rejection when callers only observe onChunk.
+            void producer.catch(() => {});
+            this.offlineProducer = producer;
 
-            this.initializing.resolve(); // nothing else to wait for
+            initializing.resolve(undefined); // producer completion is awaited by finish
         } catch (e) {
-            this.initializing.reject(e as Error);
+            initializing.reject(e as Error);
+            if (this.isGenerationActive(generation)) {
+                await this.retireCurrentResources().catch(() => {});
+            }
             throw e;
         }
     }
@@ -412,38 +938,168 @@ export class WAVEncoder {
         this.mediaEl?.pause();
     }
 
-    private _prepareElementFromFile(file: File): Promise<HTMLAudioElement> {
+    async flush(options?: { timeout?: number }) {
+        if (!this.initializing) return;
+        await this.initializing.promise;
+        const offlineProducer = this.offlineProducer;
+        if (offlineProducer) {
+            await offlineProducer;
+            return;
+        }
+        const port = this.activePort;
+        if (!this.node || !port) return;
+        await this.requestWorkletFlush({
+            port,
+            generation: this.lifecycleGeneration,
+            terminal: false,
+            timeout: options?.timeout,
+        });
+    }
+
+    async finish() {
+        if (!this.initializing) return;
+        await this.initializing.promise;
+        const offlineProducer = this.offlineProducer;
+        if (offlineProducer) {
+            await offlineProducer;
+            return;
+        }
+
+        const generation = this.lifecycleGeneration;
+        const context = this.ctx;
+        const mediaElement = this.mediaEl;
+        const sourceNode = this.srcNode;
+        const workletNode = this.node;
+        const port = this.activePort;
+        let failure: unknown;
+        try {
+            await context?.resume();
+            // Disconnect input without suspending the worklet first. This
+            // creates a stable producer boundary while the tagged terminal
+            // flush is processed and acknowledged.
+            if (sourceNode && workletNode) {
+                try {
+                    sourceNode.disconnect(workletNode);
+                } catch {
+                    // Already disconnected by an earlier idempotent finish.
+                }
+            }
+            if (workletNode && port) {
+                await this.requestTerminalWorkletFlush({
+                    port,
+                    generation,
+                });
+            }
+        } catch (error) {
+            failure = error;
+        } finally {
+            // A terminal callback may synchronously hand cleanup to destroy or
+            // re-init. Do not let stale finish cleanup touch the successor or
+            // report failures for resources now owned by retirement.
+            if (this.isGenerationActive(generation)) {
+                try {
+                    await context?.suspend();
+                } catch (error) {
+                    failure = failure
+                        ? new AggregateError(
+                              [failure, error],
+                              "Failed to finish and suspend the WAV encoder"
+                          )
+                        : error;
+                }
+                try {
+                    mediaElement?.pause();
+                } catch (error) {
+                    failure = failure
+                        ? new AggregateError(
+                              [failure, error],
+                              "Failed to finish and pause the WAV encoder"
+                          )
+                        : error;
+                }
+            }
+        }
+        if (failure) throw failure;
+    }
+
+    private _prepareElementFromFile(
+        file: File,
+        signal: AbortSignal
+    ): Promise<{ element: HTMLAudioElement; url: string }> {
         return new Promise((resolve, reject) => {
             const url = URL.createObjectURL(file);
-            const audio = new Audio(url);
-            audio.crossOrigin = "anonymous";
-            audio.preload = "auto";
-            audio.addEventListener("loadedmetadata", () => {
-                this.objURL = url;
-                resolve(audio);
-            });
-            audio.addEventListener("error", () =>
-                reject(new Error("Unable to load audio file"))
-            );
+            let audio: HTMLAudioElement | undefined;
+            let settled = false;
+            let released = false;
+            const cleanup = () => {
+                audio?.removeEventListener("loadedmetadata", onLoaded);
+                audio?.removeEventListener("error", onError);
+                signal.removeEventListener("abort", onAbort);
+            };
+            const release = () => {
+                if (released) return;
+                released = true;
+                try {
+                    audio?.pause();
+                } catch {
+                    // A provisional element can already be unable to pause.
+                }
+                try {
+                    audio?.remove();
+                } catch {
+                    // A partially constructed element can already be detached.
+                }
+                try {
+                    URL.revokeObjectURL(url);
+                } catch {
+                    // Preserve the setup error when best-effort URL release fails.
+                }
+            };
+            const onLoaded = () => {
+                if (settled || !audio) return;
+                settled = true;
+                cleanup();
+                resolve({ element: audio, url });
+            };
+            const onError = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                release();
+                reject(new Error("Unable to load audio file"));
+            };
+            const onAbort = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                release();
+                reject(new Error("WAVEncoder element preparation was retired"));
+            };
+            try {
+                audio = new Audio(url);
+                audio.crossOrigin = "anonymous";
+                audio.preload = "auto";
+                audio.addEventListener("loadedmetadata", onLoaded);
+                audio.addEventListener("error", onError);
+                signal.addEventListener("abort", onAbort, { once: true });
+                if (signal.aborted) onAbort();
+            } catch (error) {
+                if (!settled) {
+                    settled = true;
+                    cleanup();
+                    release();
+                    reject(error);
+                }
+            }
         });
     }
 
     /* ------------------------------ destroy ------------------------- */
 
     async destroy() {
-        try {
-            await this.pause();
-        } catch {}
-        this.srcNode?.disconnect();
-        this.node?.disconnect();
-        await this.ctx?.close();
-
-        if (this.ownsMedia && this.mediaEl) {
-            this.mediaEl.remove();
-            if (this.objURL) URL.revokeObjectURL(this.objURL);
-        }
-        /* clear refs */
-        this.ctx = this.node = this.srcNode = this.mediaEl = undefined;
+        this.lifecycleGeneration += 1;
+        this.initializing?.reject(new Error("Destroyed"));
+        await this.retireCurrentResources();
     }
 }
 
@@ -459,50 +1115,174 @@ export const createAudioStreamListener = (
     console.log("ADD AUDIO STREAM LISTENER");
     let pendingFrames: { buffer: AudioBuffer; timestamp: number }[] = [];
     let audioContext: AudioContext | undefined = undefined;
-    let setVolume: ((value: number) => void) | undefined = undefined;
     let gainNode: GainNode | undefined = undefined;
+    let audioContextListener: (() => void) | undefined;
+    let playbackGeneration = 0;
+    let lifecycleRequest = 0;
+    let decodeGeneration = 0;
+    let closed = false;
+    let animationFrameHandle: number | undefined;
+    let timerHandle: ReturnType<typeof setTimeout> | undefined;
+    let resumingGeneration: number | undefined;
+    let suspended = false;
+    type DecodeJob = {
+        chunk: Chunk;
+        context: AudioContext;
+        playbackGeneration: number;
+        decodeGeneration: number;
+    };
+    type DecodePump = {
+        queue: DecodeJob[];
+        running: boolean;
+        retired: boolean;
+    };
+    const createDecodePump = (): DecodePump => ({
+        queue: [],
+        running: false,
+        retired: false,
+    });
+    let decodePump = createDecodePump();
+    const contextsToClose = new Set<AudioContext>();
+    let teardownDrain = Promise.resolve();
 
-    const audioContextListener = () => {
-        if (
-            audioContext!.state === "suspended" ||
-            audioContext!.state === "closed"
-        ) {
-            console.log(
-                "AUDIO CONTEXT SUSPENDED OR CLOSED",
-                audioContext!.state
-            );
-            play = false;
+    const cancelScheduledRender = () => {
+        if (animationFrameHandle !== undefined) {
+            cancelAnimationFrame(animationFrameHandle);
+            animationFrameHandle = undefined;
+        }
+        if (timerHandle !== undefined) {
+            clearTimeout(timerHandle);
+            timerHandle = undefined;
         }
     };
-    const stop = async () => {
+
+    const invalidatePlayback = () => {
+        playbackGeneration += 1;
+        decodeGeneration += 1;
+        pendingFrames = [];
+        bufferedAudioTime = undefined;
+        resumingGeneration = undefined;
+        suspended = false;
+        // A decode cannot be aborted. Retire this context's pump so its one
+        // in-flight decode cannot feed a later playback generation, while the
+        // next context gets an independent single-concurrency pump.
+        decodePump.retired = true;
+        decodePump.queue = [];
+        decodePump = createDecodePump();
+        cancelScheduledRender();
+    };
+
+    const stop = () => {
         options?.debug && console.trace("STOP AUDIO LISTENER");
-        if (audioContext) {
-            audioContext.removeEventListener(
-                "statechange",
-                audioContextListener
-            );
-            audioContext.destination.disconnect();
-            audioContext.state !== "closed" && (await audioContext.close());
-            gainNode?.disconnect();
-        }
+        invalidatePlayback();
+        const contextToClose = audioContext;
+        const listenerToRemove = audioContextListener;
+        const gainToDisconnect = gainNode;
         audioContext = undefined;
-        setVolume = undefined;
+        audioContextListener = undefined;
         gainNode = undefined;
+        if (contextToClose) {
+            contextsToClose.add(contextToClose);
+            if (listenerToRemove) {
+                contextToClose.removeEventListener(
+                    "statechange",
+                    listenerToRemove
+                );
+            }
+            try {
+                contextToClose.destination.disconnect();
+            } catch {
+                // The destination can already be disconnected during teardown.
+            }
+            try {
+                gainToDisconnect?.disconnect();
+            } catch {
+                // The gain can already be disconnected during teardown.
+            }
+        }
+
+        const previousDrain = teardownDrain;
+        teardownDrain = previousDrain
+            .catch(() => {})
+            .then(async () => {
+                const contexts = [...contextsToClose];
+                const results = await Promise.allSettled(
+                    contexts.map((context) =>
+                        context.state === "closed"
+                            ? Promise.resolve()
+                            : context.close()
+                    )
+                );
+                const failures: unknown[] = [];
+                for (let i = 0; i < results.length; i++) {
+                    const result = results[i];
+                    if (result.status === "fulfilled") {
+                        contextsToClose.delete(contexts[i]);
+                    } else {
+                        failures.push(result.reason);
+                    }
+                }
+                if (failures.length === 1) {
+                    throw failures[0];
+                }
+                if (failures.length > 1) {
+                    throw new AggregateError(
+                        failures,
+                        "Failed to close one or more audio contexts"
+                    );
+                }
+            });
+        return teardownDrain;
     };
-    setVolume = (volume: number) => {
+    const setVolume = (volume: number) => {
         if (gainNode) gainNode.gain.value = volume;
     };
 
-    const setupAudioContext = async () => {
+    const setupAudioContext = async (request: number) => {
         await stop();
-        bufferedAudioTime = 0;
+        if (closed || !play || request !== lifecycleRequest) {
+            return;
+        }
         options?.debug && console.log("SETUP AUDIO CONTEXT");
-        audioContext = new AudioContext({
+        const context = new AudioContext({
             sampleRate: streamDB.source.sampleRate,
         });
-        audioContext.addEventListener("statechange", audioContextListener);
-        gainNode = audioContext.createGain();
-        gainNode.connect(audioContext.destination);
+        const generation = ++playbackGeneration;
+        const contextListener = () => {
+            if (generation !== playbackGeneration || context !== audioContext) {
+                return;
+            }
+            if (context.state === "suspended" || context.state === "closed") {
+                console.log("AUDIO CONTEXT SUSPENDED OR CLOSED", context.state);
+                // A suspended context may be an intentional buffering pause.
+                // Explicit pause/close synchronously fence this generation.
+                if (context.state === "closed") {
+                    play = false;
+                }
+            }
+        };
+        audioContext = context;
+        audioContextListener = contextListener;
+        try {
+            context.addEventListener("statechange", contextListener);
+            gainNode = context.createGain();
+            gainNode.connect(context.destination);
+            bufferedAudioTime = 0;
+            return { context, generation };
+        } catch (setupError) {
+            try {
+                // Transfer partially initialized resources through the same
+                // retryable teardown path as pause/close. If close also fails,
+                // stop retains the context so a later play/close retries it.
+                await stop();
+            } catch (cleanupError) {
+                throw new AggregateError(
+                    [setupError, cleanupError],
+                    "Failed to set up and retire the audio context"
+                );
+            }
+            throw setupError;
+        }
     };
 
     const mute = () => {}; // we don't do anything with the source, we let the controller set volume to 0
@@ -510,7 +1290,7 @@ export const createAudioStreamListener = (
 
     let bufferedAudioTime: number | undefined = undefined;
     const MIN_EXPECTED_LATENCY = 0.01; // seconds
-    let defaultMinExpectedLatency =
+    const defaultMinExpectedLatency =
         options?.minExpectedLatency != null
             ? options?.minExpectedLatency / 1e3
             : MIN_EXPECTED_LATENCY;
@@ -533,7 +1313,18 @@ export const createAudioStreamListener = (
             ? audioContext.currentTime - bufferedAudioTime
             : 0;
 
-    const renderFrame = async () => {
+    const isCurrentPlayback = (generation: number, context: AudioContext) =>
+        !closed &&
+        play &&
+        generation === playbackGeneration &&
+        context === audioContext &&
+        context.state !== "closed";
+
+    const renderFrame = async (generation = playbackGeneration) => {
+        const context = audioContext;
+        if (!context || !isCurrentPlayback(generation, context)) {
+            return;
+        }
         if (!bufferedAudioTime) {
             // we've not yet started the queue - just queue this up,
             // leaving a "latency gap" so we're not desperately trying
@@ -548,7 +1339,7 @@ export const createAudioStreamListener = (
         if (pendingFrames.length === 0) {
             return;
         }
-        if (!audioContext || audioContext!.state === "closed") {
+        if (!isCurrentPlayback(generation, context)) {
             return;
         }
 
@@ -557,7 +1348,7 @@ export const createAudioStreamListener = (
          */
         const frame = pendingFrames.shift();
 
-        const audioSource = audioContext!.createBufferSource();
+        const audioSource = context.createBufferSource();
         audioSource.buffer = frame!.buffer;
         audioSource.connect(gainNode!);
 
@@ -619,74 +1410,149 @@ export const createAudioStreamListener = (
             scheduleAt: options?.recoverLag ? frame!.timestamp / 1e6 : bufferedAudioTime,
         }) */
         bufferedAudioTime! += audioSource.buffer.duration; // this feels wrong
-        scheduleNextTick();
+        scheduleNextTick(generation);
     };
 
-    function scheduleNextTick() {
+    function scheduleNextTick(generation: number) {
+        if (
+            closed ||
+            !play ||
+            generation !== playbackGeneration ||
+            animationFrameHandle !== undefined ||
+            timerHandle !== undefined
+        ) {
+            return;
+        }
         if (document.visibilityState === "visible") {
-            requestAnimationFrame(() => renderFrame()); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
+            animationFrameHandle = requestAnimationFrame(() => {
+                animationFrameHandle = undefined;
+                void renderFrame(generation);
+            }); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
         } else {
-            setTimeout(() => renderFrame(), 0);
+            timerHandle = setTimeout(() => {
+                timerHandle = undefined;
+                void renderFrame(generation);
+            }, 0);
         }
     }
 
-    const decodeAudioDataQueue = new PQueue({ concurrency: 1 });
-    let resuming = false;
+    const processDecodeJob = async (pump: DecodePump, job: DecodeJob) => {
+        const {
+            chunk,
+            context,
+            playbackGeneration: generation,
+            decodeGeneration: queuedDecodeGeneration,
+        } = job;
+        const isCurrentJob = () =>
+            !pump.retired &&
+            queuedDecodeGeneration === decodeGeneration &&
+            isCurrentPlayback(generation, context);
+        if (!isCurrentJob()) return;
 
-    let push = (chunk: Chunk) => {
-        if (decodeAudioDataQueue.size > 10) {
+        const zeroOffsetBuffer = new Uint8Array(chunk.chunk.length);
+        zeroOffsetBuffer.set(chunk.chunk, 0);
+        let data: AudioBuffer;
+        try {
+            data = await context.decodeAudioData(zeroOffsetBuffer.buffer);
+        } catch (error) {
+            if (isCurrentJob()) {
+                console.error("Failed to decode error", error);
+            }
+            return;
+        }
+        if (!isCurrentJob()) return;
+
+        const frame = {
+            buffer: data,
+            timestamp: chunk.time,
+        };
+        if (context.state !== "running") {
+            pendingFrames = [frame];
+            if (resumingGeneration !== generation) {
+                resumingGeneration = generation;
+                try {
+                    await context.resume();
+                } catch {
+                    return;
+                } finally {
+                    if (resumingGeneration === generation) {
+                        resumingGeneration = undefined;
+                    }
+                }
+                if (isCurrentJob()) {
+                    await renderFrame(generation);
+                }
+            }
+        } else {
+            pendingFrames.push(frame);
+            if (!isUnderflow()) {
+                await renderFrame(generation);
+            }
+        }
+    };
+
+    const runDecodePump = (pump: DecodePump) => {
+        if (pump.running || pump.retired) return;
+        pump.running = true;
+        void (async () => {
+            try {
+                while (!pump.retired) {
+                    const job = pump.queue.shift();
+                    if (!job) return;
+                    try {
+                        await processDecodeJob(pump, job);
+                    } catch (error) {
+                        if (
+                            !pump.retired &&
+                            isCurrentPlayback(
+                                job.playbackGeneration,
+                                job.context
+                            )
+                        ) {
+                            console.error(
+                                "Failed to process decoded audio",
+                                error
+                            );
+                        }
+                    }
+                }
+            } finally {
+                pump.running = false;
+                if (!pump.retired && pump.queue.length > 0) {
+                    runDecodePump(pump);
+                }
+            }
+        })();
+    };
+
+    const push = (chunk: Chunk) => {
+        const context = audioContext;
+        if (!context || !isCurrentPlayback(playbackGeneration, context)) {
+            return;
+        }
+
+        const pump = decodePump;
+        if (pump.queue.length > 10) {
             options?.debug &&
                 console.log(
                     "CLEARING AUDIO QUEUE CAN NOT KEEP UP",
-                    decodeAudioDataQueue.size
+                    pump.queue.length
                 );
-            decodeAudioDataQueue.clear(); // We can't keep up, clear the queue
+            // Keep the one in-flight decode, invalidate and drop the queued
+            // generation, then enqueue only the newest backlog on this same
+            // single-concurrency pump.
+            decodeGeneration += 1;
+            pendingFrames = [];
+            pump.queue = [];
         }
 
-        decodeAudioDataQueue.add(async () => {
-            let zeroOffsetBuffer = new Uint8Array(chunk.chunk.length);
-            zeroOffsetBuffer.set(chunk.chunk, 0);
-            /*    options?.debug &&
-                   console.log(
-                       "DECODE AUDIO CHUNK",
-                       chunk.time,
-                       zeroOffsetBuffer.length,
-                       audioContext?.state
-                   ); */
-            audioContext?.decodeAudioData(
-                zeroOffsetBuffer.buffer,
-                (data) => {
-                    const frame = {
-                        buffer: data,
-                        timestamp: chunk.time,
-                    };
-
-                    if (audioContext?.state !== "running" && play) {
-                        pendingFrames = [];
-                        pendingFrames.push(frame);
-                        if (!resuming) {
-                            resuming = true;
-                            audioContext
-                                ?.resume()
-                                .then((r) => {
-                                    resuming = false;
-                                    renderFrame();
-                                })
-                                .catch((e) => {});
-                        }
-                    } else {
-                        /*   const wasEmpty = pendingFrames.length; */
-                        pendingFrames.push(frame);
-                        if (!isUnderflow()) {
-                            renderFrame();
-                        }
-                    }
-                },
-                (e) => {
-                    console.error("Failed to decode error", e);
-                }
-            );
+        pump.queue.push({
+            chunk,
+            context,
+            playbackGeneration,
+            decodeGeneration,
         });
+        runDecodePump(pump);
     };
     /*   const listener = (change: CustomEvent<DocumentsChange<Chunk>>) => {
   
@@ -707,24 +1573,20 @@ export const createAudioStreamListener = (
           streamDB.source.chunks.events.addEventListener("change", listener);
       }; */
 
-    let cleanup: (() => void) | undefined = () => {
-        decodeAudioDataQueue.clear();
-        /*    streamDB.source.chunks.events.removeEventListener("change", listener); */
-    };
-
-    let suspended = false;
-
-    const playPauseToKeepBufferHappy = async () => {
+    const playPauseToKeepBufferHappy = async (
+        generation: number,
+        context: AudioContext
+    ) => {
         if (options?.recoverLag) {
             return; // this method works against recoverLag, so we don't use it. TODO find a good balance
         }
 
         // if buffer ahead goes to a low value, we suspend the audio context
         // until we have enough buffer again (high threshold)
-        while (audioContext?.state !== "closed") {
-            let lowThreshold = 100; // 100 ms
-            let highThreshold = targetLatency * 1e3;
-            let bufferAhead = -1 * getBufferLag() * 1000; // convert to ms
+        while (isCurrentPlayback(generation, context)) {
+            const lowThreshold = 100; // 100 ms
+            const highThreshold = targetLatency * 1e3;
+            const bufferAhead = -1 * getBufferLag() * 1000; // convert to ms
             //  console.log("BUFFER LAG", { state: audioContext?.state, bufferAhead, currentExpectedLatency, mediaTime: audioContext?.currentTime, bufferedAudioTime, lowThreshold, highThreshold });
             if (bufferAhead < lowThreshold && !suspended) {
                 console.log("SUSPENDING AUDIO CONTEXT", {
@@ -733,7 +1595,10 @@ export const createAudioStreamListener = (
                     highThreshold,
                     suspended,
                 });
-                audioContext?.suspend();
+                await context.suspend();
+                if (!isCurrentPlayback(generation, context)) {
+                    return;
+                }
                 suspended = true;
             } else if (bufferAhead > highThreshold && suspended) {
                 console.log("RESUMING AUDIO CONTEXT", {
@@ -742,7 +1607,10 @@ export const createAudioStreamListener = (
                     highThreshold,
                     suspended,
                 });
-                audioContext?.resume();
+                await context.resume();
+                if (!isCurrentPlayback(generation, context)) {
+                    return;
+                }
                 suspended = false;
             }
             await delay(5);
@@ -752,15 +1620,32 @@ export const createAudioStreamListener = (
     };
 
     async function maybePlay() {
+        if (closed) {
+            return;
+        }
+        const request = ++lifecycleRequest;
         play = true;
-        await setupAudioContext();
-        renderFrame();
-        playPauseToKeepBufferHappy();
+        const playback = await setupAudioContext(request);
+        if (!playback || request !== lifecycleRequest) {
+            return;
+        }
+        await renderFrame(playback.generation);
+        void playPauseToKeepBufferHappy(
+            playback.generation,
+            playback.context
+        ).catch((error) => {
+            if (isCurrentPlayback(playback.generation, playback.context)) {
+                console.error("Failed to manage the audio buffer", error);
+            }
+        });
     }
 
     return {
         close: async () => {
-            cleanup?.();
+            lifecycleRequest += 1;
+            closed = true;
+            play = false;
+            invalidatePlayback();
             await stop();
         },
         /*     setProgress: (progress: number) => {
@@ -773,10 +1658,11 @@ export const createAudioStreamListener = (
         mute,
         unmute,
         play: maybePlay,
-        pause: () => {
-            cleanup();
+        pause: async () => {
+            lifecycleRequest += 1;
             play = false;
-            stop();
+            invalidatePlayback();
+            await stop();
         },
     };
 };

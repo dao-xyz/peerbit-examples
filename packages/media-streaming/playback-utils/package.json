@@ -35,8 +35,8 @@
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "pnpm run clean && tsc -p tsconfig.json",
-        "test": "vitest run",
-        "test:watch": "vitest",
+        "test": "vitest run --root ../../.. packages/media-streaming/playback-utils/src/__tests__",
+        "test:watch": "vitest --root ../../.. packages/media-streaming/playback-utils/src/__tests__",
         "test-view-remote": "npm run build && node ./lib/esm/__tests__/view-remote.js"
     },
     "devDependencies": {
