@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { repoRoot } from "../scripts/cloudflare-deployment-policy.mjs";
@@ -13,6 +13,56 @@ const productionWorkflow = readWorkflow("cloudflare-production.yml");
 const provisioningWorkflow = readWorkflow(
     "cloudflare-production-provision.yml"
 );
+
+const pinnedWorkflowActions = new Map([
+    ["actions/checkout", "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"],
+    ["actions/setup-node", "820762786026740c76f36085b0efc47a31fe5020"],
+    ["pnpm/action-setup", "0ebf47130e4866e96fce0953f49152a61190b271"],
+    ["actions/download-artifact", "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"],
+    ["actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"],
+    ["actions/setup-go", "924ae3a1cded613372ab5595356fb5720e22ba16"],
+    ["changesets/action", "a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d"],
+]);
+
+test("every remote workflow action is pinned to its reviewed commit", () => {
+    const workflowsDirectory = path.join(repoRoot, ".github/workflows");
+    const observedActions = new Set();
+
+    for (const name of readdirSync(workflowsDirectory).sort()) {
+        if (!/\.ya?ml$/.test(name)) {
+            continue;
+        }
+        const workflow = readFileSync(
+            path.join(workflowsDirectory, name),
+            "utf8"
+        );
+        for (const [index, line] of workflow.split("\n").entries()) {
+            const match = line.match(/^\s*uses:\s*([^\s#]+)/);
+            if (!match || match[1].startsWith("./")) {
+                continue;
+            }
+            const action = match[1].match(/^([^@]+)@([0-9a-f]{40})$/);
+            assert.ok(
+                action,
+                `${name}:${index + 1} must pin its remote action to an exact 40-character commit SHA`
+            );
+            const expectedCommit = pinnedWorkflowActions.get(action[1]);
+            assert.equal(
+                typeof expectedCommit,
+                "string",
+                `${name}:${index + 1} uses an unreviewed remote action: ${action[1]}`
+            );
+            assert.equal(
+                action[2],
+                expectedCommit,
+                `${name}:${index + 1} does not use the reviewed commit for ${action[1]}`
+            );
+            observedActions.add(action[1]);
+        }
+    }
+
+    assert.deepEqual(observedActions, new Set(pinnedWorkflowActions.keys()));
+});
 
 const receiptValidationScripts = () => {
     const stepMarker =
