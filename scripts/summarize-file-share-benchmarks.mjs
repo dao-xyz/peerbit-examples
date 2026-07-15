@@ -57,6 +57,80 @@ const resultNumbersMatch = (left, right, { minimum } = {}) =>
     (minimum == null || (left >= minimum && right >= minimum)) &&
     Math.abs(left - right) <= resultNumberTolerance(left, right);
 
+const deriveDemandWaitSumBounds = ({ sampleCount, percentiles, tails }) => {
+    const lowerBounds = [
+        { startRank: 1, value: 0 },
+        ...percentiles.map(({ rank, value }) => ({
+            startRank: rank,
+            value,
+        })),
+        ...tails
+            .filter(({ count }) => count > 0)
+            .map(({ threshold, count }) => ({
+                startRank: sampleCount - count + 1,
+                value: threshold,
+            })),
+    ];
+    const upperBounds = [
+        ...percentiles.map(({ rank, value }) => ({
+            endRank: rank,
+            value,
+        })),
+        ...tails
+            .filter(({ count }) => count < sampleCount)
+            .map(({ threshold, count }) => ({
+                endRank: sampleCount - count,
+                value: threshold,
+            })),
+    ];
+    const segmentStarts = new Set([1]);
+    for (const { startRank } of lowerBounds) {
+        segmentStarts.add(startRank);
+    }
+    for (const { endRank } of upperBounds) {
+        if (endRank < sampleCount) {
+            segmentStarts.add(endRank + 1);
+        }
+    }
+
+    const sortedSegmentStarts = [...segmentStarts].sort(
+        (left, right) => left - right
+    );
+    let minimum = 0;
+    let maximum = 0;
+    for (let index = 0; index < sortedSegmentStarts.length; index++) {
+        const startRank = sortedSegmentStarts[index];
+        const endRank =
+            index + 1 < sortedSegmentStarts.length
+                ? sortedSegmentStarts[index + 1] - 1
+                : sampleCount;
+        const length = endRank - startRank + 1;
+        let lower = Math.max(
+            ...lowerBounds
+                .filter((bound) => bound.startRank <= startRank)
+                .map((bound) => bound.value)
+        );
+        let upper = Math.min(
+            ...upperBounds
+                .filter((bound) => bound.endRank >= startRank)
+                .map((bound) => bound.value)
+        );
+        if (lower > upper) {
+            if (lower - upper > resultNumberTolerance(lower, upper)) {
+                throw new Error(
+                    "demand-wait percentiles and tails described no feasible samples"
+                );
+            }
+            const equivalentValue = lower / 2 + upper / 2;
+            lower = equivalentValue;
+            upper = equivalentValue;
+        }
+        minimum += length * lower;
+        maximum += length * upper;
+    }
+    return { minimum, maximum };
+};
+
 const requireMatchingResultNumber = (value, expected, label) => {
     const number = requireResultNumber(value, label, {
         minimum: Number.MIN_VALUE,
@@ -349,21 +423,12 @@ const requireResultEvidence = (
             );
         }
     }
-    const maximumDemandWaitSumMs = demandWaitMaxMs * demandWaitSampleCount;
-    if (
-        !Number.isFinite(maximumDemandWaitSumMs) ||
-        demandWaitMaxMs - demandWaitSumMs >
-            resultNumberTolerance(demandWaitMaxMs, demandWaitSumMs) ||
-        demandWaitSumMs - maximumDemandWaitSumMs >
-            resultNumberTolerance(demandWaitSumMs, maximumDemandWaitSumMs)
-    ) {
-        throw new Error(`${label} contained an inconsistent demand-wait sum`);
-    }
-    for (const { threshold, count } of [
+    const demandWaitTails = [
         { threshold: 1_000, count: demandWaitOver1sCount },
         { threshold: 5_000, count: demandWaitOver5sCount },
         { threshold: 10_000, count: demandWaitOver10sCount },
-    ]) {
+    ];
+    for (const { threshold, count } of demandWaitTails) {
         for (const percentile of demandWaitPercentiles) {
             const minimumOverThreshold =
                 percentile.value > threshold
@@ -379,6 +444,28 @@ const requireResultEvidence = (
                 );
             }
         }
+    }
+    let demandWaitSumBounds;
+    try {
+        demandWaitSumBounds = deriveDemandWaitSumBounds({
+            sampleCount: demandWaitSampleCount,
+            percentiles: demandWaitPercentiles,
+            tails: demandWaitTails,
+        });
+    } catch {
+        throw new Error(`${label} contained inconsistent demand-wait tails`);
+    }
+    const minimumDemandWaitSumMs = demandWaitSumBounds.minimum;
+    const maximumDemandWaitSumMs = demandWaitSumBounds.maximum;
+    if (
+        !Number.isFinite(minimumDemandWaitSumMs) ||
+        !Number.isFinite(maximumDemandWaitSumMs) ||
+        minimumDemandWaitSumMs - demandWaitSumMs >
+            resultNumberTolerance(minimumDemandWaitSumMs, demandWaitSumMs) ||
+        demandWaitSumMs - maximumDemandWaitSumMs >
+            resultNumberTolerance(demandWaitSumMs, maximumDemandWaitSumMs)
+    ) {
+        throw new Error(`${label} contained an inconsistent demand-wait sum`);
     }
     if (
         !resultNumbersMatch(

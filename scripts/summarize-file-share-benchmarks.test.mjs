@@ -226,13 +226,34 @@ test("fails closed on inconsistent demand-wait summary evidence", () => {
             /inconsistent demand-wait percentiles/
         );
     }
-    for (const sumMs of [899, 1_801]) {
+    for (const sumMs of [899, 900, 1_001, 1_801]) {
         assert.throws(
             () =>
                 summarizeBenchmarkResults([withDemandWait({ sumMs })], options),
             /inconsistent demand-wait sum/
         );
     }
+    const tailConstrainedResult = withDemandWait({
+        sampleCount: 4,
+        sumMs: 3_000,
+        p50Ms: 0,
+        p95Ms: 2_000,
+        p99Ms: 2_000,
+        maxMs: 2_000,
+        over1sCount: 1,
+    });
+    tailConstrainedResult.readTransfer.chunkCount = 4;
+    tailConstrainedResult.readTransfer.sources.cached.chunkCount = 2;
+    tailConstrainedResult.readTransfer.sources.local.chunkCount = 2;
+    assert.doesNotThrow(() =>
+        summarizeBenchmarkResults([tailConstrainedResult], options)
+    );
+    tailConstrainedResult.readTransfer.demandWait.sumMs = 3_500;
+    tailConstrainedResult.readTransfer.stages.demandWaitMs = 3_500;
+    assert.throws(
+        () => summarizeBenchmarkResults([tailConstrainedResult], options),
+        /inconsistent demand-wait sum/
+    );
     assert.throws(
         () =>
             summarizeBenchmarkResults(
