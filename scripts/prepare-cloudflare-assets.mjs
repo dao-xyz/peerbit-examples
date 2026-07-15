@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { findStaticPeercheckerRelayHost } from "./static-relay-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -20,12 +21,6 @@ const manifest = JSON.parse(
 
 const MAX_FILES = 20_000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
-const FORBIDDEN_RELAY_HOSTS = [
-    "9b97941c59a57bfe1cb9326c0adec2a1348e6940.peerchecker.com",
-    "72e2dee3b6cc99167ecfb6114874cd9bf02f49e3.peerchecker.com",
-    "0d028beb98c16f8eca4e1c9fb069dffd7a5a59ec.peerchecker.com",
-    "c134ffe.peerchecker.com",
-];
 const TEXT_EXTENSIONS = new Set([".html", ".js", ".mjs", ".json", ".css"]);
 const HEADERS = `/*
   X-Content-Type-Options: nosniff
@@ -142,12 +137,11 @@ for (const site of manifest.staticSites) {
             searchable += readFileSync(file.path, "utf8");
         }
     }
-    for (const host of FORBIDDEN_RELAY_HOSTS) {
-        if (searchable.includes(host)) {
-            throw new Error(
-                `${site.id}: build still references retired relay ${host}`
-            );
-        }
+    const retiredRelayHost = findStaticPeercheckerRelayHost(searchable);
+    if (retiredRelayHost) {
+        throw new Error(
+            `${site.id}: build still references retired relay ${retiredRelayHost}`
+        );
     }
     if (!searchable.includes("bootstrap.peerbit.org/bootstrap")) {
         throw new Error(

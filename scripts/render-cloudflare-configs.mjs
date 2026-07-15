@@ -38,11 +38,6 @@ const { outputDirectory, outputRelative } =
     });
 
 const allEntries = entries.map(({ site }) => site);
-const ownedProductionDomains = ["peerbit.org", "peerchecker.com"];
-const isOwnedProductionDomain = (domain) =>
-    ownedProductionDomains.some(
-        (owned) => domain === owned || domain.endsWith(`.${owned}`)
-    );
 const ids = new Set();
 const workers = new Set();
 const previewWorkers = new Set();
@@ -91,10 +86,13 @@ for (const redirect of manifest.redirects) {
     const location = new URL(redirect.location);
     if (
         location.protocol !== "https:" ||
-        !isOwnedProductionDomain(location.hostname)
+        location.username ||
+        location.password ||
+        location.port ||
+        !APP_PRODUCTION_HOSTNAME_PATTERN.test(location.hostname)
     ) {
         throw new Error(
-            `Redirect target is not an approved HTTPS domain: ${redirect.location}`
+            `Legacy redirect target must use one label under *${APP_PRODUCTION_SUFFIX}: ${redirect.location}`
         );
     }
     if (![301, 302, 303, 307, 308].includes(redirect.status)) {
@@ -112,14 +110,6 @@ for (const site of manifest.staticSites) {
     }
 }
 
-for (const redirect of manifest.redirects) {
-    const location = new URL(redirect.location);
-    if (!APP_PRODUCTION_HOSTNAME_PATTERN.test(location.hostname)) {
-        throw new Error(
-            `Legacy redirect target must use one label under *${APP_PRODUCTION_SUFFIX}: ${redirect.location}`
-        );
-    }
-}
 rmSync(outputDirectory, { recursive: true, force: true });
 mkdirSync(outputDirectory, { recursive: true });
 
