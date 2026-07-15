@@ -165,6 +165,206 @@ test("summarizes throughput, latency, JS heap, and host RSS tails", () => {
     assert.equal(summary.p95PeakCombinedRssBytes, 640 * 1024 * 1024);
 });
 
+test("accepts equivalent floating-point read-stage durations", () => {
+    const result = validResult({
+        downloadDurationMs: 0.3,
+        streamReadExclusiveMs: 0.1,
+        sinkWriteAwaitMs: 0.2,
+    });
+    result.libraryStreamDurationMs = 0.3;
+    result.readTransfer.demandWait = {
+        ...result.readTransfer.demandWait,
+        sumMs: 0,
+        p50Ms: 0,
+        p95Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
+    };
+    result.readTransfer.stages = {
+        ...result.readTransfer.stages,
+        libraryStreamWallMs: 0.3,
+        demandWaitMs: 0,
+    };
+
+    const summary = summarizeBenchmarkResults([result], {
+        expectedRuns: 1,
+        scenario: "local",
+        readerCohort: "live-replicator",
+        downloadSink: "hash-only",
+        fileSizeMb: 256,
+    });
+
+    assert.equal(summary.medianDownloadSeconds, 0.0001);
+});
+
+test("fails closed on inconsistent demand-wait summary evidence", () => {
+    const options = {
+        expectedRuns: 1,
+        scenario: "local",
+        readerCohort: "live-replicator",
+        downloadSink: "hash-only",
+        fileSizeMb: 256,
+    };
+    const withDemandWait = (demandWait) => {
+        const result = validResult();
+        result.readTransfer.demandWait = {
+            ...result.readTransfer.demandWait,
+            ...demandWait,
+        };
+        result.readTransfer.stages.demandWaitMs =
+            result.readTransfer.demandWait.sumMs;
+        return result;
+    };
+
+    for (const demandWait of [{ p50Ms: 901, p95Ms: 900 }, { p95Ms: 899 }]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [withDemandWait(demandWait)],
+                    options
+                ),
+            /inconsistent demand-wait percentiles/
+        );
+    }
+    assert.throws(
+        () =>
+            summarizeBenchmarkResults(
+                [
+                    withDemandWait({
+                        p50Ms: 1_000_000_000_000_000,
+                        p95Ms: 999_999_999_999_999,
+                        p99Ms: 999_999_999_999_999,
+                        maxMs: 999_999_999_999_999,
+                    }),
+                ],
+                options
+            ),
+        /inconsistent demand-wait percentiles/
+    );
+    for (const sumMs of [899, 900, 1_001, 1_801]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults([withDemandWait({ sumMs })], options),
+            /inconsistent demand-wait sum/
+        );
+    }
+    const tailConstrainedResult = withDemandWait({
+        sampleCount: 4,
+        sumMs: 3_000,
+        p50Ms: 0,
+        p95Ms: 2_000,
+        p99Ms: 2_000,
+        maxMs: 2_000,
+        over1sCount: 1,
+    });
+    tailConstrainedResult.readTransfer.chunkCount = 4;
+    tailConstrainedResult.readTransfer.sources.cached.chunkCount = 2;
+    tailConstrainedResult.readTransfer.sources.local.chunkCount = 2;
+    assert.doesNotThrow(() =>
+        summarizeBenchmarkResults([tailConstrainedResult], options)
+    );
+    tailConstrainedResult.readTransfer.demandWait.sumMs = 3_500;
+    tailConstrainedResult.readTransfer.stages.demandWaitMs = 3_500;
+    assert.throws(
+        () => summarizeBenchmarkResults([tailConstrainedResult], options),
+        /inconsistent demand-wait sum/
+    );
+    const strictTailBoundaryResult = withDemandWait({
+        sampleCount: 4,
+        sumMs: 3_000,
+        p50Ms: 0,
+        p95Ms: 2_000,
+        p99Ms: 2_000,
+        maxMs: 2_000,
+        over1sCount: 2,
+    });
+    strictTailBoundaryResult.readTransfer.chunkCount = 4;
+    strictTailBoundaryResult.readTransfer.sources.cached.chunkCount = 2;
+    strictTailBoundaryResult.readTransfer.sources.local.chunkCount = 2;
+    assert.throws(
+        () => summarizeBenchmarkResults([strictTailBoundaryResult], options),
+        /inconsistent demand-wait sum/
+    );
+    strictTailBoundaryResult.readTransfer.demandWait.sumMs = 3_001;
+    strictTailBoundaryResult.readTransfer.stages.demandWaitMs = 3_001;
+    assert.doesNotThrow(() =>
+        summarizeBenchmarkResults([strictTailBoundaryResult], options)
+    );
+    const exactLargeSumResult = withDemandWait({
+        sumMs: 1_999_999_999_999,
+        p50Ms: 1_000_000_000_000,
+        p95Ms: 1_000_000_000_000,
+        p99Ms: 1_000_000_000_000,
+        maxMs: 1_000_000_000_000,
+        over1sCount: 2,
+        over5sCount: 2,
+        over10sCount: 2,
+    });
+    assert.throws(
+        () => summarizeBenchmarkResults([exactLargeSumResult], options),
+        /inconsistent demand-wait sum/
+    );
+    exactLargeSumResult.readTransfer.demandWait.sumMs = 2_000_000_000_000;
+    exactLargeSumResult.readTransfer.stages.demandWaitMs = 2_000_000_000_000;
+    assert.doesNotThrow(() =>
+        summarizeBenchmarkResults([exactLargeSumResult], options)
+    );
+    for (const demandWait of [
+        { sumMs: 1_000.5 },
+        { p50Ms: 100.5 },
+        { p95Ms: 900.5 },
+        { p99Ms: 900.5 },
+        { maxMs: 900.5 },
+        { sumMs: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [withDemandWait(demandWait)],
+                    options
+                ),
+            /demand-wait .* must be a non-negative safe integer/
+        );
+    }
+    for (const demandWait of [
+        { sampleCount: 1.5 },
+        { over1sCount: 0.5 },
+        { over5sCount: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [withDemandWait(demandWait)],
+                    options
+                ),
+            /safe integer/
+        );
+    }
+    const fractionalStagedSumResult = withDemandWait({});
+    fractionalStagedSumResult.readTransfer.stages.demandWaitMs = 1_000.5;
+    assert.throws(
+        () => summarizeBenchmarkResults([fractionalStagedSumResult], options),
+        /staged demand-wait sum must be a non-negative safe integer/
+    );
+    assert.throws(
+        () =>
+            summarizeBenchmarkResults(
+                [
+                    withDemandWait({
+                        sumMs: 2_002,
+                        p50Ms: 1_001,
+                        p95Ms: 1_001,
+                        p99Ms: 1_001,
+                        maxMs: 1_001,
+                        over1sCount: 0,
+                    }),
+                ],
+                options
+            ),
+        /inconsistent demand-wait tails/
+    );
+});
+
 test("fails closed on missing samples or unverifiable result evidence", () => {
     const options = {
         expectedRuns: 2,
