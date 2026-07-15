@@ -10,6 +10,7 @@ import {
     TINY_FILE_SIZE_LIMIT_BYTES,
     validateLargeFileBenchmarkSizeMb,
     validateJsHeapMeasurement,
+    validateHostRssMeasurement,
     type ReaderCohortEvidence,
     type ReaderTopologyEvidence,
 } from "./transfer-benchmark";
@@ -167,6 +168,47 @@ describe("file-share transfer benchmark cohorts", () => {
             valid: false,
             validationReasons: ["missing-js-heap-measurement"],
         });
+    });
+
+    it("accepts complete host RSS evidence without sampling errors", () => {
+        expect(
+            validateHostRssMeasurement({
+                sampleCount: 2,
+                startBrowserBytes: 100,
+                endBrowserBytes: 120,
+                peakBrowserBytes: 140,
+                startNodeBytes: 20,
+                endNodeBytes: 25,
+                peakNodeBytes: 30,
+                peakCombinedBytes: 170,
+                samplingErrors: [],
+            })
+        ).toEqual({ valid: true, validationReasons: [] });
+    });
+
+    it("rejects incomplete or error-bearing host RSS evidence", () => {
+        expect(validateHostRssMeasurement(undefined)).toEqual({
+            valid: false,
+            validationReasons: ["missing-host-rss-measurement"],
+        });
+        expect(
+            validateHostRssMeasurement({
+                sampleCount: 0,
+                startBrowserBytes: null,
+                endBrowserBytes: 120,
+                peakBrowserBytes: 140,
+                startNodeBytes: 20,
+                endNodeBytes: 25,
+                peakNodeBytes: 30,
+                peakCombinedBytes: 0,
+                samplingErrors: ["ps failed"],
+            }).validationReasons
+        ).toEqual([
+            "invalid-host-rss-sample-count",
+            "invalid-host-rss-start-browser-bytes",
+            "invalid-host-rss-peak-combined-bytes",
+            "host-rss-sampling-errors",
+        ]);
     });
 
     it("rejects TinyFile-sized benchmark fixtures at the exact byte boundary", () => {

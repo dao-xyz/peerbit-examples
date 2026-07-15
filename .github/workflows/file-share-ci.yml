@@ -3,11 +3,13 @@ name: File Share CI
 on:
     pull_request:
         paths:
+            - ".github/workflows/file-share-benchmarks.yml"
             - ".github/workflows/file-share-ci.yml"
-            - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - ".github/workflows/file-share-two-runner-artifact-benchmarks.yml"
+            - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - "package.json"
             - "pnpm-lock.yaml"
+            - "scripts/summarize-file-share-benchmarks*.mjs"
             - "tsconfig.json"
             - "vitest.config.ts"
             - "vitest.setup.ts"
@@ -15,11 +17,13 @@ on:
     push:
         branches: [master]
         paths:
+            - ".github/workflows/file-share-benchmarks.yml"
             - ".github/workflows/file-share-ci.yml"
-            - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - ".github/workflows/file-share-two-runner-artifact-benchmarks.yml"
+            - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - "package.json"
             - "pnpm-lock.yaml"
+            - "scripts/summarize-file-share-benchmarks*.mjs"
             - "tsconfig.json"
             - "vitest.config.ts"
             - "vitest.setup.ts"
@@ -63,6 +67,9 @@ jobs:
             - name: Self-test two-runner integrity
               working-directory: packages/file-share/frontend
               run: node tests/two-runner.bench.mjs self-test
+
+            - name: Test benchmark result validation and reporting
+              run: node --test scripts/summarize-file-share-benchmarks.test.mjs
 
             - name: Test file-share library
               run: pnpm --filter @peerbit/please-lib run test
