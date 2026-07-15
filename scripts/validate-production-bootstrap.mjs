@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { findStaticPeercheckerRelayHost } from "./static-relay-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -16,11 +17,6 @@ const productionRules = new Map([
         [': "remote"'],
     ],
 ]);
-const forbiddenHosts = [
-    "9b97941c59a57bfe1cb9326c0adec2a1348e6940.peerchecker.com",
-    "72e2dee3b6cc99167ecfb6114874cd9bf02f49e3.peerchecker.com",
-    "0d028beb98c16f8eca4e1c9fb069dffd7a5a59ec.peerchecker.com",
-];
 const productionSources = new Map(
     [...productionRules].map(([file]) => [
         file,
@@ -44,9 +40,11 @@ for (const [file, fragments] of productionRules) {
 }
 
 const source = [...productionSources.values()].join("\n");
-for (const host of forbiddenHosts) {
-    if (source.includes(host))
-        throw new Error(`Production source references retired relay ${host}`);
+const retiredRelayHost = findStaticPeercheckerRelayHost(source);
+if (retiredRelayHost) {
+    throw new Error(
+        `Production source references retired relay ${retiredRelayHost}`
+    );
 }
 
 console.log(
