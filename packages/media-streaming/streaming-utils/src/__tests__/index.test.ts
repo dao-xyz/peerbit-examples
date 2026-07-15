@@ -462,7 +462,7 @@ describe("MediaStream", () => {
         });
     });
     describe("live", () => {
-        test("one chunk", async () => {
+        test("delivers one chunk with the default target", async () => {
             const track1 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
@@ -492,7 +492,9 @@ describe("MediaStream", () => {
                 new Chunk({ time: 0, chunk: new Uint8Array([1, 2, 3]) })
             );
             await waitForResolved(() =>
-                expect(receivedChunks).to.have.length(1)
+                expect(receivedChunks.map((chunk) => chunk.timeBN)).to.deep.eq([
+                    0n,
+                ])
             );
         });
 
