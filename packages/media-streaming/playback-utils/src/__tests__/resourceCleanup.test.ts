@@ -203,4 +203,183 @@ describe("retryable resource drain", () => {
         expect(registry.pendingCount(hungOwner)).toBe(1);
         expect(registry.pendingCount(readyOwner)).toBe(0);
     });
+
+    it("allows one close to await cleanup enqueued from inside itself", async () => {
+        const registry = createDurableCleanupRegistry({
+            closeAttemptTimeoutMs: 100,
+        });
+        const owner = {};
+        const second = {
+            close: vi.fn().mockResolvedValue(undefined),
+        };
+        let drain: ReturnType<typeof createRetryableResourceDrain>;
+        const first = {
+            close: vi.fn(async () => {
+                await drain.enqueue([second]);
+            }),
+        };
+        drain = createRetryableResourceDrain({
+            durableRegistry: registry,
+            durableOwner: owner,
+            closeAttemptTimeoutMs: 100,
+        });
+
+        await drain.enqueue([first]);
+
+        expect(first.close).toHaveBeenCalledOnce();
+        expect(second.close).toHaveBeenCalledOnce();
+        expect(drain.pendingCount()).toBe(0);
+    });
+
+    it("bounds same-resource reentrancy without closing concurrently", async () => {
+        vi.useFakeTimers();
+        try {
+            const registry = createDurableCleanupRegistry({
+                closeAttemptTimeoutMs: 10,
+            });
+            const owner = {};
+            let drain: ReturnType<typeof createRetryableResourceDrain>;
+            const resource = {
+                close: vi.fn(async () => {
+                    await drain.enqueue([resource]);
+                }),
+            };
+            drain = createRetryableResourceDrain({
+                durableRegistry: registry,
+                durableOwner: owner,
+                closeAttemptTimeoutMs: 10,
+            });
+
+            const cleanup = drain.enqueue([resource]);
+            await vi.advanceTimersByTimeAsync(10);
+            await cleanup;
+            await Promise.resolve();
+
+            expect(resource.close).toHaveBeenCalledOnce();
+            expect(drain.pendingCount()).toBe(0);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("keeps a hung exact attempt owned while later cleanup proceeds", async () => {
+        vi.useFakeTimers();
+        try {
+            const registry = createDurableCleanupRegistry({
+                closeAttemptTimeoutMs: 10,
+            });
+            const owner = {};
+            const hung = {
+                close: vi.fn(() => new Promise<void>(() => {})),
+            };
+            const ready = {
+                close: vi.fn().mockResolvedValue(undefined),
+            };
+            const drain = createRetryableResourceDrain({
+                durableRegistry: registry,
+                durableOwner: owner,
+                closeAttemptTimeoutMs: 10,
+            });
+
+            const firstCleanup = drain.enqueue([hung]);
+            await vi.advanceTimersByTimeAsync(10);
+            await firstCleanup;
+            expect(drain.pendingCount()).toBe(1);
+
+            await drain.enqueue([ready]);
+            expect(ready.close).toHaveBeenCalledOnce();
+
+            const retry = drain.retry();
+            await vi.advanceTimersByTimeAsync(10);
+            await retry;
+            expect(hung.close).toHaveBeenCalledOnce();
+            expect(drain.pendingCount()).toBe(1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("retries the same resource only after its timed-out attempt rejects", async () => {
+        vi.useFakeTimers();
+        try {
+            const failure = new Error("late close failure");
+            let rejectFirst!: (error: unknown) => void;
+            const resource = {
+                close: vi
+                    .fn()
+                    .mockImplementationOnce(
+                        () =>
+                            new Promise<void>((_resolve, reject) => {
+                                rejectFirst = reject;
+                            })
+                    )
+                    .mockResolvedValueOnce(undefined),
+            };
+            const registry = createDurableCleanupRegistry({
+                closeAttemptTimeoutMs: 10,
+            });
+            const owner = {};
+            const drain = createRetryableResourceDrain({
+                durableRegistry: registry,
+                durableOwner: owner,
+                closeAttemptTimeoutMs: 10,
+            });
+
+            const firstCleanup = drain.enqueue([resource]);
+            await vi.advanceTimersByTimeAsync(10);
+            await firstCleanup;
+
+            const overlappingRetry = drain.retry();
+            expect(resource.close).toHaveBeenCalledOnce();
+            rejectFirst(failure);
+            await overlappingRetry;
+            expect(resource.close).toHaveBeenCalledOnce();
+            expect(drain.pendingCount()).toBe(1);
+
+            await drain.retry();
+            expect(resource.close).toHaveBeenCalledTimes(2);
+            expect(drain.pendingCount()).toBe(0);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("contains rejected async cleanup error reporters", async () => {
+        const unhandled: unknown[] = [];
+        const onUnhandled = (error: unknown) => unhandled.push(error);
+        process.on("unhandledRejection", onUnhandled);
+        try {
+            const closeFailure = new Error("close failed");
+            const reporterFailure = new Error("reporter failed");
+            const registryReporter = vi.fn(async () => {
+                throw reporterFailure;
+            });
+            const drainReporter = vi.fn(async () => {
+                throw reporterFailure;
+            });
+
+            const registry = createDurableCleanupRegistry();
+            const owner = {};
+            registry.adopt(
+                [{ close: vi.fn().mockRejectedValue(closeFailure) }],
+                { owner, onError: registryReporter }
+            );
+            await registry.retry(owner);
+
+            const drain = createRetryableResourceDrain({
+                durableRegistry: createDurableCleanupRegistry(),
+                onError: drainReporter,
+            });
+            await drain.enqueue([
+                { close: vi.fn().mockRejectedValue(closeFailure) },
+            ]);
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+            expect(registryReporter).toHaveBeenCalledWith(closeFailure);
+            expect(drainReporter).toHaveBeenCalledWith(closeFailure);
+            expect(unhandled).toEqual([]);
+        } finally {
+            process.off("unhandledRejection", onUnhandled);
+        }
+    });
 });

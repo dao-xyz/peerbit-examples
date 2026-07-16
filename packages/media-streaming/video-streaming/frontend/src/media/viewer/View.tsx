@@ -21,15 +21,16 @@ import { getKeepAspectRatioBoundedSize } from "../MaintainAspectRatio.js";
 import ClickOnceForAudio from "./ClickOnceForAudio.js";
 import { Spinner } from "../../utils/Spinner.js";
 import {
-    adoptDurableCleanup,
     createAudioStreamListener,
-    createBoundedRetryBudget,
     createKeyedRetryBackoff,
-    durableCleanupPendingCount,
     reconcilePlaybackRequest,
-    retryDurableCleanup,
     runProgressCallback,
 } from "@peerbit/media-streaming-web";
+import {
+    createGenerationTaskRegistry,
+    createViewerPlaybackCoordinator,
+    retireOpenedPlaybackForGeneration,
+} from "./viewerPlaybackCleanup.js";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -200,23 +201,24 @@ type StreamControlFunction = Omit<ControlFunctions, "setProgress"> & {
     push: (data: Chunk) => void;
 };
 type PlaybackControl = StreamControlFunction & { track: Track<any> };
+type ViewerPlaybackResource = TracksIterator | PlaybackControl;
+type ControlCreation = Promise<PlaybackControl | undefined>;
+type ControlCreationRegistry = ReturnType<
+    typeof createGenerationTaskRegistry<string, ControlCreation>
+>;
+type ViewerPlaybackCoordinator = ReturnType<
+    typeof createViewerPlaybackCoordinator<ViewerPlaybackResource>
+>;
 
 const CLEANUP_RETRY_BACKOFF = {
     initialDelayMs: 100,
     maximumDelayMs: 5_000,
     factor: 2,
 };
+const PLAYBACK_CLOSE_ATTEMPT_TIMEOUT_MS = 5_000;
 const MAXIMUM_AUTOMATIC_CLEANUP_RETRIES = 8;
-const VIEWER_DURABLE_CLEANUP_OWNER = {};
 const reportViewerDurableCleanup = (error: unknown) =>
     console.error("Failed to release durable viewer cleanup", error);
-
-const retryViewerDurableCleanup = async () => {
-    await retryDurableCleanup(VIEWER_DURABLE_CLEANUP_OWNER);
-    if (durableCleanupPendingCount(VIEWER_DURABLE_CLEANUP_OWNER) > 0) {
-        throw new Error("Previous viewer cleanup is still pending");
-    }
-};
 
 let videoHeight = () => window.innerHeight;
 let videoWidth = () => window.innerWidth;
@@ -265,27 +267,32 @@ export const View = (properties: DBArgs) => {
         controller?: AbortController;
     }>({ generation: 0 });
     const playbackStreamAddress = useRef<string | undefined>(undefined);
-    const pendingIteratorClosures = useRef(new Set<TracksIterator>());
-    const iteratorCloseAttempts = useRef(
-        new Map<TracksIterator, Promise<void>>()
-    );
-    const controlCloseAttempts = useRef(
-        new Map<PlaybackControl, Promise<void>>()
-    );
-    const pendingControlClosures = useRef(new Set<PlaybackControl>());
-    const controlCreations = useRef(
-        new Map<string, Promise<PlaybackControl | undefined>>()
-    );
-    const controllerRetryBackoff = useRef(createKeyedRetryBackoff<string>());
-    const cleanupRetryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    const controlCreations = useRef<ControlCreationRegistry | undefined>(
         undefined
     );
-    const cleanupRetryBudget = useRef(
-        createBoundedRetryBudget({
-            ...CLEANUP_RETRY_BACKOFF,
-            maximumAttempts: MAXIMUM_AUTOMATIC_CLEANUP_RETRIES,
-        })
+    if (!controlCreations.current) {
+        controlCreations.current = createGenerationTaskRegistry<
+            string,
+            ControlCreation
+        >();
+    }
+    const controllerRetryBackoff = useRef(createKeyedRetryBackoff<string>());
+    const playbackCoordinator = useRef<ViewerPlaybackCoordinator | undefined>(
+        undefined
     );
+    if (!playbackCoordinator.current) {
+        playbackCoordinator.current =
+            createViewerPlaybackCoordinator<ViewerPlaybackResource>({
+                onError: reportViewerDurableCleanup,
+                closeAttemptTimeoutMs: PLAYBACK_CLOSE_ATTEMPT_TIMEOUT_MS,
+                autoRetry: {
+                    initialDelayMs: CLEANUP_RETRY_BACKOFF.initialDelayMs,
+                    maxDelayMs: CLEANUP_RETRY_BACKOFF.maximumDelayMs,
+                    backoffFactor: CLEANUP_RETRY_BACKOFF.factor,
+                    maxAttempts: MAXIMUM_AUTOMATIC_CLEANUP_RETRIES,
+                },
+            });
+    }
     const [liveStreamAvailable, setLiveStreamAvailable] = useState(false);
 
     const isPlaybackRequestCurrent = (
@@ -296,270 +303,97 @@ export const View = (properties: DBArgs) => {
         playbackRequest.current.controller === controller &&
         !controller.signal.aborted;
 
-    const hasPendingPlaybackCleanup = () =>
-        pendingIteratorClosures.current.size > 0 ||
-        pendingControlClosures.current.size > 0;
-
-    const resetCleanupRetryStateIfSettled = () => {
-        if (hasPendingPlaybackCleanup()) {
-            return;
-        }
-        if (cleanupRetryTimer.current != null) {
-            clearTimeout(cleanupRetryTimer.current);
-            cleanupRetryTimer.current = undefined;
-        }
-        cleanupRetryBudget.current.reset();
-    };
-
-    const reopenCleanupRetryBudget = () => {
-        if (
-            cleanupRetryTimer.current == null &&
-            cleanupRetryBudget.current.exhausted()
-        ) {
-            // A new user/lifecycle action is allowed a fresh, bounded cleanup
-            // window. Automatic retries alone never reset their own budget.
-            cleanupRetryBudget.current.reset();
-        }
-    };
-
-    const closePlaybackControl = (control: PlaybackControl) => {
-        controls.current = controls.current.filter(
-            (candidate) => candidate !== control
-        );
-        const newlyPending = !pendingControlClosures.current.has(control);
-        if (newlyPending) {
-            reopenCleanupRetryBudget();
-        }
-        pendingControlClosures.current.add(control);
-        const existingAttempt = controlCloseAttempts.current.get(control);
-        if (existingAttempt) {
-            return existingAttempt;
-        }
-        const attempt = Promise.resolve()
-            .then(() => control.close())
-            .then(() => {
-                pendingControlClosures.current.delete(control);
-            })
-            .finally(() => {
-                if (controlCloseAttempts.current.get(control) === attempt) {
-                    controlCloseAttempts.current.delete(control);
-                }
-                if (hasPendingPlaybackCleanup()) {
-                    schedulePendingCleanupRetry();
-                } else {
-                    resetCleanupRetryStateIfSettled();
-                }
-            });
-        controlCloseAttempts.current.set(control, attempt);
-        return attempt;
-    };
-
-    const closePlaybackControls = async () => {
-        // Controller initialisation can be awaiting an AudioContext or decoder
-        // transition when a seek/unmount fences its generation. Let that
-        // promise observe the fence and retire its candidate before deciding
-        // that all controls are closed.
-        await Promise.allSettled([...controlCreations.current.values()]);
-        const toClose = new Set([
-            ...pendingControlClosures.current,
-            ...controls.current,
-        ]);
-        const results = await Promise.allSettled(
-            [...toClose].map((control) => closePlaybackControl(control))
-        );
-        const failures = results
-            .filter(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            )
-            .map((result) => result.reason);
-        throwFailures(failures, "Failed to close media playback controls");
-    };
-
-    const closePlaybackIterator = (iterator: TracksIterator) => {
-        const newlyPending = !pendingIteratorClosures.current.has(iterator);
-        if (newlyPending) {
-            reopenCleanupRetryBudget();
-        }
-        pendingIteratorClosures.current.add(iterator);
-        const existingAttempt = iteratorCloseAttempts.current.get(iterator);
-        if (existingAttempt) {
-            return existingAttempt;
-        }
-        const attempt = Promise.resolve()
-            .then(() => iterator.close())
-            .then(() => {
-                pendingIteratorClosures.current.delete(iterator);
-                if (streamListener.current === iterator) {
-                    streamListener.current = undefined;
-                }
-            })
-            .finally(() => {
-                if (iteratorCloseAttempts.current.get(iterator) === attempt) {
-                    iteratorCloseAttempts.current.delete(iterator);
-                }
-                if (hasPendingPlaybackCleanup()) {
-                    schedulePendingCleanupRetry();
-                } else {
-                    resetCleanupRetryStateIfSettled();
-                }
-            });
-        iteratorCloseAttempts.current.set(iterator, attempt);
-        return attempt;
-    };
-
-    const retryPendingPlaybackResources = async () => {
-        const results = await Promise.allSettled([
-            ...[...pendingIteratorClosures.current].map((iterator) =>
-                closePlaybackIterator(iterator)
-            ),
-            ...[...pendingControlClosures.current].map((control) =>
-                closePlaybackControl(control)
-            ),
-        ]);
-        const failures = results
-            .filter(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            )
-            .map((result) => result.reason);
-        if (failures.length > 0) {
-            console.error(
-                "Failed to retry retired media playback cleanup",
-                failures.length === 1
-                    ? failures[0]
-                    : new AggregateError(
-                          failures,
-                          "Failed to retry retired media playback cleanup"
-                      )
+    const throwPendingCleanup = (
+        pending: ViewerPlaybackResource[],
+        message: string
+    ) => {
+        if (pending.length > 0) {
+            throw new Error(
+                `${message} (${pending.length} resource${
+                    pending.length === 1 ? "" : "s"
+                })`
             );
         }
     };
 
-    const adoptExhaustedPlaybackCleanup = () => {
-        const iterators = [...pendingIteratorClosures.current].filter(
-            (iterator) => !iteratorCloseAttempts.current.has(iterator)
-        );
-        const retiredControls = [...pendingControlClosures.current].filter(
-            (control) => !controlCloseAttempts.current.has(control)
-        );
-        if (iterators.length === 0 && retiredControls.length === 0) {
+    const retirePlaybackControls = async (
+        retiredControls: Iterable<PlaybackControl>
+    ) => {
+        const toClose = [...new Set(retiredControls)];
+        if (toClose.length === 0) {
             return;
         }
-
-        adoptDurableCleanup([...iterators, ...retiredControls], {
-            owner: VIEWER_DURABLE_CLEANUP_OWNER,
-            onError: reportViewerDurableCleanup,
-        });
-        for (const iterator of iterators) {
-            pendingIteratorClosures.current.delete(iterator);
-            if (streamListener.current === iterator) {
-                streamListener.current = undefined;
-            }
-        }
-        for (const control of retiredControls) {
-            pendingControlClosures.current.delete(control);
-        }
-        resetCleanupRetryStateIfSettled();
-    };
-
-    const schedulePendingCleanupRetry = () => {
-        if (cleanupRetryTimer.current != null || !hasPendingPlaybackCleanup()) {
-            return;
-        }
-        const delay = cleanupRetryBudget.current.nextDelay();
-        if (delay == null) {
-            // Transfer ownership out of the component closure. The shared
-            // registry is dormant until a later lifecycle/online/visible wake.
-            adoptExhaustedPlaybackCleanup();
-            return;
-        }
-        cleanupRetryTimer.current = setTimeout(() => {
-            cleanupRetryTimer.current = undefined;
-            void retryPendingPlaybackResources().finally(() => {
-                if (!hasPendingPlaybackCleanup()) {
-                    resetCleanupRetryStateIfSettled();
-                    return;
-                }
-                schedulePendingCleanupRetry();
-            });
-        }, delay);
-        (
-            cleanupRetryTimer.current as ReturnType<typeof setTimeout> & {
-                unref?: () => void;
-            }
-        ).unref?.();
-    };
-
-    const closePendingControlsForTrack = async (trackId: string) => {
-        await retryViewerDurableCleanup();
-        reopenCleanupRetryBudget();
-        const matching = [...pendingControlClosures.current].filter(
-            (control) => control.track.idString === trackId
+        const retiring = new Set(toClose);
+        controls.current = controls.current.filter(
+            (candidate) => !retiring.has(candidate)
         );
-        const results = await Promise.allSettled(
-            matching.map((control) => closePlaybackControl(control))
-        );
-        const failures = results
-            .filter(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            )
-            .map((result) => result.reason);
-        throwFailures(
-            failures,
-            "Previous media controller cleanup is still pending"
+        const pending = await playbackCoordinator.current!.retire(toClose);
+        throwPendingCleanup(
+            pending,
+            "Media playback control cleanup is still pending"
         );
     };
 
-    const closePlaybackIterators = async () => {
-        const toClose = new Set(pendingIteratorClosures.current);
-        if (streamListener.current) {
-            toClose.add(streamListener.current);
+    const closePlaybackControl = (control: PlaybackControl) =>
+        retirePlaybackControls([control]);
+
+    const ensureViewerCleanupSettled = async () => {
+        const pending = await playbackCoordinator.current!.retry();
+        if (pending > 0) {
+            throw new Error("Previous viewer cleanup is still pending");
         }
-        const results = await Promise.allSettled(
-            [...toClose].map((iterator) => closePlaybackIterator(iterator))
+    };
+
+    const detachPlaybackResources = (
+        additionalResources: Iterable<ViewerPlaybackResource> = []
+    ) => {
+        const activeIterator = streamListener.current;
+        const activeControls = controls.current;
+        // Detach synchronously before any close/retry await. Stale queued
+        // play/pause work can no longer discover or reuse these handles.
+        streamListener.current = undefined;
+        controls.current = [];
+        return [
+            ...(activeIterator ? [activeIterator] : []),
+            ...activeControls,
+            ...additionalResources,
+        ];
+    };
+
+    const retireAllPlaybackResources = async (
+        additionalResources: Iterable<ViewerPlaybackResource> = [],
+        message = "Failed to close media playback resources"
+    ) => {
+        const detached = detachPlaybackResources(additionalResources);
+        // All currently-owned candidates and exact prior debt enter bounded
+        // retirement before its first await. This runs independently of a
+        // stuck playback queue without owner-wide false positives.
+        const pending = await playbackCoordinator.current!.retireAll(detached);
+        if (pending > 0) {
+            throw new Error(
+                `${message} (${pending} resource${pending === 1 ? "" : "s"})`
+            );
+        }
+    };
+
+    const closePlaybackResources = () => retireAllPlaybackResources();
+
+    const retirePlaybackIterator = async (iterator: TracksIterator) => {
+        if (streamListener.current === iterator) {
+            streamListener.current = undefined;
+        }
+        const pending = await playbackCoordinator.current!.retire([iterator]);
+        throwPendingCleanup(
+            pending,
+            "Media playback iterator cleanup is still pending"
         );
-        const failures = results
-            .filter(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            )
-            .map((result) => result.reason);
-        throwFailures(failures, "Failed to close media playback iterators");
     };
 
-    const closePlaybackResources = async () => {
-        reopenCleanupRetryBudget();
-        const results = await Promise.allSettled([
-            retryViewerDurableCleanup(),
-            closePlaybackIterators(),
-            closePlaybackControls(),
-        ]);
-        const failures = results
-            .filter(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            )
-            .map((result) => result.reason);
-        throwFailures(failures, "Failed to close media playback resources");
-    };
-
-    const closeOpenedPlayback = async (iterator?: TracksIterator) => {
-        reopenCleanupRetryBudget();
-        const results = await Promise.allSettled([
-            retryViewerDurableCleanup(),
-            iterator ? closePlaybackIterator(iterator) : Promise.resolve(),
-            closePlaybackControls(),
-        ]);
-        const failures = results
-            .filter(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            )
-            .map((result) => result.reason);
-        throwFailures(failures, "Failed to retire media playback resources");
-    };
+    const closeOpenedPlayback = (iterator?: TracksIterator) =>
+        retireAllPlaybackResources(
+            iterator ? [iterator] : [],
+            "Failed to retire media playback resources"
+        );
 
     const reconcileIteratorPlayback = async (
         iterator: TracksIterator,
@@ -584,6 +418,9 @@ export const View = (properties: DBArgs) => {
     };
 
     const setProgress = (progress: number | "live") => {
+        // A creation stuck in an old generation's initial play/pause must not
+        // be returned for the same track in this replacement generation.
+        controlCreations.current!.beginGeneration();
         setCursor(progress);
         setIsBuffering(true);
         setPlaybackError(undefined);
@@ -628,7 +465,13 @@ export const View = (properties: DBArgs) => {
                         return openedPlaybackRetirement;
                     }
                     openedPlaybackRetirementAttempted = true;
-                    const attempt = closeOpenedPlayback(nextListener)
+                    const retirement = retireOpenedPlaybackForGeneration({
+                        isCurrent,
+                        resource: nextListener,
+                        retireExact: retirePlaybackIterator,
+                        retireCurrentGeneration: closeOpenedPlayback,
+                    });
+                    const attempt = retirement
                         .then(() => {
                             openedPlaybackRetired = true;
                         })
@@ -789,6 +632,13 @@ export const View = (properties: DBArgs) => {
                         },
                         onClose: scheduleClose,
                     });
+                    // Publish the iterator before its first awaited playback
+                    // transition. Unmount can now find and retire it even when
+                    // play()/pause() never settles.
+                    if (!playbackCoordinator.current!.register(nextListener)) {
+                        await retireOpenedPlayback();
+                        return;
+                    }
                     if (!isCurrent() || closeObserved) {
                         await retireOpenedPlayback();
                         return;
@@ -797,7 +647,11 @@ export const View = (properties: DBArgs) => {
                         nextListener,
                         callbacksCurrent
                     );
-                    if (!isCurrent() || closeObserved) {
+                    if (
+                        !isCurrent() ||
+                        closeObserved ||
+                        !playbackCoordinator.current!.isOwned(nextListener)
+                    ) {
                         await retireOpenedPlayback();
                         return;
                     }
@@ -867,26 +721,14 @@ export const View = (properties: DBArgs) => {
             playbackRequest.current.generation++;
             playbackRequest.current.controller?.abort("Viewer unmounted");
             playbackRequest.current.controller = undefined;
-            void updateProgressQueue.current
-                .add(async () => {
-                    reopenCleanupRetryBudget();
-                    const results = await Promise.allSettled([
-                        retryDurableCleanup(VIEWER_DURABLE_CLEANUP_OWNER),
-                        closePlaybackIterators(),
-                        closePlaybackControls(),
-                    ]);
-                    for (const result of results) {
-                        if (result.status === "rejected") {
-                            console.error(
-                                "Failed to close viewer playback",
-                                result.reason
-                            );
-                        }
-                    }
-                })
-                .catch((error) =>
-                    console.error("Failed to queue viewer cleanup", error)
-                );
+            controlCreations.current!.beginGeneration();
+            // Abandon the old serial queue immediately. Its active play/pause
+            // promise may never settle, but a replacement effect/mount gets a
+            // fresh queue and cleanup starts independently below.
+            updateProgressQueue.current = new PQueue({ concurrency: 1 });
+            void retireAllPlaybackResources().catch((error) =>
+                console.error("Failed to close viewer playback", error)
+            );
         };
     }, [peer?.identity.publicKey.hashcode(), properties.stream?.address]);
 
@@ -944,7 +786,7 @@ export const View = (properties: DBArgs) => {
             (control) => control.track.idString === trackId
         );
         if (!fn) {
-            let creation = controlCreations.current.get(trackId);
+            let creation = controlCreations.current!.get(trackId);
             if (!creation) {
                 if (!controllerRetryBackoff.current.canAttempt(trackId)) {
                     return false;
@@ -964,7 +806,7 @@ export const View = (properties: DBArgs) => {
                         // it closes. Gate replacement on the retired controller
                         // for this track actually closing, so failed cleanup
                         // cannot accumulate one controller per incoming chunk.
-                        await closePendingControlsForTrack(trackId);
+                        await ensureViewerCleanupSettled();
                         if (!isCurrent()) {
                             return undefined;
                         }
@@ -999,6 +841,17 @@ export const View = (properties: DBArgs) => {
                                 playbackIntent.current
                             ),
                         };
+                        // Register synchronously before the first awaited
+                        // reconcile/play. Cleanup never waits for the creation
+                        // promise to discover this candidate.
+                        if (
+                            !playbackCoordinator.current!.register(
+                                newController
+                            )
+                        ) {
+                            await retireCandidate();
+                            return undefined;
+                        }
 
                         await reconcilePlaybackRequest({
                             isCurrent,
@@ -1014,7 +867,10 @@ export const View = (properties: DBArgs) => {
                                 "The media controller playback state changed too often to settle",
                         });
 
-                        if (!isCurrent()) {
+                        if (
+                            !isCurrent() ||
+                            !playbackCoordinator.current!.isOwned(newController)
+                        ) {
                             await retireCandidate();
                             return undefined;
                         }
@@ -1063,14 +919,13 @@ export const View = (properties: DBArgs) => {
                         throw failure;
                     }
                 })();
-                controlCreations.current.set(trackId, creation);
+                controlCreations.current!.set(trackId, creation);
                 void creation
                     .finally(() => {
-                        if (
-                            controlCreations.current.get(trackId) === creation
-                        ) {
-                            controlCreations.current.delete(trackId);
-                        }
+                        controlCreations.current!.deleteIfCurrent(
+                            trackId,
+                            creation
+                        );
                     })
                     .catch(() => {});
             }
