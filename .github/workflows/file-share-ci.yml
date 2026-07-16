@@ -80,14 +80,50 @@ jobs:
             - name: Build file-share frontend
               run: pnpm --filter file-share run build
 
-            - name: Install Playwright Chromium
-              run: pnpm exec playwright install --with-deps chromium
+            - name: Install Playwright browsers
+              run: pnpm exec playwright install --with-deps chromium firefox webkit
 
             - name: Browser-test two-runner file sink
               working-directory: packages/file-share/frontend
               env:
                   PW_TWO_RUNNER_BROWSER_SELF_TEST: "1"
               run: node tests/two-runner.bench.mjs self-test
+
+            - name: Browser-test bounded download sinks
+              env:
+                  PW_BROWSERS: chromium,firefox,webkit
+              run: >-
+                  pnpm --filter file-share exec playwright test
+                  -c playwright.config.ts
+                  tests/download-sink.browser.e2e.spec.ts
+                  --workers 1
+                  --reporter=line
+                  --output "${RUNNER_TEMP}/file-share-download-sinks"
+
+            - name: Browser-test Peerbit OPFS download wiring
+              env:
+                  PW_BROWSERS: chromium
+                  PW_OPFS_FILE_MB: "6"
+              run: >-
+                  pnpm --filter file-share exec playwright test
+                  -c playwright.config.ts
+                  tests/download-streamed.local.e2e.spec.ts
+                  --project chromium
+                  --grep "OPFS when the save picker is unavailable"
+                  --workers 1
+                  --reporter=line
+                  --output "${RUNNER_TEMP}/file-share-opfs-integration"
+
+            - name: Upload bounded-download failure artifacts
+              if: failure()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: file-share-download-sinks-${{ github.run_id }}
+                  path: |
+                      ${{ runner.temp }}/file-share-download-sinks
+                      ${{ runner.temp }}/file-share-opfs-integration
+                  if-no-files-found: ignore
+                  retention-days: 7
 
             - name: Test persisted offline browser reopen
               env:
