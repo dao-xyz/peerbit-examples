@@ -1,5 +1,13 @@
 # @peerbit/blog-sdk
 
+## 2.0.2
+
+### Patch Changes
+
+- bfff594: Carry indexed post authors in remote query results so non-replicating readers
+  can search posts and resolve their authors without requiring the source log head
+  locally.
+
 ## 2.0.1
 
 ### Patch Changes

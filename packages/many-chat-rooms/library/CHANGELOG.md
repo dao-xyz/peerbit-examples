@@ -1,5 +1,12 @@
 # @peerbit/example-many-chat-rooms
 
+## 2.0.2
+
+### Patch Changes
+
+- bfff594: Give the room index projection a stable serialization variant so persisted
+  indexes can be reopened with current Peerbit releases.
+
 ## 2.0.1
 
 ### Patch Changes
