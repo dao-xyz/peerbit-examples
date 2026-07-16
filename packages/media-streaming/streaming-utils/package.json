@@ -26,7 +26,7 @@
         "LICENSE"
     ],
     "engines": {
-        "node": ">=16.15.1"
+        "node": ">=22"
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
@@ -36,16 +36,23 @@
         "test-view-remote": "npm run build && node ./lib/esm/__tests__/view-remote.js"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.1.0",
+        "@peerbit/test-utils": "^3.1.8",
         "@types/sinon": "^20.0.0",
+        "peerbit": "^5.3.8",
         "sinon": "^21.0.0",
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "^13.1.0",
-        "@peerbit/rpc": "^6.1.1",
-        "@peerbit/shared-log": "^13.2.0",
-        "peerbit": "^5.3.0",
-        "uuid": "^10.0.0"
+        "@dao-xyz/borsh": "^6.0.0",
+        "@peerbit/crypto": "^3.1.4",
+        "@peerbit/document": "^13.1.10",
+        "@peerbit/indexer-interface": "^3.0.8",
+        "@peerbit/log": "^6.2.7",
+        "@peerbit/program": "^6.0.37",
+        "@peerbit/rpc": "^6.1.5",
+        "@peerbit/shared-log": "^13.2.9",
+        "@peerbit/time": "^3.0.1",
+        "p-queue": "^7.4.1",
+        "uint8arrays": "^5.1.0"
     }
 }

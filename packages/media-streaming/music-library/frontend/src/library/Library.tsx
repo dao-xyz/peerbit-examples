@@ -197,11 +197,9 @@ export const Library: React.FC = () => {
         existing: "reuse",
     });
 
-    /* load track list ------------------------------------------------------- */
-    const { items: tracks, isLoading: tracksLoading } = useQuery(
-        lib.program?.mediaStreams,
-        {
-            query: useMemo(() => ({ query: {} }), []),
+    const queryOptions = useMemo(
+        () => ({
+            query: { query: {} },
             prefetch: true,
             batchSize: 100,
             updates: {
@@ -211,7 +209,14 @@ export const Library: React.FC = () => {
                 reach: { eager: true },
                 wait: { timeout: 5e3 },
             },
-        }
+        }),
+        []
+    );
+
+    /* load track list ------------------------------------------------------- */
+    const { items: tracks, isLoading: tracksLoading } = useQuery(
+        lib.program?.mediaStreams,
+        queryOptions
     );
 
     /* owner? ---------------------------------------------------------------- */

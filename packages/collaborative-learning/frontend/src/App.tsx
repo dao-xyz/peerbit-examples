@@ -34,6 +34,7 @@ export const App = () => {
             config={{
                 runtime: "node",
                 inMemory: true,
+                waitForConnected: true,
                 network:
                     import.meta.env.MODE === "development" ? "local" : "remote",
             }}

@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { findForbiddenStaticPeercheckerHost } from "../scripts/static-relay-policy.mjs";
+import {
+    findForbiddenStaticPeercheckerHost,
+    hasAuthoritativeBootstrapEndpoint,
+} from "../scripts/static-relay-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -74,4 +77,28 @@ test("does not positively allowlist peerchecker.com for app redirects", () => {
         "utf8"
     );
     assert.doesNotMatch(renderer, /peerchecker\.com/);
+});
+
+test("recognizes only reviewed authoritative bootstrap URL forms", () => {
+    assert.equal(
+        hasAuthoritativeBootstrapEndpoint(
+            "https://bootstrap.peerbit.org/bootstrap-5.env"
+        ),
+        true
+    );
+    assert.equal(
+        hasAuthoritativeBootstrapEndpoint(
+            'const e=`bootstrap${version ? "-" + encodeURIComponent(version) : ""}.env`;return [`https://bootstrap.peerbit.org/${e}`]'
+        ),
+        true
+    );
+
+    for (const source of [
+        "https://bootstrap.peerbit.org/",
+        "const e=`bootstrap${version}.env`;return [`http://bootstrap.peerbit.org/${e}`]",
+        "const e=`bootstrap${version}.txt`;return [`https://bootstrap.peerbit.org/${e}`]",
+        "const e=`bootstrap${version}.env`;return [`https://bootstrap.peerbit.org/${other}`]",
+    ]) {
+        assert.equal(hasAuthoritativeBootstrapEndpoint(source), false);
+    }
 });

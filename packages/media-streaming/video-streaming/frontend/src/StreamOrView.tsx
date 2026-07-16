@@ -1,41 +1,25 @@
-import { usePeer, useProgram } from "@peerbit/react";
-import { useState, useEffect } from "react";
-import { useParams } from "react-router";
 import { View } from "./media/viewer/View";
-import { MediaStreamDB } from "@peerbit/media-streaming";
 import { Editor } from "./media/streamer/Stream";
+import { usePeer } from "@peerbit/react";
+import { useOwnedStreamProgram } from "./StreamProgramOwner";
 
 export const StreamOrView = () => {
     const { peer } = usePeer();
 
-    const params = useParams();
-
-    const [isStreamer, setIsStreamer] = useState<boolean | undefined>(
-        undefined
-    );
-
-    const mediaStream = useProgram<MediaStreamDB>(peer, params.address, {
-        existing: "reuse",
-    });
-
-    // TODO
-    useEffect(() => {
-        if (!peer || !mediaStream?.program) {
-            return;
-        }
-        setIsStreamer(
-            peer.identity.publicKey.equals(mediaStream.program.owner)
-        );
-    }, [mediaStream?.program?.address]);
+    const mediaStream = useOwnedStreamProgram();
+    const isStreamer =
+        peer && mediaStream
+            ? peer.identity.publicKey.equals(mediaStream.owner)
+            : undefined;
     return (
         <>
             {isStreamer !== undefined && (
                 <>
                     {isStreamer ? (
-                        <Editor stream={mediaStream.program}></Editor>
+                        <Editor stream={mediaStream}></Editor>
                     ) : (
                         /*       <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */
-                        <View stream={mediaStream.program}></View>
+                        <View stream={mediaStream}></View>
                     )}
                 </>
             )}

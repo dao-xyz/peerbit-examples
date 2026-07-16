@@ -20,7 +20,7 @@ const Ctx = createContext<PlayStatsCtx | null>(null);
 
 export const PlayStatsProvider = ({ children }: PropsWithChildren) => {
     const { peer } = usePeer();
-    /* open once – replicate to everyone */
+    /* open once – keep browser storage local and write through replicators */
     const stats = useProgram(peer, new PlayStats(), {
         existing: "reuse",
         args: {}, // no extra args
@@ -32,7 +32,9 @@ export const PlayStatsProvider = ({ children }: PropsWithChildren) => {
             addPlay: async ({ duration, sourceId }) => {
                 if (!stats.program) return;
                 const ev = new PlayEvent({ duration, source: sourceId });
-                await stats.program.documents.put(ev, { target: "all" });
+                await stats.program.documents.put(ev, {
+                    target: "replicators",
+                });
             },
         };
     }, [stats.program]);

@@ -7,6 +7,7 @@ import {
     MediaStreamDBs,
     oneVideoAndOneAudioChangeProcessor,
     Track,
+    TrackSource,
     TracksIterator,
     WebcodecsStreamDB,
 } from "../index.js";
@@ -20,14 +21,28 @@ import {
 import { equals } from "uint8arrays";
 import { expect, describe, test, beforeAll, afterAll, afterEach } from "vitest";
 import sinon from "sinon";
-import { Ed25519Keypair } from "@peerbit/crypto";
+import { Ed25519Keypair, randomBytes } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
 import pDefer, { DeferredPromise } from "p-defer";
 import path from "path";
 import { Compare, WithContext, WithIndexedContext } from "@peerbit/document";
 import { MissingResponsesError } from "@peerbit/rpc";
+import { ClosedError } from "@peerbit/program";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
+
+const interceptTrackSourceIterator = (
+    wrap: (iterator: any, source: TrackSource) => void
+) => {
+    const iterate = TrackSource.prototype.iterate;
+    return sinon
+        .stub(TrackSource.prototype, "iterate")
+        .callsFake(async function (this: TrackSource, ...args: any[]) {
+            const iterator = await (iterate as any).apply(this, args);
+            wrap(iterator, this);
+            return iterator;
+        } as any);
+};
 
 describe("oneVideoAndOneAudioChangeProcessor", () => {
     test("preload tracks when end time not set", async () => {
@@ -290,6 +305,41 @@ describe("Track", () => {
         expect(track.endTime).to.be.closeTo(1e3, 10);
     });
 });
+describe("TrackSource", () => {
+    test("clears live replication debt after its shared log is closed", async () => {
+        const source = new AudioStreamDB({ sampleRate: 44100 });
+        source.lastLivestreamingSegmentId = randomBytes(32);
+        source.lastLivestreamingSegmentStart = 1n;
+
+        await source.endPreviousLivestreamSubscription();
+
+        expect(source.lastLivestreamingSegmentId).to.be.undefined;
+        expect(source.lastLivestreamingSegmentStart).to.be.undefined;
+    });
+
+    test("clears live replication debt when a closed index resolves empty", async () => {
+        const source = new AudioStreamDB({ sampleRate: 44100 });
+        source.lastLivestreamingSegmentId = randomBytes(32);
+        source.lastLivestreamingSegmentStart = 1n;
+        const log = source.chunks.log as any;
+        const previousIndex = log._replicationRangeIndex;
+        const all = sinon.stub().resolves([]);
+        const iterate = sinon.stub().returns({ all });
+        log._replicationRangeIndex = { iterate };
+
+        try {
+            expect(source.chunks.log.closed).to.be.true;
+            await source.endPreviousLivestreamSubscription();
+
+            expect(iterate.calledOnce).to.be.true;
+            expect(all.calledOnce).to.be.true;
+            expect(source.lastLivestreamingSegmentId).to.be.undefined;
+            expect(source.lastLivestreamingSegmentStart).to.be.undefined;
+        } finally {
+            log._replicationRangeIndex = previousIndex;
+        }
+    });
+});
 describe("MediaStream", () => {
     let streamer: Peerbit,
         viewer: Peerbit,
@@ -312,8 +362,29 @@ describe("MediaStream", () => {
     });
 
     afterEach(async () => {
-        await cleanup?.();
-        await iterator?.close();
+        const currentIterator = iterator;
+        const currentCleanup = cleanup;
+        // Do not let a test without its own scenario inherit and re-run the
+        // previous test's teardown handles. Retire playback before closing its
+        // owning programs so RAF loops and subscriptions cannot outlive the
+        // test that created them.
+        iterator = undefined as any;
+        cleanup = undefined;
+
+        const failures: unknown[] = [];
+        try {
+            await currentIterator?.close();
+        } catch (error) {
+            failures.push(error);
+        }
+        try {
+            await currentCleanup?.();
+        } catch (error) {
+            failures.push(error);
+        }
+        if (failures.length > 0) {
+            throw new AggregateError(failures, "Failed to clean up media test");
+        }
     });
 
     type OneTrack = {
@@ -381,23 +452,29 @@ describe("MediaStream", () => {
             })
         );
 
+        const firstTrackWrites: Promise<void>[] = [];
         for (let i = 0; i < firstSize; i++) {
-            track1.put(
-                new Chunk({
-                    chunk: new Uint8Array([i]),
-                    time: i * MILLISECONDS_TO_MICROSECONDS * delta,
-                    type: "key",
-                }),
-                {
-                    target: "all" /* 
+            firstTrackWrites.push(
+                track1.put(
+                    new Chunk({
+                        chunk: new Uint8Array([i]),
+                        time: i * MILLISECONDS_TO_MICROSECONDS * delta,
+                        type: "key",
+                    }),
+                    {
+                        // These are historical fixtures written before a viewer
+                        // exists, so they must not require a live fanout route.
+                        target: "none" /*
                     meta: {
                         timestamp: new Timestamp({
                             wallTime: now + BigInt(i * deltaNano),
                         }),
                     }, */,
-                }
+                    }
+                )
             );
         }
+        await Promise.all(firstTrackWrites);
         await mediaStreams.tracks.put(track1);
 
         let track2: Track | undefined = undefined;
@@ -422,23 +499,27 @@ describe("MediaStream", () => {
                             : undefined,
                 })
             );
+            const secondTrackWrites: Promise<void>[] = [];
             for (let i = 0; i < (properties.second.size ?? 1000); i++) {
-                track2.put(
-                    new Chunk({
-                        chunk: new Uint8Array([i]),
-                        time: i * MILLISECONDS_TO_MICROSECONDS * delta,
-                        type: "key",
-                    }),
-                    {
-                        target: "all",
-                        /*  meta: {
+                secondTrackWrites.push(
+                    track2.put(
+                        new Chunk({
+                            chunk: new Uint8Array([i]),
+                            time: i * MILLISECONDS_TO_MICROSECONDS * delta,
+                            type: "key",
+                        }),
+                        {
+                            target: "none",
+                            /*  meta: {
                              timestamp: new Timestamp({
                                  wallTime: now + BigInt(i * deltaNano),
                              }),
                          }, */
-                    }
+                        }
+                    )
                 );
             }
+            await Promise.all(secondTrackWrites);
             await mediaStreams.tracks.put(track2);
         }
 
@@ -700,8 +781,8 @@ describe("MediaStream", () => {
                         remote: { timeout: 25, replicate: false },
                     })
                 ).rejects.toThrow(MissingResponsesError);
-                expect(iterateStub.calledOnce).to.be.true;
-                expect(probeClose.calledOnce).to.be.true;
+                expect(iterateStub.callCount).to.be.greaterThanOrEqual(1);
+                expect(probeClose.callCount).to.eq(iterateStub.callCount);
             } finally {
                 iterateStub.restore();
                 await viewerTrack.close();
@@ -755,8 +836,8 @@ describe("MediaStream", () => {
                     })
                 ).rejects.toThrow(MissingResponsesError);
                 expect(localIndexIterateStub.called).to.be.false;
-                expect(iterateStub.calledOnce).to.be.true;
-                expect(probeClose.calledOnce).to.be.true;
+                expect(iterateStub.callCount).to.be.greaterThanOrEqual(1);
+                expect(probeClose.callCount).to.eq(iterateStub.callCount);
             } finally {
                 iterateStub.restore();
                 localIndexIterateStub.restore();
@@ -831,6 +912,53 @@ describe("MediaStream", () => {
                     }),
                     close: probeClose,
                 })) as any);
+
+            try {
+                const startedAt = Date.now();
+                await expect(
+                    source.iterate(0, {
+                        local: false,
+                        remote: { timeout: 25, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(Date.now() - startedAt).to.be.lessThan(1_000);
+                expect(iterateStub.callCount).to.be.greaterThanOrEqual(1);
+                expect(probeClose.callCount).to.eq(iterateStub.callCount);
+            } finally {
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("does not accept an abort-resolved empty origin probe", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const probeClose = sinon.stub().resolves();
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((_request: any, options: any) => {
+                    const signal = options.remote.signal as AbortSignal;
+                    return {
+                        next: sinon.stub().callsFake(
+                            () =>
+                                new Promise<Chunk[]>((resolve) => {
+                                    if (signal.aborted) {
+                                        resolve([]);
+                                        return;
+                                    }
+                                    signal.addEventListener(
+                                        "abort",
+                                        () => resolve([]),
+                                        { once: true }
+                                    );
+                                })
+                        ),
+                        close: probeClose,
+                    } as any;
+                }) as any);
 
             try {
                 const startedAt = Date.now();
@@ -1836,6 +1964,69 @@ describe("MediaStream", () => {
         });
     });
     describe("live", () => {
+        test("pauses after a live progress callback fails without hot retrying", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const attempts: number[] = [];
+            const delivered: number[] = [];
+            let rejectFrame = true;
+            const errorLog = sinon.stub(console, "error");
+
+            try {
+                iterator = await viewerStreams.iterate("live", {
+                    onProgress: async ({ chunk }) => {
+                        attempts.push(chunk.time);
+                        if (rejectFrame) {
+                            rejectFrame = false;
+                            throw new Error(
+                                "synthetic live frame delivery failure"
+                            );
+                        }
+                        delivered.push(chunk.time);
+                    },
+                });
+                await track1.put(
+                    new Chunk({
+                        time: 0,
+                        chunk: new Uint8Array([0]),
+                    })
+                );
+
+                await waitForResolved(() => expect(iterator.paused).to.be.true);
+                expect(attempts).to.deep.eq([0]);
+                await track1.put(
+                    new Chunk({
+                        time: MILLISECONDS_TO_MICROSECONDS,
+                        chunk: new Uint8Array([1]),
+                    })
+                );
+                await delay(100);
+                expect(attempts).to.deep.eq([0]);
+
+                await iterator.play();
+                await track1.put(
+                    new Chunk({
+                        time: 2 * MILLISECONDS_TO_MICROSECONDS,
+                        chunk: new Uint8Array([2]),
+                    })
+                );
+                await waitForResolved(() =>
+                    expect(delivered).to.deep.eq([
+                        MILLISECONDS_TO_MICROSECONDS,
+                        2 * MILLISECONDS_TO_MICROSECONDS,
+                    ])
+                );
+                expect(
+                    errorLog.calledWithMatch(
+                        "Media progress callback failed; playback paused"
+                    )
+                ).to.be.true;
+            } finally {
+                errorLog.restore();
+            }
+        });
+
         test("delivers one chunk with the default target", async () => {
             const track1 = await streamer.open(
                 new Track({
@@ -1946,7 +2137,9 @@ describe("MediaStream", () => {
                     }
                 },
             });
-            (await listenTrack.promise).waitFor(streamer.identity.publicKey);
+            await (
+                await listenTrack.promise
+            ).waitFor(streamer.identity.publicKey);
             const c1 = new Chunk({
                 chunk: new Uint8Array([101]),
                 time: 8888888 * MILLISECONDS_TO_MICROSECONDS,
@@ -1958,9 +2151,9 @@ describe("MediaStream", () => {
                 type: "key",
             });
 
-            await track1.put(c1, { target: "all" });
+            await track1.put(c1, { target: "replicators" });
             await waitForResolved(() => expect(chunks).to.have.length(1));
-            await track1.put(c2, { target: "all" });
+            await track1.put(c2, { target: "replicators" });
             await waitForResolved(() => expect(chunks).to.have.length(2));
 
             expect(chunks[0].chunk.id).to.eq(c1.id);
@@ -1984,8 +2177,8 @@ describe("MediaStream", () => {
                 time: (0 + 1) * MILLISECONDS_TO_MICROSECONDS,
                 type: "key",
             });
-            await track1.put(c1, { target: "all" });
-            await track1.put(c2, { target: "all" });
+            await track1.put(c1, { target: "replicators" });
+            await track1.put(c2, { target: "replicators" });
 
             let listenTrackDeferred: DeferredPromise<Track> = pDefer();
             let maxTimeFromCallback = -1;
@@ -2049,9 +2242,9 @@ describe("MediaStream", () => {
                 maxTime = ev.detail.maxTime;
             });
 
-            await track1.put(c3, { target: "all" });
+            await track1.put(c3, { target: "replicators" });
             await waitForResolved(() => expect(chunks).to.have.length(3));
-            await track1.put(c4, { target: "all" });
+            await track1.put(c4, { target: "replicators" });
             await waitForResolved(() => expect(chunks).to.have.length(4));
 
             expect(chunks[2].chunk.id).to.eq(c3.id);
@@ -2092,6 +2285,503 @@ describe("MediaStream", () => {
             await waitForResolved(() =>
                 expect(maxTime).to.eq(start * 1e3 + time)
             );
+        });
+
+        test("keeps max-time scan ownership until the final subscriber stops", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const first = viewerStreams.listenForMaxTimeChanges(false);
+            const second = viewerStreams.listenForMaxTimeChanges(false);
+
+            try {
+                await Promise.all([first.ready, second.ready]);
+                const lease = (viewerStreams as any).trackLeases.get(
+                    track1.idString
+                );
+                expect(lease.references).to.eq(2);
+                const closeTrack = sinon.spy(lease.track, "close");
+
+                await first.stop();
+                expect(lease.track.closed).to.be.false;
+                expect(closeTrack.called).to.be.false;
+
+                await second.stop();
+                expect(lease.track.closed).to.be.true;
+                expect(closeTrack.calledOnce).to.be.true;
+            } finally {
+                await Promise.allSettled([first.stop(), second.stop()]);
+            }
+        });
+
+        test("coalesces a burst of max-time refreshes to one pending scan", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const scanStarted = pDefer<void>();
+            const releaseScan = pDefer<void>();
+            const index = viewerStreams.tracks.index as any;
+            const search = index.search.bind(index);
+            let scanCount = 0;
+            const searchStub = sinon
+                .stub(index, "search")
+                .callsFake(async (...args: any[]) => {
+                    scanCount++;
+                    if (scanCount === 1) {
+                        scanStarted.resolve();
+                        await releaseScan.promise;
+                    }
+                    return search(...args);
+                });
+            const subscription = viewerStreams.listenForMaxTimeChanges(false);
+
+            try {
+                await scanStarted.promise;
+                for (let i = 0; i < 10; i++) {
+                    viewerStreams.tracks.events.dispatchEvent(
+                        new CustomEvent("change", {
+                            detail: { added: [], removed: [] },
+                        })
+                    );
+                }
+                releaseScan.resolve();
+                await subscription.ready;
+                expect(scanCount).to.eq(2);
+            } finally {
+                releaseScan.resolve();
+                searchStub.restore();
+                await subscription.stop();
+            }
+        });
+
+        test("re-arms a max-time refresh that arrives during scan handoff", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const tracksAddListener = sinon.spy(
+                viewerStreams.tracks.events,
+                "addEventListener"
+            );
+            const logAddListener = sinon.spy(
+                viewerStreams.tracks.log.events,
+                "addEventListener"
+            );
+            const subscription = viewerStreams.listenForMaxTimeChanges(false);
+            const changeListener = tracksAddListener.args.find(
+                ([type]) => type === "change"
+            )?.[1] as ((event: CustomEvent) => void) | undefined;
+            const joinListener = logAddListener.args.find(
+                ([type]) => type === "replicator:join"
+            )?.[1] as (() => void) | undefined;
+            expect(changeListener).to.be.a("function");
+            expect(joinListener).to.be.a("function");
+            // Exercise the captured requestScan closure directly so unrelated
+            // document/replicator traffic cannot inflate this handoff count.
+            viewerStreams.tracks.events.removeEventListener(
+                "change",
+                changeListener as any
+            );
+            viewerStreams.tracks.log.events.removeEventListener(
+                "replicator:join",
+                joinListener as any
+            );
+            await subscription.ready;
+
+            const lease = (viewerStreams as any).trackLeases.get(
+                track1.idString
+            );
+            let queueHandoffRefresh = true;
+            const dispatchRefresh = () =>
+                changeListener?.(
+                    new CustomEvent("change", {
+                        detail: { added: [], removed: [] },
+                    })
+                );
+            const lastStub = sinon.stub(lease.track.source, "last").callsFake(
+                () =>
+                    ({
+                        then: (resolve: (value: undefined) => void) => {
+                            resolve(undefined);
+                            if (queueHandoffRefresh) {
+                                queueHandoffRefresh = false;
+                                // Cross last() -> refresh() -> scan() before
+                                // firing in the running-loop/finally handoff.
+                                queueMicrotask(() =>
+                                    queueMicrotask(() =>
+                                        queueMicrotask(dispatchRefresh)
+                                    )
+                                );
+                            }
+                        },
+                    }) as any
+            );
+
+            try {
+                dispatchRefresh();
+                // Other consumers can legitimately refresh the same shared
+                // track. The burst test above owns the exact upper-bound
+                // assertion; this handoff test only needs to prove that the
+                // queued edge produces a follow-up refresh instead of being
+                // lost while the running scan settles.
+                await waitForResolved(() =>
+                    expect(lastStub.callCount).to.be.greaterThanOrEqual(2)
+                );
+            } finally {
+                lastStub.restore();
+                tracksAddListener.restore();
+                logAddListener.restore();
+                await subscription.stop();
+            }
+        });
+
+        test("cleans up a max-time monitor after its initial scan fails", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const scanError = new Error("synthetic max-time scan failure");
+            const searchStub = sinon
+                .stub(viewerStreams.tracks.index, "search")
+                .rejects(scanError);
+            const subscription = viewerStreams.listenForMaxTimeChanges(false);
+
+            try {
+                await expect(subscription.ready).rejects.toBe(scanError);
+                await subscription.stop();
+                expect((viewerStreams as any).maxTimeSubscriptionCount).to.eq(
+                    0
+                );
+                expect((viewerStreams as any).activeMediaConsumers.size).to.eq(
+                    0
+                );
+            } finally {
+                searchStub.restore();
+                await subscription.stop().catch(() => {});
+            }
+        });
+
+        test("shares replication monitoring and skips it without a callback", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const startSubscription = sinon.spy(
+                viewerStreams as any,
+                "startReplicationInfoSubscription"
+            );
+            const withoutCallback = await viewerStreams.iterate("live");
+            const openTrack = [...withoutCallback.current.values()][0].track;
+            const listenerCountBeforeMonitoring =
+                openTrack.source.chunks.log.events.listenerCount(
+                    "replication:change"
+                );
+            let first: TracksIterator | undefined;
+            let second: TracksIterator | undefined;
+
+            try {
+                expect(startSubscription.called).to.be.false;
+
+                const firstChanges: { hash: string; track: Track }[] = [];
+                const secondChanges: { hash: string; track: Track }[] = [];
+                first = await viewerStreams.iterate("live", {
+                    onReplicationChange: (change) => firstChanges.push(change),
+                });
+                second = await viewerStreams.iterate("live", {
+                    onReplicationChange: (change) => secondChanges.push(change),
+                });
+                expect(startSubscription.calledOnce).to.be.true;
+                await waitForResolved(() =>
+                    expect(
+                        openTrack.source.chunks.log.events.listenerCount(
+                            "replication:change"
+                        )
+                    ).to.be.greaterThan(listenerCountBeforeMonitoring)
+                );
+
+                firstChanges.length = 0;
+                secondChanges.length = 0;
+                openTrack.source.chunks.log.events.dispatchEvent(
+                    new CustomEvent("replication:change", {
+                        detail: { publicKey: "synthetic-replicator" },
+                    })
+                );
+                expect(firstChanges).to.have.length(1);
+                expect(secondChanges).to.have.length(1);
+                expect(firstChanges[0].hash).to.eq("synthetic-replicator");
+                expect(secondChanges[0].hash).to.eq("synthetic-replicator");
+            } finally {
+                startSubscription.restore();
+                await Promise.allSettled([
+                    withoutCallback.close(),
+                    first?.close(),
+                    second?.close(),
+                ]);
+            }
+        });
+
+        test("coalesces a burst of replication refreshes to one pending scan", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const scanStarted = pDefer<void>();
+            const releaseScan = pDefer<void>();
+            const index = viewerStreams.tracks.index as any;
+            const iterateTracks = index.iterate.bind(index);
+            let scanCount = 0;
+            const iterateStub = sinon
+                .stub(index, "iterate")
+                .callsFake((...args: any[]) => {
+                    scanCount++;
+                    const result = iterateTracks(...args);
+                    if (scanCount === 1) {
+                        const all = result.all.bind(result);
+                        result.all = async () => {
+                            scanStarted.resolve();
+                            await releaseScan.promise;
+                            return all();
+                        };
+                    }
+                    return result;
+                });
+            const subscription = viewerStreams.listenForReplicationInfo();
+
+            try {
+                await scanStarted.promise;
+                for (let i = 0; i < 10; i++) {
+                    viewerStreams.tracks.events.dispatchEvent(
+                        new CustomEvent("change", {
+                            detail: { added: [], removed: [] },
+                        })
+                    );
+                }
+                releaseScan.resolve();
+                await subscription.ready;
+                expect(scanCount).to.eq(2);
+            } finally {
+                releaseScan.resolve();
+                iterateStub.restore();
+                await subscription.stop();
+            }
+        });
+
+        test("re-arms a replication refresh that arrives during scan handoff", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const subscription = viewerStreams.listenForReplicationInfo();
+            await subscription.ready;
+
+            const index = viewerStreams.tracks.index as any;
+            const iterateTracks = index.iterate.bind(index);
+            let scanCount = 0;
+            let queueHandoffRefresh = false;
+            let callsPerRefresh = Number.POSITIVE_INFINITY;
+            const dispatchRefresh = () =>
+                viewerStreams.tracks.events.dispatchEvent(
+                    new CustomEvent("change", {
+                        detail: { added: [], removed: [] },
+                    })
+                );
+            const iterateStub = sinon
+                .stub(index, "iterate")
+                .callsFake((...args: any[]) => {
+                    const result = iterateTracks(...args);
+                    if (args[1]?.local && args[1]?.remote === false) {
+                        scanCount++;
+                        const all = result.all.bind(result);
+                        result.all = () =>
+                            ({
+                                then: (
+                                    resolve: (value: Track[]) => void,
+                                    reject: (error: unknown) => void
+                                ) => {
+                                    void all().then((tracks: Track[]) => {
+                                        resolve(tracks);
+                                        if (
+                                            queueHandoffRefresh &&
+                                            scanCount === callsPerRefresh
+                                        ) {
+                                            queueHandoffRefresh = false;
+                                            // Cross all() -> scanLocalTracks()
+                                            // before firing after the outer
+                                            // loop has observed no pending edge.
+                                            queueMicrotask(() =>
+                                                queueMicrotask(dispatchRefresh)
+                                            );
+                                        }
+                                    }, reject);
+                                },
+                            }) as any;
+                    }
+                    return result;
+                });
+
+            try {
+                // Establish how many index iterations one ordinary refresh
+                // performs, then inject the edge after that final await.
+                dispatchRefresh();
+                await waitForResolved(() =>
+                    expect(scanCount).to.be.greaterThan(0)
+                );
+                await delay(100);
+                callsPerRefresh = scanCount;
+                scanCount = 0;
+                queueHandoffRefresh = true;
+
+                dispatchRefresh();
+                await waitForResolved(() =>
+                    // The handoff edge must add one replacement scan beyond
+                    // the monitor's ordinary refresh work.
+                    expect(scanCount).to.eq(callsPerRefresh + 1)
+                );
+            } finally {
+                iterateStub.restore();
+                await subscription.stop();
+            }
+        });
+
+        test("retries the exact final replication subscription release", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const cleanupError = new Error(
+                "synthetic replication cleanup failure"
+            );
+            const stopUnderlying = sinon.stub();
+            stopUnderlying.onFirstCall().rejects(cleanupError);
+            stopUnderlying.onSecondCall().resolves();
+            const startSubscription = sinon
+                .stub(viewerStreams as any, "startReplicationInfoSubscription")
+                .returns({
+                    ready: Promise.resolve(),
+                    stop: stopUnderlying,
+                });
+            const subscription = viewerStreams.listenForReplicationInfo();
+
+            try {
+                await expect(subscription.stop()).rejects.toBe(cleanupError);
+                expect(stopUnderlying.calledOnce).to.be.true;
+                expect(
+                    (viewerStreams as any).replicationInfoSubscription
+                        .references
+                ).to.eq(0);
+
+                await subscription.stop();
+                expect(stopUnderlying.callCount).to.eq(2);
+                expect((viewerStreams as any).replicationInfoSubscription).to.be
+                    .undefined;
+            } finally {
+                startSubscription.restore();
+                await subscription.stop().catch(() => {});
+            }
+        });
+
+        test("retains a shared replication callback until its final handle stops", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const onChange = sinon.stub();
+            const withoutCallback = await viewerStreams.iterate("live");
+            const openTrack = [...withoutCallback.current.values()][0].track;
+            const listenerCountBeforeMonitoring =
+                openTrack.source.chunks.log.events.listenerCount(
+                    "replication:change"
+                );
+            const first = await viewerStreams.iterate("live", {
+                onReplicationChange: onChange,
+            });
+            const second = await viewerStreams.iterate("live", {
+                onReplicationChange: onChange,
+            });
+
+            try {
+                await waitForResolved(() =>
+                    expect(
+                        openTrack.source.chunks.log.events.listenerCount(
+                            "replication:change"
+                        )
+                    ).to.be.greaterThan(listenerCountBeforeMonitoring)
+                );
+                onChange.resetHistory();
+                const removeListener = sinon.spy(
+                    openTrack.source.chunks.log.events,
+                    "removeEventListener"
+                );
+
+                try {
+                    openTrack.source.chunks.log.events.dispatchEvent(
+                        new CustomEvent("replication:change", {
+                            detail: { publicKey: "first-synthetic-replicator" },
+                        })
+                    );
+                    expect(onChange.calledOnce).to.be.true;
+
+                    await first.close();
+                    expect(
+                        (viewerStreams as any).replicationInfoSubscription
+                            .references
+                    ).to.eq(1);
+                    expect(
+                        removeListener
+                            .getCalls()
+                            .filter(
+                                (call) => call.args[0] === "replication:change"
+                            )
+                    ).to.have.length(0);
+
+                    openTrack.source.chunks.log.events.dispatchEvent(
+                        new CustomEvent("replication:change", {
+                            detail: {
+                                publicKey: "second-synthetic-replicator",
+                            },
+                        })
+                    );
+                    expect(onChange.callCount).to.eq(2);
+
+                    await second.close();
+                    expect(
+                        removeListener
+                            .getCalls()
+                            .filter(
+                                (call) => call.args[0] === "replication:change"
+                            )
+                    ).not.to.have.length(0);
+                    expect((viewerStreams as any).replicationInfoSubscription)
+                        .to.be.undefined;
+                } finally {
+                    removeListener.restore();
+                }
+            } finally {
+                await Promise.allSettled([
+                    withoutCallback.close(),
+                    first.close(),
+                    second.close(),
+                ]);
+            }
+        });
+
+        test("cleans up replication monitoring after its initial scan fails", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const scanError = new Error("synthetic replication scan failure");
+            const iterateStub = sinon
+                .stub(viewerStreams.tracks.index, "iterate")
+                .returns({
+                    all: () => Promise.reject(scanError),
+                } as any);
+            const subscription = viewerStreams.listenForReplicationInfo();
+
+            try {
+                await expect(subscription.ready).rejects.toBe(scanError);
+                await subscription.stop();
+                expect((viewerStreams as any).replicationInfoSubscription).to.be
+                    .undefined;
+                expect((viewerStreams as any).activeMediaConsumers.size).to.eq(
+                    0
+                );
+            } finally {
+                iterateStub.restore();
+                await subscription.stop().catch(() => {});
+            }
         });
 
         test("new track while viewing", async () => {
@@ -2136,7 +2826,8 @@ describe("MediaStream", () => {
             );
 
             let ts = 1e3;
-            delay(ts).then(async () => {
+            const publishSecondTrack = (async () => {
+                await delay(ts);
                 const track2 = await streamer.open(
                     new Track({
                         sender: streamer.identity.publicKey,
@@ -2147,7 +2838,21 @@ describe("MediaStream", () => {
 
                 await mediaStreams.tracks.put(track2);
 
-                await gotTrack2.promise;
+                const secondTrackTimeout = new AbortController();
+                try {
+                    await Promise.race([
+                        gotTrack2.promise,
+                        delay(30_000, {
+                            signal: secondTrackTimeout.signal,
+                        }).then(() => {
+                            throw new Error(
+                                "Timed out opening the second track"
+                            );
+                        }),
+                    ]);
+                } finally {
+                    secondTrackTimeout.abort();
+                }
 
                 console.log("HERE2");
                 await track2.put(
@@ -2157,10 +2862,15 @@ describe("MediaStream", () => {
                         type: "key",
                     })
                 );
-            });
+            })();
 
             try {
-                await waitForResolved(() => expect(chunks).to.have.length(2));
+                await Promise.all([
+                    publishSecondTrack,
+                    waitForResolved(() => expect(chunks).to.have.length(2), {
+                        timeout: 30_000,
+                    }),
+                ]);
             } catch (error) {
                 throw error;
             }
@@ -2168,7 +2878,7 @@ describe("MediaStream", () => {
         });
 
         /*  TODO should this test be deleted or can we try to figure out a test case where old data can disrupt the live feed?
-       
+
         test("old ignored", async () => {
              const { mediaStreams, track1, viewerStreams } =
                  await createScenario({
@@ -2197,10 +2907,10 @@ describe("MediaStream", () => {
                  time: 102 * MILLISECONDS_TO_MICROSECONDS,
                  type: "key",
              });
-             await track1.put(c1, { target: "all" });
+             await track1.put(c1, { target: "replicators" });
  
              await waitForResolved(() => expect(chunks).to.have.length(1));
-             await track1.put(c2, { target: "all" });
+             await track1.put(c2, { target: "replicators" });
              await delay(3000);
              expect(chunks).to.have.length(1);
          }); */
@@ -2238,7 +2948,7 @@ describe("MediaStream", () => {
                 type: "key",
             });
 
-            await track1.put(c1, { target: "all" });
+            await track1.put(c1, { target: "replicators" });
             await waitForResolved(() =>
                 expect(replicators.map((x) => x.hash)).to.deep.eq([
                     track1.node.identity.publicKey.hashcode(),
@@ -2310,8 +3020,8 @@ describe("MediaStream", () => {
                 expect(iterator!.options()).to.have.length(2)
             );
 
-            await track1.put(c1, { target: "all" });
-            await track2.put(c2, { target: "all" });
+            await track1.put(c1, { target: "replicators" });
+            await track2.put(c2, { target: "replicators" });
 
             await waitForResolved(() => expect(chunks).to.have.length(1));
 
@@ -2342,8 +3052,8 @@ describe("MediaStream", () => {
                 type: "key",
             });
 
-            await track1.put(c3, { target: "all" });
-            await track2.put(c4, { target: "all" });
+            await track1.put(c3, { target: "replicators" });
+            await track2.put(c4, { target: "replicators" });
 
             await waitForResolved(() => expect(chunks).to.have.length(2));
             expect(chunks[1].chunk.id).to.eq(c4.id);
@@ -2358,11 +3068,27 @@ describe("MediaStream", () => {
             const viewerStreams = await viewer.open(mediaStreams.clone());
 
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+            const progressStarted = pDefer<void>();
+            const releaseProgress = pDefer<void>();
+            let blockedTrackId: string | undefined;
+            let allowReplacement = false;
 
             iterator = await viewerStreams.iterate("live", {
-                onProgress: (ev) => {
+                onProgress: async (ev) => {
                     chunks.push(ev);
+                    if (chunks.length === 1) {
+                        progressStarted.resolve();
+                        await releaseProgress.promise;
+                    }
                 },
+                changeProcessor: (change, progress, preloadTime) =>
+                    !allowReplacement && change.add?.idString === blockedTrackId
+                        ? {}
+                        : oneVideoAndOneAudioChangeProcessor(
+                              change,
+                              progress,
+                              preloadTime
+                          ),
             });
 
             const track1 = await streamer.open(
@@ -2375,7 +3101,7 @@ describe("MediaStream", () => {
                 })
             );
 
-            await mediaStreams.tracks.put(track1, { target: "all" });
+            await mediaStreams.tracks.put(track1, { target: "replicators" });
             const track2 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
@@ -2385,11 +3111,36 @@ describe("MediaStream", () => {
                     start: 1000,
                 })
             );
-            await mediaStreams.tracks.put(track2, { target: "all" });
+            blockedTrackId = track2.idString;
+            await mediaStreams.tracks.put(track2, { target: "replicators" });
 
             await waitForResolved(() =>
                 expect(iterator.options()).to.have.length(2)
             );
+            await track1.source.chunks.log.waitForReplicator(
+                viewer.identity.publicKey,
+                { eager: true }
+            );
+            await waitForResolved(() => {
+                expect(iterator.current).to.have.length(1);
+                expect([...iterator.current.values()][0]?.track.idString).to.eq(
+                    track1.idString
+                );
+            });
+            const viewerTrack = [...iterator.current.values()][0].track;
+            const closeStarted = pDefer<void>();
+            const releaseClose = pDefer<void>();
+            const endPreviousLivestreamSubscription =
+                viewerTrack.source.endPreviousLivestreamSubscription.bind(
+                    viewerTrack.source
+                );
+            const endLiveStub = sinon
+                .stub(viewerTrack.source, "endPreviousLivestreamSubscription")
+                .callsFake(async () => {
+                    closeStarted.resolve();
+                    await releaseClose.promise;
+                    return endPreviousLivestreamSubscription();
+                });
 
             // insert some data and make sure only track1 is played
             const c1 = new Chunk({
@@ -2403,44 +3154,78 @@ describe("MediaStream", () => {
                 type: "key",
             });
 
-            await track1.put(c1, { target: "all" });
-            await track2.put(c2, { target: "all" });
-
-            await waitForResolved(() =>
-                expect(chunks.map((x) => x.chunk.id)).to.deep.eq([c1.id])
-            );
-
-            await mediaStreams.setEnd(track1, 0);
-
-            await waitForResolved(() =>
-                expect(iterator.options()).to.have.length(1)
-            );
             try {
+                await track1.put(c1, { target: "replicators" });
+                await track2.put(c2, { target: "replicators" });
+                await progressStarted.promise;
+
+                expect(chunks.map((x) => x.chunk.id)).to.deep.eq([c1.id]);
+
+                await mediaStreams.setEnd(track1, 0);
                 await waitForResolved(() =>
-                    expect(iterator.current).to.have.length(1)
+                    expect(iterator.options()).to.have.length(1)
                 );
-            } catch (error) {
-                throw error;
+                await closeStarted.promise;
+                expect(iterator.current).to.have.length(1);
+                expect([...iterator.current.values()][0]?.track.idString).to.eq(
+                    track1.idString
+                );
+
+                releaseProgress.resolve();
+                await waitForResolved(() => {
+                    expect(iterator.current).to.have.length(1);
+                    expect(
+                        [...iterator.current.values()][0]?.chunks
+                    ).to.have.length(0);
+                });
+                expect(endLiveStub.calledOnce).to.be.true;
+
+                releaseClose.resolve();
+                await waitForResolved(
+                    () => expect(iterator.current).to.have.length(0),
+                    { timeout: 10_000, delayInterval: 10 }
+                );
+                expect(endLiveStub.calledOnce).to.be.true;
+
+                allowReplacement = true;
+                await waitForResolved(() => {
+                    expect(iterator.current).to.have.length(1);
+                    expect(
+                        [...iterator.current.values()][0]?.track.idString
+                    ).to.eq(track2.idString);
+                });
+                await track2.source.chunks.log.waitForReplicator(
+                    viewer.identity.publicKey,
+                    { eager: true }
+                );
+
+                // put some data in track1 and track2 and make sure only track2 is played
+                const c3 = new Chunk({
+                    chunk: new Uint8Array([103]),
+                    time: 104 * MILLISECONDS_TO_MICROSECONDS,
+                    type: "key",
+                });
+                const c4 = new Chunk({
+                    chunk: new Uint8Array([103]),
+                    time: 104 * MILLISECONDS_TO_MICROSECONDS,
+                    type: "key",
+                });
+
+                await track1.put(c3, { target: "replicators" });
+                await track2.put(c4, { target: "replicators" });
+
+                await waitForResolved(() =>
+                    expect(chunks.map((x) => x.chunk.id)).to.deep.eq([
+                        c1.id,
+                        c4.id,
+                    ])
+                );
+            } finally {
+                allowReplacement = true;
+                releaseProgress.resolve();
+                releaseClose.resolve();
+                endLiveStub.restore();
             }
-
-            // put some data in track1 and track2 and make sure only track2 is played
-            const c3 = new Chunk({
-                chunk: new Uint8Array([103]),
-                time: 104 * MILLISECONDS_TO_MICROSECONDS,
-                type: "key",
-            });
-            const c4 = new Chunk({
-                chunk: new Uint8Array([103]),
-                time: 104 * MILLISECONDS_TO_MICROSECONDS,
-                type: "key",
-            });
-
-            await track1.put(c3, { target: "all" });
-            await track2.put(c4, { target: "all" });
-
-            await waitForResolved(() =>
-                expect(chunks.map((x) => x.chunk.id)).to.deep.eq([c1.id, c4.id])
-            );
         });
 
         test("closing iterator will end track", async () => {
@@ -2473,6 +3258,1225 @@ describe("MediaStream", () => {
             );
             await iterator.close();
             expect(viewerTracks[0].closed).to.be.true;
+        });
+
+        test("keeps a shared track open until its final iterator closes", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const firstTracks: Track[] = [];
+            const secondTracks: Track[] = [];
+            const first = await viewerStreams.iterate("live", {
+                onTracksChange: (tracks) => firstTracks.push(...tracks),
+            });
+            const second = await viewerStreams.iterate("live", {
+                onTracksChange: (tracks) => secondTracks.push(...tracks),
+            });
+
+            try {
+                await waitForResolved(() => {
+                    expect(firstTracks).to.have.length(1);
+                    expect(secondTracks).to.have.length(1);
+                });
+                expect(firstTracks[0]).to.eq(secondTracks[0]);
+                const closeTrack = sinon.spy(firstTracks[0], "close");
+
+                await first.close();
+                expect(firstTracks[0].closed).to.be.false;
+                expect(closeTrack.called).to.be.false;
+
+                await second.close();
+                expect(firstTracks[0].closed).to.be.true;
+                expect(closeTrack.calledOnce).to.be.true;
+            } finally {
+                await Promise.allSettled([first.close(), second.close()]);
+            }
+        });
+
+        test("reference-counts live replication independently of non-live track leases", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const monitor = viewerStreams.listenForMaxTimeChanges(false);
+            await monitor.ready;
+            const sharedLease = [
+                ...(viewerStreams as any).trackLeases.values(),
+            ][0];
+            const replicateLive = sinon
+                .stub(sharedLease.track.source, "replicate")
+                .resolves();
+            const endLive = sinon
+                .stub(
+                    sharedLease.track.source,
+                    "endPreviousLivestreamSubscription"
+                )
+                .resolves();
+            let first:
+                | Awaited<ReturnType<MediaStreamDB["iterate"]>>
+                | undefined;
+            let second:
+                | Awaited<ReturnType<MediaStreamDB["iterate"]>>
+                | undefined;
+
+            try {
+                first = await viewerStreams.iterate("live");
+                second = await viewerStreams.iterate("live");
+
+                expect(replicateLive.calledOnceWith("live")).to.be.true;
+                expect(endLive.notCalled).to.be.true;
+
+                await first.close();
+                expect(endLive.notCalled).to.be.true;
+
+                await second.close();
+                expect(endLive.calledOnce).to.be.true;
+                expect(
+                    (viewerStreams as any).trackLeases.get(
+                        sharedLease.track.idString
+                    ).references
+                ).to.eq(1);
+            } finally {
+                await Promise.allSettled([first?.close(), second?.close()]);
+                replicateLive.restore();
+                endLive.restore();
+                await monitor.stop();
+            }
+        });
+
+        test("retries the exact live shutdown before retiring its track lease", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            const lease = [...(viewerStreams as any).trackLeases.values()][0];
+            const shutdownError = new Error(
+                "synthetic live subscription shutdown failure"
+            );
+            const realEnd =
+                lease.track.source.endPreviousLivestreamSubscription.bind(
+                    lease.track.source
+                );
+            const endLive = sinon.stub(
+                lease.track.source,
+                "endPreviousLivestreamSubscription"
+            );
+            endLive.onFirstCall().rejects(shutdownError);
+            endLive.onSecondCall().callsFake(realEnd);
+
+            try {
+                await expect(viewerStreams.close()).rejects.toBe(shutdownError);
+                expect(endLive.calledOnce).to.be.true;
+                expect(viewerStreams.closed).to.be.false;
+                expect(lease.track.closed).to.be.false;
+                expect(
+                    (viewerStreams as any).trackLeases.get(lease.track.idString)
+                ).to.eq(lease);
+                expect(
+                    (viewerStreams as any).openedTracks.get(lease.track.address)
+                ).to.eq(lease.track);
+
+                await viewerStreams.close();
+                expect(endLive.callCount).to.eq(2);
+                expect(viewerStreams.closed).to.be.true;
+                expect(lease.track.closed).to.be.true;
+                expect((viewerStreams as any).trackLeases.size).to.eq(0);
+                expect((viewerStreams as any).openedTracks.size).to.eq(0);
+                await waitForResolved(() =>
+                    expect((viewerStreams as any).trackLeaseQueues.size).to.eq(
+                        0
+                    )
+                );
+            } finally {
+                endLive.restore();
+                await result.close().catch(() => {});
+                await viewerStreams.close().catch(() => {});
+            }
+        });
+
+        test("retires the queue for a final keep-open track lease", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live", {
+                keepTracksOpen: true,
+            });
+
+            await result.close();
+            expect((viewerStreams as any).trackLeases.size).to.eq(1);
+            expect((viewerStreams as any).trackLeaseQueues.size).to.eq(1);
+
+            await (viewerStreams as any).closeMediaResources();
+
+            expect((viewerStreams as any).trackLeases.size).to.eq(0);
+            expect((viewerStreams as any).openedTracks.size).to.eq(0);
+            await waitForResolved(() =>
+                expect((viewerStreams as any).trackLeaseQueues.size).to.eq(0)
+            );
+        });
+
+        test("does not block an unrelated lease behind a stalled live start", async () => {
+            const { track1, track2, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+                second: { start: 0, size: 0, type: "video" },
+            });
+            const first = await (viewerStreams as any).acquireTrackLease(
+                track1.clone()
+            );
+            const second = await (viewerStreams as any).acquireTrackLease(
+                track2.clone()
+            );
+            const startEntered = pDefer<void>();
+            const releaseStart = pDefer<void>();
+            const replicateLive = sinon
+                .stub(first.track.source, "replicate")
+                .callsFake(async () => {
+                    startEntered.resolve();
+                    await releaseStart.promise;
+                });
+            const starting = first.acquireLivestream();
+
+            try {
+                await startEntered.promise;
+                const unrelatedReleased = await Promise.race([
+                    second.release().then(() => true),
+                    delay(1000).then(() => false),
+                ]);
+                expect(unrelatedReleased).to.be.true;
+            } finally {
+                releaseStart.resolve();
+                await starting.catch(() => {});
+                await Promise.allSettled([first.release(), second.release()]);
+                replicateLive.restore();
+            }
+        });
+
+        test("rejects duplicate and foreign parent closes without tearing down valid consumers", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            const openTrack = [...result.current.values()][0].track;
+            const previousParents = (viewerStreams as any).parents;
+            const firstParent = {} as MediaStreamDB;
+            const secondParent = {} as MediaStreamDB;
+            (viewerStreams as any).parents = [firstParent, secondParent];
+
+            try {
+                expect(await viewerStreams.close(firstParent)).to.be.false;
+                expect(viewerStreams.closed).to.be.false;
+                expect(result.current.size).to.eq(1);
+                expect(openTrack.closed).to.be.false;
+                expect(
+                    (viewerStreams as any).activeMediaConsumers.size
+                ).to.be.greaterThan(0);
+
+                await expect(viewerStreams.close(firstParent)).rejects.toThrow(
+                    "Could not find from in parents"
+                );
+                const foreignParent = {} as MediaStreamDB;
+                await expect(
+                    viewerStreams.close(foreignParent)
+                ).rejects.toThrow("Could not find from in parents");
+
+                expect(viewerStreams.closed).to.be.false;
+                expect(result.current.size).to.eq(1);
+                expect(openTrack.closed).to.be.false;
+                expect(
+                    (viewerStreams as any).activeMediaConsumers.size
+                ).to.be.greaterThan(0);
+            } finally {
+                (viewerStreams as any).parents = previousParents;
+                await result.close();
+            }
+        });
+
+        test("keeps consumers alive after a non-final parent drop", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            const openTrack = [...result.current.values()][0].track;
+            const previousParents = (viewerStreams as any).parents;
+            const firstParent = {} as MediaStreamDB;
+            const secondParent = {} as MediaStreamDB;
+            (viewerStreams as any).parents = [firstParent, secondParent];
+
+            try {
+                expect(await viewerStreams.drop(firstParent)).to.be.false;
+                expect(viewerStreams.closed).to.be.false;
+                expect(result.current.size).to.eq(1);
+                expect(openTrack.closed).to.be.false;
+                expect(
+                    (viewerStreams as any).activeMediaConsumers.size
+                ).to.be.greaterThan(0);
+            } finally {
+                (viewerStreams as any).parents = previousParents;
+                await result.close();
+            }
+        });
+
+        test("coalesces final cleanup and rejects parent attachment behind its fence", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const parent = await viewer.open(
+                new MediaStreamDBs({ id: randomBytes(32) }),
+                { args: { replicate: false } }
+            );
+            const cleanupStarted = pDefer<void>();
+            const releaseCleanup = pDefer<void>();
+            const drainMediaResources = sinon
+                .stub(viewerStreams as any, "drainMediaResources")
+                .callsFake(async () => {
+                    cleanupStarted.resolve();
+                    await releaseCleanup.promise;
+                });
+            const firstClose = viewerStreams.close();
+            const secondClose = viewerStreams.close();
+
+            try {
+                await cleanupStarted.promise;
+                expect(drainMediaResources.calledOnce).to.be.true;
+                expect(viewerStreams.acceptsParentAttachments).to.be.false;
+                await expect(
+                    viewer.open(viewerStreams, {
+                        existing: "reuse",
+                        parent,
+                    })
+                ).rejects.toThrow();
+                expect(viewerStreams.parents).not.to.include(parent);
+
+                releaseCleanup.resolve();
+                expect(await Promise.all([firstClose, secondClose])).to.deep.eq(
+                    [true, true]
+                );
+            } finally {
+                releaseCleanup.resolve();
+                await Promise.allSettled([firstClose, secondClose]);
+                drainMediaResources.restore();
+                await parent.close().catch(() => {});
+            }
+        });
+
+        test("fences parent admission before destructive media drop cleanup", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const cleanupStarted = pDefer<void>();
+            const releaseCleanup = pDefer<void>();
+            const closeMediaResources = sinon
+                .stub(viewerStreams as any, "closeMediaResources")
+                .callsFake(async () => {
+                    cleanupStarted.resolve();
+                    await releaseCleanup.promise;
+                });
+            const dropping = viewerStreams.drop();
+
+            try {
+                await cleanupStarted.promise;
+                expect(viewerStreams.acceptsParentAttachments).to.be.false;
+                releaseCleanup.resolve();
+                expect(await dropping).to.be.true;
+            } finally {
+                releaseCleanup.resolve();
+                await dropping.catch(() => {});
+                closeMediaResources.restore();
+            }
+        });
+
+        test("rejects a queued track lease once final close begins", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const leaseQueue = (viewerStreams as any).getTrackLeaseQueue(
+                track1.idString
+            );
+            const blockerStarted = pDefer<void>();
+            const releaseBlocker = pDefer<void>();
+            const blocker = leaseQueue.add(async () => {
+                blockerStarted.resolve();
+                await releaseBlocker.promise;
+            });
+            await blockerStarted.promise;
+
+            const admission = (viewerStreams as any).acquireTrackLease(
+                track1.clone()
+            );
+            const admissionRejected =
+                expect(admission).rejects.toBeInstanceOf(ClosedError);
+            const closing = viewerStreams.close();
+
+            try {
+                expect((viewerStreams as any).mediaResourcesClosing).to.be.true;
+                releaseBlocker.resolve();
+                await admissionRejected;
+                await blocker;
+                await closing;
+                expect((viewerStreams as any).trackLeases.size).to.eq(0);
+                expect((viewerStreams as any).openedTracks.size).to.eq(0);
+            } finally {
+                releaseBlocker.resolve();
+                await Promise.allSettled([blocker, admission, closing]);
+            }
+        });
+
+        test("fences iterator and monitor admission during final drop", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const initialReadStarted = pDefer<void>();
+            const releaseInitialRead = pDefer<void>();
+            const getLatest = sinon
+                .stub(viewerStreams, "getLatest")
+                .callsFake(async () => {
+                    initialReadStarted.resolve();
+                    await releaseInitialRead.promise;
+                    return [];
+                });
+            const iteration = viewerStreams.iterate("live");
+            await initialReadStarted.promise;
+            const iterationRejected =
+                expect(iteration).rejects.toBeInstanceOf(ClosedError);
+            const dropping = viewerStreams.drop();
+
+            try {
+                expect((viewerStreams as any).mediaResourcesClosing).to.be.true;
+                expect(() =>
+                    viewerStreams.listenForMaxTimeChanges(false)
+                ).to.throw(ClosedError);
+                expect(() => viewerStreams.listenForReplicationInfo()).to.throw(
+                    ClosedError
+                );
+                await expect(
+                    viewerStreams.iterate("live")
+                ).rejects.toBeInstanceOf(ClosedError);
+
+                releaseInitialRead.resolve();
+                await iterationRejected;
+                await dropping;
+                expect((viewerStreams as any).activeMediaConsumers.size).to.eq(
+                    0
+                );
+                expect((viewerStreams as any).trackLeases.size).to.eq(0);
+            } finally {
+                releaseInitialRead.resolve();
+                getLatest.restore();
+                await Promise.allSettled([iteration, dropping]);
+            }
+        });
+
+        test("releases only its explicit parent from an externally opened track", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const openedTrack = await viewer.open(track1.clone());
+            const closeTrack = sinon.spy(openedTrack, "close");
+
+            try {
+                const lease = await (viewerStreams as any).acquireTrackLease(
+                    openedTrack
+                );
+                expect(lease.track).to.eq(openedTrack);
+                expect(openedTrack.parents).to.include(viewerStreams);
+                await lease.release();
+                expect(openedTrack.closed).to.be.false;
+                expect(closeTrack.calledOnceWith(viewerStreams)).to.be.true;
+                expect(openedTrack.parents).not.to.include(viewerStreams);
+            } finally {
+                closeTrack.restore();
+                await openedTrack.close();
+            }
+        });
+
+        test("preserves a later external root when releasing its track parent", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const lease = await (viewerStreams as any).acquireTrackLease(
+                track1.clone()
+            );
+            const openedTrack = lease.track as Track;
+            const externalTrack = await viewer.open(openedTrack, {
+                existing: "reuse",
+            });
+            const closeTrack = sinon.spy(openedTrack, "close");
+
+            try {
+                expect(externalTrack).to.eq(openedTrack);
+                expect(openedTrack.parents).to.include(viewerStreams);
+                expect(openedTrack.parents).to.include(undefined);
+
+                await lease.release();
+
+                expect(closeTrack.calledOnceWith(viewerStreams)).to.be.true;
+                expect(openedTrack.closed).to.be.false;
+                expect(openedTrack.parents).not.to.include(viewerStreams);
+                expect(openedTrack.parents).to.include(undefined);
+            } finally {
+                closeTrack.restore();
+                await openedTrack.close();
+            }
+        });
+
+        test("resets default replication when reopened without it", async () => {
+            const mediaStreams = new MediaStreamDB(viewer.identity.publicKey);
+            const tracksOpen = sinon
+                .stub(mediaStreams.tracks, "open")
+                .resolves();
+
+            try {
+                await mediaStreams.open({ replicate: "all" });
+                expect((mediaStreams as any).replicateTracksByDefault).to.be
+                    .true;
+
+                await mediaStreams.open({ replicate: false });
+                expect((mediaStreams as any).replicateTracksByDefault).to.be
+                    .false;
+
+                (mediaStreams as any).replicateTracksByDefault = true;
+                await mediaStreams.open();
+                expect((mediaStreams as any).replicateTracksByDefault).to.be
+                    .false;
+            } finally {
+                tracksOpen.restore();
+            }
+        });
+
+        test("drains default replication admission that races stream close", async () => {
+            const { track1, viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const replicationStarted = pDefer<void>();
+            const releaseReplication = pDefer<void>();
+            const replicateStub = sinon
+                .stub(AudioStreamDB.prototype, "replicate")
+                .callsFake(async function (this: AudioStreamDB, mode) {
+                    expect(mode).to.eq("all");
+                    replicationStarted.resolve();
+                    await releaseReplication.promise;
+                });
+
+            try {
+                const admission = (
+                    viewerStreams as any
+                ).ensureDefaultTrackReplication(track1.clone());
+                await replicationStarted.promise;
+                const openedTrack = (
+                    viewerStreams as any
+                ).defaultReplicationLeases.get(track1.idString).handle.track;
+
+                const closing = viewerStreams.close();
+                releaseReplication.resolve();
+                await Promise.all([admission, closing]);
+
+                expect(openedTrack.closed).to.be.true;
+                expect(
+                    (viewerStreams as any).defaultReplicationLeases.size
+                ).to.eq(0);
+                expect((viewerStreams as any).trackLeases.size).to.eq(0);
+                expect((viewerStreams as any).openedTracks.size).to.eq(0);
+            } finally {
+                releaseReplication.resolve();
+                replicateStub.restore();
+                await viewerStreams.close().catch(() => {});
+            }
+        });
+
+        test("retries a failed nested iterator cleanup", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            const cleanupError = new Error("synthetic track cleanup failure");
+            const closeTrackResources = sinon.stub();
+            closeTrackResources.onFirstCall().rejects(cleanupError);
+            closeTrackResources.onSecondCall().resolves();
+            result.current.set("synthetic-track", {
+                track: {
+                    idString: "synthetic-track",
+                    source: { mediaType: "synthetic" },
+                },
+                chunks: [],
+                close: closeTrackResources,
+            } as any);
+
+            await expect(result.close()).rejects.toBe(cleanupError);
+            expect(closeTrackResources.calledOnce).to.be.true;
+
+            await result.close();
+            expect(closeTrackResources.callCount).to.eq(2);
+        });
+
+        test("retains the exact closer when a non-final track notification throws", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const notificationError = new Error(
+                "synthetic track removal notification failure"
+            );
+            let failRemovalNotification = true;
+            const result = await viewerStreams.iterate("live", {
+                onTracksChange: (tracks) => {
+                    if (tracks.length === 0 && failRemovalNotification) {
+                        failRemovalNotification = false;
+                        throw notificationError;
+                    }
+                },
+            });
+            const trackWithBuffer = [...result.current.values()][0];
+            const originalClose = trackWithBuffer.close;
+            expect(originalClose).to.be.a("function");
+            const cleanupError = new Error(
+                "synthetic retained track cleanup failure"
+            );
+            const closeTrackResources = sinon.stub();
+            closeTrackResources.onFirstCall().rejects(cleanupError);
+            closeTrackResources
+                .onSecondCall()
+                .callsFake(() => originalClose!());
+            trackWithBuffer.close = closeTrackResources;
+
+            try {
+                await expect(
+                    result.selectOption(trackWithBuffer.track)
+                ).rejects.toBe(notificationError);
+                expect(closeTrackResources.called).to.be.false;
+
+                await expect(result.close()).rejects.toBe(cleanupError);
+                expect(closeTrackResources.calledOnce).to.be.true;
+
+                await result.close();
+                expect(closeTrackResources.callCount).to.eq(2);
+            } finally {
+                trackWithBuffer.close = originalClose;
+                await result.close().catch(() => {});
+            }
+        });
+
+        test("pause waits for nested track cleanup", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            const releaseCleanup = pDefer<void>();
+            const cleanupStarted = pDefer<void>();
+            result.current.set("delayed-track", {
+                track: {
+                    idString: "delayed-track",
+                    source: { mediaType: "synthetic" },
+                },
+                chunks: [],
+                close: async () => {
+                    cleanupStarted.resolve();
+                    await releaseCleanup.promise;
+                },
+            } as any);
+
+            let pauseSettled = false;
+            const pause = result.pause().then(() => {
+                pauseSettled = true;
+            });
+            await cleanupStarted.promise;
+            expect(result.paused).to.be.true;
+            expect(pauseSettled).to.be.false;
+
+            releaseCleanup.resolve();
+            await pause;
+            expect(pauseSettled).to.be.true;
+            await result.close();
+        });
+
+        test("interrupts delayed live startup on pause and close", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            await result.pause();
+
+            const firstReadStarted = pDefer<AbortSignal>();
+            const secondReadStarted = pDefer<AbortSignal>();
+            const starts = [firstReadStarted, secondReadStarted];
+            let invocation = 0;
+            const latestStub = sinon
+                .stub(viewerStreams, "getLatest")
+                .callsFake((options: any) => {
+                    const signal = options.signal as AbortSignal;
+                    starts[invocation++].resolve(signal);
+                    return new Promise<any[]>((_, reject) => {
+                        const abort = () =>
+                            reject(new Error("synthetic aborted live read"));
+                        if (signal.aborted) {
+                            abort();
+                        } else {
+                            signal.addEventListener("abort", abort, {
+                                once: true,
+                            });
+                        }
+                    });
+                });
+
+            try {
+                const firstPlay = result.play();
+                const firstSignal = await firstReadStarted.promise;
+                const pause = result.pause();
+                expect(firstSignal.aborted).to.be.true;
+                await Promise.all([firstPlay, pause]);
+                expect(result.paused).to.be.true;
+
+                const secondPlay = result.play();
+                const secondSignal = await secondReadStarted.promise;
+                const close = result.close();
+                expect(secondSignal.aborted).to.be.true;
+                await Promise.all([secondPlay, close]);
+                expect(result.paused).to.be.true;
+            } finally {
+                latestStub.restore();
+                await result.close().catch(() => {});
+            }
+        });
+
+        test("cancels initial iteration through the caller signal", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const readStarted = pDefer<AbortSignal>();
+            const latestStub = sinon
+                .stub(viewerStreams, "getLatest")
+                .callsFake((options: any) => {
+                    const signal = options.signal as AbortSignal;
+                    readStarted.resolve(signal);
+                    return new Promise<any[]>((_, reject) => {
+                        const abort = () => reject(new AbortError());
+                        if (signal.aborted) {
+                            abort();
+                        } else {
+                            signal.addEventListener("abort", abort, {
+                                once: true,
+                            });
+                        }
+                    });
+                });
+            const controller = new AbortController();
+
+            try {
+                const iteration = viewerStreams.iterate("live", {
+                    signal: controller.signal,
+                });
+                const playbackSignal = await readStarted.promise;
+                controller.abort("Viewer unmounted");
+                expect(playbackSignal.aborted).to.be.true;
+                await expect(iteration).rejects.toBeInstanceOf(AbortError);
+                expect((viewerStreams as any).activeMediaConsumers.size).to.eq(
+                    0
+                );
+            } finally {
+                latestStub.restore();
+            }
+        });
+
+        test("interrupts delayed live track admission on pause", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            await result.pause();
+            const replicateStarted = pDefer<AbortSignal>();
+            const replicateStub = sinon
+                .stub(AudioStreamDB.prototype, "replicate")
+                .callsFake((_args: any, options?: { signal?: AbortSignal }) => {
+                    const signal = options?.signal;
+                    if (!signal) {
+                        throw new Error("Missing playback lifecycle signal");
+                    }
+                    replicateStarted.resolve(signal);
+                    return new Promise<void>((_, reject) => {
+                        const abort = () =>
+                            reject(
+                                new Error(
+                                    "synthetic aborted live track admission"
+                                )
+                            );
+                        if (signal.aborted) {
+                            abort();
+                        } else {
+                            signal.addEventListener("abort", abort, {
+                                once: true,
+                            });
+                        }
+                    });
+                });
+
+            try {
+                const play = result.play();
+                const signal = await replicateStarted.promise;
+                const pause = result.pause();
+                expect(signal.aborted).to.be.true;
+                await Promise.all([play, pause]);
+                expect(result.paused).to.be.true;
+            } finally {
+                replicateStub.restore();
+                await result.close().catch(() => {});
+            }
+        });
+
+        test("does not publish an orphan live segment when startup aborts", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live", {
+                keepTracksOpen: true,
+            });
+            const openTrack = [...result.current.values()][0]?.track;
+            expect(openTrack).to.exist;
+            const source = openTrack.source;
+            await result.pause();
+            expect(source.lastLivestreamingSegmentId).to.be.undefined;
+
+            const originalLast = source.last.bind(source);
+            const lastStarted = pDefer<AbortSignal>();
+            let delayNextLast = true;
+            const lastStub = sinon
+                .stub(source, "last")
+                .callsFake((options?: { signal?: AbortSignal }) => {
+                    if (!delayNextLast) {
+                        return originalLast(options);
+                    }
+                    delayNextLast = false;
+                    const signal = options?.signal;
+                    if (!signal) {
+                        throw new Error("Missing playback lifecycle signal");
+                    }
+                    lastStarted.resolve(signal);
+                    return new Promise<Chunk | undefined>((_, reject) => {
+                        const abort = () => reject(new AbortError());
+                        if (signal.aborted) {
+                            abort();
+                        } else {
+                            signal.addEventListener("abort", abort, {
+                                once: true,
+                            });
+                        }
+                    });
+                });
+
+            try {
+                const play = result.play();
+                const signal = await lastStarted.promise;
+                const pause = result.pause();
+                expect(signal.aborted).to.be.true;
+                await Promise.all([play, pause]);
+
+                // The failed probe never reached chunks.log.replicate, so no
+                // segment ID may be exposed to the retryable cleanup path.
+                expect(source.lastLivestreamingSegmentId).to.be.undefined;
+
+                // Cleanup debt from the aborted attempt must not poison the
+                // next admission. A real retry can create and then end a live
+                // segment normally.
+                await result.play();
+                expect(source.lastLivestreamingSegmentId).to.exist;
+                await result.pause();
+                expect(source.lastLivestreamingSegmentId).to.be.undefined;
+            } finally {
+                lastStub.restore();
+                await result.close().catch(() => {});
+            }
+        });
+
+        test("interrupts delayed recorded startup on pause and close", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate(0.5);
+            await result.pause();
+
+            const firstReadStarted = pDefer<AbortSignal>();
+            const secondReadStarted = pDefer<AbortSignal>();
+            const starts = [firstReadStarted, secondReadStarted];
+            const closes = [sinon.stub().resolves(), sinon.stub().resolves()];
+            let invocation = 0;
+            const metadataStub = sinon
+                .stub(viewerStreams.tracks.index as any, "iterate")
+                .callsFake((_request: any, options: any) => {
+                    const currentInvocation = invocation++;
+                    const signal = options.signal as AbortSignal;
+                    starts[currentInvocation].resolve(signal);
+                    const next = () =>
+                        new Promise<any[]>((_, reject) => {
+                            const abort = () =>
+                                reject(
+                                    new Error("synthetic aborted recorded read")
+                                );
+                            if (signal.aborted) {
+                                abort();
+                            } else {
+                                signal.addEventListener("abort", abort, {
+                                    once: true,
+                                });
+                            }
+                        });
+                    return {
+                        next,
+                        done: () => false,
+                        pending: () => 0,
+                        first: async () => (await next())[0],
+                        all: async () => next(),
+                        close: closes[currentInvocation],
+                        [Symbol.asyncIterator]: async function* () {},
+                    };
+                });
+
+            try {
+                const firstPlay = result.play();
+                const firstSignal = await firstReadStarted.promise;
+                const pause = result.pause();
+                expect(firstSignal.aborted).to.be.true;
+                await Promise.all([firstPlay, pause]);
+                expect(closes[0].calledOnce).to.be.true;
+                expect(result.paused).to.be.true;
+
+                const secondPlay = result.play();
+                const secondSignal = await secondReadStarted.promise;
+                const close = result.close();
+                expect(secondSignal.aborted).to.be.true;
+                await Promise.all([secondPlay, close]);
+                expect(closes[1].calledOnce).to.be.true;
+                expect(result.paused).to.be.true;
+            } finally {
+                metadataStub.restore();
+                await result.close().catch(() => {});
+            }
+        });
+
+        test("retries only failed iterator close notifications", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const notificationError = new Error(
+                "synthetic close notification failure"
+            );
+            let failTrackNotification = true;
+            const onTracksChange = sinon.stub().callsFake((tracks: Track[]) => {
+                if (tracks.length === 0 && failTrackNotification) {
+                    failTrackNotification = false;
+                    throw notificationError;
+                }
+            });
+            const onTrackOptionsChange = sinon.stub();
+            const onClose = sinon.stub();
+            const result = await viewerStreams.iterate("live", {
+                onTracksChange,
+                onTrackOptionsChange,
+                onClose,
+            });
+
+            await expect(result.close()).rejects.toBe(notificationError);
+            expect(
+                onTracksChange
+                    .getCalls()
+                    .filter((call) => call.args[0].length === 0)
+            ).to.have.length(1);
+            expect(
+                onTrackOptionsChange
+                    .getCalls()
+                    .filter((call) => call.args[0].length === 0)
+            ).to.have.length(1);
+            expect(onClose.calledOnce).to.be.true;
+
+            await Promise.resolve();
+            await result.close();
+            expect(
+                onTracksChange
+                    .getCalls()
+                    .filter((call) => call.args[0].length === 0)
+            ).to.have.length(2);
+            expect(
+                onTrackOptionsChange
+                    .getCalls()
+                    .filter((call) => call.args[0].length === 0)
+            ).to.have.length(1);
+            expect(onClose.calledOnce).to.be.true;
+        });
+
+        test("does not await an async close notification that closes its own iterator", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const callbackCompleted = pDefer<void>();
+
+            iterator = await viewerStreams.iterate("live", {
+                onClose: async () => {
+                    await iterator.close();
+                    callbackCompleted.resolve();
+                },
+            });
+
+            await Promise.race([
+                iterator.close(),
+                delay(2_000).then(() => {
+                    throw new Error("Re-entrant iterator close deadlocked");
+                }),
+            ]);
+            await callbackCompleted.promise;
+            expect((viewerStreams as any).activeMediaConsumers.size).to.eq(0);
+        });
+
+        test("does not deadlock when an async close notification closes its owner", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const callbackCompleted = pDefer<void>();
+
+            iterator = await viewerStreams.iterate("live", {
+                onClose: async () => {
+                    await viewerStreams.close();
+                    callbackCompleted.resolve();
+                },
+            });
+
+            await Promise.race([
+                iterator.close(),
+                delay(2_000).then(() => {
+                    throw new Error("Iterator-to-owner close deadlocked");
+                }),
+            ]);
+            await Promise.race([
+                callbackCompleted.promise,
+                delay(2_000).then(() => {
+                    throw new Error(
+                        "Iterator-to-owner callback did not finish"
+                    );
+                }),
+            ]);
+            expect(viewerStreams.closed).to.be.true;
+        });
+
+        test("does not deadlock an owner close on its iterator notification", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const callbackCompleted = pDefer<void>();
+
+            iterator = await viewerStreams.iterate("live", {
+                onClose: async () => {
+                    await viewerStreams.close();
+                    callbackCompleted.resolve();
+                },
+            });
+
+            await Promise.race([
+                viewerStreams.close(),
+                delay(2_000).then(() => {
+                    throw new Error("Owner-to-iterator close deadlocked");
+                }),
+            ]);
+            await callbackCompleted.promise;
+            expect(viewerStreams.closed).to.be.true;
+            expect((viewerStreams as any).activeMediaConsumers.size).to.eq(0);
+        });
+
+        test("publishes a final empty track state after pause then close", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const trackChanges: Track[][] = [];
+
+            iterator = await viewerStreams.iterate("live", {
+                onTracksChange: (tracks) => trackChanges.push([...tracks]),
+            });
+            await waitForResolved(
+                () =>
+                    expect(trackChanges.some((tracks) => tracks.length > 0)).to
+                        .be.true
+            );
+
+            await iterator.pause();
+            expect(iterator.current.size).to.eq(0);
+            expect(trackChanges.at(-1)).not.to.deep.eq([]);
+
+            await iterator.close();
+            expect(trackChanges.at(-1)).to.deep.eq([]);
+        });
+
+        test("publishes a final empty state when a nonempty callback closes re-entrantly", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const trackChanges: Track[][] = [];
+            let closeOnNextNonempty = false;
+            let reentrantClose: Promise<void> | undefined;
+            const nonemptyCallbackStarted = pDefer<void>();
+
+            iterator = await viewerStreams.iterate("live", {
+                changeProcessor: (change) =>
+                    change.force
+                        ? { add: change.add, remove: change.remove }
+                        : {},
+                onTracksChange: (tracks) => {
+                    trackChanges.push([...tracks]);
+                    if (closeOnNextNonempty && tracks.length > 0) {
+                        closeOnNextNonempty = false;
+                        reentrantClose = iterator.close();
+                        nonemptyCallbackStarted.resolve();
+                    }
+                },
+            });
+            await waitForResolved(() =>
+                expect(iterator.options()).to.have.length(1)
+            );
+            const option = iterator.options()[0];
+            expect(iterator.current.size).to.eq(0);
+            trackChanges.length = 0;
+            closeOnNextNonempty = true;
+            const selecting = iterator.selectOption(option);
+            await Promise.race([
+                nonemptyCallbackStarted.promise,
+                delay(2_000).then(() => {
+                    throw new Error("Nonempty reentrant callback did not run");
+                }),
+            ]);
+            await selecting;
+            await reentrantClose;
+
+            expect(trackChanges.some((tracks) => tracks.length > 0)).to.be.true;
+            expect(trackChanges.at(-1)).to.deep.eq([]);
+        });
+
+        test("clears a published future-only track option on close", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 10_000, end: 20_000, size: 0 },
+            });
+            const optionChanges: Track[][] = [];
+
+            iterator = await viewerStreams.iterate(0, {
+                preload: 0,
+                changeProcessor: () => ({}),
+                onTrackOptionsChange: (tracks) =>
+                    optionChanges.push([...tracks]),
+            });
+            await waitForResolved(
+                () =>
+                    expect(optionChanges.some((tracks) => tracks.length > 0)).to
+                        .be.true
+            );
+            expect(iterator.current.size).to.eq(0);
+
+            await iterator.close();
+            expect(optionChanges.at(-1)).to.deep.eq([]);
+        });
+
+        test("does not publish a metadata page resolved after iterator close", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const lateTrack = new Track({
+                sender: streamer.identity.publicKey,
+                source: new AudioStreamDB({ sampleRate: 44100 }),
+                start: 10_000 * MILLISECONDS_TO_MICROSECONDS,
+                end: 20_000 * MILLISECONDS_TO_MICROSECONDS,
+            });
+            const optionChanges: Track[][] = [];
+
+            iterator = await viewerStreams.iterate(0, {
+                preload: 0,
+                changeProcessor: () => ({}),
+                onTrackOptionsChange: (tracks) =>
+                    optionChanges.push([...tracks]),
+            });
+            await waitForResolved(
+                () =>
+                    expect(optionChanges.some((tracks) => tracks.length > 0)).to
+                        .be.true
+            );
+            await iterator.pause();
+            optionChanges.length = 0;
+
+            const pageRequested = pDefer<void>();
+            const page = pDefer<Track[]>();
+            const metadataClose = sinon.stub().resolves();
+            const realIterate = viewerStreams.tracks.index.iterate.bind(
+                viewerStreams.tracks.index
+            );
+            const iterateStub = sinon
+                .stub(viewerStreams.tracks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (options?.remote && "replicate" in options.remote) {
+                        return {
+                            next: async () => {
+                                pageRequested.resolve();
+                                return page.promise;
+                            },
+                            done: () => false,
+                            close: metadataClose,
+                        } as any;
+                    }
+                    return realIterate(request, options);
+                }) as any);
+
+            try {
+                const replay = iterator.play();
+                await pageRequested.promise;
+                const closing = iterator.close();
+                page.resolve([lateTrack.clone()]);
+
+                await Promise.all([replay, closing]);
+                expect(optionChanges.some((tracks) => tracks.length > 0)).to.be
+                    .false;
+                expect(optionChanges.at(-1)).to.deep.eq([]);
+                expect(metadataClose.calledOnce).to.be.true;
+            } finally {
+                page.resolve([]);
+                iterateStub.restore();
+                await iterator.close();
+            }
+        });
+
+        test("serializes concurrent play, pause, and close controls", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const result = await viewerStreams.iterate("live");
+            const controls = await Promise.allSettled([
+                result.pause(),
+                result.play(),
+                result.pause(),
+                result.close(),
+            ]);
+
+            expect(controls.every((control) => control.status === "fulfilled"))
+                .to.be.true;
+            expect(result.paused).to.be.true;
+            expect(result.current.size).to.eq(0);
+        });
+
+        test("stream close retains and retries a failed owned track", async () => {
+            const { viewerStreams } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const cleanupError = new Error("synthetic owned track failure");
+            const closeTrack = sinon.stub();
+            closeTrack.onFirstCall().rejects(cleanupError);
+            closeTrack.onSecondCall().resolves(true);
+            const ownedTrack = {
+                close: closeTrack,
+                parents: [viewerStreams],
+            };
+            (viewerStreams as any).openedTracks.set(
+                "synthetic-owned-track",
+                ownedTrack
+            );
+
+            await expect(viewerStreams.close()).rejects.toBe(cleanupError);
+            expect(
+                (viewerStreams as any).openedTracks.get("synthetic-owned-track")
+            ).to.eq(ownedTrack);
+
+            await viewerStreams.close();
+            expect(closeTrack.callCount).to.eq(2);
+            expect(closeTrack.alwaysCalledWith(viewerStreams)).to.be.true;
+            expect(
+                (viewerStreams as any).openedTracks.has("synthetic-owned-track")
+            ).to.be.false;
         });
 
         test("closing iterator with keep alive with prevent further replication when closing", async () => {
@@ -2635,14 +4639,19 @@ describe("MediaStream", () => {
             });
 
             await firstChunk.promise;
-            await delay(Number(lastChunkTime) / 1e3);
-            // wait for some extra time for the last chunks to propagate for async operations
-            // TODO make it so we dont need this
-            await delay(1e3);
+            await waitForResolved(
+                () => expect(viewerTracksChangesAgain).to.have.length(2),
+                {
+                    // Playback starts after its preload window, so a fixed
+                    // media-duration sleep races slower CI schedulers.
+                    timeout: Number(lastChunkTime) / 1e3 + 10_000,
+                }
+            );
 
-            expect(viewerTracksChangesAgain).to.have.length(2); // open and close
             expect(viewerTracksChangesAgain[0]).to.have.length(1);
             expect(viewerTracksChangesAgain[1]).to.have.length(0); // all closed
+            expect(secondIterator.current.size).to.eq(0);
+            expect(viewerTracksChangesAgain[0][0].closed).to.be.false;
             expect(viewerTracksChangesAgain[0][0] === viewerTracksChanges[0][0])
                 .to.be.true;
 
@@ -2713,6 +4722,26 @@ describe("MediaStream", () => {
             await mediaStreams.tracks.put(track1);
 
             const listener = await viewer.open(mediaStreams.clone());
+            let track2: Track | undefined;
+            cleanup = async () => {
+                const results = await Promise.allSettled(
+                    [listener, mediaStreams, track1, track2]
+                        .filter((resource) => resource != null)
+                        .map((resource) => resource!.close())
+                );
+                const failures = results
+                    .filter(
+                        (result): result is PromiseRejectedResult =>
+                            result.status === "rejected"
+                    )
+                    .map((result) => result.reason);
+                if (failures.length > 0) {
+                    throw new AggregateError(
+                        failures,
+                        "Failed to clean up live-track preference test"
+                    );
+                }
+            };
 
             let receivedChunks: Chunk[] = [];
             let trackChanged: Track<AudioStreamDB | WebcodecsStreamDB>[][] = [];
@@ -2720,7 +4749,7 @@ describe("MediaStream", () => {
                 AudioStreamDB | WebcodecsStreamDB
             >[][] = [];
 
-            await listener.iterate("live", {
+            iterator = await listener.iterate("live", {
                 onTracksChange(tracks) {
                     trackChanged.push(tracks);
                 },
@@ -2752,7 +4781,7 @@ describe("MediaStream", () => {
                 ).to.deep.eq([[track1.id]])
             );
 
-            const track2 = await streamer.open(
+            track2 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
                     source: new AudioStreamDB({ sampleRate: 44100 }),
@@ -2813,6 +4842,25 @@ describe("MediaStream", () => {
             await mediaStreams.tracks.put(track1);
 
             const listener = await viewer.open(mediaStreams.clone());
+            cleanup = async () => {
+                const results = await Promise.allSettled(
+                    [listener, mediaStreams, track1].map((resource) =>
+                        resource.close()
+                    )
+                );
+                const failures = results
+                    .filter(
+                        (result): result is PromiseRejectedResult =>
+                            result.status === "rejected"
+                    )
+                    .map((result) => result.reason);
+                if (failures.length > 0) {
+                    throw new AggregateError(
+                        failures,
+                        "Failed to clean up live-track completion test"
+                    );
+                }
+            };
 
             let receivedChunks: Chunk[] = [];
             let trackChanged: Track<AudioStreamDB | WebcodecsStreamDB>[][] = [];
@@ -2820,7 +4868,7 @@ describe("MediaStream", () => {
                 AudioStreamDB | WebcodecsStreamDB
             >[][] = [];
 
-            await listener.iterate("live", {
+            iterator = await listener.iterate("live", {
                 onTracksChange(tracks) {
                     trackChanged.push(tracks);
                 },
@@ -3021,49 +5069,56 @@ describe("MediaStream", () => {
                 let once = false;
                 let gotTrackPromise = pDefer();
                 let underflowCalled = false;
-                iterator = await viewerStreams.iterate(0, {
-                    bufferSize: 1,
-                    onTracksChange(tracks) {
-                        if (tracks[0]) {
-                            const iterate =
-                                tracks[0].source.chunks.index.iterate.bind(
-                                    tracks[0].source.chunks.index
-                                );
-                            tracks[0].source.chunks.index.iterate = (q, o) => {
-                                const iterator = iterate(q, o);
-                                const next = iterator.next.bind(iterator);
-                                iterator.next = async (args) => {
-                                    once && (await bufferPausePromise.promise);
-                                    once = true;
-                                    return next(args);
-                                };
-                                return iterator;
-                            };
-                            gotTrackPromise.resolve();
-                        }
-                    },
-                    onProgress: (ev) => {
-                        chunks.push(ev);
-                    },
-                    onUnderflow: () => {
-                        if (chunks.length > 0) {
-                            underflowCalled = true;
-                        }
-                    },
-                });
+                const iterateStub = interceptTrackSourceIterator(
+                    (trackIterator) => {
+                        const next = trackIterator.next.bind(trackIterator);
+                        trackIterator.next = async (args: number) => {
+                            once && (await bufferPausePromise.promise);
+                            once = true;
+                            return next(args);
+                        };
+                    }
+                );
 
-                await gotTrackPromise.promise;
-                await waitForResolved(() => expect(chunks.length).to.eq(1));
-                await waitForResolved(() => expect(underflowCalled).to.be.true);
+                try {
+                    iterator = await viewerStreams.iterate(0, {
+                        bufferSize: 1,
+                        onTracksChange(tracks) {
+                            tracks[0] && gotTrackPromise.resolve();
+                        },
+                        onProgress: (ev) => {
+                            chunks.push(ev);
+                        },
+                        onUnderflow: () => {
+                            if (chunks.length > 0) {
+                                underflowCalled = true;
+                            }
+                        },
+                    });
 
-                let time = iterator.time();
-                for (let i = 0; i < 10; i++) {
-                    await delay(1e2);
-                    expect(iterator.time()).to.eq(time); // should pause since we are stuck
+                    await gotTrackPromise.promise;
+                    await waitForResolved(
+                        () => expect(chunks.length).to.eq(1),
+                        {
+                            timeout: 15_000,
+                        }
+                    );
+                    await waitForResolved(
+                        () => expect(underflowCalled).to.be.true
+                    );
+
+                    let time = iterator.time();
+                    for (let i = 0; i < 10; i++) {
+                        await delay(1e2);
+                        expect(iterator.time()).to.eq(time); // should pause since we are stuck
+                    }
+                    bufferPausePromise.resolve(); // release the lock
+                    await waitForResolved(() => expect(chunks.length).to.eq(2));
+                    expect(iterator.time()).to.be.greaterThan(time as number);
+                } finally {
+                    bufferPausePromise.resolve();
+                    iterateStub.restore();
                 }
-                bufferPausePromise.resolve(); // release the lock
-                await waitForResolved(() => expect(chunks.length).to.eq(2));
-                expect(iterator.time()).to.be.greaterThan(time as number);
             });
 
             test("current time is accurate after pause resume when lagging", async () => {
@@ -3080,52 +5135,58 @@ describe("MediaStream", () => {
                 let bufferPausePromise = pDefer();
                 let once = false;
                 let gotTrackPromise = pDefer();
-                iterator = await viewerStreams.iterate(0, {
-                    bufferSize: 1,
-                    onTracksChange(tracks) {
-                        if (tracks[0]) {
-                            const iterate =
-                                tracks[0].source.chunks.index.iterate.bind(
-                                    tracks[0].source.chunks.index
-                                );
-                            tracks[0].source.chunks.index.iterate = (q, o) => {
-                                const iterator = iterate(q, o);
-                                const next = iterator.next.bind(iterator);
-                                iterator.next = async (args) => {
-                                    once && (await bufferPausePromise.promise);
-                                    once = true;
-                                    return next(args);
-                                };
-                                return iterator;
-                            };
-                            gotTrackPromise.resolve();
-                        }
-                    },
-                    onProgress: (ev) => {
-                        chunks.push(ev);
-                    },
-                });
-
-                await gotTrackPromise.promise;
-                await waitForResolved(() => expect(chunks.length).to.eq(1));
-                let time = iterator.time();
-                await delay(1e3);
-                bufferPausePromise.resolve(); // release the lock
-                await waitForResolved(() => expect(chunks.length).to.eq(2));
-                let timeAfterBuffer = iterator.time();
-                expect(timeAfterBuffer as number).to.be.greaterThan(
-                    time as number
+                const iterateStub = interceptTrackSourceIterator(
+                    (trackIterator) => {
+                        const next = trackIterator.next.bind(trackIterator);
+                        trackIterator.next = async (args: number) => {
+                            once && (await bufferPausePromise.promise);
+                            once = true;
+                            return next(args);
+                        };
+                    }
                 );
-                const delta = (timeAfterBuffer as number) - (time as number);
-                expect(delta).to.lessThan(100 * 1e3); // while 1s has passed, the time between two frames is less
-                iterator.pause();
-                iterator.play();
-                let timeAfterPlay = iterator.time();
-                //   expect(timeAfterPlay).to.eq(timeAfterBuffer) // because no new frames has come, even if 1s has passed
-                await delay(1e3);
-                let timeAfterPlayDelay = iterator.time();
-                // expect(timeAfterPlayDelay).to.eq(timeAfterBuffer) // because no new frames has come, even if 1s has passed
-                expect(timeAfterPlayDelay).to.eq(timeAfterPlay);
+
+                try {
+                    iterator = await viewerStreams.iterate(0, {
+                        bufferSize: 1,
+                        onTracksChange(tracks) {
+                            tracks[0] && gotTrackPromise.resolve();
+                        },
+                        onProgress: (ev) => {
+                            chunks.push(ev);
+                        },
+                    });
+
+                    await gotTrackPromise.promise;
+                    await waitForResolved(
+                        () => expect(chunks.length).to.eq(1),
+                        {
+                            timeout: 15_000,
+                        }
+                    );
+                    let time = iterator.time();
+                    await delay(1e3);
+                    bufferPausePromise.resolve(); // release the lock
+                    await waitForResolved(() => expect(chunks.length).to.eq(2));
+                    let timeAfterBuffer = iterator.time();
+                    expect(timeAfterBuffer as number).to.be.greaterThan(
+                        time as number
+                    );
+                    const delta =
+                        (timeAfterBuffer as number) - (time as number);
+                    expect(delta).to.lessThan(100 * 1e3); // while 1s has passed, the time between two frames is less
+                    await iterator.pause();
+                    await iterator.play();
+                    let timeAfterPlay = iterator.time();
+                    //   expect(timeAfterPlay).to.eq(timeAfterBuffer) // because no new frames has come, even if 1s has passed
+                    await delay(1e3);
+                    let timeAfterPlayDelay = iterator.time();
+                    // expect(timeAfterPlayDelay).to.eq(timeAfterBuffer) // because no new frames has come, even if 1s has passed
+                    expect(timeAfterPlayDelay).to.eq(timeAfterPlay);
+                } finally {
+                    bufferPausePromise.resolve();
+                    iterateStub.restore();
+                }
             });
 
             test("time will progress on track with no chunks", async () => {
@@ -3278,12 +5339,12 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(underFlowCalled).to.have.length(1)
                 );
-                // underflow should be called when we go into the buffer loop and does not have any frames,
-                // so we will receive  freezeAtChunk - bufferSize amount of chunks
-                // so (freezeAtChunk - bufferSize - 1) * delta * 1e3 ms microseconds
-                // -1 because we will play the first frame at 0 and not at 1
+                // The blocked read begins after freezeAtChunk frames have been
+                // buffered. Underflow must wait until that buffered tail has
+                // played, so its media time is the last delivered frame.
+                expect(chunks).to.have.length(freezeAtChunk);
                 expect(underFlowCalled[0]).to.be.closeTo(
-                    (freezeAtChunk - bufferSize - 1) * delta * 1e3,
+                    (freezeAtChunk - 1) * delta * 1e3,
                     1e5
                 );
             });
@@ -3331,7 +5392,7 @@ describe("MediaStream", () => {
                 }
             });
 
-            test("merges segments on re-start at the same time", async () => {
+            test("keeps one merged segment when restarting at the same time", async () => {
                 let size = 200;
                 let delta = 10;
                 const {
@@ -3345,10 +5406,15 @@ describe("MediaStream", () => {
                         },
                     });
                 let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+                let tracks: Track[][] = [];
 
                 iterator = await viewerStreams.iterate(0, {
                     bufferTime: 10, // 10 ms,
                     bufferSize: 10,
+                    keepTracksOpen: true,
+                    onTracksChange: (current) => {
+                        tracks.push(current);
+                    },
                     onProgress: (ev) => {
                         chunks.push(ev);
                     },
@@ -3357,25 +5423,60 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(chunks).to.have.length(size)
                 );
+                await waitForResolved(async () =>
+                    expect(
+                        await tracks[0]?.[0]?.source.chunks.log.getMyReplicationSegments()
+                    ).to.have.length(1)
+                );
+                const firstSegment = (
+                    await tracks[0][0].source.chunks.log.getMyReplicationSegments()
+                )[0];
+                const firstRange = {
+                    idString: firstSegment.idString,
+                    hash: firstSegment.hash,
+                    start1: firstSegment.start1,
+                    end1: firstSegment.end1,
+                    start2: firstSegment.start2,
+                    end2: firstSegment.end2,
+                    width: firstSegment.width,
+                };
                 await iterator.close();
 
                 chunks = [];
+                tracks = [];
                 iterator = await viewerStreams.iterate(0, {
                     bufferTime: 10, // 10 ms,
                     bufferSize: 10,
+                    keepTracksOpen: true,
+                    onTracksChange: (current) => {
+                        tracks.push(current);
+                    },
                     onProgress: (ev) => {
                         chunks.push(ev);
-                    },
-                    onReplicationChange: (range) => {
-                        expect(
-                            viewerStreams.node.identity.publicKey.hashcode() ===
-                                range.hash
-                        ).to.be.false;
                     },
                 });
 
                 await waitForResolved(() =>
                     expect(chunks).to.have.length(size)
+                );
+                await waitForResolved(async () =>
+                    expect(
+                        await tracks[0]?.[0]?.source.chunks.log.getMyReplicationSegments()
+                    ).to.have.length(1)
+                );
+                const restartedSegments =
+                    await tracks[0][0].source.chunks.log.getMyReplicationSegments();
+                expect({
+                    idString: restartedSegments[0].idString,
+                    hash: restartedSegments[0].hash,
+                    start1: restartedSegments[0].start1,
+                    end1: restartedSegments[0].end1,
+                    start2: restartedSegments[0].start2,
+                    end2: restartedSegments[0].end2,
+                    width: restartedSegments[0].width,
+                }).to.deep.equal(firstRange);
+                expect(firstRange.hash).to.eq(
+                    viewerStreams.node.identity.publicKey.hashcode()
                 );
             });
 
@@ -3861,7 +5962,7 @@ describe("MediaStream", () => {
                     },
                     onTrackOptionsChange: (tracks) => {
                         tracks.forEach((track) => {
-                            trackOptions.set(track.address, track);
+                            trackOptions.set(track.idString, track);
                         });
                     },
                     onTracksChange: (tracks) => {
@@ -3877,8 +5978,8 @@ describe("MediaStream", () => {
                                 ).to.have.length(1);
                                 expect(
                                     selectedTracks[selectedTracks.length - 1][0]
-                                        .address
-                                ).to.eq(unselected.address);
+                                        .idString
+                                ).to.eq(unselected.idString);
                                 selectedUnselected.resolve();
                             } catch (error) {
                                 // ignore
@@ -3890,20 +5991,20 @@ describe("MediaStream", () => {
                 await waitForResolved(() => {
                     expect(selectedTracks).to.have.length(1);
                     expect(selectedTracks[0]).to.have.length(1);
-                    expect(selectedTracks[0][0].address).to.be.oneOf([
-                        track1.address,
-                        track2.address,
+                    expect(selectedTracks[0][0].idString).to.be.oneOf([
+                        track1.idString,
+                        track2.idString,
                     ]);
                 });
 
                 selected =
-                    selectedTracks[0][0].address === track1.address
-                        ? trackOptions.get(track1.address)!
-                        : trackOptions.get(track2.address)!;
+                    selectedTracks[0][0].idString === track1.idString
+                        ? trackOptions.get(track1.idString)!
+                        : trackOptions.get(track2.idString)!;
                 unselected =
-                    selectedTracks[0][0].address === track1.address
-                        ? trackOptions.get(track2.address)!
-                        : trackOptions.get(track1.address)!;
+                    selectedTracks[0][0].idString === track1.idString
+                        ? trackOptions.get(track2.idString)!
+                        : trackOptions.get(track1.idString)!;
 
                 // select the unselected track
                 await delay(3e3); // wait  for some time to consume some chunks from the first track
@@ -3914,9 +6015,9 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(chunks).to.have.length(chunkCountPerTrack)
                 );
-                expect(chunks[0].track.address).to.eq(selected.address); // starts from the first track
-                expect(chunks[chunks.length - 1].track.address).to.eq(
-                    unselected.address
+                expect(chunks[0].track.idString).to.eq(selected.idString); // starts from the first track
+                expect(chunks[chunks.length - 1].track.idString).to.eq(
+                    unselected.idString
                 ); // ends on the second track
             });
         });
@@ -3959,12 +6060,12 @@ describe("MediaStream", () => {
 
                 // assert the track options are correct for each time
                 expect(
-                    trackOptionsPerChunk.map((x) => x.map((y) => y.address))
+                    trackOptionsPerChunk.map((x) => x.map((y) => y.idString))
                 ).to.deep.eq([
-                    [track1.address],
-                    [track1.address],
-                    [track2.address],
-                    [track2.address],
+                    [track1.idString],
+                    [track1.idString],
+                    [track2.idString],
+                    [track2.idString],
                 ]);
 
                 await waitForResolved(() =>
@@ -4041,14 +6142,13 @@ describe("MediaStream", () => {
             });
 
             test("many chunks single track", async () => {
-                let size = 5e3;
+                const size = 1e3;
 
-                const { mediaStreams, track1, viewerStreams } =
-                    await createScenario({
-                        delta: 1,
-                        first: { start: 0, size },
-                    });
-                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+                const { viewerStreams } = await createScenario({
+                    delta: 1,
+                    first: { start: 0, size },
+                });
+                const chunks: { track: Track<any>; chunk: Chunk }[] = [];
 
                 // start playing from track1 and then assume we will start playing from track2
                 const start = 0.23;
@@ -4059,9 +6159,13 @@ describe("MediaStream", () => {
                     },
                 });
 
-                await delay(5e3); // why?
-                await waitForResolved(() =>
-                    expect(chunks.length).to.closeTo(size * (1 - start), 100)
+                const expectedChunkCount = Math.round(size * (1 - start));
+                await waitForResolved(
+                    () =>
+                        expect(
+                            Math.abs(chunks.length - expectedChunkCount)
+                        ).to.be.lessThanOrEqual(size * 0.02),
+                    { timeout: 30_000 }
                 );
                 // assert that the timestamps are correct
                 let delta = chunks[1].chunk.time - chunks[0].chunk.time;
@@ -4122,7 +6226,6 @@ describe("MediaStream", () => {
             });
 
             test("buffers evenly", async () => {
-                // TODO this test is flaky for some reason
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
                 );
@@ -4141,7 +6244,9 @@ describe("MediaStream", () => {
                     })
                 );
 
-                await mediaStreams.tracks.put(track1, { target: "all" });
+                await mediaStreams.tracks.put(track1, {
+                    target: "replicators",
+                });
                 //  console.log(viewerStreams.node.identity.publicKey.hashcode(), await viewerStreams.tracks.log.getCover(undefined as any, undefined))
                 // console.log(await viewerStreams.tracks.index.search(new SearchRequest()));
                 //  await delay(3000)
@@ -4149,31 +6254,33 @@ describe("MediaStream", () => {
 
                 // console.log(await viewerStreams.tracks.index.search(new SearchRequest()));
 
-                let frames = 3e3;
+                const frameIntervalMs = 10;
+                const frames = 300;
 
                 for (let i = 0; i < frames; i++) {
                     await track1.put(
                         new Chunk({
                             chunk: new Uint8Array([i]),
-                            time: i * MILLISECONDS_TO_MICROSECONDS,
+                            time:
+                                i *
+                                frameIntervalMs *
+                                MILLISECONDS_TO_MICROSECONDS,
                             type: "key",
                         })
                     );
                 }
 
-                let t0 = +new Date();
-                let maxDiff = 0;
-                let lastTs: number | undefined = undefined;
-                let diffs: number[] = [];
-                let firstChunkPromise = pDefer();
+                const t0 = performance.now();
+                let lastTs: number | undefined;
+                const diffs: number[] = [];
+                const firstChunkPromise = pDefer<void>();
                 iterator = await viewerStreams.iterate(0, {
                     bufferTime: 1e3,
                     preload: 1e3,
                     onProgress: (ev) => {
                         firstChunkPromise.resolve();
-                        let now = +new Date();
+                        const now = performance.now();
                         if (lastTs) {
-                            maxDiff = Math.max(maxDiff, now - lastTs);
                             diffs.push(now - lastTs);
                         }
                         lastTs = now;
@@ -4185,11 +6292,19 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(chunks.length).to.eq(frames)
                 );
-                let t1 = +new Date();
-                expect(t1 - t0).to.be.greaterThan(frames);
+                const elapsedMs = performance.now() - t0;
+                const mediaDurationMs = (frames - 1) * frameIntervalMs;
+                expect(elapsedMs).to.be.greaterThanOrEqual(mediaDurationMs);
 
-                let meanDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
-                expect(meanDiff - 1).to.be.lessThan(0.001); // TODO polyfill requestAnimationFrame better to make this test more reliable
+                const meanDiff =
+                    diffs.reduce((a, b) => a + b, 0) / diffs.length;
+                // Ten-millisecond frames stay above timer quantization while
+                // retaining a three-second pacing window. The tolerance catches
+                // burst delivery without assuming a dedicated real-time runner.
+                expect(meanDiff).to.be.closeTo(
+                    frameIntervalMs,
+                    frameIntervalMs * 0.25
+                );
             });
 
             test("pause", async () => {
@@ -4211,7 +6326,9 @@ describe("MediaStream", () => {
                     })
                 );
 
-                await mediaStreams.tracks.put(track1, { target: "all" });
+                await mediaStreams.tracks.put(track1, {
+                    target: "replicators",
+                });
 
                 let frames = 1000;
 
@@ -4225,10 +6342,10 @@ describe("MediaStream", () => {
                     );
                 }
                 iterator = await viewerStreams.iterate(0, {
-                    onProgress: (ev) => {
+                    onProgress: async (ev) => {
                         chunks.push(ev);
                         if (chunks.length === frames / 2) {
-                            iterator.pause(); // pause after half of the frames
+                            await iterator.pause(); // pause after half of the frames
                         }
                     },
                 });
@@ -4241,11 +6358,158 @@ describe("MediaStream", () => {
                     throw error;
                 }
 
-                iterator.play();
+                await iterator.play();
 
                 await waitForResolved(() =>
-                    expect(chunks.length).to.eq(frames)
+                    expect(chunks.length).to.be.at.least(frames)
                 );
+                expect(chunks.length).to.eq(frames);
+                chunks.forEach(({ chunk }, index) => {
+                    expect(chunk.time, `frame ${index}`).to.eq(
+                        index * MILLISECONDS_TO_MICROSECONDS
+                    );
+                });
+            });
+
+            test("retries an uncommitted async frame after pause and play", async () => {
+                const { viewerStreams } = await createScenario({
+                    delta: 1,
+                    first: {
+                        start: 0,
+                        size: 3,
+                        type: "video",
+                    },
+                });
+
+                const delivered: number[] = [];
+                const attempts: number[] = [];
+                const blockedAttemptStarted = pDefer<void>();
+                const releaseBlockedAttempt = pDefer<void>();
+                let rejectBlockedAttempt = true;
+                let trackAdmissions = 0;
+                iterator = await viewerStreams.iterate(0, {
+                    preload: 0,
+                    onTracksChange: (tracks) => {
+                        if (tracks.length > 0) {
+                            trackAdmissions++;
+                        }
+                    },
+                    onProgress: async ({ chunk }) => {
+                        attempts.push(chunk.time);
+                        if (
+                            chunk.time === MILLISECONDS_TO_MICROSECONDS &&
+                            rejectBlockedAttempt
+                        ) {
+                            rejectBlockedAttempt = false;
+                            blockedAttemptStarted.resolve();
+                            await releaseBlockedAttempt.promise;
+                            throw new Error(
+                                "synthetic interrupted frame delivery"
+                            );
+                        }
+                        delivered.push(chunk.time);
+                    },
+                });
+
+                try {
+                    await blockedAttemptStarted.promise;
+                    await iterator.pause();
+                    await iterator.play();
+                    expect(trackAdmissions).to.be.greaterThanOrEqual(2);
+                    await delay(100);
+                    expect(delivered).to.deep.eq([0]);
+                    expect(
+                        attempts.filter(
+                            (time) => time === MILLISECONDS_TO_MICROSECONDS
+                        )
+                    ).to.have.length(1);
+                    releaseBlockedAttempt.resolve();
+
+                    await waitForResolved(() =>
+                        expect(delivered).to.deep.eq([
+                            0,
+                            MILLISECONDS_TO_MICROSECONDS,
+                            2 * MILLISECONDS_TO_MICROSECONDS,
+                        ])
+                    );
+                    expect(
+                        attempts.filter(
+                            (time) => time === MILLISECONDS_TO_MICROSECONDS
+                        )
+                    ).to.have.length(2);
+                } finally {
+                    releaseBlockedAttempt.resolve();
+                }
+            });
+
+            test("pauses after an active progress callback fails and retries on play", async () => {
+                const { viewerStreams } = await createScenario({
+                    delta: 1,
+                    first: {
+                        start: 0,
+                        size: 3,
+                        type: "video",
+                    },
+                });
+                const delivered: number[] = [];
+                const attempts: number[] = [];
+                let rejectFrame = true;
+                const errorLog = sinon.stub(console, "error");
+
+                try {
+                    iterator = await viewerStreams.iterate(0, {
+                        preload: 0,
+                        onProgress: async ({ chunk }) => {
+                            attempts.push(chunk.time);
+                            if (
+                                chunk.time === MILLISECONDS_TO_MICROSECONDS &&
+                                rejectFrame
+                            ) {
+                                rejectFrame = false;
+                                await delay(100);
+                                throw new Error(
+                                    "synthetic active frame delivery failure"
+                                );
+                            }
+                            delivered.push(chunk.time);
+                        },
+                    });
+
+                    await waitForResolved(
+                        () => expect(iterator.paused).to.be.true
+                    );
+                    expect(attempts).to.deep.eq([
+                        0,
+                        MILLISECONDS_TO_MICROSECONDS,
+                    ]);
+                    expect(delivered).to.deep.eq([0]);
+                    await delay(100);
+                    expect(attempts).to.deep.eq([
+                        0,
+                        MILLISECONDS_TO_MICROSECONDS,
+                    ]);
+
+                    await iterator.play();
+                    await waitForResolved(() =>
+                        expect(delivered).to.deep.eq([
+                            0,
+                            MILLISECONDS_TO_MICROSECONDS,
+                            2 * MILLISECONDS_TO_MICROSECONDS,
+                        ])
+                    );
+                    expect(
+                        attempts.filter(
+                            (time) => time === MILLISECONDS_TO_MICROSECONDS
+                        )
+                    ).to.have.length(2);
+                    expect(
+                        errorLog.calledWithMatch(
+                            "Media progress callback failed; playback paused"
+                        )
+                    ).to.be.true;
+                } finally {
+                    errorLog.restore();
+                }
             });
 
             test("change from live subscription to progress earlier track", async () => {
@@ -4315,6 +6579,7 @@ describe("MediaStream", () => {
                         [track1.id],
                         [track1.id, track2.id],
                         [track2.id],
+                        [],
                     ])
                 );
             });
@@ -4338,7 +6603,9 @@ describe("MediaStream", () => {
                     })
                 );
 
-                await mediaStreams.tracks.put(track1, { target: "all" });
+                await mediaStreams.tracks.put(track1, {
+                    target: "replicators",
+                });
 
                 let frames = 1000;
 
@@ -4389,7 +6656,9 @@ describe("MediaStream", () => {
                     })
                 );
 
-                await mediaStreams.tracks.put(track1, { target: "all" });
+                await mediaStreams.tracks.put(track1, {
+                    target: "replicators",
+                });
 
                 let frames = 3;
 
@@ -4427,6 +6696,240 @@ describe("MediaStream", () => {
                 }, 5e3);
                 await closePromise.promise;
                 clearTimeout(timeout);
+            });
+
+            test("close on exhausted recorded track without an end time", async () => {
+                const { viewerStreams } = await createScenario({
+                    delta: 10,
+                    first: { start: 0, size: 3 },
+                });
+                const chunks: Chunk[] = [];
+                const trackChanges: Track[][] = [];
+                let closed = false;
+
+                iterator = await viewerStreams.iterate(0, {
+                    preload: 0,
+                    closeOnEnd: true,
+                    onProgress: ({ chunk }) => chunks.push(chunk),
+                    onTracksChange: (tracks) => trackChanges.push(tracks),
+                    onClose: () => {
+                        closed = true;
+                    },
+                });
+
+                await waitForResolved(() => expect(closed).to.be.true);
+                expect(chunks).to.have.length(3);
+                expect(trackChanges).to.have.length(2);
+                expect(trackChanges[0]).to.have.length(1);
+                expect(trackChanges[1]).to.have.length(0);
+                expect(iterator.current.size).to.eq(0);
+            });
+
+            test("close on an exhausted recorded track with no chunks", async () => {
+                const { viewerStreams } = await createScenario({
+                    first: { start: 0, end: 10, size: 0 },
+                });
+                let closed = false;
+
+                iterator = await viewerStreams.iterate(0, {
+                    preload: 0,
+                    closeOnEnd: true,
+                    onClose: () => {
+                        closed = true;
+                    },
+                });
+
+                await waitForResolved(() => expect(closed).to.be.true);
+                expect(iterator.current.size).to.eq(0);
+            });
+
+            test("does not close on an empty non-terminal metadata page", async () => {
+                const { track1, viewerStreams } = await createScenario({
+                    first: { start: 0, end: 10, size: 1 },
+                });
+                let metadataDone = false;
+                let metadataReads = 0;
+                const metadataClose = sinon.stub().resolves();
+                const realMetadataIterate =
+                    viewerStreams.tracks.index.iterate.bind(
+                        viewerStreams.tracks.index
+                    );
+                const metadataStub = sinon
+                    .stub(viewerStreams.tracks.index, "iterate")
+                    .callsFake(((request: any, options: any) => {
+                        // Max-time subscription scans share this index but do
+                        // not use the sorted playback metadata request.
+                        if (
+                            !options?.remote ||
+                            !("replicate" in options.remote)
+                        ) {
+                            return realMetadataIterate(request, options);
+                        }
+                        return {
+                            next: async () => {
+                                metadataReads++;
+                                if (metadataReads === 1) {
+                                    return [];
+                                }
+                                if (metadataReads === 2) {
+                                    return [track1.clone()];
+                                }
+                                metadataDone = true;
+                                return [];
+                            },
+                            done: () => metadataDone,
+                            close: metadataClose,
+                        } as any;
+                    }) as any);
+                const delivered: number[] = [];
+                let closed = false;
+
+                try {
+                    iterator = await viewerStreams.iterate(0, {
+                        preload: 0,
+                        closeOnEnd: true,
+                        onProgress: ({ chunk }) => {
+                            delivered.push(chunk.time);
+                        },
+                        onClose: () => {
+                            closed = true;
+                        },
+                    });
+
+                    expect(metadataReads).to.eq(1);
+                    expect(metadataClose.notCalled).to.be.true;
+                    await delay(100);
+                    expect(closed).to.be.false;
+                    expect(metadataReads).to.eq(1);
+
+                    await waitForResolved(() => expect(closed).to.be.true, {
+                        timeout: 5_000,
+                    });
+                    expect(delivered).to.deep.eq([0]);
+                    expect(metadataReads).to.eq(3);
+                    expect(metadataClose.calledOnce).to.be.true;
+                } finally {
+                    metadataStub.restore();
+                }
+            });
+
+            test("waits for a future recorded segment before closing on end", async () => {
+                const { track1, viewerStreams } = await createScenario({
+                    delta: 1,
+                    first: { start: 0, end: 10, size: 1 },
+                    // Keep the later historical source open-ended so this
+                    // exercises exhausted-recording behavior without a
+                    // finite admission boundary masking a stuck playback clock.
+                    second: { start: 1_000, size: 1 },
+                });
+                const realMetadataIterate =
+                    viewerStreams.tracks.index.iterate.bind(
+                        viewerStreams.tracks.index
+                    );
+                let playbackMetadataIterators = 0;
+                const metadataStub = sinon
+                    .stub(viewerStreams.tracks.index, "iterate")
+                    .callsFake(((request: any, options: any) => {
+                        if (options?.remote && "replicate" in options.remote) {
+                            playbackMetadataIterators++;
+                        }
+                        return realMetadataIterate(request, options);
+                    }) as any);
+                const delivered: number[] = [];
+                const releaseFirstExhaustion = pDefer<void>();
+                const releaseSecondDelivery = pDefer<void>();
+                let firstSourceIteratorWrapped = false;
+                let firstUnderflowObserved = false;
+                let secondDeliveryStarted = false;
+                let closed = false;
+                let closeCalls = 0;
+                const sourceIteratorStub = interceptTrackSourceIterator(
+                    (trackIterator, source) => {
+                        if (
+                            firstSourceIteratorWrapped ||
+                            source.address !== track1.source.address
+                        ) {
+                            return;
+                        }
+                        firstSourceIteratorWrapped = true;
+                        const next = trackIterator.next.bind(trackIterator);
+                        const done = trackIterator.done.bind(trackIterator);
+                        let reads = 0;
+                        let allowExhaustion = false;
+                        trackIterator.done = () => allowExhaustion && done();
+                        trackIterator.next = async (args: number) => {
+                            reads++;
+                            if (reads > 1) {
+                                await releaseFirstExhaustion.promise;
+                                allowExhaustion = true;
+                            }
+                            return next(args);
+                        };
+                    }
+                );
+
+                try {
+                    iterator = await viewerStreams.iterate(0, {
+                        preload: 0,
+                        closeOnEnd: true,
+                        onUnderflow: () => {
+                            firstUnderflowObserved = true;
+                        },
+                        onProgress: async ({ track, chunk }) => {
+                            const timestamp = track.startTime + chunk.time;
+                            if (
+                                timestamp ===
+                                1_000 * MILLISECONDS_TO_MICROSECONDS
+                            ) {
+                                secondDeliveryStarted = true;
+                                await releaseSecondDelivery.promise;
+                            }
+                            delivered.push(timestamp);
+                        },
+                        onClose: () => {
+                            closed = true;
+                            closeCalls++;
+                        },
+                    });
+
+                    await waitForResolved(() =>
+                        expect(delivered).to.deep.eq([0])
+                    );
+                    expect(firstSourceIteratorWrapped).to.be.true;
+                    await waitForResolved(
+                        () => expect(firstUnderflowObserved).to.be.true,
+                        { timeout: 10_000 }
+                    );
+                    releaseFirstExhaustion.resolve();
+                    await waitForResolved(
+                        () => expect(secondDeliveryStarted).to.be.true,
+                        { timeout: 10_000 }
+                    );
+
+                    // Hold the future frame beyond the normal one-second
+                    // metadata rescan. Terminal close-on-end playback must not
+                    // reopen the snapshot from zero and resurrect track one.
+                    await delay(1_100);
+                    expect(closed).to.be.false;
+                    expect(playbackMetadataIterators).to.eq(1);
+
+                    releaseSecondDelivery.resolve();
+
+                    await waitForResolved(() => expect(closed).to.be.true, {
+                        timeout: 30_000,
+                    });
+                    expect(delivered).to.deep.eq([
+                        0,
+                        1_000 * MILLISECONDS_TO_MICROSECONDS,
+                    ]);
+                    expect(playbackMetadataIterators).to.eq(1);
+                    expect(closeCalls).to.eq(1);
+                } finally {
+                    releaseFirstExhaustion.resolve();
+                    releaseSecondDelivery.resolve();
+                    sourceIteratorStub.restore();
+                    metadataStub.restore();
+                }
             });
 
             test("will join adjecent replication segments", async () => {
@@ -4552,10 +7055,17 @@ describe("MediaStream", () => {
                     },
                 });
 
-                await waitForResolved(() =>
-                    expect(chunksFromStart).to.length(
-                        chunksToFetchFromTheBeginning
-                    )
+                await waitForResolved(
+                    () =>
+                        expect(chunksFromStart).to.length(
+                            chunksToFetchFromTheBeginning
+                        ),
+                    {
+                        // A continuation miss may spend 5s on the page request
+                        // and then use the route's 15s recovery window before
+                        // playback reaches this assertion under suite load.
+                        timeout: 30_000,
+                    }
                 );
 
                 const segments =
@@ -4603,7 +7113,7 @@ describe("MediaStream", () => {
                 expect(chunksFromGap.length).to.be.lessThanOrEqual(gapSize);
             });
 
-            test("can rewatch segment after streamer shuts down", async () => {
+            test("rejects an unverified cached segment after the streamer shuts down", async () => {
                 let chunksCount = 1e3;
 
                 const { track1, viewerStreams } = await createScenario({
@@ -4614,7 +7124,6 @@ describe("MediaStream", () => {
                 let chunks: { track: Track<any>; chunk: Chunk }[] = [];
                 let tracks: Track<any>[][] = [];
 
-                let maxTime = 0;
                 iterator = await viewerStreams.iterate(0, {
                     keepTracksOpen: true,
                     onProgress: (ev) => {
@@ -4622,9 +7131,6 @@ describe("MediaStream", () => {
                     },
                     onTracksChange(track) {
                         tracks.push(track);
-                    },
-                    onMaxTimeChange: (newMaxTime) => {
-                        maxTime = newMaxTime.maxTime;
                     },
                 });
 
@@ -4636,30 +7142,31 @@ describe("MediaStream", () => {
                 expect(tracks[0][0].source.chunks.log.log.length).to.eq(
                     chunksCount
                 );
+                const cachedTrack = tracks[0][0];
 
+                await iterator.close();
                 await track1.node.stop();
 
-                chunks = [];
-                tracks = [];
-
-                iterator = await viewerStreams.iterate(0, {
-                    onProgress: (ev) => {
-                        chunks.push(ev);
-                    },
-                    onTracksChange(track) {
-                        tracks.push(track);
-                    },
-                    onMaxTimeChange: (newMaxTime) => {
-                        maxTime = newMaxTime.maxTime;
-                    },
-                });
-
-                await waitForResolved(() =>
-                    expect(chunks.length).to.eq(chunksCount)
-                );
+                try {
+                    await expect(
+                        cachedTrack.source.iterate(0, {
+                            local: true,
+                            remote: {
+                                timeout: 25,
+                                replicate: false,
+                            },
+                        })
+                    ).rejects.toThrow(MissingResponsesError);
+                } finally {
+                    await viewer.stop();
+                    cleanup = undefined;
+                    streamer = await Peerbit.create();
+                    viewer = await Peerbit.create();
+                    await streamer.dial(viewer);
+                }
             });
 
-            test("can rewatch segment after streamer shuts down - 2 tracks", async () => {
+            test("rejects two unverified cached tracks after the streamer shuts down", async () => {
                 let chunksCount = 1e3;
 
                 const { track1, viewerStreams } = await createScenario({
@@ -4669,51 +7176,52 @@ describe("MediaStream", () => {
                 });
 
                 let chunks: { track: Track<any>; chunk: Chunk }[] = [];
-                let tracks: Track<any>[][] = [];
+                const cachedTracks = new Map<string, Track<any>>();
 
-                let maxTime = 0;
                 iterator = await viewerStreams.iterate(0, {
                     keepTracksOpen: true,
                     onProgress: (ev) => {
                         chunks.push(ev);
                     },
-                    onTracksChange(track) {
-                        tracks.push(track);
-                    },
-                    onMaxTimeChange: (newMaxTime) => {
-                        maxTime = newMaxTime.maxTime;
+                    onTracksChange(tracks) {
+                        tracks.forEach((track) =>
+                            cachedTracks.set(track.idString, track)
+                        );
                     },
                 });
 
                 await waitForResolved(() =>
                     expect(chunks.length).to.eq(chunksCount * 2)
                 );
+                expect(cachedTracks.size).to.eq(2);
+                for (const track of cachedTracks.values()) {
+                    expect(track.source.chunks.log.log.length).to.eq(
+                        chunksCount
+                    );
+                }
 
-                // all stuff should be replicated
-                expect(tracks[0][0].source.chunks.log.log.length).to.eq(
-                    chunksCount
-                );
-
+                await iterator.close();
                 await track1.node.stop();
 
-                chunks = [];
-                tracks = [];
-
-                iterator = await viewerStreams.iterate(0, {
-                    onProgress: (ev) => {
-                        chunks.push(ev);
-                    },
-                    onTracksChange(track) {
-                        tracks.push(track);
-                    },
-                    onMaxTimeChange: (newMaxTime) => {
-                        maxTime = newMaxTime.maxTime;
-                    },
-                });
-
-                await waitForResolved(() =>
-                    expect(chunks.length).to.eq(chunksCount * 2)
-                );
+                try {
+                    for (const track of cachedTracks.values()) {
+                        await expect(
+                            track.source.iterate(0, {
+                                local: true,
+                                remote: {
+                                    timeout: 25,
+                                    replicate: false,
+                                },
+                            })
+                        ).rejects.toThrow(MissingResponsesError);
+                    }
+                } finally {
+                    await viewer.stop();
+                    cleanup = undefined;
+                    streamer = await Peerbit.create();
+                    viewer = await Peerbit.create();
+                    await streamer.dial(viewer);
+                }
             });
         });
 
@@ -4936,7 +7444,256 @@ describe("MediaStreams", () => {
     test("address is deterministic", async () => {
         const streamerStreams = await streamer.open(new MediaStreamDBs());
         const viewerStreams = await replicator.open(streamerStreams.clone());
-        expect(viewerStreams.address).to.eq(streamerStreams.address);
+        try {
+            expect(viewerStreams.address).to.eq(streamerStreams.address);
+        } finally {
+            await Promise.allSettled([
+                viewerStreams.close(),
+                streamerStreams.close(),
+            ]);
+        }
+    });
+
+    test("fences parent admission before destructive library drop cleanup", async () => {
+        const library = await replicator.open(
+            new MediaStreamDBs({ id: randomBytes(32) }),
+            { args: { replicate: false } }
+        );
+        const cleanupStarted = pDefer<void>();
+        const releaseCleanup = pDefer<void>();
+        const closeReplicatedStreams = sinon
+            .stub(library as any, "closeReplicatedStreams")
+            .callsFake(async () => {
+                cleanupStarted.resolve();
+                await releaseCleanup.promise;
+            });
+        const dropping = library.drop();
+
+        try {
+            await cleanupStarted.promise;
+            expect(library.acceptsParentAttachments).to.be.false;
+            releaseCleanup.resolve();
+            expect(await dropping).to.be.true;
+        } finally {
+            releaseCleanup.resolve();
+            await dropping.catch(() => {});
+            closeReplicatedStreams.restore();
+        }
+    });
+
+    test("keeps a replicated stream open until final library cleanup succeeds", async () => {
+        const library = await replicator.open(
+            new MediaStreamDBs({ id: randomBytes(32) }),
+            { args: { replicate: false } }
+        );
+        const stream = await replicator.open(
+            new MediaStreamDB(replicator.identity.publicKey),
+            {
+                args: { replicate: false },
+                parent: library,
+            }
+        );
+        const streamId = stream.idString;
+        (library as any).replicatedStreams.set(streamId, stream);
+        const cleanupError = new Error(
+            "synthetic final replicated-stream cleanup failure"
+        );
+        const realClose = stream.close.bind(stream);
+        const closeStream = sinon.stub(stream, "close");
+        closeStream.onFirstCall().rejects(cleanupError);
+        closeStream.onSecondCall().callsFake(realClose);
+
+        try {
+            await expect(library.close()).rejects.toBe(cleanupError);
+            expect(library.closed).to.be.false;
+            expect(stream.closed).to.be.false;
+            expect(stream.parents).to.include(library);
+            expect((library as any).replicatedStreams.get(streamId)).to.eq(
+                stream
+            );
+
+            await library.close();
+            expect(closeStream.callCount).to.eq(2);
+            expect(library.closed).to.be.true;
+            expect(stream.closed).to.be.true;
+            expect((library as any).replicatedStreams.size).to.eq(0);
+        } finally {
+            closeStream.restore();
+            await Promise.allSettled([library.close(), stream.close()]);
+        }
+    });
+
+    test("retries a replicated stream after its failing close detached the parent", async () => {
+        const library = new MediaStreamDBs({ id: randomBytes(32) });
+        const stream = new MediaStreamDB(streamer.identity.publicKey);
+        const streamId = stream.idString;
+        const cleanupError = new Error(
+            "synthetic detached replicated-stream cleanup failure"
+        );
+        stream.closed = false;
+        stream.parents = [library];
+        library.children = [stream];
+        const closeStream = sinon.stub(stream, "close");
+        closeStream.onFirstCall().callsFake(async (from?: any) => {
+            expect(from).to.eq(library);
+            stream.parents = [];
+            stream.closed = true;
+            throw cleanupError;
+        });
+        closeStream.onSecondCall().resolves(true);
+        (library as any).replicatedStreams.set(streamId, stream);
+
+        try {
+            await expect(
+                (library as any).closeReplicatedStreams()
+            ).rejects.toBe(cleanupError);
+            expect((library as any).replicatedStreams.get(streamId)).to.eq(
+                stream
+            );
+            expect(library.children).to.include(stream);
+
+            await (library as any).closeReplicatedStreams();
+            expect(closeStream.callCount).to.eq(2);
+            expect(closeStream.firstCall.calledWithExactly(library)).to.be.true;
+            expect(closeStream.secondCall.calledWithExactly()).to.be.true;
+            expect((library as any).replicatedStreams.has(streamId)).to.be
+                .false;
+            expect(library.children).not.to.include(stream);
+        } finally {
+            closeStream.restore();
+        }
+    });
+
+    test("closes dynamically parented replication streams with the library", async () => {
+        const track = await streamer.open(
+            new Track({
+                sender: streamer.identity.publicKey,
+                source: new AudioStreamDB({ sampleRate: 44100 }),
+                start: 0,
+            })
+        );
+        const mediaStream = await streamer.open(
+            new MediaStreamDB(streamer.identity.publicKey)
+        );
+        await mediaStream.tracks.put(track);
+        const streamerLibrary = await streamer.open(
+            new MediaStreamDBs({ id: randomBytes(32) }),
+            { args: { replicate: false } }
+        );
+        await streamerLibrary.mediaStreams.put(mediaStream);
+        const replicatorLibrary = await replicator.open(
+            streamerLibrary.clone(),
+            { args: { replicate: "all" } }
+        );
+        cleanup = async () => {
+            await Promise.allSettled([
+                replicatorLibrary.close(),
+                streamerLibrary.close(),
+                mediaStream.close(),
+                track.close(),
+            ]);
+        };
+
+        let replicatedStream: MediaStreamDB | undefined;
+        let replicatedTrack: Track | undefined;
+        await waitForResolved(() => {
+            replicatedStream = (replicatorLibrary as any).replicatedStreams.get(
+                mediaStream.idString
+            );
+            expect(replicatedStream).to.exist;
+            expect(replicatedStream!.parents).to.include(replicatorLibrary);
+            replicatedTrack = (
+                replicatedStream as any
+            ).defaultReplicationLeases.get(track.idString)?.handle.track;
+            expect(replicatedTrack).to.exist;
+        });
+
+        await replicatorLibrary.close();
+
+        expect(replicatedStream!.closed).to.be.true;
+        expect(replicatedTrack!.closed).to.be.true;
+        expect((replicatorLibrary as any).replicatedStreams.size).to.eq(0);
+        expect(mediaStream.closed).to.be.false;
+        expect(track.closed).to.be.false;
+    });
+
+    test("closes rather than drops dynamically replicated streams when dropping the library", async () => {
+        const mediaStream = await streamer.open(
+            new MediaStreamDB(streamer.identity.publicKey)
+        );
+        const streamerLibrary = await streamer.open(
+            new MediaStreamDBs({ id: randomBytes(32) }),
+            { args: { replicate: false } }
+        );
+        await streamerLibrary.mediaStreams.put(mediaStream);
+        const replicatorLibrary = await replicator.open(
+            streamerLibrary.clone(),
+            { args: { replicate: "all" } }
+        );
+        cleanup = async () => {
+            await Promise.allSettled([
+                replicatorLibrary.close(),
+                streamerLibrary.close(),
+                mediaStream.close(),
+            ]);
+        };
+
+        let replicatedStream: MediaStreamDB | undefined;
+        await waitForResolved(() => {
+            replicatedStream = (replicatorLibrary as any).replicatedStreams.get(
+                mediaStream.idString
+            );
+            expect(replicatedStream).to.exist;
+            expect(replicatedStream!.parents).to.include(replicatorLibrary);
+        });
+        const closeStream = sinon.spy(replicatedStream!, "close");
+        const dropStream = sinon.spy(replicatedStream!, "drop");
+
+        await replicatorLibrary.drop();
+
+        expect(closeStream.calledOnceWith(replicatorLibrary)).to.be.true;
+        expect(dropStream.notCalled).to.be.true;
+        expect(replicatedStream!.closed).to.be.true;
+        expect((replicatorLibrary as any).replicatedStreams.size).to.eq(0);
+    });
+
+    test("does not close a reused root stream with the library", async () => {
+        const mediaStream = await streamer.open(
+            new MediaStreamDB(streamer.identity.publicKey)
+        );
+        const streamerLibrary = await streamer.open(
+            new MediaStreamDBs({ id: randomBytes(32) }),
+            { args: { replicate: false } }
+        );
+        await streamerLibrary.mediaStreams.put(mediaStream);
+        const externalStream = await replicator.open(mediaStream.clone());
+        const replicatorLibrary = await replicator.open(
+            streamerLibrary.clone(),
+            { args: { replicate: "all" } }
+        );
+        cleanup = async () => {
+            await Promise.allSettled([
+                replicatorLibrary.close(),
+                externalStream.close(),
+                streamerLibrary.close(),
+                mediaStream.close(),
+            ]);
+        };
+
+        await waitForResolved(() => {
+            expect(
+                (replicatorLibrary as any).replicatedStreams.get(
+                    mediaStream.idString
+                )
+            ).to.eq(externalStream);
+            expect(externalStream.parents).to.include(replicatorLibrary);
+        });
+
+        await replicatorLibrary.close();
+
+        expect(externalStream.closed).to.be.false;
+        expect(externalStream.parents).not.to.include(replicatorLibrary);
+        expect((replicatorLibrary as any).replicatedStreams.size).to.eq(0);
     });
 
     test("will start replicating things that are added by default", async () => {

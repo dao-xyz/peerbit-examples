@@ -592,12 +592,15 @@ importers:
 
   packages/media-streaming/music-library/frontend:
     dependencies:
+      '@peerbit/crypto':
+        specifier: ^3.1.4
+        version: 3.1.4
       '@peerbit/document':
-        specifier: ^13.1.0
-        version: 13.1.3
+        specifier: ^13.1.10
+        version: 13.1.10
       '@peerbit/document-react':
-        specifier: ^1.0.45
-        version: 1.0.48(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        specifier: ^1.0.56
+        version: 1.0.56(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
@@ -608,8 +611,8 @@ importers:
         specifier: workspace:*
         version: link:../music-library-utils
       '@peerbit/react':
-        specifier: ^1.1.24
-        version: 1.1.27(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        specifier: ^1.1.33
+        version: 1.1.33(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-dialog':
         specifier: ^1.1.2
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -619,6 +622,9 @@ importers:
       '@radix-ui/react-icons':
         specifier: ^1.3.0
         version: 1.3.2(react@19.2.4)
+      '@radix-ui/react-popover':
+        specifier: ^1.0.7
+        version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-select':
         specifier: ^2.1.6
         version: 2.2.6(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -635,8 +641,8 @@ importers:
         specifier: ^8.0.1
         version: 8.1.1
       peerbit:
-        specifier: ^5.3.0
-        version: 5.3.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+        specifier: ^5.3.8
+        version: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -655,10 +661,13 @@ importers:
       react-use:
         specifier: ^17.6.0
         version: 17.6.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      uint8arrays:
+        specifier: ^5.1.0
+        version: 5.1.1
     devDependencies:
       '@peerbit/vite':
-        specifier: ^2.0.7
-        version: 2.0.7(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
+        specifier: ^2.0.8
+        version: 2.0.8(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
       '@tailwindcss/postcss':
         specifier: ^4.0.14
         version: 4.1.18
@@ -704,72 +713,93 @@ importers:
 
   packages/media-streaming/music-library/music-library-utils:
     dependencies:
+      '@dao-xyz/borsh':
+        specifier: ^6.0.0
+        version: 6.0.1
+      '@peerbit/crypto':
+        specifier: ^3.1.4
+        version: 3.1.4
       '@peerbit/document':
-        specifier: ^13.1.0
-        version: 13.1.3
+        specifier: ^13.1.10
+        version: 13.1.10
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
-      peerbit:
-        specifier: ^5.3.0
-        version: 5.3.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
-      uuid:
-        specifier: ^10.0.0
-        version: 10.0.0
+      '@peerbit/program':
+        specifier: ^6.0.37
+        version: 6.0.37
     devDependencies:
       '@peerbit/test-utils':
-        specifier: ^3.1.0
-        version: 3.1.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+        specifier: ^3.1.8
+        version: 3.1.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/time':
+        specifier: ^3.0.1
+        version: 3.0.1
+      peerbit:
+        specifier: ^5.3.8
+        version: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
 
   packages/media-streaming/playback-utils:
     dependencies:
-      '@peerbit/document':
-        specifier: ^13.1.0
-        version: 13.1.3
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../streaming-utils
-      peerbit:
-        specifier: ^5.3.0
-        version: 5.3.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
-      uuid:
-        specifier: ^10.0.0
-        version: 10.0.0
     devDependencies:
       '@peerbit/test-utils':
-        specifier: ^3.1.0
-        version: 3.1.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+        specifier: ^3.1.8
+        version: 3.1.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
 
   packages/media-streaming/streaming-utils:
     dependencies:
+      '@dao-xyz/borsh':
+        specifier: ^6.0.0
+        version: 6.0.1
+      '@peerbit/crypto':
+        specifier: ^3.1.4
+        version: 3.1.4
       '@peerbit/document':
-        specifier: ^13.1.0
-        version: 13.1.3
+        specifier: ^13.1.10
+        version: 13.1.10
+      '@peerbit/indexer-interface':
+        specifier: ^3.0.8
+        version: 3.0.8
+      '@peerbit/log':
+        specifier: ^6.2.7
+        version: 6.2.7
+      '@peerbit/program':
+        specifier: ^6.0.37
+        version: 6.0.37
       '@peerbit/rpc':
-        specifier: ^6.1.1
-        version: 6.1.1
+        specifier: ^6.1.5
+        version: 6.1.5
       '@peerbit/shared-log':
-        specifier: ^13.2.0
-        version: 13.2.3
-      peerbit:
-        specifier: ^5.3.0
-        version: 5.3.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
-      uuid:
-        specifier: ^10.0.0
-        version: 10.0.0
+        specifier: ^13.2.9
+        version: 13.2.9
+      '@peerbit/time':
+        specifier: ^3.0.1
+        version: 3.0.1
+      p-queue:
+        specifier: ^7.4.1
+        version: 7.4.1
+      uint8arrays:
+        specifier: ^5.1.0
+        version: 5.1.1
     devDependencies:
       '@peerbit/test-utils':
-        specifier: ^3.1.0
-        version: 3.1.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+        specifier: ^3.1.8
+        version: 3.1.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       '@types/sinon':
         specifier: ^20.0.0
         version: 20.0.0
+      peerbit:
+        specifier: ^5.3.8
+        version: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       sinon:
         specifier: ^21.0.0
         version: 21.1.2
@@ -788,9 +818,15 @@ importers:
       '@inquirer/select':
         specifier: ^2
         version: 2.5.0
+      '@peerbit/crypto':
+        specifier: ^3.1.4
+        version: 3.1.4
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
+      peerbit:
+        specifier: ^5.3.8
+        version: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
     devDependencies:
       '@types/inquirer':
         specifier: ^9
@@ -801,12 +837,27 @@ importers:
 
   packages/media-streaming/video-streaming/frontend:
     dependencies:
+      '@emotion/react':
+        specifier: ^11.14.0
+        version: 11.14.0(@types/react@19.2.10)(react@19.2.4)
+      '@emotion/styled':
+        specifier: ^11.14.1
+        version: 11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4)
+      '@mui/icons-material':
+        specifier: ^5.15.7
+        version: 5.18.0(@mui/material@5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@types/react@19.2.10)(react@19.2.4)
+      '@mui/material':
+        specifier: ^5.15.7
+        version: 5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@peerbit/crypto':
+        specifier: ^3.1.4
+        version: 3.1.4
       '@peerbit/document':
-        specifier: ^13.1.0
-        version: 13.1.3
+        specifier: ^13.1.10
+        version: 13.1.10
       '@peerbit/document-react':
-        specifier: ^1.0.45
-        version: 1.0.48(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        specifier: ^1.0.56
+        version: 1.0.56(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
@@ -814,8 +865,14 @@ importers:
         specifier: workspace:*
         version: link:../../playback-utils
       '@peerbit/react':
-        specifier: ^1.1.24
-        version: 1.1.27(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        specifier: ^1.1.33
+        version: 1.1.33(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+      '@peerbit/shared-log':
+        specifier: ^13.2.9
+        version: 13.2.9
+      '@peerbit/time':
+        specifier: ^3.0.1
+        version: 3.0.1
       '@radix-ui/react-dialog':
         specifier: ^1.1.2
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -837,12 +894,18 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: ^1.1.8
         version: 1.2.8(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      buffer:
+        specifier: ^6.0.3
+        version: 6.0.3
+      p-defer:
+        specifier: ^4.0.1
+        version: 4.0.1
       p-queue:
         specifier: ^8.0.1
         version: 8.1.1
       peerbit:
-        specifier: ^5.3.0
-        version: 5.3.3(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+        specifier: ^5.3.8
+        version: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -860,8 +923,8 @@ importers:
         version: 17.6.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
     devDependencies:
       '@peerbit/vite':
-        specifier: ^2.0.7
-        version: 2.0.7(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
+        specifier: ^2.0.8
+        version: 2.0.8(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
       '@tailwindcss/postcss':
         specifier: ^4.0.14
         version: 4.1.18
@@ -2623,6 +2686,17 @@ packages:
   '@mui/core-downloads-tracker@5.18.0':
     resolution: {integrity: sha512-jbhwoQ1AY200PSSOrNXmrFCaSDSJWP7qk6urkTmIirvRXDROkqe+QwcLlUiw/PrREwsIF/vm3/dAXvjlMHF0RA==}
 
+  '@mui/icons-material@5.18.0':
+    resolution: {integrity: sha512-1s0vEZj5XFXDMmz3Arl/R7IncFqJ+WQ95LDp1roHWGDE2oCO3IS4/hmiOv1/8SD9r6B7tv9GLiqVZYHo+6PkTg==}
+    engines: {node: '>=12.0.0'}
+    peerDependencies:
+      '@mui/material': ^5.0.0
+      '@types/react': ^17.0.0 || ^18.0.0 || ^19.0.0
+      react: ^17.0.0 || ^18.0.0 || ^19.0.0
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
+
   '@mui/icons-material@7.3.7':
     resolution: {integrity: sha512-3Q+ulAqG+A1+R4ebgoIs7AccaJhIGy+Xi/9OnvX376jQ6wcy+rz4geDGrxQxCGzdjOQr4Z3NgyFSZCz4T999lA==}
     engines: {node: '>=14.0.0'}
@@ -2727,9 +2801,17 @@ packages:
     resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
     engines: {node: '>= 20.19.0'}
 
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
   '@noble/curves@2.2.0':
     resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
     engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
@@ -2852,21 +2934,41 @@ packages:
   '@peerbit/any-store-interface@1.1.0':
     resolution: {integrity: sha512-d8MgJjtRwGWS9QXL8wc3xTgvoGR49kfL/WpJ7ge+UuPBH5qKIeJ8h2DGFIZoa0DxD543UaVMz3mFoB8JLmBEmQ==}
 
+  '@peerbit/any-store-interface@1.1.1':
+    resolution: {integrity: sha512-KSLqDtNEHQpUN1nsYeZzAHJUxYbFSLOYGKho7PkjCguPt2EsITJuV9YsTW3BFkmY60sDUGKB/gh2LMCLb4pUrw==}
+
+  '@peerbit/any-store-opfs@1.1.10':
+    resolution: {integrity: sha512-NOMqWYdDg9AkfvtvER7t5vVbpjQwOKaMjcok7gSGBN4VPwfYzmcd0Jo3XVJqHu5W5DWTGOyVyOGxSW1o+Dcjnw==}
+
   '@peerbit/any-store-opfs@1.1.8':
     resolution: {integrity: sha512-WJwAZQYUVQXyD9ssMjfXxw1bYcXC4HIr+V+EWtBOOh2cmVZps1GbMD1vyCKRTXd9wt3erLNx+lFAL0roUP1ZWQ==}
 
   '@peerbit/any-store-rust@0.1.1':
     resolution: {integrity: sha512-oJ6xb/vjGk3LKykKONabg625EV3EHT2aNJhOz/tnfr0NcCWxRKF1RauK2g8ioFs459V+K83lecLojMLvQ7TU0Q==}
 
+  '@peerbit/any-store-rust@0.1.2':
+    resolution: {integrity: sha512-+/9hfZQmEdUyM/1k+I7mw1cxUEwdXEyIBQAE2QLPOZObnG7yOGTSuX4wRzuJZ1ZIFeAz/OGLsRIbGYko4+9UAA==}
+
   '@peerbit/any-store@2.2.10':
     resolution: {integrity: sha512-IBX6sJrOGMVZpr1AMHVa+l4VHhMjjEuxV9piaGHIVZ2yPDjlPJqkV2wpbNfmoiKBfiD8p2fTTOpolmWQS6UTyg==}
+
+  '@peerbit/any-store@2.2.12':
+    resolution: {integrity: sha512-bZsr2yVy+aD3UeKWWKqslSmasv+xhNv7/pPIIVHFTXOeJR7l4PiE39HfZ9toe93DBAil4HZckodwivxtSiQiIA==}
 
   '@peerbit/blocks-interface@2.1.0':
     resolution: {integrity: sha512-uZUFab/jJ0VJZtgqM0QEFGwMpH+4PWktS5fqkuwJSANOCSbuWdhX3x56dIu3vIPWfaiuk/EH/BMwgwl2LlwXCw==}
     engines: {node: '>=16.15.1'}
 
+  '@peerbit/blocks-interface@2.1.2':
+    resolution: {integrity: sha512-JnFs25onTUfpVlqG6D/5Rf4t57EGKc0Bp7nG6BIFwCxhae9hQxNz62jaxdc/D2baj+v9G6+rtgL4Tdtz9X1pYQ==}
+    engines: {node: '>=16.15.1'}
+
   '@peerbit/blocks@4.2.1':
     resolution: {integrity: sha512-gcY+EL9wadKOQxk/fhf9OOpfIBQSrsh4nUZEmtBdY7VpFpIqMwfLU5g2KOXIO9+61sCLEzqiwxZxoxE0AHqG8A==}
+    engines: {node: '>=16.15.1'}
+
+  '@peerbit/blocks@4.2.4':
+    resolution: {integrity: sha512-aA+o61g/t/yADkWzvCz0UIxVhR78JfBTKsMtPJo/zfaUtDeaxdGP/0PmW3myRRHf/1aA8x5/s/6JpYqwiRpMXQ==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/build-assets@1.1.0':
@@ -2877,6 +2979,10 @@ packages:
 
   '@peerbit/canonical-client@1.1.36':
     resolution: {integrity: sha512-Sp79Yk4gihIbDB//Mmceais5P/Vh8ZEcAy3+9kaRIG9JAuI+nCblNF1cSH/rV+nbfpVYHKM2HgkLwkjMaaRCIQ==}
+    engines: {node: '>=18'}
+
+  '@peerbit/canonical-client@1.1.40':
+    resolution: {integrity: sha512-yzS8HpF12309ZX/OyKAo6qRJrQeKrCM8rgHrUz7/yDmSeZyFeNiDpbfYqsAgvUQE0+hfKqPhfofmk/rd39vJ6g==}
     engines: {node: '>=18'}
 
   '@peerbit/canonical-host@1.0.44':
@@ -2890,11 +2996,17 @@ packages:
   '@peerbit/crypto@3.1.2':
     resolution: {integrity: sha512-T6BdYJZQmRkJRpv2jqvp/fFCAGWe80bIHgJZ2zNaiUpE1vpjO/wGZaXOxLiCpgtB2HIWcna3o1haRJsO8NnOtw==}
 
+  '@peerbit/crypto@3.1.4':
+    resolution: {integrity: sha512-Iaij+DH4p+Nx3uPJfXsxKFJF0+oOjzLXHjMiFhv2iT88DN3ThiBZ5FWhdnx6z90SF0VzF8R72S+WWqCTDPkuOA==}
+
   '@peerbit/diagnostics@0.0.1':
     resolution: {integrity: sha512-a6jB9mdQfLzO96ITnrqwxkk76QY0w7c88p6eGO4J9h1b/I6MgMhORcOcFEOWZsw84/7GGBq8T5DYgAh8pkOh1w==}
 
   '@peerbit/document-interface@3.2.46':
     resolution: {integrity: sha512-E5aG7Ifc61PLhoO9FiiBmwrutqGqY0o4eK2xXD8OgGY6uYDzu+ry+mgpd0RqZh7Nki9myJ9g4Bp41qMrphojog==}
+
+  '@peerbit/document-interface@3.2.50':
+    resolution: {integrity: sha512-/ybCitcdJffFlV86t7KYU0mtZu1eqpawOWLmRGFjgx9Ao7CBkLEm1+XE5m8B03mRwmN6/YQ/esJ35V2isA4fCg==}
 
   '@peerbit/document-proxy@2.0.48':
     resolution: {integrity: sha512-RqchyF8C3bZ48VSHqyWFtk317f/g6+ZD0X8RHCkhS56ciO3Hbx9Dzzj32NvFSc3lO7Pj13Mis/ZRMeeFdldmhA==}
@@ -2905,11 +3017,22 @@ packages:
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
 
+  '@peerbit/document-react@1.0.56':
+    resolution: {integrity: sha512-x7lfpuqvInd8z643FGx178L/hH6mcFtonEOlSEJTyR4Z8AqxvC6pbEPTJ/5m4bRhm1yrnzT9izFFtD6cWd+S3A==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0
+
   '@peerbit/document-rust@0.1.1':
     resolution: {integrity: sha512-2Lu9j2ohjIFIC7YzeBovWk4mehGEh73kYYRT7HKs+iVD8L/8rjl7TxFrgSDkuPbBBK/yMYvYjK81v176dUNZGA==}
 
+  '@peerbit/document@13.1.10':
+    resolution: {integrity: sha512-l58PUZoYv08CU6xEy0iQAm+kFiCZ+P3KsbFNJSifSxZaQnxk9clgwt788fcv3v3jYPQ1/XWBIJisEpY6YmGpRw==}
+
   '@peerbit/document@13.1.3':
     resolution: {integrity: sha512-fVzw8zC19hMiQ0QelQCP05+ep5HbQsAH1EZjDiTuhiY/a1YvglLngNVF0P0P6qb0aOG/gDnUWX+OoX79wzPUlw==}
+
+  '@peerbit/indexer-cache@0.2.11':
+    resolution: {integrity: sha512-WNUf6JFOCUlNpMt4AJGyk7ANwrJTvC6TmeD1cnV/S4EC2OtPGVXlBBDTrb8aJMewFu0n6DqetMT87utnO2g9uA==}
 
   '@peerbit/indexer-cache@0.2.8':
     resolution: {integrity: sha512-vgShvIWYWd0A1+tXVvcaGDYrEMgbaEN86RV035QgqvUK92D7hrcI2xcWji+GR56EKDjvQgLJ4C9HDI84eq4QyA==}
@@ -2917,11 +3040,23 @@ packages:
   '@peerbit/indexer-interface@3.0.5':
     resolution: {integrity: sha512-m6lzQkIfneaAXa1dpssbyoPMb0jMH3vD+5htf1VipbsabjZmTWNW316smDgHBNbDUMBFuMBpnlqcstwkxrNr2Q==}
 
+  '@peerbit/indexer-interface@3.0.8':
+    resolution: {integrity: sha512-FWjdfmAG99RituhnM32QaosQ5Fx05Sa71HqmYtT8SnuUnTh8tnzYCSMbBp5C2xZxLdDNZ2QjsFG+aVpsvrgLjg==}
+
   '@peerbit/indexer-rust@1.0.2':
     resolution: {integrity: sha512-Knhm6MYJH1iAakC5CrwOWvMWGw48BfKQ9b3oZPUPdrucdG/a14mAosw6ruMBlhweqoP/5G1Dar5I6i1hJuR4aQ==}
 
+  '@peerbit/indexer-rust@1.0.6':
+    resolution: {integrity: sha512-fyueVJPV5tnb7y9wGY+zzgauC89W8gEV2Ah03Vjjo5/2TW+mwlfjeywr7ORknK717QayxaTW+mtI9qOeCiA73g==}
+
+  '@peerbit/indexer-simple@1.2.12':
+    resolution: {integrity: sha512-T7FWZlY0Uzp+43XtVsNmv4VTh+JPgzrmqIvwLyctP9q/dxxJEuETjgufCjESexVh8pmHpD+Dkk9iOrXAqVgWCg==}
+
   '@peerbit/indexer-simple@1.2.8':
     resolution: {integrity: sha512-uy57yqOVWnptlTqJa5pnX+OURwLkTr3HYtbN+eMlUUw9AbYbZFkE2bl2RvSXpigkqnbKtVR6283k1szicPcdzA==}
+
+  '@peerbit/indexer-sqlite3@3.0.11':
+    resolution: {integrity: sha512-OTr4FZwZhbkl6HhjbpjPPe6LxQ9JvT+x+Cu+RhjpbSYDA2pxs08G+8gyLsJB5ePYiqhkyXIYky6jfIptQBUSDg==}
 
   '@peerbit/indexer-sqlite3@3.0.8':
     resolution: {integrity: sha512-GvfPfljRdBUD3ZZKAqg/QxKBHrQAUPQ+sge7yK/604COs1ebDAYDxHj5U3pdtSO1nDp0qf2eP2zwrb6iUVXtTw==}
@@ -2929,8 +3064,15 @@ packages:
   '@peerbit/keychain@1.2.10':
     resolution: {integrity: sha512-FkpUdqrcnWjRSIcmtDz0kTogAWx0ntj4JvobHRPzKbcqq98K8EdhMZEb1bZFwmxP1MqOPkiQVrQxGw+JUxxX5Q==}
 
+  '@peerbit/keychain@1.2.12':
+    resolution: {integrity: sha512-/b+LQ2tRhWIgBHv3Ek4y32UmREjewPRFe+nA5e+nNmmwy97HCQMUJm7Extm+3Ep7ANLHsOuhOuLl5OmDARdzJA==}
+
   '@peerbit/libp2p-test-utils@3.0.6':
     resolution: {integrity: sha512-9uLUOAyQiY4iFR3E3dS/9umZdsI/uRHqdQ/RR4ZpOdrlxAxAwz/VU/LGgcWFympC5hU06CGitYaN1vAUkREpEg==}
+    engines: {node: '>=16.15.1'}
+
+  '@peerbit/libp2p-test-utils@3.0.8':
+    resolution: {integrity: sha512-PFLfHurQ88uWE/zJB3a3utPABWsNbb59HaWXv8Q5UKpmkirsf192eMjgI70AyJbX1WOtC105ZfTyCkou1ddmZw==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/log-rust@1.1.2':
@@ -2940,33 +3082,64 @@ packages:
     resolution: {integrity: sha512-UTp/VdWsbaJgr9yuRsLfntMhEPv2jPYN5LgEBZIGCmZYZ+7aJob05MNNWXXcioHa0gUo7SyYRxtgqYwr1ZDfrQ==}
     engines: {node: '>=16.15.1'}
 
+  '@peerbit/log@6.2.7':
+    resolution: {integrity: sha512-gbPogw/kpNZQwo9141+oBv1RUvwp0QWzkKnBG9/M/onqIiesja+uuoQkuaeGi0zVGZoyghmV0vxxRFGqOXt56g==}
+    engines: {node: '>=16.15.1'}
+
   '@peerbit/logger@2.0.1':
     resolution: {integrity: sha512-CRs8SbcdW4XXk/UPFgcx05AtrwxEP5bW5CVxTUlWhRTCQTFx1JWLRNet5rLEA7kawGfJ7bn8+edd9AJTfHGWOg==}
 
   '@peerbit/native-backbone@0.1.2':
     resolution: {integrity: sha512-FXIbwjyOs6r3U085PVrWB5RoTUpDIpJ+ZAWpgj2qyaz0fUdV8N2inpfXv0pO7kI7UEQ3Oh6FXgAToNZK1stDbw==}
 
+  '@peerbit/native-backbone@0.2.1':
+    resolution: {integrity: sha512-as7bRr+9aflaUIBMXd/IG6pTC15PhXlFihUt72x4xcOE8lhI8rmLsM092kOq99Osq587S/6BDhFg8ADICGMdxQ==}
+
   '@peerbit/network-rust@0.1.1':
     resolution: {integrity: sha512-1r9+TxSR5zZCHD5izOX9N3yDPxju6HL8Xo5VgWo7Y3VoFuwdBEgpS1GNQpA/M7WJ0+YM6SQXviigdKfGjvLuGA==}
+
+  '@peerbit/network-rust@0.1.2':
+    resolution: {integrity: sha512-WxUcqZQOc2kQy+yoKRD2xRrT4eiHa0Nvqn885GGiWqBP8AK/P32BtO8ogA9UHJcWkhUe62/P5gb7r67m36RfFQ==}
 
   '@peerbit/program-react@0.4.36':
     resolution: {integrity: sha512-Nnm360u79Vtu3A71R5pSTYaJWCQ6X8n/QX929xiCnA4FwisAygpOQpXzQQs3hypjge4wsYuFO+I0gVxHp4t7Iw==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
 
+  '@peerbit/program-react@0.4.41':
+    resolution: {integrity: sha512-tAePukJ+bporhcTXlqUV7hDelAK7tqK8Pwu+y9r+vZiHW/6UQAuEW7lLxXjHt+qeU8sR2RsbyFl+LzEyjxiNkQ==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0
+
   '@peerbit/program@6.0.33':
     resolution: {integrity: sha512-9wIO0wiU05V/PhsaYTzmfvJCYnGqYm5Mx4SYvF7l0UDn2hR9suvXoFpZ4pPWcqkHRITuru9gA+3oojgas8ax+Q==}
 
+  '@peerbit/program@6.0.37':
+    resolution: {integrity: sha512-WiI/EPRwlNAANvH0mtFsyh5io0Az2G+9dgMM7WZZgD/egRTu4w9GxBPJlQUTGXdjKzDRYpucUiokQIRbwMQwiQ==}
+
   '@peerbit/pubsub-interface@5.1.5':
     resolution: {integrity: sha512-pwK1Y/RL5fbhq8uDOgK++RYe/HGDwgigUTQ7GLHiDflgGQtSLzE9gcXWdEthLdiM3pQgUjYwc7T7DtTh+IxtfQ==}
+    engines: {node: '>=16.15.1'}
+
+  '@peerbit/pubsub-interface@5.1.7':
+    resolution: {integrity: sha512-ISe3PXDvszgf8St4Ga1ZiLjYRlIsEy8Sy+PRbzjSuCPWhimhu40yffTnerH8uFO2kAK1p0uJ4oA3zqssUQLR1Q==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/pubsub@5.3.0':
     resolution: {integrity: sha512-xvKtixtH652DRh272mC4hqxCZJ3a/fvcF+8C2+Km5qnC8wFhrJw90q4fQJwQ01YkjYM17KgtEoQl69RwpSCUjQ==}
     engines: {node: '>=16.15.1'}
 
+  '@peerbit/pubsub@5.3.2':
+    resolution: {integrity: sha512-m2W3pYICUAbTi1K+L1xOtddROUuxn/bJ8ngANhfPiLsrzfYrnC+E2MUtcNkNfrwg9biTchrmGyXB7cfuWpgFXg==}
+    engines: {node: '>=16.15.1'}
+
   '@peerbit/react@1.1.27':
     resolution: {integrity: sha512-OcUNYUn/fqP72sDrgYaBokwmEoNzEHd7yvsvoYn0LW5+L0JNpcquiebj85JbJLlrhpDfble5QxR7T7de6PW6gw==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0
+
+  '@peerbit/react@1.1.33':
+    resolution: {integrity: sha512-Vr5PkGqcePSezaopLk+IvIoO5lGFQ7aZGOv8tWQ+9OK0dKoA/+lXImsRIx2xuXnmWDOQyw0m/Dz7RVotlKSaTA==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
 
@@ -2976,6 +3149,9 @@ packages:
   '@peerbit/rpc@6.1.1':
     resolution: {integrity: sha512-UbZK1/LkwMzN50qkhtqgZC137aGJXEUv5Qgc9Wwu6PUD98U0lP+5fgD+QNTTaLlq6JsOxnxScg3jw8InTacnfg==}
 
+  '@peerbit/rpc@6.1.5':
+    resolution: {integrity: sha512-H5NPtxKNS598RXYtEZfJBVIKxnmsndgDJq7uaP2DdeN6UFH40vMx09M57KVdaodxqTWlsPllPybhoGzi9jUsww==}
+
   '@peerbit/shared-log-proxy@2.0.47':
     resolution: {integrity: sha512-lwTTqkVJhA69HW/K+sA/j+3Cfmm7dE//WSClcrUBio2h7yhaBlqy2Oiw5kl7AzFaKF8oxlXoRsso3kPzDzXwTQ==}
     engines: {node: '>=18'}
@@ -2983,15 +3159,29 @@ packages:
   '@peerbit/shared-log-rust@0.1.1':
     resolution: {integrity: sha512-UqCHPaewrZBsnne4njlUF/BBvnqe7M3ISYPtKnoD1sdLOVa3hPhNYNsWYSZO38je3+77CfJJ8fS2cLj2JeWRsg==}
 
+  '@peerbit/shared-log-rust@0.1.3':
+    resolution: {integrity: sha512-7m4obLPuKnViO1pUHH7CvR01lV6nYCw3fJDxxUZu0TrQ6SP/xSdO4lI6Q8K0V6m1KOxopVJrrKUrNhW35NHhJQ==}
+
   '@peerbit/shared-log@13.2.3':
     resolution: {integrity: sha512-guXc1vL+YZNiPXFq90cEaMkmsk9zIXITEo9G4gzVMpcB+YNUTojiY08lTaXPbCj2/Qi/gh3V25UU+hnNWWlPiQ==}
+
+  '@peerbit/shared-log@13.2.9':
+    resolution: {integrity: sha512-yhWQanYTJ2fAEmspN6IzQLPAbDE7ukWBPADqApa3OTqtcnSlcMituA6jGWf/HHvPinRXKKCrEV3bAKftT4gVkQ==}
 
   '@peerbit/stream-interface@6.0.11':
     resolution: {integrity: sha512-s7knnyPCkTftSHazStFPDU5yyLLzZjWIf9N5V45ErQyR3ebPshlx3jnjaVPI3MOkkAJb76Q0gZZ5mrQkEq4YCA==}
     engines: {node: '>=16.15.1'}
 
+  '@peerbit/stream-interface@6.0.13':
+    resolution: {integrity: sha512-fpJaWPI4TQLsOl6s4nSY7fRGUnmR85lJQEV0J7RYI1ERX2I1Rg9RpRL/vifjJO4dOqWpT59MWA8EpaHsDGUFGg==}
+    engines: {node: '>=16.15.1'}
+
   '@peerbit/stream@5.1.0':
     resolution: {integrity: sha512-ylrObYHdEKHVdc0p8aItz18EOn4m8F0UYyDU1AbbcjwFgIjFnegbyvk+9R92j/xWTisOk4hK11xeKPUKRK221w==}
+    engines: {node: '>=16.15.1'}
+
+  '@peerbit/stream@5.1.2':
+    resolution: {integrity: sha512-YIoktTDyLK3lRqwSFukMHe94NQDugAif6rapFrrUgssqdhuNrjp/iJFN8iDGBuPukKGgKtmLGtqfMHGlTufgKg==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/string@5.1.70':
@@ -3001,14 +3191,25 @@ packages:
     resolution: {integrity: sha512-UAKBQZaEYt9iEoyj5NQBF+G/lkcAGRzqDktAHYDcWhA0HMQlGXqDkY2QZVkf6vdYRKs4C2K48LZAvj/SV6eAGg==}
     engines: {node: '>=16.15.1'}
 
+  '@peerbit/test-utils@3.1.8':
+    resolution: {integrity: sha512-ZBjxKchhTNj96XzI/ODiBjGHvl72qMTeH+8Djd0XpLkMxJqe0iCnieBxvfjyZ+krF8emK54J6cReSm8mkkhUmw==}
+    engines: {node: '>=16.15.1'}
+
   '@peerbit/time@3.0.0':
     resolution: {integrity: sha512-UpFwxHkS9qTFFDPqZji5J1yHJdNEzlGObmZFj9yg1kl+4jEuxhjL7sjL+KYx5W9O1E45RMZUTw1mMvUEhCr18Q==}
+
+  '@peerbit/time@3.0.1':
+    resolution: {integrity: sha512-TceT0VZ9f1lymF61Wr7rYbfs2Zlxa2ehwxYIOkpHUdnwfvp53TMTOKfKNWg1kXkOTgCPBaEk3A2qAcKdWfYHnQ==}
 
   '@peerbit/trusted-network@6.0.48':
     resolution: {integrity: sha512-yqa3SwLrmXl2GD4iMlgn38beAFExC3wsiHczqIAAMEp2PR1IkKSESSPBptTIO4bdhLe7D2nhuehWXCLF3NplvA==}
 
   '@peerbit/vite@2.0.7':
     resolution: {integrity: sha512-4q6U9WaUgGYpGre03MhD5xVdqRN0YoFDVdMAvEmsDj/3BFi6bPBmz98PJpbbbxc3gAeza7bQrStdtZ27xsMafQ==}
+    engines: {node: '>=16.15.1'}
+
+  '@peerbit/vite@2.0.8':
+    resolution: {integrity: sha512-k/yKMWegUvykBvxA96zci5lwSye7dp5pY+cMM89zmFKptOJxj0xszOSFmcsZ83sHFdo9+lyb07HhPpq+/f+UcA==}
     engines: {node: '>=16.15.1'}
 
   '@pinojs/redact@0.4.0':
@@ -3072,6 +3273,9 @@ packages:
 
   '@protobufjs/utf8@1.1.1':
     resolution: {integrity: sha512-oOAWABowe8EAbMyWKM0tYDKi8Yaox52D+HWZhAIJqQXbqe0xI/GV7FhLWqlEKreMkfDjshR5FKgi3mnle0h6Eg==}
+
+  '@protobufjs/utf8@1.1.2':
+    resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
 
   '@radix-ui/number@1.1.1':
     resolution: {integrity: sha512-MkKCwxlXTgz6CFoJx3pCwn07GKp36+aZyu/u2Ln2VrA5DcdyCZkASEDBTd8x5whTQQL5CiYf4prXKLcgQdv29g==}
@@ -7185,6 +7389,10 @@ packages:
     resolution: {integrity: sha512-tkAQEw8ysMzmkhgw8k+1U/iPhWNhykKnSk4Rd5zLoPJCuJaGRPo6YposrZgaxHKzDHdDWWZvE/Sk7hsL2X/CpQ==}
     engines: {node: '>=18'}
 
+  p-queue@7.4.1:
+    resolution: {integrity: sha512-vRpMXmIkYF2/1hLBKisKeVYJZ8S2tZ0zEAmIJgdVKP2nq0nh4qCdf8bgw+ZgKrkh71AOCaqzwbJJk1WtdcF3VA==}
+    engines: {node: '>=12'}
+
   p-queue@8.1.1:
     resolution: {integrity: sha512-aNZ+VfjobsWryoiPnEApGGmf5WmNsCo9xu8dfaYamG5qaLP7ClhLN6NgsFe6SwJ2UbLEBK5dv9x8Mn5+RVhMWQ==}
     engines: {node: '>=18'}
@@ -7196,6 +7404,10 @@ packages:
   p-retry@8.0.0:
     resolution: {integrity: sha512-kFVqH1HxOHp8LupNsOys7bSV09VYTRLxarH/mokO4Rqhk6wGi70E0jh4VzvVGXfEVNggHoHLAMWsQqHyU1Ey9A==}
     engines: {node: '>=22'}
+
+  p-timeout@5.1.0:
+    resolution: {integrity: sha512-auFDyzzzGZZZdHz3BtET9VEz0SE/uMEAx7uWfGPucfzEwwe/xH0iVeZibQmANYE/hp9T2+UUZT5m+BKyrDp3Ew==}
+    engines: {node: '>=12'}
 
   p-timeout@6.1.4:
     resolution: {integrity: sha512-MyIV3ZA/PmyBN/ud8vV9XzwTrNtR4jFrObymZYnZqMmW0zA8Z17vnT0rBgFE/TlohB+YCHqXMgZzb3Csp49vqg==}
@@ -7277,6 +7489,10 @@ packages:
 
   peerbit@5.3.3:
     resolution: {integrity: sha512-ptmMi26FczoP7g6how5ovOLyPdBBD7BMpWUSmDNC3uu4244KyIQlbMVEIRtLQdQFhW5LR0oa3pPt4VoSAlhyUw==}
+    engines: {node: '>=18'}
+
+  peerbit@5.3.8:
+    resolution: {integrity: sha512-HNU/qpbnVIH8WDbsbwHqBZuP3nELDOR3lg1XSRUekqp3ZBnREMOeM7DA1I33MbbJ+uNYb/RSc7CrkhOwHeoPAg==}
     engines: {node: '>=18'}
 
   picocolors@1.1.1:
@@ -8455,6 +8671,10 @@ packages:
     deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
+  uuid@11.1.1:
+    resolution: {integrity: sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ==}
+    hasBin: true
+
   v8-compile-cache-lib@3.0.1:
     resolution: {integrity: sha512-wa7YjyUGfNZngI/vtK0UHAN+lgDCxBPCylVXGp0zu59Fz5aiGtNXaq3DhIov063MorB+VfufLh3JlF2KdTK3xg==}
 
@@ -8470,6 +8690,46 @@ packages:
 
   vite@7.3.1:
     resolution: {integrity: sha512-w+N7Hifpc3gRjZ63vYBXA56dvvRlNWRczTdmCBBa+CotUzAPf5b7YMdMR/8CQoeYE5LX3W4wj6RYTgonm1b9DA==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    hasBin: true
+    peerDependencies:
+      '@types/node': ^20.19.0 || >=22.12.0
+      jiti: '>=1.21.0'
+      less: ^4.0.0
+      lightningcss: ^1.21.0
+      sass: ^1.70.0
+      sass-embedded: ^1.70.0
+      stylus: '>=0.54.8'
+      sugarss: ^5.0.0
+      terser: ^5.16.0
+      tsx: ^4.8.1
+      yaml: ^2.4.2
+    peerDependenciesMeta:
+      '@types/node':
+        optional: true
+      jiti:
+        optional: true
+      less:
+        optional: true
+      lightningcss:
+        optional: true
+      sass:
+        optional: true
+      sass-embedded:
+        optional: true
+      stylus:
+        optional: true
+      sugarss:
+        optional: true
+      terser:
+        optional: true
+      tsx:
+        optional: true
+      yaml:
+        optional: true
+
+  vite@7.3.6:
+    resolution: {integrity: sha512-4XP60spRGjSZFf1qYH+dJIkK2znL3zQfl9KkOV9MkkRR/3Dls0dxaBsQPTloEc5BLXWPL9vsOxopxyKoMmDueg==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
     peerDependencies:
@@ -10901,6 +11161,14 @@ snapshots:
 
   '@mui/core-downloads-tracker@5.18.0': {}
 
+  '@mui/icons-material@5.18.0(@mui/material@5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@types/react@19.2.10)(react@19.2.4)':
+    dependencies:
+      '@babel/runtime': 7.29.7
+      '@mui/material': 5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      react: 19.2.4
+    optionalDependencies:
+      '@types/react': 19.2.10
+
   '@mui/icons-material@7.3.7(@mui/material@5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@types/react@19.2.10)(react@19.2.4)':
     dependencies:
       '@babel/runtime': 7.29.7
@@ -11013,9 +11281,15 @@ snapshots:
 
   '@noble/ciphers@2.2.0': {}
 
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
   '@noble/curves@2.2.0':
     dependencies:
       '@noble/hashes': 2.2.0
+
+  '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.2.0': {}
 
@@ -11206,6 +11480,20 @@ snapshots:
       '@dao-xyz/borsh': 6.0.1
       uuid: 10.0.0
 
+  '@peerbit/any-store-interface@1.1.1':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      uuid: 11.1.1
+
+  '@peerbit/any-store-opfs@1.1.10':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/any-store-interface': 1.1.1
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/logger': 2.0.1
+      '@peerbit/time': 3.0.1
+      uuid: 11.1.1
+
   '@peerbit/any-store-opfs@1.1.8':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
@@ -11221,6 +11509,11 @@ snapshots:
       '@peerbit/any-store-interface': 1.1.0
     optional: true
 
+  '@peerbit/any-store-rust@0.1.2':
+    dependencies:
+      '@peerbit/any-store-interface': 1.1.1
+    optional: true
+
   '@peerbit/any-store@2.2.10':
     dependencies:
       '@peerbit/any-store-interface': 1.1.0
@@ -11234,12 +11527,33 @@ snapshots:
       level: 10.0.0
       uuid: 10.0.0
 
+  '@peerbit/any-store@2.2.12':
+    dependencies:
+      '@peerbit/any-store-interface': 1.1.1
+      '@peerbit/any-store-opfs': 1.1.10
+      '@peerbit/build-assets': 1.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/logger': 2.0.1
+      '@peerbit/time': 3.0.1
+      abstract-level: 3.1.1
+      classic-level: 3.0.0
+      level: 10.0.0
+      uuid: 11.1.1
+
   '@peerbit/blocks-interface@2.1.0':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@ipld/dag-cbor': 9.2.7
       '@peerbit/crypto': 3.1.2
       '@peerbit/stream-interface': 6.0.11
+      multiformats: 13.4.2
+
+  '@peerbit/blocks-interface@2.1.2':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@ipld/dag-cbor': 9.2.7
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/stream-interface': 6.0.13
       multiformats: 13.4.2
 
   '@peerbit/blocks@4.2.1':
@@ -11266,6 +11580,30 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@peerbit/blocks@4.2.4':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@ipld/dag-cbor': 9.2.7
+      '@libp2p/interface': 3.2.4
+      '@libp2p/tcp': 11.0.20
+      '@libp2p/websockets': 10.1.13
+      '@peerbit/any-store': 2.2.12
+      '@peerbit/any-store-interface': 1.1.1
+      '@peerbit/blocks-interface': 2.1.2
+      '@peerbit/cache': 3.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/logger': 2.0.1
+      '@peerbit/stream': 5.1.2
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
+      multiformats: 13.4.2
+      p-defer: 4.0.1
+      p-queue: 8.1.1
+      uint8arrays: 5.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@peerbit/build-assets@1.1.0': {}
 
   '@peerbit/cache@3.1.0':
@@ -11281,6 +11619,19 @@ snapshots:
       '@peerbit/canonical-transport': 1.0.0
       '@peerbit/crypto': 3.1.2
       '@peerbit/program': 6.0.33
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@peerbit/canonical-client@1.1.40':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@libp2p/peer-id': 6.0.11
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/canonical-transport': 1.0.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/program': 6.0.37
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -11318,6 +11669,22 @@ snapshots:
       js-sha3: 0.9.3
       libsodium-wrappers: 0.7.15
 
+  '@peerbit/crypto@3.1.4':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@ethersproject/bytes': 5.8.0
+      '@ethersproject/strings': 5.8.0
+      '@libp2p/crypto': 5.1.20
+      '@libp2p/interface': 3.2.4
+      '@libp2p/peer-id': 6.0.11
+      '@noble/curves': 1.9.7
+      '@protobufjs/utf8': 1.1.2
+      '@stablelib/sha256': 2.0.1
+      js-sha3: 0.9.3
+      libsodium-wrappers: 0.7.15
+      multiformats: 13.4.2
+      uint8arrays: 5.1.1
+
   '@peerbit/diagnostics@0.0.1': {}
 
   '@peerbit/document-interface@3.2.46':
@@ -11326,6 +11693,16 @@ snapshots:
       '@peerbit/crypto': 3.1.2
       '@peerbit/indexer-interface': 3.0.5
       '@peerbit/log': 6.2.3
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@peerbit/document-interface@3.2.50':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/log': 6.2.7
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -11362,8 +11739,52 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@peerbit/document-react@1.0.56(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+    dependencies:
+      '@peerbit/document': 13.1.10
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/logger': 2.0.1
+      '@peerbit/react': 1.1.33(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+      react: 19.2.4
+      uuid: 11.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
+
   '@peerbit/document-rust@0.1.1':
     optional: true
+
+  '@peerbit/document@13.1.10':
+    dependencies:
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@libp2p/tcp': 11.0.20
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/cache': 3.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/document-interface': 3.2.50
+      '@peerbit/indexer-cache': 0.2.11
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/indexer-simple': 1.2.12
+      '@peerbit/indexer-sqlite3': 3.0.11
+      '@peerbit/log': 6.2.7
+      '@peerbit/logger': 2.0.1
+      '@peerbit/program': 6.0.37
+      '@peerbit/pubsub': 5.3.2
+      '@peerbit/rpc': 6.1.5
+      '@peerbit/shared-log': 13.2.9
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
+      p-defer: 4.0.1
+      uint8arrays: 5.1.1
+    optionalDependencies:
+      '@peerbit/document-rust': 0.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   '@peerbit/document@13.1.3':
     dependencies:
@@ -11394,6 +11815,13 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@peerbit/indexer-cache@0.2.11':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/time': 3.0.1
+
   '@peerbit/indexer-cache@0.2.8':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
@@ -11408,6 +11836,13 @@ snapshots:
       uint8-varint: 2.0.5
       uuid: 10.0.0
 
+  '@peerbit/indexer-interface@3.0.8':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/crypto': 3.1.4
+      uint8-varint: 2.0.5
+      uuid: 11.1.1
+
   '@peerbit/indexer-rust@1.0.2':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
@@ -11416,12 +11851,40 @@ snapshots:
       uint8arrays: 5.1.1
     optional: true
 
+  '@peerbit/indexer-rust@1.0.6':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/logger': 2.0.1
+      uint8arrays: 5.1.1
+    optional: true
+
+  '@peerbit/indexer-simple@1.2.12':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/logger': 2.0.1
+      uint8arrays: 5.1.1
+
   '@peerbit/indexer-simple@1.2.8':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@peerbit/indexer-interface': 3.0.5
       '@peerbit/logger': 2.0.1
       uint8arrays: 5.1.1
+
+  '@peerbit/indexer-sqlite3@3.0.11':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/time': 3.0.1
+      '@sqlite.org/sqlite-wasm': 3.51.1-build2
+      better-sqlite3: 12.10.0
+      libsodium-wrappers: 0.7.15
+      p-defer: 4.0.1
+      uint8arrays: 5.1.1
+      uuid: 11.1.1
 
   '@peerbit/indexer-sqlite3@3.0.8':
     dependencies:
@@ -11444,6 +11907,14 @@ snapshots:
       '@peerbit/any-store': 2.2.10
       '@peerbit/crypto': 3.1.2
 
+  '@peerbit/keychain@1.2.12':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@libp2p/keychain': 6.1.0
+      '@peerbit/any-store': 2.2.12
+      '@peerbit/crypto': 3.1.4
+
   '@peerbit/libp2p-test-utils@3.0.6(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
@@ -11456,6 +11927,27 @@ snapshots:
       '@libp2p/websockets': 10.1.13
       '@multiformats/multiaddr': 13.0.3
       '@peerbit/crypto': 3.1.2
+      it-pushable: 3.2.4
+      libp2p: 3.3.4
+      libsodium-wrappers: 0.7.16
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
+
+  '@peerbit/libp2p-test-utils@3.0.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))':
+    dependencies:
+      '@chainsafe/libp2p-noise': 17.0.0
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@libp2p/circuit-relay-v2': 4.2.5
+      '@libp2p/identify': 4.1.6
+      '@libp2p/interface': 3.2.4
+      '@libp2p/tcp': 11.0.20
+      '@libp2p/webrtc': 6.0.21(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      '@libp2p/websockets': 10.1.13
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/crypto': 3.1.4
       it-pushable: 3.2.4
       libp2p: 3.3.4
       libsodium-wrappers: 0.7.16
@@ -11498,6 +11990,36 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@peerbit/log@6.2.7':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/any-store': 2.2.12
+      '@peerbit/blocks': 4.2.4
+      '@peerbit/blocks-interface': 2.1.2
+      '@peerbit/cache': 3.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/indexer-simple': 1.2.12
+      '@peerbit/indexer-sqlite3': 3.0.11
+      '@peerbit/keychain': 1.2.12
+      '@peerbit/logger': 2.0.1
+      '@peerbit/pubsub-interface': 5.1.7
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
+      libp2p: 3.3.4
+      libsodium-wrappers: 0.7.15
+      p-queue: 8.1.1
+      path-browserify: 1.0.1
+      pidusage: 4.0.1
+      pino: 9.14.0
+      uint8arrays: 5.1.1
+      uuid: 11.1.1
+    optionalDependencies:
+      '@peerbit/log-rust': 1.1.2
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@peerbit/logger@2.0.1':
     dependencies:
       '@libp2p/logger': 6.2.9
@@ -11507,9 +12029,21 @@ snapshots:
       '@peerbit/blocks-interface': 2.1.0
     optional: true
 
+  '@peerbit/native-backbone@0.2.1':
+    dependencies:
+      '@peerbit/blocks-interface': 2.1.2
+      classic-level: 3.0.0
+    optional: true
+
   '@peerbit/network-rust@0.1.1':
     dependencies:
       '@peerbit/time': 3.0.0
+      p-defer: 4.0.1
+    optional: true
+
+  '@peerbit/network-rust@0.1.2':
+    dependencies:
+      '@peerbit/time': 3.0.1
       p-defer: 4.0.1
     optional: true
 
@@ -11517,6 +12051,15 @@ snapshots:
     dependencies:
       '@peerbit/crypto': 3.1.2
       '@peerbit/program': 6.0.33
+      react: 19.2.4
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@peerbit/program-react@0.4.41(react@19.2.4)':
+    dependencies:
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/program': 6.0.37
       react: 19.2.4
     transitivePeerDependencies:
       - bufferutil
@@ -11544,12 +12087,42 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@peerbit/program@6.0.37':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/any-store-interface': 1.1.1
+      '@peerbit/blocks': 4.2.4
+      '@peerbit/blocks-interface': 2.1.2
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/keychain': 1.2.12
+      '@peerbit/logger': 2.0.1
+      '@peerbit/pubsub': 5.3.2
+      '@peerbit/pubsub-interface': 5.1.7
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
+      multiformats: 13.4.2
+      p-queue: 8.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@peerbit/pubsub-interface@5.1.5':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.4
       '@peerbit/crypto': 3.1.2
       '@peerbit/stream-interface': 6.0.11
+      uint8arraylist: 2.4.9
+
+  '@peerbit/pubsub-interface@5.1.7':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/stream-interface': 6.0.13
       uint8arraylist: 2.4.9
 
   '@peerbit/pubsub@5.3.0':
@@ -11569,6 +12142,34 @@ snapshots:
       '@peerbit/stream': 5.1.0
       '@peerbit/stream-interface': 6.0.11
       '@peerbit/time': 3.0.0
+      any-signal: 4.2.0
+      it-length-prefixed: 10.0.2
+      it-pipe: 3.0.1
+      it-pushable: 3.2.4
+      p-defer: 4.0.1
+      uint8arraylist: 2.4.9
+      uint8arrays: 5.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@peerbit/pubsub@5.3.2':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/circuit-relay-v2': 4.2.5
+      '@libp2p/crypto': 5.1.20
+      '@libp2p/identify': 4.1.6
+      '@libp2p/interface': 3.2.4
+      '@libp2p/tcp': 11.0.20
+      '@libp2p/websockets': 10.1.13
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/any-store-interface': 1.1.1
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/logger': 2.0.1
+      '@peerbit/pubsub-interface': 5.1.7
+      '@peerbit/stream': 5.1.2
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
       any-signal: 4.2.0
       it-length-prefixed: 10.0.2
       it-pipe: 3.0.1
@@ -11609,6 +12210,35 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@peerbit/react@1.1.33(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+    dependencies:
+      '@chainsafe/libp2p-noise': 17.0.0
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/circuit-relay-v2': 4.2.5
+      '@libp2p/crypto': 5.1.20
+      '@libp2p/interface': 3.2.4
+      '@libp2p/webrtc': 6.0.21(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      '@libp2p/websockets': 10.1.13
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/canonical-client': 1.1.40
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/logger': 2.0.1
+      '@peerbit/program': 6.0.37
+      '@peerbit/program-react': 0.4.41(react@19.2.4)
+      debug: 4.4.3(supports-color@5.5.0)
+      detectincognitojs: 1.6.2
+      libsodium-wrappers: 0.7.15
+      peerbit: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      react: 19.2.4
+      uuid: 11.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
+
   '@peerbit/riblt@1.2.0': {}
 
   '@peerbit/rpc@6.1.1':
@@ -11621,6 +12251,21 @@ snapshots:
       '@peerbit/pubsub-interface': 5.1.5
       '@peerbit/stream-interface': 6.0.11
       '@peerbit/time': 3.0.0
+      p-defer: 4.0.1
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@peerbit/rpc@6.1.5':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/logger': 2.0.1
+      '@peerbit/program': 6.0.37
+      '@peerbit/pubsub': 5.3.2
+      '@peerbit/pubsub-interface': 5.1.7
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
       p-defer: 4.0.1
     transitivePeerDependencies:
       - bufferutil
@@ -11644,6 +12289,9 @@ snapshots:
       - utf-8-validate
 
   '@peerbit/shared-log-rust@0.1.1':
+    optional: true
+
+  '@peerbit/shared-log-rust@0.1.3':
     optional: true
 
   '@peerbit/shared-log@13.2.3':
@@ -11681,11 +12329,53 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@peerbit/shared-log@13.2.9':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/crypto': 5.1.20
+      '@peerbit/any-store': 2.2.12
+      '@peerbit/blocks': 4.2.4
+      '@peerbit/blocks-interface': 2.1.2
+      '@peerbit/cache': 3.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/diagnostics': 0.0.1
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/indexer-sqlite3': 3.0.11
+      '@peerbit/log': 6.2.7
+      '@peerbit/logger': 2.0.1
+      '@peerbit/program': 6.0.37
+      '@peerbit/pubsub': 5.3.2
+      '@peerbit/pubsub-interface': 5.1.7
+      '@peerbit/riblt': 1.2.0
+      '@peerbit/rpc': 6.1.5
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
+      json-stringify-deterministic: 1.0.13
+      p-defer: 4.0.1
+      p-each-series: 3.0.0
+      p-queue: 8.1.1
+      pidusage: 4.0.1
+      pino: 9.14.0
+      uint8arrays: 5.1.1
+    optionalDependencies:
+      '@peerbit/native-backbone': 0.2.1
+      '@peerbit/shared-log-rust': 0.1.3
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@peerbit/stream-interface@6.0.11':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.4
       '@peerbit/crypto': 3.1.2
+      uint8arraylist: 2.4.9
+
+  '@peerbit/stream-interface@6.0.13':
+    dependencies:
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@peerbit/crypto': 3.1.4
       uint8arraylist: 2.4.9
 
   '@peerbit/stream@5.1.0':
@@ -11704,6 +12394,39 @@ snapshots:
       '@peerbit/logger': 2.0.1
       '@peerbit/stream-interface': 6.0.11
       '@peerbit/time': 3.0.0
+      abortable-iterator: 5.1.0
+      any-signal: 4.2.0
+      fast-fifo: 1.3.2
+      it-all: 3.0.11
+      it-length-prefixed: 10.0.2
+      it-pipe: 3.0.1
+      it-pushable: 3.2.4
+      libp2p: 3.3.4
+      p-defer: 4.0.1
+      p-queue: 8.1.1
+      uint8arraylist: 2.4.9
+      uint8arrays: 5.1.1
+      yallist: 5.0.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@peerbit/stream@5.1.2':
+    dependencies:
+      '@chainsafe/libp2p-noise': 17.0.0
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@dao-xyz/borsh': 6.0.1
+      '@libp2p/interface': 3.2.4
+      '@libp2p/interface-internal': 3.1.7
+      '@libp2p/tcp': 11.0.20
+      '@libp2p/websockets': 10.1.13
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      '@peerbit/cache': 3.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/logger': 2.0.1
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
       abortable-iterator: 5.1.0
       any-signal: 4.2.0
       fast-fifo: 1.3.2
@@ -11761,7 +12484,34 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@peerbit/test-utils@3.1.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))':
+    dependencies:
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@libp2p/interface': 3.2.4
+      '@multiformats/multiaddr': 13.0.3
+      '@peerbit/any-store': 2.2.12
+      '@peerbit/blocks': 4.2.4
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/keychain': 1.2.12
+      '@peerbit/libp2p-test-utils': 3.0.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program': 6.0.37
+      '@peerbit/pubsub': 5.3.2
+      '@peerbit/stream': 5.1.2
+      it-pushable: 3.2.4
+      libp2p: 3.3.4
+      libsodium-wrappers: 0.7.16
+      peerbit: 5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      tty-table: 4.2.3
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
+
   '@peerbit/time@3.0.0': {}
+
+  '@peerbit/time@3.0.1': {}
 
   '@peerbit/trusted-network@6.0.48':
     dependencies:
@@ -11782,6 +12532,24 @@ snapshots:
       '@peerbit/build-assets': 1.1.0
       vite: 7.3.1(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
       vite-plugin-static-copy: 3.3.0(vite@7.3.1(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0))
+    transitivePeerDependencies:
+      - '@types/node'
+      - jiti
+      - less
+      - lightningcss
+      - sass
+      - sass-embedded
+      - stylus
+      - sugarss
+      - terser
+      - tsx
+      - yaml
+
+  '@peerbit/vite@2.0.8(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)':
+    dependencies:
+      '@peerbit/build-assets': 1.1.0
+      vite: 7.3.6(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
+      vite-plugin-static-copy: 3.3.0(vite@7.3.6(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0))
     transitivePeerDependencies:
       - '@types/node'
       - jiti
@@ -11849,6 +12617,8 @@ snapshots:
   '@protobufjs/pool@1.1.0': {}
 
   '@protobufjs/utf8@1.1.1': {}
+
+  '@protobufjs/utf8@1.1.2': {}
 
   '@radix-ui/number@1.1.1': {}
 
@@ -16470,6 +17240,11 @@ snapshots:
 
   p-map@7.0.4: {}
 
+  p-queue@7.4.1:
+    dependencies:
+      eventemitter3: 5.0.4
+      p-timeout: 5.1.0
+
   p-queue@8.1.1:
     dependencies:
       eventemitter3: 5.0.4
@@ -16483,6 +17258,8 @@ snapshots:
   p-retry@8.0.0:
     dependencies:
       is-network-error: 1.3.1
+
+  p-timeout@5.1.0: {}
 
   p-timeout@6.1.4: {}
 
@@ -16599,6 +17376,57 @@ snapshots:
       '@peerbit/log-rust': 1.1.2
       '@peerbit/native-backbone': 0.1.2
       '@peerbit/network-rust': 0.1.1
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
+
+  peerbit@5.3.8(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4)):
+    dependencies:
+      '@chainsafe/libp2p-noise': 17.0.0
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@dao-xyz/borsh': 6.0.1
+      '@dao-xyz/datastore-level': 11.2.0
+      '@libp2p/circuit-relay-v2': 4.2.5
+      '@libp2p/crypto': 5.1.20
+      '@libp2p/identify': 4.1.6
+      '@libp2p/interface': 3.2.4
+      '@libp2p/keychain': 6.1.0
+      '@libp2p/tcp': 11.0.20
+      '@libp2p/webrtc': 6.0.21(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      '@libp2p/websockets': 10.1.13
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      '@peerbit/any-store': 2.2.12
+      '@peerbit/any-store-opfs': 1.1.10
+      '@peerbit/blocks': 4.2.4
+      '@peerbit/build-assets': 1.1.0
+      '@peerbit/crypto': 3.1.4
+      '@peerbit/indexer-interface': 3.0.8
+      '@peerbit/indexer-simple': 1.2.12
+      '@peerbit/indexer-sqlite3': 3.0.11
+      '@peerbit/keychain': 1.2.12
+      '@peerbit/logger': 2.0.1
+      '@peerbit/program': 6.0.37
+      '@peerbit/pubsub': 5.3.2
+      '@peerbit/stream': 5.1.2
+      '@peerbit/stream-interface': 6.0.13
+      '@peerbit/time': 3.0.1
+      '@sqlite.org/sqlite-wasm': 3.51.1-build2
+      level: 10.0.0
+      libp2p: 3.3.4
+      libsodium-wrappers: 0.7.15
+      memory-level: 3.1.0
+      p-queue: 8.1.1
+      path-browserify: 1.0.1
+      uint8arrays: 5.1.1
+    optionalDependencies:
+      '@peerbit/any-store-rust': 0.1.2
+      '@peerbit/indexer-rust': 1.0.6
+      '@peerbit/log-rust': 1.1.2
+      '@peerbit/native-backbone': 0.2.1
+      '@peerbit/network-rust': 0.1.2
     transitivePeerDependencies:
       - bufferutil
       - react-native
@@ -17964,6 +18792,8 @@ snapshots:
 
   uuid@10.0.0: {}
 
+  uuid@11.1.1: {}
+
   v8-compile-cache-lib@3.0.1: {}
 
   vary@1.1.2: {}
@@ -17975,6 +18805,14 @@ snapshots:
       picocolors: 1.1.1
       tinyglobby: 0.2.15
       vite: 7.3.1(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
+
+  vite-plugin-static-copy@3.3.0(vite@7.3.6(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)):
+    dependencies:
+      chokidar: 3.6.0
+      p-map: 7.0.4
+      picocolors: 1.1.1
+      tinyglobby: 0.2.15
+      vite: 7.3.6(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0)
 
   vite@7.3.1(@types/node@20.19.30)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
@@ -17994,6 +18832,23 @@ snapshots:
       yaml: 2.9.0
 
   vite@7.3.1(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0):
+    dependencies:
+      esbuild: 0.27.2
+      fdir: 6.5.0(picomatch@4.0.3)
+      picomatch: 4.0.3
+      postcss: 8.5.6
+      rollup: 4.57.0
+      tinyglobby: 0.2.15
+    optionalDependencies:
+      '@types/node': 26.1.0
+      fsevents: 2.3.3
+      jiti: 2.6.1
+      lightningcss: 1.30.2
+      terser: 5.48.0
+      tsx: 4.21.0
+      yaml: 2.9.0
+
+  vite@7.3.6(@types/node@26.1.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.48.0)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       esbuild: 0.27.2
       fdir: 6.5.0(picomatch@4.0.3)

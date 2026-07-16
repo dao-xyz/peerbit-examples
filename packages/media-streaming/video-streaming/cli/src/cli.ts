@@ -6,9 +6,9 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import events from "events";
-events.setMaxListeners(102);
 
 export const start = async (directory?: string | null) => {
+    events.setMaxListeners(102);
     process.on("uncaughtException", (err) => {
         console.error("Uncaught exception", err);
     });

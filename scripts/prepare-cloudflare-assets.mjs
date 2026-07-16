@@ -9,7 +9,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findForbiddenStaticPeercheckerHost } from "./static-relay-policy.mjs";
+import {
+    findForbiddenStaticPeercheckerHost,
+    hasAuthoritativeBootstrapEndpoint,
+} from "./static-relay-policy.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -143,7 +146,7 @@ for (const site of manifest.staticSites) {
             `${site.id}: build contains forbidden direct peerchecker host pin ${forbiddenStaticHost}`
         );
     }
-    if (!searchable.includes("bootstrap.peerbit.org/bootstrap")) {
+    if (!hasAuthoritativeBootstrapEndpoint(searchable)) {
         throw new Error(
             `${site.id}: build is missing the authoritative bootstrap endpoint`
         );

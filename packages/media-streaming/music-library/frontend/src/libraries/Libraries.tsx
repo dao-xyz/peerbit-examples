@@ -75,18 +75,14 @@ export const Libraries = () => {
     const { libraries, create, loading: isLoadingLibraries } = useLibraries();
     const { getName } = useNames();
 
-    /* live list of library docs */
-    const { items: libraryItems, isLoading: isLoadingQUery } = useQuery(
-        libraries?.libraries,
-        {
-            query: useMemo(() => {
-                return {
-                    sort: new Sort({
-                        key: ["__context", "created"],
-                        direction: SortDirection.DESC,
-                    }),
-                };
-            }, []),
+    const queryOptions = useMemo(
+        () => ({
+            query: {
+                sort: new Sort({
+                    key: ["__context", "created"],
+                    direction: SortDirection.DESC,
+                }),
+            },
             prefetch: true,
             batchSize: 200,
             updates: {
@@ -96,7 +92,14 @@ export const Libraries = () => {
                 reach: { eager: true },
                 wait: { timeout: 5e3 },
             },
-        }
+        }),
+        []
+    );
+
+    /* live list of library docs */
+    const { items: libraryItems, isLoading: isLoadingQUery } = useQuery(
+        libraries?.libraries,
+        queryOptions
     );
 
     const goToLibrary = async (lib: MediaStreamDBs) => {

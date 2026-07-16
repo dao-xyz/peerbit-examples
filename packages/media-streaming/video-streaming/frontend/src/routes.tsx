@@ -1,21 +1,18 @@
 import { Routes, Route } from "react-router";
 import { CreateStream } from "./CreateStream";
 import { StreamOrView } from "./StreamOrView";
-import { MediaStreamDB } from "@peerbit/media-streaming";
-import { Params } from "react-router";
-export const STREAM = "s/:address";
+import { STREAM } from "./streamRoutes";
+import { StreamProgramOwner } from "./StreamProgramOwner";
 
-export const getMediaStreamAddress = (params: Readonly<Params<string>>) =>
-    params.address;
-export const getStreamPath = (db: MediaStreamDB) => {
-    return "s/" + db.address;
-};
+export { getMediaStreamAddress, getStreamPath, STREAM } from "./streamRoutes";
 
 export function BaseRoutes() {
     return (
-        <Routes>
-            <Route path={STREAM} element={<StreamOrView />} />
-            <Route path={"/"} element={<CreateStream />} />
-        </Routes>
+        <StreamProgramOwner>
+            <Routes>
+                <Route path={STREAM} element={<StreamOrView />} />
+                <Route path={"/"} element={<CreateStream />} />
+            </Routes>
+        </StreamProgramOwner>
     );
 }
