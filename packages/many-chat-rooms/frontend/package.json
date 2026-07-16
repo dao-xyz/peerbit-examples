@@ -1,6 +1,6 @@
 {
     "name": "chat-frontend",
-    "version": "0.2.3",
+    "version": "0.2.4",
     "private": true,
     "homepage": "https://github.com/dao-xyz/peerbit-examples",
     "type": "module",

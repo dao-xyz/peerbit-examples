@@ -1,5 +1,12 @@
 # @peerbit/blog
 
+## 2.0.2
+
+### Patch Changes
+
+- Updated dependencies [bfff594]
+    - @peerbit/blog-sdk@2.0.2
+
 ## 2.0.1
 
 ### Patch Changes
