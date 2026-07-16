@@ -11,20 +11,25 @@ export const useCover = (id?: Uint8Array) => {
         existing: "reuse",
     });
 
+    const queryOptions = useMemo(
+        () => ({
+            query: { query: { id } },
+            prefetch: true,
+            updates: {
+                merge: true,
+            },
+            remote: {
+                reach: { eager: true },
+                wait: { timeout: 5000 },
+            },
+        }),
+        [id]
+    );
+
     /* subscribe to THIS id */
     const {
         items: [doc],
-    } = useQuery(imgs.program?.documents, {
-        query: useMemo(() => ({ query: { id } }), [id]),
-        prefetch: true,
-        updates: {
-            merge: true,
-        },
-        remote: {
-            reach: { eager: true },
-            wait: { timeout: 5000 },
-        },
-    });
+    } = useQuery(imgs.program?.documents, queryOptions);
 
     /* blob-url for <img> / background-image */
     const url = useMemo(() => {

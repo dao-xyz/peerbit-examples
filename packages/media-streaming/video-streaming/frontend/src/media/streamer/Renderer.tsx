@@ -1,5 +1,11 @@
 import { inIframe, usePeer, useProgram } from "@peerbit/react";
-import React, { useRef, useState, useEffect, useCallback } from "react";
+import React, {
+    useRef,
+    useState,
+    useEffect,
+    useCallback,
+    useMemo,
+} from "react";
 import {
     Chunk,
     WebcodecsStreamDB,
@@ -31,7 +37,6 @@ import pDefer from "p-defer";
 import { isSafari } from "../utils";
 import { convertGPUFrameToCPUFrame } from "./convertGPUFrameToCPUFrame";
 import { Tracks } from "../controls/Tracks.js";
-import { start } from "repl";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -383,7 +388,7 @@ const createAudioEncoder = async (properties: {
         await audioTrack.source.replicate("streamer");
 
         await properties.mediaStreamDBs.tracks.put(audioTrack, {
-            target: "all",
+            target: "replicators",
         });
 
         let lastAudioTimestamp = -1;
@@ -574,9 +579,10 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         }
     );
 
+    const mediaStreamsToOpen = useMemo(() => new MediaStreamDBs(), []);
     const { program: mediaStreamDBs } = useProgram<MediaStreamDBs>(
         peer,
-        new MediaStreamDBs(),
+        mediaStreamsToOpen,
         {
             existing: "reuse",
             args: {

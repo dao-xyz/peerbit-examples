@@ -23,20 +23,28 @@ export const NamesProvider = ({ children }: PropsWithChildren) => {
     const { peer } = usePeer();
     const namesProg = useProgram(peer, new NamedItems(), {});
 
+    const queryOptions = useMemo(
+        () => ({
+            query: {},
+            prefetch: true,
+            batchSize: 1000,
+            updates: {
+                merge: true,
+            },
+            debug: false,
+            remote: {
+                reach: { eager: true },
+                wait: { timeout: 5000 },
+            },
+        }),
+        []
+    );
+
     /* live cache of all docs */
-    const { items: docs } = useQuery(namesProg.program?.documents, {
-        query: useMemo(() => ({}), []),
-        prefetch: true,
-        batchSize: 1000,
-        updates: {
-            merge: true,
-        },
-        debug: false,
-        remote: {
-            reach: { eager: true },
-            wait: { timeout: 5000 },
-        },
-    });
+    const { items: docs } = useQuery(
+        namesProg.program?.documents,
+        queryOptions
+    );
 
     const value = useMemo<NamesCtx>(() => {
         const program = namesProg.program;

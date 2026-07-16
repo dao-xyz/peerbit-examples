@@ -1,0 +1,291 @@
+name: Media Package Install
+
+on:
+    pull_request:
+        paths:
+            - ".github/workflows/media-package-install.yml"
+            - ".npmrc"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "pnpm-workspace.yaml"
+            - "tsconfig.json"
+            - "scripts/media-package-install-smoke.mjs"
+            - "packages/media-streaming/playback-utils/**"
+            - "packages/media-streaming/streaming-utils/**"
+            - "packages/media-streaming/music-library/music-library-utils/**"
+            - "packages/media-streaming/music-library/frontend/**"
+            - "packages/media-streaming/video-streaming/cli/**"
+            - "packages/media-streaming/video-streaming/frontend/**"
+    push:
+        branches: [master]
+        paths:
+            - ".github/workflows/media-package-install.yml"
+            - ".npmrc"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "pnpm-workspace.yaml"
+            - "tsconfig.json"
+            - "scripts/media-package-install-smoke.mjs"
+            - "packages/media-streaming/playback-utils/**"
+            - "packages/media-streaming/streaming-utils/**"
+            - "packages/media-streaming/music-library/music-library-utils/**"
+            - "packages/media-streaming/music-library/frontend/**"
+            - "packages/media-streaming/video-streaming/cli/**"
+            - "packages/media-streaming/video-streaming/frontend/**"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    NPM_CONFIG_AUDIT: "false"
+    NPM_CONFIG_ENGINE_STRICT: "true"
+    NPM_CONFIG_FUND: "false"
+
+jobs:
+    test:
+        name: Media behavior tests
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  persist-credentials: false
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build media test dependencies
+              run: >-
+                  pnpm -r --sort
+                  --filter @peerbit/media-streaming
+                  --filter @peerbit/music-library-utils
+                  run build
+
+            - name: Test media lifecycle
+              run: >-
+                  pnpm exec vitest run --bail=0
+                  packages/media-streaming/streaming-utils/src/__tests__/index.test.ts
+
+            - name: Test play-stat propagation
+              run: >-
+                  pnpm exec vitest run
+                  packages/media-streaming/music-library/music-library-utils/src/__tests__/index.test.ts
+
+            - name: Test video stream ownership
+              run: pnpm --filter videostreaming test
+
+    pack:
+        name: Build and pack media packages
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  persist-credentials: false
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build published media packages
+              run: >-
+                  pnpm -r --sort
+                  --filter @peerbit/media-streaming
+                  --filter @peerbit/music-library-utils
+                  --filter @peerbit/media-streaming-web
+                  --filter @peerbit/video-replicator-cli
+                  run build
+
+            - name: Pack packages
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  pack_dir="$RUNNER_TEMP/media-packs"
+                  mkdir -p "$pack_dir"
+                  pnpm --filter @peerbit/media-streaming pack --pack-destination "$pack_dir"
+                  pnpm --filter @peerbit/music-library-utils pack --pack-destination "$pack_dir"
+                  pnpm --filter @peerbit/media-streaming-web pack --pack-destination "$pack_dir"
+                  pnpm --filter @peerbit/video-replicator-cli pack --pack-destination "$pack_dir"
+                  test "$(find "$pack_dir" -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')" = 4
+                  ls -l "$pack_dir"
+
+            - name: Upload package tarballs
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: media-packs
+                  path: ${{ runner.temp }}/media-packs/*.tgz
+                  if-no-files-found: error
+                  retention-days: 1
+
+    install:
+        name: Install media packages (Node ${{ matrix.node }})
+        needs: pack
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - node: 22
+                      include-cli: true
+                    - node: 24
+                      include-cli: true
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: ${{ matrix.node }}
+
+            - name: Setup nested-install capable npm
+              run: npm install --global npm@9.9.4
+
+            - name: Download package tarballs
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: media-packs
+                  path: ${{ runner.temp }}/media-packs
+
+            - name: Install and import fresh packages
+              shell: bash
+              env:
+                  INCLUDE_CLI: ${{ matrix.include-cli }}
+              run: |
+                  set -euo pipefail
+                  pack_dir="$RUNNER_TEMP/media-packs"
+                  project_root="$RUNNER_TEMP/media-package-smokes"
+
+                  find_pack() {
+                      local pattern="$1"
+                      local result
+                      result="$(find "$pack_dir" -maxdepth 1 -name "$pattern" -print -quit)"
+                      test -n "$result"
+                      printf '%s\n' "$result"
+                  }
+
+                  assert_fresh_media_install() {
+                      local manifests
+                      manifests="$(find node_modules -path '*/@peerbit/media-streaming/package.json' | wc -l | tr -d ' ')"
+                      test "$manifests" = 1
+                      node --input-type=module -e '
+                          import { readFileSync } from "node:fs";
+                          const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+                          const resolved = lock.packages?.["node_modules/@peerbit/media-streaming"]?.resolved;
+                          if (typeof resolved !== "string" || !resolved.startsWith("file:")) {
+                              throw new Error(`Expected the fresh media tarball, got ${resolved}`);
+                          }
+                      '
+                      npm ls @peerbit/media-streaming --depth=1
+                  }
+
+                  install_and_import() {
+                      local directory="$1"
+                      local tarball="$2"
+                      local package_name="$3"
+                      local export_name="$4"
+                      shift 4
+                      local project_dir="$project_root/$directory"
+                      mkdir -p "$project_dir"
+                      cd "$project_dir"
+                      npm init -y >/dev/null
+                      npm install --ignore-scripts --omit=peer --install-strategy=nested "$@" "$tarball"
+                      if [ "$#" -gt 0 ]; then
+                          assert_fresh_media_install
+                      fi
+                      PACKAGE_NAME="$package_name" EXPORT_NAME="$export_name" node --input-type=module -e '
+                          const imported = await import(process.env.PACKAGE_NAME);
+                          if (!(process.env.EXPORT_NAME in imported)) {
+                              throw new Error(`${process.env.EXPORT_NAME} export missing from ${process.env.PACKAGE_NAME}`);
+                          }
+                      '
+                  }
+
+                  install_and_import_cli() {
+                      local directory="$1"
+                      local tarball="$2"
+                      local media_tarball="$3"
+                      local project_dir="$project_root/$directory"
+                      mkdir -p "$project_dir"
+                      cd "$project_dir"
+                      npm init -y >/dev/null
+                      npm install --ignore-scripts --omit=peer --install-strategy=nested "$media_tarball" "$tarball"
+                      assert_fresh_media_install
+                      node --input-type=module -e '
+                          import events from "node:events";
+                          const previousDefaultMaxListeners = events.defaultMaxListeners;
+                          const imported = await import("@peerbit/video-replicator-cli");
+                          if (typeof imported.start !== "function") {
+                              throw new Error("start export missing from the packed video CLI package root");
+                          }
+                          if (events.defaultMaxListeners !== previousDefaultMaxListeners) {
+                              throw new Error("importing the packed video CLI mutated the process-wide listener limit");
+                          }
+                      '
+                  }
+
+                  media_tgz="$(find_pack 'peerbit-media-streaming-[0-9]*.tgz')"
+                  music_tgz="$(find_pack 'peerbit-music-library-utils-*.tgz')"
+                  web_tgz="$(find_pack 'peerbit-media-streaming-web-*.tgz')"
+                  cli_tgz="$(find_pack 'peerbit-video-replicator-cli-*.tgz')"
+
+                  install_and_import media "$media_tgz" @peerbit/media-streaming Chunk
+                  install_and_import music "$music_tgz" @peerbit/music-library-utils PlayEvent "$media_tgz"
+                  install_and_import web "$web_tgz" @peerbit/media-streaming-web WAVEncoder "$media_tgz"
+                  if [ "$INCLUDE_CLI" = "true" ]; then
+                      install_and_import_cli cli "$cli_tgz" "$media_tgz"
+                  fi
+
+            - name: Exercise consumer constructor identity
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  pack_dir="$RUNNER_TEMP/media-packs"
+                  project_dir="$RUNNER_TEMP/media-constructor-identity"
+                  mkdir -p "$project_dir"
+                  cd "$project_dir"
+                  npm init -y >/dev/null
+                  media_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-media-streaming-[0-9]*.tgz' -print -quit)"
+                  music_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-music-library-utils-*.tgz' -print -quit)"
+                  test -n "$media_tgz"
+                  test -n "$music_tgz"
+                  npm install --ignore-scripts --omit=peer \
+                      '@dao-xyz/borsh@^6.0.0' \
+                      '@peerbit/crypto@^3.1.4' \
+                      "$media_tgz" \
+                      "$music_tgz"
+                  cp "$GITHUB_WORKSPACE/scripts/media-package-install-smoke.mjs" ./smoke.mjs
+                  node ./smoke.mjs

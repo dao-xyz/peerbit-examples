@@ -82,7 +82,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
                 })
             );
             await track.source.replicate("streamer");
-            await source.tracks.put(track, { target: "all" });
+            await source.tracks.put(track, { target: "replicators" });
 
             // 2️⃣ wire up the WAVEncoder
             const wav = new WAVEncoder();

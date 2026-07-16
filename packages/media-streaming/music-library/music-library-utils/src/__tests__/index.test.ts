@@ -2,7 +2,14 @@ import { expect } from "chai";
 import { afterEach, beforeEach, describe, it } from "vitest";
 import { Peerbit } from "peerbit";
 import { isPutOperation } from "@peerbit/document";
-import { ImageItems, NamedItems, StoraOfLibraries } from "../index.js";
+import { waitForResolved } from "@peerbit/time";
+import {
+    ImageItems,
+    NamedItems,
+    PlayEvent,
+    PlayStats,
+    StoraOfLibraries,
+} from "../index.js";
 
 describe("music library indexes", () => {
     let peer: Peerbit;
@@ -84,5 +91,50 @@ describe("music library indexes", () => {
         expect(
             (await reopenedImages.documents.index.get(itemId))?.id
         ).to.deep.equal(itemId);
+    });
+
+    it("shares plays between browser observers through a replicator", async () => {
+        const observerPeer = await Peerbit.create();
+        const replicatorPeer = await Peerbit.create();
+        let writer: PlayStats | undefined;
+        let observer: PlayStats | undefined;
+        let replicator: PlayStats | undefined;
+        try {
+            await peer.dial(replicatorPeer);
+            await observerPeer.dial(replicatorPeer);
+            replicator = await replicatorPeer.open(new PlayStats(), {
+                args: { replicate: true },
+            });
+            writer = await peer.open(replicator.clone(), {
+                args: { replicate: false },
+            });
+            observer = await observerPeer.open(replicator.clone(), {
+                args: { replicate: false },
+            });
+            const play = new PlayEvent({
+                duration: 1_000,
+                source: new Uint8Array(32).fill(7),
+            });
+
+            await writer.documents.log.waitForReplicator(
+                replicatorPeer.identity.publicKey
+            );
+            await observer.documents.log.waitForReplicator(
+                replicatorPeer.identity.publicKey
+            );
+            await writer.documents.put(play, { target: "replicators" });
+            const observerDocuments = observer.documents;
+
+            await waitForResolved(async () => {
+                expect(await observerDocuments.index.get(play.id)).to.not.be
+                    .undefined;
+            });
+        } finally {
+            await writer?.close();
+            await observer?.close();
+            await replicator?.close();
+            await observerPeer.stop();
+            await replicatorPeer.stop();
+        }
     });
 });

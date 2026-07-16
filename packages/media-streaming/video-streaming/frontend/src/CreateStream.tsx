@@ -1,21 +1,10 @@
-import { usePeer, useProgram } from "@peerbit/react";
 import { useLocation, useNavigate } from "react-router";
-import { getStreamPath } from "./routes";
+import { getStreamPath } from "./streamRoutes";
 import { useEffect, useState } from "react";
-import { MediaStreamDB } from "@peerbit/media-streaming";
+import { useOwnedStreamProgram } from "./StreamProgramOwner";
 
 export const CreateStream = () => {
-    const { peer } = usePeer();
-    const mediaStream = useProgram<MediaStreamDB>(
-        peer,
-        peer && new MediaStreamDB(peer.identity.publicKey),
-        {
-            existing: "reuse",
-            args: {
-                replicate: "all",
-            },
-        }
-    );
+    const mediaStream = useOwnedStreamProgram();
     const navigate = useNavigate();
     const location = useLocation();
 
@@ -23,25 +12,20 @@ export const CreateStream = () => {
     const [initialSearch] = useState(location.search);
 
     useEffect(() => {
-        if (!peer?.identity.publicKey) {
-            return;
-        }
-        if (!mediaStream.program?.address) {
+        if (!mediaStream?.address) {
             return;
         }
 
-        const pathToNavigateTo = getStreamPath(mediaStream.program);
+        const pathToNavigateTo = getStreamPath(mediaStream);
         // Navigate while preserving the original query parameters
-        navigate({
-            pathname: pathToNavigateTo,
-            search: initialSearch, // or use location.search if you want the most current query
-        });
-    }, [
-        peer?.identity.publicKey,
-        mediaStream.program?.address,
-        navigate,
-        initialSearch,
-    ]);
+        navigate(
+            {
+                pathname: pathToNavigateTo,
+                search: initialSearch, // or use location.search if you want the most current query
+            },
+            { replace: true }
+        );
+    }, [mediaStream?.address, navigate, initialSearch]);
 
     return <></>;
 };
