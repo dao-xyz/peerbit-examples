@@ -71,13 +71,14 @@ import {
 import { ClosedError, Program, ProgramEvents } from "@peerbit/program";
 import { concat, fromString } from "uint8arrays";
 import { randomBytes } from "@peerbit/crypto";
-import { delay, waitFor, AbortError } from "@peerbit/time";
+import { delay, waitFor, AbortError, TimeoutError } from "@peerbit/time";
 import PQueue from "p-queue";
 import { equals } from "uint8arrays";
 import pQueue from "p-queue";
-import { ReplicationRangeIndexable } from "@peerbit/shared-log";
+import { MAX_U64, ReplicationRangeIndexable } from "@peerbit/shared-log";
 import { hrtime } from "@peerbit/time";
 import { Timestamp } from "@peerbit/log";
+import { MissingResponsesError } from "@peerbit/rpc";
 
 const isClosedError = (error: any) => {
     if (
@@ -89,6 +90,7 @@ const isClosedError = (error: any) => {
     }
     return false;
 };
+
 export const hrtimeMicroSeconds = () => {
     const nano = hrtime.bigint();
     return nano / 1000n;
@@ -219,7 +221,11 @@ export class MediaStreamInfo {
     }
 }
 
-type Args = { sender: PublicSignKey; startTime: bigint };
+type Args = {
+    sender: PublicSignKey;
+    startTime: bigint;
+    endTime?: bigint;
+};
 
 @variant("track-source")
 export abstract class TrackSource {
@@ -242,6 +248,7 @@ export abstract class TrackSource {
 
     sender: PublicSignKey;
     startTime: bigint;
+    endTime?: bigint;
 
     async open(args: Args): Promise<void> {
         /*        
@@ -256,6 +263,7 @@ export abstract class TrackSource {
 
         this.sender = args.sender;
         this.startTime = args.startTime;
+        this.endTime = args.endTime;
 
         await this.chunks.open({
             type: Chunk,
@@ -319,35 +327,721 @@ export abstract class TrackSource {
         time: number,
         options?: {
             local?: boolean;
-            remote?: { eager?: boolean; replicate?: boolean };
+            remote?: {
+                eager?: boolean;
+                replicate?: boolean;
+                timeout?: number;
+                retryMissingResponses?: boolean;
+            };
+            signal?: AbortSignal;
         }
     ) {
-        await this.waitForReplicators();
+        if (options?.signal?.aborted) {
+            throw new AbortError();
+        }
+        if (!Number.isFinite(time)) {
+            throw new Error("Media seek time must be finite");
+        }
 
-        return this.chunks.index.iterate(
-            new SearchRequest({
-                query: [
+        const localEnabled = options?.local ?? true;
+
+        const normalizeTimeout = (
+            value: number | undefined,
+            fallback: number
+        ) =>
+            value == null || !Number.isFinite(value)
+                ? fallback
+                : Math.max(0, value);
+        const requestedTimeout = options?.remote?.timeout;
+        const initialRouteTimeout = normalizeTimeout(requestedTimeout, 2_000);
+        const retryWindow = normalizeTimeout(requestedTimeout, 15_000);
+        const routeController = new AbortController();
+        const abortState: {
+            iterator?: ResultsIterator<Chunk>;
+            closePromise?: Promise<void>;
+        } = {};
+        const startAbortClose = () => {
+            if (abortState.iterator == null) {
+                return;
+            }
+            abortState.closePromise ??= abortState.iterator.close();
+            void abortState.closePromise.catch(() => {
+                // A later explicit close retries retained iterator cleanup.
+            });
+        };
+        const onCallerAbort = () => {
+            routeController.abort();
+            startAbortClose();
+        };
+        options?.signal?.addEventListener("abort", onCallerAbort, {
+            once: true,
+        });
+        if (options?.signal?.aborted) {
+            onCallerAbort();
+        }
+
+        const requestedTime = BigInt(Math.max(0, Math.ceil(time)));
+        let lastEmittedTime: bigint | undefined;
+        const originHash = this.sender.hashcode();
+        const getRemainingDomain = (): [bigint, bigint] => {
+            const firstQueriedTime =
+                lastEmittedTime == null ? requestedTime : lastEmittedTime + 1n;
+            const lower = (this.startTime + firstQueriedTime) * 1000n;
+            const endCoordinate =
+                this.endTime == null ? MAX_U64 : this.endTime * 1000n;
+            const upper =
+                endCoordinate >= MAX_U64 ? MAX_U64 : endCoordinate + 1n;
+            return [lower, upper];
+        };
+        const remainingDomainIsEmpty = () => {
+            const [lower, upper] = getRemainingDomain();
+            return lower >= upper;
+        };
+
+        const createRequest = (resumeAfter?: bigint, fetch?: number) => {
+            const query = [
+                new IntegerCompare({
+                    key: "time",
+                    compare:
+                        resumeAfter == null
+                            ? Compare.GreaterOrEqual
+                            : Compare.Greater,
+                    value: resumeAfter ?? requestedTime,
+                }),
+            ];
+            if (this.endTime != null) {
+                query.push(
                     new IntegerCompare({
                         key: "time",
-                        compare: Compare.GreaterOrEqual,
-                        value: time,
-                    }),
-                ],
+                        compare: Compare.LessOrEqual,
+                        value: this.endTime - this.startTime,
+                    })
+                );
+            }
+            return new SearchRequest({
+                query,
                 sort: [
                     new Sort({
                         direction: SortDirection.ASC,
                         key: "time",
                     }),
                 ],
-            }),
-            {
-                remote: options?.remote ?? {
-                    reach: { eager: true }, // TODO eager needed?
-                    replicate: options?.remote?.replicate ?? true,
-                },
-                local: options?.local ?? true,
+                fetch,
+            });
+        };
+
+        const linkSignal = (parent?: AbortSignal) => {
+            if (parent == null) {
+                return {
+                    signal: undefined,
+                    detach: () => {},
+                };
             }
+            const controller = new AbortController();
+            const forwardAbort = () => controller.abort();
+            if (parent.aborted) {
+                forwardAbort();
+            } else {
+                parent.addEventListener("abort", forwardAbort, { once: true });
+            }
+            return {
+                signal: controller.signal,
+                detach: () => parent.removeEventListener("abort", forwardAbort),
+            };
+        };
+
+        const activeProbeRuns = new Set<Promise<void>>();
+        const probesToClose = new Set<ResultsIterator<Chunk>>();
+        let probeClosePromise: Promise<void> | undefined;
+        const closeOwnedProbes = () => {
+            probeClosePromise ??= (async () => {
+                const probes = [...probesToClose];
+                const results = await Promise.allSettled(
+                    probes.map((probe) =>
+                        Promise.resolve().then(() => probe.close())
+                    )
+                );
+                const failures: unknown[] = [];
+                for (let index = 0; index < results.length; index++) {
+                    const result = results[index];
+                    if (result.status === "fulfilled") {
+                        probesToClose.delete(probes[index]);
+                    } else {
+                        failures.push(result.reason);
+                    }
+                }
+                if (failures.length === 1) {
+                    throw failures[0];
+                }
+                if (failures.length > 1) {
+                    throw new AggregateError(
+                        failures,
+                        "Failed to close one or more media route probes"
+                    );
+                }
+            })().finally(() => {
+                probeClosePromise = undefined;
+            });
+            return probeClosePromise;
+        };
+        const probeOrigin = async (
+            timeout: number
+        ): Promise<"productive" | "empty" | "missing"> => {
+            if (routeController.signal.aborted) {
+                throw new AbortError();
+            }
+            let finishProbeRun!: () => void;
+            const probeRun = new Promise<void>((resolve) => {
+                finishProbeRun = resolve;
+            });
+            activeProbeRuns.add(probeRun);
+            try {
+                const probeTimeout = Math.max(1, Math.floor(timeout));
+                let probe: ResultsIterator<Chunk> | undefined;
+                let result: "productive" | "empty" | "missing" = "missing";
+                const linkedSignal = linkSignal(routeController.signal);
+                try {
+                    probe = this.chunks.index.iterate(
+                        createRequest(lastEmittedTime, 1),
+                        {
+                            local: false,
+                            remote: {
+                                from: [originHash],
+                                reach: {
+                                    eager: options?.remote?.eager ?? true,
+                                },
+                                replicate: false,
+                                retryMissingResponses: false,
+                                throwOnMissing: true,
+                                timeout: probeTimeout,
+                                signal: linkedSignal.signal,
+                            } as any,
+                        }
+                    );
+                    probesToClose.add(probe);
+                    const chunks = await probe.next(1);
+                    result = chunks.length > 0 ? "productive" : "empty";
+                } catch (error) {
+                    if (
+                        error instanceof MissingResponsesError ||
+                        error instanceof TimeoutError
+                    ) {
+                        result = "missing";
+                    } else {
+                        throw error;
+                    }
+                } finally {
+                    try {
+                        await probe?.close();
+                        if (probe != null) {
+                            probesToClose.delete(probe);
+                        }
+                    } finally {
+                        linkedSignal.detach();
+                    }
+                }
+                if (routeController.signal.aborted) {
+                    throw new AbortError();
+                }
+                return result;
+            } finally {
+                activeProbeRuns.delete(probeRun);
+                finishProbeRun();
+            }
+        };
+
+        const discoverResponsiveRemotes = async (
+            timeout: number,
+            properties?: {
+                acceptEmpty?: boolean;
+            }
+        ): Promise<string[]> => {
+            const deadline = Date.now() + timeout;
+            let firstRound = true;
+            let missingBackoff = 100;
+
+            while (firstRound || Date.now() < deadline) {
+                firstRound = false;
+                if (routeController.signal.aborted) {
+                    throw new AbortError();
+                }
+                const remaining = Math.max(0, deadline - Date.now());
+                if (remaining <= 0) {
+                    break;
+                }
+                const probeResult = await probeOrigin(remaining);
+                if (probeResult === "productive") {
+                    return [originHash];
+                }
+                if (
+                    properties?.acceptEmpty === true &&
+                    probeResult === "empty"
+                ) {
+                    return [originHash];
+                }
+                if (probeResult === "empty") {
+                    return [];
+                }
+
+                await delay(
+                    Math.min(
+                        missingBackoff,
+                        Math.max(0, deadline - Date.now())
+                    ),
+                    {
+                        signal: routeController.signal,
+                    }
+                );
+                missingBackoff = Math.min(1_000, missingBackoff * 2);
+            }
+            return [];
+        };
+
+        const iteratorSignalCleanup = new WeakMap<
+            ResultsIterator<Chunk>,
+            () => void
+        >();
+        const createIterator = (
+            responsiveRemotes: string[],
+            resumeAfter?: bigint
+        ) => {
+            const pageTimeout = normalizeTimeout(
+                options?.remote?.timeout,
+                5_000
+            );
+            const linkedSignal = linkSignal(routeController.signal);
+            try {
+                const iterator = this.chunks.index.iterate(
+                    createRequest(resumeAfter),
+                    {
+                        remote:
+                            responsiveRemotes.length > 0
+                                ? ({
+                                      from: responsiveRemotes,
+                                      reach: {
+                                          eager: options?.remote?.eager ?? true,
+                                      },
+                                      replicate:
+                                          options?.remote?.replicate ?? true,
+                                      retryMissingResponses:
+                                          options?.remote
+                                              ?.retryMissingResponses ?? false,
+                                      // The resilient wrapper can only refresh
+                                      // stale routes if missing responders are
+                                      // surfaced instead of looking exhausted.
+                                      throwOnMissing: true,
+                                      timeout: Math.max(1, pageTimeout),
+                                      signal: linkedSignal.signal,
+                                  } as any)
+                                : false,
+                        // A local cache is not evidence that a remote origin's
+                        // requested interval is complete. Query it only when
+                        // this node is itself the canonical origin.
+                        local: senderIsLocal && localEnabled,
+                        // Current document pagination forwards outer options
+                        // to CollectNextRequest RPCs, while first-page options
+                        // are nested under remote. Keep both paths aligned.
+                        timeout: Math.max(1, pageTimeout),
+                    } as any
+                );
+                iteratorSignalCleanup.set(iterator, linkedSignal.detach);
+                return iterator;
+            } catch (error) {
+                linkedSignal.detach();
+                throw error;
+            }
+        };
+        const createExhaustedIterator = (): ResultsIterator<Chunk> => ({
+            next: async () => [],
+            done: () => true,
+            pending: () => 0,
+            first: async () => undefined,
+            all: async () => [],
+            close: async () => {},
+            async *[Symbol.asyncIterator]() {},
+        });
+
+        const senderIsLocal = this.sender.equals(
+            this.chunks.node.identity.publicKey
         );
+        let activeRouteHashes: string[] = [];
+        let activeIterator: ResultsIterator<Chunk>;
+        let initiallyExhausted = false;
+        try {
+            if (remainingDomainIsEmpty()) {
+                activeIterator = createExhaustedIterator();
+                initiallyExhausted = true;
+            } else {
+                if (senderIsLocal && !localEnabled) {
+                    throw new MissingResponsesError(
+                        "The canonical media origin is local, but local reads are disabled",
+                        [[originHash]]
+                    );
+                }
+                const expectsRemoteRoute = !senderIsLocal;
+                activeRouteHashes = expectsRemoteRoute
+                    ? await discoverResponsiveRemotes(initialRouteTimeout, {
+                          acceptEmpty: true,
+                      })
+                    : [];
+                if (activeRouteHashes.length === 0 && !senderIsLocal) {
+                    throw new MissingResponsesError(
+                        "The canonical media origin did not respond",
+                        [[originHash]]
+                    );
+                }
+                activeIterator = createIterator(activeRouteHashes);
+            }
+        } catch (error) {
+            routeController.abort();
+            options?.signal?.removeEventListener("abort", onCallerAbort);
+            while (activeProbeRuns.size > 0) {
+                await Promise.all([...activeProbeRuns]);
+            }
+            try {
+                await closeOwnedProbes();
+            } catch (cleanupError) {
+                throw new AggregateError(
+                    [error, cleanupError],
+                    "Media route discovery and probe cleanup both failed"
+                );
+            }
+            throw error;
+        }
+
+        const iteratorsToClose = new Set<ResultsIterator<Chunk>>();
+        let closePromise: Promise<void> | undefined;
+        const closeOwnedIterators = () => {
+            closePromise ??= (async () => {
+                const iterators = [...iteratorsToClose];
+                const results = await Promise.allSettled(
+                    iterators.map((iterator) => {
+                        iteratorSignalCleanup.get(iterator)?.();
+                        iteratorSignalCleanup.delete(iterator);
+                        return Promise.resolve().then(() => iterator.close());
+                    })
+                );
+                const failures: unknown[] = [];
+                for (let i = 0; i < results.length; i++) {
+                    const result = results[i];
+                    if (result.status === "fulfilled") {
+                        iteratorsToClose.delete(iterators[i]);
+                    } else {
+                        failures.push(result.reason);
+                    }
+                }
+                if (failures.length === 1) {
+                    throw failures[0];
+                }
+                if (failures.length > 1) {
+                    throw new AggregateError(
+                        failures,
+                        "Failed to close one or more media result iterators"
+                    );
+                }
+            })().finally(() => {
+                closePromise = undefined;
+            });
+            return closePromise;
+        };
+
+        let closed = false;
+        let retryStartedAt: number | undefined;
+        let exhaustionChecked = initiallyExhausted;
+
+        const replaceActiveIterator = async (hashes: string[]) => {
+            const iteratorToReplace = activeIterator;
+            iteratorsToClose.add(iteratorToReplace);
+            await closeOwnedIterators().catch(() => {
+                // Retain failed cleanup for the public close() retry path.
+            });
+            if (
+                closed ||
+                routeController.signal.aborted ||
+                activeIterator !== iteratorToReplace
+            ) {
+                return;
+            }
+            activeRouteHashes = hashes;
+            activeIterator = createIterator(activeRouteHashes, lastEmittedTime);
+            exhaustionChecked = false;
+        };
+
+        const refreshExhaustedRoute = async (): Promise<boolean> => {
+            if (exhaustionChecked) {
+                return false;
+            }
+            if (remainingDomainIsEmpty()) {
+                exhaustionChecked = true;
+                return false;
+            }
+            if (activeRouteHashes.length === 0) {
+                // Only the canonical local sender can reach this path. Its
+                // local index is authoritative for the requested interval.
+                exhaustionChecked = true;
+                return false;
+            }
+
+            // The document iterator can become done when its remote state
+            // disappears, before CollectNextRequest surfaces a missing peer.
+            // Re-probe the origin so an unanswered page never looks like EOF.
+            const active = await probeOrigin(
+                Math.max(1, Math.min(250, initialRouteTimeout))
+            );
+            if (active === "missing") {
+                throw new MissingResponsesError(
+                    "The canonical media origin stopped responding",
+                    [[originHash]]
+                );
+            }
+
+            if (active === "productive") {
+                const previous = activeIterator;
+                await replaceActiveIterator([originHash]);
+                return activeIterator !== previous;
+            }
+
+            // A clean empty response from the canonical origin is the only
+            // currently supported proof that the requested tail is exhausted.
+            exhaustionChecked = true;
+            return false;
+        };
+
+        const next = async (amount: number): Promise<Chunk[]> => {
+            if (amount < 0) {
+                throw new Error(
+                    "Expecting to fetch a positive amount of element"
+                );
+            }
+            // ResultsIterator.next(0) is a valid no-op. Passing it through to a
+            // live iterator can repeatedly yield an empty, non-done page and
+            // otherwise spin this recovery loop without an asynchronous edge.
+            if (amount === 0 || closed) {
+                return [];
+            }
+            if (remainingDomainIsEmpty()) {
+                exhaustionChecked = true;
+                return [];
+            }
+
+            let noProgressDeadline: number | undefined;
+            let lastNoProgressRouteRefresh = Date.now();
+            let noProgressBackoff = 10;
+
+            while (!closed) {
+                if (
+                    noProgressDeadline != null &&
+                    Date.now() >= noProgressDeadline
+                ) {
+                    throw new TimeoutError(
+                        "Media chunk iterator made no progress"
+                    );
+                }
+                try {
+                    // The document iterator contract does not permit pulling
+                    // again after done() becomes true. In particular, a
+                    // terminal next() can reopen its done flag and look like a
+                    // live empty page. Perform the one-time route refresh
+                    // before asking the exhausted iterator for more data.
+                    if (activeIterator.done()) {
+                        if (await refreshExhaustedRoute()) {
+                            continue;
+                        }
+                        return [];
+                    }
+
+                    const chunks = await activeIterator.next(amount);
+                    if (closed) {
+                        return [];
+                    }
+                    if (routeController.signal.aborted) {
+                        throw new AbortError();
+                    }
+                    const unique = chunks.filter((chunk) => {
+                        if (
+                            lastEmittedTime != null &&
+                            chunk.timeBN <= lastEmittedTime
+                        ) {
+                            return false;
+                        }
+                        lastEmittedTime = chunk.timeBN;
+                        return true;
+                    });
+                    if (unique.length > 0) {
+                        retryStartedAt = undefined;
+                        exhaustionChecked = false;
+                        return unique;
+                    }
+
+                    if (activeIterator.done()) {
+                        if (await refreshExhaustedRoute()) {
+                            continue;
+                        }
+                        return [];
+                    }
+                    const now = Date.now();
+                    noProgressDeadline ??= now + retryWindow;
+                    let remaining = Math.max(0, noProgressDeadline - now);
+
+                    // Empty non-done pages are legitimate for live streams,
+                    // but each retry yields and the whole call remains bounded
+                    // by the configured route deadline.
+                    if (
+                        remaining > 0 &&
+                        now - lastNoProgressRouteRefresh >= 500
+                    ) {
+                        const refreshed = await discoverResponsiveRemotes(
+                            Math.min(500, remaining)
+                        );
+                        lastNoProgressRouteRefresh = Date.now();
+                        if (refreshed.length > 0) {
+                            await replaceActiveIterator(refreshed);
+                            noProgressBackoff = 10;
+                        }
+                        remaining = Math.max(
+                            0,
+                            noProgressDeadline - Date.now()
+                        );
+                    }
+                    if (remaining > 0) {
+                        await delay(Math.min(noProgressBackoff, remaining), {
+                            signal: routeController.signal,
+                        });
+                        noProgressBackoff = Math.min(
+                            100,
+                            noProgressBackoff * 2
+                        );
+                    }
+                } catch (error) {
+                    if (closed) {
+                        return [];
+                    }
+                    if (
+                        options?.signal?.aborted ||
+                        (error instanceof TimeoutError === false &&
+                            error instanceof MissingResponsesError === false)
+                    ) {
+                        throw error;
+                    }
+
+                    retryStartedAt ??= Date.now();
+                    const remaining =
+                        retryWindow - (Date.now() - retryStartedAt);
+                    if (remaining <= 0) {
+                        throw error;
+                    }
+
+                    let refreshed: string[];
+                    try {
+                        refreshed = await discoverResponsiveRemotes(remaining, {
+                            acceptEmpty: true,
+                        });
+                    } catch (recoveryError) {
+                        if (closed) {
+                            return [];
+                        }
+                        throw recoveryError;
+                    }
+                    if (closed) {
+                        return [];
+                    }
+                    if (refreshed.length === 0) {
+                        throw error;
+                    }
+                    await replaceActiveIterator(refreshed);
+                }
+            }
+            return [];
+        };
+
+        const resilientIterator: ResultsIterator<Chunk> = {
+            next,
+            done: () =>
+                closed ||
+                remainingDomainIsEmpty() ||
+                (activeIterator.done() && exhaustionChecked),
+            pending: () =>
+                closed ||
+                remainingDomainIsEmpty() ||
+                (activeIterator.done() && exhaustionChecked)
+                    ? 0
+                    : activeIterator.pending(),
+            first: async () => {
+                try {
+                    return (await next(1))[0];
+                } finally {
+                    await resilientIterator.close();
+                }
+            },
+            all: async () => {
+                try {
+                    const chunks: Chunk[] = [];
+                    while (!resilientIterator.done()) {
+                        // Match the bounded drain behavior of the underlying
+                        // document iterator instead of asking a remote peer
+                        // for the maximum u32 batch in one allocation.
+                        chunks.push(...(await next(100)));
+                    }
+                    return chunks;
+                } finally {
+                    await resilientIterator.close();
+                }
+            },
+            close: async () => {
+                if (!closed) {
+                    closed = true;
+                    routeController.abort();
+                    options?.signal?.removeEventListener(
+                        "abort",
+                        onCallerAbort
+                    );
+                    iteratorsToClose.add(activeIterator);
+                }
+                const failures: unknown[] = [];
+                try {
+                    await closeOwnedIterators();
+                } catch (error) {
+                    failures.push(error);
+                }
+                try {
+                    while (activeProbeRuns.size > 0) {
+                        await Promise.all([...activeProbeRuns]);
+                    }
+                } catch (error) {
+                    failures.push(error);
+                }
+                try {
+                    await closeOwnedProbes();
+                } catch (error) {
+                    failures.push(error);
+                }
+                if (failures.length === 1) {
+                    throw failures[0];
+                }
+                if (failures.length > 1) {
+                    throw new AggregateError(
+                        failures,
+                        "Failed to close the media result iterator"
+                    );
+                }
+            },
+            async *[Symbol.asyncIterator]() {
+                try {
+                    while (!resilientIterator.done()) {
+                        for (const chunk of await next(1)) {
+                            yield chunk;
+                        }
+                    }
+                } finally {
+                    await resilientIterator.close();
+                }
+            },
+        };
+        abortState.iterator = resilientIterator;
+        if (options?.signal?.aborted) {
+            startAbortClose();
+        }
+        return resilientIterator;
     }
 
     async last(): Promise<Chunk | undefined> {
@@ -634,6 +1328,7 @@ export class Track<
 
     setEnd(time?: bigint | number) {
         this._endTime = time != null ? BigInt(time) : this.timeSinceStart();
+        this.source.endTime = this._endTime;
     }
 
     async open(args?: Args): Promise<void> {
@@ -641,6 +1336,7 @@ export class Track<
             ...args,
             sender: this.sender,
             startTime: this._startTime,
+            endTime: this._endTime,
         });
         if (this.node.identity.publicKey.equals(this.sender)) {
             await this.source.replicate("streamer");

@@ -10,7 +10,13 @@ import {
     TracksIterator,
     WebcodecsStreamDB,
 } from "../index.js";
-import { delay, hrtime, waitForResolved } from "@peerbit/time";
+import {
+    AbortError,
+    delay,
+    hrtime,
+    TimeoutError,
+    waitForResolved,
+} from "@peerbit/time";
 import { equals } from "uint8arrays";
 import { expect, describe, test, beforeAll, afterAll, afterEach } from "vitest";
 import sinon from "sinon";
@@ -18,7 +24,8 @@ import { Ed25519Keypair } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
 import pDefer, { DeferredPromise } from "p-defer";
 import path from "path";
-import { WithContext, WithIndexedContext } from "@peerbit/document";
+import { Compare, WithContext, WithIndexedContext } from "@peerbit/document";
+import { MissingResponsesError } from "@peerbit/rpc";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
 
@@ -452,6 +459,1373 @@ describe("MediaStream", () => {
 
     // TODO add test for max time updates when you are not subsrcibing for live feed.
     // What is the expected option when the iterator runs out?
+
+    describe("route correctness", () => {
+        test("forces missing-response errors and bounds empty-page progress", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const chunk = new Chunk({
+                chunk: new Uint8Array([1]),
+                time: 0,
+                type: "key",
+            });
+            const underlying = {
+                next: sinon.stub().resolves([chunk]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+                first: sinon.stub(),
+                all: sinon.stub(),
+                [Symbol.asyncIterator]: sinon.stub(),
+            } as any;
+            let finalOptions: any;
+            const probeClose = sinon.stub().resolves();
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const candidate = options.remote.from[0] as string;
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (candidate === originHash) {
+                                    return [chunk];
+                                }
+                                throw new MissingResponsesError("wrong route");
+                            }),
+                            close: probeClose,
+                        } as any;
+                    }
+                    finalOptions = options;
+                    options.signal?.addEventListener("abort", () => {
+                        void underlying.close();
+                    });
+                    return underlying;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    remote: { timeout: 25, replicate: false },
+                });
+                expect(finalOptions.remote.throwOnMissing).to.be.true;
+                expect(finalOptions.remote.retryMissingResponses).to.be.false;
+                expect(finalOptions.remote.from).to.deep.eq([originHash]);
+                expect(finalOptions.timeout).to.eq(25);
+                expect(finalOptions.signal).to.be.undefined;
+
+                expect(await result.next(0)).to.deep.eq([]);
+                expect(underlying.next.called).to.be.false;
+                await expect(result.next(-1)).rejects.toThrow(
+                    "Expecting to fetch a positive amount of element"
+                );
+                expect(underlying.next.called).to.be.false;
+                expect(await result.next(1)).to.deep.eq([chunk]);
+                expect(underlying.next.calledOnce).to.be.true;
+
+                underlying.next.resetBehavior();
+                underlying.next.resolves([]);
+                const callsBeforeNoProgress = underlying.next.callCount;
+                await expect(result.next(1)).rejects.toThrow(TimeoutError);
+                expect(
+                    underlying.next.callCount - callsBeforeNoProgress
+                ).to.be.lessThanOrEqual(4);
+                expect(probeClose.calledOnce).to.be.true;
+                await result.close();
+                expect(underlying.close.calledOnce).to.be.true;
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("normalizes fractional and u32-exceeding seeks to bigint requests", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const chunk = new Chunk({
+                chunk: new Uint8Array([16]),
+                time: 0,
+                type: "key",
+            });
+            const requests: any[] = [];
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any) => {
+                    requests.push(request);
+                    if (request.fetch === 1) {
+                        return {
+                            next: sinon.stub().resolves([chunk]),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    return {
+                        next: sinon.stub().resolves([chunk]),
+                        close: sinon.stub().resolves(),
+                        done: sinon.stub().returns(false),
+                        pending: sinon.stub().returns(0),
+                    } as any;
+                }) as any);
+
+            try {
+                for (const { seek, expected } of [
+                    { seek: 0.5, expected: 1n },
+                    {
+                        seek: MAX_U32 + 123,
+                        expected: BigInt(MAX_U32 + 123),
+                    },
+                ]) {
+                    const firstCall = requests.length;
+                    const result = await source.iterate(seek, {
+                        local: false,
+                        remote: { timeout: 25, replicate: false },
+                    });
+                    const [probeRequest, finalRequest] = requests.slice(
+                        firstCall,
+                        firstCall + 2
+                    );
+                    expect(probeRequest.fetch).to.eq(1);
+                    expect(finalRequest.fetch).not.to.eq(1);
+                    for (const request of [probeRequest, finalRequest]) {
+                        expect(request.query[0].compare).to.eq(
+                            Compare.GreaterOrEqual
+                        );
+                        expect(typeof request.query[0].value.value).to.eq(
+                            "bigint"
+                        );
+                        expect(request.query[0].value.value).to.eq(expected);
+                    }
+                    await result.close();
+                }
+            } finally {
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("forwards a timeout above one second to the canonical-origin probe", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const chunk = new Chunk({
+                chunk: new Uint8Array([17]),
+                time: 0,
+                type: "key",
+            });
+            const configuredTimeout = 2_000;
+            const simulatedSlowOriginThreshold = 1_500;
+            const probeTimeouts: number[] = [];
+            let finalOptions: any;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const probeTimeout = options.remote.timeout as number;
+                        probeTimeouts.push(probeTimeout);
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (
+                                    probeTimeout < simulatedSlowOriginThreshold
+                                ) {
+                                    throw new MissingResponsesError(
+                                        "probe budget too short"
+                                    );
+                                }
+                                return [chunk];
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalOptions = options;
+                    return {
+                        next: sinon.stub().resolves([chunk]),
+                        close: sinon.stub().resolves(),
+                        done: sinon.stub().returns(false),
+                        pending: sinon.stub().returns(0),
+                    } as any;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: {
+                        timeout: configuredTimeout,
+                        replicate: false,
+                    },
+                });
+                expect(probeTimeouts).to.have.length(1);
+                expect(probeTimeouts[0]).to.be.greaterThanOrEqual(
+                    simulatedSlowOriginThreshold
+                );
+                expect(probeTimeouts[0]).to.be.lessThanOrEqual(
+                    configuredTimeout
+                );
+                expect(finalOptions.remote.timeout).to.eq(configuredTimeout);
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("rejects a remote-only seek when no route responds", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const probeClose = sinon.stub().resolves();
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .returns({
+                    next: sinon
+                        .stub()
+                        .rejects(new MissingResponsesError("offline sender")),
+                    close: probeClose,
+                } as any);
+
+            try {
+                await expect(
+                    source.iterate(0, {
+                        local: false,
+                        remote: { timeout: 25, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(iterateStub.calledOnce).to.be.true;
+                expect(probeClose.calledOnce).to.be.true;
+            } finally {
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("rejects a local canonical seek when local reads are disabled", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const source = track1.source;
+            const iterateStub = sinon.stub(source.chunks.index, "iterate");
+
+            try {
+                await expect(
+                    source.iterate(0, {
+                        local: false,
+                        remote: { timeout: 25, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(iterateStub.called).to.be.false;
+            } finally {
+                iterateStub.restore();
+            }
+        });
+
+        test("rejects a default seek when the remote origin is unavailable and the cache is empty", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const probeClose = sinon.stub().resolves();
+            const localIndexIterateStub = sinon.stub(
+                source.chunks.index.index,
+                "iterate"
+            );
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .returns({
+                    next: sinon
+                        .stub()
+                        .rejects(new MissingResponsesError("offline sender")),
+                    close: probeClose,
+                } as any);
+
+            try {
+                await expect(
+                    source.iterate(0, {
+                        remote: { timeout: 25, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(localIndexIterateStub.called).to.be.false;
+                expect(iterateStub.calledOnce).to.be.true;
+                expect(probeClose.calledOnce).to.be.true;
+            } finally {
+                iterateStub.restore();
+                localIndexIterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("aborts a stalled canonical-origin probe", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const probeClose = sinon.stub().resolves();
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((_request: any, options: any) => {
+                    const signal = options.remote.signal as AbortSignal;
+                    return {
+                        next: sinon.stub().callsFake(
+                            () =>
+                                new Promise<Chunk[]>((_resolve, reject) => {
+                                    if (signal.aborted) {
+                                        reject(new AbortError());
+                                        return;
+                                    }
+                                    signal.addEventListener(
+                                        "abort",
+                                        () => reject(new AbortError()),
+                                        { once: true }
+                                    );
+                                })
+                        ),
+                        close: probeClose,
+                    } as any;
+                }) as any);
+            const controller = new AbortController();
+
+            try {
+                const pending = source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 5_000, replicate: false },
+                    signal: controller.signal,
+                });
+                await waitForResolved(
+                    () => expect(iterateStub.calledOnce).to.be.true
+                );
+                const abortedAt = Date.now();
+                controller.abort();
+                await expect(pending).rejects.toThrow(AbortError);
+                expect(Date.now() - abortedAt).to.be.lessThan(1_000);
+                expect(probeClose.calledOnce).to.be.true;
+            } finally {
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("bounds a stalled canonical-origin probe by the route timeout", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const probeClose = sinon.stub().resolves();
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((_request: any, options: any) => ({
+                    next: sinon.stub().callsFake(async () => {
+                        await delay(options.remote.timeout);
+                        throw new TimeoutError("origin probe timed out");
+                    }),
+                    close: probeClose,
+                })) as any);
+
+            try {
+                const startedAt = Date.now();
+                await expect(
+                    source.iterate(0, {
+                        local: false,
+                        remote: { timeout: 25, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(Date.now() - startedAt).to.be.lessThan(1_000);
+                expect(iterateStub.callCount).to.be.greaterThanOrEqual(1);
+                expect(probeClose.callCount).to.eq(iterateStub.callCount);
+            } finally {
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("fails closed after the canonical origin disappears between pages", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const relayHash = "unverified-relay";
+            const firstChunk = new Chunk({
+                chunk: new Uint8Array([3]),
+                time: 0,
+                type: "key",
+            });
+            const relayChunk = new Chunk({
+                chunk: new Uint8Array([4]),
+                time: 1,
+                type: "key",
+            });
+            let originOffline = false;
+            let firstPageRead = false;
+            const segmentsStub = sinon
+                .stub(source.chunks.log, "getAllReplicationSegments")
+                .resolves([{ hash: relayHash }] as any);
+            const firstIterator = {
+                next: sinon.stub().callsFake(async () => {
+                    if (!firstPageRead) {
+                        firstPageRead = true;
+                        return [firstChunk];
+                    }
+                    originOffline = true;
+                    throw new MissingResponsesError("origin disappeared");
+                }),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const forbiddenRelayIterator = {
+                next: sinon.stub().resolves([relayChunk]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const finalOptions: any[] = [];
+            const probeQueries: any[] = [];
+            const probedHashes: string[] = [];
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        probeQueries.push(request.query[0]);
+                        const candidate = options.remote.from[0] as string;
+                        probedHashes.push(candidate);
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (
+                                    !originOffline &&
+                                    candidate === originHash
+                                ) {
+                                    return [firstChunk];
+                                }
+                                if (candidate === relayHash) {
+                                    return [relayChunk];
+                                }
+                                throw new MissingResponsesError(
+                                    "origin unavailable"
+                                );
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalOptions.push(options);
+                    return finalOptions.length === 1
+                        ? firstIterator
+                        : forbiddenRelayIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 25, replicate: false },
+                });
+                const firstPage = await result.next(1);
+                expect(firstPage).to.have.length(1);
+                expect(firstPage[0].timeBN).to.eq(0n);
+                await expect(result.next(1)).rejects.toThrow(
+                    MissingResponsesError
+                );
+                expect(finalOptions).to.have.length(1);
+                expect(finalOptions[0].remote.from).to.deep.eq([originHash]);
+                expect(finalOptions[0].remote.throwOnMissing).to.be.true;
+                expect(probedHashes).not.to.be.empty;
+                expect(probedHashes.every((hash) => hash === originHash)).to.be
+                    .true;
+                expect(segmentsStub.called).to.be.false;
+                expect(forbiddenRelayIterator.next.called).to.be.false;
+                expect(probeQueries.at(-1).compare).to.eq(Compare.Greater);
+                expect(probeQueries.at(-1).value.value).to.eq(0n);
+                await result.close();
+                expect(firstIterator.close.calledOnce).to.be.true;
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                segmentsStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("accepts clean exhaustion after the canonical origin recovers empty", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const chunk = new Chunk({
+                chunk: new Uint8Array([5]),
+                time: 0,
+                type: "key",
+            });
+            let routeFailed = false;
+            let firstPageRead = false;
+            const firstIterator = {
+                next: sinon.stub().callsFake(async () => {
+                    if (!firstPageRead) {
+                        firstPageRead = true;
+                        return [chunk];
+                    }
+                    routeFailed = true;
+                    throw new MissingResponsesError("route moved");
+                }),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const exhaustedIterator = {
+                next: sinon.stub().resolves([]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(true),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const finalOptions: any[] = [];
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const candidate = options.remote.from[0] as string;
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (candidate !== originHash) {
+                                    throw new MissingResponsesError(
+                                        "unexpected route"
+                                    );
+                                }
+                                if (!routeFailed) {
+                                    return [chunk];
+                                }
+                                return [];
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalOptions.push(options);
+                    return finalOptions.length === 1
+                        ? firstIterator
+                        : exhaustedIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 100, replicate: false },
+                });
+                expect(await result.next(1)).to.deep.eq([chunk]);
+                expect(await result.next(1)).to.deep.eq([]);
+                expect(result.done()).to.be.true;
+                expect(finalOptions).to.have.length(2);
+                expect(
+                    finalOptions.every((options) =>
+                        options.remote.from.every(
+                            (hash: string) => hash === originHash
+                        )
+                    )
+                ).to.be.true;
+                expect(firstIterator.close.calledOnce).to.be.true;
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("finishes after the inclusive endpoint without re-probing a lost origin", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, end: 10, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const endpointChunk = new Chunk({
+                chunk: new Uint8Array([15]),
+                time: 10_000,
+                type: "key",
+            });
+            let originOffline = false;
+            let probeCalls = 0;
+            let delivered = false;
+            let finalRequest: any;
+            const finalIterator = {
+                next: sinon.stub().callsFake(async () => {
+                    delivered = true;
+                    return [endpointChunk];
+                }),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().callsFake(() => delivered),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any) => {
+                    if (request.fetch === 1) {
+                        probeCalls++;
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (originOffline) {
+                                    throw new MissingResponsesError(
+                                        "origin offline"
+                                    );
+                                }
+                                return [endpointChunk];
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalRequest = request;
+                    return finalIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 50, replicate: false },
+                });
+                expect(await result.next(1)).to.deep.eq([endpointChunk]);
+                finalIterator.pending.resetHistory();
+                expect(result.pending()).to.eq(0);
+                expect(finalIterator.pending.called).to.be.false;
+                originOffline = true;
+                const probesBeforeTerminalPull = probeCalls;
+                expect(await result.next(1)).to.deep.eq([]);
+                expect(result.done()).to.be.true;
+                expect(probeCalls).to.eq(probesBeforeTerminalPull);
+                expect(finalRequest.query[1].compare).to.eq(
+                    Compare.LessOrEqual
+                );
+                expect(finalRequest.query[1].value.value).to.eq(10_000n);
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("returns an exhausted iterator for an offline seek past track end", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, end: 10, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const segmentsStub = sinon.stub(
+                source.chunks.log,
+                "getAllReplicationSegments"
+            );
+            const iterateStub = sinon.stub(source.chunks.index, "iterate");
+            let result: any;
+
+            try {
+                result = await source.iterate(10_001, {
+                    local: false,
+                    remote: { timeout: 25, replicate: false },
+                });
+                expect(result.done()).to.be.true;
+                expect(await result.next(1)).to.deep.eq([]);
+                expect(segmentsStub.called).to.be.false;
+                expect(iterateStub.called).to.be.false;
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                segmentsStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("rejects a productive suffix relay before it can mask a missing prefix", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, end: 10, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const relayHash = "partial-relay";
+            const endpointChunk = new Chunk({
+                chunk: new Uint8Array([8]),
+                time: 10_000,
+                type: "key",
+            });
+            const segmentsStub = sinon
+                .stub(source.chunks.log, "getAllReplicationSegments")
+                .resolves([
+                    {
+                        hash: relayHash,
+                        start1: 5_000_000n,
+                        end1: 10_000_001n,
+                        start2: 0n,
+                        end2: 0n,
+                        width: 5_000_001n,
+                        wrapped: false,
+                    },
+                ] as any);
+            const probedHashes: string[] = [];
+            const forbiddenFinalIterator = {
+                next: sinon.stub().resolves([endpointChunk]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            let finalIteratorCreations = 0;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const candidate = options.remote.from[0] as string;
+                        probedHashes.push(candidate);
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (candidate === relayHash) {
+                                    return [endpointChunk];
+                                }
+                                throw new MissingResponsesError(
+                                    "origin offline"
+                                );
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalIteratorCreations++;
+                    return forbiddenFinalIterator;
+                }) as any);
+
+            try {
+                await expect(
+                    source.iterate(0, {
+                        local: false,
+                        remote: { timeout: 50, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(segmentsStub.called).to.be.false;
+                expect(probedHashes).not.to.be.empty;
+                expect(probedHashes.every((hash) => hash === originHash)).to.be
+                    .true;
+                expect(probedHashes).not.to.include(relayHash);
+                expect(finalIteratorCreations).to.eq(0);
+                expect(forbiddenFinalIterator.next.called).to.be.false;
+            } finally {
+                iterateStub.restore();
+                segmentsStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("rejects gap-free relay advertisements without sync-complete proof", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, end: 10, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const relayHashes = ["first-cover", "second-cover"];
+            const probedHashes: string[] = [];
+            const segmentsStub = sinon
+                .stub(source.chunks.log, "getAllReplicationSegments")
+                .resolves([
+                    {
+                        hash: relayHashes[0],
+                        start1: 0n,
+                        end1: 5_000_000n,
+                        start2: 0n,
+                        end2: 0n,
+                        width: 5_000_000n,
+                        wrapped: false,
+                    },
+                    {
+                        hash: relayHashes[1],
+                        start1: 5_000_000n,
+                        end1: 10_000_001n,
+                        start2: 0n,
+                        end2: 0n,
+                        width: 5_000_001n,
+                        wrapped: false,
+                    },
+                ] as any);
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const candidate = options.remote.from[0] as string;
+                        probedHashes.push(candidate);
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (relayHashes.includes(candidate)) {
+                                    return [];
+                                }
+                                throw new MissingResponsesError(
+                                    "origin offline"
+                                );
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    throw new Error("unexpected final iterator");
+                }) as any);
+
+            try {
+                await expect(
+                    source.iterate(0, {
+                        local: false,
+                        remote: { timeout: 50, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(segmentsStub.called).to.be.false;
+                expect(probedHashes).not.to.be.empty;
+                expect(probedHashes.every((hash) => hash === originHash)).to.be
+                    .true;
+                expect(probedHashes.some((hash) => relayHashes.includes(hash)))
+                    .to.be.false;
+            } finally {
+                iterateStub.restore();
+                segmentsStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("does not use a partial local cache when the remote origin is offline", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, end: 10, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const selfHash = viewer.identity.publicKey.hashcode();
+            const chunk = new Chunk({
+                chunk: new Uint8Array([9]),
+                time: 0,
+                type: "key",
+            });
+            const segmentsStub = sinon
+                .stub(source.chunks.log, "getAllReplicationSegments")
+                .resolves([
+                    {
+                        hash: selfHash,
+                        start1: 0n,
+                        end1: 5_000_000n,
+                        start2: 0n,
+                        end2: 0n,
+                        width: 5_000_000n,
+                        wrapped: false,
+                    },
+                ] as any);
+            const localIndexIterateStub = sinon.stub(
+                source.chunks.index.index,
+                "iterate"
+            );
+            const forbiddenLocalIterator = {
+                next: sinon.stub().resolves([chunk]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            let finalIteratorCreations = 0;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any) => {
+                    if (request.fetch === 1) {
+                        return {
+                            next: sinon
+                                .stub()
+                                .rejects(
+                                    new MissingResponsesError("origin offline")
+                                ),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalIteratorCreations++;
+                    return forbiddenLocalIterator;
+                }) as any);
+
+            try {
+                await expect(
+                    source.iterate(0, {
+                        remote: { timeout: 50, replicate: false },
+                    })
+                ).rejects.toThrow(MissingResponsesError);
+                expect(segmentsStub.called).to.be.false;
+                expect(localIndexIterateStub.called).to.be.false;
+                expect(finalIteratorCreations).to.eq(0);
+                expect(forbiddenLocalIterator.next.called).to.be.false;
+            } finally {
+                iterateStub.restore();
+                localIndexIterateStub.restore();
+                segmentsStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("does not create a replacement iterator after concurrent close", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const chunk = new Chunk({
+                chunk: new Uint8Array([5]),
+                time: 0,
+                type: "key",
+            });
+            const closeGate = pDefer<void>();
+            const firstIterator = {
+                next: sinon
+                    .stub()
+                    .rejects(new MissingResponsesError("route moved")),
+                close: sinon.stub().callsFake(() => closeGate.promise),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const replacementIterator = {
+                next: sinon.stub().resolves([chunk]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            let finalIteratorCreations = 0;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const candidate = options.remote.from[0] as string;
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (candidate === originHash) {
+                                    return [chunk];
+                                }
+                                throw new MissingResponsesError("stale sender");
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    finalIteratorCreations++;
+                    return finalIteratorCreations === 1
+                        ? firstIterator
+                        : replacementIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 600, replicate: false },
+                });
+                const pendingNext = result.next(1);
+                void pendingNext.catch(() => {});
+                await waitForResolved(
+                    () => expect(firstIterator.close.called).to.be.true
+                );
+                const pendingClose = result.close();
+                closeGate.resolve();
+
+                expect(await pendingNext).to.deep.eq([]);
+                await pendingClose;
+                expect(finalIteratorCreations).to.eq(1);
+                expect(replacementIterator.close.called).to.be.false;
+            } finally {
+                closeGate.resolve();
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("drops a page that resolves after concurrent close", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const chunk = new Chunk({
+                chunk: new Uint8Array([10]),
+                time: 0,
+                type: "key",
+            });
+            const page = pDefer<Chunk[]>();
+            const finalIterator = {
+                next: sinon.stub().returns(page.promise),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (options.remote.from[0] === originHash) {
+                                    return [chunk];
+                                }
+                                throw new MissingResponsesError("offline");
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    return finalIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 25, replicate: false },
+                });
+                const pendingNext = result.next(1);
+                await waitForResolved(
+                    () => expect(finalIterator.next.calledOnce).to.be.true
+                );
+                await result.close();
+                page.resolve([chunk]);
+                expect(await pendingNext).to.deep.eq([]);
+                expect(result.done()).to.be.true;
+                expect(finalIterator.close.calledOnce).to.be.true;
+            } finally {
+                page.resolve([]);
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("waits for in-flight route probe cleanup before close resolves", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const chunk = new Chunk({
+                chunk: new Uint8Array([11]),
+                time: 0,
+                type: "key",
+            });
+            const probeCloseGate = pDefer<void>();
+            const recoveryProbeClose = sinon
+                .stub()
+                .returns(probeCloseGate.promise);
+            let probeCreations = 0;
+            const finalIterator = {
+                next: sinon
+                    .stub()
+                    .rejects(new MissingResponsesError("route moved")),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const creation = probeCreations++;
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (options.remote.from[0] === originHash) {
+                                    return [chunk];
+                                }
+                                throw new MissingResponsesError("offline");
+                            }),
+                            close:
+                                creation === 0
+                                    ? sinon.stub().resolves()
+                                    : recoveryProbeClose,
+                        } as any;
+                    }
+                    return finalIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 600, replicate: false },
+                });
+                const pendingNext = result.next(1);
+                await waitForResolved(
+                    () => expect(recoveryProbeClose.calledOnce).to.be.true
+                );
+                let closeResolved = false;
+                const pendingClose = result.close().then(() => {
+                    closeResolved = true;
+                });
+                await delay(25);
+                expect(closeResolved).to.be.false;
+                probeCloseGate.resolve();
+                await pendingClose;
+                expect(await pendingNext).to.deep.eq([]);
+                expect(recoveryProbeClose.calledOnce).to.be.true;
+            } finally {
+                probeCloseGate.resolve();
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("retries a failed route probe cleanup during wrapper close", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const chunk = new Chunk({
+                chunk: new Uint8Array([12]),
+                time: 0,
+                type: "key",
+            });
+            const recoveryProbeClose = sinon
+                .stub()
+                .onFirstCall()
+                .rejects(new Error("transient probe close failure"));
+            recoveryProbeClose.onSecondCall().resolves();
+            let probeCreations = 0;
+            const finalIterator = {
+                next: sinon
+                    .stub()
+                    .rejects(new MissingResponsesError("route moved")),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any) => {
+                    if (request.fetch === 1) {
+                        const creation = probeCreations++;
+                        return {
+                            next: sinon.stub().resolves([chunk]),
+                            close:
+                                creation === 0
+                                    ? sinon.stub().resolves()
+                                    : recoveryProbeClose,
+                        } as any;
+                    }
+                    return finalIterator;
+                }) as any);
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 600, replicate: false },
+                });
+                const pendingNext = result.next(1);
+                void pendingNext.catch(() => {});
+                await waitForResolved(
+                    () => expect(recoveryProbeClose.calledOnce).to.be.true
+                );
+                await result.close();
+                expect(recoveryProbeClose.calledTwice).to.be.true;
+                await expect(pendingNext).rejects.toThrow(
+                    "transient probe close failure"
+                );
+            } finally {
+                await result?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("caller abort closes and detaches the active iterator", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const chunk = new Chunk({
+                chunk: new Uint8Array([13]),
+                time: 0,
+                type: "key",
+            });
+            const finalIterator = {
+                next: sinon.stub().resolves([chunk]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any) => {
+                    if (request.fetch === 1) {
+                        return {
+                            next: sinon.stub().resolves([chunk]),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    return finalIterator;
+                }) as any);
+            const controller = new AbortController();
+            const removeListener = sinon.spy(
+                controller.signal,
+                "removeEventListener"
+            );
+            let result: any;
+
+            try {
+                result = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 25, replicate: false },
+                    signal: controller.signal,
+                });
+                controller.abort();
+                await waitForResolved(
+                    () => expect(finalIterator.close.calledOnce).to.be.true
+                );
+                await result.close();
+                expect(finalIterator.close.calledOnce).to.be.true;
+                expect(removeListener.calledOnce).to.be.true;
+                expect(result.done()).to.be.true;
+            } finally {
+                await result?.close();
+                removeListener.restore();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("bounds all() batches and closes terminal helper iterators", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const viewerTrack = await viewer.open(track1.clone());
+            const source = viewerTrack.source;
+            const originHash = source.sender.hashcode();
+            const chunks = Array.from(
+                { length: 101 },
+                (_, time) =>
+                    new Chunk({
+                        chunk: new Uint8Array([time]),
+                        time,
+                        type: "key",
+                    })
+            );
+            let drainOffset = 0;
+            const drainAmounts: number[] = [];
+            const drainIterator = {
+                next: sinon.stub().callsFake(async (amount: number) => {
+                    if (drainOffset >= chunks.length) {
+                        throw new Error(
+                            "next called after iterator exhaustion"
+                        );
+                    }
+                    drainAmounts.push(amount);
+                    const batch = chunks.slice(
+                        drainOffset,
+                        drainOffset + amount
+                    );
+                    drainOffset += batch.length;
+                    return batch;
+                }),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().callsFake(() => {
+                    return drainOffset >= chunks.length;
+                }),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const firstIterator = {
+                next: sinon.stub().resolves([chunks[0]]),
+                close: sinon.stub().resolves(),
+                done: sinon.stub().returns(false),
+                pending: sinon.stub().returns(0),
+            } as any;
+            const finalIterators = [drainIterator, firstIterator];
+            let finalIteratorIndex = 0;
+            const iterateStub = sinon
+                .stub(source.chunks.index, "iterate")
+                .callsFake(((request: any, options: any) => {
+                    if (request.fetch === 1) {
+                        const candidate = options.remote.from[0] as string;
+                        return {
+                            next: sinon.stub().callsFake(async () => {
+                                if (candidate === originHash) {
+                                    return drainOffset >= chunks.length
+                                        ? []
+                                        : [chunks[0]];
+                                }
+                                throw new MissingResponsesError("stale sender");
+                            }),
+                            close: sinon.stub().resolves(),
+                        } as any;
+                    }
+                    return finalIterators[finalIteratorIndex++];
+                }) as any);
+            let drainResult: any;
+            let firstResult: any;
+
+            try {
+                drainResult = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 25, replicate: false },
+                });
+                expect(await drainResult.all()).to.deep.eq(chunks);
+                expect(drainAmounts).to.deep.eq([100, 100]);
+                expect(drainIterator.close.calledOnce).to.be.true;
+                expect(drainResult.done()).to.be.true;
+                expect(await drainResult.pending()).to.eq(0);
+
+                firstResult = await source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 25, replicate: false },
+                });
+                expect(await firstResult.first()).to.eq(chunks[0]);
+                expect(firstIterator.close.calledOnce).to.be.true;
+                expect(firstResult.done()).to.be.true;
+                expect(await firstResult.pending()).to.eq(0);
+            } finally {
+                await firstResult?.close();
+                await drainResult?.close();
+                iterateStub.restore();
+                await viewerTrack.close();
+            }
+        });
+
+        test("surfaces a missing responder from a real later page", async () => {
+            const { track1 } = await createScenario({
+                first: { start: 0, size: 0 },
+            });
+            const firstChunk = new Chunk({
+                chunk: new Uint8Array([6]),
+                time: 0,
+                type: "key",
+            });
+            const secondChunk = new Chunk({
+                chunk: new Uint8Array([7]),
+                time: 1,
+                type: "key",
+            });
+            await track1.put(firstChunk, { target: "none" });
+            await track1.put(secondChunk, { target: "none" });
+            const viewerTrack = await viewer.open(track1.clone());
+            let result: any;
+
+            try {
+                result = await viewerTrack.source.iterate(0, {
+                    local: false,
+                    remote: { timeout: 500, replicate: false },
+                });
+                const firstPage = await result.next(1);
+                expect(firstPage).to.have.length(1);
+                expect(firstPage[0].timeBN).to.eq(0n);
+
+                await track1.close();
+                await expect(result.next(1)).rejects.toThrow(
+                    MissingResponsesError
+                );
+            } finally {
+                await result?.close();
+                await viewerTrack.close();
+            }
+        });
+    });
 
     describe("waitFor", () => {
         test("wait for self", async () => {
@@ -1536,11 +2910,13 @@ describe("MediaStream", () => {
 
                 expect(
                     onReplicationChanges.map((x) =>
-                        x.map(
-                            (y) =>
-                                y.hash ===
-                                viewerStreams.node.identity.publicKey.hashcode()
-                        )
+                        x
+                            .map(
+                                (y) =>
+                                    y.hash ===
+                                    viewerStreams.node.identity.publicKey.hashcode()
+                            )
+                            .sort((left, right) => Number(left) - Number(right))
                     )
                 ).to.deep.eq([[false], [false, true]]);
 

@@ -43,6 +43,8 @@
     },
     "dependencies": {
         "@peerbit/document": "^13.1.0",
+        "@peerbit/rpc": "^6.1.1",
+        "@peerbit/shared-log": "^13.2.0",
         "peerbit": "^5.3.0",
         "uuid": "^10.0.0"
     }
