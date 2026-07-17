@@ -70,20 +70,19 @@ import {
     type RemoteRootObservation,
 } from "./remote-root-reconciliation";
 import { settleUploadBatch, takeInputFiles } from "./upload-lifecycle";
+import {
+    BoundedDownloadUnavailableError,
+    createOpfsDownloadWriter,
+    requiresBoundedDownload,
+    sanitizeDownloadFileName,
+    type BrowserFileWriter,
+} from "./download-sink";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
 };
 const getRoleFromLocalStorage = (files: Files) => {
     return localStorage.getItem(files.address + "-role"); // Save role in localstorage for next time
-};
-
-const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000n;
-
-type BrowserFileWriter = {
-    write(data: Uint8Array): Promise<void>;
-    close(): Promise<void>;
-    abort?(reason?: unknown): Promise<void>;
 };
 
 type ListingDiagnostics = {
@@ -136,10 +135,14 @@ type ListingDiagnostics = {
     lastShareUrlWithPeerHintsAt: number | null;
 };
 
+type BrowserFileHandle = {
+    createWritable(): Promise<BrowserFileWriter>;
+};
+
 type SaveFilePickerWindow = Window & {
-    showSaveFilePicker?: (options?: { suggestedName?: string }) => Promise<{
-        createWritable(): Promise<BrowserFileWriter>;
-    }>;
+    showSaveFilePicker?: (options?: {
+        suggestedName?: string;
+    }) => Promise<BrowserFileHandle>;
     __peerbitStreamingDownloadThresholdBytes?: number;
 };
 
@@ -163,18 +166,6 @@ const getProgramHookErrorMessage = (error: unknown) => {
     }
     return String(error);
 };
-
-const getStreamingDownloadThresholdBytes = () => {
-    const override = (window as SaveFilePickerWindow)
-        .__peerbitStreamingDownloadThresholdBytes;
-    if (typeof override === "number" && Number.isFinite(override)) {
-        return BigInt(Math.max(0, Math.floor(override)));
-    }
-    return STREAMING_DOWNLOAD_THRESHOLD_BYTES;
-};
-
-const getFileSizeBigInt = (file: AbstractFile) =>
-    typeof file.size === "bigint" ? file.size : BigInt(file.size);
 
 const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 10_000;
 const LARGE_FILE_DOWNLOAD_MIN_TIMEOUT_MS = 5 * 60_000;
@@ -1943,6 +1934,29 @@ export const Drop = () => {
         const timeout = getDownloadTimeout(file);
         startActiveTransfer();
         try {
+            const pickerWindow = window as SaveFilePickerWindow;
+            const saveFilePicker = pickerWindow.showSaveFilePicker;
+            const initialNeedsBoundedDownload = requiresBoundedDownload(
+                file.size,
+                pickerWindow.__peerbitStreamingDownloadThresholdBytes
+            );
+            let nativeSaveHandle: BrowserFileHandle | undefined;
+            if (initialNeedsBoundedDownload && saveFilePicker) {
+                // The picker requires transient user activation. Request the
+                // handle before any persistence or peer lookup can consume it.
+                nativeSaveHandle = await saveFilePicker({
+                    suggestedName: sanitizeDownloadFileName(file.name),
+                }).catch((error) => {
+                    if (isUserCancelledDownload(error)) {
+                        return undefined;
+                    }
+                    throw error;
+                });
+                if (!nativeSaveHandle) {
+                    return;
+                }
+            }
+
             let downloadFile = file;
             if (program.persistChunkReads) {
                 try {
@@ -1997,32 +2011,39 @@ export const Drop = () => {
             // live reader to observer mode can detach the fanout route that a
             // partially-local file still needs for its missing chunk queries.
 
-            const saveFilePicker = (window as SaveFilePickerWindow)
-                .showSaveFilePicker;
+            const needsBoundedDownload = requiresBoundedDownload(
+                downloadFile.size,
+                pickerWindow.__peerbitStreamingDownloadThresholdBytes
+            );
 
-            if (
-                saveFilePicker &&
-                getFileSizeBigInt(downloadFile) >=
-                    getStreamingDownloadThresholdBytes()
-            ) {
-                const handle = await saveFilePicker({
-                    suggestedName: downloadFile.name,
-                }).catch((error) => {
-                    if (isUserCancelledDownload(error)) {
-                        return undefined;
+            if (needsBoundedDownload || nativeSaveHandle) {
+                let writable: BrowserFileWriter;
+                if (nativeSaveHandle) {
+                    writable = await nativeSaveHandle.createWritable();
+                } else {
+                    try {
+                        writable = await createOpfsDownloadWriter({
+                            fileName: downloadFile.name,
+                            expectedSize: downloadFile.size,
+                        });
+                    } catch (error) {
+                        if (error instanceof BoundedDownloadUnavailableError) {
+                            throw new Error(
+                                "This file is too large to buffer safely in memory. " +
+                                    error.message.replace(/\.+$/, "") +
+                                    ". Free browser storage or use a current browser with origin-private file storage.",
+                                { cause: error }
+                            );
+                        }
+                        throw error;
                     }
-                    throw error;
-                });
-                if (handle) {
-                    const writable = await handle.createWritable();
-                    await downloadFile.writeFile(program, writable, {
-                        timeout,
-                        progress: (value) => {
-                            progress(value);
-                        },
-                    });
-                    return;
                 }
+                await downloadFile.writeFile(program, writable, {
+                    timeout,
+                    progress: (value) => {
+                        progress(value);
+                    },
+                });
                 return;
             }
 
@@ -2035,7 +2056,7 @@ export const Drop = () => {
             const link = document.createElement("a");
             const url = window.URL.createObjectURL(blob);
             link.href = url;
-            link.download = downloadFile.name;
+            link.download = sanitizeDownloadFileName(downloadFile.name);
             link.click();
             setTimeout(() => {
                 window.URL.revokeObjectURL(url);

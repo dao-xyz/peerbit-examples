@@ -44,6 +44,24 @@ const baseURL = explicitBaseUrl || localBaseUrl;
 const ignoreHTTPSErrors =
     process.env.PW_IGNORE_HTTPS_ERRORS === "1" ||
     (!explicitBaseUrl && localProtocol === "https");
+const browserDevices = {
+    chromium: devices["Desktop Chrome"],
+    firefox: devices["Desktop Firefox"],
+    webkit: devices["Desktop Safari"],
+} as const;
+const requestedBrowsers = (process.env.PW_BROWSERS || "chromium")
+    .split(",")
+    .map((browser) => browser.trim())
+    .filter(Boolean);
+const projects = requestedBrowsers.map((browser) => {
+    if (!(browser in browserDevices)) {
+        throw new Error(
+            `Unsupported PW_BROWSERS entry "${browser}"; expected chromium, firefox, or webkit`
+        );
+    }
+    const browserName = browser as keyof typeof browserDevices;
+    return { name: browserName, use: { ...browserDevices[browserName] } };
+});
 const localWebServerCommand = isBenchmark
     ? `pnpm --filter @peerbit/please-lib build && pnpm run build && pnpm exec vite preview${viteConfigArg} --port ${PORT} --strictPort --host ${HOST}`
     : `pnpm --filter @peerbit/please-lib build && pnpm exec vite dev --mode ${viteMode}${viteConfigArg} --port ${PORT} --strictPort --host ${HOST}`;
@@ -66,7 +84,7 @@ export default defineConfig({
         trace: "retain-on-failure",
         video: "retain-on-failure",
     },
-    projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+    projects,
     webServer: explicitBaseUrl
         ? undefined
         : {
