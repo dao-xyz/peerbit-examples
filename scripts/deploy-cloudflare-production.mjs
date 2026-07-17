@@ -167,11 +167,7 @@ const assertNoWorkersDevOutput = (...values) => {
     }
 };
 
-export const parseWranglerVersionUploadOutput = (
-    output,
-    expectedWorkerName
-) => {
-    assertNoWorkersDevOutput(output);
+const parseWranglerOutputEntries = (output) => {
     const entries = [];
     for (const line of output.split(/\r?\n/)) {
         if (line.trim() === "") continue;
@@ -185,6 +181,15 @@ export const parseWranglerVersionUploadOutput = (
             throw new Error("Wrangler deployment output is not valid NDJSON");
         }
     }
+    return entries;
+};
+
+export const parseWranglerVersionUploadOutput = (
+    output,
+    expectedWorkerName
+) => {
+    assertNoWorkersDevOutput(output);
+    const entries = parseWranglerOutputEntries(output);
     const uploads = entries.filter(({ type }) => type === "version-upload");
     if (uploads.length !== 1) {
         throw new Error(
@@ -202,6 +207,39 @@ export const parseWranglerVersionUploadOutput = (
             workerName: upload.worker_name,
             workerTag: upload.worker_tag,
             versionId: upload.version_id,
+        },
+        expectedWorkerName
+    );
+};
+
+export const parseWranglerInitialDeployOutput = (
+    output,
+    expectedWorkerName
+) => {
+    assertNoWorkersDevOutput(output);
+    const entries = parseWranglerOutputEntries(output);
+    const deployments = entries.filter(({ type }) => type === "deploy");
+    if (deployments.length !== 1) {
+        throw new Error(
+            `${expectedWorkerName}: Wrangler output requires exactly one deploy record`
+        );
+    }
+    const deployment = deployments[0];
+    if (
+        deployment.version !== 1 ||
+        deployment.worker_name_overridden !== false ||
+        !Array.isArray(deployment.targets) ||
+        deployment.targets.length !== 0
+    ) {
+        throw new Error(
+            `${expectedWorkerName}: Wrangler deploy record has unsupported identity or target metadata`
+        );
+    }
+    return validateDeploymentEvidence(
+        {
+            workerName: deployment.worker_name,
+            workerTag: deployment.worker_tag,
+            versionId: deployment.version_id,
         },
         expectedWorkerName
     );
@@ -1734,7 +1772,7 @@ export const createRouteFreeWranglerConfig = ({
     return privateConfig;
 };
 
-export const runWranglerVersionUpload = ({
+const runWranglerRouteFreeMutation = ({
     wrangler,
     configFile,
     renderedConfig,
@@ -1743,6 +1781,9 @@ export const runWranglerVersionUpload = ({
     workerName,
     versionTag,
     artifact,
+    command,
+    parseOutput,
+    temporaryDirectoryPrefix,
     environment = deploymentEnvironment,
     runtime = {},
 }) => {
@@ -1761,7 +1802,7 @@ export const runWranglerVersionUpload = ({
             rmSync(directory, { recursive: true, force: true }),
     } = runtime;
     const outputDirectory = makeTemporaryDirectory(
-        path.join(tmpdir(), "peerbit-wrangler-version-upload-")
+        path.join(tmpdir(), temporaryDirectoryPrefix)
     );
     const privateConfigFile = path.join(outputDirectory, "deploy.json");
     const outputFile = path.join(outputDirectory, "deploy.ndjson");
@@ -1787,8 +1828,7 @@ export const runWranglerVersionUpload = ({
             const commandOutput = runLogged(
                 wrangler,
                 [
-                    "versions",
-                    "upload",
+                    ...command,
                     "--config",
                     privateConfigFile,
                     "--strict",
@@ -1827,7 +1867,7 @@ export const runWranglerVersionUpload = ({
 
         let deploymentEvidence;
         try {
-            deploymentEvidence = parseWranglerVersionUploadOutput(
+            deploymentEvidence = parseOutput(
                 outputExists(outputFile) ? readOutput(outputFile, "utf8") : "",
                 workerName
             );
@@ -1850,6 +1890,22 @@ export const runWranglerVersionUpload = ({
         });
     }
 };
+
+export const runWranglerVersionUpload = (input) =>
+    runWranglerRouteFreeMutation({
+        ...input,
+        command: ["versions", "upload"],
+        parseOutput: parseWranglerVersionUploadOutput,
+        temporaryDirectoryPrefix: "peerbit-wrangler-version-upload-",
+    });
+
+export const runWranglerInitialDeploy = (input) =>
+    runWranglerRouteFreeMutation({
+        ...input,
+        command: ["deploy"],
+        parseOutput: parseWranglerInitialDeployOutput,
+        temporaryDirectoryPrefix: "peerbit-wrangler-initial-deploy-",
+    });
 
 export const parseProductionDeploymentArgs = (argv) => {
     const args = new Map();

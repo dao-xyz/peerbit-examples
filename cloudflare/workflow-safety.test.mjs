@@ -14,6 +14,14 @@ const provisioningWorkflow = readWorkflow(
     "cloudflare-production-provision.yml"
 );
 const fileShareCiWorkflow = readWorkflow("file-share-ci.yml");
+const provisioningScript = readFileSync(
+    path.join(repoRoot, "scripts/provision-cloudflare-production.mjs"),
+    "utf8"
+);
+const deploymentScript = readFileSync(
+    path.join(repoRoot, "scripts/deploy-cloudflare-production.mjs"),
+    "utf8"
+);
 
 const pinnedWorkflowActions = new Map([
     ["actions/checkout", "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"],
@@ -442,6 +450,13 @@ test("one-time provisioning rebuilds exact bundles and never invokes Worker dele
     );
     assert.match(provisioningWorkflow, /wrangler versions upload/);
     assert.match(provisioningWorkflow, /--dry-run/);
+    assert.match(provisioningScript, /runWranglerInitialDeploy/);
+    assert.match(
+        provisioningScript,
+        /deploy-initial-route-free-private-baseline/
+    );
+    assert.match(deploymentScript, /command: \["deploy"\]/);
+    assert.match(deploymentScript, /deployment\.targets\.length !== 0/);
     assert.equal(
         (
             provisioningWorkflow.match(

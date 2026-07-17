@@ -15,6 +15,7 @@ import {
     accountZoneInventorySha256,
     createRouteFreeWranglerConfig,
     deployProductionEntries as deployProductionEntriesWithPolicy,
+    parseWranglerInitialDeployOutput,
     parseWranglerVersionUploadOutput,
     parseProductionDeploymentArgs,
     productionSmokeEnvironment,
@@ -23,6 +24,7 @@ import {
     removeTemporaryWranglerOutput,
     runCloudflareCapturedJson,
     runCloudflareLogged,
+    runWranglerInitialDeploy,
     runWranglerVersionUpload,
     withoutCloudflareDeploymentCredentials,
 } from "../scripts/deploy-cloudflare-production.mjs";
@@ -305,6 +307,18 @@ const wranglerVersionUploadRecord = (overrides = {}) =>
         ...overrides,
     });
 
+const wranglerInitialDeployRecord = (overrides = {}) =>
+    JSON.stringify({
+        type: "deploy",
+        version: 1,
+        worker_name: "peerbit-examples-files",
+        worker_tag: WORKER_TAGS.get("files"),
+        version_id: NEW_VERSION,
+        targets: [],
+        worker_name_overridden: false,
+        ...overrides,
+    });
+
 test("Wrangler structured output provides exact inactive-version ownership evidence", () => {
     assert.deepEqual(
         parseWranglerVersionUploadOutput(
@@ -368,6 +382,53 @@ test("Wrangler structured output provides exact inactive-version ownership evide
     assert.ok(previewFailure instanceof Error);
     assert.match(previewFailure.message, /unexpected workers\.dev/);
     assert.doesNotMatch(previewFailure.message, new RegExp(accountSlug));
+});
+
+test("Wrangler initial deploy output proves one exact private deployment with no targets", () => {
+    assert.deepEqual(
+        parseWranglerInitialDeployOutput(
+            `${JSON.stringify({ type: "wrangler-session", version: 1 })}\n${wranglerInitialDeployRecord()}\n`,
+            "peerbit-examples-files"
+        ),
+        {
+            workerName: "peerbit-examples-files",
+            workerTag: WORKER_TAGS.get("files"),
+            versionId: NEW_VERSION,
+        }
+    );
+    for (const [output, pattern] of [
+        ["", /exactly one deploy record/],
+        ["null", /not valid NDJSON/],
+        [
+            `${wranglerInitialDeployRecord()}\n${wranglerInitialDeployRecord()}`,
+            /exactly one deploy record/,
+        ],
+        [
+            wranglerInitialDeployRecord({
+                worker_name: "peerbit-examples-stream",
+            }),
+            /invalid deployment ownership evidence/,
+        ],
+        [
+            wranglerInitialDeployRecord({
+                targets: ["https://files.apps.peerbit.org"],
+            }),
+            /unsupported identity or target metadata/,
+        ],
+        [
+            wranglerInitialDeployRecord({ worker_name_overridden: true }),
+            /unsupported identity or target metadata/,
+        ],
+    ]) {
+        assert.throws(
+            () =>
+                parseWranglerInitialDeployOutput(
+                    output,
+                    "peerbit-examples-files"
+                ),
+            pattern
+        );
+    }
 });
 
 test("verification children do not receive Cloudflare deployment credentials", () => {
@@ -3713,6 +3774,65 @@ test("Wrangler versions upload receives only a private route-free config", () =>
     assert.equal(existsSync(path.dirname(invokedConfigFile)), false);
 });
 
+test("Wrangler initial deploy receives one exact route-free config and emits private ownership evidence", () => {
+    const canonical = canonicalRouteConfig("files");
+    const canonicalFile = path.join(
+        repoRoot,
+        ".wrangler-config",
+        "files.jsonc"
+    );
+    let invokedConfigFile;
+    const versionTag = "peerbit_files_aaaaaaaaaaaa_initial";
+    const evidence = runWranglerInitialDeploy({
+        wrangler: "/tools/wrangler",
+        configFile: canonicalFile,
+        renderedConfig: canonical,
+        site: { id: "files" },
+        expectedCommit: COMMIT,
+        workerName: "peerbit-examples-files",
+        versionTag,
+        environment: CLOUDFLARE_CREDENTIALS,
+        runtime: {
+            runLogged: (command, args, environment) => {
+                assert.equal(command, "/tools/wrangler");
+                assert.deepEqual(args.slice(0, 1), ["deploy"]);
+                assert.equal(args.includes("versions"), false);
+                assert.equal(args.includes("--strict"), true);
+                assert.equal(args[args.indexOf("--tag") + 1], versionTag);
+                assert.equal(
+                    args.some((argument) =>
+                        [
+                            "--route",
+                            "--routes",
+                            "--domain",
+                            "--domains",
+                        ].includes(argument)
+                    ),
+                    false
+                );
+                invokedConfigFile = args[args.indexOf("--config") + 1];
+                const invokedConfig = JSON.parse(
+                    readFileSync(invokedConfigFile, "utf8")
+                );
+                assert.equal(invokedConfig.workers_dev, false);
+                assert.equal(invokedConfig.preview_urls, false);
+                assert.equal("routes" in invokedConfig, false);
+                assert.equal("route" in invokedConfig, false);
+                assert.equal("domains" in invokedConfig, false);
+                writeFileSync(
+                    environment.WRANGLER_OUTPUT_FILE_PATH,
+                    wranglerInitialDeployRecord() + "\n",
+                    "utf8"
+                );
+            },
+        },
+    });
+
+    assert.deepEqual(evidence, deploymentEvidence("files"));
+    assert.ok(invokedConfigFile);
+    assert.equal(existsSync(path.dirname(invokedConfigFile)), false);
+});
+
 test("unexpected Wrangler Preview URL output fails closed without exposing the account slug", () => {
     const accountSlug = "private-account-slug";
     const previewUrl = `https://version-files.${accountSlug}.workers.dev`;
@@ -3810,4 +3930,31 @@ test("pinned Wrangler version upload cannot invoke route or domain publishers", 
     assert.doesNotMatch(upload, /\btriggersDeploy\(/);
     assert.doesNotMatch(upload, /\bpublishRoutes\(|\bpublishCustomDomains\(/);
     assert.doesNotMatch(upload, /\/domains\/records|\/routes/);
+
+    const preflightStart = bundle.indexOf(
+        "async function preUploadApiChecks(props, config2)"
+    );
+    const preflightEnd = bundle.indexOf(
+        "\nfunction addWorkersSitesBindings",
+        preflightStart
+    );
+    assert.ok(preflightStart >= 0 && preflightEnd > preflightStart);
+    assert.match(
+        bundle.slice(preflightStart, preflightEnd),
+        /You cannot upload a new version of a Worker that does not yet exist/
+    );
+
+    const deployHandlerStart = bundle.indexOf(
+        "async function runDeployCommandHandler(args, {"
+    );
+    const deployHandlerEnd = bundle.indexOf(
+        "\nvar deployCommand",
+        deployHandlerStart
+    );
+    assert.ok(deployHandlerStart >= 0 && deployHandlerEnd > deployHandlerStart);
+    const deployHandler = bundle.slice(deployHandlerStart, deployHandlerEnd);
+    assert.match(deployHandler, /type: "deploy"/);
+    assert.match(deployHandler, /worker_tag: workerTag/);
+    assert.match(deployHandler, /version_id: versionId/);
+    assert.match(deployHandler, /targets/);
 });

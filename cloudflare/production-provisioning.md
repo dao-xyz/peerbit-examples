@@ -10,12 +10,21 @@ legacy Worker through policy alone. The script never creates preview Workers,
 traditional Worker routes, or any resource outside that allowlist.
 
 Cloudflare's current model separates an uploaded Worker version from the
-deployment that sends traffic to it. The workflow uses that separation to
-upload a route-free version, disable both `workers.dev` and version Preview
-URLs, activate exactly that version at 100%, and attach the custom domain last.
+deployment that sends traffic to it, but Wrangler refuses `versions upload`
+when the named Worker does not exist yet. For a missing reviewed Worker, the
+workflow therefore performs one exact-name initial `wrangler deploy` from a
+temporary config with `workers_dev: false`, `preview_urls: false`, and no
+routes or custom domains. It accepts that private active baseline only when
+the same invocation emits one structured `deploy` record with an empty target
+list and exact Cloudflare GETs prove the Worker tag, version, artifact, active
+100% deployment, and both disabled public URL flags. Existing Workers retain
+the separated inactive-version upload and exact 100% activation path. In both
+cases the reviewed custom domain is attached last.
+
 These are the relevant official references:
 
 - [Versions and deployments](https://developers.cloudflare.com/workers/versions-and-deployments/)
+- [`wrangler deploy`](https://developers.cloudflare.com/workers/wrangler/commands/workers/#deploy)
 - [`wrangler versions upload`](https://developers.cloudflare.com/workers/wrangler/commands/workers/#versions-upload)
 - [Worker scripts API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/)
 - [Zones list API](https://developers.cloudflare.com/api/resources/zones/methods/list/)
@@ -125,9 +134,12 @@ canonical manifest bytes to
 manifest digest is included in the plan receipt, so rebuilding different code,
 configuration, or assets cannot reuse a reviewed account-state receipt.
 
-Review all seven rows. Expected first-run actions are a route-free upload,
-public-subdomain disable, exact 100% activation, domain attachment, and live
-verification. Each existing allowlisted preview Worker with either public flag
+Review all seven rows. Expected actions for a missing first-run Worker are an
+exact route-free private initial deploy, public-subdomain disable, domain
+attachment, and live verification. An existing Worker instead shows a fresh
+route-free version upload, public-subdomain disable, exact 100% activation,
+domain attachment, and live verification. Each existing allowlisted preview
+Worker with either public flag
 enabled has an explicit `disable-public-subdomains` action; a missing preview
 has no action and is never created. Any unknown `peerbit-examples-*` Worker,
 traditional route, wrong domain owner, split deployment, Tail consumer,
@@ -178,8 +190,8 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    unreviewed Custom Domain attachment. This initial read creates one
    invocation-wide production ledger: existence, immutable Worker tag, exact
    active/deployable versions, attachments, and domain state are never silently
-   rebaselined. A
-   Worker missing at that read must remain missing until its own proved upload.
+   rebaselined. A Worker missing at that read must remain missing until its own
+   proved initial private deploy.
 2. Disables both public flags on every existing allowlisted preview **and
    production** Worker. It requires exact `enabled: false`,
    `previews_enabled: false` GET evidence for all of them before the first
@@ -189,31 +201,42 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    zero Tail/Logpush attachments, active service-binding inventory, the exact
    account-wide Queue-consumer inventory, complete authoritative account
    zone-and-route inventory, and global false/false public-URL fence before
-   every upload, activation, and domain attachment and after every mutation.
+   every initial deploy, version upload, activation, and domain attachment and
+   after every mutation.
    An added/deleted zone, route drift, or a change to an earlier or unrelated
    site or Queue stops the invocation; it is never accepted as a new baseline.
-4. Revalidates every artifact manifest immediately before upload, uploads its
-   exact prebuilt module with bundling disabled, and uploads one new route-free
-   version for every site on every apply. Its tag
-   contains a cryptographically random invocation nonce. No inactive version
-   from an earlier or ambiguous attempt is ever reused, even if its annotations
-   look exact. A new Worker/version identity is learned only when structured
-   evidence from this exact Wrangler invocation and a direct exact-version GET
-   agree on Worker tag, version ID, nonce-tag/message, runtime settings
+4. Revalidates every artifact manifest immediately before mutation and sends
+   its exact prebuilt module with bundling disabled. A Worker missing from the
+   reviewed invocation ledger is initialized only with exact-name route-free
+   `wrangler deploy`; its private config disables both public URL settings and
+   omits every route/custom-domain field. The workflow requires exactly one
+   same-invocation structured `deploy` record with an empty target list, then
+   direct GETs must prove its immutable Worker tag, exact active version at
+   100%, one reviewed deployable version, no domain, the reviewed runtime and
+   artifact, and no attachment drift. An existing Worker instead receives one
+   fresh inactive route-free version through `wrangler versions upload`,
+   followed later by exact activation. Every version tag contains a
+   cryptographically random invocation nonce. No inactive version from an
+   earlier or ambiguous attempt is ever reused, even if its annotations look
+   exact. A Worker/version identity is learned only when structured evidence
+   from this exact Wrangler invocation and a direct exact-version GET agree on
+   Worker tag, version ID, nonce-tag/message, runtime settings
    (including cache, limits, migrations, placement, and usage model), reviewed
    bindings, the artifact digest binding, and the version resource fingerprint.
    For an omitted limits config, only Wrangler's equivalent omitted or plain
    empty-object response is accepted; any limit field is rejected. Explicitly
    configured limits must match exactly.
-   It also downloads that exact inactive version through the content API and
+   It also downloads that exact version through the content API and
    requires the multipart body to contain exactly the one reviewed ES module,
    with no auxiliary modules or source maps. The same digest is carried by the
    version message, same-invocation evidence, plan, and apply ledger.
-5. Allows only the just-uploaded Worker as a narrow public-URL transient, then
+5. Allows only the just-mutated Worker as a narrow public-URL transient, then
    immediately disables both public flags and restores the global fence before
    any other mutation.
-6. Activates exactly the tagged version at 100% through the deployments API,
-   then downloads content for that exact version ID again and requires the
+6. For an existing Worker, activates exactly the tagged inactive version at
+   100% through the deployments API. For a newly initialized Worker, requires
+   the initial private deploy to remain the exact active version. It then
+   downloads content for that exact version ID again and requires the
    entrypoint name, MIME type, length, SHA-256, and complete one-module
    multipart set to match the reviewed artifact.
 7. Attaches exactly one reviewed Custom Domain to each Worker, after all
@@ -228,12 +251,16 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    schedule, Tail/Logpush, service-binding, Queue-consumer, active-module, and
    subdomain state, including every existing allowlisted preview Worker.
 
-A rerun is deliberately not idempotent at the version-upload layer: after a new
-plan is reviewed, it uploads and proves seven fresh nonce-bound versions. This
-prevents a failed invocation's unproved leftover version from becoming trusted
-on a later run. Existing active versions and quarantined inactive IDs remain in
-the plan state until the fresh versions are proved and promoted. Use the routine
-transactional production workflow after the initial baseline exists.
+A rerun is deliberately not idempotent at the version-upload layer for Workers
+that already exist: after a new plan is reviewed, it uploads and proves fresh
+nonce-bound versions. This prevents a failed invocation's unproved leftover
+version from becoming trusted on a later run. Existing active versions and
+quarantined inactive IDs remain in the plan state until the fresh versions are
+proved and promoted. A Worker is eligible for the initial-deploy path only when
+the reviewed state digest proved that exact identity absent. The state-digest
+schema is revised whenever these transition semantics change, so an older plan
+receipt cannot authorize a newer implementation. Use the routine transactional
+production workflow after the initial baseline exists.
 
 ## Ambiguous responses and recovery
 
@@ -259,18 +286,19 @@ mismatch is therefore an explicit manual-recovery condition: stop, inspect the
 named Worker's active deployment and assets, and do not blindly retry or attach
 further domains.
 
-For an upload that creates a previously missing Worker, GET state alone cannot
-establish that the invocation owns the new identity: another actor could have
-created it concurrently. The script also requires Wrangler's structured upload
-evidence to name the same Worker tag and version. If the upload response is
-lost without that evidence, it never learns or activates the Worker. Before
-stopping, it still targets the independently pinned exact Worker name to disable
-both public URL surfaces, requires a direct false/false GET, and rereads the
-invocation-wide fence without accepting the unproved identity or version. The
-manual-recovery error retains the original upload/proof failure and separately
-reports whether the exact cleanup and global post-cleanup fence were proved.
-The same failure-safe cleanup runs when Wrangler evidence is mismatched or the
-first post-upload account inspection fails.
+For an initial deploy that creates a previously missing Worker, GET state alone
+cannot establish that the invocation owns the new identity: another actor could
+have created it concurrently. The script also requires Wrangler's structured
+`deploy` evidence to name the same Worker tag and version and to report no
+targets. If that evidence is lost or malformed, it never learns the Worker and
+never attaches a domain. Before stopping, it still targets the independently
+pinned exact Worker name to disable both public URL surfaces, requires a direct
+false/false GET, and rereads the invocation-wide fence without accepting the
+unproved identity or version. The manual-recovery error retains the original
+deploy/proof failure and separately reports whether the exact cleanup and
+global post-cleanup fence were proved. The same failure-safe cleanup runs when
+Wrangler evidence is mismatched or the first post-deploy account inspection
+fails.
 
 Do not blindly rerun an apply failure. First dispatch a new read-only plan and
 inspect the named Worker's versions, active deployment, routes, custom domain,
@@ -278,8 +306,9 @@ and public-subdomain settings in Cloudflare. Partial runs intentionally leave
 proved inactive versions or exact active Workers in place; they do not delete
 or roll back resources whose ownership cannot be proved. Once the account
 matches a safe partial state, review its new state digest. The next apply keeps
-old inactive versions quarantined and uploads a fresh version for every site;
-it never resumes by adopting the ambiguous upload.
+old inactive versions quarantined, uses the initial private-deploy path only
+for exact Workers still proved absent, and uploads a fresh version for every
+Worker that exists; it never resumes by adopting the ambiguous mutation.
 
 After all seven sites have passed routine deployments in production, remove
 this one-time workflow in a separately reviewed pull request. Keep this

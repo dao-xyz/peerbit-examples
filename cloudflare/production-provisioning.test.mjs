@@ -322,6 +322,46 @@ const createHarness = () => {
                 sha256: module.sha256,
             };
         },
+        initialDeploy: async ({
+            site,
+            policy,
+            expectedCommit,
+            versionTag,
+            artifact,
+        }) => {
+            calls.push(["initial-deploy", site.id]);
+            const workerTag = addWorker({
+                entry: { site, policy },
+                enabled: true,
+                previewsEnabled: true,
+            });
+            const index = entries.findIndex(
+                ({ site: value }) => value.id === site.id
+            );
+            const versionId = versionIdFor(index + entries.length * 10);
+            versionsFor(policy.productionWorker).set(versionId, {
+                id: versionId,
+                annotations: {
+                    "workers/tag": versionTag,
+                    "workers/message": expectedMessage(site.id, expectedCommit),
+                },
+                resources: versionResources(site.id, versionTag),
+                ...(versionCacheOptions(site.id)
+                    ? { cache_options: versionCacheOptions(site.id) }
+                    : {}),
+            });
+            deployments.set(policy.productionWorker, [
+                {
+                    versions: [{ version_id: versionId, percentage: 100 }],
+                },
+            ]);
+            return {
+                workerName: policy.productionWorker,
+                workerTag,
+                versionId,
+                artifactManifestDigest: artifact.digest,
+            };
+        },
         upload: async ({
             site,
             policy,
@@ -418,10 +458,18 @@ const createHarness = () => {
 
 const mutationCalls = (calls) =>
     calls.filter(([name]) =>
-        ["upload", "disable-subdomain", "activate", "attach-domain"].includes(
-            name
-        )
+        [
+            "initial-deploy",
+            "upload",
+            "disable-subdomain",
+            "activate",
+            "attach-domain",
+        ].includes(name)
     );
+
+const seedExistingWorkers = (harness) => {
+    for (const entry of entries) harness.addWorker({ entry });
+};
 
 test("provisioning CLI requires mode-specific explicit confirmation", () => {
     const planConfirmation = productionProvisioningConfirmation({
@@ -591,6 +639,14 @@ test("read-only plan proposes all seven exact targets without mutations", async 
             actions.includes("attach-reviewed-custom-domain")
         )
     );
+    for (const { actions } of plan) {
+        assert.deepEqual(actions, [
+            "deploy-initial-route-free-private-baseline",
+            "disable-initial-public-subdomains",
+            "attach-reviewed-custom-domain",
+            "verify-live-release",
+        ]);
+    }
     assert.deepEqual(
         plan.map(({ previewWorker, previewExists, previewActions }) => [
             previewWorker,
@@ -609,6 +665,105 @@ test("read-only plan proposes all seven exact targets without mutations", async 
     );
     assert.deepEqual(mutationCalls(harness.calls), []);
     assert.match(logs.at(-1), /no Cloudflare mutations were dispatched/);
+});
+
+test("missing Workers use exact private deploys and prove every public fence before any domain", async () => {
+    const harness = createHarness();
+    await provisionProductionEntries({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "apply",
+        operations: harness.operations,
+        log: () => {},
+    });
+
+    assert.equal(
+        harness.calls.filter(([name]) => name === "initial-deploy").length,
+        entries.length
+    );
+    assert.equal(
+        harness.calls.some(([name]) => name === "upload"),
+        false
+    );
+    assert.equal(
+        harness.calls.some(([name]) => name === "activate"),
+        false
+    );
+    const firstDomain = harness.calls.findIndex(
+        ([name]) => name === "attach-domain"
+    );
+    assert.ok(firstDomain >= 0);
+    for (const { site, policy } of entries) {
+        const deployedAt = harness.calls.findIndex(
+            ([name, identity]) =>
+                name === "initial-deploy" && identity === site.id
+        );
+        const disabledAt = harness.calls.findIndex(
+            ([name, worker], index) =>
+                index > deployedAt &&
+                name === "disable-subdomain" &&
+                worker === policy.productionWorker
+        );
+        const provedAt = harness.calls.findIndex(
+            ([name, worker], index) =>
+                index > disabledAt &&
+                name === "get-subdomain" &&
+                worker === policy.productionWorker
+        );
+        const moduleProvedAt = harness.calls.findIndex(
+            ([name, worker, versionId], index) =>
+                index > deployedAt &&
+                name === "get-version-module" &&
+                worker === policy.productionWorker &&
+                typeof versionId === "string"
+        );
+        assert.ok(deployedAt >= 0);
+        assert.ok(disabledAt > deployedAt && disabledAt < firstDomain);
+        assert.ok(provedAt > disabledAt && provedAt < firstDomain);
+        assert.ok(moduleProvedAt > deployedAt && moduleProvedAt < firstDomain);
+        assert.deepEqual(harness.subdomains.get(policy.productionWorker), {
+            enabled: false,
+            previewsEnabled: false,
+        });
+    }
+});
+
+test("missing-Worker deploy evidence failures close the exact public URLs and never attach a domain", async () => {
+    const harness = createHarness();
+    const initialDeploy = harness.operations.initialDeploy;
+    harness.operations.initialDeploy = async (input) => {
+        await initialDeploy(input);
+        return undefined;
+    };
+    await assert.rejects(
+        provisionProductionEntries({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            mode: "apply",
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /initial route-free private deploy could not be proved safely/
+    );
+    const workerName = entries[0].policy.productionWorker;
+    assert.ok(
+        harness.calls.some(
+            ([name, worker]) =>
+                name === "disable-subdomain" && worker === workerName
+        )
+    );
+    assert.deepEqual(harness.subdomains.get(workerName), {
+        enabled: false,
+        previewsEnabled: false,
+    });
+    assert.equal(
+        harness.calls.some(([name]) =>
+            ["upload", "activate", "attach-domain"].includes(name)
+        ),
+        false
+    );
 });
 
 test("provisioning requires the independently reviewed zone fingerprint", async (t) => {
@@ -921,6 +1076,7 @@ test("reviewed fingerprint and state digest bind every authoritative zone and ro
 
 test("authoritative route drift after upload trips the invocation fence", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const reviewed = await provisionProductionEntriesWithReceipt({
         entries,
         configs,
@@ -959,6 +1115,7 @@ test("authoritative route drift after upload trips the invocation fence", async 
 
 test("independent zone identity fingerprint is rechecked after upload", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     harness.zoneRouteInventory.push({
         zoneId: HIDDEN_ZONE_ID,
         zoneName: "hidden.example",
@@ -1139,7 +1296,9 @@ test("all preview disable GET postconditions precede the first production mutati
     );
     const firstProductionMutation = harness.calls.findIndex(
         ([name, worker]) =>
-            ["upload", "activate", "attach-domain"].includes(name) ||
+            ["initial-deploy", "upload", "activate", "attach-domain"].includes(
+                name
+            ) ||
             (name === "disable-subdomain" && productionWorkers.has(worker))
     );
     assert.ok(firstProductionMutation >= 0);
@@ -1249,7 +1408,7 @@ test("preview identities are independently pinned before every account read", as
     }
 });
 
-test("every confirmed apply uploads and activates seven fresh nonce-bound versions", async () => {
+test("first apply privately deploys missing Workers and reruns upload fresh versions", async () => {
     const harness = createHarness();
     await provisionProductionEntries({
         entries,
@@ -1259,14 +1418,18 @@ test("every confirmed apply uploads and activates seven fresh nonce-bound versio
         operations: harness.operations,
         log: () => {},
     });
-    assert.equal(harness.calls.filter(([name]) => name === "upload").length, 7);
+    assert.equal(
+        harness.calls.filter(([name]) => name === "initial-deploy").length,
+        7
+    );
+    assert.equal(harness.calls.filter(([name]) => name === "upload").length, 0);
     assert.equal(
         harness.calls.filter(([name]) => name === "disable-subdomain").length,
         7
     );
     assert.equal(
         harness.calls.filter(([name]) => name === "activate").length,
-        7
+        0
     );
     assert.equal(
         harness.calls.filter(([name]) => name === "attach-domain").length,
@@ -1303,6 +1466,10 @@ test("every confirmed apply uploads and activates seven fresh nonce-bound versio
         operations: harness.operations,
         log: () => {},
     });
+    assert.equal(
+        harness.calls.filter(([name]) => name === "initial-deploy").length,
+        0
+    );
     assert.equal(harness.calls.filter(([name]) => name === "upload").length, 7);
     assert.equal(
         harness.calls.filter(([name]) => name === "activate").length,
@@ -1806,6 +1973,7 @@ test("forged uploaded resources and bindings cannot authorize activation", async
     ]) {
         await t.test(name, async () => {
             const harness = createHarness();
+            seedExistingWorkers(harness);
             const reviewed = await provisionProductionEntriesWithReceipt({
                 entries,
                 configs,
@@ -1854,6 +2022,7 @@ test("forged uploaded resources and bindings cannot authorize activation", async
 
 test("omitted and plain-empty default limits keep one fingerprint through every candidate fence", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const reviewed = await provisionProductionEntriesWithReceipt({
         entries,
         configs,
@@ -1911,6 +2080,7 @@ test("an explicitly reviewed limits object still requires an exact match", async
     ]) {
         await t.test(name, async () => {
             const harness = createHarness();
+            seedExistingWorkers(harness);
             const limitedConfigs = new Map(
                 [...configs].map(([siteId, rendered]) => [
                     siteId,
@@ -1974,6 +2144,7 @@ test("an explicitly reviewed limits object still requires an exact match", async
 
 test("an exact uploaded version resource substitution is caught before activation", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const reviewed = await provisionProductionEntriesWithReceipt({
         entries,
         configs,
@@ -2018,6 +2189,7 @@ test("an exact uploaded version resource substitution is caught before activatio
 
 test("a concurrent same-Worker version addition is never learned with the upload", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const reviewed = await provisionProductionEntriesWithReceipt({
         entries,
         configs,
@@ -2061,6 +2233,7 @@ test("a concurrent same-Worker version addition is never learned with the upload
 
 test("Queue consumer drift after upload is caught by the mutation-time ledger before activation", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const reviewed = await provisionProductionEntriesWithReceipt({
         entries,
         configs,
@@ -2110,6 +2283,7 @@ test("Queue consumer drift after upload is caught by the mutation-time ledger be
 
 test("a lost upload response can never be adopted by a later apply", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const firstPlan = await provisionProductionEntriesWithReceipt({
         entries,
         configs,
@@ -2371,7 +2545,7 @@ test("a reviewed different active baseline is replaced only by a fresh proved ve
     );
 });
 
-test("a production Worker missing initially cannot appear before its owned upload", async () => {
+test("a production Worker missing initially cannot appear before its owned initial deploy", async () => {
     const harness = createHarness();
     const target = entries[0];
     const originalList = harness.operations.listWorkerScripts;
@@ -2398,6 +2572,7 @@ test("a production Worker missing initially cannot appear before its owned uploa
 test("a cross-site Worker replacement after upload is never rebaselined", async () => {
     const harness = createHarness();
     const target = entries[0];
+    harness.addWorker({ entry: target });
     const victim = entries[1];
     for (const entry of entries.slice(1)) harness.seedExact({ entry });
     const originalUpload = harness.operations.upload;
@@ -2484,6 +2659,7 @@ test("an earlier production public URL re-enable blocks every later domain mutat
 
 test("ambiguous upload, subdomain, activation, and domain responses require exact GET postconditions", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const logs = [];
     for (const [operationName, methodName] of [
         ["upload", "upload"],
@@ -2652,6 +2828,7 @@ test("a preview Worker identity replacement during fencing blocks production", a
 
 test("a preview Worker re-enabled during upload blocks activation", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const target = entries[0];
     harness.addPreview({
         entry: target,
@@ -2701,6 +2878,7 @@ test("a preview Worker re-enabled during upload blocks activation", async () => 
 
 test("an unproved ambiguous upload stops before activation and domain mutation", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const target = entries[0];
     harness.operations.upload = async ({ site }) => {
         harness.calls.push(["upload", site.id]);
@@ -2733,6 +2911,7 @@ test("an unproved ambiguous upload stops before activation and domain mutation",
 
 test("an applied new upload without Wrangler evidence cannot establish Worker identity", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const target = entries[0];
     const originalUpload = harness.operations.upload;
     harness.operations.upload = async (input) => {
@@ -2783,6 +2962,7 @@ test("an applied new upload without Wrangler evidence cannot establish Worker id
 
 test("successful upload output must match exact GET-confirmed ownership", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const target = entries[0];
     const originalUpload = harness.operations.upload;
     harness.operations.upload = async (input) => {
@@ -2801,7 +2981,7 @@ test("successful upload output must match exact GET-confirmed ownership", async 
         (error) => {
             assert.match(
                 error.message,
-                /Wrangler upload evidence does not match/
+                /same-invocation structured Wrangler upload evidence is missing or malformed/
             );
             assert.match(
                 error.message,
@@ -2828,6 +3008,7 @@ test("successful upload output must match exact GET-confirmed ownership", async 
 
 test("a post-upload inspection failure still closes the exact public URL surfaces", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const target = entries[0];
     const originalUpload = harness.operations.upload;
     const originalList = harness.operations.listWorkerScripts;
@@ -2888,11 +3069,16 @@ test("a post-upload inspection failure still closes the exact public URL surface
 
 test("a failed upload preserves both the primary and public-URL cleanup diagnostics", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const target = entries[0];
     const originalUpload = harness.operations.upload;
     const originalDisable = harness.operations.disableWorkerSubdomain;
     harness.operations.upload = async (input) => {
         await originalUpload(input);
+        harness.subdomains.set(target.policy.productionWorker, {
+            enabled: true,
+            previewsEnabled: true,
+        });
         throw new Error("original upload response diagnostic");
     };
     harness.operations.disableWorkerSubdomain = async (workerName) => {
@@ -2972,6 +3158,7 @@ test("live verification and its final policy fence are required for success", as
 
 test("wrong exact-version module bytes require manual recovery before any later mutation", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const getWorkerVersionModule = harness.operations.getWorkerVersionModule;
     harness.operations.getWorkerVersionModule = async (
         workerName,
@@ -3060,6 +3247,7 @@ test("final verification rechecks every existing preview Worker", async () => {
 
 test("manual-recovery diagnostics redact token, account, and workers.dev slug", async () => {
     const harness = createHarness();
+    seedExistingWorkers(harness);
     const oldToken = process.env.CLOUDFLARE_API_TOKEN;
     const oldAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
     process.env.CLOUDFLARE_API_TOKEN = API_TOKEN;

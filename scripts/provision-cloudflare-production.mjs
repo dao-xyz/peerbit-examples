@@ -22,6 +22,7 @@ import {
     readWorkerDomainInventory,
     readWorkerScriptMap,
     requireExpectedAccountZoneInventorySha256,
+    runWranglerInitialDeploy,
     runWranglerVersionUpload,
     withoutCloudflareDeploymentCredentials,
 } from "./deploy-cloudflare-production.mjs";
@@ -1075,9 +1076,8 @@ export const inspectProductionProvisioning = async ({
                 active: false,
                 domainAttached: false,
                 actions: [
-                    "upload-fresh-route-free-version",
-                    "disable-uploaded-public-subdomains",
-                    "activate-exact-version-100-percent",
+                    "deploy-initial-route-free-private-baseline",
+                    "disable-initial-public-subdomains",
                     "attach-reviewed-custom-domain",
                     "verify-live-release",
                 ],
@@ -1242,7 +1242,7 @@ export const productionProvisioningStateDigest = ({
         expectedZoneInventorySha256
     );
     const state = {
-        schema: 4,
+        schema: 5,
         expectedCommit: expectedCommit.toLowerCase(),
         accountId: accountId.toLowerCase(),
         expectedZoneInventorySha256: expectedZoneFingerprint,
@@ -1348,6 +1348,9 @@ const manualRecoveryError = ({ site, workerName, operation, error }) =>
 const failedUploadRecoveryError = ({
     site,
     workerName,
+    operation = "route-free version upload",
+    responseLabel = "upload response",
+    proofLabel = "post-upload proof",
     uploadError,
     proofError,
     exactCleanupError,
@@ -1355,9 +1358,9 @@ const failedUploadRecoveryError = ({
 }) => {
     const details = [
         uploadError
-            ? `upload response: ${diagnostic(uploadError, 750)}`
+            ? `${responseLabel}: ${diagnostic(uploadError, 750)}`
             : undefined,
-        `post-upload proof: ${diagnostic(proofError, 750)}`,
+        `${proofLabel}: ${diagnostic(proofError, 750)}`,
         exactCleanupError
             ? `exact-name public-URL failure cleanup was not proved: ${diagnostic(
                   exactCleanupError,
@@ -1372,7 +1375,7 @@ const failedUploadRecoveryError = ({
             : "post-cleanup invocation fence was proved",
     ].filter(Boolean);
     return new Error(
-        `${site.id}: route-free version upload could not be proved safely (${details.join(
+        `${site.id}: ${operation} could not be proved safely (${details.join(
             "; "
         )}); do not retry mutations blindly. Inspect ${workerName}'s versions, active deployment, routes, custom domain, and public subdomain state before rerunning the read-only plan`
     );
@@ -1577,7 +1580,7 @@ const assertAllManagedPublicUrlsDisabled = (
     }
 };
 
-const validateUploadEvidence = ({ plan, evidence }) => {
+const validateWranglerMutationEvidence = ({ plan, evidence }) => {
     if (
         !evidence ||
         evidence.workerName !== plan.workerName ||
@@ -1586,7 +1589,7 @@ const validateUploadEvidence = ({ plan, evidence }) => {
         evidence.artifactManifestDigest !== plan.artifactManifestDigest
     ) {
         throw new Error(
-            `${plan.site.id}: Wrangler upload evidence does not match the exact GET-confirmed Worker identity and version`
+            `${plan.site.id}: Wrangler mutation evidence does not match the exact GET-confirmed Worker identity and version`
         );
     }
 };
@@ -1874,6 +1877,9 @@ export const provisionProductionEntries = async ({
 
     const stopAfterFailedUploadProof = async ({
         before,
+        operation,
+        responseLabel,
+        proofLabel,
         uploadError,
         proofError,
     }) => {
@@ -1911,6 +1917,9 @@ export const provisionProductionEntries = async ({
         throw failedUploadRecoveryError({
             site: before.site,
             workerName: before.workerName,
+            operation,
+            responseLabel,
+            proofLabel,
             uploadError,
             proofError,
             exactCleanupError,
@@ -1990,9 +1999,143 @@ export const provisionProductionEntries = async ({
 
     for (const { site } of entries) {
         const before = planFor(
-            await readFencedInspection("before a route-free version upload"),
+            await readFencedInspection(
+                "before a route-free provisioning mutation"
+            ),
             site.id
         );
+        if (!before.active && !before.versionId && !before.workerExists) {
+            const pinnedBefore = productionLedgerFor(productionLedger, site.id);
+            let deployEvidence;
+            let deployError;
+            try {
+                deployEvidence = await operations.initialDeploy({
+                    configFile: before.file,
+                    renderedConfig: before.renderedConfig,
+                    site: before.site,
+                    policy: before.policy,
+                    expectedCommit,
+                    versionTag: before.versionTag,
+                    artifact: before.artifact,
+                });
+            } catch (error) {
+                deployError = error;
+                deployEvidence = error?.deploymentEvidence;
+            }
+            let afterDeploy;
+            let deployProofError;
+            try {
+                if (
+                    !deployEvidence ||
+                    deployEvidence.workerName !== before.workerName ||
+                    typeof deployEvidence.workerTag !== "string" ||
+                    deployEvidence.workerTag.length === 0 ||
+                    !VERSION_ID.test(deployEvidence.versionId || "") ||
+                    deployEvidence.artifactManifestDigest !==
+                        before.artifactManifestDigest
+                ) {
+                    throw new Error(
+                        "same-invocation structured Wrangler deploy evidence is missing or malformed"
+                    );
+                }
+                invocationCandidates.set(site.id, {
+                    ...deployEvidence,
+                    versionTag: before.versionTag,
+                });
+                const afterInspection = assertPinnedInspection(
+                    await inspect(context),
+                    {
+                        phase: "after an initial route-free private deploy",
+                        skipProductionSiteId: site.id,
+                        requirePublicFence: true,
+                        // The config disables both public URL surfaces, and
+                        // this narrow allowance lets us inspect and then
+                        // force-disable the exact new Worker even if
+                        // Cloudflare transiently reports otherwise.
+                        allowProductionWorker: before.workerName,
+                    }
+                );
+                afterDeploy = planFor(afterInspection, site.id);
+                if (
+                    !afterDeploy.workerExists ||
+                    afterDeploy.workerTag !== deployEvidence.workerTag ||
+                    afterDeploy.versionId !== deployEvidence.versionId ||
+                    !afterDeploy.active ||
+                    afterDeploy.activeVersionId !== deployEvidence.versionId ||
+                    JSON.stringify(afterDeploy.deployableVersionIds) !==
+                        JSON.stringify([deployEvidence.versionId]) ||
+                    afterDeploy.domainAttached ||
+                    pinnedBefore.workerExists ||
+                    pinnedBefore.activeVersionId != null ||
+                    pinnedBefore.deployableVersionIds.length !== 0
+                ) {
+                    throw new Error(
+                        "exact active route-free initial Worker/version transition was not observed"
+                    );
+                }
+                validateWranglerMutationEvidence({
+                    plan: afterDeploy,
+                    evidence: deployEvidence,
+                });
+                invocationCandidates.get(site.id).versionFingerprint =
+                    afterDeploy.versionFingerprint;
+                Object.assign(
+                    productionLedgerFor(productionLedger, site.id),
+                    productionLedgerState(afterDeploy)
+                );
+                assertProductionLedger(productionLedger, afterInspection, {
+                    phase: "after learning the exact Wrangler-owned initial deploy",
+                });
+            } catch (error) {
+                deployProofError = error;
+            }
+            if (deployProofError) {
+                invocationCandidates.delete(site.id);
+                await stopAfterFailedUploadProof({
+                    before,
+                    operation: "initial route-free private deploy",
+                    responseLabel: "initial deploy response",
+                    proofLabel: "post-deploy proof",
+                    uploadError: deployError,
+                    proofError: deployProofError,
+                });
+            }
+            if (deployError) {
+                log(
+                    `${site.id}: ambiguous initial deploy response was resolved by matching Wrangler evidence and exact active Worker/version/tag GETs`
+                );
+            }
+            await disableAndConfirm({
+                plan: afterDeploy,
+                operations,
+                log,
+                force: true,
+            });
+            try {
+                await readFencedInspection(
+                    "after the initial Worker public-URL disable"
+                );
+                await confirmActiveWorkerModule({
+                    site: afterDeploy.site,
+                    policy: afterDeploy.policy,
+                    versionId: afterDeploy.versionId,
+                    artifact: afterDeploy.artifact,
+                    operations,
+                });
+                await readFencedInspection(
+                    "after the initial active Worker version module-set proof"
+                );
+            } catch (error) {
+                throw manualRecoveryError({
+                    site: before.site,
+                    workerName: before.workerName,
+                    operation:
+                        "initial active baseline public-URL and module proof",
+                    error,
+                });
+            }
+            continue;
+        }
         if (!before.active && !before.versionId) {
             const pinnedBefore = productionLedgerFor(productionLedger, site.id);
             let uploadEvidence;
@@ -2073,7 +2216,7 @@ export const provisionProductionEntries = async ({
                         "exact inactive uploaded Worker/version transition was not observed"
                     );
                 }
-                validateUploadEvidence({
+                validateWranglerMutationEvidence({
                     plan: afterUpload,
                     evidence: uploadEvidence,
                 });
@@ -2490,6 +2633,25 @@ export const main = async (argv = process.argv.slice(2)) => {
         disableWorkerSubdomain: workersApi.disableWorkerSubdomain,
         attachDomain: workersApi.attachWorkerDomain,
         activate: workersApi.createDeployment,
+        initialDeploy: ({
+            configFile,
+            renderedConfig,
+            site,
+            policy,
+            expectedCommit: commit,
+            versionTag,
+            artifact,
+        }) =>
+            runWranglerInitialDeploy({
+                wrangler,
+                configFile,
+                renderedConfig,
+                site,
+                expectedCommit: commit,
+                workerName: policy.productionWorker,
+                versionTag,
+                artifact,
+            }),
         upload: ({
             configFile,
             renderedConfig,
