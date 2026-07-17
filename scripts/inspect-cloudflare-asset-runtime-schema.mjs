@@ -161,6 +161,7 @@ const emptyArrayClassification = (object, key, exact) => {
 
 const handlerClassification = (script) => {
     if (!hasOwn(script, "handlers")) return "absent";
+    if (script.handlers === null) return "exact-null";
     if (Array.isArray(script.handlers) && script.handlers.length === 0) {
         return "exact-empty";
     }

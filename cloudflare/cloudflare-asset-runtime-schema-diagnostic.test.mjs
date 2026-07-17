@@ -255,6 +255,7 @@ const REVIEWED_CLASSIFICATIONS = new Set([
     "exact-enabled-no-cross-version",
     "exact-false",
     "exact-fetch-only",
+    "exact-null",
     "exact-true",
     "exact-empty-user-worker",
 ]);
@@ -514,6 +515,12 @@ test("handler classifications disclose no handler values", async (t) => {
             name: "empty handlers",
             value: [],
             expected: "exact-empty",
+            expectedCount: 0,
+        },
+        {
+            name: "null handlers",
+            value: null,
+            expected: "exact-null",
             expectedCount: 0,
         },
         {
