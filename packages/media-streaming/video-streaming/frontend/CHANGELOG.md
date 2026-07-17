@@ -1,5 +1,12 @@
 # videostreaming
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies [46d7741]
+    - @peerbit/media-streaming-web@2.2.0
+
 ## 0.1.4
 
 ### Patch Changes
