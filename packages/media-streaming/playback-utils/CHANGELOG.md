@@ -1,5 +1,14 @@
 # @peerbit/media-streaming-web
 
+## 2.2.0
+
+### Minor Changes
+
+- 46d7741: Own media playback resources across component lifecycle changes, fence stale
+  asynchronous work, and preserve failed cleanup in a bounded retry registry.
+  Bound stalled cleanup attempts without duplicating exact closes, permit
+  reentrant teardown, and contain rejected asynchronous cleanup reporters.
+
 ## 2.1.0
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 {
     "name": "music-library-frontend",
-    "version": "0.1.4",
+    "version": "0.1.5",
     "private": true,
     "homepage": "https://music.apps.peerbit.org",
     "type": "module",
