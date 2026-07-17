@@ -1,0 +1,64 @@
+name: Inspect Cloudflare Worker version schema
+
+on:
+    workflow_dispatch:
+        inputs:
+            worker:
+                description: Exact reviewed production Worker
+                required: true
+                type: choice
+                options:
+                    - peerbit-examples-stream
+                    - peerbit-examples-music
+                    - peerbit-examples-chat
+                    - peerbit-examples-ml
+                    - peerbit-examples-text
+                    - peerbit-examples-files
+                    - peerbit-examples-chess
+            version:
+                description: Exact lowercase Worker version UUID
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+jobs:
+    inspect:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        environment: cloudflare-production
+        steps:
+            - name: Require reviewed default branch
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+                      echo "Schema inspection is permitted only from master" >&2
+                      exit 1
+                  fi
+
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 22.x
+
+            - name: Re-run schema diagnostic safety tests
+              run: node --test cloudflare/cloudflare-version-schema-diagnostic.test.mjs
+
+            - name: Inspect one exact Worker version with one GET
+              env:
+                  DIAGNOSTIC_WORKER: ${{ inputs.worker }}
+                  DIAGNOSTIC_VERSION: ${{ inputs.version }}
+                  CLOUDFLARE_PRODUCTION_API_TOKEN: ${{ secrets.CLOUDFLARE_PRODUCTION_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: >-
+                  node scripts/inspect-cloudflare-worker-version-schema.mjs
+                  --worker "$DIAGNOSTIC_WORKER"
+                  --version "$DIAGNOSTIC_VERSION"
