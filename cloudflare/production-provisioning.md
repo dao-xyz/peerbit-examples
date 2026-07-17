@@ -15,11 +15,14 @@ when the named Worker does not exist yet. For a missing reviewed Worker, the
 workflow therefore performs one exact-name initial `wrangler deploy` from a
 temporary config with `workers_dev: false`, `preview_urls: false`, and no
 routes or custom domains. It accepts that private active baseline only when
-the same invocation emits one structured `deploy` record with an empty target
-list and exact Cloudflare GETs prove the Worker tag, version, artifact, active
-100% deployment, and both disabled public URL flags. Existing Workers retain
-the separated inactive-version upload and exact 100% activation path. In both
-cases the reviewed custom domain is attached last.
+the same invocation emits one structured `deploy` record with the exact Worker
+name and version and an empty target list. Wrangler 4.110.0 reports
+`worker_tag: null` for this first deploy because its tag lookup correctly ran
+while the Worker was still absent. Immediate Cloudflare GETs must therefore
+bind the new non-null immutable Worker tag to that same version, artifact,
+active 100% deployment, and both disabled public URL flags. Existing Workers
+retain the separated inactive-version upload and exact 100% activation path.
+In both cases the reviewed custom domain is attached last.
 
 These are the relevant official references:
 
@@ -210,17 +213,23 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    reviewed invocation ledger is initialized only with exact-name route-free
    `wrangler deploy`; its private config disables both public URL settings and
    omits every route/custom-domain field. The workflow requires exactly one
-   same-invocation structured `deploy` record with an empty target list, then
-   direct GETs must prove its immutable Worker tag, exact active version at
-   100%, one reviewed deployable version, no domain, the reviewed runtime and
-   artifact, and no attachment drift. An existing Worker instead receives one
+   same-invocation structured `deploy` record with the exact Worker name and
+   version and an empty target list. Its first-deploy Worker tag may be null;
+   the workflow immediately reads the new non-null immutable tag, binds it to
+   that structured version evidence, and repeats the inventory and artifact
+   proof before trusting the identity. Those direct GETs must also prove the
+   exact active version at 100%, one reviewed deployable version, no domain,
+   the reviewed runtime and artifact, and no attachment drift. An existing
+   Worker instead receives one
    fresh inactive route-free version through `wrangler versions upload`,
    followed later by exact activation. Every version tag contains a
    cryptographically random invocation nonce. No inactive version from an
    earlier or ambiguous attempt is ever reused, even if its annotations look
-   exact. A Worker/version identity is learned only when structured evidence
-   from this exact Wrangler invocation and a direct exact-version GET agree on
-   Worker tag, version ID, nonce-tag/message, runtime settings
+   exact. For existing Workers, structured evidence from this exact Wrangler
+   invocation and direct GETs must agree on the Worker tag. For a missing
+   Worker, the structured record's exact name/version and the immediate GET's
+   non-null tag are bound first. In both paths, the evidence must then agree on
+   version ID, nonce-tag/message, runtime settings
    (including cache, limits, migrations, placement, and usage model), reviewed
    bindings, the artifact digest binding, and the version resource fingerprint.
    For an omitted limits config, only Wrangler's equivalent omitted or plain
@@ -289,8 +298,13 @@ further domains.
 For an initial deploy that creates a previously missing Worker, GET state alone
 cannot establish that the invocation owns the new identity: another actor could
 have created it concurrently. The script also requires Wrangler's structured
-`deploy` evidence to name the same Worker tag and version and to report no
-targets. If that evidence is lost or malformed, it never learns the Worker and
+`deploy` evidence to name the exact Worker and version and to report no targets.
+The pinned first-deploy record's null tag is accepted only on this
+missing-Worker path; the first GET must return a non-null immutable tag, and a
+second inspection must retain that tag while proving the exact active version,
+nonce annotation, artifact, and module. A null tag remains forbidden for
+`versions upload` and every existing-Worker path. If that evidence is lost,
+malformed, or changes between GETs, the script never learns the Worker and
 never attaches a domain. Before stopping, it still targets the independently
 pinned exact Worker name to disable both public URL surfaces, requires a direct
 false/false GET, and rereads the invocation-wide fence without accepting the
