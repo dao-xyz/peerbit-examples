@@ -75,6 +75,7 @@ jobs:
                   pnpm -r --sort
                   --filter @peerbit/media-streaming
                   --filter @peerbit/music-library-utils
+                  --filter @peerbit/media-streaming-web
                   run build
 
             - name: Test media lifecycle
