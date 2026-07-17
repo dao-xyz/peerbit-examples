@@ -16,6 +16,9 @@ const provisioningWorkflow = readWorkflow(
 const versionSchemaDiagnosticWorkflow = readWorkflow(
     "cloudflare-version-schema-diagnostic.yml"
 );
+const assetRuntimeSchemaDiagnosticWorkflow = readWorkflow(
+    "cloudflare-asset-runtime-schema-diagnostic.yml"
+);
 const fileShareCiWorkflow = readWorkflow("file-share-ci.yml");
 const provisioningScript = readFileSync(
     path.join(repoRoot, "scripts/provision-cloudflare-production.mjs"),
@@ -159,9 +162,41 @@ test("Cloudflare workflows carry no Supabase build configuration", () => {
         productionWorkflow,
         provisioningWorkflow,
         versionSchemaDiagnosticWorkflow,
+        assetRuntimeSchemaDiagnosticWorkflow,
     ]) {
         assert.doesNotMatch(workflow, /VITE_SUPABASE_/);
     }
+});
+
+test("asset runtime schema inspection is bot-only, first-attempt-only, and account-bound", () => {
+    assert.match(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /"\$GITHUB_ACTOR" != "peerbit-org"/
+    );
+    assert.match(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /"\$GITHUB_TRIGGERING_ACTOR" != "peerbit-org"/
+    );
+    assert.match(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /"\$GITHUB_RUN_ATTEMPT" != "1"/
+    );
+    assert.match(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN \}\}/
+    );
+    assert.doesNotMatch(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /CLOUDFLARE_PRODUCTION_API_TOKEN/
+    );
+    assert.match(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: \$\{\{ secrets\.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 \}\}/
+    );
+    assert.doesNotMatch(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /vars\.CLOUDFLARE_/
+    );
 });
 
 test("preview hosting is validation-only and has no Cloudflare credentials", () => {
@@ -559,6 +594,7 @@ test("every action in Cloudflare workflows is pinned to a full commit", () => {
         productionWorkflow,
         provisioningWorkflow,
         versionSchemaDiagnosticWorkflow,
+        assetRuntimeSchemaDiagnosticWorkflow,
     ]) {
         const uses = workflow.match(/^\s+-?\s*uses:\s*([^\s#]+)/gm) ?? [];
         assert.ok(uses.length > 0);
