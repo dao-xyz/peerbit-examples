@@ -64,6 +64,9 @@ jobs:
               env:
                   DIAGNOSTIC_MODE: ${{ inputs.mode }}
                   DIAGNOSTIC_WORKER: ${{ inputs.worker }}
+                  # Dedicated short-lived token: Workers Scripts Read for the
+                  # account plus Zone Read for all account zones. It must not
+                  # carry Workers Routes or any write permission.
                   CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: ${{ secrets.CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN }}
                   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
                   CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: ${{ secrets.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 }}
