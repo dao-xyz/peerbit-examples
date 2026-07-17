@@ -78,6 +78,9 @@ jobs:
                   --filter @peerbit/media-streaming-web
                   run build
 
+            - name: Test media playback lifecycle
+              run: pnpm --filter @peerbit/media-streaming-web test
+
             - name: Test media lifecycle
               run: >-
                   pnpm exec vitest run --bail=0

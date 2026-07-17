@@ -5,6 +5,7 @@ import {
     type DurableCleanupRegistry,
     type RetryableCloseResource,
 } from "@peerbit/media-streaming-web";
+import PQueue from "p-queue";
 
 export type ViewerPlaybackCleanupOptions = {
     durableOwner: DurableCleanupOwner;
@@ -176,5 +177,50 @@ export const createGenerationTaskRegistry = <Key, Task>() => {
             return tasks.delete(key);
         },
         size: () => tasks.size,
+    };
+};
+
+/** A serial queue whose superseded generations cannot block replacement work. */
+export const createGenerationTaskQueue = () => {
+    let queue = new PQueue({ concurrency: 1 });
+    let generationController = new AbortController();
+
+    const supersededError = () => {
+        const error = new Error("Playback task generation was superseded");
+        error.name = "AbortError";
+        return error;
+    };
+
+    return {
+        beginGeneration: () => {
+            generationController.abort();
+            queue.clear();
+            queue = new PQueue({ concurrency: 1 });
+            generationController = new AbortController();
+        },
+        add: <T>(task: () => T | Promise<T>) => {
+            const signal = generationController.signal;
+            const queued = queue.add(task) as Promise<T>;
+            return new Promise<T>((resolve, reject) => {
+                let settled = false;
+                const finish = (callback: () => void) => {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    signal.removeEventListener("abort", onAbort);
+                    callback();
+                };
+                const onAbort = () => finish(() => reject(supersededError()));
+                signal.addEventListener("abort", onAbort, { once: true });
+                if (signal.aborted) {
+                    onAbort();
+                }
+                void queued.then(
+                    (value) => finish(() => resolve(value)),
+                    (error) => finish(() => reject(error))
+                );
+            });
+        },
     };
 };

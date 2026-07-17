@@ -48,6 +48,32 @@ export const createPlaybackGenerationLifecycle = (options: {
     };
 };
 
+/**
+ * Transfer the current generation's resources to cleanup before fencing its
+ * callbacks. `retire` is invoked synchronously, so callers can detach resource
+ * ownership before `fence` invalidates the generation, while the potentially
+ * slow cleanup remains awaitable and bounded by the resource owner.
+ */
+export const fencePlaybackFailure = async (options: {
+    isCurrent: () => boolean;
+    retire: () => void | Promise<void>;
+    fence: () => void;
+}) => {
+    if (!options.isCurrent()) {
+        return false;
+    }
+
+    let retirement: Promise<void>;
+    try {
+        retirement = Promise.resolve(options.retire());
+    } catch (error) {
+        retirement = Promise.reject(error);
+    }
+    options.fence();
+    await retirement;
+    return true;
+};
+
 export type BackoffOptions = {
     initialDelayMs: number;
     maximumDelayMs: number;

@@ -3,6 +3,7 @@ import PQueue from "p-queue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     createGenerationTaskRegistry,
+    createGenerationTaskQueue,
     createViewerPlaybackCleanup,
     createViewerPlaybackCoordinator,
     retireOpenedPlaybackForGeneration,
@@ -192,6 +193,36 @@ describe("viewer playback coordinator", () => {
 });
 
 describe("viewer generation wiring", () => {
+    it("starts replacement work while a superseded generation is hung", async () => {
+        const tasks = createGenerationTaskQueue();
+        let releaseOld!: () => void;
+        let oldWorkSettled = false;
+        const oldTask = tasks.add(
+            () =>
+                new Promise<void>((resolve) => {
+                    releaseOld = () => {
+                        oldWorkSettled = true;
+                        resolve();
+                    };
+                })
+        );
+        await Promise.resolve();
+        const oldTaskRejected = expect(oldTask).rejects.toMatchObject({
+            name: "AbortError",
+        });
+
+        tasks.beginGeneration();
+        await oldTaskRejected;
+        const replacement = vi.fn().mockResolvedValue("replacement");
+        await expect(tasks.add(replacement)).resolves.toBe("replacement");
+
+        expect(replacement).toHaveBeenCalledOnce();
+        expect(oldWorkSettled).toBe(false);
+
+        releaseOld();
+        expect(oldWorkSettled).toBe(true);
+    });
+
     it("ignores a late stale iterate rejection after replacement resources publish", async () => {
         const replacement = {
             close: vi.fn().mockResolvedValue(undefined),

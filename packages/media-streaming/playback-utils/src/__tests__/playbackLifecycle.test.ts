@@ -4,11 +4,46 @@ import {
     createBoundedRetryBudget,
     createKeyedRetryBackoff,
     createPlaybackGenerationLifecycle,
+    fencePlaybackFailure,
     reconcilePlaybackRequest,
     runProgressCallback,
 } from "../playbackLifecycle.js";
 
 describe("playback lifecycle", () => {
+    it("fences a failed generation before its retirement settles", async () => {
+        let current = true;
+        let releaseRetirement!: () => void;
+        const retirement = new Promise<void>((resolve) => {
+            releaseRetirement = resolve;
+        });
+        const order: string[] = [];
+        let lateResourcePublished = false;
+
+        const cleanup = fencePlaybackFailure({
+            isCurrent: () => current,
+            retire: () => {
+                order.push("detach");
+                return retirement.then(() => {
+                    order.push("retired");
+                });
+            },
+            fence: () => {
+                current = false;
+                order.push("fence");
+            },
+        });
+
+        expect(order).toEqual(["detach", "fence"]);
+        if (current) {
+            lateResourcePublished = true;
+        }
+        expect(lateResourcePublished).toBe(false);
+
+        releaseRetirement();
+        await expect(cleanup).resolves.toBe(true);
+        expect(order).toEqual(["detach", "fence", "retired"]);
+    });
+
     it("backs resource retries off and recovers after a success", () => {
         let now = 1_000;
         const retry = createKeyedRetryBackoff<string>({

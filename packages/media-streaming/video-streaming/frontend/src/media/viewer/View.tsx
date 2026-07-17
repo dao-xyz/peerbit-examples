@@ -16,18 +16,19 @@ import { Controls } from "./controller/Control.js";
 import { ControlFunctions } from "./controller/controls.js";
 import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
-import PQueue from "p-queue";
 import { getKeepAspectRatioBoundedSize } from "../MaintainAspectRatio.js";
 import ClickOnceForAudio from "./ClickOnceForAudio.js";
 import { Spinner } from "../../utils/Spinner.js";
 import {
     createAudioStreamListener,
     createKeyedRetryBackoff,
+    fencePlaybackFailure,
     reconcilePlaybackRequest,
     runProgressCallback,
 } from "@peerbit/media-streaming-web";
 import {
     createGenerationTaskRegistry,
+    createGenerationTaskQueue,
     createViewerPlaybackCoordinator,
     retireOpenedPlaybackForGeneration,
 } from "./viewerPlaybackCleanup.js";
@@ -261,7 +262,10 @@ export const View = (properties: DBArgs) => {
         });
 
     const streamListener = useRef<TracksIterator | undefined>(undefined);
-    const updateProgressQueue = useRef<PQueue>(new PQueue({ concurrency: 1 }));
+    const updateProgressQueue = useRef<
+        ReturnType<typeof createGenerationTaskQueue> | undefined
+    >(undefined);
+    updateProgressQueue.current ??= createGenerationTaskQueue();
     const playbackRequest = useRef<{
         generation: number;
         controller?: AbortController;
@@ -421,6 +425,7 @@ export const View = (properties: DBArgs) => {
         // A creation stuck in an old generation's initial play/pause must not
         // be returned for the same track in this replacement generation.
         controlCreations.current!.beginGeneration();
+        updateProgressQueue.current!.beginGeneration();
         setCursor(progress);
         setIsBuffering(true);
         setPlaybackError(undefined);
@@ -430,8 +435,8 @@ export const View = (properties: DBArgs) => {
         playbackRequest.current = { generation, controller };
         const isCurrent = () =>
             isPlaybackRequestCurrent(generation, controller);
-        void updateProgressQueue.current
-            .add(async () => {
+        void updateProgressQueue
+            .current!.add(async () => {
                 if (!isCurrent()) {
                     return;
                 }
@@ -489,8 +494,8 @@ export const View = (properties: DBArgs) => {
                         return;
                     }
                     closeScheduled = true;
-                    void updateProgressQueue.current
-                        .add(async () => {
+                    void updateProgressQueue
+                        .current!.add(async () => {
                             if (!isCurrent() || !nextListener) {
                                 return;
                             }
@@ -658,6 +663,47 @@ export const View = (properties: DBArgs) => {
                     streamListener.current = nextListener;
                     setIsPlaying(!nextListener.paused);
                 } catch (error) {
+                    if (isCurrent()) {
+                        let reportedError = error;
+                        try {
+                            await fencePlaybackFailure({
+                                isCurrent,
+                                retire: () => closeOpenedPlayback(nextListener),
+                                fence: () => {
+                                    controller.abort(
+                                        "Media playback failed to start"
+                                    );
+                                    if (
+                                        playbackRequest.current.generation ===
+                                            generation &&
+                                        playbackRequest.current.controller ===
+                                            controller
+                                    ) {
+                                        playbackRequest.current = {
+                                            generation: generation + 1,
+                                        };
+                                    }
+                                    playbackIntent.current = false;
+                                    playbackStateRequest.current += 1;
+                                    setIsBuffering(false);
+                                    setIsPlaying(false);
+                                    setPlaybackError(
+                                        `Unable to update playback: ${errorMessage(error)}`
+                                    );
+                                },
+                            });
+                        } catch (cleanupError) {
+                            reportedError = new AggregateError(
+                                [error, cleanupError],
+                                "Failed to start and retire media playback"
+                            );
+                        }
+                        console.error(
+                            "Failed to update media playback",
+                            reportedError
+                        );
+                        return;
+                    }
                     const cleanup = openedPlaybackRetirementAttempted
                         ? []
                         : await Promise.allSettled([retireOpenedPlayback()]);
@@ -725,7 +771,7 @@ export const View = (properties: DBArgs) => {
             // Abandon the old serial queue immediately. Its active play/pause
             // promise may never settle, but a replacement effect/mount gets a
             // fresh queue and cleanup starts independently below.
-            updateProgressQueue.current = new PQueue({ concurrency: 1 });
+            updateProgressQueue.current!.beginGeneration();
             void retireAllPlaybackResources().catch((error) =>
                 console.error("Failed to close viewer playback", error)
             );
@@ -961,7 +1007,7 @@ export const View = (properties: DBArgs) => {
         playbackIntent.current = play;
 
         try {
-            await updateProgressQueue.current.add(async () => {
+            await updateProgressQueue.current!.add(async () => {
                 if (
                     request !== playbackStateRequest.current ||
                     generation !== playbackRequest.current.generation

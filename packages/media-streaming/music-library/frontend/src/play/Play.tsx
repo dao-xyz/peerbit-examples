@@ -11,6 +11,7 @@ import {
     createKeyedRetryBackoff,
     createPlaybackGenerationLifecycle,
     createRetryableResourceDrain,
+    fencePlaybackFailure,
     reconcilePlaybackRequest,
     runProgressCallback,
 } from "@peerbit/media-streaming-web";
@@ -522,10 +523,31 @@ export const Play: React.FC<Props> = ({
             iteratorRef.current = { generation, iterator: thisIterator };
             setPlaying(!thisIterator.paused);
         })().catch(async (error) => {
+            const failedWhileCurrent = callbacksCurrent();
             let reportedError = error;
             let cleanupFailed = false;
             try {
-                await retirePlayback(generation, thisIterator);
+                if (failedWhileCurrent) {
+                    await fencePlaybackFailure({
+                        isCurrent: callbacksCurrent,
+                        retire: () => retirePlayback(generation, thisIterator),
+                        fence: () => {
+                            generationLifecycle.terminate(
+                                "Media playback failed"
+                            );
+                            controlIntent.current += 1;
+                            requestedPlaying.current = false;
+                            endedRef.current = true;
+                            setIsLoading(false);
+                            setPlaying(false);
+                            setPlaybackError(
+                                `Unable to start playback: ${errorMessage(error)}`
+                            );
+                        },
+                    });
+                } else {
+                    await retirePlayback(generation, thisIterator);
+                }
             } catch (cleanupError) {
                 cleanupFailed = true;
                 reportedError = new AggregateError(
@@ -533,16 +555,8 @@ export const Play: React.FC<Props> = ({
                     "Failed to start and retire media playback"
                 );
             }
-            if (callbacksCurrent()) {
+            if (failedWhileCurrent) {
                 console.error("Failed to start media playback", reportedError);
-                generationLifecycle.terminate("Media playback failed");
-                requestedPlaying.current = false;
-                endedRef.current = true;
-                setIsLoading(false);
-                setPlaying(false);
-                setPlaybackError(
-                    `Unable to start playback: ${errorMessage(reportedError)}`
-                );
             } else if (cleanupFailed) {
                 console.error(
                     "Failed to retire obsolete media playback",
