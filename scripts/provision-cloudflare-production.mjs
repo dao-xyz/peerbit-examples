@@ -30,6 +30,7 @@ import {
     CLOUDFLARE_ARTIFACT_DIGEST_BINDING,
     artifactBoundVersionMessage,
     loadCloudflareArtifactManifestSet,
+    readReviewedCloudflareArtifactAsset,
     validateActiveWorkerModule,
 } from "./cloudflare-artifact-manifest.mjs";
 
@@ -43,6 +44,7 @@ const STATE_DIGEST = /^[0-9a-f]{64}$/;
 const WORKER_NAME = /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_DIAGNOSTIC_LENGTH = 2_000;
 const RETIRED_LEGACY_WORKER = "peerbit-examples-legacy-stream-preview";
+const CLOUDFLARE_STATIC_HEADERS_SCHEMA_VERSION = 2;
 
 export const PROVISIONING_CONFIRMATION_PREFIXES = Object.freeze({
     plan: "plan-peerbit-production",
@@ -404,43 +406,355 @@ const assertExactObjectKeys = (value, allowedKeys, label) => {
     }
 };
 
-const normalizeVersionLimits = ({ runtime, renderedConfig, siteId }) => {
-    const hasLimits = Object.hasOwn(runtime, "limits");
-    const expectsLimits = Object.hasOwn(renderedConfig, "limits");
-    if (expectsLimits) {
-        if (
-            !isPlainObject(renderedConfig.limits) ||
-            !hasLimits ||
-            !isPlainObject(runtime.limits) ||
-            !sameCanonicalValue(runtime.limits, renderedConfig.limits)
-        ) {
-            throw new Error(
-                `${siteId}: exact Worker version limits do not match the reviewed config`
+const assertExactReviewedValue = (actual, expected, label) => {
+    if (Array.isArray(expected)) {
+        if (!Array.isArray(actual) || actual.length !== expected.length) {
+            throw new Error(`${label} does not match the reviewed value`);
+        }
+        for (let index = 0; index < expected.length; index += 1) {
+            assertExactReviewedValue(
+                actual[index],
+                expected[index],
+                `${label}[${index}]`
             );
         }
-        return runtime.limits;
+        return;
     }
-    // Wrangler 4.110 and Cloudflare can serialize the default no-limits state
-    // either by omitting the field or as an exact empty object. Normalize only
-    // those two representations; any actual limit remains an unreviewed policy.
-    if (
-        hasLimits &&
-        (!isPlainObject(runtime.limits) ||
-            Reflect.ownKeys(runtime.limits).length !== 0)
-    ) {
+    if (isPlainObject(expected)) {
+        if (!isPlainObject(actual)) {
+            throw new Error(`${label} does not match the reviewed value`);
+        }
+        const expectedKeys = Object.keys(expected);
+        assertExactObjectKeys(actual, new Set(expectedKeys), label);
+        const missing = expectedKeys.filter(
+            (key) => !Object.hasOwn(actual, key)
+        );
+        if (missing.length > 0) {
+            throw new Error(
+                `${label} is missing reviewed fields ${missing.sort().join(", ")}`
+            );
+        }
+        for (const key of expectedKeys) {
+            assertExactReviewedValue(
+                actual[key],
+                expected[key],
+                `${label}.${key}`
+            );
+        }
+        return;
+    }
+    if (!Object.is(actual, expected)) {
+        throw new Error(`${label} does not match the reviewed value`);
+    }
+};
+
+const parseReviewedStaticHeaders = ({ bytes, siteId }) => {
+    let rawHeaders;
+    try {
+        rawHeaders = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
         throw new Error(
-            `${siteId}: exact Worker version limits do not match the reviewed config`
+            `${siteId}: reviewed _headers input is not valid UTF-8`
         );
     }
-    return {};
+    if (
+        rawHeaders.length === 0 ||
+        !rawHeaders.endsWith("\n") ||
+        rawHeaders.includes("\r")
+    ) {
+        throw new Error(
+            `${siteId}: reviewed _headers input is not in the exact supported format`
+        );
+    }
+    const rules = {};
+    let currentRule;
+    for (const line of rawHeaders.slice(0, -1).split("\n")) {
+        if (line.length === 0) {
+            currentRule = undefined;
+            continue;
+        }
+        if (!line.startsWith(" ")) {
+            if (!/^\/\S*$/.test(line) || Object.hasOwn(rules, line)) {
+                throw new Error(
+                    `${siteId}: reviewed _headers route is malformed or duplicated`
+                );
+            }
+            currentRule = { set: {}, unset: [] };
+            rules[line] = currentRule;
+            continue;
+        }
+        const match = /^  ([A-Za-z][A-Za-z0-9-]*): (\S(?:.*\S)?)$/.exec(line);
+        if (!currentRule || !match) {
+            throw new Error(
+                `${siteId}: reviewed _headers declaration is malformed`
+            );
+        }
+        const header = match[1].toLowerCase();
+        if (Object.hasOwn(currentRule.set, header)) {
+            throw new Error(
+                `${siteId}: reviewed _headers declaration is duplicated`
+            );
+        }
+        currentRule.set[header] = match[2];
+    }
+    if (
+        Object.keys(rules).length === 0 ||
+        Object.values(rules).some((rule) => Object.keys(rule.set).length === 0)
+    ) {
+        throw new Error(
+            `${siteId}: reviewed _headers input contains an empty rule`
+        );
+    }
+    return { rawHeaders, rules };
+};
+
+const reviewedVersionRuntime = ({
+    renderedConfig,
+    artifact,
+    site,
+    configFile,
+    siteId,
+}) => {
+    const assets = renderedConfig.assets;
+    if (!isPlainObject(assets)) {
+        throw new Error(
+            `${siteId}: reviewed static-assets config is missing or malformed`
+        );
+    }
+    const expectsWorkerFirstRuntime = siteId === "stream";
+    const siteHasScript = Object.hasOwn(site ?? {}, "script");
+    const siteHasWorkerFirst = Object.hasOwn(site ?? {}, "workerFirst");
+    if (
+        site?.id !== siteId ||
+        siteHasScript !== expectsWorkerFirstRuntime ||
+        siteHasWorkerFirst !== expectsWorkerFirstRuntime ||
+        typeof configFile !== "string" ||
+        !path.isAbsolute(configFile)
+    ) {
+        throw new Error(
+            `${siteId}: reviewed site and static-assets runtime kind do not match`
+        );
+    }
+    assertExactObjectKeys(
+        assets,
+        new Set([
+            "binding",
+            "directory",
+            "html_handling",
+            "not_found_handling",
+            "run_worker_first",
+        ]),
+        `${siteId}: reviewed static-assets config`
+    );
+    if (
+        typeof assets.directory !== "string" ||
+        assets.directory.length === 0 ||
+        typeof assets.html_handling !== "string" ||
+        assets.html_handling.length === 0 ||
+        typeof assets.not_found_handling !== "string" ||
+        assets.not_found_handling.length === 0 ||
+        (assets.binding != null &&
+            (typeof assets.binding !== "string" || assets.binding.length === 0))
+    ) {
+        throw new Error(
+            `${siteId}: reviewed static-assets config is missing or malformed`
+        );
+    }
+    const runWorkerFirst = assets.run_worker_first ?? [];
+    if (
+        !Array.isArray(runWorkerFirst) ||
+        new Set(runWorkerFirst).size !== runWorkerFirst.length ||
+        runWorkerFirst.some(
+            (value) =>
+                typeof value !== "string" ||
+                value.length === 0 ||
+                !value.startsWith("/")
+        )
+    ) {
+        throw new Error(
+            `${siteId}: reviewed static-assets worker-first routes are malformed or duplicated`
+        );
+    }
+    const hasWorkerFirstRuntime = runWorkerFirst.length > 0;
+    if (expectsWorkerFirstRuntime) {
+        if (
+            typeof site.script !== "string" ||
+            site.script.length === 0 ||
+            !Array.isArray(site.workerFirst) ||
+            site.workerFirst.length === 0 ||
+            new Set(site.workerFirst).size !== site.workerFirst.length ||
+            site.workerFirst.some(
+                (value) =>
+                    typeof value !== "string" ||
+                    value.length === 0 ||
+                    !value.startsWith("/")
+            )
+        ) {
+            throw new Error(
+                `${siteId}: reviewed Worker-first site declaration is malformed`
+            );
+        }
+        const siteScriptFile = path.resolve(repoRoot, site.script);
+        const siteScriptRelative = path.relative(repoRoot, siteScriptFile);
+        if (
+            siteScriptRelative.length === 0 ||
+            siteScriptRelative.startsWith("..") ||
+            path.isAbsolute(siteScriptRelative) ||
+            typeof renderedConfig.main !== "string" ||
+            renderedConfig.main.length === 0 ||
+            path.resolve(path.dirname(configFile), renderedConfig.main) !==
+                siteScriptFile ||
+            assets.binding !== "ASSETS" ||
+            !Object.hasOwn(assets, "run_worker_first") ||
+            !sameCanonicalValue(runWorkerFirst, site.workerFirst) ||
+            !hasWorkerFirstRuntime
+        ) {
+            throw new Error(
+                `${siteId}: reviewed Worker-first script, binding, and routes do not match`
+            );
+        }
+    } else if (
+        Object.hasOwn(renderedConfig, "main") ||
+        Object.hasOwn(assets, "binding") ||
+        Object.hasOwn(assets, "run_worker_first") ||
+        hasWorkerFirstRuntime
+    ) {
+        throw new Error(
+            `${siteId}: reviewed asset-only config contains a Worker-first script, binding, or route`
+        );
+    }
+    const { rawHeaders, rules } = parseReviewedStaticHeaders({
+        bytes: readReviewedCloudflareArtifactAsset({
+            artifact,
+            relativePath: "_headers",
+        }),
+        siteId,
+    });
+    if (
+        typeof renderedConfig.compatibility_date !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(renderedConfig.compatibility_date)
+    ) {
+        throw new Error(
+            `${siteId}: reviewed compatibility date is missing or malformed`
+        );
+    }
+    if (Object.hasOwn(renderedConfig, "migrations")) {
+        throw new Error(
+            `${siteId}: Durable Object migrations are outside the reviewed static-app runtime contract`
+        );
+    }
+    const expectedRuntime = {
+        assets: {
+            headers: {
+                rules,
+                version: CLOUDFLARE_STATIC_HEADERS_SCHEMA_VERSION,
+            },
+            html_handling: assets.html_handling,
+            not_found_handling: assets.not_found_handling,
+            raw_headers: rawHeaders,
+            // Cloudflare normalizes asset-only Workers to a boolean false and
+            // omits static_routing. A Worker-first site retains the reviewed
+            // Wrangler route arrays in both API fields.
+            raw_run_worker_first: hasWorkerFirstRuntime
+                ? [...runWorkerFirst]
+                : false,
+            serve_directly: true,
+            ...(hasWorkerFirstRuntime
+                ? { static_routing: { user_worker: [...runWorkerFirst] } }
+                : {}),
+        },
+        compatibility_date: renderedConfig.compatibility_date,
+        usage_model: renderedConfig.usage_model ?? "standard",
+    };
+    if (
+        typeof expectedRuntime.usage_model !== "string" ||
+        expectedRuntime.usage_model.length === 0
+    ) {
+        throw new Error(`${siteId}: reviewed usage model is malformed`);
+    }
+    if (Object.hasOwn(renderedConfig, "compatibility_flags")) {
+        if (
+            !Array.isArray(renderedConfig.compatibility_flags) ||
+            new Set(renderedConfig.compatibility_flags).size !==
+                renderedConfig.compatibility_flags.length ||
+            renderedConfig.compatibility_flags.some(
+                (flag) => typeof flag !== "string" || flag.length === 0
+            )
+        ) {
+            throw new Error(
+                `${siteId}: reviewed compatibility flags are malformed or duplicated`
+            );
+        }
+        if (renderedConfig.compatibility_flags.length > 0) {
+            expectedRuntime.compatibility_flags = [
+                ...renderedConfig.compatibility_flags,
+            ];
+        }
+    }
+    if (Object.hasOwn(renderedConfig, "limits")) {
+        if (!isPlainObject(renderedConfig.limits)) {
+            throw new Error(`${siteId}: reviewed limits are malformed`);
+        }
+        expectedRuntime.limits = structuredClone(renderedConfig.limits);
+    }
+    if (Object.hasOwn(renderedConfig, "cache")) {
+        const cache = renderedConfig.cache;
+        if (
+            !isPlainObject(cache) ||
+            Object.keys(cache).length !== 2 ||
+            !Object.hasOwn(cache, "enabled") ||
+            !Object.hasOwn(cache, "cross_version_cache") ||
+            typeof cache.enabled !== "boolean" ||
+            typeof cache.cross_version_cache !== "boolean"
+        ) {
+            throw new Error(
+                `${siteId}: reviewed cache options are missing or malformed`
+            );
+        }
+        expectedRuntime.cache_options = {
+            enabled: cache.enabled,
+            cross_version_cache: cache.cross_version_cache,
+        };
+    }
+    return expectedRuntime;
+};
+
+const matchesReviewedEventHandlers = ({ script, assetOnly }) => {
+    if (!isPlainObject(script) || !Object.hasOwn(script, "handlers")) {
+        return false;
+    }
+    if (assetOnly) {
+        return (
+            script.handlers === null && !Object.hasOwn(script, "named_handlers")
+        );
+    }
+    const namedHandlers = Object.hasOwn(script, "named_handlers")
+        ? script.named_handlers
+        : [];
+    return (
+        Array.isArray(script.handlers) &&
+        script.handlers.length === 1 &&
+        script.handlers[0] === "fetch" &&
+        Array.isArray(namedHandlers) &&
+        namedHandlers.length === 0
+    );
 };
 
 const validateVersionResources = ({
     version,
     renderedConfig,
+    expectedRuntime,
     siteId,
     artifactManifestDigest,
 }) => {
+    if (
+        Object.hasOwn(version, "assets") ||
+        Object.hasOwn(version, "cache_options")
+    ) {
+        throw new Error(
+            `${siteId}: exact Worker version contains duplicated top-level runtime policy`
+        );
+    }
     const resources = version?.resources;
     const script = resources?.script;
     const runtime = resources?.script_runtime;
@@ -475,7 +789,9 @@ const validateVersionResources = ({
             "etag",
             "handlers",
             "last_deployed_from",
-            "named_handlers",
+            ...(expectedRuntime.assets.raw_run_worker_first === false
+                ? []
+                : ["named_handlers"]),
             "placement",
             "placement_mode",
         ]),
@@ -483,66 +799,25 @@ const validateVersionResources = ({
     );
     assertExactObjectKeys(
         runtime,
-        new Set([
-            "compatibility_date",
-            "compatibility_flags",
-            "limits",
-            "migration_tag",
-            "usage_model",
-        ]),
+        new Set(Object.keys(expectedRuntime)),
         `${siteId}: exact Worker version runtime resource`
     );
-    const handlers = script.handlers ?? [];
-    const namedHandlers = script.named_handlers ?? [];
     if (
-        !Array.isArray(handlers) ||
-        new Set(handlers).size !== handlers.length ||
-        handlers.some((handler) => handler !== "fetch") ||
-        !handlers.includes("fetch") ||
-        !Array.isArray(namedHandlers) ||
-        namedHandlers.length !== 0
+        !matchesReviewedEventHandlers({
+            script,
+            assetOnly: expectedRuntime.assets.raw_run_worker_first === false,
+        })
     ) {
         throw new Error(
             `${siteId}: exact Worker version event handlers do not match the reviewed config`
         );
     }
 
-    if (
-        renderedConfig.compatibility_date != null &&
-        runtime.compatibility_date !== renderedConfig.compatibility_date
-    ) {
-        throw new Error(
-            `${siteId}: exact Worker version has the wrong compatibility date`
-        );
-    }
-    const expectedFlags = [
-        ...(renderedConfig.compatibility_flags ?? []),
-    ].sort();
-    if (!Array.isArray(runtime.compatibility_flags ?? [])) {
-        throw new Error(
-            `${siteId}: exact Worker version has malformed compatibility flags`
-        );
-    }
-    const actualFlags = [...(runtime.compatibility_flags ?? [])].sort();
-    if (JSON.stringify(actualFlags) !== JSON.stringify(expectedFlags)) {
-        throw new Error(
-            `${siteId}: exact Worker version has the wrong compatibility flags`
-        );
-    }
-
-    const normalizedLimits = normalizeVersionLimits({
+    assertExactReviewedValue(
         runtime,
-        renderedConfig,
-        siteId,
-    });
-    if (
-        Object.hasOwn(renderedConfig, "migrations") ||
-        Object.hasOwn(runtime, "migration_tag")
-    ) {
-        throw new Error(
-            `${siteId}: Durable Object migrations are outside the reviewed static-app runtime contract`
-        );
-    }
+        expectedRuntime,
+        `${siteId}: exact Worker version runtime resource`
+    );
     const actualPlacement =
         script.placement ??
         (script.placement_mode == null
@@ -556,45 +831,6 @@ const validateVersionResources = ({
             `${siteId}: exact Worker version placement does not match the reviewed config`
         );
     }
-    const expectedUsageModel = renderedConfig.usage_model;
-    if (
-        expectedUsageModel == null
-            ? runtime.usage_model != null && runtime.usage_model !== "standard"
-            : runtime.usage_model !== expectedUsageModel
-    ) {
-        throw new Error(
-            `${siteId}: exact Worker version usage model does not match the reviewed config`
-        );
-    }
-
-    const expectsCache = Object.hasOwn(renderedConfig, "cache");
-    const hasCache = Object.hasOwn(version, "cache_options");
-    if (
-        expectsCache !== hasCache ||
-        (hasCache &&
-            !sameCanonicalValue(version.cache_options, renderedConfig.cache))
-    ) {
-        throw new Error(
-            `${siteId}: exact Worker version cache options do not match the reviewed config`
-        );
-    }
-    if (hasCache) {
-        assertExactObjectKeys(
-            version.cache_options,
-            new Set(["enabled", "cross_version_cache"]),
-            `${siteId}: exact Worker version cache options`
-        );
-        if (
-            typeof version.cache_options.enabled !== "boolean" ||
-            (version.cache_options.cross_version_cache != null &&
-                typeof version.cache_options.cross_version_cache !== "boolean")
-        ) {
-            throw new Error(
-                `${siteId}: exact Worker version cache options are malformed`
-            );
-        }
-    }
-
     const expectedVars = new Map(
         Object.entries(renderedConfig.vars ?? {}).map(([name, value]) => [
             name,
@@ -661,14 +897,7 @@ const validateVersionResources = ({
         );
     }
     return sha256Canonical({
-        resources: {
-            ...resources,
-            script_runtime: {
-                ...runtime,
-                limits: normalizedLimits,
-            },
-        },
-        cacheOptions: hasCache ? version.cache_options : null,
+        resources,
         // This receipt binds the reviewed assets behavior and byte inventory;
         // exhaustive live verification proves that contract after activation.
         artifactManifestDigest,
@@ -682,6 +911,7 @@ const validateProvisioningVersion = ({
     siteId,
     expectedCommit,
     renderedConfig,
+    expectedRuntime,
     artifactManifestDigest,
 }) => {
     if (
@@ -706,6 +936,7 @@ const validateProvisioningVersion = ({
         fingerprint: validateVersionResources({
             version,
             renderedConfig,
+            expectedRuntime,
             siteId,
             artifactManifestDigest,
         }),
@@ -732,12 +963,18 @@ const readActiveServiceAttachmentInventory = async ({
     scripts,
     operations,
 }) => {
-    const policyWorkers = new Set(
-        entries.flatMap(({ policy }) => [
-            policy.productionWorker,
-            policy.previewWorker,
-        ])
+    const policyWorkerKinds = new Map(
+        entries.flatMap(({ site, policy }) => {
+            const assetOnly =
+                !Object.hasOwn(site, "script") &&
+                !Object.hasOwn(site, "workerFirst");
+            return [
+                [policy.productionWorker, { assetOnly }],
+                [policy.previewWorker, { assetOnly }],
+            ];
+        })
     );
+    const policyWorkers = new Set(policyWorkerKinds.keys());
     const inventory = [];
     for (const workerName of [...scripts.keys()].sort()) {
         const activeVersionId = readCurrentVersion({
@@ -758,14 +995,12 @@ const readActiveServiceAttachmentInventory = async ({
                 `${workerName}: active version binding inventory is missing or ambiguous`
             );
         }
-        const handlers = version.resources?.script?.handlers ?? [];
-        const namedHandlers = version.resources?.script?.named_handlers ?? [];
         if (
             policyWorkers.has(workerName) &&
-            (!Array.isArray(handlers) ||
-                handlers.some((handler) => handler !== "fetch") ||
-                !Array.isArray(namedHandlers) ||
-                namedHandlers.length > 0)
+            !matchesReviewedEventHandlers({
+                script: version.resources?.script,
+                assetOnly: policyWorkerKinds.get(workerName).assetOnly,
+            })
         ) {
             throw new Error(
                 `${workerName}: managed active version has an unreviewed queue, scheduled, email, tail, or other event handler`
@@ -961,6 +1196,13 @@ export const inspectProductionProvisioning = async ({
         if (typeof plan.file !== "string" || plan.file.length === 0) {
             throw new Error(`${site.id}: rendered config path is missing`);
         }
+        plan.expectedRuntime = reviewedVersionRuntime({
+            renderedConfig: plan.renderedConfig,
+            artifact,
+            site,
+            configFile: plan.file,
+            siteId: site.id,
+        });
         return plan;
     });
     const scripts = await readWorkerScriptMap(operations, {
@@ -1152,6 +1394,7 @@ export const inspectProductionProvisioning = async ({
                     siteId: site.id,
                     expectedCommit,
                     renderedConfig: configPlan.renderedConfig,
+                    expectedRuntime: configPlan.expectedRuntime,
                     artifactManifestDigest: configPlan.artifactManifestDigest,
                 });
             const observedModule = await operations.getWorkerVersionModule(
@@ -1242,7 +1485,7 @@ export const productionProvisioningStateDigest = ({
         expectedZoneInventorySha256
     );
     const state = {
-        schema: 5,
+        schema: 6,
         expectedCommit: expectedCommit.toLowerCase(),
         accountId: accountId.toLowerCase(),
         expectedZoneInventorySha256: expectedZoneFingerprint,
@@ -1654,11 +1897,12 @@ const finalVerify = async ({
                 `${site.id}: final active version was not created and proved by this apply invocation`
             );
         }
-        const { renderedConfig } = productionWorkerConfig({
+        const { file, renderedConfig } = productionWorkerConfig({
             site,
             policy,
             configs,
         });
+        const artifact = artifacts.get(site.id);
         const { fingerprint: runtimeFingerprint } = validateProvisioningVersion(
             {
                 version: await operations.getWorkerVersion(
@@ -1670,6 +1914,13 @@ const finalVerify = async ({
                 siteId: site.id,
                 expectedCommit,
                 renderedConfig,
+                expectedRuntime: reviewedVersionRuntime({
+                    renderedConfig,
+                    artifact,
+                    site,
+                    configFile: file,
+                    siteId: site.id,
+                }),
                 artifactManifestDigest: candidate.artifactManifestDigest,
             }
         );
@@ -1677,7 +1928,7 @@ const finalVerify = async ({
             site,
             policy,
             versionId,
-            artifact: artifacts.get(site.id),
+            artifact,
             operations,
         });
         const fingerprint = sha256Canonical({
@@ -1732,11 +1983,12 @@ const finalVerify = async ({
             );
         }
         const candidate = invocationCandidates.get(site.id);
-        const { renderedConfig } = productionWorkerConfig({
+        const { file, renderedConfig } = productionWorkerConfig({
             site,
             policy,
             configs,
         });
+        const artifact = artifacts.get(site.id);
         const { fingerprint: runtimeFingerprint } = validateProvisioningVersion(
             {
                 version: await operations.getWorkerVersion(
@@ -1748,6 +2000,13 @@ const finalVerify = async ({
                 siteId: site.id,
                 expectedCommit,
                 renderedConfig,
+                expectedRuntime: reviewedVersionRuntime({
+                    renderedConfig,
+                    artifact,
+                    site,
+                    configFile: file,
+                    siteId: site.id,
+                }),
                 artifactManifestDigest: candidate.artifactManifestDigest,
             }
         );
@@ -1755,7 +2014,7 @@ const finalVerify = async ({
             site,
             policy,
             versionId,
-            artifact: artifacts.get(site.id),
+            artifact,
             operations,
         });
         if (

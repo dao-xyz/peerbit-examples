@@ -13,6 +13,7 @@ import {
     findForbiddenStaticPeercheckerHost,
     hasAuthoritativeBootstrapEndpoint,
 } from "./static-relay-policy.mjs";
+import { CLOUDFLARE_STATIC_ASSET_HEADERS } from "./cloudflare-static-asset-inputs.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -25,14 +26,6 @@ const manifest = JSON.parse(
 const MAX_FILES = 20_000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set([".html", ".js", ".mjs", ".json", ".css"]);
-const HEADERS = `/*
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: strict-origin-when-cross-origin
-
-/assets/*
-  Cache-Control: public, max-age=31556952, immutable
-`;
-
 const commit = (
     process.env.COMMIT_HASH ||
     execFileSync("git", ["rev-parse", "HEAD"], {
@@ -102,7 +95,11 @@ for (const site of manifest.staticSites) {
         }
     }
 
-    writeFileSync(path.join(canonicalOutput, "_headers"), HEADERS, "utf8");
+    writeFileSync(
+        path.join(canonicalOutput, "_headers"),
+        CLOUDFLARE_STATIC_ASSET_HEADERS,
+        "utf8"
+    );
     writeFileSync(
         path.join(canonicalOutput, "release.json"),
         `${JSON.stringify({

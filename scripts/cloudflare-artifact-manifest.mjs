@@ -99,20 +99,33 @@ const posixRelative = (root, file) => {
     return relative;
 };
 
-const fileRecord = (root, file, extra = {}) => {
+const assertRegularFile = (file) => {
     const stat = lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error(
             `Cloudflare artifact input must be a regular file: ${file}`
         );
     }
-    const bytes = readFileSync(file);
+};
+
+const fileRecordFromBytes = (root, file, bytes, extra = {}) => {
+    if (!Buffer.isBuffer(bytes)) {
+        throw new Error(
+            `Cloudflare artifact input must be a regular file: ${file}`
+        );
+    }
     return {
         path: posixRelative(root, file),
         size: bytes.length,
         sha256: sha256(bytes),
         ...extra,
     };
+};
+
+const fileRecord = (root, file, extra = {}) => {
+    assertRegularFile(file);
+    const bytes = readFileSync(file);
+    return fileRecordFromBytes(root, file, bytes, extra);
 };
 
 const walk = (root, directory = root) => {
@@ -493,6 +506,52 @@ export const loadCloudflareArtifactManifestSet = ({
             ];
         })
     );
+
+export const readReviewedCloudflareArtifactAsset = ({
+    artifact,
+    relativePath,
+}) => {
+    if (
+        !artifact?.manifest ||
+        !Array.isArray(artifact.manifest.assets) ||
+        typeof artifact.assetsDirectory !== "string" ||
+        !SAFE_RELATIVE_PATH.test(relativePath || "")
+    ) {
+        throw new Error(
+            "Cloudflare reviewed artifact asset evidence is missing or malformed"
+        );
+    }
+    const matchingRecords = artifact.manifest.assets.filter(
+        (asset) => asset?.path === relativePath
+    );
+    if (matchingRecords.length !== 1) {
+        throw new Error(
+            `${artifact.siteId}: reviewed artifact must contain exactly one ${relativePath}`
+        );
+    }
+    const canonicalRoot = realpathSync(artifact.assetsDirectory);
+    const candidate = assertInside(
+        canonicalRoot,
+        path.resolve(canonicalRoot, relativePath),
+        `${artifact.siteId}: reviewed artifact asset`
+    );
+    const canonicalFile = assertInside(
+        canonicalRoot,
+        realpathSync(candidate),
+        `${artifact.siteId}: reviewed artifact asset`
+    );
+    assertRegularFile(canonicalFile);
+    const bytes = readFileSync(canonicalFile);
+    const actual = fileRecordFromBytes(canonicalRoot, canonicalFile, bytes, {
+        public: isPublicAsset(relativePath),
+    });
+    if (!sameCanonicalValue(actual, matchingRecords[0])) {
+        throw new Error(
+            `${artifact.siteId}: reviewed artifact asset bytes changed for ${relativePath}`
+        );
+    }
+    return bytes;
+};
 
 export const revalidateCloudflareArtifactManifest = (artifact) => {
     if (!artifact || !SHA256.test(artifact.digest || "")) {
