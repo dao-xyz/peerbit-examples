@@ -13,6 +13,9 @@ const productionWorkflow = readWorkflow("cloudflare-production.yml");
 const provisioningWorkflow = readWorkflow(
     "cloudflare-production-provision.yml"
 );
+const versionSchemaDiagnosticWorkflow = readWorkflow(
+    "cloudflare-version-schema-diagnostic.yml"
+);
 const fileShareCiWorkflow = readWorkflow("file-share-ci.yml");
 const provisioningScript = readFileSync(
     path.join(repoRoot, "scripts/provision-cloudflare-production.mjs"),
@@ -155,6 +158,7 @@ test("Cloudflare workflows carry no Supabase build configuration", () => {
         previewWorkflow,
         productionWorkflow,
         provisioningWorkflow,
+        versionSchemaDiagnosticWorkflow,
     ]) {
         assert.doesNotMatch(workflow, /VITE_SUPABASE_/);
     }
@@ -554,6 +558,7 @@ test("every action in Cloudflare workflows is pinned to a full commit", () => {
         previewWorkflow,
         productionWorkflow,
         provisioningWorkflow,
+        versionSchemaDiagnosticWorkflow,
     ]) {
         const uses = workflow.match(/^\s+-?\s*uses:\s*([^\s#]+)/gm) ?? [];
         assert.ok(uses.length > 0);
