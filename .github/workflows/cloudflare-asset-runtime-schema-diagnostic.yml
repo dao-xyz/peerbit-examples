@@ -1,0 +1,73 @@
+name: Inspect Cloudflare asset-only runtime schema
+
+on:
+    workflow_dispatch:
+        inputs:
+            mode:
+                description: Read-only schema discovery mode
+                required: true
+                type: choice
+                options:
+                    - active
+            worker:
+                description: Exact reviewed asset-only preview Worker
+                required: true
+                type: choice
+                options:
+                    - peerbit-examples-text-preview
+
+permissions:
+    contents: read
+
+jobs:
+    inspect:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        environment: cloudflare-production
+        steps:
+            - name: Require reviewed default branch and manual dispatch
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+                      echo "Schema inspection requires a manual dispatch" >&2
+                      exit 1
+                  fi
+                  if [[ "$GITHUB_ACTOR" != "peerbit-org" || "$GITHUB_TRIGGERING_ACTOR" != "peerbit-org" ]]; then
+                      echo "Schema inspection requires the peerbit-org bot identity" >&2
+                      exit 1
+                  fi
+                  if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+                      echo "Schema inspection cannot be rerun" >&2
+                      exit 1
+                  fi
+                  if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+                      echo "Schema inspection is permitted only from master" >&2
+                      exit 1
+                  fi
+
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ github.sha }}
+                  persist-credentials: false
+
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 22.x
+
+            - name: Re-run asset runtime schema diagnostic safety tests
+              run: node --test cloudflare/cloudflare-asset-runtime-schema-diagnostic.test.mjs
+
+            - name: Inspect the exact active asset-only Worker version
+              env:
+                  DIAGNOSTIC_MODE: ${{ inputs.mode }}
+                  DIAGNOSTIC_WORKER: ${{ inputs.worker }}
+                  CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: ${{ secrets.CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+                  CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256: ${{ secrets.CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256 }}
+              run: >-
+                  node scripts/inspect-cloudflare-asset-runtime-schema.mjs
+                  --mode "$DIAGNOSTIC_MODE"
+                  --worker "$DIAGNOSTIC_WORKER"
