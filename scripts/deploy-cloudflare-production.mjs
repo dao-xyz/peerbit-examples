@@ -139,11 +139,18 @@ export const readSingleVersionDeployment = (deployment, siteId) => {
     return deployment.versions[0].version_id;
 };
 
-const validateDeploymentEvidence = (evidence, expectedWorkerName) => {
+const validateDeploymentEvidence = (
+    evidence,
+    expectedWorkerName,
+    { allowNullWorkerTag = false } = {}
+) => {
+    const validWorkerTag =
+        (typeof evidence?.workerTag === "string" &&
+            /^[A-Za-z0-9_-]{1,128}$/.test(evidence.workerTag)) ||
+        (allowNullWorkerTag && evidence?.workerTag === null);
     if (
         evidence?.workerName !== expectedWorkerName ||
-        typeof evidence.workerTag !== "string" ||
-        !/^[A-Za-z0-9_-]{1,128}$/.test(evidence.workerTag) ||
+        !validWorkerTag ||
         !VERSION_ID.test(evidence.versionId || "")
     ) {
         throw new Error(
@@ -241,7 +248,13 @@ export const parseWranglerInitialDeployOutput = (
             workerTag: deployment.worker_tag,
             versionId: deployment.version_id,
         },
-        expectedWorkerName
+        expectedWorkerName,
+        // Wrangler 4.110.0 reads a Worker's immutable tag before upload. A
+        // first deploy therefore reports null here because that preflight GET
+        // proved the Worker absent. Provisioning must bind the non-null tag
+        // returned by the immediate post-deploy Cloudflare inventory GET
+        // before it can trust or expose the new Worker.
+        { allowNullWorkerTag: true }
     );
 };
 

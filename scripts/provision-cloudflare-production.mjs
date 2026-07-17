@@ -2028,8 +2028,9 @@ export const provisionProductionEntries = async ({
                 if (
                     !deployEvidence ||
                     deployEvidence.workerName !== before.workerName ||
-                    typeof deployEvidence.workerTag !== "string" ||
-                    deployEvidence.workerTag.length === 0 ||
+                    (deployEvidence.workerTag !== null &&
+                        (typeof deployEvidence.workerTag !== "string" ||
+                            deployEvidence.workerTag.length === 0)) ||
                     !VERSION_ID.test(deployEvidence.versionId || "") ||
                     deployEvidence.artifactManifestDigest !==
                         before.artifactManifestDigest
@@ -2038,11 +2039,7 @@ export const provisionProductionEntries = async ({
                         "same-invocation structured Wrangler deploy evidence is missing or malformed"
                     );
                 }
-                invocationCandidates.set(site.id, {
-                    ...deployEvidence,
-                    versionTag: before.versionTag,
-                });
-                const afterInspection = assertPinnedInspection(
+                const observedInspection = assertPinnedInspection(
                     await inspect(context),
                     {
                         phase: "after an initial route-free private deploy",
@@ -2055,16 +2052,19 @@ export const provisionProductionEntries = async ({
                         allowProductionWorker: before.workerName,
                     }
                 );
-                afterDeploy = planFor(afterInspection, site.id);
+                const observedDeploy = planFor(observedInspection, site.id);
                 if (
-                    !afterDeploy.workerExists ||
-                    afterDeploy.workerTag !== deployEvidence.workerTag ||
-                    afterDeploy.versionId !== deployEvidence.versionId ||
-                    !afterDeploy.active ||
-                    afterDeploy.activeVersionId !== deployEvidence.versionId ||
-                    JSON.stringify(afterDeploy.deployableVersionIds) !==
+                    !observedDeploy.workerExists ||
+                    typeof observedDeploy.workerTag !== "string" ||
+                    observedDeploy.workerTag.length === 0 ||
+                    (deployEvidence.workerTag !== null &&
+                        observedDeploy.workerTag !==
+                            deployEvidence.workerTag) ||
+                    observedDeploy.activeVersionId !==
+                        deployEvidence.versionId ||
+                    JSON.stringify(observedDeploy.deployableVersionIds) !==
                         JSON.stringify([deployEvidence.versionId]) ||
-                    afterDeploy.domainAttached ||
+                    observedDeploy.domainAttached ||
                     pinnedBefore.workerExists ||
                     pinnedBefore.activeVersionId != null ||
                     pinnedBefore.deployableVersionIds.length !== 0
@@ -2073,9 +2073,41 @@ export const provisionProductionEntries = async ({
                         "exact active route-free initial Worker/version transition was not observed"
                     );
                 }
+                const boundEvidence = {
+                    ...deployEvidence,
+                    workerTag: observedDeploy.workerTag,
+                };
+                invocationCandidates.set(site.id, {
+                    ...boundEvidence,
+                    versionTag: before.versionTag,
+                });
+                const afterInspection = assertPinnedInspection(
+                    await inspect(context),
+                    {
+                        phase: "after binding the initial Worker identity",
+                        skipProductionSiteId: site.id,
+                        requirePublicFence: true,
+                        allowProductionWorker: before.workerName,
+                    }
+                );
+                afterDeploy = planFor(afterInspection, site.id);
+                if (
+                    !afterDeploy.workerExists ||
+                    afterDeploy.workerTag !== boundEvidence.workerTag ||
+                    afterDeploy.versionId !== boundEvidence.versionId ||
+                    !afterDeploy.active ||
+                    afterDeploy.activeVersionId !== boundEvidence.versionId ||
+                    JSON.stringify(afterDeploy.deployableVersionIds) !==
+                        JSON.stringify([boundEvidence.versionId]) ||
+                    afterDeploy.domainAttached
+                ) {
+                    throw new Error(
+                        "GET-bound initial Worker identity, active version, and artifact evidence did not remain exact"
+                    );
+                }
                 validateWranglerMutationEvidence({
                     plan: afterDeploy,
-                    evidence: deployEvidence,
+                    evidence: boundEvidence,
                 });
                 invocationCandidates.get(site.id).versionFingerprint =
                     afterDeploy.versionFingerprint;

@@ -330,7 +330,7 @@ const createHarness = () => {
             artifact,
         }) => {
             calls.push(["initial-deploy", site.id]);
-            const workerTag = addWorker({
+            addWorker({
                 entry: { site, policy },
                 enabled: true,
                 previewsEnabled: true,
@@ -357,7 +357,10 @@ const createHarness = () => {
             ]);
             return {
                 workerName: policy.productionWorker,
-                workerTag,
+                // Wrangler 4.110.0 reads this immutable tag before upload, so
+                // a first deploy of an absent Worker reports null. The
+                // provisioning path must bind the tag from the immediate GET.
+                workerTag: null,
                 versionId,
                 artifactManifestDigest: artifact.digest,
             };
@@ -764,6 +767,220 @@ test("missing-Worker deploy evidence failures close the exact public URLs and ne
         ),
         false
     );
+});
+
+test("missing-Worker deploy binds the immediate GET tag and version before any later mutation", async (t) => {
+    for (const failureMode of [
+        "version mismatch",
+        "structured tag mismatch",
+        "tag changes before bind",
+    ]) {
+        await t.test(failureMode, async () => {
+            const harness = createHarness();
+            const target = entries[0];
+            const workerName = target.policy.productionWorker;
+            const initialDeploy = harness.operations.initialDeploy;
+            const listWorkerScripts = harness.operations.listWorkerScripts;
+            let deployed = false;
+            let postDeployTagReads = 0;
+
+            harness.operations.initialDeploy = async (input) => {
+                const evidence = await initialDeploy(input);
+                deployed = true;
+                if (failureMode === "version mismatch") {
+                    return {
+                        ...evidence,
+                        versionId: versionIdFor(entries.length * 50),
+                    };
+                }
+                if (failureMode === "structured tag mismatch") {
+                    return {
+                        ...evidence,
+                        workerTag: "different-structured-worker-tag",
+                    };
+                }
+                return evidence;
+            };
+            harness.operations.listWorkerScripts = async () => {
+                const scripts = await listWorkerScripts();
+                if (
+                    failureMode === "tag changes before bind" &&
+                    deployed &&
+                    ++postDeployTagReads === 2
+                ) {
+                    scripts.get(workerName).tag = "replacement-worker-tag";
+                }
+                return scripts;
+            };
+
+            await assert.rejects(
+                provisionProductionEntries({
+                    entries,
+                    configs,
+                    expectedCommit: COMMIT,
+                    mode: "apply",
+                    operations: harness.operations,
+                    log: () => {},
+                }),
+                /initial route-free private deploy could not be proved safely/
+            );
+            assert.deepEqual(
+                harness.calls.filter(([name]) => name === "initial-deploy"),
+                [["initial-deploy", target.site.id]]
+            );
+            assert.deepEqual(harness.subdomains.get(workerName), {
+                enabled: false,
+                previewsEnabled: false,
+            });
+            assert.equal(
+                harness.calls.some(([name]) =>
+                    ["upload", "activate", "attach-domain"].includes(name)
+                ),
+                false
+            );
+        });
+    }
+});
+
+test("recovery updates one existing private Worker and bootstraps only six absent Workers", async () => {
+    const beforeFailure = createHarness();
+    for (const entry of entries) beforeFailure.addPreview({ entry });
+    const oldPlan = await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "plan",
+        operations: beforeFailure.operations,
+        log: () => {},
+    });
+
+    const harness = createHarness();
+    for (const entry of entries) harness.addPreview({ entry });
+    const stream = entries[0];
+    harness.addWorker({ entry: stream });
+    harness.addExactVersion({
+        entry: stream,
+        active: true,
+        commit: OTHER_COMMIT,
+    });
+
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            plannedStateDigest: oldPlan.stateDigest,
+            mode: "apply",
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /Cloudflare provisioning state changed after review/
+    );
+    assert.deepEqual(mutationCalls(harness.calls), []);
+
+    const recoveryPlan = await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "plan",
+        operations: harness.operations,
+        log: () => {},
+    });
+    assert.notEqual(recoveryPlan.stateDigest, oldPlan.stateDigest);
+    assert.deepEqual(recoveryPlan[0].actions, [
+        "upload-fresh-route-free-version",
+        "disable-uploaded-public-subdomains",
+        "activate-exact-version-100-percent",
+        "attach-reviewed-custom-domain",
+        "verify-live-release",
+    ]);
+    assert.ok(
+        recoveryPlan
+            .slice(1)
+            .every(({ actions }) =>
+                actions.includes("deploy-initial-route-free-private-baseline")
+            )
+    );
+
+    harness.calls.length = 0;
+    await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        plannedStateDigest: recoveryPlan.stateDigest,
+        mode: "apply",
+        operations: harness.operations,
+        log: () => {},
+    });
+
+    assert.deepEqual(
+        harness.calls
+            .filter(([name]) => name === "upload")
+            .map(([, siteId]) => siteId),
+        [stream.site.id]
+    );
+    assert.deepEqual(
+        harness.calls
+            .filter(([name]) => name === "activate")
+            .map(([, workerName]) => workerName),
+        [stream.policy.productionWorker]
+    );
+    assert.deepEqual(
+        harness.calls
+            .filter(([name]) => name === "initial-deploy")
+            .map(([, siteId]) => siteId),
+        entries.slice(1).map(({ site }) => site.id)
+    );
+    const firstDomain = harness.calls.findIndex(
+        ([name]) => name === "attach-domain"
+    );
+    assert.ok(firstDomain >= 0);
+    const streamActivation = harness.calls.findIndex(
+        ([name, worker]) =>
+            name === "activate" && worker === stream.policy.productionWorker
+    );
+    assert.ok(streamActivation >= 0 && streamActivation < firstDomain);
+    for (const { site, policy } of entries) {
+        const previewFencedAt = harness.calls.findIndex(
+            ([name, worker], index) =>
+                index < firstDomain &&
+                name === "get-subdomain" &&
+                worker === policy.previewWorker
+        );
+        const mutationAt = harness.calls.findIndex(
+            ([name, identity]) =>
+                (site.id === stream.site.id
+                    ? name === "upload"
+                    : name === "initial-deploy") && identity === site.id
+        );
+        const disabledAt = harness.calls.findIndex(
+            ([name, worker], index) =>
+                index > mutationAt &&
+                name === "disable-subdomain" &&
+                worker === policy.productionWorker
+        );
+        const fencedAt = harness.calls.findIndex(
+            ([name, worker], index) =>
+                index > disabledAt &&
+                name === "get-subdomain" &&
+                worker === policy.productionWorker
+        );
+        const moduleProvedAt = harness.calls.findIndex(
+            ([name, worker], index) =>
+                index > mutationAt &&
+                name === "get-version-module" &&
+                worker === policy.productionWorker
+        );
+        assert.ok(mutationAt >= 0);
+        assert.ok(previewFencedAt >= 0);
+        assert.ok(disabledAt > mutationAt && disabledAt < firstDomain);
+        assert.ok(fencedAt > disabledAt && fencedAt < firstDomain);
+        assert.ok(moduleProvedAt > mutationAt && moduleProvedAt < firstDomain);
+        assert.deepEqual(harness.subdomains.get(policy.productionWorker), {
+            enabled: false,
+            previewsEnabled: false,
+        });
+    }
 });
 
 test("provisioning requires the independently reviewed zone fingerprint", async (t) => {

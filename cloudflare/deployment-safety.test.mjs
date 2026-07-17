@@ -349,6 +349,10 @@ test("Wrangler structured output provides exact inactive-version ownership evide
             /invalid deployment ownership evidence/,
         ],
         [
+            wranglerVersionUploadRecord({ worker_tag: null }),
+            /invalid deployment ownership evidence/,
+        ],
+        [
             wranglerVersionUploadRecord({ version_id: "not-a-version" }),
             /invalid deployment ownership evidence/,
         ],
@@ -387,6 +391,17 @@ test("Wrangler structured output provides exact inactive-version ownership evide
 test("Wrangler initial deploy output proves one exact private deployment with no targets", () => {
     assert.deepEqual(
         parseWranglerInitialDeployOutput(
+            wranglerInitialDeployRecord({ worker_tag: null }),
+            "peerbit-examples-files"
+        ),
+        {
+            workerName: "peerbit-examples-files",
+            workerTag: null,
+            versionId: NEW_VERSION,
+        }
+    );
+    assert.deepEqual(
+        parseWranglerInitialDeployOutput(
             `${JSON.stringify({ type: "wrangler-session", version: 1 })}\n${wranglerInitialDeployRecord()}\n`,
             "peerbit-examples-files"
         ),
@@ -418,6 +433,14 @@ test("Wrangler initial deploy output proves one exact private deployment with no
         [
             wranglerInitialDeployRecord({ worker_name_overridden: true }),
             /unsupported identity or target metadata/,
+        ],
+        [
+            wranglerInitialDeployRecord({ worker_tag: "bad tag" }),
+            /invalid deployment ownership evidence/,
+        ],
+        [
+            wranglerInitialDeployRecord({ worker_tag: undefined }),
+            /invalid deployment ownership evidence/,
         ],
     ]) {
         assert.throws(
@@ -3821,14 +3844,17 @@ test("Wrangler initial deploy receives one exact route-free config and emits pri
                 assert.equal("domains" in invokedConfig, false);
                 writeFileSync(
                     environment.WRANGLER_OUTPUT_FILE_PATH,
-                    wranglerInitialDeployRecord() + "\n",
+                    wranglerInitialDeployRecord({ worker_tag: null }) + "\n",
                     "utf8"
                 );
             },
         },
     });
 
-    assert.deepEqual(evidence, deploymentEvidence("files"));
+    assert.deepEqual(evidence, {
+        ...deploymentEvidence("files"),
+        workerTag: null,
+    });
     assert.ok(invokedConfigFile);
     assert.equal(existsSync(path.dirname(invokedConfigFile)), false);
 });
@@ -3939,9 +3965,33 @@ test("pinned Wrangler version upload cannot invoke route or domain publishers", 
         preflightStart
     );
     assert.ok(preflightStart >= 0 && preflightEnd > preflightStart);
+    const preflight = bundle.slice(preflightStart, preflightEnd);
     assert.match(
-        bundle.slice(preflightStart, preflightEnd),
+        preflight,
         /You cannot upload a new version of a Worker that does not yet exist/
+    );
+    assert.match(preflight, /let workerTag = null/);
+    assert.match(
+        preflight,
+        /if \(isWorkerNotFoundError\([^)]+\)\)[\s\S]*workerExists = false/
+    );
+
+    const deployStart = bundle.indexOf(
+        "async function deploy(props, config2, buildResult, callbacks)"
+    );
+    const deployEnd = bundle.indexOf(
+        "\nfunction renderBindingDependsOnExportError",
+        deployStart
+    );
+    assert.ok(deployStart >= 0 && deployEnd > deployStart);
+    const deploy = bundle.slice(deployStart, deployEnd);
+    assert.match(
+        deploy,
+        /const \{ workerTag, tags, workerExists,[\s\S]*\} = await preUploadApiChecks/
+    );
+    assert.match(
+        deploy,
+        /return \{[\s\S]*versionId,[\s\S]*workerTag,[\s\S]*targets: targets \?\? \[\][\s\S]*\}/
     );
 
     const deployHandlerStart = bundle.indexOf(
