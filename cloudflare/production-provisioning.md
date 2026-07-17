@@ -232,9 +232,23 @@ commit, tests the sources, dry-runs every locked Wrangler bundle, and then:
    version ID, nonce-tag/message, runtime settings
    (including cache, limits, migrations, placement, and usage model), reviewed
    bindings, the artifact digest binding, and the version resource fingerprint.
-   For an omitted limits config, only Wrangler's equivalent omitted or plain
-   empty-object response is accepted; any limit field is rejected. Explicitly
-   configured limits must match exactly.
+   The production validator retains two reviewed static-assets contracts. The
+   existing Worker-first stream contract requires `handlers: ["fetch"]`, its
+   exact `raw_run_worker_first` path array, and the matching
+   `static_routing.user_worker` array. The asset-only diagnostic confirms that
+   those Workers instead normalize to `handlers: null` with no
+   `named_handlers`, `raw_run_worker_first: false`, and no `static_routing`.
+   The rendered Wrangler config and artifact receipt still
+   bind the source-form Worker-first intent: the stream's exact path array and
+   the asset-only sites' omitted, empty route set. API normalization does not
+   rewrite or weaken that deployment intent.
+   The asset-only schema diagnostic inspected an existing preview with no
+   bindings. Production candidates deliberately add the
+   `PEERBIT_ARTIFACT_MANIFEST_SHA256` plain-text binding, which remains required
+   by the candidate-version proof.
+   For an omitted limits config, the version API field must also be absent; even
+   a plain empty object is rejected as unreviewed. Explicitly configured limits
+   must match exactly.
    It also downloads that exact version through the content API and
    requires the multipart body to contain exactly the one reviewed ES module,
    with no auxiliary modules or source maps. The same digest is carried by the
@@ -284,10 +298,12 @@ with manual-recovery guidance.
 Cloudflare exposes exact script content for a requested version ID, but it does
 not expose an exact-version static-assets manifest that this workflow can
 compare before activation. Consequently, the inactive-version GET proves the
-reviewed runtime, handlers, cache options, bindings, artifact digest, and exact
-one-module script set. The artifact receipt binds every reviewed asset byte and
-static-assets behavior setting, while exact deployed asset-byte and behavior
-proof is necessarily performed through the custom domain after activation. The
+reviewed API-normalized runtime shape, handlers, cache options, bindings,
+artifact digest, and exact one-module script set. The artifact receipt binds
+every reviewed asset byte and the source-form static-assets behavior settings,
+including array-valued Worker-first paths, while exact deployed asset-byte and
+behavior proof is necessarily performed through the custom domain after
+activation. The
 served manifest plus exhaustive path/length/SHA-256, 404, HTML, header, and
 Worker-first range/cache checks detect a wrong asset upload, but detection is
 post-activation. Any exact-version module, served-manifest, or live-asset

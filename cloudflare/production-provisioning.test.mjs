@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { loadCloudflareDeploymentData } from "../scripts/cloudflare-deployment-policy.mjs";
+import {
+    loadCloudflareDeploymentData,
+    repoRoot,
+} from "../scripts/cloudflare-deployment-policy.mjs";
 import {
     CloudflareWorkersApiError,
     createCloudflareWorkersApi,
@@ -20,6 +26,7 @@ import {
     artifactBoundVersionMessage,
 } from "../scripts/cloudflare-artifact-manifest.mjs";
 import { accountZoneInventorySha256 } from "../scripts/deploy-cloudflare-production.mjs";
+import { CLOUDFLARE_STATIC_ASSET_HEADERS } from "../scripts/cloudflare-static-asset-inputs.mjs";
 
 const COMMIT = "a".repeat(40);
 const OTHER_COMMIT = "b".repeat(40);
@@ -34,6 +41,20 @@ const LEGACY_NONCE = "1".repeat(32);
 const PLAN_DIGEST = "2".repeat(64);
 const clone = (value) => structuredClone(value);
 const { entries } = loadCloudflareDeploymentData();
+const artifactAssetsDirectory = mkdtempSync(
+    path.join(tmpdir(), "peerbit-cloudflare-provisioning-assets-")
+);
+const artifactHeadersBytes = Buffer.from(
+    CLOUDFLARE_STATIC_ASSET_HEADERS,
+    "utf8"
+);
+writeFileSync(
+    path.join(artifactAssetsDirectory, "_headers"),
+    artifactHeadersBytes
+);
+test.after(() =>
+    rmSync(artifactAssetsDirectory, { recursive: true, force: true })
+);
 const artifactDigestFor = (siteId) =>
     createHash("sha256").update(`artifact:${siteId}`).digest("hex");
 const artifacts = new Map(
@@ -48,6 +69,7 @@ const artifacts = new Map(
                 workerName: policy.productionWorker,
                 commit: COMMIT,
                 digest: artifactDigestFor(site.id),
+                assetsDirectory: artifactAssetsDirectory,
                 manifest: {
                     module: {
                         path: "module.js",
@@ -55,6 +77,16 @@ const artifacts = new Map(
                         size: site.id.length,
                         sha256,
                     },
+                    assets: [
+                        {
+                            path: "_headers",
+                            size: artifactHeadersBytes.length,
+                            sha256: createHash("sha256")
+                                .update(artifactHeadersBytes)
+                                .digest("hex"),
+                            public: false,
+                        },
+                    ],
                 },
             },
         ];
@@ -64,19 +96,38 @@ const configs = new Map(
     entries.map(({ site, policy }) => [
         site.id,
         {
-            file: `/reviewed/${site.id}.json`,
+            file: path.join(repoRoot, ".reviewed", `${site.id}.json`),
             config: {
                 name: policy.productionWorker,
+                compatibility_date: "2026-07-13",
                 workers_dev: false,
                 preview_urls: false,
                 ...(site.id === "stream"
                     ? {
+                          main: "../cloudflare/cached-static-assets.mjs",
                           cache: {
                               enabled: true,
                               cross_version_cache: false,
                           },
+                          vars: {
+                              RANGE_MEDIA_PATHS: JSON.stringify([
+                                  "/bird.mp4",
+                                  "/noise.mp4",
+                              ]),
+                          },
                       }
                     : {}),
+                assets: {
+                    directory: `/reviewed-assets/${site.id}`,
+                    html_handling: "auto-trailing-slash",
+                    not_found_handling: "none",
+                    ...(site.id === "stream"
+                        ? {
+                              binding: "ASSETS",
+                              run_worker_first: ["/bird.mp4", "/noise.mp4"],
+                          }
+                        : {}),
+                },
                 routes: policy.productionHostnames.map((hostname) => ({
                     pattern: hostname,
                     custom_domain: true,
@@ -121,27 +172,82 @@ const expectedMessage = (siteId, commit = COMMIT) =>
         artifactManifestDigest: artifactDigestFor(siteId),
     });
 
-const versionCacheOptions = (siteId) =>
-    siteId === "stream"
-        ? { enabled: true, cross_version_cache: false }
-        : undefined;
+const versionAssets = (siteId) => {
+    const workerFirst = siteId === "stream";
+    return {
+        headers: {
+            rules: {
+                "/*": {
+                    set: {
+                        "referrer-policy": "strict-origin-when-cross-origin",
+                        "x-content-type-options": "nosniff",
+                    },
+                    unset: [],
+                },
+                "/assets/*": {
+                    set: {
+                        "cache-control": "public, max-age=31556952, immutable",
+                    },
+                    unset: [],
+                },
+            },
+            version: 2,
+        },
+        html_handling: "auto-trailing-slash",
+        not_found_handling: "none",
+        raw_headers: CLOUDFLARE_STATIC_ASSET_HEADERS,
+        raw_run_worker_first: workerFirst ? ["/bird.mp4", "/noise.mp4"] : false,
+        serve_directly: true,
+        ...(workerFirst
+            ? {
+                  static_routing: {
+                      user_worker: ["/bird.mp4", "/noise.mp4"],
+                  },
+              }
+            : {}),
+    };
+};
 
 const versionResources = (siteId, suffix = "baseline") => ({
     bindings: [
+        ...(siteId === "stream"
+            ? [
+                  { name: "ASSETS", type: "assets" },
+                  {
+                      name: "RANGE_MEDIA_PATHS",
+                      type: "plain_text",
+                      text: JSON.stringify(["/bird.mp4", "/noise.mp4"]),
+                  },
+              ]
+            : []),
         {
             name: CLOUDFLARE_ARTIFACT_DIGEST_BINDING,
             type: "plain_text",
             text: artifactDigestFor(siteId),
         },
     ],
-    script: {
-        etag: `etag-${siteId}-${suffix}`,
-        handlers: ["fetch"],
-        named_handlers: [],
-    },
+    script:
+        siteId === "stream"
+            ? {
+                  etag: `etag-${siteId}-${suffix}`,
+                  handlers: ["fetch"],
+                  named_handlers: [],
+              }
+            : {
+                  etag: `etag-${siteId}-${suffix}`,
+                  handlers: null,
+              },
     script_runtime: {
-        compatibility_flags: [],
-        limits: {},
+        assets: versionAssets(siteId),
+        ...(siteId === "stream"
+            ? {
+                  cache_options: {
+                      enabled: true,
+                      cross_version_cache: false,
+                  },
+              }
+            : {}),
+        compatibility_date: "2026-07-13",
         usage_model: "standard",
     },
 });
@@ -231,9 +337,6 @@ const createHarness = () => {
                 "workers/message": expectedMessage(entry.site.id, commit),
             },
             resources: versionResources(entry.site.id),
-            ...(versionCacheOptions(entry.site.id)
-                ? { cache_options: versionCacheOptions(entry.site.id) }
-                : {}),
         });
         if (active) {
             deployments.set(entry.policy.productionWorker, [
@@ -346,9 +449,6 @@ const createHarness = () => {
                     "workers/message": expectedMessage(site.id, expectedCommit),
                 },
                 resources: versionResources(site.id, versionTag),
-                ...(versionCacheOptions(site.id)
-                    ? { cache_options: versionCacheOptions(site.id) }
-                    : {}),
             });
             deployments.set(policy.productionWorker, [
                 {
@@ -394,9 +494,6 @@ const createHarness = () => {
                     "workers/message": expectedMessage(site.id, expectedCommit),
                 },
                 resources: versionResources(site.id, versionTag),
-                ...(versionCacheOptions(site.id)
-                    ? { cache_options: versionCacheOptions(site.id) }
-                    : {}),
             });
             return {
                 workerName: policy.productionWorker,
@@ -1599,6 +1696,85 @@ test("provisioning rejects a rendered config that could publish a preview URL", 
     assert.deepEqual(harness.calls, []);
 });
 
+test("reviewed site kind, script, binding, and worker-first routes cannot drift before mutation", async (t) => {
+    const workerFirst = ["/bird.mp4", "/noise.mp4"];
+    for (const [name, mutate] of [
+        [
+            "asset-only config gains the Worker-first shape",
+            ({ invalidConfigs }) => {
+                const config = invalidConfigs.get("music").config;
+                config.main = "../cloudflare/cached-static-assets.mjs";
+                config.assets.binding = "ASSETS";
+                config.assets.run_worker_first = workerFirst;
+            },
+        ],
+        [
+            "asset-only site and config jointly switch kind",
+            ({ invalidEntries, invalidConfigs }) => {
+                const site = invalidEntries.find(
+                    (entry) => entry.site.id === "music"
+                ).site;
+                site.script = "cloudflare/cached-static-assets.mjs";
+                site.workerFirst = workerFirst;
+                const config = invalidConfigs.get("music").config;
+                config.main = "../cloudflare/cached-static-assets.mjs";
+                config.assets.binding = "ASSETS";
+                config.assets.run_worker_first = workerFirst;
+            },
+        ],
+        [
+            "Worker-first config loses its runtime fields",
+            ({ invalidConfigs }) => {
+                const config = invalidConfigs.get("stream").config;
+                delete config.main;
+                delete config.assets.binding;
+                delete config.assets.run_worker_first;
+            },
+        ],
+        [
+            "Worker-first main no longer resolves to the manifest script",
+            ({ invalidConfigs }) => {
+                invalidConfigs.get("stream").config.main =
+                    "../cloudflare/redirect.mjs";
+            },
+        ],
+        [
+            "Worker-first assets binding changes",
+            ({ invalidConfigs }) => {
+                invalidConfigs.get("stream").config.assets.binding =
+                    "OTHER_ASSETS";
+            },
+        ],
+        [
+            "Worker-first route array differs from the manifest",
+            ({ invalidConfigs }) => {
+                invalidConfigs.get("stream").config.assets.run_worker_first = [
+                    "/bird.mp4",
+                ];
+            },
+        ],
+    ]) {
+        await t.test(name, async () => {
+            const harness = createHarness();
+            const invalidEntries = clone(entries);
+            const invalidConfigs = clone(configs);
+            mutate({ invalidEntries, invalidConfigs });
+            await assert.rejects(
+                provisionProductionEntries({
+                    entries: invalidEntries,
+                    configs: invalidConfigs,
+                    expectedCommit: COMMIT,
+                    mode: "plan",
+                    operations: harness.operations,
+                    log: () => {},
+                }),
+                /runtime kind do not match|asset-only config contains|Worker-first script, binding, and routes do not match/
+            );
+            assert.deepEqual(harness.calls, []);
+        });
+    }
+});
+
 test("preview identities are independently pinned before every account read", async (t) => {
     for (const [name, entryIndex, substitute] of [
         ["duplicate", 1, entries[0].policy.previewWorker],
@@ -2011,6 +2187,28 @@ test("tail consumers, Logpush, and Cron schedules all block before mutation", as
             },
             /unreviewed queue, scheduled, email, tail, or other event handler/,
         ],
+        [
+            "managed asset-only fetch handler array",
+            (harness) => {
+                const entry = entries.find(({ site }) => site.id === "music");
+                const versionId = harness.seedExact({ entry });
+                harness.versions
+                    .get(entry.policy.productionWorker)
+                    .get(versionId).resources.script.handlers = ["fetch"];
+            },
+            /unreviewed queue, scheduled, email, tail, or other event handler/,
+        ],
+        [
+            "managed asset-only named handler field",
+            (harness) => {
+                const entry = entries.find(({ site }) => site.id === "music");
+                const versionId = harness.seedExact({ entry });
+                harness.versions
+                    .get(entry.policy.productionWorker)
+                    .get(versionId).resources.script.named_handlers = [];
+            },
+            /unreviewed queue, scheduled, email, tail, or other event handler/,
+        ],
     ]) {
         await t.test(name, async () => {
             const harness = createHarness();
@@ -2068,12 +2266,110 @@ test("separate Queue consumer attachments to production or preview Workers block
     }
 });
 
+test("version validation separates asset-only normalization from the reviewed Worker-first runtime", async () => {
+    const harness = createHarness();
+    seedExistingWorkers(harness);
+    const reviewed = await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "plan",
+        operations: harness.operations,
+        log: () => {},
+    });
+    await provisionProductionEntriesWithReceipt({
+        entries,
+        configs,
+        expectedCommit: COMMIT,
+        mode: "apply",
+        plannedStateDigest: reviewed.stateDigest,
+        operations: harness.operations,
+        log: () => {},
+    });
+
+    for (const { site, policy } of entries) {
+        const versionId = harness.deployments.get(policy.productionWorker)[0]
+            .versions[0].version_id;
+        const version = harness.versions
+            .get(policy.productionWorker)
+            .get(versionId);
+        const runtime = version.resources.script_runtime;
+        assert.deepEqual(
+            Object.keys(runtime).sort(),
+            [
+                "assets",
+                ...(site.id === "stream" ? ["cache_options"] : []),
+                "compatibility_date",
+                "usage_model",
+            ].sort()
+        );
+        assert.equal(Object.hasOwn(version, "assets"), false);
+        assert.equal(Object.hasOwn(version, "cache_options"), false);
+        if (site.id === "stream") {
+            assert.deepEqual(version.resources.script.handlers, ["fetch"]);
+            assert.deepEqual(version.resources.script.named_handlers, []);
+            assert.deepEqual(runtime.assets.raw_run_worker_first, [
+                "/bird.mp4",
+                "/noise.mp4",
+            ]);
+            assert.deepEqual(runtime.assets.static_routing.user_worker, [
+                "/bird.mp4",
+                "/noise.mp4",
+            ]);
+        } else {
+            assert.equal(version.resources.script.handlers, null);
+            assert.equal(
+                Object.hasOwn(version.resources.script, "named_handlers"),
+                false
+            );
+            assert.equal(runtime.assets.raw_run_worker_first, false);
+            assert.equal(
+                Object.hasOwn(runtime.assets, "static_routing"),
+                false
+            );
+        }
+        assert.deepEqual(
+            version.resources.bindings
+                .filter(({ type }) => type === "assets")
+                .map(({ name }) => name),
+            site.id === "stream" ? ["ASSETS"] : []
+        );
+    }
+    assert.equal(
+        harness.calls.filter(([operation]) => operation === "activate").length,
+        entries.length
+    );
+});
+
+test("runtime validation derives _headers only from manifest-bound artifact bytes", async () => {
+    const harness = createHarness();
+    const forgedArtifacts = new Map(artifacts);
+    const forged = clone(artifacts.get("stream"));
+    forged.assetsDirectory = artifactAssetsDirectory;
+    forged.manifest.assets[0].sha256 = "f".repeat(64);
+    forgedArtifacts.set("stream", forged);
+
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            artifacts: forgedArtifacts,
+            expectedCommit: COMMIT,
+            mode: "plan",
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /reviewed artifact asset bytes changed for _headers/
+    );
+    assert.deepEqual(harness.calls, []);
+});
+
 test("forged uploaded resources and bindings cannot authorize activation", async (t) => {
     for (const [name, mutate, targetSiteId = "stream"] of [
         [
             "unexpected cache options",
             (version) =>
-                (version.cache_options = {
+                (version.resources.script_runtime.cache_options = {
                     enabled: true,
                     cross_version_cache: false,
                 }),
@@ -2081,11 +2377,544 @@ test("forged uploaded resources and bindings cannot authorize activation", async
         ],
         [
             "missing reviewed cache options",
-            (version) => delete version.cache_options,
+            (version) => delete version.resources.script_runtime.cache_options,
         ],
         [
             "cross-version cache enabled",
-            (version) => (version.cache_options.cross_version_cache = true),
+            (version) =>
+                (version.resources.script_runtime.cache_options.cross_version_cache = true),
+        ],
+        [
+            "top-level assets duplicate",
+            (version) =>
+                (version.assets = clone(
+                    version.resources.script_runtime.assets
+                )),
+        ],
+        [
+            "top-level cache-options duplicate",
+            (version) =>
+                (version.cache_options = clone(
+                    version.resources.script_runtime.cache_options
+                )),
+        ],
+        [
+            "runtime assets missing",
+            (version) => delete version.resources.script_runtime.assets,
+        ],
+        [
+            "runtime assets wrong type",
+            (version) => (version.resources.script_runtime.assets = []),
+        ],
+        [
+            "runtime assets extra field",
+            (version) =>
+                (version.resources.script_runtime.assets.unreviewed = true),
+        ],
+        [
+            "asset headers missing",
+            (version) => delete version.resources.script_runtime.assets.headers,
+        ],
+        [
+            "asset headers wrong type",
+            (version) => (version.resources.script_runtime.assets.headers = []),
+        ],
+        [
+            "asset headers extra field",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.unreviewed = true),
+        ],
+        [
+            "header rules missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules,
+        ],
+        [
+            "header rules wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules = []),
+        ],
+        [
+            "header rules extra route",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/unreviewed/*"
+                ] = { set: { "x-test": "unreviewed" }, unset: [] }),
+        ],
+        [
+            "root header rule missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ],
+        ],
+        [
+            "assets header rule missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ],
+        ],
+        [
+            "root header rule wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules["/*"] =
+                    []),
+        ],
+        [
+            "root header rule extra field",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].unreviewed = true),
+        ],
+        [
+            "root header set missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set,
+        ],
+        [
+            "root header set wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set = []),
+        ],
+        [
+            "root header set extra field",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set.unreviewed = "value"),
+        ],
+        [
+            "referrer-policy header missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set["referrer-policy"],
+        ],
+        [
+            "referrer-policy header wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set["referrer-policy"] = "unsafe-url"),
+        ],
+        [
+            "referrer-policy header wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set["referrer-policy"] = true),
+        ],
+        [
+            "content-type-options header missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set["x-content-type-options"],
+        ],
+        [
+            "content-type-options header wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set["x-content-type-options"] = "reviewed-but-different"),
+        ],
+        [
+            "content-type-options header wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].set["x-content-type-options"] = 1),
+        ],
+        [
+            "root header unset missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].unset,
+        ],
+        [
+            "root header unset wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].unset = {}),
+        ],
+        [
+            "root header unset nonempty",
+            (version) =>
+                version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].unset.push("x-content-type-options"),
+        ],
+        [
+            "root header unset duplicates",
+            (version) =>
+                version.resources.script_runtime.assets.headers.rules[
+                    "/*"
+                ].unset.push("x-test", "x-test"),
+        ],
+        [
+            "assets header set missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].set,
+        ],
+        [
+            "assets header set wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].set = []),
+        ],
+        [
+            "assets header set extra field",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].set.unreviewed = "value"),
+        ],
+        [
+            "cache-control header missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].set["cache-control"],
+        ],
+        [
+            "cache-control header wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].set["cache-control"] = "no-store"),
+        ],
+        [
+            "cache-control header wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].set["cache-control"] = false),
+        ],
+        [
+            "assets header unset missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].unset,
+        ],
+        [
+            "assets header unset wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].unset = null),
+        ],
+        [
+            "assets header unset nonempty",
+            (version) =>
+                version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].unset.push("cache-control"),
+        ],
+        [
+            "assets header unset duplicates",
+            (version) =>
+                version.resources.script_runtime.assets.headers.rules[
+                    "/assets/*"
+                ].unset.push("x-test", "x-test"),
+        ],
+        [
+            "header schema version missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.headers.version,
+        ],
+        [
+            "header schema version wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.version = 1),
+        ],
+        [
+            "header schema version wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.headers.version = "2"),
+        ],
+        [
+            "HTML handling missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.html_handling,
+        ],
+        [
+            "HTML handling wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.html_handling =
+                    "none"),
+        ],
+        [
+            "HTML handling wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.html_handling = true),
+        ],
+        [
+            "not-found handling missing",
+            (version) =>
+                delete version.resources.script_runtime.assets
+                    .not_found_handling,
+        ],
+        [
+            "not-found handling wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.not_found_handling =
+                    "single-page-application"),
+        ],
+        [
+            "not-found handling wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.not_found_handling = 0),
+        ],
+        [
+            "raw headers missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.raw_headers,
+        ],
+        [
+            "raw headers wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_headers += "\n"),
+        ],
+        [
+            "raw headers wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_headers = {}),
+        ],
+        [
+            "raw worker-first routes missing",
+            (version) =>
+                delete version.resources.script_runtime.assets
+                    .raw_run_worker_first,
+        ],
+        [
+            "raw worker-first routes wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first =
+                    {}),
+        ],
+        [
+            "raw worker-first route order changed",
+            (version) =>
+                version.resources.script_runtime.assets.raw_run_worker_first.reverse(),
+        ],
+        [
+            "raw worker-first route duplicated",
+            (version) =>
+                version.resources.script_runtime.assets.raw_run_worker_first.push(
+                    "/bird.mp4"
+                ),
+        ],
+        [
+            "raw worker-first route extra",
+            (version) =>
+                version.resources.script_runtime.assets.raw_run_worker_first.push(
+                    "/extra.mp4"
+                ),
+        ],
+        [
+            "asset-only site gains a raw worker-first route",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first =
+                    ["/extra.mp4"]),
+            "music",
+        ],
+        [
+            "asset-only raw worker-first marker missing",
+            (version) =>
+                delete version.resources.script_runtime.assets
+                    .raw_run_worker_first,
+            "music",
+        ],
+        [
+            "asset-only raw worker-first marker true",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first = true),
+            "music",
+        ],
+        [
+            "asset-only raw worker-first marker is an empty array",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first =
+                    []),
+            "music",
+        ],
+        [
+            "asset-only raw worker-first marker is an object",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first =
+                    {}),
+            "music",
+        ],
+        [
+            "asset-only raw worker-first marker is null",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first =
+                    null),
+            "music",
+        ],
+        [
+            "raw worker-first route wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.raw_run_worker_first[0] = true),
+        ],
+        [
+            "serve-directly missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.serve_directly,
+        ],
+        [
+            "serve-directly wrong value",
+            (version) =>
+                (version.resources.script_runtime.assets.serve_directly = false),
+        ],
+        [
+            "serve-directly wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.serve_directly = 1),
+        ],
+        [
+            "static routing missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.static_routing,
+        ],
+        [
+            "static routing wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing = []),
+        ],
+        [
+            "static routing extra field",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing.unreviewed =
+                    []),
+        ],
+        [
+            "static user-worker routes missing",
+            (version) =>
+                delete version.resources.script_runtime.assets.static_routing
+                    .user_worker,
+        ],
+        [
+            "static user-worker routes wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing.user_worker =
+                    {}),
+        ],
+        [
+            "static user-worker route order changed",
+            (version) =>
+                version.resources.script_runtime.assets.static_routing.user_worker.reverse(),
+        ],
+        [
+            "static user-worker route duplicated",
+            (version) =>
+                version.resources.script_runtime.assets.static_routing.user_worker.push(
+                    "/bird.mp4"
+                ),
+        ],
+        [
+            "static user-worker route extra",
+            (version) =>
+                version.resources.script_runtime.assets.static_routing.user_worker.push(
+                    "/extra.mp4"
+                ),
+        ],
+        [
+            "asset-only site gains a static user-worker route",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing = {
+                    user_worker: ["/extra.mp4"],
+                }),
+            "music",
+        ],
+        [
+            "asset-only site gains empty static routing",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing = {}),
+            "music",
+        ],
+        [
+            "asset-only site gains null static routing",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing = null),
+            "music",
+        ],
+        [
+            "static user-worker route wrong type",
+            (version) =>
+                (version.resources.script_runtime.assets.static_routing.user_worker[0] = false),
+        ],
+        [
+            "runtime cache wrong type",
+            (version) => (version.resources.script_runtime.cache_options = []),
+        ],
+        [
+            "runtime cache extra field",
+            (version) =>
+                (version.resources.script_runtime.cache_options.unreviewed = true),
+        ],
+        [
+            "runtime cache enabled missing",
+            (version) =>
+                delete version.resources.script_runtime.cache_options.enabled,
+        ],
+        [
+            "runtime cache enabled wrong value",
+            (version) =>
+                (version.resources.script_runtime.cache_options.enabled = false),
+        ],
+        [
+            "runtime cache enabled wrong type",
+            (version) =>
+                (version.resources.script_runtime.cache_options.enabled = 1),
+        ],
+        [
+            "runtime cross-version cache missing",
+            (version) =>
+                delete version.resources.script_runtime.cache_options
+                    .cross_version_cache,
+        ],
+        [
+            "runtime cross-version cache wrong type",
+            (version) =>
+                (version.resources.script_runtime.cache_options.cross_version_cache =
+                    "false"),
+        ],
+        [
+            "compatibility date missing",
+            (version) =>
+                delete version.resources.script_runtime.compatibility_date,
+        ],
+        [
+            "compatibility date wrong value",
+            (version) =>
+                (version.resources.script_runtime.compatibility_date =
+                    "2026-07-12"),
+        ],
+        [
+            "compatibility date wrong type",
+            (version) =>
+                (version.resources.script_runtime.compatibility_date = 0),
+        ],
+        [
+            "usage model missing",
+            (version) => delete version.resources.script_runtime.usage_model,
+        ],
+        [
+            "usage model wrong type",
+            (version) => (version.resources.script_runtime.usage_model = false),
         ],
         [
             "unreviewed nonempty resource limits",
@@ -2148,6 +2977,42 @@ test("forged uploaded resources and bindings cannot authorize activation", async
             (version) => (version.resources.script.handlers = ["queue"]),
         ],
         [
+            "asset-only event handler missing",
+            (version) => delete version.resources.script.handlers,
+            "music",
+        ],
+        [
+            "asset-only event handler uses the Worker-first fetch array",
+            (version) => (version.resources.script.handlers = ["fetch"]),
+            "music",
+        ],
+        [
+            "asset-only event handler uses an empty array",
+            (version) => (version.resources.script.handlers = []),
+            "music",
+        ],
+        [
+            "asset-only event handler uses a false primitive",
+            (version) => (version.resources.script.handlers = false),
+            "music",
+        ],
+        [
+            "asset-only event handler uses an object",
+            (version) => (version.resources.script.handlers = {}),
+            "music",
+        ],
+        [
+            "asset-only named handler field is present but empty",
+            (version) => (version.resources.script.named_handlers = []),
+            "music",
+        ],
+        [
+            "asset-only named event handler",
+            (version) =>
+                (version.resources.script.named_handlers = ["namedFetch"]),
+            "music",
+        ],
+        [
             "named event handler",
             (version) =>
                 (version.resources.script.named_handlers = ["namedFetch"]),
@@ -2174,9 +3039,20 @@ test("forged uploaded resources and bindings cannot authorize activation", async
             "assets binding",
             (version) =>
                 version.resources.bindings.push({
-                    name: "ASSETS",
+                    name: "UNREVIEWED_ASSETS",
                     type: "assets",
                 }),
+            "music",
+        ],
+        [
+            "missing reviewed assets binding",
+            (version) =>
+                version.resources.bindings.splice(
+                    version.resources.bindings.findIndex(
+                        ({ type }) => type === "assets"
+                    ),
+                    1
+                ),
         ],
         [
             "plain text substitution",
@@ -2186,6 +3062,25 @@ test("forged uploaded resources and bindings cannot authorize activation", async
                     type: "plain_text",
                     text: "forged",
                 }),
+        ],
+        [
+            "missing artifact digest binding",
+            (version) =>
+                version.resources.bindings.splice(
+                    version.resources.bindings.findIndex(
+                        ({ name }) =>
+                            name === CLOUDFLARE_ARTIFACT_DIGEST_BINDING
+                    ),
+                    1
+                ),
+        ],
+        [
+            "wrong artifact digest binding",
+            (version) => {
+                version.resources.bindings.find(
+                    ({ name }) => name === CLOUDFLARE_ARTIFACT_DIGEST_BINDING
+                ).text = "f".repeat(64);
+            },
         ],
     ]) {
         await t.test(name, async () => {
@@ -2221,7 +3116,7 @@ test("forged uploaded resources and bindings cannot authorize activation", async
                     operations: harness.operations,
                     log: () => {},
                 }),
-                /resource evidence|event handlers|unreviewed service, queue, secret, storage|assets binding|plain-text bindings|cache options|limits|migrations|placement|usage model|unreviewed fields/
+                /resource evidence|runtime resource|event handlers|unreviewed service, queue, secret, storage|assets binding|plain-text bindings|cache options|limits|migrations|placement|usage model|unreviewed fields|duplicated top-level runtime policy/
             );
             assert.equal(
                 harness.calls.some(
@@ -2237,7 +3132,7 @@ test("forged uploaded resources and bindings cannot authorize activation", async
     }
 });
 
-test("omitted and plain-empty default limits keep one fingerprint through every candidate fence", async () => {
+test("an unreviewed empty default-limits field fails the exact runtime shape", async () => {
     const harness = createHarness();
     seedExistingWorkers(harness);
     const reviewed = await provisionProductionEntriesWithReceipt({
@@ -2248,44 +3143,35 @@ test("omitted and plain-empty default limits keep one fingerprint through every 
         operations: harness.operations,
         log: () => {},
     });
-    const candidateIds = new Set();
     const upload = harness.operations.upload;
     harness.operations.upload = async (input) => {
         const evidence = await upload(input);
-        candidateIds.add(evidence.versionId);
+        if (input.site.id === "stream") {
+            harness.versions
+                .get(input.policy.productionWorker)
+                .get(evidence.versionId).resources.script_runtime.limits = {};
+        }
         return evidence;
     };
-    const getWorkerVersion = harness.operations.getWorkerVersion;
-    let emptyReads = 0;
-    let omittedReads = 0;
-    harness.operations.getWorkerVersion = async (workerName, versionId) => {
-        const version = await getWorkerVersion(workerName, versionId);
-        if (candidateIds.has(versionId)) {
-            if ((emptyReads + omittedReads) % 2 === 0) {
-                emptyReads += 1;
-                assert.deepEqual(version.resources.script_runtime.limits, {});
-            } else {
-                omittedReads += 1;
-                delete version.resources.script_runtime.limits;
-            }
-        }
-        return version;
-    };
-
-    await provisionProductionEntriesWithReceipt({
-        entries,
-        configs,
-        expectedCommit: COMMIT,
-        mode: "apply",
-        plannedStateDigest: reviewed.stateDigest,
-        operations: harness.operations,
-        log: () => {},
-    });
-    assert.ok(emptyReads > 0);
-    assert.ok(omittedReads > 0);
+    await assert.rejects(
+        provisionProductionEntriesWithReceipt({
+            entries,
+            configs,
+            expectedCommit: COMMIT,
+            mode: "apply",
+            plannedStateDigest: reviewed.stateDigest,
+            operations: harness.operations,
+            log: () => {},
+        }),
+        /runtime resource contains unreviewed fields limits/
+    );
     assert.equal(
-        harness.calls.filter(([operation]) => operation === "activate").length,
-        entries.length
+        harness.calls.some(
+            ([operation, workerName]) =>
+                operation === "activate" &&
+                workerName === entries[0].policy.productionWorker
+        ),
+        false
     );
 });
 
@@ -2343,7 +3229,10 @@ test("an explicitly reviewed limits object still requires an exact match", async
                     entries.length
                 );
             } else {
-                await assert.rejects(apply, /limits do not match/);
+                await assert.rejects(
+                    apply,
+                    /runtime resource(?:\.limits\.cpu_ms)? does not match|missing reviewed fields limits/
+                );
                 assert.equal(
                     harness.calls.some(
                         ([operation, workerName]) =>

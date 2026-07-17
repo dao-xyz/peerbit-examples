@@ -15,6 +15,7 @@ import {
     CLOUDFLARE_ARTIFACT_PUBLIC_PATH,
     artifactBoundVersionMessage,
     createCloudflareArtifactManifest,
+    readReviewedCloudflareArtifactAsset,
     revalidateCloudflareArtifactManifest,
     validateActiveWorkerModule,
     verifyLiveCloudflareArtifact,
@@ -167,6 +168,35 @@ test("pre-credential artifact receipt binds exact module, route-free config, and
             new RegExp(`artifact-sha256:${artifact.digest}$`)
         );
         assert.equal(revalidateCloudflareArtifactManifest(artifact), artifact);
+    } finally {
+        fixture.cleanup();
+    }
+});
+
+test("reviewed artifact reads return the exact manifest-bound buffer", () => {
+    const fixture = createFixture();
+    try {
+        const expected = Buffer.from("/*\n  X-Test: yes\n", "utf8");
+        const observed = readReviewedCloudflareArtifactAsset({
+            artifact: fixture.artifact,
+            relativePath: "_headers",
+        });
+        assert.ok(Buffer.isBuffer(observed));
+        assert.deepEqual(observed, expected);
+
+        writeFileSync(
+            path.join(fixture.assetsDirectory, "_headers"),
+            "/*\n  X-Test: substituted\n"
+        );
+        assert.throws(
+            () =>
+                readReviewedCloudflareArtifactAsset({
+                    artifact: fixture.artifact,
+                    relativePath: "_headers",
+                }),
+            /reviewed artifact asset bytes changed/
+        );
+        assert.deepEqual(observed, expected);
     } finally {
         fixture.cleanup();
     }
