@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 import { MediaStreamDB, Track } from "@peerbit/media-streaming";
 import { ReplicationRangeIndexable } from "@peerbit/shared-log";
+import {
+    createRetryableResourceDrain,
+    durableCleanupPendingCount,
+    retryDurableCleanup,
+} from "@peerbit/media-streaming-web";
+
+const REPLICATION_LISTENER_CLEANUP_OWNER = {};
+const reportReplicationListenerCleanup = (error: unknown) =>
+    console.error("Failed to stop replication listener", error);
 
 export const useReplicationChange = (props: {
     mediaStreams?: MediaStreamDB;
@@ -10,45 +19,86 @@ export const useReplicationChange = (props: {
     >(new Map());
 
     useEffect(() => {
-        if (!props.mediaStreams || props.mediaStreams.closed) {
+        const mediaStreams = props.mediaStreams;
+        if (!mediaStreams || mediaStreams.closed) {
             return;
         }
-        const changeListener = async (ev: { detail: { track: Track } }) => {
-            if (ev.detail.track.source.chunks.log.closed) {
+        let active = true;
+        let retiredSubscription:
+            | {
+                  cleanup: ReturnType<typeof createRetryableResourceDrain>;
+                  resource: { close: () => void | Promise<void> };
+              }
+            | undefined;
+        const refreshVersions = new Map<string, number>();
+        const refreshTrack = async ({ track }: { track: Track }) => {
+            if (!active || track.source.chunks.log.closed) {
                 return;
             }
-            const ranges =
-                await ev.detail.track.source.chunks.log.replicationIndex
-                    .iterate()
-                    .all();
+            const version = (refreshVersions.get(track.idString) ?? 0) + 1;
+            refreshVersions.set(track.idString, version);
+            const ranges = await track.source.chunks.log.replicationIndex
+                .iterate()
+                .all();
+            if (!active || refreshVersions.get(track.idString) !== version) {
+                return;
+            }
             setReplicationRanges((prev) => {
                 const newMap = new Map(prev);
                 newMap.set(
-                    ev.detail.track.idString,
+                    track.idString,
                     ranges.map((x) => x.value)
                 );
                 return newMap;
             });
         };
-        props.mediaStreams.tracks.index
-            .iterate({}, { local: true, remote: false })
-            .all()
-            .then((tracks) => {
-                for (const track of tracks) {
-                    changeListener({ detail: { track } });
-                }
-            });
 
-        props.mediaStreams.events.addEventListener(
-            "replicationChange",
-            changeListener
-        );
+        void (async () => {
+            await retryDurableCleanup(REPLICATION_LISTENER_CLEANUP_OWNER);
+            if (!active) {
+                return;
+            }
+            if (
+                durableCleanupPendingCount(REPLICATION_LISTENER_CLEANUP_OWNER) >
+                0
+            ) {
+                throw new Error(
+                    "Previous replication listener cleanup is still pending"
+                );
+            }
+
+            const subscription = mediaStreams.listenForReplicationInfo(
+                (change) => refreshTrack(change)
+            );
+            const cleanup = createRetryableResourceDrain({
+                onError: reportReplicationListenerCleanup,
+                autoRetry: {},
+                durableOwner: REPLICATION_LISTENER_CLEANUP_OWNER,
+            });
+            retiredSubscription = {
+                cleanup,
+                resource: {
+                    close: () => subscription.stop(),
+                },
+            };
+            await subscription.ready;
+        })().catch((error) => {
+            if (active) {
+                console.error("Failed to start replication listener", error);
+            }
+        });
 
         return () => {
-            return props.mediaStreams?.events.removeEventListener(
-                "replicationChange",
-                changeListener
-            );
+            active = false;
+            refreshVersions.clear();
+            // Keep this exact subscription through a finite backoff window,
+            // then transfer it to the quiet module registry. A permanent stop
+            // failure must not create an immortal retry timer.
+            if (retiredSubscription) {
+                void retiredSubscription.cleanup.enqueue([
+                    retiredSubscription.resource,
+                ]);
+            }
         };
     }, [props.mediaStreams?.address, props.mediaStreams?.closed]);
 

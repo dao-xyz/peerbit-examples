@@ -43,6 +43,12 @@ export const Controls = (
     const [prevMuteVolume, setPrevMuteVolume] = useState(1);
     const [volume, setVolume] = useState(0.66);
     const [isPlaying, setIsPlaying] = useState(props.isPlaying ?? false);
+    const desiredPlaying = useRef(props.isPlaying ?? false);
+    const parentPlaying = useRef(props.isPlaying ?? false);
+    const transitionTail = useRef<Promise<void>>(Promise.resolve());
+    const transitionCount = useRef(0);
+    const transitionGeneration = useRef(0);
+    const mounted = useRef(true);
 
     const [selectedResolutions, setSelectedResolutions] = useState<
         Resolution[]
@@ -54,11 +60,71 @@ export const Controls = (
     // Reference to the controls div
     const controlRef = useRef<HTMLDivElement>(null);
 
-    const togglePlay = () => {
-        const isPlayingNow = !isPlaying;
-        isPlayingNow ? props.play() : props.pause();
-        setIsPlaying(isPlayingNow);
+    const togglePlay = async () => {
+        const requestedPlaying = !desiredPlaying.current;
+        desiredPlaying.current = requestedPlaying;
+        const generation = ++transitionGeneration.current;
+        transitionCount.current++;
+        const transition = transitionTail.current
+            .catch(() => {})
+            .then(async () => {
+                try {
+                    if (
+                        !mounted.current ||
+                        transitionGeneration.current !== generation
+                    ) {
+                        return;
+                    }
+                    await (requestedPlaying ? props.play() : props.pause());
+                    if (
+                        mounted.current &&
+                        transitionGeneration.current === generation
+                    ) {
+                        setIsPlaying(requestedPlaying);
+                    }
+                } catch (error) {
+                    if (
+                        mounted.current &&
+                        transitionGeneration.current === generation
+                    ) {
+                        desiredPlaying.current = parentPlaying.current;
+                        setIsPlaying(parentPlaying.current);
+                    }
+                    console.error(
+                        "Failed to change media playback state",
+                        error
+                    );
+                } finally {
+                    transitionCount.current = Math.max(
+                        0,
+                        transitionCount.current - 1
+                    );
+                    if (mounted.current && transitionCount.current === 0) {
+                        desiredPlaying.current = parentPlaying.current;
+                        setIsPlaying(parentPlaying.current);
+                    }
+                }
+            });
+        transitionTail.current = transition;
+        await transition;
     };
+
+    useEffect(() => {
+        const next = props.isPlaying ?? false;
+        parentPlaying.current = next;
+        if (transitionCount.current === 0) {
+            desiredPlaying.current = next;
+            setIsPlaying(next);
+        }
+    }, [props.isPlaying]);
+
+    useEffect(() => {
+        mounted.current = true;
+        return () => {
+            mounted.current = false;
+            transitionGeneration.current++;
+        };
+    }, []);
 
     useEffect(() => {
         if (!props.viewRef) {

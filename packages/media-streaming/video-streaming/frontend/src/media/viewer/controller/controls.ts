@@ -1,8 +1,8 @@
 import { ReplicationRangeIndexable } from "@peerbit/shared-log";
 
 export interface ControlFunctions {
-    play: () => void;
-    pause: () => void;
+    play: () => void | Promise<void>;
+    pause: () => void | Promise<void>;
     setProgress: (value: number | "live") => void;
     mute?: () => void;
     unmute?: () => void;

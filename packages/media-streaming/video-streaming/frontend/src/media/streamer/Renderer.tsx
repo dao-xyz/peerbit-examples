@@ -27,7 +27,12 @@ import {
 
 import { Controls } from "./controller/Control";
 import PQueue from "p-queue";
-import { WAVEncoder } from "@peerbit/media-streaming-web";
+import {
+    createRetryableResourceDrain,
+    durableCleanupPendingCount,
+    retryDurableCleanup,
+    WAVEncoder,
+} from "@peerbit/media-streaming-web";
 import TickWorker from "./tickWorker.js?worker";
 import { NextTick, Stop } from "./tickWorker.js";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -52,6 +57,10 @@ let inBackground = false;
 document.addEventListener("visibilitychange", () => {
     inBackground = document.hidden;
 });
+
+const MAX_TIME_LISTENER_CLEANUP_OWNER = {};
+const reportMaxTimeListenerCleanup = (error: unknown) =>
+    console.error("Failed to stop max-time listener", error);
 
 interface VideoStream {
     video?: {
@@ -91,7 +100,13 @@ const createVideoEncoder = (properties: {
     let encoder: VideoEncoder | undefined = undefined;
     let abortController = new AbortController();
 
-    let closeListener = () => abortController.abort();
+    const closeListener = (event: CustomEvent<unknown>) => {
+        // Track and source lifecycle events bubble through their Program
+        // parents. Only the MediaStreamDB itself closing should stop capture.
+        if (event.detail === properties.mediaStreamDBs) {
+            abortController.abort();
+        }
+    };
 
     properties.mediaStreamDBs.events.addEventListener("close", closeListener);
     let aborted = false;
@@ -702,18 +717,60 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     ]);
 
     useEffect(() => {
-        if (!mediaStreamDB?.address) {
+        if (!mediaStreamDB?.address || mediaStreamDB.closed) {
             return;
         }
-        const stopMaxTime = mediaStreamDB.listenForMaxTimeChanges(true).stop;
+        let active = true;
+        let retiredSubscription:
+            | {
+                  cleanup: ReturnType<typeof createRetryableResourceDrain>;
+                  resource: { close: () => void | Promise<void> };
+              }
+            | undefined;
+        void (async () => {
+            await retryDurableCleanup(MAX_TIME_LISTENER_CLEANUP_OWNER);
+            if (!active) {
+                return;
+            }
+            if (
+                durableCleanupPendingCount(MAX_TIME_LISTENER_CLEANUP_OWNER) > 0
+            ) {
+                throw new Error(
+                    "Previous max-time listener cleanup is still pending"
+                );
+            }
 
-        const stopReplicationInfo =
-            mediaStreamDB.listenForReplicationInfo().stop;
+            const maxTimeSubscription =
+                mediaStreamDB.listenForMaxTimeChanges(true);
+            const cleanup = createRetryableResourceDrain({
+                onError: reportMaxTimeListenerCleanup,
+                autoRetry: {},
+                durableOwner: MAX_TIME_LISTENER_CLEANUP_OWNER,
+            });
+            retiredSubscription = {
+                cleanup,
+                resource: {
+                    close: () => maxTimeSubscription.stop(),
+                },
+            };
+            await maxTimeSubscription.ready;
+        })().catch((error) => {
+            if (active) {
+                console.error("Failed to start max-time listener", error);
+            }
+        });
         return () => {
-            stopMaxTime();
-            stopReplicationInfo();
+            active = false;
+            // Keep the exact handle through a finite backoff window, then
+            // transfer it to the quiet module registry without creating an
+            // immortal retry timer.
+            if (retiredSubscription) {
+                void retiredSubscription.cleanup.enqueue([
+                    retiredSubscription.resource,
+                ]);
+            }
         };
-    }, [mediaStreamDB?.address]);
+    }, [mediaStreamDB?.address, mediaStreamDB?.closed]);
 
     const updateStream = async (properties: {
         streamType?: StreamType;
