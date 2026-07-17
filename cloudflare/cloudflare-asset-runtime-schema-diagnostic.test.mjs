@@ -118,7 +118,7 @@ const versionPayload = ({ mutate } = {}) => {
                 ],
                 script: {
                     etag: LOW_ENTROPY_STRING,
-                    handlers: ["fetch"],
+                    handlers: [],
                     named_handlers: [],
                     [DYNAMIC_KEY]: LOW_ENTROPY_STRING,
                 },
@@ -128,7 +128,7 @@ const versionPayload = ({ mutate } = {}) => {
                         html_handling: "auto-trailing-slash",
                         not_found_handling: "none",
                         raw_headers: RAW_HEADERS,
-                        raw_run_worker_first: [],
+                        raw_run_worker_first: false,
                         serve_directly: true,
                         static_routing: { user_worker: [] },
                         [DYNAMIC_KEY]: LOW_ENTROPY_STRING,
@@ -253,6 +253,7 @@ const REVIEWED_CLASSIFICATIONS = new Set([
     "exact-empty",
     "exact-empty-object",
     "exact-enabled-no-cross-version",
+    "exact-false",
     "exact-fetch-only",
     "exact-true",
     "exact-empty-user-worker",
@@ -346,6 +347,17 @@ test("read-only diagnostic binds the account and brackets one exact version with
     });
     assert.deepEqual(
         {
+            fetchHandlerClassification:
+                summary.shape.resources.fetchHandlerClassification,
+            fetchHandlerCount: summary.shape.resources.fetchHandlerCount,
+        },
+        {
+            fetchHandlerClassification: "exact-empty",
+            fetchHandlerCount: 0,
+        }
+    );
+    assert.deepEqual(
+        {
             present: summary.shape.scriptRuntime.present,
             isObject: summary.shape.scriptRuntime.isObject,
             fieldCount: summary.shape.scriptRuntime.fieldCount,
@@ -371,6 +383,7 @@ test("read-only diagnostic binds the account and brackets one exact version with
             unknownFieldCount: summary.shape.assets.unknownFieldCount,
             rawRunWorkerFirstClassification:
                 summary.shape.assets.rawRunWorkerFirstClassification,
+            rawRunWorkerFirstCount: summary.shape.assets.rawRunWorkerFirstCount,
             staticRoutingClassification:
                 summary.shape.assets.staticRoutingClassification,
         },
@@ -380,7 +393,8 @@ test("read-only diagnostic binds the account and brackets one exact version with
             fieldCount: 8,
             knownFieldCount: 7,
             unknownFieldCount: 1,
-            rawRunWorkerFirstClassification: "exact-empty",
+            rawRunWorkerFirstClassification: "exact-false",
+            rawRunWorkerFirstCount: 0,
             staticRoutingClassification: "exact-empty-user-worker",
         }
     );
@@ -487,7 +501,75 @@ test("zone-only account binding reads every page in two stable complete snapshot
     );
 });
 
+test("handler classifications disclose no handler values", async (t) => {
+    const privateHandler = "PRIVATE_HANDLER_VALUE_DO_NOT_LEAK";
+    const cases = [
+        {
+            name: "absent handlers",
+            value: undefined,
+            expected: "absent",
+            expectedCount: 0,
+        },
+        {
+            name: "empty handlers",
+            value: [],
+            expected: "exact-empty",
+            expectedCount: 0,
+        },
+        {
+            name: "fetch-only handlers",
+            value: ["fetch"],
+            expected: "exact-fetch-only",
+            expectedCount: 1,
+        },
+        {
+            name: "other handler array",
+            value: [privateHandler],
+            expected: "other",
+            expectedCount: 1,
+        },
+        {
+            name: "non-array handlers",
+            value: privateHandler,
+            expected: "other",
+            expectedCount: 0,
+        },
+    ];
+    for (const item of cases) {
+        await t.test(item.name, async () => {
+            const harness = createReadOnlyRequestHarness({
+                version: versionPayload({
+                    mutate: (version) => {
+                        if (item.value === undefined) {
+                            delete version.resources.script.handlers;
+                        } else {
+                            version.resources.script.handlers = item.value;
+                        }
+                    },
+                }),
+            });
+            const summary = await inspectActiveAssetRuntimeSchema(
+                invocation({ request: harness.request })
+            );
+            assert.equal(
+                summary.shape.resources.fetchHandlerClassification,
+                item.expected
+            );
+            assert.equal(
+                summary.shape.resources.fetchHandlerCount,
+                item.expectedCount
+            );
+            assert.doesNotMatch(
+                JSON.stringify(summary),
+                new RegExp(privateHandler, "u")
+            );
+            assertFixedSafeLeaves(summary);
+        });
+    }
+});
+
 test("routing classifications disclose no route values", async (t) => {
+    const privateRoute = "PRIVATE_ROUTE_VALUE_DO_NOT_LEAK";
     const cases = [
         {
             name: "absent routing fields",
@@ -498,21 +580,52 @@ test("routing classifications disclose no route values", async (t) => {
             },
             expectedRaw: "absent",
             expectedStatic: "absent",
-            expectedCount: 0,
+            expectedRawCount: 0,
+            expectedStaticCount: 0,
+        },
+        {
+            name: "empty routing arrays",
+            mutate: (version) => {
+                version.resources.script_runtime.assets.raw_run_worker_first =
+                    [];
+            },
+            expectedRaw: "exact-empty",
+            expectedStatic: "exact-empty-user-worker",
+            expectedRawCount: 0,
+            expectedStaticCount: 0,
+        },
+        {
+            name: "false worker-first flag",
+            mutate: () => {},
+            expectedRaw: "exact-false",
+            expectedStatic: "exact-empty-user-worker",
+            expectedRawCount: 0,
+            expectedStaticCount: 0,
+        },
+        {
+            name: "true worker-first flag",
+            mutate: (version) => {
+                version.resources.script_runtime.assets.raw_run_worker_first = true;
+            },
+            expectedRaw: "exact-true",
+            expectedStatic: "exact-empty-user-worker",
+            expectedRawCount: 0,
+            expectedStaticCount: 0,
         },
         {
             name: "nonempty routing fields",
             mutate: (version) => {
                 version.resources.script_runtime.assets.raw_run_worker_first = [
-                    LOW_ENTROPY_STRING,
+                    privateRoute,
                 ];
                 version.resources.script_runtime.assets.static_routing = {
-                    user_worker: [LOW_ENTROPY_STRING],
+                    user_worker: [privateRoute],
                 };
             },
             expectedRaw: "other",
             expectedStatic: "other",
-            expectedCount: 1,
+            expectedRawCount: 1,
+            expectedStaticCount: 1,
         },
     ];
     for (const item of cases) {
@@ -533,15 +646,15 @@ test("routing classifications disclose no route values", async (t) => {
             );
             assert.equal(
                 summary.shape.assets.rawRunWorkerFirstCount,
-                item.expectedCount
+                item.expectedRawCount
             );
             assert.equal(
                 summary.shape.assets.staticRoutingUserWorkerCount,
-                item.expectedCount
+                item.expectedStaticCount
             );
-            assert.equal(
-                leafValues(summary).includes(LOW_ENTROPY_STRING),
-                false
+            assert.doesNotMatch(
+                JSON.stringify(summary),
+                new RegExp(privateRoute, "u")
             );
             assertFixedSafeLeaves(summary);
         });
@@ -986,6 +1099,60 @@ test("version byte and fixed-count limits fail without emitting response data", 
         assert.equal(harness.workerCalls().length, 3);
         assert.deepEqual(output, []);
     });
+
+    for (const item of [
+        {
+            name: "handler count limit",
+            sentinel: "PRIVATE_HANDLER_COUNT_VALUE_DO_NOT_LEAK",
+            mutate: (version, sentinel) => {
+                version.resources.script.handlers = Array(1_001).fill(sentinel);
+            },
+        },
+        {
+            name: "worker-first count limit",
+            sentinel: "PRIVATE_WORKER_FIRST_COUNT_VALUE_DO_NOT_LEAK",
+            mutate: (version, sentinel) => {
+                version.resources.script_runtime.assets.raw_run_worker_first =
+                    Array(1_001).fill(sentinel);
+            },
+        },
+    ]) {
+        await t.test(item.name, async () => {
+            const harness = createReadOnlyRequestHarness({
+                version: versionPayload({
+                    mutate: (version) => item.mutate(version, item.sentinel),
+                }),
+            });
+            const output = [];
+            let observed;
+            try {
+                await runAssetRuntimeSchemaDiagnostic({
+                    argv: ["--mode", MODE, "--worker", WORKER],
+                    env: {
+                        CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
+                        CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: API_TOKEN,
+                        CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256:
+                            EXPECTED_ACCOUNT_FINGERPRINT,
+                    },
+                    request: harness.request,
+                    write: (line) => output.push(line),
+                });
+            } catch (error) {
+                observed = error;
+            }
+            assert.ok(observed instanceof Error);
+            assert.match(
+                observed.message,
+                /response exceeds safe count limits/
+            );
+            assert.doesNotMatch(
+                observed.message,
+                new RegExp(item.sentinel, "u")
+            );
+            assert.equal(harness.workerCalls().length, 3);
+            assert.deepEqual(output, []);
+        });
+    }
 });
 
 test("deployment or policy drift around the version read emits no evidence", async (t) => {

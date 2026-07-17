@@ -159,6 +159,29 @@ const emptyArrayClassification = (object, key, exact) => {
         : "other";
 };
 
+const handlerClassification = (script) => {
+    if (!hasOwn(script, "handlers")) return "absent";
+    if (Array.isArray(script.handlers) && script.handlers.length === 0) {
+        return "exact-empty";
+    }
+    return isDeepStrictEqual(script.handlers, ["fetch"])
+        ? "exact-fetch-only"
+        : "other";
+};
+
+const rawRunWorkerFirstClassification = (assets) => {
+    if (!hasOwn(assets, "raw_run_worker_first")) return "absent";
+    if (
+        Array.isArray(assets.raw_run_worker_first) &&
+        assets.raw_run_worker_first.length === 0
+    ) {
+        return "exact-empty";
+    }
+    if (assets.raw_run_worker_first === false) return "exact-false";
+    if (assets.raw_run_worker_first === true) return "exact-true";
+    return "other";
+};
+
 const activeDeploymentEvidence = (result) => {
     const active = Array.isArray(result?.deployments)
         ? result.deployments[0]
@@ -194,6 +217,7 @@ const fixedRuntimeShape = (version) => {
         ? assets.static_routing
         : undefined;
     const bindings = isPlainObject(resources) ? resources.bindings : undefined;
+    const handlers = isPlainObject(script) ? script.handlers : undefined;
     const rawRunWorkerFirst = isPlainObject(assets)
         ? assets.raw_run_worker_first
         : undefined;
@@ -230,11 +254,8 @@ const fixedRuntimeShape = (version) => {
             scriptFieldCount: scriptCounts.fieldCount,
             scriptKnownFieldCount: scriptCounts.knownFieldCount,
             scriptUnknownFieldCount: scriptCounts.unknownFieldCount,
-            fetchHandlerClassification: !hasOwn(script, "handlers")
-                ? "absent"
-                : isDeepStrictEqual(script.handlers, ["fetch"])
-                  ? "exact-fetch-only"
-                  : "other",
+            fetchHandlerClassification: handlerClassification(script),
+            fetchHandlerCount: boundedArrayCount(handlers),
             namedHandlersClassification: emptyArrayClassification(
                 script,
                 "named_handlers",
@@ -310,11 +331,8 @@ const fixedRuntimeShape = (version) => {
                 "raw_headers",
                 EXPECTED_RAW_HEADERS
             ),
-            rawRunWorkerFirstClassification: emptyArrayClassification(
-                assets,
-                "raw_run_worker_first",
-                "exact-empty"
-            ),
+            rawRunWorkerFirstClassification:
+                rawRunWorkerFirstClassification(assets),
             rawRunWorkerFirstCount: boundedArrayCount(rawRunWorkerFirst),
             serveDirectlyClassification: !hasOwn(assets, "serve_directly")
                 ? "absent"
