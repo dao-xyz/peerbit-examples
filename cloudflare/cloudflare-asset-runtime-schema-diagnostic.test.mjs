@@ -40,8 +40,7 @@ const WORKER_URL =
     `/workers/scripts/${WORKER}`;
 const DEPLOYMENTS_URL = `${WORKER_URL}/deployments`;
 const VERSION_URL = `${WORKER_URL}/versions/${VERSION}`;
-const ZONE_ROUTES_URL =
-    `https://api.cloudflare.com/client/v4/zones/${ZONE_ID}` + "/workers/routes";
+const ZONES_URL = "https://api.cloudflare.com/client/v4/zones";
 
 const RAW_HEADERS = `/*
   X-Content-Type-Options: nosniff
@@ -146,23 +145,35 @@ const versionPayload = ({ mutate } = {}) => {
     return payload;
 };
 
-const zonePayload = ({ zoneAccountId = ACCOUNT_ID } = {}) => ({
+const reviewedZone = ({
+    id = ZONE_ID,
+    name = ZONE_NAME,
+    zoneAccountId = ACCOUNT_ID,
+} = {}) => ({
+    id,
+    name,
+    status: "active",
+    type: "full",
+    account: { id: zoneAccountId, name: LOW_ENTROPY_STRING },
+});
+
+const zonePayload = ({
+    zones = [reviewedZone()],
+    page = 1,
+    perPage = 50,
+    totalCount = zones.length,
+    totalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / perPage),
+    resultInfo = {},
+} = {}) => ({
     success: true,
-    result: [
-        {
-            id: ZONE_ID,
-            name: ZONE_NAME,
-            status: "active",
-            type: "full",
-            account: { id: zoneAccountId, name: LOW_ENTROPY_STRING },
-        },
-    ],
+    result: zones,
     result_info: {
-        count: 1,
-        page: 1,
-        per_page: 50,
-        total_count: 1,
-        total_pages: 1,
+        count: zones.length,
+        page,
+        per_page: perPage,
+        total_count: totalCount,
+        total_pages: totalPages,
+        ...resultInfo,
     },
 });
 
@@ -171,17 +182,25 @@ const createReadOnlyRequestHarness = ({
     finalDeployment = firstDeployment,
     version = versionPayload(),
     zoneAccountId = ACCOUNT_ID,
+    zoneResponses,
 } = {}) => {
     const calls = [];
     let deploymentReads = 0;
+    let zoneReads = 0;
     const request = async (url, init = {}) => {
         calls.push([url, init]);
         const parsed = new URL(url);
-        if (parsed.pathname.endsWith("/zones")) {
-            return jsonResponse(zonePayload({ zoneAccountId }));
-        }
-        if (url === ZONE_ROUTES_URL) {
-            return jsonResponse({ success: true, result: [] });
+        if (parsed.origin + parsed.pathname === ZONES_URL) {
+            const response = zoneResponses?.[zoneReads];
+            zoneReads += 1;
+            if (response instanceof Error) throw response;
+            if (response instanceof Response) return response;
+            return jsonResponse(
+                response ??
+                    zonePayload({
+                        zones: [reviewedZone({ zoneAccountId })],
+                    })
+            );
         }
         if (url === DEPLOYMENTS_URL) {
             deploymentReads += 1;
@@ -276,7 +295,7 @@ test("read-only diagnostic binds the account and brackets one exact version with
     });
 
     assert.equal(policyReads, 5);
-    assert.equal(harness.accountCalls().length, 4);
+    assert.equal(harness.accountCalls().length, 2);
     assert.deepEqual(
         harness.workerCalls().map(([url]) => url),
         [DEPLOYMENTS_URL, VERSION_URL, DEPLOYMENTS_URL]
@@ -286,6 +305,23 @@ test("read-only diagnostic binds the account and brackets one exact version with
         "every account and Worker operation must remain GET-only"
     );
     assert.ok(harness.calls.every(([, init]) => !Object.hasOwn(init, "body")));
+    for (const [url, init] of harness.accountCalls()) {
+        const parsed = new URL(url);
+        assert.equal(parsed.origin + parsed.pathname, ZONES_URL);
+        assert.deepEqual([...parsed.searchParams.entries()].sort(), [
+            ["account.id", ACCOUNT_ID],
+            ["direction", "asc"],
+            ["match", "all"],
+            ["order", "name"],
+            ["page", "1"],
+            ["per_page", "50"],
+            ["type", "full,partial,secondary,internal"],
+        ]);
+        assert.equal(init.redirect, "error");
+        assert.deepEqual(init.headers, {
+            Authorization: `Bearer ${API_TOKEN}`,
+        });
+    }
     for (const [, init] of harness.workerCalls()) {
         assert.equal(init.redirect, "error");
         assert.deepEqual(init.headers, {
@@ -383,6 +419,72 @@ test("read-only diagnostic binds the account and brackets one exact version with
     const leaves = leafValues(summary);
     assert.equal(leaves.includes(LOW_ENTROPY_STRING), false);
     assert.equal(leaves.includes(LOW_ENTROPY_NUMBER), false);
+});
+
+test("zone-only account binding reads every page in two stable complete snapshots", async () => {
+    const zones = Array.from({ length: 51 }, (_, index) =>
+        reviewedZone({
+            id: (index + 1).toString(16).padStart(32, "0"),
+            name: `zone-${String(index + 1).padStart(2, "0")}.peerbit.org`,
+        })
+    );
+    const firstPage = zonePayload({
+        zones: zones.slice(0, 50),
+        page: 1,
+        perPage: 50,
+        totalCount: zones.length,
+        totalPages: 2,
+    });
+    const secondPage = zonePayload({
+        zones: zones.slice(50),
+        page: 2,
+        perPage: 50,
+        totalCount: zones.length,
+        totalPages: 2,
+    });
+    const harness = createReadOnlyRequestHarness({
+        zoneResponses: [firstPage, secondPage, firstPage, secondPage],
+    });
+    const summary = await inspectActiveAssetRuntimeSchema(
+        invocation({
+            request: harness.request,
+            overrides: {
+                expectedAccountZoneInventorySha256: accountZoneInventorySha256(
+                    zones.map(({ id, name }) => ({
+                        zoneId: id,
+                        zoneName: name,
+                    }))
+                ),
+            },
+        })
+    );
+
+    assert.equal(
+        summary.evidence.accountIdentityMatchedReviewedFingerprint,
+        true
+    );
+    assert.deepEqual(
+        harness
+            .accountCalls()
+            .map(([url]) => new URL(url).searchParams.get("page")),
+        ["1", "2", "1", "2"]
+    );
+    for (const [url, init] of harness.accountCalls()) {
+        const parsed = new URL(url);
+        assert.equal(parsed.origin + parsed.pathname, ZONES_URL);
+        assert.equal(parsed.searchParams.get("account.id"), ACCOUNT_ID);
+        assert.equal(parsed.searchParams.get("per_page"), "50");
+        assert.equal(
+            parsed.searchParams.get("type"),
+            "full,partial,secondary,internal"
+        );
+        assert.equal(init.method, "GET");
+        assert.equal(Object.hasOwn(init, "body"), false);
+    }
+    assert.equal(
+        harness.calls.some(([url]) => url.includes("/workers/routes")),
+        false
+    );
 });
 
 test("routing classifications disclose no route values", async (t) => {
@@ -551,7 +653,7 @@ test("account fingerprint and wrong-account failures precede every Worker endpoi
             ),
             /does not match the independently reviewed fingerprint/
         );
-        assert.equal(harness.accountCalls().length, 4);
+        assert.equal(harness.accountCalls().length, 2);
         assert.equal(harness.workerCalls().length, 0);
     });
 
@@ -563,11 +665,136 @@ test("account fingerprint and wrong-account failures precede every Worker endpoi
             inspectActiveAssetRuntimeSchema(
                 invocation({ request: harness.request })
             ),
-            /account identity validation failed/
+            /zone identity response was malformed or incomplete/
         );
         assert.equal(harness.accountCalls().length, 1);
         assert.equal(harness.workerCalls().length, 0);
     });
+});
+
+test("zone-only account reads fail closed on transport, incomplete data, malformed zones, and drift", async (t) => {
+    const otherZone = reviewedZone({
+        id: "d".repeat(32),
+        name: "peerchecker.org",
+    });
+    const runFailure = async ({ zoneResponses, error, forbidden = [] }) => {
+        const harness = createReadOnlyRequestHarness({ zoneResponses });
+        const output = [];
+        let observed;
+        try {
+            await runAssetRuntimeSchemaDiagnostic({
+                argv: ["--mode", MODE, "--worker", WORKER],
+                env: {
+                    CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
+                    CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: API_TOKEN,
+                    CLOUDFLARE_ACCOUNT_ZONE_INVENTORY_SHA256:
+                        EXPECTED_ACCOUNT_FINGERPRINT,
+                },
+                request: harness.request,
+                write: (line) => output.push(line),
+            });
+        } catch (cause) {
+            observed = cause;
+        }
+        assert.ok(observed instanceof Error);
+        assert.match(observed.message, error);
+        for (const value of [
+            API_TOKEN,
+            ACCOUNT_ID,
+            BODY_SENTINEL,
+            EXPECTED_ACCOUNT_FINGERPRINT,
+            ...forbidden,
+        ]) {
+            assert.doesNotMatch(observed.message, new RegExp(value, "u"));
+        }
+        assert.deepEqual(output, []);
+        assert.equal(harness.workerCalls().length, 0);
+        assert.ok(
+            harness.accountCalls().every(([, init]) => init.method === "GET")
+        );
+        assert.ok(
+            harness
+                .accountCalls()
+                .every(([, init]) => !Object.hasOwn(init, "body"))
+        );
+    };
+
+    await t.test("transport failure", () =>
+        runFailure({
+            zoneResponses: [
+                new Error(`${API_TOKEN} ${ACCOUNT_ID} ${BODY_SENTINEL}`),
+            ],
+            error: /zone identity transport request failed/,
+        })
+    );
+
+    const missingInfo = zonePayload();
+    delete missingInfo.result_info;
+    const missingTotalCount = zonePayload();
+    delete missingTotalCount.result_info.total_count;
+    const incompleteInventory = zonePayload({
+        zones: [reviewedZone()],
+        totalCount: 2,
+        totalPages: 1,
+    });
+    for (const [name, payload] of [
+        ["missing result_info", missingInfo],
+        ["missing total_count", missingTotalCount],
+        ["truncated inventory", incompleteInventory],
+    ]) {
+        await t.test(name, () =>
+            runFailure({
+                zoneResponses: [payload],
+                error: /zone identity response was malformed or incomplete/,
+            })
+        );
+    }
+
+    const duplicateId = zonePayload({
+        zones: [
+            reviewedZone(),
+            reviewedZone({ id: ZONE_ID, name: "duplicate.peerbit.org" }),
+        ],
+    });
+    const duplicateName = zonePayload({
+        zones: [
+            reviewedZone(),
+            reviewedZone({ id: "d".repeat(32), name: ZONE_NAME }),
+        ],
+    });
+    const malformedId = zonePayload({
+        zones: [reviewedZone({ id: "NOT_A_PRIVATE_ZONE_ID" })],
+    });
+    const privateMalformedName = `private-${BODY_SENTINEL}`;
+    const malformedName = zonePayload({
+        zones: [reviewedZone({ name: privateMalformedName })],
+    });
+    const missingAccount = zonePayload({
+        zones: [{ id: ZONE_ID, name: ZONE_NAME }],
+    });
+    for (const [name, payload, forbidden] of [
+        ["duplicate zone ID", duplicateId, []],
+        ["duplicate zone name", duplicateName, []],
+        ["malformed zone ID", malformedId, ["NOT_A_PRIVATE_ZONE_ID"]],
+        ["malformed zone name", malformedName, [privateMalformedName]],
+        ["missing zone account", missingAccount, []],
+    ]) {
+        await t.test(name, () =>
+            runFailure({
+                zoneResponses: [payload],
+                error: /zone identity response was malformed or incomplete/,
+                forbidden,
+            })
+        );
+    }
+
+    await t.test("snapshot drift", () =>
+        runFailure({
+            zoneResponses: [zonePayload(), zonePayload({ zones: [otherZone] })],
+            error: /zone identity inventory changed between complete snapshots/,
+            forbidden: [otherZone.id, otherZone.name],
+        })
+    );
 });
 
 test("account and Worker read failures redact credentials and response values", async (t) => {
@@ -594,7 +821,7 @@ test("account and Worker read failures redact credentials and response values", 
                     },
                 };
             },
-            error: /account identity validation failed/,
+            error: /zone identity API request failed/,
             workerCalls: 0,
         },
         {
@@ -986,6 +1213,9 @@ test("manual workflow is bot-only, first-attempt-only, account-bound, and non-mu
         workflow,
         /CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN \}\}/
     );
+    assert.match(workflow, /Workers Scripts Read/);
+    assert.match(workflow, /Zone Read for all account zones/);
+    assert.doesNotMatch(workflow, /Workers Routes Read/);
     assert.doesNotMatch(workflow, /CLOUDFLARE_PRODUCTION_API_TOKEN/);
     assert.match(
         workflow,
@@ -1005,10 +1235,11 @@ test("manual workflow is bot-only, first-attempt-only, account-bound, and non-mu
         (script.match(/await exactReadOnlyWorkerGet\(/g) ?? []).length,
         3
     );
-    assert.equal((script.match(/method: "GET"/g) ?? []).length, 1);
+    assert.equal((script.match(/method: "GET"/g) ?? []).length, 2);
     assert.doesNotMatch(script, /method: "(?:POST|PUT|PATCH|DELETE)"/);
     assert.doesNotMatch(script, /--(?:url|method|body|version)/);
-    assert.match(script, /await listZoneRouteInventory\(\)/);
+    assert.doesNotMatch(script, /listZoneRouteInventory|workers\/routes/);
+    assert.match(script, /await readCompleteSnapshot\(\)/);
     assert.match(script, /accountZoneInventorySha256\(inventory\)/);
     assert.match(script, /`\$\{workerUrl\}\/deployments`/g);
     assert.match(

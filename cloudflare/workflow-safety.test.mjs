@@ -185,6 +185,15 @@ test("asset runtime schema inspection is bot-only, first-attempt-only, and accou
         assetRuntimeSchemaDiagnosticWorkflow,
         /CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_RUNTIME_DIAGNOSTIC_API_TOKEN \}\}/
     );
+    assert.match(assetRuntimeSchemaDiagnosticWorkflow, /Workers Scripts Read/);
+    assert.match(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /Zone Read for all account zones/
+    );
+    assert.doesNotMatch(
+        assetRuntimeSchemaDiagnosticWorkflow,
+        /Workers Routes Read/
+    );
     assert.doesNotMatch(
         assetRuntimeSchemaDiagnosticWorkflow,
         /CLOUDFLARE_PRODUCTION_API_TOKEN/

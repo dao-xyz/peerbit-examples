@@ -2,7 +2,6 @@ import { Buffer } from "node:buffer";
 import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
 import { loadCloudflareDeploymentData } from "./cloudflare-deployment-policy.mjs";
-import { createCloudflareWorkersApi } from "./cloudflare-workers-api.mjs";
 import {
     accountZoneInventorySha256,
     requireExpectedAccountZoneInventorySha256,
@@ -13,6 +12,26 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const API_BASE_URL = "https://api.cloudflare.com/client/v4";
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_BOUNDED_COUNT = 1_000;
+const ZONE_PAGE_SIZE = 50;
+const MAX_ZONE_PAGES = 1_000;
+const MAX_ZONES = ZONE_PAGE_SIZE * MAX_ZONE_PAGES;
+const REVIEWED_ZONE_TYPES = Object.freeze([
+    "full",
+    "partial",
+    "secondary",
+    "internal",
+]);
+const DNS_HOSTNAME =
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+const ZONE_TRANSPORT_FAILURE =
+    "Cloudflare account zone identity transport request failed without authorizing a Worker read";
+const ZONE_API_FAILURE =
+    "Cloudflare account zone identity API request failed without authorizing a Worker read";
+const ZONE_MALFORMED_FAILURE =
+    "Cloudflare account zone identity response was malformed or incomplete without authorizing a Worker read";
+const ZONE_STABILITY_FAILURE =
+    "Cloudflare account zone identity inventory changed between complete snapshots without authorizing a Worker read";
 
 export const ASSET_RUNTIME_DIAGNOSTIC_MODE = "active";
 export const ASSET_RUNTIME_DIAGNOSTIC_WORKER = "peerbit-examples-text-preview";
@@ -94,6 +113,9 @@ const isPlainObject = (value) =>
 
 const hasOwn = (value, key) =>
     isPlainObject(value) && Object.hasOwn(value, key);
+
+const compareCanonicalStrings = (left, right) =>
+    left < right ? -1 : left > right ? 1 : 0;
 
 const boundedArrayCount = (value) => {
     if (!Array.isArray(value)) return 0;
@@ -448,19 +470,161 @@ const requireReviewedAccountIdentity = async ({
     const expectedFingerprint = requireExpectedAccountZoneInventorySha256(
         expectedAccountZoneInventorySha256
     );
-    const { listZoneRouteInventory } = createCloudflareWorkersApi({
-        accountId,
-        apiToken: runtimeDiagnosticApiToken,
-        request,
-    });
-    let inventory;
-    try {
-        inventory = await listZoneRouteInventory();
-    } catch {
-        throw new Error(
-            "Cloudflare account identity validation failed without authorizing a Worker read"
+    const readPage = async (page) => {
+        const query = new URLSearchParams({
+            "account.id": accountId,
+            page: String(page),
+            per_page: String(ZONE_PAGE_SIZE),
+            order: "name",
+            direction: "asc",
+            match: "all",
+            type: REVIEWED_ZONE_TYPES.join(","),
+        });
+        let response;
+        try {
+            response = await request(`${API_BASE_URL}/zones?${query}`, {
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${runtimeDiagnosticApiToken}`,
+                },
+                redirect: "error",
+                signal: AbortSignal.timeout(15_000),
+            });
+        } catch {
+            throw new Error(ZONE_TRANSPORT_FAILURE);
+        }
+
+        let responseOk;
+        try {
+            responseOk = response.ok;
+        } catch {
+            throw new Error(ZONE_MALFORMED_FAILURE);
+        }
+        if (!responseOk) {
+            throw new Error(ZONE_API_FAILURE);
+        }
+
+        let raw;
+        try {
+            raw = await response.text();
+        } catch {
+            throw new Error(ZONE_MALFORMED_FAILURE);
+        }
+        if (Buffer.byteLength(raw, "utf8") > MAX_RESPONSE_BYTES) {
+            throw new Error(ZONE_MALFORMED_FAILURE);
+        }
+
+        let payload;
+        try {
+            payload = raw.trim() === "" ? undefined : JSON.parse(raw);
+        } catch {
+            throw new Error(ZONE_MALFORMED_FAILURE);
+        }
+        if (payload?.success !== true) {
+            throw new Error(ZONE_API_FAILURE);
+        }
+        if (
+            !Array.isArray(payload.result) ||
+            !isPlainObject(payload.result_info)
+        ) {
+            throw new Error(ZONE_MALFORMED_FAILURE);
+        }
+        return {
+            result: payload.result,
+            resultInfo: payload.result_info,
+        };
+    };
+
+    const readCompleteSnapshot = async () => {
+        const zones = [];
+        const zoneIds = new Set();
+        const zoneNames = new Set();
+        let expectedTotalCount;
+        let expectedTotalPages;
+        let expectedPerPage;
+
+        for (let page = 1; page <= MAX_ZONE_PAGES; page += 1) {
+            const { result, resultInfo: info } = await readPage(page);
+            const validMetadata =
+                Number.isSafeInteger(info.count) &&
+                info.count >= 0 &&
+                info.count === result.length &&
+                Number.isSafeInteger(info.page) &&
+                info.page === page &&
+                Number.isSafeInteger(info.per_page) &&
+                info.per_page > 0 &&
+                info.per_page <= ZONE_PAGE_SIZE &&
+                info.count <= info.per_page &&
+                Number.isSafeInteger(info.total_count) &&
+                info.total_count >= 0 &&
+                info.total_count <= MAX_ZONES &&
+                Number.isSafeInteger(info.total_pages) &&
+                info.total_pages >= 0 &&
+                info.total_pages <= MAX_ZONE_PAGES &&
+                (info.total_count === 0
+                    ? info.total_pages === 0 || info.total_pages === 1
+                    : info.total_pages ===
+                      Math.ceil(info.total_count / info.per_page)) &&
+                page <= Math.max(info.total_pages, 1);
+            if (!validMetadata) {
+                throw new Error(ZONE_MALFORMED_FAILURE);
+            }
+
+            expectedTotalCount ??= info.total_count;
+            expectedTotalPages ??= info.total_pages;
+            expectedPerPage ??= info.per_page;
+            if (
+                info.total_count !== expectedTotalCount ||
+                info.total_pages !== expectedTotalPages ||
+                info.per_page !== expectedPerPage
+            ) {
+                throw new Error(ZONE_MALFORMED_FAILURE);
+            }
+
+            for (const zone of result) {
+                if (
+                    !isPlainObject(zone) ||
+                    !ACCOUNT_ID.test(zone.id || "") ||
+                    zone.id !== zone.id.toLowerCase() ||
+                    zoneIds.has(zone.id) ||
+                    typeof zone.name !== "string" ||
+                    zone.name !== zone.name.toLowerCase() ||
+                    zone.name.trim() !== zone.name ||
+                    !DNS_HOSTNAME.test(zone.name) ||
+                    zoneNames.has(zone.name) ||
+                    !isPlainObject(zone.account) ||
+                    zone.account.id !== accountId
+                ) {
+                    throw new Error(ZONE_MALFORMED_FAILURE);
+                }
+                zoneIds.add(zone.id);
+                zoneNames.add(zone.name);
+                zones.push({ zoneId: zone.id, zoneName: zone.name });
+            }
+
+            if (page >= info.total_pages) break;
+        }
+
+        if (
+            expectedTotalCount == null ||
+            expectedTotalPages == null ||
+            zones.length !== expectedTotalCount
+        ) {
+            throw new Error(ZONE_MALFORMED_FAILURE);
+        }
+        return zones.sort(
+            (left, right) =>
+                compareCanonicalStrings(left.zoneId, right.zoneId) ||
+                compareCanonicalStrings(left.zoneName, right.zoneName)
         );
+    };
+
+    const firstInventory = await readCompleteSnapshot();
+    const finalInventory = await readCompleteSnapshot();
+    if (!isDeepStrictEqual(firstInventory, finalInventory)) {
+        throw new Error(ZONE_STABILITY_FAILURE);
     }
+    const inventory = finalInventory;
     if (accountZoneInventorySha256(inventory) !== expectedFingerprint) {
         throw new Error(
             "Cloudflare account identity does not match the independently reviewed fingerprint"
