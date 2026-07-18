@@ -654,6 +654,7 @@ const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_CHANGE_WAIT_FALLBACK_MS = 250;
 const LARGE_FILE_CHUNK_PUT_CONCURRENCY = 8;
 const LARGE_FILE_CHUNK_PUT_BYTE_LIMIT = 4 * 1024 * 1024;
+const READY_MANIFEST_DELIVERY_GRACE_MS = 5_000;
 const LARGE_FILE_DOWNLOAD_BYTE_LIMIT =
     LARGE_FILE_PERSISTED_READ_AHEAD * MAX_LARGE_FILE_SEGMENT_SIZE;
 const LARGE_FILE_DECODE_RESERVATION_BYTES = TINY_FILE_SIZE_LIMIT;
@@ -4678,7 +4679,8 @@ export class Files extends Program<Args> {
     private async commitReadyManifest(
         pendingFile: LargeFileValue,
         pendingPut: { entry: { hash: string } },
-        readyFile: LargeFileWithChunkHeads | ParentedLargeFileWithChunkHeads
+        readyFile: LargeFileWithChunkHeads | ParentedLargeFileWithChunkHeads,
+        signal?: AbortSignal
     ) {
         await this.withFileMutation(readyFile.id, async () => {
             const pendingHead = pendingPut.entry.hash;
@@ -4701,6 +4703,16 @@ export class Files extends Program<Args> {
             try {
                 await this.putAuthoredFile(readyFile, {
                     meta: { next: [pendingPut.entry as any] },
+                    // This is a bounded propagation grace: a received ACK
+                    // proves transport receipt/signature verification by one
+                    // selected remote, not Files indexing or durable storage.
+                    delivery: {
+                        reliability: "ack",
+                        minAcks: 1,
+                        requireRecipients: false,
+                        timeout: READY_MANIFEST_DELIVERY_GRACE_MS,
+                        signal,
+                    },
                 });
             } catch (error) {
                 let current: AbstractFile | undefined;
@@ -5901,7 +5913,8 @@ export class Files extends Program<Args> {
                     this.commitReadyManifest(
                         manifest,
                         pendingManifest,
-                        readyManifest
+                        readyManifest,
+                        transfer.owner.signal
                     )
                 );
                 transfer.owner.throwIfFailed();
@@ -6249,7 +6262,8 @@ export class Files extends Program<Args> {
                     this.commitReadyManifest(
                         manifest,
                         pendingManifest,
-                        readyManifest
+                        readyManifest,
+                        transfer.owner.signal
                     )
                 );
                 transfer.owner.throwIfFailed();
