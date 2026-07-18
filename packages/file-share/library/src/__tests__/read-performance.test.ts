@@ -1272,8 +1272,579 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.readAheadPeak).toBe(8);
         expect(diagnostics.maxInFlightChunks).toBe(8);
         expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
+        expect(diagnostics.chunkManifestHeadLogicalWindowCount).toBe(3);
+        expect(diagnostics.maxManifestHeadLogicalWindowSize).toBe(3);
+        expect(diagnostics.chunkManifestHeadPhysicalRemoteRequestCount).toBe(3);
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrorCount
+        ).toBe(0);
         expect(diagnostics.chunkManifestHeadBatchAcceptedCount).toBe(9);
         expect(diagnostics.chunkManifestEntryRawFetchAttemptCount).toBe(0);
+    });
+
+    it("rolls a large manifest window forward when one admitted head settles", async () => {
+        const chunks = Array.from(
+            { length: 40 },
+            (_, index) => new Uint8Array([index])
+        );
+        const { entriesByHead, file, files, heads, perIndexGets } =
+            createPersistedManifestStreamHarness(chunks);
+        const remoteGates = heads.map(() => createDeferred<any[]>());
+        const remoteStarts: number[] = [];
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                expect(requestedHeads).toHaveLength(1);
+                if (options.remote === false) {
+                    return [undefined];
+                }
+                const index = heads.indexOf(requestedHeads[0]!);
+                remoteStarts.push(index);
+                return remoteGates[index]!.promise;
+            }
+        );
+        (files.files.log.log as any).getMany = getMany;
+
+        const reading = file.getFile(files, {
+            as: "joined",
+            transferId: "rolling-manifest-window",
+        });
+        await vi.waitFor(() => {
+            expect(remoteStarts).toEqual([0, 1, 2]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 3,
+                activeBytes: 15_000_000,
+                queuedCount: 5,
+            });
+        });
+
+        remoteGates[0]!.resolve([entriesByHead.get(heads[0]!)]);
+        await vi.waitFor(() => {
+            expect(remoteStarts).toContain(3);
+            expect(remoteStarts).not.toContain(4);
+        });
+        expect(remoteStarts.slice(0, 4)).toEqual([0, 1, 2, 3]);
+        expect(
+            files.getTransferSchedulerDiagnostics().download.activeBytes
+        ).toBeLessThanOrEqual(16 * 1024 * 1024);
+
+        for (let index = 1; index < heads.length; index++) {
+            remoteGates[index]!.resolve([entriesByHead.get(heads[index]!)]);
+        }
+        const roundTrip = await reading;
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(perIndexGets).toEqual([]);
+        expect(remoteStarts).toEqual(
+            Array.from({ length: chunks.length }, (_, index) => index)
+        );
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(1);
+        expect(diagnostics.maxManifestHeadLogicalWindowSize).toBe(8);
+        expect(diagnostics.chunkManifestHeadLogicalWindowCount).toBe(
+            diagnostics.chunkManifestHeadBatchQueryCount
+        );
+        expect(diagnostics.chunkManifestHeadLogicalWindowCount).toBeGreaterThan(
+            1
+        );
+        expect(diagnostics.chunkManifestHeadPhysicalRemoteRequestCount).toBe(
+            chunks.length
+        );
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrorCount
+        ).toBe(0);
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrors
+        ).toEqual([]);
+        expect(diagnostics.readAheadLimit).toBe(8);
+        expect(diagnostics.readAheadPeak).toBe(8);
+        expect(diagnostics.chunkManifestHeadBatchAcceptedCount).toBe(
+            chunks.length
+        );
+        expect(diagnostics.aggregatePeakBytes).toBeLessThanOrEqual(
+            16 * 1024 * 1024
+        );
+    });
+
+    it("admits the next rolling-window head when the consumed permit is released", async () => {
+        const chunks = Array.from(
+            { length: 40 },
+            (_, index) => new Uint8Array([index])
+        );
+        const { entriesByHead, file, files, heads } =
+            createPersistedManifestStreamHarness(chunks);
+        const remoteGates = heads.map(() => createDeferred<any[]>());
+        const remoteStarts: number[] = [];
+        (files.files.log.log as any).getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                expect(requestedHeads).toHaveLength(1);
+                if (options.remote === false) {
+                    return [undefined];
+                }
+                const index = heads.indexOf(requestedHeads[0]!);
+                remoteStarts.push(index);
+                return remoteGates[index]!.promise;
+            }
+        );
+
+        const controller = new AbortController();
+        const transferId = "rolling-manifest-cross-window";
+        const iterator = file
+            .streamFile(files, {
+                signal: controller.signal,
+                transferId,
+            })
+            [Symbol.asyncIterator]();
+        const firstRead = iterator.next();
+        try {
+            await vi.waitFor(() => expect(remoteStarts).toEqual([0, 1, 2]));
+            remoteGates[0]!.resolve([entriesByHead.get(heads[0]!)]);
+            for (let index = 2; index < 8; index++) {
+                remoteGates[index]!.resolve([entriesByHead.get(heads[index]!)]);
+            }
+
+            expect(await firstRead).toEqual({
+                done: false,
+                value: chunks[0],
+            });
+            await vi.waitFor(() =>
+                expect(remoteStarts).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+            );
+            expect(remoteStarts).not.toContain(8);
+
+            const secondRead = iterator.next().then(
+                (value) => ({ status: "fulfilled" as const, value }),
+                (reason) => ({ status: "rejected" as const, reason })
+            );
+            await vi.waitFor(() => expect(remoteStarts).toContain(8));
+            expect(remoteStarts.slice(0, 9)).toEqual([
+                0, 1, 2, 3, 4, 5, 6, 7, 8,
+            ]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download.activeBytes
+            ).toBeLessThanOrEqual(16 * 1024 * 1024);
+
+            const cancellation = new Error(
+                "cancel cross-window admission regression"
+            );
+            controller.abort(cancellation);
+            remoteGates[1]!.reject(cancellation);
+            remoteGates[8]!.reject(cancellation);
+            const secondOutcome = await secondRead;
+            expect(secondOutcome.status).toBe("rejected");
+            expect(
+                secondOutcome.status === "rejected" && secondOutcome.reason
+            ).toMatchObject({ message: cancellation.message });
+            await vi.waitFor(() => {
+                expect(
+                    files.getTransferSchedulerDiagnostics().download
+                ).toMatchObject({
+                    activeCount: 0,
+                    activeBytes: 0,
+                    queuedCount: 0,
+                });
+            });
+            expect(files.getReadDiagnostics(transferId)).toMatchObject({
+                chunkManifestHeadLogicalWindowCount: 2,
+                chunkManifestHeadPhysicalRemoteRequestCount: 9,
+                chunkManifestHeadPhysicalRemoteRequestErrorCount: 0,
+                maxManifestHeadBatchSize: 1,
+                maxManifestHeadLogicalWindowSize: 8,
+            });
+        } finally {
+            controller.abort(
+                new Error("clean up cross-window admission regression")
+            );
+            remoteGates[1]!.reject(controller.signal.reason);
+            remoteGates[8]!.reject(controller.signal.reason);
+            await iterator.return?.();
+        }
+    });
+
+    it("keeps an overlapping singleton failure from poisoning later rolling windows", async () => {
+        const chunks = Array.from(
+            { length: 40 },
+            (_, index) => new Uint8Array([index])
+        );
+        const { entriesByHead, fallbackIndices, file, files, heads } =
+            createPersistedManifestStreamHarness(chunks);
+        fallbackIndices.add(8);
+        const olderHeadGate = createDeferred<any[]>();
+        const remoteStarts: number[] = [];
+        const exactFallbackHeads: string[] = [];
+        (files.files.log.log as any).getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                expect(requestedHeads).toHaveLength(1);
+                if (options.remote === false) {
+                    return [undefined];
+                }
+                const index = heads.indexOf(requestedHeads[0]!);
+                remoteStarts.push(index);
+                if (index === 1) {
+                    return olderHeadGate.promise;
+                }
+                if (index === 8) {
+                    throw new Error("overlapping singleton request failed");
+                }
+                return [entriesByHead.get(requestedHeads[0]!)];
+            }
+        );
+        (files.files.log.log as any).get = async (head: string) => {
+            exactFallbackHeads.push(head);
+            return entriesByHead.get(head);
+        };
+
+        const transferId = "rolling-manifest-overlapping-singleton-error";
+        const iterator = file
+            .streamFile(files, { transferId })
+            [Symbol.asyncIterator]();
+        const received: Uint8Array[] = [];
+        const firstRead = iterator.next();
+        try {
+            await vi.waitFor(() =>
+                expect(remoteStarts.slice(0, 3)).toEqual([0, 1, 2])
+            );
+            const first = await firstRead;
+            expect(first).toEqual({ done: false, value: chunks[0] });
+            received.push(first.value!);
+            await vi.waitFor(() =>
+                expect(remoteStarts).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+            );
+
+            const secondRead = iterator.next().then(
+                (value) => ({ status: "fulfilled" as const, value }),
+                (reason) => ({ status: "rejected" as const, reason })
+            );
+            await vi.waitFor(() => {
+                expect(remoteStarts).toContain(8);
+                expect(files.getReadDiagnostics(transferId)).toMatchObject({
+                    chunkManifestHeadBatchCircuitState: "enabled",
+                    chunkManifestHeadBatchPermanentDisableReason: null,
+                    chunkManifestHeadBatchErrorCount: 0,
+                    chunkManifestHeadPhysicalRemoteRequestErrorCount: 1,
+                });
+            });
+            expect(remoteStarts).not.toContain(9);
+            expect(
+                files.getReadDiagnostics(transferId)
+                    ?.chunkManifestHeadBatchRecoveryProbeCount
+            ).toBe(0);
+
+            olderHeadGate.resolve([entriesByHead.get(heads[1]!)]);
+            const secondOutcome = await secondRead;
+            expect(secondOutcome.status).toBe("fulfilled");
+            if (secondOutcome.status !== "fulfilled") {
+                throw secondOutcome.reason;
+            }
+            expect(secondOutcome.value).toEqual({
+                done: false,
+                value: chunks[1],
+            });
+            received.push(secondOutcome.value.value!);
+
+            while (true) {
+                const next = await iterator.next();
+                if (next.done) {
+                    break;
+                }
+                received.push(next.value);
+            }
+
+            expect(concat(received)).toEqual(concat(chunks));
+            expect(remoteStarts).toEqual(
+                Array.from({ length: chunks.length }, (_, index) => index)
+            );
+            expect(exactFallbackHeads).toContain(heads[8]);
+            const diagnostics = files.lastReadDiagnostics!;
+            expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
+                "enabled"
+            );
+            expect(
+                diagnostics.chunkManifestHeadBatchPermanentDisableReason
+            ).toBeNull();
+            expect(diagnostics.chunkManifestHeadBatchErrorCount).toBe(0);
+            expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(1);
+            expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(
+                0
+            );
+            expect(
+                diagnostics.chunkManifestHeadPhysicalRemoteRequestCount
+            ).toBe(chunks.length);
+            expect(
+                diagnostics.chunkManifestHeadPhysicalRemoteRequestErrorCount
+            ).toBe(1);
+            expect(
+                diagnostics.chunkManifestHeadPhysicalRemoteRequestErrors
+            ).toEqual([
+                {
+                    indices: [8],
+                    message: "overlapping singleton request failed",
+                },
+            ]);
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 0,
+                activeBytes: 0,
+                queuedCount: 0,
+            });
+        } finally {
+            olderHeadGate.resolve([entriesByHead.get(heads[1]!)]);
+            await iterator.return?.();
+        }
+    });
+
+    it("keeps later rolling windows enabled after one physical request fails", async () => {
+        const chunks = Array.from(
+            { length: 40 },
+            (_, index) => new Uint8Array([index])
+        );
+        const {
+            entriesByHead,
+            fallbackIndices,
+            file,
+            files,
+            heads,
+            perIndexGets,
+        } = createPersistedManifestStreamHarness(chunks);
+        fallbackIndices.add(1);
+        const remoteStarts: number[] = [];
+        const admissionOrder: string[] = [];
+        const getIndexedChunk = (files.files.index as any).get;
+        (files.files.index as any).get = async (...args: any[]) => {
+            const id = args[0] as string;
+            const index = Number(id.slice(id.lastIndexOf(":") + 1));
+            if (index === 1) {
+                admissionOrder.push("fallback:1");
+            }
+            return getIndexedChunk(...args);
+        };
+        let injectedFailure = false;
+        (files.files.log.log as any).getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                expect(requestedHeads).toHaveLength(1);
+                if (options.remote === false) {
+                    return [undefined];
+                }
+                const index = heads.indexOf(requestedHeads[0]!);
+                remoteStarts.push(index);
+                admissionOrder.push(`remote:${index}`);
+                if (index === 1 && !injectedFailure) {
+                    injectedFailure = true;
+                    throw new Error("one physical manifest request failed");
+                }
+                return [entriesByHead.get(requestedHeads[0]!)];
+            }
+        );
+        (files.files.log.log as any).get = async (head: string) =>
+            entriesByHead.get(head);
+
+        const roundTrip = await file.getFile(files, {
+            as: "joined",
+            transferId: "rolling-manifest-partial-error",
+            timeout: 10_000,
+        });
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(remoteStarts).toEqual(
+            Array.from({ length: chunks.length }, (_, index) => index)
+        );
+        expect(perIndexGets).toContain(1);
+        expect(admissionOrder.indexOf("remote:8")).toBeLessThan(
+            admissionOrder.indexOf("fallback:1")
+        );
+        expect(admissionOrder.indexOf("fallback:1")).toBeLessThan(
+            admissionOrder.indexOf("remote:9")
+        );
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe("enabled");
+        expect(diagnostics.chunkManifestHeadBatchPermanentDisableReason).toBe(
+            null
+        );
+        expect(diagnostics.chunkManifestHeadBatchErrorCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchPartialCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(1);
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(1);
+        expect(diagnostics.maxManifestHeadLogicalWindowSize).toBe(8);
+        expect(diagnostics.chunkManifestHeadPhysicalRemoteRequestCount).toBe(
+            chunks.length
+        );
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrorCount
+        ).toBe(1);
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrors
+        ).toEqual([
+            {
+                indices: [1],
+                message: "one physical manifest request failed",
+            },
+        ]);
+    });
+
+    it("drains rolling manifest capacity after a terminal batch error", async () => {
+        const chunks = Array.from(
+            { length: 40 },
+            (_, index) => new Uint8Array([index])
+        );
+        const { chunkFiles, file, files } =
+            createPersistedManifestStreamHarness(chunks);
+        const firstFallbackGate = createDeferred<void>();
+        (files.files.index as any).get = vi.fn(async (id: string) => {
+            const index = Number(id.slice(id.lastIndexOf(":") + 1));
+            if (index === 0) {
+                await firstFallbackGate.promise;
+            }
+            return chunkFiles[index];
+        });
+        let remoteAttempts = 0;
+        (files.files.log.log as any).getMany = vi.fn(
+            async (_requestedHeads: string[], options: any) => {
+                if (options.remote === false) {
+                    return [undefined];
+                }
+                remoteAttempts += 1;
+                throw new Error("rolling manifest terminal error");
+            }
+        );
+
+        const transferId = "rolling-manifest-error";
+        const reading = file
+            .getFile(files, {
+                as: "joined",
+                timeout: 10_000,
+                transferId,
+            })
+            .then(
+                (value) => ({ status: "fulfilled" as const, value }),
+                (reason) => ({ status: "rejected" as const, reason })
+            );
+        try {
+            await vi.waitFor(() => {
+                expect(remoteAttempts).toBe(8);
+                expect(files.getReadDiagnostics(transferId)).toMatchObject({
+                    chunkManifestHeadBatchErrorCount: 1,
+                    chunkManifestHeadBatchMissingCount: 8,
+                });
+            });
+        } finally {
+            firstFallbackGate.resolve();
+        }
+        expect(
+            files.getTransferSchedulerDiagnostics().download.peakBytes
+        ).toBeLessThanOrEqual(16 * 1024 * 1024);
+
+        const outcome = await reading;
+        expect(outcome.status).toBe("rejected");
+        expect(outcome.status === "rejected" && outcome.reason).toMatchObject({
+            message: "unexpected single manifest-head fallback",
+        });
+        await vi.waitFor(() => {
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 0,
+                activeBytes: 0,
+                queuedCount: 0,
+            });
+        });
+        expect(files.getReadDiagnostics(transferId)).toMatchObject({
+            chunkManifestHeadBatchErrorCount: 1,
+            chunkManifestHeadBatchMissingCount: chunks.length,
+            chunkManifestHeadPhysicalRemoteRequestCount: 8,
+            chunkManifestHeadPhysicalRemoteRequestErrorCount: 8,
+            maxManifestHeadBatchSize: 1,
+            maxManifestHeadLogicalWindowSize: 8,
+            activeManifestHeadBatches: 0,
+        });
+        expect(
+            files
+                .getReadDiagnostics(transferId)!
+                .chunkManifestHeadPhysicalRemoteRequestErrors.flatMap(
+                    ({ indices }: { indices: number[] }) => indices
+                )
+        ).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    });
+
+    it("aborts admitted rolling manifest heads and drains queued capacity", async () => {
+        const chunks = Array.from(
+            { length: 40 },
+            (_, index) => new Uint8Array([index])
+        );
+        const { file, files, heads } =
+            createPersistedManifestStreamHarness(chunks);
+        const remoteStarts: number[] = [];
+        const remoteSignals = new Set<AbortSignal>();
+        (files.files.log.log as any).getMany = vi.fn(
+            async (requestedHeads: string[], options: any) => {
+                if (options.remote === false) {
+                    return [undefined];
+                }
+                const signal = options.remote.signal as AbortSignal;
+                remoteStarts.push(heads.indexOf(requestedHeads[0]!));
+                remoteSignals.add(signal);
+                return await new Promise<any[]>((_, reject) => {
+                    const abort = () => reject(signal.reason);
+                    if (signal.aborted) {
+                        abort();
+                    } else {
+                        signal.addEventListener("abort", abort, { once: true });
+                    }
+                });
+            }
+        );
+
+        const controller = new AbortController();
+        const transferId = "rolling-manifest-cancel";
+        const reading = file
+            .getFile(files, {
+                as: "joined",
+                signal: controller.signal,
+                transferId,
+            })
+            .then(
+                (value) => ({ status: "fulfilled" as const, value }),
+                (reason) => ({ status: "rejected" as const, reason })
+            );
+        await vi.waitFor(() => {
+            expect(remoteStarts).toEqual([0, 1, 2]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 3,
+                activeBytes: 15_000_000,
+                queuedCount: 5,
+            });
+        });
+
+        controller.abort(new Error("cancel rolling manifest window"));
+        const outcome = await reading;
+        expect(outcome.status).toBe("rejected");
+        expect(outcome.status === "rejected" && outcome.reason).toMatchObject({
+            message: "cancel rolling manifest window",
+        });
+        expect(remoteSignals.size).toBeGreaterThan(0);
+        expect([...remoteSignals].every((signal) => signal.aborted)).toBe(true);
+        await vi.waitFor(() => {
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 0,
+                activeBytes: 0,
+                queuedCount: 0,
+            });
+        });
+        expect(files.getReadDiagnostics(transferId)).toMatchObject({
+            activeManifestHeadBatches: 0,
+            finalKnownChunkCount: 0,
+            chunkManifestHeadPhysicalRemoteRequestCount: 3,
+            chunkManifestHeadPhysicalRemoteRequestErrorCount: 0,
+        });
+        expect(remoteStarts).toEqual([0, 1, 2]);
     });
 
     it("prefetches aligned persisted manifest heads through one bounded local and remote phase", async () => {
@@ -2517,6 +3088,23 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.chunkManifestHeadBatchPermanentDisableReason).toBe(
             "error"
         );
+        expect(diagnostics.chunkManifestHeadBatchErrorCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadBatchErrors).toEqual([
+            "terminal manifest-head batch failure",
+        ]);
+        expect(diagnostics.chunkManifestHeadPhysicalRemoteRequestCount).toBe(1);
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrorCount
+        ).toBe(1);
+        expect(
+            diagnostics.chunkManifestHeadPhysicalRemoteRequestErrors
+        ).toEqual([
+            {
+                indices: [0, 1, 2],
+                message: "terminal manifest-head batch failure",
+            },
+        ]);
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
     });
 
     it("fails closed when authoritative heads decode to invalid chunks", async () => {
@@ -2904,6 +3492,15 @@ describe("large-file read scheduling", () => {
                 0
             );
             expect(files.lastReadDiagnostics?.finalKnownChunkCount).toBe(0);
+            await vi.waitFor(() =>
+                expect(
+                    files.getTransferSchedulerDiagnostics().download
+                ).toMatchObject({
+                    activeCount: 0,
+                    activeBytes: 0,
+                    queuedCount: 0,
+                })
+            );
         } finally {
             await iterator.return?.();
         }
