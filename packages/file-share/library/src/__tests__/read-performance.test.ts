@@ -145,6 +145,48 @@ const createPersistedManifestStreamHarness = (chunks: Uint8Array[]) => {
     );
     const fallbackIndices = new Set<number>();
     const perIndexGets: number[] = [];
+    const persistedHeads = new Set<string>();
+    const rawEntriesByHead = new Map<string, any>();
+    const log = files.files.log.log as any;
+    let getImplementation: (
+        head: string,
+        options?: any
+    ) => Promise<any> = async () => {
+        throw new Error("unexpected single manifest-head fallback");
+    };
+    let getManyImplementation:
+        | ((heads: string[], options: any) => Promise<any[]>)
+        | undefined;
+    const replicatedGet = async (head: string, options?: any) => {
+        if (options?.remote === false && rawEntriesByHead.has(head)) {
+            return rawEntriesByHead.get(head);
+        }
+        const entry = await getImplementation(head, options);
+        if (
+            entry &&
+            (options?.remote === false || options?.remote?.replicate === true)
+        ) {
+            persistedHeads.add(head);
+            rawEntriesByHead.set(head, entry);
+        }
+        return entry;
+    };
+    const replicatedGetMany = async (
+        requestedHeads: string[],
+        options: any
+    ) => {
+        const entries = await getManyImplementation!(requestedHeads, options);
+        if (options?.remote === false || options?.remote?.replicate === true) {
+            for (const [index, entry] of entries.entries()) {
+                if (entry) {
+                    const head = requestedHeads[index]!;
+                    persistedHeads.add(head);
+                    rawEntriesByHead.set(head, entry);
+                }
+            }
+        }
+        return entries;
+    };
 
     (file as any).chunkEntryHeads = heads;
     (files as any).countLocalChunks = async () => 0;
@@ -170,9 +212,46 @@ const createPersistedManifestStreamHarness = (chunks: Uint8Array[]) => {
     (files.files.index as any).search = async () => {
         throw new Error("unexpected indexed fallback");
     };
-    (files.files.log.log as any).get = async () => {
-        throw new Error("unexpected single manifest-head fallback");
-    };
+    Object.defineProperty(log, "get", {
+        configurable: true,
+        get: () => replicatedGet,
+        set: (implementation) => {
+            getImplementation = implementation;
+        },
+    });
+    Object.defineProperty(log, "getMany", {
+        configurable: true,
+        get: () =>
+            getManyImplementation == null ? undefined : replicatedGetMany,
+        set: (implementation) => {
+            getManyImplementation = implementation;
+        },
+    });
+    Object.defineProperty(log, "blocks", {
+        configurable: true,
+        value: {
+            // The harness stubs replicated log reads rather than exercising a
+            // real blockstore. Model their durable side effect so production's
+            // final exact-head presence gate remains meaningful in unit tests.
+            hasMany: async (requestedHeads: string[]) =>
+                requestedHeads.map((head) => persistedHeads.has(head)),
+            has: async (head: string) => persistedHeads.has(head),
+            get: async (head: string, options: any) => {
+                const entry = await getImplementation(head, options);
+                if (!entry) {
+                    return undefined;
+                }
+                if (
+                    options?.remote === false ||
+                    options?.remote?.replicate === true
+                ) {
+                    persistedHeads.add(head);
+                    rawEntriesByHead.set(head, entry);
+                }
+                return new Uint8Array([1]);
+            },
+        },
+    });
 
     return {
         entriesByHead,
@@ -181,6 +260,7 @@ const createPersistedManifestStreamHarness = (chunks: Uint8Array[]) => {
         files,
         heads,
         chunkFiles,
+        persistedHeads,
         perIndexGets,
     };
 };
@@ -1192,6 +1272,7 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.maxInFlightChunks).toBe(8);
         expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
         expect(diagnostics.chunkManifestHeadBatchAcceptedCount).toBe(9);
+        expect(diagnostics.chunkManifestEntryRawFetchAttemptCount).toBe(0);
     });
 
     it("prefetches aligned persisted manifest heads through one bounded local and remote phase", async () => {
@@ -1253,19 +1334,38 @@ describe("large-file read scheduling", () => {
     });
 
     it("uses aligned entry-index batches when public log getMany is unavailable", async () => {
-        const { entriesByHead, file, files, heads, perIndexGets } =
-            createPersistedManifestStreamHarness([
-                new Uint8Array([1]),
-                new Uint8Array([2]),
-            ]);
+        const {
+            entriesByHead,
+            file,
+            files,
+            heads,
+            perIndexGets,
+            persistedHeads,
+        } = createPersistedManifestStreamHarness([
+            new Uint8Array([1]),
+            new Uint8Array([2]),
+        ]);
         const entryIndexGetMany = vi.fn(
             async (requestedHeads: string[], options: any): Promise<any[]> => {
-                if (options.remote === false) {
-                    return requestedHeads.map((head) =>
-                        head === heads[0] ? entriesByHead.get(head) : undefined
-                    );
+                const entries =
+                    options.remote === false
+                        ? requestedHeads.map((head) =>
+                              head === heads[0]
+                                  ? entriesByHead.get(head)
+                                  : undefined
+                          )
+                        : requestedHeads.map((head) => entriesByHead.get(head));
+                if (
+                    options.remote === false ||
+                    options.remote?.replicate === true
+                ) {
+                    for (const [index, entry] of entries.entries()) {
+                        if (entry) {
+                            persistedHeads.add(requestedHeads[index]!);
+                        }
+                    }
                 }
-                return requestedHeads.map((head) => entriesByHead.get(head));
+                return entries;
             }
         );
         const log = files.files.log.log as any;
@@ -1360,6 +1460,51 @@ describe("large-file read scheduling", () => {
         expect(maxActiveGets).toBeLessThanOrEqual(8);
     });
 
+    it.each([
+        ["empty", [""]],
+        ["whitespace", [" chunk-head-0"]],
+        ["control character", ["chunk-head-\u0001"]],
+        ["duplicate", ["duplicate-head", "duplicate-head"]],
+    ] as const)(
+        "keeps legacy replicating fallbacks for %s manifest evidence",
+        async (_case, malformedHeads) => {
+            const chunks = malformedHeads.map(
+                (_, index) => new Uint8Array([index + 1])
+            );
+            const { chunkFiles, file, files, persistedHeads } =
+                createPersistedManifestStreamHarness(chunks);
+            (file as any).chunkEntryHeads = [...malformedHeads];
+            const exactGet = vi.fn(async () => {
+                throw new Error("invalid manifest evidence was used");
+            });
+            const replicateFlags: boolean[] = [];
+            (files.files.log.log as any).get = exactGet;
+            (files.files.index as any).get = async (
+                id: string,
+                options: any
+            ) => {
+                if (options.remote === false) {
+                    return undefined;
+                }
+                replicateFlags.push(options.remote.replicate);
+                const index = Number(id.slice(id.lastIndexOf(":") + 1));
+                return chunkFiles[index];
+            };
+
+            await expect(
+                file.getFile(files, { as: "joined" })
+            ).resolves.toEqual(concat(chunks));
+
+            expect(exactGet).not.toHaveBeenCalled();
+            expect(replicateFlags).toEqual(malformedHeads.map(() => true));
+            expect(persistedHeads).toEqual(new Set());
+            expect(
+                files.lastReadDiagnostics
+                    ?.chunkManifestEntryPersistenceStartedCount
+            ).toBe(0);
+        }
+    );
+
     it("falls back only for missing persisted manifest-head batch results", async () => {
         const {
             entriesByHead,
@@ -1368,6 +1513,7 @@ describe("large-file read scheduling", () => {
             files,
             heads,
             perIndexGets,
+            persistedHeads,
         } = createPersistedManifestStreamHarness([
             new Uint8Array([1]),
             new Uint8Array([2]),
@@ -1384,6 +1530,26 @@ describe("large-file read scheduling", () => {
             }
         );
         (files.files.log.log as any).getMany = getMany;
+        let persistenceAttempts = 0;
+        const persistenceAttemptStartedAt: number[] = [];
+        const persistenceAttemptTimeouts: number[] = [];
+        (files.files.log.log as any).get = async (
+            head: string,
+            options: any
+        ) => {
+            if (head === heads[1]) {
+                persistenceAttemptStartedAt.push(Date.now());
+                persistenceAttemptTimeouts.push(options.remote.timeout);
+            }
+            if (head === heads[1] && persistenceAttempts++ < 2) {
+                return undefined;
+            }
+            const entry = entriesByHead.get(head);
+            if (entry) {
+                persistedHeads.add(head);
+            }
+            return entry;
+        };
 
         const roundTrip = await file.getFile(files, { as: "joined" });
 
@@ -1398,9 +1564,593 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(1);
         expect(diagnostics.chunkManifestHeadBatchPartialCount).toBe(1);
         expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(false);
-        expect((files as any).retainedChunkEntryHeads).toEqual(
-            new Set([heads[0]])
+        expect(persistenceAttempts).toBe(3);
+        expect(
+            persistenceAttemptStartedAt.at(-1)! -
+                persistenceAttemptStartedAt[0]!
+        ).toBeGreaterThanOrEqual(60);
+        expect(
+            persistenceAttemptTimeouts.every((timeout) => timeout >= 4_900)
+        ).toBe(true);
+        expect(diagnostics.chunkManifestEntryPersistenceSucceededCount).toBe(1);
+        expect(diagnostics.chunkManifestEntryRawFetchAttemptCount).toBe(3);
+        expect((files as any).retainedChunkEntryHeads).toEqual(new Set(heads));
+    });
+
+    it("fails persistent finalization when an exact manifest head stays unavailable", async () => {
+        const { chunkFiles, file, files, heads, persistedHeads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        (files.files.log.log as any).getMany = async (
+            requestedHeads: string[]
+        ) => requestedHeads.map(() => undefined);
+        (files.files.log.log as any).get = async () => undefined;
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        const iterator = file
+            .streamFile(files, { timeout: 100 })
+            [Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([1]),
+        });
+        await expect(iterator.next()).rejects.toThrow(
+            "Failed to persist exact manifest entry"
         );
+
+        expect(persistedHeads).toEqual(new Set());
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryPersistenceFailedCount
+        ).toBe(1);
+        expect((files as any).retainedChunkEntryHeads).not.toContain(heads[0]);
+    });
+
+    it("keeps manifest-backed demand reads ahead of causal replication after a zero batch", async () => {
+        const chunks = [
+            new Uint8Array([1]),
+            new Uint8Array([2]),
+            new Uint8Array([3]),
+        ];
+        const {
+            chunkFiles,
+            entriesByHead,
+            file,
+            files,
+            heads,
+            persistedHeads,
+        } = createPersistedManifestStreamHarness(chunks);
+        const entryImports = new Map(
+            heads.map((head) => [head, createDeferred<any>()])
+        );
+        const getMany = vi.fn(
+            async (requestedHeads: string[]): Promise<any[]> =>
+                requestedHeads.map(() => undefined)
+        );
+        const get = vi.fn(async (head: string) => {
+            const pending = entryImports.get(head);
+            if (!pending) {
+                throw new Error(`unexpected entry head: ${head}`);
+            }
+            return pending.promise;
+        });
+        const directGet = vi.fn(async () => undefined);
+        const search = vi.fn(async (_request: unknown, options: any) => {
+            if (options.remote.replicate) {
+                throw new Error("simulated causal catch-up barrier");
+            }
+            return chunkFiles.map((chunk, index) =>
+                withHead(chunk, heads[index]!)
+            );
+        });
+        (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = get;
+        (files.files.index as any).get = directGet;
+        (files.files.index as any).search = search;
+
+        let firstReadSettled = false;
+        const firstRead = file
+            .getFile(files, { as: "joined" })
+            .finally(() => (firstReadSettled = true));
+
+        await vi.waitFor(() => {
+            expect(get).toHaveBeenCalledTimes(chunks.length);
+            expect(search).toHaveBeenCalled();
+        });
+
+        // Demand bytes are queried while every exact signed-entry import is
+        // still pending. The full persistent read cannot finalize until those
+        // imports settle, but first-byte work is no longer behind that gate.
+        expect(firstReadSettled).toBe(false);
+        expect(persistedHeads).toEqual(new Set());
+        expect(
+            search.mock.calls.every(
+                ([, options]) => options.remote.replicate === false
+            )
+        ).toBe(true);
+        for (const head of heads) {
+            entryImports.get(head)!.resolve(entriesByHead.get(head));
+        }
+
+        const roundTrip = await firstRead;
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(getMany).toHaveBeenCalledTimes(2);
+        expect(get).toHaveBeenCalled();
+        expect(
+            get.mock.calls.every(([, options]) => options.remote.replicate)
+        ).toBe(true);
+        expect(
+            directGet.mock.calls
+                .filter(([, options]) => options.remote !== false)
+                .every(([, options]) => options.remote.replicate === false)
+        ).toBe(true);
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(
+            "zero-accepted"
+        );
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
+            "half-open-ready"
+        );
+        expect(
+            diagnostics.chunkManifestHeadBatchRecoveryProofCount
+        ).toBeGreaterThan(0);
+        expect(diagnostics.chunkAttempts).toEqual({ 0: 1, 1: 1, 2: 1 });
+        expect(diagnostics.readAheadChanges).toEqual([]);
+        expect(diagnostics.chunkManifestEntryPersistenceSucceededCount).toBe(
+            chunks.length
+        );
+        expect(persistedHeads).toEqual(new Set(heads));
+
+        // Remove every remote demand seam and prove the next read resolves
+        // solely from the exact entry blocks imported by the first read.
+        const remoteGetCallCount = get.mock.calls.length;
+        (files.files.log.log as any).getMany = vi.fn(
+            async (requestedHeads: string[], options: any) => {
+                if (options.remote !== false) {
+                    throw new Error("offline reader attempted a remote batch");
+                }
+                return requestedHeads.map((head) =>
+                    persistedHeads.has(head)
+                        ? entriesByHead.get(head)
+                        : undefined
+                );
+            }
+        );
+        (files.files.index as any).search = vi.fn(async () => {
+            throw new Error("offline reader attempted a Documents search");
+        });
+
+        const offlineRoundTrip = await file.getFile(files, { as: "joined" });
+
+        expect(offlineRoundTrip).toEqual(concat(chunks));
+        expect(get).toHaveBeenCalledTimes(remoteGetCallCount);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestHeadRemoteBatchQueryCount
+        ).toBe(0);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestHeadLocalBatchAcceptedCount
+        ).toBe(chunks.length);
+    });
+
+    it("keeps retryable demand fallbacks ahead of a deferred raw import", async () => {
+        const { chunkFiles, entriesByHead, file, files, heads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const rawImport = createDeferred<any>();
+        const exactGet = vi.fn(async () => rawImport.promise);
+        const directGet = vi.fn(async (_id: string, options: any) => {
+            if (options.remote === false) {
+                return undefined;
+            }
+            throw Object.assign(new Error("direct request timed out"), {
+                name: "TimeoutError",
+            });
+        });
+        const indexedSearch = vi.fn(async (_request: unknown, options: any) => {
+            expect(options.remote.replicate).toBe(false);
+            return [chunkFiles[0]];
+        });
+        (files.files.log.log as any).getMany = async (
+            requestedHeads: string[]
+        ) => requestedHeads.map(() => undefined);
+        (files.files.log.log as any).get = exactGet;
+        (files.files.index as any).get = directGet;
+        (files.files.index as any).search = indexedSearch;
+
+        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        const first = await iterator.next();
+
+        expect(first).toEqual({ done: false, value: new Uint8Array([1]) });
+        expect(directGet).toHaveBeenCalled();
+        expect(indexedSearch).toHaveBeenCalledOnce();
+        expect(exactGet).toHaveBeenCalledOnce();
+
+        let finalizationSettled = false;
+        const finalization = iterator
+            .next()
+            .finally(() => (finalizationSettled = true));
+        await Promise.resolve();
+        expect(finalizationSettled).toBe(false);
+
+        rawImport.resolve(entriesByHead.get(heads[0]!));
+        await expect(finalization).resolves.toEqual({
+            done: true,
+            value: undefined,
+        });
+        expect(
+            files.lastReadDiagnostics
+                ?.chunkManifestEntryPersistenceSucceededCount
+        ).toBe(1);
+    });
+
+    it("retains only the authoritative head for a transient Documents batch hit", async () => {
+        const {
+            chunkFiles,
+            entriesByHead,
+            file,
+            files,
+            heads,
+            persistedHeads,
+        } = createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const authoritativeHead = heads[0]!;
+        const transientHead = "transient-documents-entry";
+        const deliveryChunk = withHead(chunkFiles[0]!, transientHead);
+        const rawImport = createDeferred<any>();
+        const exactGet = vi.fn(async () => rawImport.promise);
+        const localBatchSearch = vi.fn(
+            async (_request: unknown, options: any) => {
+                expect(options.remote).toBe(false);
+                return [deliveryChunk];
+            }
+        );
+        (files as any).countLocalChunks = async () => 1;
+        (files as any).countLocalChunkBlocks = async () => 0;
+        (files.files.log.log as any).get = exactGet;
+        (files.files.index as any).search = localBatchSearch;
+
+        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([1]),
+        });
+
+        expect(localBatchSearch).toHaveBeenCalledOnce();
+        expect(exactGet).toHaveBeenCalledOnce();
+        expect(persistedHeads).toEqual(new Set());
+        expect(
+            (files as any).retainedChunkEntryHeads ?? new Set()
+        ).not.toContain(transientHead);
+        expect((files as any).retainedChunkIds).toContain(deliveryChunk.id);
+
+        const finalization = iterator.next();
+        rawImport.resolve(entriesByHead.get(authoritativeHead));
+        await expect(finalization).resolves.toEqual({
+            done: true,
+            value: undefined,
+        });
+
+        expect(persistedHeads).toEqual(new Set([authoritativeHead]));
+        expect((files as any).retainedChunkEntryHeads).toEqual(
+            new Set([authoritativeHead])
+        );
+    });
+
+    it("rejects hashless persistent reads when transient bytes differ from the exact entry", async () => {
+        const { entriesByHead, file, files, heads, persistedHeads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        expect(file.finalHash).toBeUndefined();
+        const authoritativeHead = heads[0]!;
+        const transientChunk = new TinyFile({
+            id: `${file.id}:0`,
+            name: `${file.name}/0`,
+            file: new Uint8Array([2]),
+            parentId: file.id,
+            index: 0,
+        });
+        const rawImport = createDeferred<any>();
+        const exactGet = vi.fn(async () => rawImport.promise);
+        const localBatchSearch = vi.fn(
+            async (_request: unknown, options: any) => {
+                expect(options.remote).toBe(false);
+                return [transientChunk];
+            }
+        );
+        (files as any).countLocalChunks = async () => 1;
+        (files as any).countLocalChunkBlocks = async () => 0;
+        (files.files.log.log as any).get = exactGet;
+        (files.files.index as any).search = localBatchSearch;
+
+        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([2]),
+        });
+        const finalization = iterator.next();
+        rawImport.resolve(entriesByHead.get(authoritativeHead));
+
+        await expect(finalization).rejects.toThrow(
+            "Persistent file read content did not match exact manifest entries for chunks 1"
+        );
+
+        expect(exactGet).toHaveBeenCalledOnce();
+        expect(persistedHeads).toEqual(new Set([authoritativeHead]));
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryContentMismatchIndices
+        ).toEqual([0]);
+        expect(files.lastReadDiagnostics?.finishedAt).toBeNull();
+    });
+
+    it("rejects persistent finalization when an imported head has an invalid payload", async () => {
+        const { chunkFiles, file, files, heads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const invalidChunk = new TinyFile({
+            id: chunkFiles[0]!.id,
+            name: chunkFiles[0]!.name,
+            file: chunkFiles[0]!.file,
+            parentId: "wrong-parent",
+            index: 0,
+        });
+        (files.files.log.log as any).getMany = async (
+            requestedHeads: string[]
+        ) => requestedHeads.map(() => undefined);
+        (files.files.log.log as any).get = async (head: string) =>
+            createPutEntry(invalidChunk, head);
+        let invalidEntryBlockStored = false;
+        Object.defineProperty(files.files.log.log, "blocks", {
+            configurable: true,
+            value: {
+                hasMany: async () => [invalidEntryBlockStored],
+                has: async () => invalidEntryBlockStored,
+                get: async () => {
+                    invalidEntryBlockStored = true;
+                    return new Uint8Array([1]);
+                },
+            },
+        });
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        await expect(file.getFile(files, { as: "joined" })).rejects.toThrow(
+            "Manifest entry payload mismatch"
+        );
+
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryPersistenceFailedCount
+        ).toBe(1);
+        expect((files as any).retainedChunkEntryHeads).not.toContain(heads[0]);
+    });
+
+    it("imports the raw signed block when an observer cache entry is not durable", async () => {
+        const { chunkFiles, entriesByHead, file, files, heads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const head = heads[0]!;
+        const cachedEntry = entriesByHead.get(head)!;
+        let rawBlockStored = false;
+        const rawGet = vi.fn(async (_head: string, options: any) => {
+            expect(options.remote).toMatchObject({
+                replicate: true,
+                from: ["writer-peer"],
+            });
+            rawBlockStored = true;
+            return new Uint8Array([1]);
+        });
+        const cachedGetMany = vi.fn(async () => [cachedEntry]);
+        const localDecode = vi.fn(async () => cachedEntry);
+        const log = files.files.log.log as any;
+        Object.defineProperty(log, "getMany", {
+            configurable: true,
+            value: cachedGetMany,
+        });
+        Object.defineProperty(log, "get", {
+            configurable: true,
+            value: localDecode,
+        });
+        Object.defineProperty(log, "blocks", {
+            configurable: true,
+            value: {
+                hasMany: async () => [rawBlockStored],
+                has: async () => rawBlockStored,
+                get: rawGet,
+            },
+        });
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        await expect(file.getFile(files, { as: "joined" })).resolves.toEqual(
+            new Uint8Array([1])
+        );
+
+        expect(cachedGetMany).toHaveBeenCalledTimes(2);
+        expect(rawGet).toHaveBeenCalledOnce();
+        expect(localDecode).toHaveBeenCalledWith(head, { remote: false });
+        expect(rawBlockStored).toBe(true);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestHeadBatchCacheOnlyCount
+        ).toBe(2);
+        expect(
+            files.lastReadDiagnostics
+                ?.chunkManifestEntryPersistenceSucceededCount
+        ).toBe(1);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryRawFetchAttemptCount
+        ).toBe(1);
+    });
+
+    it("repairs an exact block pruned between presence and local decode", async () => {
+        const { chunkFiles, entriesByHead, file, files, heads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const head = heads[0]!;
+        const entry = entriesByHead.get(head)!;
+        let blockPresent = true;
+        let localDecodeAttempts = 0;
+        const rawGet = vi.fn(async (_head: string, options: any) => {
+            expect(options.remote).toMatchObject({
+                replicate: true,
+                from: ["writer-peer"],
+            });
+            blockPresent = true;
+            return new Uint8Array([1]);
+        });
+        const localDecode = vi.fn(async (_head: string, options: any) => {
+            expect(options).toEqual({ remote: false });
+            localDecodeAttempts += 1;
+            if (localDecodeAttempts === 1) {
+                blockPresent = false;
+                return undefined;
+            }
+            return entry;
+        });
+        const log = files.files.log.log as any;
+        Object.defineProperty(log, "getMany", {
+            configurable: true,
+            value: async (requestedHeads: string[]) =>
+                requestedHeads.map(() => undefined),
+        });
+        Object.defineProperty(log, "get", {
+            configurable: true,
+            value: localDecode,
+        });
+        Object.defineProperty(log, "blocks", {
+            configurable: true,
+            value: {
+                hasMany: async (requestedHeads: string[]) =>
+                    requestedHeads.map(() => blockPresent),
+                has: async () => blockPresent,
+                get: rawGet,
+            },
+        });
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        await expect(file.getFile(files, { as: "joined" })).resolves.toEqual(
+            new Uint8Array([1])
+        );
+
+        expect(localDecode).toHaveBeenCalledTimes(2);
+        expect(rawGet).toHaveBeenCalledOnce();
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryLocalDecodeMissCount
+        ).toBe(1);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryRawFetchAttemptCount
+        ).toBe(1);
+        expect(
+            files.lastReadDiagnostics
+                ?.chunkManifestEntryPersistenceSucceededCount
+        ).toBe(1);
+    });
+
+    it("bounds repeated exact local decode misses by the persistence deadline", async () => {
+        const { chunkFiles, file, files } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const localDecode = vi.fn(async () => undefined);
+        const rawGet = vi.fn(async () => {
+            throw new Error(
+                "unexpected raw fetch while the block remains local"
+            );
+        });
+        const log = files.files.log.log as any;
+        Object.defineProperty(log, "getMany", {
+            configurable: true,
+            value: async (requestedHeads: string[]) =>
+                requestedHeads.map(() => undefined),
+        });
+        Object.defineProperty(log, "get", {
+            configurable: true,
+            value: localDecode,
+        });
+        Object.defineProperty(log, "blocks", {
+            configurable: true,
+            value: {
+                hasMany: async (requestedHeads: string[]) =>
+                    requestedHeads.map(() => true),
+                has: async () => true,
+                get: rawGet,
+            },
+        });
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        const iterator = file
+            .streamFile(files, { timeout: 500 })
+            [Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([1]),
+        });
+        await expect(iterator.next()).rejects.toThrow("could not be decoded");
+
+        expect(localDecode.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(localDecode.mock.calls.length).toBeLessThan(10);
+        expect(rawGet).not.toHaveBeenCalled();
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryLocalDecodeMissCount
+        ).toBe(localDecode.mock.calls.length);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryRawFetchAttemptCount
+        ).toBe(0);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryPersistenceFailedCount
+        ).toBe(1);
+    });
+
+    it("continues local exact-head batches before the remote circuit recovers", async () => {
+        const chunks = Array.from(
+            { length: 6 },
+            (_, index) => new Uint8Array([index + 1])
+        );
+        const {
+            entriesByHead,
+            fallbackIndices,
+            file,
+            files,
+            heads,
+            perIndexGets,
+        } = createPersistedManifestStreamHarness(chunks);
+        fallbackIndices.add(0);
+        fallbackIndices.add(1);
+        fallbackIndices.add(2);
+        fallbackIndices.add(4);
+        fallbackIndices.add(5);
+        const remoteBatchStarts: number[] = [];
+        const localBatchStarts: number[] = [];
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                const firstIndex = heads.indexOf(requestedHeads[0]!);
+                if (options.remote === false) {
+                    localBatchStarts.push(firstIndex);
+                    return firstIndex >= 3
+                        ? requestedHeads.map((head, offset) =>
+                              offset === 0 ? entriesByHead.get(head) : undefined
+                          )
+                        : requestedHeads.map(() => undefined);
+                }
+                remoteBatchStarts.push(firstIndex);
+                return requestedHeads.map(() => undefined);
+            }
+        );
+        (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = async (head: string) =>
+            entriesByHead.get(head);
+
+        const roundTrip = await file.getFile(files, { as: "joined" });
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(perIndexGets).toEqual([0, 1, 2, 4, 5]);
+        expect(remoteBatchStarts).toEqual([0, 4]);
+        expect(localBatchStarts).toEqual([0, 3]);
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe("enabled");
+        expect(diagnostics.chunkManifestHeadLocalBatchAcceptedCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadRemoteBatchAcceptedCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchDisabledSkipCount).toBe(0);
+        expect(
+            diagnostics.chunkManifestHeadBatchDisabledSkippedIndexCount
+        ).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(5);
+        expect(diagnostics.chunkManifestHeadBatchPartialCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProofCount).toBe(3);
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadBatchRecoverySuccessCount).toBe(1);
     });
 
     for (const mode of ["error", "zero-accepted"] as const) {
@@ -1446,6 +2196,8 @@ describe("large-file read scheduling", () => {
                 }
             );
             (files.files.log.log as any).getMany = getMany;
+            (files.files.log.log as any).get = async (head: string) =>
+                entriesByHead.get(head);
 
             const roundTrip = await file.getFile(files, { as: "joined" });
 
@@ -1457,46 +2209,65 @@ describe("large-file read scheduling", () => {
                     ? [1, 2, 3, 4, 5, 6, 7, 8, 9]
                     : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             );
-            expect(getMany).toHaveBeenCalledTimes(2);
-            expect(getMany.mock.calls[0]![0]).toEqual(heads.slice(0, 3));
-            expect(getMany.mock.calls[0]![1].remote).toBe(false);
-            expect(getMany.mock.calls[1]![0]).toEqual(
-                mode === "error" ? heads.slice(1, 3) : heads.slice(0, 3)
+            const localBatchCalls = getMany.mock.calls.filter(
+                ([, options]) => options.remote === false
             );
-            expect(getMany.mock.calls[1]![1].remote.replicate).toBe(true);
+            const remoteBatchCalls = getMany.mock.calls.filter(
+                ([, options]) => options.remote !== false
+            );
+            expect(localBatchCalls.map(([batch]) => batch)).toEqual([
+                heads.slice(0, 3),
+                heads.slice(3, 6),
+                heads.slice(6, 9),
+                heads.slice(9, 10),
+            ]);
+            expect(remoteBatchCalls.map(([batch]) => batch)).toEqual(
+                mode === "error"
+                    ? [heads.slice(1, 3)]
+                    : [heads.slice(0, 3), heads.slice(3, 6)]
+            );
+            expect(
+                remoteBatchCalls.every(
+                    ([, options]) => options.remote.replicate === true
+                )
+            ).toBe(true);
 
             const diagnostics = files.lastReadDiagnostics!;
-            expect(diagnostics.chunkManifestHeadBatchQueryCount).toBe(1);
-            expect(diagnostics.chunkManifestHeadLocalBatchQueryCount).toBe(1);
-            expect(diagnostics.chunkManifestHeadRemoteBatchQueryCount).toBe(1);
+            expect(diagnostics.chunkManifestHeadBatchQueryCount).toBe(4);
+            expect(diagnostics.chunkManifestHeadLocalBatchQueryCount).toBe(4);
+            expect(diagnostics.chunkManifestHeadRemoteBatchQueryCount).toBe(
+                mode === "error" ? 1 : 2
+            );
             expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
             expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(mode);
             expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
-                mode === "error" ? "permanent-error" : "zero-open"
+                mode === "error" ? "permanent-error" : "permanent-zero"
             );
             expect(
                 diagnostics.chunkManifestHeadBatchFirstDisabledStartIndex
             ).toBe(0);
             expect(diagnostics.chunkManifestHeadBatchRecoveryProofCount).toBe(
-                0
+                mode === "error" ? 0 : 3
             );
             expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(
-                0
+                mode === "error" ? 0 : 1
             );
             expect(diagnostics.chunkManifestHeadBatchRecoverySuccessCount).toBe(
                 0
             );
             expect(
                 diagnostics.chunkManifestHeadBatchPermanentDisableReason
-            ).toBe(mode === "error" ? "error" : null);
+            ).toBe(mode === "error" ? "error" : "zero-accepted");
             // The pessimistic decoder reservation caps the speculative batch
             // at three chunks. Once the
             // consumer resumes, three bounded scheduling windows record all
             // seven disabled tail probes before fallback completes.
-            expect(diagnostics.chunkManifestHeadBatchDisabledSkipCount).toBe(3);
+            expect(diagnostics.chunkManifestHeadBatchDisabledSkipCount).toBe(
+                mode === "error" ? 3 : 2
+            );
             expect(
                 diagnostics.chunkManifestHeadBatchDisabledSkippedIndexCount
-            ).toBe(7);
+            ).toBe(mode === "error" ? 7 : 4);
             expect(diagnostics.chunkManifestHeadBatchErrorCount).toBe(
                 mode === "error" ? 1 : 0
             );
@@ -1513,7 +2284,7 @@ describe("large-file read scheduling", () => {
                 mode === "error" ? 1 : 0
             );
             expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(
-                mode === "zero-accepted" ? 3 : 0
+                mode === "zero-accepted" ? 10 : 9
             );
         });
     }
@@ -1523,7 +2294,7 @@ describe("large-file read scheduling", () => {
             { length: 12 },
             (_, index) => new Uint8Array([index + 1])
         );
-        const { entriesByHead, file, files, heads, perIndexGets } =
+        const { chunkFiles, entriesByHead, file, files, heads, perIndexGets } =
             createPersistedManifestStreamHarness(chunks);
         const remoteBatchStarts: number[] = [];
         const getMany = vi.fn(
@@ -1543,6 +2314,11 @@ describe("large-file read scheduling", () => {
         (files.files.log.log as any).getMany = getMany;
         (files.files.log.log as any).get = get;
         (files.files.index as any).get = async () => undefined;
+        const indexedSearch = vi.fn(async (_request: unknown, options: any) => {
+            expect(options.remote.replicate).toBe(false);
+            return chunkFiles;
+        });
+        (files.files.index as any).search = indexedSearch;
 
         const roundTrip = await file.getFile(files, { as: "joined" });
 
@@ -1552,6 +2328,7 @@ describe("large-file read scheduling", () => {
         expect(remoteBatchStarts).toContain(3);
         expect(remoteBatchStarts.some((index) => index > 5)).toBe(true);
         expect(get).toHaveBeenCalled();
+        expect(indexedSearch).toHaveBeenCalled();
         const diagnostics = files.lastReadDiagnostics!;
         expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
         expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(
@@ -1583,7 +2360,7 @@ describe("large-file read scheduling", () => {
             { length: 21 },
             (_, index) => new Uint8Array([index + 1])
         );
-        const { entriesByHead, file, files, heads, perIndexGets } =
+        const { chunkFiles, entriesByHead, file, files, heads, perIndexGets } =
             createPersistedManifestStreamHarness(chunks);
         const remoteBatchStarts: number[] = [];
         const transientZeroStarts = new Set([3, 12]);
@@ -1603,6 +2380,11 @@ describe("large-file read scheduling", () => {
         (files.files.log.log as any).getMany = getMany;
         (files.files.log.log as any).get = get;
         (files.files.index as any).get = async () => undefined;
+        const indexedSearch = vi.fn(async (_request: unknown, options: any) => {
+            expect(options.remote.replicate).toBe(false);
+            return chunkFiles;
+        });
+        (files.files.index as any).search = indexedSearch;
 
         const roundTrip = await file.getFile(files, { as: "joined" });
 
@@ -1611,6 +2393,7 @@ describe("large-file read scheduling", () => {
         expect(remoteBatchStarts).toContain(3);
         expect(remoteBatchStarts).toContain(12);
         expect(get).toHaveBeenCalled();
+        expect(indexedSearch).toHaveBeenCalled();
         const diagnostics = files.lastReadDiagnostics!;
         expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe("enabled");
         expect(
@@ -1629,7 +2412,7 @@ describe("large-file read scheduling", () => {
             { length: 15 },
             (_, index) => new Uint8Array([index + 1])
         );
-        const { entriesByHead, file, files, heads, perIndexGets } =
+        const { chunkFiles, entriesByHead, file, files, heads, perIndexGets } =
             createPersistedManifestStreamHarness(chunks);
         const remoteBatchStarts: number[] = [];
         const getMany = vi.fn(
@@ -1648,6 +2431,11 @@ describe("large-file read scheduling", () => {
         (files.files.log.log as any).getMany = getMany;
         (files.files.log.log as any).get = get;
         (files.files.index as any).get = async () => undefined;
+        const indexedSearch = vi.fn(async (_request: unknown, options: any) => {
+            expect(options.remote.replicate).toBe(false);
+            return chunkFiles;
+        });
+        (files.files.index as any).search = indexedSearch;
 
         const roundTrip = await file.getFile(files, { as: "joined" });
 
@@ -1657,6 +2445,7 @@ describe("large-file read scheduling", () => {
         expect(remoteBatchStarts.slice(0, 2)).toEqual([0, 3]);
         expect(remoteBatchStarts[2]).toBeGreaterThan(5);
         expect(get).toHaveBeenCalled();
+        expect(indexedSearch).toHaveBeenCalled();
         const diagnostics = files.lastReadDiagnostics!;
         expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
         expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(
@@ -1684,7 +2473,7 @@ describe("large-file read scheduling", () => {
             { length: 10 },
             (_, index) => new Uint8Array([index + 1])
         );
-        const { entriesByHead, file, files, perIndexGets } =
+        const { chunkFiles, entriesByHead, file, files, perIndexGets } =
             createPersistedManifestStreamHarness(chunks);
         let remoteBatchCalls = 0;
         const getMany = vi.fn(
@@ -1700,6 +2489,11 @@ describe("large-file read scheduling", () => {
         (files.files.log.log as any).getMany = getMany;
         (files.files.log.log as any).get = get;
         (files.files.index as any).get = async () => undefined;
+        const indexedSearch = vi.fn(async (_request: unknown, options: any) => {
+            expect(options.remote.replicate).toBe(false);
+            return chunkFiles;
+        });
+        (files.files.index as any).search = indexedSearch;
 
         const roundTrip = await file.getFile(files, { as: "joined" });
 
@@ -1707,6 +2501,7 @@ describe("large-file read scheduling", () => {
         expect(perIndexGets).toEqual([]);
         expect(remoteBatchCalls).toBe(1);
         expect(get).toHaveBeenCalled();
+        expect(indexedSearch).toHaveBeenCalled();
         const diagnostics = files.lastReadDiagnostics!;
         expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
             "permanent-error"
@@ -1719,7 +2514,7 @@ describe("large-file read scheduling", () => {
         );
     });
 
-    it("rejects invalid parent and index entries before per-index fallback", async () => {
+    it("fails closed when authoritative heads decode to invalid chunks", async () => {
         const {
             entriesByHead,
             fallbackIndices,
@@ -1764,9 +2559,10 @@ describe("large-file read scheduling", () => {
         );
         (files.files.log.log as any).getMany = getMany;
 
-        const roundTrip = await file.getFile(files, { as: "joined" });
+        await expect(file.getFile(files, { as: "joined" })).rejects.toThrow(
+            "Manifest entry payload mismatch"
+        );
 
-        expect(roundTrip).toEqual(new Uint8Array([1, 2, 3, 4]));
         expect(perIndexGets).toEqual([0, 2]);
         expect(
             getMany.mock.calls.every(([, options]) => options.remote === false)
@@ -1776,6 +2572,9 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.chunkManifestHeadBatchInvalidCount).toBe(2);
         expect(diagnostics.chunkManifestHeadBatchPartialCount).toBe(1);
         expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(false);
+        expect(diagnostics.chunkManifestEntryPersistenceFailedCount).toBe(2);
+        expect((files as any).retainedChunkEntryHeads).not.toContain(heads[0]);
+        expect((files as any).retainedChunkEntryHeads).not.toContain(heads[2]);
     });
 
     it("yields a locally accepted batch index before a remote sibling settles", async () => {
@@ -1903,6 +2702,8 @@ describe("large-file read scheduling", () => {
             }
         );
         (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = async (head: string) =>
+            entriesByHead.get(head);
 
         const iterator = file.streamFile(files)[Symbol.asyncIterator]();
         const firstRead = iterator.next();
@@ -2001,7 +2802,8 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.chunkBatchResultCount).toBe(0);
         expect(diagnostics.prefetchedChunkCount).toBe(file.chunkCount);
         expect(diagnostics.chunkPersistedRemoteBatchSkippedIndexCount).toBe(0);
-        expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadBatchPartialCount).toBe(1);
         expect(diagnostics.activeManifestHeadBatches).toBe(0);
         expect(diagnostics.finalKnownChunkCount).toBe(0);
         expect(files.getActiveTransfers()).toEqual([]);
@@ -2258,8 +3060,15 @@ describe("large-file read scheduling", () => {
         };
         (files.files.index as any).search = async (
             _request: unknown,
-            options: { remote: { timeout: number; from?: string[] } }
+            options: {
+                remote: {
+                    timeout: number;
+                    from?: string[];
+                    replicate: boolean;
+                };
+            }
         ) => {
+            expect(options.remote.replicate).toBe(true);
             operations.push(
                 `indexed:${options.remote.from ? "hinted" : "unhinted"}:${options.remote.timeout}`
             );

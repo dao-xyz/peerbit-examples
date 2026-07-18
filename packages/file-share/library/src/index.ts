@@ -1054,6 +1054,21 @@ const validateLargeFileChunkPayload = (
     return chunk;
 };
 
+const validateAuthoritativeLargeFileChunk = (
+    file: LargeFileChunkGeometry,
+    chunk: TinyFile,
+    index: number
+) => {
+    validateLargeFileChunkPayload(file, chunk, index);
+    const actualHash = sha256Base64Sync(chunk.file);
+    if (actualHash !== chunk.hash) {
+        throw new Error(
+            `Manifest entry content hash mismatch for chunk ${index + 1}/${file.chunkCount}`
+        );
+    }
+    return actualHash;
+};
+
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
     @field({ type: "string" })
@@ -1352,6 +1367,12 @@ export class LargeFile extends AbstractFile {
             timeout?: number;
             debug?: Record<string, any>;
             persist: boolean;
+            manifestEntryHead?: string;
+            persistManifestEntry?: (
+                head: string,
+                from: string[] | undefined,
+                timeout: number
+            ) => Promise<TinyFile>;
             onManifestHeadResolved?: (index: number) => void;
             decodeGuard: {
                 run<Value>(
@@ -1375,6 +1396,111 @@ export class LargeFile extends AbstractFile {
             properties.debug.chunkAttemptTimeoutMs = attemptTimeout;
         }
         const chunkId = getChunkId(this.id, index);
+        const manifestEntryHead = Object.prototype.hasOwnProperty.call(
+            properties,
+            "manifestEntryHead"
+        )
+            ? properties.manifestEntryHead
+            : getCompleteChunkEntryHeads(this as LargeFileValue)?.[index];
+        // Manifest-backed files can persist the exact entry through the
+        // manifest-head log lookup above the Documents layer. Asking a
+        // Documents fallback to replicate the same result synchronously joins
+        // its complete missing causal history before returning, which can put a
+        // demand read behind thousands of unrelated index writes. Keep those
+        // fallbacks non-replicating; legacy files without exact heads retain the
+        // old persistence path.
+        const hasManifestEntryHead =
+            properties.persist && typeof manifestEntryHead === "string";
+        const hasEntryOnlyPersistence =
+            hasManifestEntryHead && properties.persistManifestEntry != null;
+        const replicateResolvedFallback =
+            properties.persist && !hasManifestEntryHead;
+        let manifestPersistence: Promise<TinyFile> | undefined;
+        let manifestPersistenceWinner: Promise<TinyFile> | undefined;
+        const startManifestPersistence = (
+            remoteFrom: string[] | undefined,
+            timeout: number
+        ) => {
+            if (
+                manifestPersistence ||
+                !hasEntryOnlyPersistence ||
+                manifestEntryHead == null
+            ) {
+                return;
+            }
+            manifestPersistence = properties.persistManifestEntry!(
+                manifestEntryHead,
+                remoteFrom,
+                timeout
+            );
+            manifestPersistenceWinner = manifestPersistence.then(
+                (chunk) => {
+                    properties.onManifestHeadResolved?.(index);
+                    return chunk;
+                },
+                () => new Promise<TinyFile>(() => undefined)
+            );
+            void manifestPersistence.catch(() => undefined);
+        };
+        const settleResolvedChunk = (retainedBytes: number) =>
+            properties.decodeGuard.settle(retainedBytes);
+        const retainResolvedChunk = (chunk: TinyFile, durable: boolean) => {
+            if (!properties.persist) {
+                return;
+            }
+            if (durable || !hasManifestEntryHead) {
+                files.retainResolvedChunk(chunk, properties.persist);
+            } else {
+                // The demand response is intentionally transient. Retain its
+                // document id, but do not claim the signed manifest entry until
+                // the entry-only block import has actually completed.
+                files.retainChunkRead(chunk.id, chunk.parentId);
+            }
+        };
+        let manifestChunkAccepted = false;
+        const acceptPersistedManifestChunk = (chunk: TinyFile) => {
+            if (manifestChunkAccepted) {
+                return chunk;
+            }
+            manifestChunkAccepted = true;
+            validateLargeFileChunkPayload(this, chunk, index);
+            settleResolvedChunk(chunk.file.byteLength);
+            knownChunks.set(index, chunk);
+            retainResolvedChunk(chunk, true);
+            properties?.debug &&
+                ((properties.debug.chunkResolved ||= {})[index] =
+                    "manifest-entry-persistence");
+            return chunk;
+        };
+        const raceChunkLookupWithManifest = (
+            lookup: Promise<TinyFile | undefined>
+        ): Promise<TinyFile | undefined> => {
+            const winner = manifestPersistenceWinner;
+            if (!winner) {
+                return lookup;
+            }
+            return Promise.race([
+                lookup.then(
+                    (chunk) => ({ source: "lookup" as const, chunk }),
+                    (error) => ({ source: "lookup-error" as const, error })
+                ),
+                winner.then((chunk) => ({
+                    source: "manifest" as const,
+                    chunk,
+                })),
+            ]).then(async (result) => {
+                if (result.source === "manifest") {
+                    return acceptPersistedManifestChunk(result.chunk);
+                }
+                if (result.source === "lookup") {
+                    return result.chunk;
+                }
+                // Do not put demand fallback classification behind the exact
+                // import's durability deadline. The importer remains tracked
+                // and can win any later lookup race or the next retry round.
+                throw result.error;
+            });
+        };
         if (properties.persist) {
             files.retainChunkRead(chunkId, this.id);
         }
@@ -1403,11 +1529,9 @@ export class LargeFile extends AbstractFile {
                 chunk.index === index
             ) {
                 validateLargeFileChunkPayload(this, chunk, index);
-                properties.decodeGuard.settle(chunk.file.byteLength);
+                settleResolvedChunk(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
-                if (properties.persist) {
-                    files.retainResolvedChunk(chunk, properties.persist);
-                }
+                retainResolvedChunk(chunk, !hasManifestEntryHead);
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] =
                         resolvedBy);
@@ -1453,7 +1577,7 @@ export class LargeFile extends AbstractFile {
                                 strategy: "fallback" as any,
                                 throwOnMissing: false,
                                 retryMissingResponses: false,
-                                replicate: properties.persist,
+                                replicate: replicateResolvedFallback,
                                 from: remoteFrom,
                             },
                         } as any
@@ -1469,11 +1593,9 @@ export class LargeFile extends AbstractFile {
             );
             if (chunk) {
                 validateLargeFileChunkPayload(this, chunk, index);
-                properties.decodeGuard.settle(chunk.file.byteLength);
+                settleResolvedChunk(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
-                if (properties.persist) {
-                    files.retainResolvedChunk(chunk, properties.persist);
-                }
+                retainResolvedChunk(chunk, replicateResolvedFallback);
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] =
                         "indexed-search");
@@ -1531,11 +1653,9 @@ export class LargeFile extends AbstractFile {
             );
             if (chunk) {
                 validateLargeFileChunkPayload(this, chunk, index);
-                properties.decodeGuard.settle(chunk.file.byteLength);
+                settleResolvedChunk(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
-                if (properties.persist) {
-                    files.retainResolvedChunk(chunk, properties.persist);
-                }
+                retainResolvedChunk(chunk, false);
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] =
                         "resolved-search");
@@ -1574,11 +1694,9 @@ export class LargeFile extends AbstractFile {
                 chunk.index === index
             ) {
                 validateLargeFileChunkPayload(this, chunk, index);
-                properties.decodeGuard.settle(chunk.file.byteLength);
+                settleResolvedChunk(chunk.file.byteLength);
                 knownChunks.set(index, chunk);
-                if (properties.persist) {
-                    files.retainResolvedChunk(chunk, properties.persist);
-                }
+                retainResolvedChunk(chunk, replicate);
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] = replicate
                         ? "remote-get"
@@ -1593,9 +1711,7 @@ export class LargeFile extends AbstractFile {
             if (skipManifestHeadForChunk) {
                 return;
             }
-            const heads = (this as { chunkEntryHeads?: unknown })
-                .chunkEntryHeads;
-            const head = Array.isArray(heads) ? heads[index] : undefined;
+            const head = manifestEntryHead;
             if (typeof head !== "string") {
                 return;
             }
@@ -1643,14 +1759,12 @@ export class LargeFile extends AbstractFile {
                 chunk.index === index
             ) {
                 validateLargeFileChunkPayload(this, chunk, index);
-                properties.decodeGuard.settle(chunk.file.byteLength);
+                settleResolvedChunk(chunk.file.byteLength);
                 if (properties.persist) {
                     files.retainChunkEntryHead(head, this.id, chunk.id);
                 }
                 knownChunks.set(index, chunk);
-                if (properties.persist) {
-                    files.retainResolvedChunk(chunk, properties.persist);
-                }
+                retainResolvedChunk(chunk, true);
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] =
                         "manifest-head-get");
@@ -1700,6 +1814,14 @@ export class LargeFile extends AbstractFile {
             properties?.debug &&
                 ((properties.debug.chunkAttempts ||= {})[index] =
                     ((properties.debug.chunkAttempts ||= {})[index] ?? 0) + 1);
+            // The exact entry import has its own transfer-scoped signal and
+            // the complete per-chunk deadline. Start it before consulting a
+            // cached Documents result: an EntryIndex cache hit is not proof
+            // that the signed block still exists locally.
+            startManifestPersistence(
+                readContext.lastReadPeerHints,
+                Math.max(1, deadline - Date.now())
+            );
             const cached = knownChunks.get(index);
             if (cached) {
                 properties?.debug &&
@@ -1707,7 +1829,9 @@ export class LargeFile extends AbstractFile {
                 return cached;
             }
             try {
-                const localChunk = await materializeLocalChunk("local");
+                const localChunk = await raceChunkLookupWithManifest(
+                    materializeLocalChunk("local")
+                );
                 if (localChunk) {
                     return localChunk;
                 }
@@ -1775,6 +1899,17 @@ export class LargeFile extends AbstractFile {
                 }
 
                 if (strategy === "manifest-head") {
+                    if (hasEntryOnlyPersistence && manifestEntryHead != null) {
+                        // Import the exact signed entry block in parallel with
+                        // the demand lookup. This persists only the manifest
+                        // entry CID; it never asks Documents to join the
+                        // entry's missing causal history.
+                        startManifestPersistence(
+                            remoteFrom,
+                            remainingRoundTimeout
+                        );
+                        continue;
+                    }
                     try {
                         const chunk = await resolveChunkByManifestEntryHead(
                             remoteFrom,
@@ -1810,10 +1945,12 @@ export class LargeFile extends AbstractFile {
 
                 if (strategy === "deterministic-id") {
                     try {
-                        const chunk = await resolveChunkByDirectGet(
-                            remoteFrom,
-                            properties.persist,
-                            remainingRoundTimeout
+                        const chunk = await raceChunkLookupWithManifest(
+                            resolveChunkByDirectGet(
+                                remoteFrom,
+                                replicateResolvedFallback,
+                                remainingRoundTimeout
+                            )
                         );
                         if (chunk instanceof TinyFile) {
                             return chunk;
@@ -1852,9 +1989,11 @@ export class LargeFile extends AbstractFile {
 
                 if (strategy === "indexed-fields") {
                     try {
-                        const chunk = await resolveChunkByIndexedFields(
-                            remoteFrom,
-                            remainingRoundTimeout
+                        const chunk = await raceChunkLookupWithManifest(
+                            resolveChunkByIndexedFields(
+                                remoteFrom,
+                                remainingRoundTimeout
+                            )
                         );
                         if (chunk) {
                             return chunk;
@@ -1890,9 +2029,11 @@ export class LargeFile extends AbstractFile {
                         index
                     ] = true);
                 try {
-                    const chunk = await resolveChunkByIndexedFields(
-                        undefined,
-                        remainingRoundTimeout
+                    const chunk = await raceChunkLookupWithManifest(
+                        resolveChunkByIndexedFields(
+                            undefined,
+                            remainingRoundTimeout
+                        )
                     );
                     if (chunk) {
                         properties?.debug &&
@@ -1941,9 +2082,11 @@ export class LargeFile extends AbstractFile {
                     }
                     attemptedNonReplicatingLookup = true;
                     try {
-                        const chunk = await resolveChunkWithoutPersisting(
-                            sourceFrom,
-                            remainingRoundTimeout
+                        const chunk = await raceChunkLookupWithManifest(
+                            resolveChunkWithoutPersisting(
+                                sourceFrom,
+                                remainingRoundTimeout
+                            )
                         );
                         if (chunk) {
                             return chunk;
@@ -1979,9 +2122,11 @@ export class LargeFile extends AbstractFile {
                     }
                     attemptedNonReplicatingLookup = true;
                     try {
-                        const chunk = await resolveChunkByResolvedFields(
-                            sourceFrom,
-                            remainingRoundTimeout
+                        const chunk = await raceChunkLookupWithManifest(
+                            resolveChunkByResolvedFields(
+                                sourceFrom,
+                                remainingRoundTimeout
+                            )
                         );
                         if (chunk) {
                             return chunk;
@@ -2346,6 +2491,7 @@ export class LargeFile extends AbstractFile {
             chunkManifestHeadRemoteBatchAcceptedCount: 0,
             chunkManifestHeadBatchMissingCount: 0,
             chunkManifestHeadBatchInvalidCount: 0,
+            chunkManifestHeadBatchCacheOnlyCount: 0,
             chunkManifestHeadBatchInvalidErrors: [] as {
                 index: number;
                 message: string;
@@ -2389,6 +2535,17 @@ export class LargeFile extends AbstractFile {
             activeManifestHeadBatches: 0,
             maxConcurrentManifestHeadBatches: 0,
             chunkManifestHeadBatchResolved: {} as Record<number, string>,
+            chunkManifestEntryPersistenceStartedCount: 0,
+            chunkManifestEntryPersistenceSucceededCount: 0,
+            chunkManifestEntryPersistenceFailedCount: 0,
+            chunkManifestEntryRawFetchAttemptCount: 0,
+            chunkManifestEntryLocalDecodeMissCount: 0,
+            chunkManifestEntryPersistenceErrors: [] as {
+                index: number;
+                message: string;
+            }[],
+            chunkManifestEntryPersistenceMissingIndices: [] as number[],
+            chunkManifestEntryContentMismatchIndices: [] as number[],
             chunkBatchAttemptTimeoutMs: 0,
             chunkBatchRemoteReclassificationCount: 0,
             chunkLocalIndexedBatchQueryCount: 0,
@@ -2516,15 +2673,25 @@ export class LargeFile extends AbstractFile {
                 resolvedFile.chunkCount,
                 LARGE_FILE_PERSISTED_READ_AHEAD
             );
-            const manifestChunkEntryHeads = (
-                resolvedFile as { chunkEntryHeads?: unknown }
-            ).chunkEntryHeads;
-            const hasCompleteChunkEntryHeads =
-                Array.isArray(manifestChunkEntryHeads) &&
-                manifestChunkEntryHeads.length === resolvedFile.chunkCount &&
-                manifestChunkEntryHeads.every(
-                    (head: unknown) => typeof head === "string"
-                );
+            const completeChunkEntryHeads = getCompleteChunkEntryHeads(
+                resolvedFile as LargeFileValue
+            );
+            const hasCompleteChunkEntryHeads = completeChunkEntryHeads != null;
+            const retainDocumentsChunkCandidate = (chunk: TinyFile) => {
+                if (!persistChunkReads) {
+                    return;
+                }
+                if (hasCompleteChunkEntryHeads) {
+                    // A Documents row can satisfy demand before its
+                    // authoritative manifest entry has been imported. Retain
+                    // only the chunk identity here; retaining __context.head
+                    // would pin a stale/non-authoritative entry until the raw
+                    // manifest proof finishes.
+                    files.retainChunkRead(chunk.id, resolvedFile.id);
+                    return;
+                }
+                files.retainResolvedChunk(chunk, true);
+            };
             let isRemotePersistedRead =
                 persistChunkReads &&
                 debug.initialLocalChunkBlockCount !== resolvedFile.chunkCount &&
@@ -2619,6 +2786,20 @@ export class LargeFile extends AbstractFile {
                 number,
                 Set<Promise<unknown>>
             >();
+            // Track only void settlements through finalization. Keeping the
+            // resolved TinyFile promises here would retain every imported
+            // chunk payload until the whole read completed.
+            const manifestPersistenceSettlements = new Set<Promise<void>>();
+            const manifestPersistenceTasksByIndex = new Map<
+                number,
+                Promise<TinyFile>
+            >();
+            const pendingManifestPersistenceIndices = new Set<number>();
+            const detachedManifestPersistencePermitIndices = new Set<number>();
+            const persistedManifestEntryIndices = new Set<number>();
+            const resolvedChunkDocumentIdsByIndex = new Map<number, string>();
+            const resolvedChunkHashesByIndex = new Map<number, string>();
+            const authoritativeChunkHashesByIndex = new Map<number, string>();
             let readGenerationActive = true;
             let suspendedPayload: Uint8Array | undefined;
             const throwIfReadGenerationInactive = () => {
@@ -2627,9 +2808,68 @@ export class LargeFile extends AbstractFile {
                 }
                 transfer.owner.throwIfFailed();
             };
+            const recordAuthoritativeChunkHash = (
+                index: number,
+                chunk: TinyFile
+            ) => {
+                throwIfReadGenerationInactive();
+                const hash = validateAuthoritativeLargeFileChunk(
+                    resolvedFile,
+                    chunk,
+                    index
+                );
+                const existing = authoritativeChunkHashesByIndex.get(index);
+                if (existing != null && existing !== hash) {
+                    throw new Error(
+                        `Conflicting exact manifest content for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                    );
+                }
+                authoritativeChunkHashesByIndex.set(index, hash);
+                return hash;
+            };
+            const recordResolvedChunkHash = (index: number, hash: string) => {
+                throwIfReadGenerationInactive();
+                const existing = resolvedChunkHashesByIndex.get(index);
+                if (existing != null && existing !== hash) {
+                    throw new Error(
+                        `Conflicting resolved content for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                    );
+                }
+                resolvedChunkHashesByIndex.set(index, hash);
+            };
             const releaseChunkPermit = (index: number) => {
-                chunkPermitsByIndex.get(index)?.release();
+                const permit = chunkPermitsByIndex.get(index);
+                if (!permit) {
+                    return;
+                }
+                const persistence = manifestPersistenceTasksByIndex.get(index);
+                if (
+                    persistence &&
+                    pendingManifestPersistenceIndices.has(index)
+                ) {
+                    if (detachedManifestPersistencePermitIndices.has(index)) {
+                        return;
+                    }
+                    // Demand delivery is complete, but the same pessimistic
+                    // reservation still covers the concurrent signed-entry
+                    // decode. Detach it from the transfer and release it only
+                    // after that import has settled.
+                    detachedManifestPersistencePermitIndices.add(index);
+                    transfer.owner.detachLeaseUntilSettled(permit, persistence);
+                    void persistence
+                        .finally(() => {
+                            if (chunkPermitsByIndex.get(index) === permit) {
+                                chunkPermitsByIndex.delete(index);
+                            }
+                            detachedManifestPersistencePermitIndices.delete(
+                                index
+                            );
+                        })
+                        .catch(() => undefined);
+                    return;
+                }
                 chunkPermitsByIndex.delete(index);
+                permit.release();
             };
             const settleChunkPermit = (
                 index: number,
@@ -2640,6 +2880,29 @@ export class LargeFile extends AbstractFile {
                     throw new Error(
                         `Missing decode reservation for chunk ${index + 1}/${resolvedFile.chunkCount}`
                     );
+                }
+                const persistence = manifestPersistenceTasksByIndex.get(index);
+                if (
+                    persistence &&
+                    pendingManifestPersistenceIndices.has(index)
+                ) {
+                    // Keep the full reservation while the demand response and
+                    // exact entry import may both be decoded concurrently.
+                    // Once the import settles, shrink only if the consumer
+                    // still owns this permit; releaseChunkPermit handles the
+                    // detached case.
+                    void persistence
+                        .finally(() => {
+                            const current = chunkPermitsByIndex.get(index);
+                            if (current === permit && !permit.released) {
+                                shrinkTransferPermitToBytes(
+                                    permit,
+                                    retainedBytes
+                                );
+                            }
+                        })
+                        .catch(() => undefined);
+                    return;
                 }
                 shrinkTransferPermitToBytes(permit, retainedBytes);
             };
@@ -2707,6 +2970,254 @@ export class LargeFile extends AbstractFile {
                     }
                 }
             };
+            const persistManifestEntryForIndex = (
+                index: number,
+                head: string,
+                from: string[] | undefined,
+                timeout: number
+            ) => {
+                const expectedHead = completeChunkEntryHeads?.[index];
+                if (!expectedHead || expectedHead !== head) {
+                    return Promise.reject(
+                        new Error(
+                            `Refusing to persist invalid manifest head for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                        )
+                    );
+                }
+                const existing = manifestPersistenceTasksByIndex.get(index);
+                if (existing) {
+                    return existing;
+                }
+
+                const persistenceSignal = files.createFileChangeSignal(
+                    (file) =>
+                        file.id === getChunkId(resolvedFile.id, index) ||
+                        (file instanceof TinyFile &&
+                            file.parentId === resolvedFile.id &&
+                            file.index === index),
+                    transfer.owner.signal
+                );
+                readContext.fileChangeSignals!.add(persistenceSignal);
+                const operation = Promise.resolve().then(async () => {
+                    const deadline = Date.now() + timeout;
+                    const sources: Array<string[] | undefined> = from
+                        ? [from, undefined]
+                        : [undefined];
+                    const blocks = files.files.log.log.blocks;
+                    const hasLocalBlock = () =>
+                        runChunkDecodeOperation(
+                            [index],
+                            persistenceSignal,
+                            () => blocks.has(head),
+                            "Manifest entry presence check cancelled"
+                        );
+                    let blockPresent = await hasLocalBlock();
+                    let lastError: unknown;
+                    const attemptBudget = Math.max(
+                        1,
+                        getChunkLookupAttemptTimeout(
+                            resolvedFile.size,
+                            resolvedFile.chunkCount,
+                            index,
+                            timeout
+                        )
+                    );
+                    // The deadline is authoritative. Keep only an absolute
+                    // request-count ceiling here: deriving the count from a
+                    // worst-case RPC duration would exhaust retries almost
+                    // immediately when providers answer with a fast miss.
+                    const maxAttempts = Math.max(sources.length, 64);
+                    let rawFetchAttempts = 0;
+                    let entry: Awaited<
+                        ReturnType<typeof files.files.log.log.get>
+                    > = undefined;
+                    for (
+                        let attempt = 0;
+                        entry == null && attempt < maxAttempts;
+                        attempt++
+                    ) {
+                        persistenceSignal.throwIfClosed();
+                        const remaining = deadline - Date.now();
+                        if (remaining <= 0) {
+                            break;
+                        }
+                        const attemptTimeout = Math.max(
+                            1,
+                            Math.min(attemptBudget, remaining)
+                        );
+                        if (!blockPresent) {
+                            const source =
+                                sources[rawFetchAttempts % sources.length];
+                            rawFetchAttempts += 1;
+                            debug.chunkManifestEntryRawFetchAttemptCount += 1;
+                            try {
+                                const rawEntry = await runChunkDecodeOperation(
+                                    [index],
+                                    persistenceSignal,
+                                    () =>
+                                        blocks.get(head, {
+                                            remote: {
+                                                timeout: attemptTimeout,
+                                                replicate: true,
+                                                from: source,
+                                                signal: persistenceSignal.abortSignal,
+                                            },
+                                        }),
+                                    "Raw manifest entry persistence cancelled"
+                                );
+                                if (rawEntry) {
+                                    blockPresent = await hasLocalBlock();
+                                    if (!blockPresent) {
+                                        lastError = new Error(
+                                            `Raw manifest entry '${head}' was fetched but not stored locally`
+                                        );
+                                    }
+                                }
+                            } catch (error) {
+                                persistenceSignal.throwIfClosed();
+                                if (!isRetryableChunkLookupError(error)) {
+                                    throw error;
+                                }
+                                lastError = error;
+                            }
+                        }
+                        if (blockPresent) {
+                            let localDecodeMissed = false;
+                            try {
+                                entry = await runChunkDecodeOperation(
+                                    [index],
+                                    persistenceSignal,
+                                    () =>
+                                        files.files.log.log.get(head, {
+                                            remote: false,
+                                        }),
+                                    "Stored manifest entry decode cancelled"
+                                );
+                                localDecodeMissed = entry == null;
+                            } catch (error) {
+                                persistenceSignal.throwIfClosed();
+                                if (!isRetryableChunkLookupError(error)) {
+                                    throw error;
+                                }
+                                lastError = error;
+                            }
+                            if (!entry) {
+                                if (localDecodeMissed) {
+                                    debug.chunkManifestEntryLocalDecodeMissCount += 1;
+                                    lastError = new Error(
+                                        `Stored manifest entry '${head}' could not be decoded for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                                    );
+                                }
+                                // Presence is only a point-in-time observation.
+                                // Adaptive pruning can remove the exact block
+                                // between has() and local decode, so recheck and
+                                // repair that one block on the next attempt.
+                                blockPresent = await hasLocalBlock();
+                            }
+                        }
+                        if (
+                            !entry &&
+                            attempt + 1 < maxAttempts &&
+                            Date.now() < deadline
+                        ) {
+                            // An exact raw fetch or local decode can miss
+                            // immediately. Back off under the persistence signal
+                            // so a full transfer deadline cannot turn into a tight
+                            // burst of repeated block operations.
+                            const retryDelay = Math.min(
+                                attemptBudget,
+                                25 * 2 ** Math.min(attempt, 8),
+                                Math.max(0, deadline - Date.now())
+                            );
+                            if (retryDelay > 0) {
+                                await persistenceSignal.waitForChangeAfter(
+                                    persistenceSignal.snapshot(),
+                                    retryDelay
+                                );
+                                persistenceSignal.throwIfClosed();
+                            }
+                        }
+                    }
+                    persistenceSignal.throwIfClosed();
+                    if (!entry) {
+                        throw (
+                            lastError ??
+                            new Error(
+                                `Failed to persist exact manifest entry '${head}' for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                            )
+                        );
+                    }
+                    if (entry.hash && entry.hash !== head) {
+                        throw new Error(
+                            `Manifest entry hash mismatch for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                        );
+                    }
+                    const payload = await runChunkDecodeOperation(
+                        [index],
+                        persistenceSignal,
+                        () => entry.getPayloadValue(),
+                        "Manifest entry payload decode cancelled"
+                    );
+                    persistenceSignal.throwIfClosed();
+                    if (!isPutOperation(payload)) {
+                        throw new Error(
+                            `Manifest entry for chunk ${index + 1}/${resolvedFile.chunkCount} is not a put`
+                        );
+                    }
+                    const chunk = files.files.index.valueEncoding.decoder(
+                        payload.data
+                    );
+                    if (
+                        !(chunk instanceof TinyFile) ||
+                        chunk.parentId !== resolvedFile.id ||
+                        chunk.index !== index
+                    ) {
+                        throw new Error(
+                            `Manifest entry payload mismatch for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                        );
+                    }
+                    persistenceSignal.throwIfClosed();
+                    recordAuthoritativeChunkHash(index, chunk);
+                    persistedManifestEntryIndices.add(index);
+                    files.retainChunkEntryHead(head, resolvedFile.id, chunk.id);
+                    files.retainResolvedChunk(chunk, true);
+                    return chunk;
+                });
+                const task = transfer.owner.track(operation, false);
+                const settlement = task.then(() => undefined);
+                manifestPersistenceSettlements.add(settlement);
+                void settlement.catch(() => undefined);
+                manifestPersistenceTasksByIndex.set(index, task);
+                pendingManifestPersistenceIndices.add(index);
+                debug.chunkManifestEntryPersistenceStartedCount += 1;
+                void task
+                    .then(
+                        () => {
+                            debug.chunkManifestEntryPersistenceSucceededCount += 1;
+                        },
+                        (error) => {
+                            debug.chunkManifestEntryPersistenceFailedCount += 1;
+                            debug.chunkManifestEntryPersistenceErrors.push({
+                                index,
+                                message: getErrorMessage(error),
+                            });
+                        }
+                    )
+                    .finally(() => {
+                        pendingManifestPersistenceIndices.delete(index);
+                        if (
+                            manifestPersistenceTasksByIndex.get(index) === task
+                        ) {
+                            manifestPersistenceTasksByIndex.delete(index);
+                        }
+                        persistenceSignal.close();
+                        readContext.fileChangeSignals!.delete(
+                            persistenceSignal
+                        );
+                    })
+                    .catch(() => undefined);
+                return task;
+            };
             const cleanupReadState = (reason?: unknown) => {
                 if (!readGenerationActive) {
                     return;
@@ -2737,6 +3248,14 @@ export class LargeFile extends AbstractFile {
                 }
                 chunkPermitsByIndex.clear();
                 decodeOperationsByIndex.clear();
+                manifestPersistenceSettlements.clear();
+                manifestPersistenceTasksByIndex.clear();
+                pendingManifestPersistenceIndices.clear();
+                detachedManifestPersistencePermitIndices.clear();
+                persistedManifestEntryIndices.clear();
+                resolvedChunkDocumentIdsByIndex.clear();
+                resolvedChunkHashesByIndex.clear();
+                authoritativeChunkHashesByIndex.clear();
                 inFlightChunks.clear();
                 knownChunks.clear();
                 batchAttemptedIndices.clear();
@@ -2908,13 +3427,9 @@ export class LargeFile extends AbstractFile {
                     return indices;
                 }
                 changeSignal.throwIfClosed();
-                const heads = (resolvedFile as { chunkEntryHeads?: unknown })
-                    .chunkEntryHeads;
                 const requested = indices.flatMap((index) => {
-                    const head = Array.isArray(heads)
-                        ? heads[index]
-                        : undefined;
-                    return typeof head === "string" ? [{ head, index }] : [];
+                    const head = completeChunkEntryHeads?.[index];
+                    return head ? [{ head, index }] : [];
                 });
                 if (requested.length === 0) {
                     return indices;
@@ -2925,13 +3440,7 @@ export class LargeFile extends AbstractFile {
                     fetchRemotelyMissing
                 );
                 syncManifestHeadBatchCircuitDiagnostics();
-                if (!circuitAttempt) {
-                    debug.chunkManifestHeadBatchDisabledSkipCount += 1;
-                    debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
-                        indices.length;
-                    return indices;
-                }
-                const isRecoveryProbe = circuitAttempt.kind === "recovery";
+                const isRecoveryProbe = circuitAttempt?.kind === "recovery";
                 if (isRecoveryProbe) {
                     debug.chunkManifestHeadBatchRecoveryProbeCount += 1;
                     debug.chunkManifestHeadBatchRecoveryProbeStartIndex =
@@ -2972,17 +3481,48 @@ export class LargeFile extends AbstractFile {
                             !resolvedDuringBatch.has(index) &&
                             !knownChunks.has(index)
                     );
+                const recordEarlyMissingOutcome = () => {
+                    const missingCount = getMissingIndices().length;
+                    debug.chunkManifestHeadBatchMissingCount += missingCount;
+                    if (accepted > 0 && missingCount > 0) {
+                        debug.chunkManifestHeadBatchPartialCount += 1;
+                    }
+                };
                 const acceptEntries = async (
                     candidates: typeof requested,
                     entries: ManifestHeadEntry[],
                     phase: "local" | "remote"
                 ) => {
                     const missing: typeof requested = [];
+                    const blocks = files.files.log.log.blocks;
+                    const blockPresence = await runChunkDecodeOperation(
+                        candidates.map(({ index }) => index),
+                        changeSignal,
+                        () =>
+                            typeof blocks.hasMany === "function"
+                                ? blocks.hasMany(
+                                      candidates.map(({ head }) => head)
+                                  )
+                                : Promise.all(
+                                      candidates.map(({ head }) =>
+                                          blocks.has(head)
+                                      )
+                                  ),
+                        "Manifest-head block presence check cancelled"
+                    );
+                    changeSignal.throwIfClosed();
                     for (const [
                         position,
                         { head, index },
                     ] of candidates.entries()) {
                         const entry = entries[position];
+                        if (!blockPresence[position]) {
+                            if (entry) {
+                                debug.chunkManifestHeadBatchCacheOnlyCount += 1;
+                            }
+                            missing.push({ head, index });
+                            continue;
+                        }
                         if (!entry) {
                             missing.push({ head, index });
                             continue;
@@ -3042,6 +3582,8 @@ export class LargeFile extends AbstractFile {
                                 index
                             );
                             settleChunkPermit(index, chunk.file.byteLength);
+                            changeSignal.throwIfClosed();
+                            recordAuthoritativeChunkHash(index, chunk);
                         } catch (error) {
                             debug.chunkManifestHeadBatchInvalidCount += 1;
                             (debug.chunkManifestHeadBatchInvalidErrors ||=
@@ -3053,6 +3595,7 @@ export class LargeFile extends AbstractFile {
                         }
 
                         if (persistChunkReads) {
+                            persistedManifestEntryIndices.add(index);
                             files.retainChunkEntryHead(
                                 head,
                                 resolvedFile.id,
@@ -3098,32 +3641,47 @@ export class LargeFile extends AbstractFile {
                         localEntries,
                         "local"
                     );
-                    if (fetchRemotelyMissing && remotelyMissing.length > 0) {
-                        debug.chunkManifestHeadRemoteBatchQueryCount += 1;
-                        const remoteEntries = await runChunkDecodeOperation(
-                            remotelyMissing.map(({ index }) => index),
-                            changeSignal,
-                            () =>
-                                readManifestHeadEntries(
-                                    remotelyMissing.map(({ head }) => head),
-                                    {
-                                        timeout: attemptTimeout,
-                                        replicate: true,
-                                        from,
-                                        signal: changeSignal.abortSignal,
-                                    },
-                                    changeSignal
-                                ),
-                            "Manifest-head remote batch lookup cancelled"
-                        );
-                        changeSignal.throwIfClosed();
-                        const stillMissing = await acceptEntries(
-                            remotelyMissing,
-                            remoteEntries,
-                            "remote"
-                        );
+                    if (!fetchRemotelyMissing) {
                         debug.chunkManifestHeadBatchMissingCount +=
-                            stillMissing.length;
+                            remotelyMissing.length;
+                    } else if (remotelyMissing.length > 0) {
+                        // The circuit protects speculative network reads only.
+                        // Exact heads may have arrived locally through another
+                        // read or background sync after the remote circuit
+                        // opened, so never suppress the cheap local batch.
+                        if (!circuitAttempt) {
+                            debug.chunkManifestHeadBatchDisabledSkipCount += 1;
+                            debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
+                                remotelyMissing.length;
+                            debug.chunkManifestHeadBatchMissingCount +=
+                                remotelyMissing.length;
+                        } else {
+                            debug.chunkManifestHeadRemoteBatchQueryCount += 1;
+                            const remoteEntries = await runChunkDecodeOperation(
+                                remotelyMissing.map(({ index }) => index),
+                                changeSignal,
+                                () =>
+                                    readManifestHeadEntries(
+                                        remotelyMissing.map(({ head }) => head),
+                                        {
+                                            timeout: attemptTimeout,
+                                            replicate: true,
+                                            from,
+                                            signal: changeSignal.abortSignal,
+                                        },
+                                        changeSignal
+                                    ),
+                                "Manifest-head remote batch lookup cancelled"
+                            );
+                            changeSignal.throwIfClosed();
+                            const stillMissing = await acceptEntries(
+                                remotelyMissing,
+                                remoteEntries,
+                                "remote"
+                            );
+                            debug.chunkManifestHeadBatchMissingCount +=
+                                stillMissing.length;
+                        }
                     }
                 } catch (error) {
                     changeSignal.throwIfClosed();
@@ -3131,16 +3689,19 @@ export class LargeFile extends AbstractFile {
                     debug.chunkManifestHeadBatchErrors.push(
                         getErrorMessage(error)
                     );
-                    permanentlyDisableManifestHeadBatchAfterError(
-                        indices,
-                        circuitAttempt
-                    );
+                    if (circuitAttempt) {
+                        permanentlyDisableManifestHeadBatchAfterError(
+                            indices,
+                            circuitAttempt
+                        );
+                    }
+                    recordEarlyMissingOutcome();
                     return getMissingIndices();
                 } finally {
                     debug.activeManifestHeadBatches -= 1;
                 }
 
-                if (accepted === 0 && fetchRemotelyMissing) {
+                if (circuitAttempt && accepted === 0 && fetchRemotelyMissing) {
                     const zeroResult = manifestHeadBatchCircuit.observeZero(
                         circuitAttempt,
                         indices[indices.length - 1] ?? -1
@@ -3159,10 +3720,10 @@ export class LargeFile extends AbstractFile {
                     } else if (zeroResult === "stale") {
                         debug.chunkManifestHeadBatchStaleZeroOutcomeCount += 1;
                     }
-                } else if (accepted < requested.length) {
+                } else if (accepted > 0 && accepted < requested.length) {
                     debug.chunkManifestHeadBatchPartialCount += 1;
                 }
-                if (isRecoveryProbe && accepted > 0) {
+                if (isRecoveryProbe && circuitAttempt && accepted > 0) {
                     if (
                         manifestHeadBatchCircuit.observeRecoverySuccess(
                             circuitAttempt
@@ -3310,12 +3871,7 @@ export class LargeFile extends AbstractFile {
                         prefetchedDuringBatch.add(expectedIndex);
                         chunkBatchResultsDuringBatch.add(expectedIndex);
                         resolveBatchIndexCompletion(expectedIndex);
-                        if (persistChunkReads) {
-                            files.retainResolvedChunk(
-                                candidate,
-                                persistChunkReads
-                            );
-                        }
+                        retainDocumentsChunkCandidate(candidate);
                         accepted += 1;
                     }
                 }
@@ -3387,12 +3943,7 @@ export class LargeFile extends AbstractFile {
                             knownChunks.set(index, chunk);
                             resolvedDuringBatch.add(index);
                             resolveBatchIndexCompletion(index);
-                            if (persistChunkReads) {
-                                files.retainResolvedChunk(
-                                    chunk,
-                                    persistChunkReads
-                                );
-                            }
+                            retainDocumentsChunkCandidate(chunk);
                             debug.chunkLocalIndexedBatchResultCount += 1;
                         } else {
                             missing.push(index);
@@ -3777,6 +4328,22 @@ export class LargeFile extends AbstractFile {
                                     timeout: properties?.timeout,
                                     debug,
                                     persist: persistChunkReads,
+                                    manifestEntryHead:
+                                        completeChunkEntryHeads?.[index],
+                                    persistManifestEntry:
+                                        persistChunkReads &&
+                                        completeChunkEntryHeads &&
+                                        !persistedManifestEntryIndices.has(
+                                            index
+                                        )
+                                            ? (head, from, timeout) =>
+                                                  persistManifestEntryForIndex(
+                                                      index,
+                                                      head,
+                                                      from,
+                                                      timeout
+                                                  )
+                                            : undefined,
                                     onManifestHeadResolved:
                                         notePerIndexManifestHeadResolution,
                                     decodeGuard: {
@@ -3799,6 +4366,10 @@ export class LargeFile extends AbstractFile {
                                 resolvedFile,
                                 chunk,
                                 index
+                            );
+                            resolvedChunkDocumentIdsByIndex.set(
+                                index,
+                                chunk.id
                             );
                             settleChunkPermit(index, chunk.file.byteLength);
                             updateKnownChunkPeak();
@@ -3910,6 +4481,12 @@ export class LargeFile extends AbstractFile {
                                 `Chunk ${index + 1}/${resolvedFile.chunkCount} materialized without bytes`
                             );
                         }
+                        if (persistChunkReads && completeChunkEntryHeads) {
+                            recordResolvedChunkHash(
+                                index,
+                                scheduledChunk.chunkFile.hash
+                            );
+                        }
                         debug.chunkByteLength[index] = chunk.byteLength;
                         const nextProcessed =
                             processed + BigInt(chunk.byteLength);
@@ -3963,6 +4540,83 @@ export class LargeFile extends AbstractFile {
                     throw new Error(
                         "File hash does not match the expected content"
                     );
+                }
+                if (persistChunkReads && completeChunkEntryHeads) {
+                    const persistenceResults = await raceWithSignal(
+                        Promise.allSettled([...manifestPersistenceSettlements]),
+                        transfer.owner.signal,
+                        "Manifest entry persistence cancelled"
+                    );
+                    transfer.owner.throwIfFailed();
+                    const rejectedPersistence = persistenceResults.find(
+                        (result): result is PromiseRejectedResult =>
+                            result.status === "rejected"
+                    );
+                    if (rejectedPersistence) {
+                        throw rejectedPersistence.reason;
+                    }
+                    const contentMismatchIndices =
+                        completeChunkEntryHeads.flatMap((_, index) => {
+                            const resolvedHash =
+                                resolvedChunkHashesByIndex.get(index);
+                            const authoritativeHash =
+                                authoritativeChunkHashesByIndex.get(index);
+                            return resolvedHash != null &&
+                                authoritativeHash != null &&
+                                resolvedHash === authoritativeHash
+                                ? []
+                                : [index];
+                        });
+                    debug.chunkManifestEntryContentMismatchIndices =
+                        contentMismatchIndices;
+                    if (contentMismatchIndices.length > 0) {
+                        throw new Error(
+                            `Persistent file read content did not match exact manifest entries for chunks ${contentMismatchIndices
+                                .map((index) => index + 1)
+                                .join(", ")}`
+                        );
+                    }
+                    const blocks = files.files.log.log.blocks;
+                    const presence = blocks
+                        ? await raceWithSignal(
+                              Promise.resolve(
+                                  typeof blocks.hasMany === "function"
+                                      ? blocks.hasMany(completeChunkEntryHeads)
+                                      : Promise.all(
+                                            completeChunkEntryHeads.map(
+                                                (head) => blocks.has(head)
+                                            )
+                                        )
+                              ),
+                              transfer.owner.signal,
+                              "Manifest entry persistence verification cancelled"
+                          )
+                        : completeChunkEntryHeads.map((_, index) =>
+                              persistedManifestEntryIndices.has(index)
+                          );
+                    const missingIndices = presence.flatMap((present, index) =>
+                        present ? [] : [index]
+                    );
+                    debug.chunkManifestEntryPersistenceMissingIndices =
+                        missingIndices;
+                    if (missingIndices.length > 0) {
+                        throw new Error(
+                            `Persistent file read could not store exact manifest entries for chunks ${missingIndices
+                                .map((index) => index + 1)
+                                .join(", ")}`
+                        );
+                    }
+                    for (const [
+                        index,
+                        head,
+                    ] of completeChunkEntryHeads.entries()) {
+                        files.retainChunkEntryHead(
+                            head,
+                            resolvedFile.id,
+                            resolvedChunkDocumentIdsByIndex.get(index) ??
+                                getChunkId(resolvedFile.id, index)
+                        );
+                    }
                 }
                 debug.finishedAt = Date.now();
             } finally {
@@ -4162,8 +4816,12 @@ const getCompleteChunkEntryHeads = (
         candidateHeads.length === file.chunkCount &&
         candidateHeads.every(
             (head): head is string =>
-                typeof head === "string" && head.length > 0
-        )
+                typeof head === "string" &&
+                head.length > 0 &&
+                head.trim() === head &&
+                !/[\u0000-\u001f\u007f]/.test(head)
+        ) &&
+        new Set(candidateHeads).size === candidateHeads.length
         ? candidateHeads
         : undefined;
 };
