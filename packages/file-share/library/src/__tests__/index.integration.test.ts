@@ -78,6 +78,166 @@ describe("index", () => {
         expect(await filestoreReader.getByName("tiny file")).to.be.undefined;
     });
 
+    it("lists compact local chunk ids across replacement and deletion", async () => {
+        const filestore = await peer.open(new Files());
+        const parentId = "local-chunk-id-snapshot";
+        const changes: Array<{
+            added: AbstractFile[];
+            removed: AbstractFile[];
+        }> = [];
+        filestore.files.events.addEventListener("change", (event) => {
+            changes.push(event.detail);
+        });
+        const parent = new LargeFile({
+            id: parentId,
+            name: "snapshot",
+            size: 4n,
+            chunkCount: 4,
+            ready: false,
+        });
+        const first = new TinyFile({
+            name: "snapshot/0",
+            file: new Uint8Array([1]),
+            parentId,
+            index: 0,
+        });
+        const second = new TinyFile({
+            name: "snapshot/1",
+            file: new Uint8Array([2]),
+            parentId,
+            index: 1,
+        });
+        const nestedTiny = new TinyFile({
+            id: "local-chunk-id-snapshot:nested-tiny",
+            name: "snapshot/nested-tiny",
+            file: new Uint8Array([3]),
+            parentId,
+        });
+        const nestedLarge = new ParentedLargeFileWithChunkHeads({
+            id: "local-chunk-id-snapshot:nested-large",
+            name: "snapshot/nested-large",
+            size: 1n,
+            chunkCount: 0,
+            ready: true,
+            parentId,
+        });
+        const exactIdTinyWithoutIndex = new TinyFile({
+            id: `${parentId}:2`,
+            name: "snapshot/exact-id-without-index",
+            file: new Uint8Array([4]),
+            parentId,
+        });
+        const exactIdWrongType = new ParentedLargeFileWithChunkHeads({
+            id: `${parentId}:3`,
+            name: "snapshot/exact-id-wrong-type",
+            size: 1n,
+            chunkCount: 0,
+            ready: true,
+            parentId,
+        });
+        const outOfRange = new TinyFile({
+            name: "snapshot/4",
+            file: new Uint8Array([5]),
+            parentId,
+            index: parent.chunkCount,
+        });
+
+        await filestore.files.put(parent);
+        await filestore.files.put(first);
+        await filestore.files.put(second);
+        await filestore.files.put(nestedTiny);
+        await filestore.files.put(nestedLarge);
+        await filestore.files.put(exactIdTinyWithoutIndex);
+        await filestore.files.put(exactIdWrongType);
+        await filestore.files.put(outOfRange);
+        const occupiedSlotIds = [
+            first.id,
+            second.id,
+            exactIdTinyWithoutIndex.id,
+            exactIdWrongType.id,
+        ];
+        expect(
+            (await filestore.listLocalChunkIds(parent)).sort()
+        ).to.deep.equal(occupiedSlotIds.sort());
+
+        changes.length = 0;
+        await filestore.files.put(
+            new TinyFile({
+                id: first.id,
+                name: first.name,
+                file: new Uint8Array([3]),
+                parentId,
+                index: 0,
+            })
+        );
+        expect(changes).to.have.length(1);
+        expect(changes[0].added).to.have.length(1);
+        expect(changes[0].removed).to.be.empty;
+        expect(changes[0].added[0]).to.be.instanceOf(TinyFile);
+        expect(changes[0].added[0]).to.include({
+            id: first.id,
+            parentId,
+        });
+        expect(
+            (await filestore.listLocalChunkIds(parent)).sort()
+        ).to.deep.equal(occupiedSlotIds.sort());
+
+        changes.length = 0;
+        await filestore.files.del(nestedTiny.id);
+        expect(changes).to.have.length(1);
+        expect(changes[0].removed[0]).to.be.instanceOf(TinyFile);
+        expect(changes[0].removed[0]).to.include({
+            id: nestedTiny.id,
+            parentId,
+            index: undefined,
+        });
+        expect(
+            (await filestore.listLocalChunkIds(parent)).sort()
+        ).to.deep.equal(occupiedSlotIds.sort());
+
+        changes.length = 0;
+        await filestore.files.del(nestedLarge.id);
+        expect(changes).to.have.length(1);
+        expect(changes[0].removed[0]).to.be.instanceOf(
+            ParentedLargeFileWithChunkHeads
+        );
+        expect(
+            (await filestore.listLocalChunkIds(parent)).sort()
+        ).to.deep.equal(occupiedSlotIds.sort());
+
+        changes.length = 0;
+        await filestore.files.del(exactIdTinyWithoutIndex.id);
+        expect(changes).to.have.length(1);
+        expect(changes[0].removed[0]).to.be.instanceOf(TinyFile);
+        expect(
+            (await filestore.listLocalChunkIds(parent)).sort()
+        ).to.deep.equal([first.id, second.id, exactIdWrongType.id].sort());
+
+        changes.length = 0;
+        await filestore.files.del(exactIdWrongType.id);
+        expect(changes).to.have.length(1);
+        expect(changes[0].removed[0]).to.be.instanceOf(
+            ParentedLargeFileWithChunkHeads
+        );
+        expect(
+            (await filestore.listLocalChunkIds(parent)).sort()
+        ).to.deep.equal([first.id, second.id].sort());
+
+        changes.length = 0;
+        await filestore.files.del(second.id);
+        expect(changes).to.have.length(1);
+        expect(changes[0].added).to.be.empty;
+        expect(changes[0].removed).to.have.length(1);
+        expect(changes[0].removed[0]).to.be.instanceOf(TinyFile);
+        expect(changes[0].removed[0]).to.include({
+            id: second.id,
+            parentId,
+        });
+        expect(await filestore.listLocalChunkIds(parent)).to.deep.equal([
+            first.id,
+        ]);
+    });
+
     it("removes a remote-only root through a non-replicating observer", async () => {
         const writer = await peer.open(new Files());
         const fileId = await writer.add(
