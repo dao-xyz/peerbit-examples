@@ -83,6 +83,23 @@ const waitForWriterVisible = async (reader, writerPeer) => {
   );
 };
 
+const openConfiguredReader = async (readerPeer, writerStore) => {
+  // Avoid a transient default-replicator phase, especially before upload.
+  const readerStore = await readerPeer.open(writerStore.address, {
+    args: { replicate: false },
+  });
+  readerStore.persistChunkReads = READER_REPLICATE;
+  if (READER_REPLICATE) {
+    await readerStore.files.log.replicate({
+      limits: {
+        cpu: { max: 1 },
+        storage: STORAGE_BYTES,
+      },
+    });
+  }
+  return readerStore;
+};
+
 const runScenario = async ({ name, connectBeforeUpload, payload }) => {
   let writerPeer;
   let readerPeer;
@@ -100,7 +117,7 @@ const runScenario = async ({ name, connectBeforeUpload, payload }) => {
       await writerPeer.dial(readerPeer);
       log(name, "dialed before upload");
 
-      readerStore = await readerPeer.open(writerStore.address);
+      readerStore = await openConfiguredReader(readerPeer, writerStore);
       await waitForWriterVisible(readerStore, writerPeer);
       log(name, "writer visible before upload");
 
@@ -113,18 +130,7 @@ const runScenario = async ({ name, connectBeforeUpload, payload }) => {
       await writerPeer.dial(readerPeer);
       log(name, "dialed after upload");
 
-      readerStore = await readerPeer.open(writerStore.address);
-    }
-
-    // Mirror frontend role update: reader can be storage-limited replicator or observer.
-    await readerStore.files.log.replicate(false);
-    if (READER_REPLICATE) {
-      await readerStore.files.log.replicate({
-        limits: {
-          cpu: { max: 1 },
-          storage: STORAGE_BYTES,
-        },
-      });
+      readerStore = await openConfiguredReader(readerPeer, writerStore);
     }
 
     const stopSampling = startSampler(readerStore, `${name}/reader`);
@@ -134,7 +140,7 @@ const runScenario = async ({ name, connectBeforeUpload, payload }) => {
 
     await waitForResolved(
       async () => {
-        const listed = await readerStore.list();
+        const listed = await readerStore.list({ replicate: READER_REPLICATE });
         if (!listed.some((f) => f.name === fileName)) {
           throw new Error("file metadata not visible yet");
         }

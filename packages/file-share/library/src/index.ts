@@ -278,6 +278,14 @@ export type FileReadOptions = {
     transferId?: string;
 };
 
+export type FileListOptions = {
+    /**
+     * Persist remote root results into Documents replication. Defaults to the
+     * program's current persisted-read policy for backwards compatibility.
+     */
+    replicate?: boolean;
+};
+
 export type FileWriteOptions = {
     progress?: (progress: number) => void;
     signal?: AbortSignal;
@@ -6724,8 +6732,9 @@ export class Files extends Program<Args> {
         }
     }
 
-    async list() {
+    async list(options?: FileListOptions) {
         const remoteFrom = await this.getReadPeerHints();
+        const replicate = options?.replicate ?? this.persistChunkReads;
         // only root files (don't fetch fetch chunks here)
         const files = await this.files.index.search(
             new SearchRequest({
@@ -6739,7 +6748,7 @@ export class Files extends Program<Args> {
                     // throw on missing shards here, the UI can appear "empty" until
                     // all shard roots respond, which feels broken during joins/churn.
                     throwOnMissing: false,
-                    replicate: this.persistChunkReads,
+                    replicate,
                     from: remoteFrom,
                 },
             } as any
@@ -6767,7 +6776,7 @@ export class Files extends Program<Args> {
                                 timeout: 5_000,
                                 throwOnMissing: false,
                                 retryMissingResponses: true,
-                                replicate: this.persistChunkReads,
+                                replicate,
                                 from: remoteFrom,
                             },
                         } as any
