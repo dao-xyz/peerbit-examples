@@ -27,7 +27,9 @@ import { SHA256 } from "@stablelib/sha256";
 import {
     adaptRemotePersistedReadAhead,
     getRemotePersistedReadAheadLimit,
+    ManifestHeadBatchCircuit,
     REMOTE_PERSISTED_READ_AHEAD_MIN,
+    type ManifestHeadBatchAttempt,
 } from "./read-scheduling.js";
 import {
     FairTransferOwner,
@@ -1292,6 +1294,7 @@ export class LargeFile extends AbstractFile {
             timeout?: number;
             debug?: Record<string, any>;
             persist: boolean;
+            onManifestHeadResolved?: (index: number) => void;
             decodeGuard: {
                 run<Value>(
                     operation: () => PromiseLike<Value> | Value,
@@ -1593,6 +1596,7 @@ export class LargeFile extends AbstractFile {
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] =
                         "manifest-head-get");
+                properties.onManifestHeadResolved?.(index);
                 return chunk;
             }
         };
@@ -2293,6 +2297,33 @@ export class LargeFile extends AbstractFile {
             chunkManifestHeadBatchErrors: [] as string[],
             chunkManifestHeadBatchDisabled: false,
             chunkManifestHeadBatchDisabledReason: null as string | null,
+            chunkManifestHeadBatchCircuitState: "enabled" as
+                | "enabled"
+                | "zero-open"
+                | "half-open-ready"
+                | "half-open-inflight"
+                | "permanent-zero"
+                | "permanent-error",
+            chunkManifestHeadBatchCircuitEpoch: 0,
+            chunkManifestHeadBatchFirstDisabledStartIndex: null as
+                | number
+                | null,
+            chunkManifestHeadBatchRecoveryEligibleAfterIndex: null as
+                | number
+                | null,
+            chunkManifestHeadBatchRecoveryProofCount: 0,
+            chunkManifestHeadBatchRecoveryProbeCount: 0,
+            chunkManifestHeadBatchRecoveryProbeStartIndex: null as
+                | number
+                | null,
+            chunkManifestHeadBatchRecoveryProbeEpoch: null as number | null,
+            chunkManifestHeadBatchRecoverySuccessCount: 0,
+            chunkManifestHeadBatchRecoveryCasMissCount: 0,
+            chunkManifestHeadBatchStaleZeroOutcomeCount: 0,
+            chunkManifestHeadBatchPermanentDisableReason: null as
+                | "zero-accepted"
+                | "error"
+                | null,
             chunkManifestHeadBatchDisabledSkipCount: 0,
             chunkManifestHeadBatchDisabledSkippedIndexCount: 0,
             chunkManifestHeadBatchAttemptTimeoutMs: 0,
@@ -2650,11 +2681,49 @@ export class LargeFile extends AbstractFile {
                     knownChunks.size
                 );
             };
-            let manifestHeadBatchDisabled = false;
-            const disableManifestHeadBatch = (reason: string) => {
-                manifestHeadBatchDisabled = true;
+            const manifestHeadBatchCircuit = new ManifestHeadBatchCircuit();
+            const syncManifestHeadBatchCircuitDiagnostics = () => {
+                debug.chunkManifestHeadBatchCircuitState =
+                    manifestHeadBatchCircuit.state;
+                debug.chunkManifestHeadBatchCircuitEpoch =
+                    manifestHeadBatchCircuit.epoch;
+                debug.chunkManifestHeadBatchRecoveryEligibleAfterIndex =
+                    manifestHeadBatchCircuit.recoveryEligibleAfterIndex >= 0
+                        ? manifestHeadBatchCircuit.recoveryEligibleAfterIndex
+                        : null;
+            };
+            const recordManifestHeadBatchDisabled = (
+                reason: "zero-accepted" | "error",
+                indices: number[]
+            ) => {
                 debug.chunkManifestHeadBatchDisabled = true;
                 debug.chunkManifestHeadBatchDisabledReason ??= reason;
+                debug.chunkManifestHeadBatchFirstDisabledStartIndex ??=
+                    indices[0] ?? null;
+            };
+            const recordPermanentManifestHeadBatchDisable = (
+                reason: "zero-accepted" | "error",
+                indices: number[]
+            ) => {
+                recordManifestHeadBatchDisabled(reason, indices);
+                debug.chunkManifestHeadBatchPermanentDisableReason = reason;
+            };
+            const permanentlyDisableManifestHeadBatchAfterError = (
+                indices: number[],
+                attempt: ManifestHeadBatchAttempt
+            ) => {
+                manifestHeadBatchCircuit.observeError(attempt);
+                syncManifestHeadBatchCircuitDiagnostics();
+                recordPermanentManifestHeadBatchDisable("error", indices);
+            };
+            const notePerIndexManifestHeadResolution = (index: number) => {
+                const result =
+                    manifestHeadBatchCircuit.noteManifestHeadResolution(index);
+                if (result === "ignored") {
+                    return;
+                }
+                debug.chunkManifestHeadBatchRecoveryProofCount += 1;
+                syncManifestHeadBatchCircuitDiagnostics();
             };
             type ManifestHeadEntry =
                 | {
@@ -2726,13 +2795,6 @@ export class LargeFile extends AbstractFile {
                     return indices;
                 }
                 changeSignal.throwIfClosed();
-                if (manifestHeadBatchDisabled) {
-                    debug.chunkManifestHeadBatchDisabledSkipCount += 1;
-                    debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
-                        indices.length;
-                    return indices;
-                }
-
                 const heads = (resolvedFile as { chunkEntryHeads?: unknown })
                     .chunkEntryHeads;
                 const requested = indices.flatMap((index) => {
@@ -2743,6 +2805,26 @@ export class LargeFile extends AbstractFile {
                 });
                 if (requested.length === 0) {
                     return indices;
+                }
+
+                const circuitAttempt = manifestHeadBatchCircuit.tryStart(
+                    requested[0]!.index,
+                    fetchRemotelyMissing
+                );
+                syncManifestHeadBatchCircuitDiagnostics();
+                if (!circuitAttempt) {
+                    debug.chunkManifestHeadBatchDisabledSkipCount += 1;
+                    debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
+                        indices.length;
+                    return indices;
+                }
+                const isRecoveryProbe = circuitAttempt.kind === "recovery";
+                if (isRecoveryProbe) {
+                    debug.chunkManifestHeadBatchRecoveryProbeCount += 1;
+                    debug.chunkManifestHeadBatchRecoveryProbeStartIndex =
+                        requested[0]!.index;
+                    debug.chunkManifestHeadBatchRecoveryProbeEpoch =
+                        circuitAttempt.epoch;
                 }
 
                 debug.chunkManifestHeadBatchQueryCount += 1;
@@ -2924,16 +3006,48 @@ export class LargeFile extends AbstractFile {
                     debug.chunkManifestHeadBatchErrors.push(
                         getErrorMessage(error)
                     );
-                    disableManifestHeadBatch("error");
+                    permanentlyDisableManifestHeadBatchAfterError(
+                        indices,
+                        circuitAttempt
+                    );
                     return indices.filter((index) => !knownChunks.has(index));
                 } finally {
                     debug.activeManifestHeadBatches -= 1;
                 }
 
                 if (accepted === 0 && fetchRemotelyMissing) {
-                    disableManifestHeadBatch("zero-accepted");
+                    const zeroResult = manifestHeadBatchCircuit.observeZero(
+                        circuitAttempt,
+                        indices[indices.length - 1] ?? -1
+                    );
+                    syncManifestHeadBatchCircuitDiagnostics();
+                    if (zeroResult === "opened") {
+                        recordManifestHeadBatchDisabled(
+                            "zero-accepted",
+                            indices
+                        );
+                    } else if (zeroResult === "permanent-zero") {
+                        recordPermanentManifestHeadBatchDisable(
+                            "zero-accepted",
+                            indices
+                        );
+                    } else if (zeroResult === "stale") {
+                        debug.chunkManifestHeadBatchStaleZeroOutcomeCount += 1;
+                    }
                 } else if (accepted < requested.length) {
                     debug.chunkManifestHeadBatchPartialCount += 1;
+                }
+                if (isRecoveryProbe && accepted > 0) {
+                    if (
+                        manifestHeadBatchCircuit.observeRecoverySuccess(
+                            circuitAttempt
+                        )
+                    ) {
+                        debug.chunkManifestHeadBatchRecoverySuccessCount += 1;
+                    } else {
+                        debug.chunkManifestHeadBatchRecoveryCasMissCount += 1;
+                    }
+                    syncManifestHeadBatchCircuitDiagnostics();
                 }
                 return indices.filter((index) => !knownChunks.has(index));
             };
@@ -3437,6 +3551,8 @@ export class LargeFile extends AbstractFile {
                                     timeout: properties?.timeout,
                                     debug,
                                     persist: persistChunkReads,
+                                    onManifestHeadResolved:
+                                        notePerIndexManifestHeadResolution,
                                     decodeGuard: {
                                         run: (operation, cancellationLabel) =>
                                             runChunkDecodeOperation(
