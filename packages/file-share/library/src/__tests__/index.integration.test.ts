@@ -12,7 +12,7 @@ import {
 } from "../index.js";
 import { concat, equals } from "uint8arrays";
 import crypto from "crypto";
-import { delay, waitForResolved } from "@peerbit/time";
+import { delay, TimeoutError, waitForResolved } from "@peerbit/time";
 import { sha256Base64Sync } from "@peerbit/crypto";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { expect, describe, it, beforeEach, afterEach } from "vitest";
@@ -984,6 +984,366 @@ describe("index", () => {
             }
         });
 
+        it("acknowledges only the ready manifest and succeeds without peers", async () => {
+            const disconnectedPeer = await Peerbit.create();
+            try {
+                const filestore = await disconnectedPeer.open(new Files());
+                const originalPut = filestore.files.put.bind(filestore.files);
+                const observedPuts: Array<{
+                    value: AbstractFile;
+                    options: any;
+                }> = [];
+                let readySignalWasAborted: boolean | undefined;
+
+                (filestore.files as any).put = async (
+                    value: AbstractFile,
+                    ...args: any[]
+                ) => {
+                    observedPuts.push({ value, options: args[0] });
+                    if (isLargeFileLike(value) && value.ready) {
+                        readySignalWasAborted =
+                            args[0]?.delivery?.signal?.aborted;
+                    }
+                    return (originalPut as any)(value, ...args);
+                };
+
+                let fileId: string;
+                try {
+                    const bytes = new Uint8Array(5_000_001);
+                    bytes[bytes.length - 1] = 11;
+                    fileId = await uploadLargeThrough(
+                        filestore,
+                        "source",
+                        "ready delivery without peers",
+                        bytes
+                    );
+                } finally {
+                    (filestore.files as any).put = originalPut;
+                }
+
+                const deliveryPuts = observedPuts.filter(
+                    ({ options }) => options?.delivery != null
+                );
+                expect(deliveryPuts).to.have.length(1);
+                expect(isLargeFileLike(deliveryPuts[0].value)).to.be.true;
+                expect((deliveryPuts[0].value as LargeFile).ready).to.be.true;
+                const { signal, ...delivery } =
+                    deliveryPuts[0].options.delivery;
+                expect(delivery).to.deep.eq({
+                    reliability: "ack",
+                    minAcks: 1,
+                    requireRecipients: false,
+                    timeout: 5_000,
+                });
+                expect(signal).to.be.instanceOf(AbortSignal);
+                expect(readySignalWasAborted).to.be.false;
+
+                const localReady = await filestore.files.index.get(fileId!, {
+                    local: true,
+                    remote: false,
+                });
+                expect(isLargeFileLike(localReady)).to.be.true;
+                expect((localReady as LargeFile).ready).to.be.true;
+            } finally {
+                await disconnectedPeer.stop();
+            }
+        });
+
+        it("aborts a stale ready delivery wait without discarding its local commit", async () => {
+            const filestore = await peer.open(new Files());
+            const controller = new AbortController();
+            const bytes = new Uint8Array(5_000_001);
+            bytes[bytes.length - 1] = 13;
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let uploadId: string | undefined;
+            let deliverySignal: AbortSignal | undefined;
+            let rejectStaleDelivery: ((reason: unknown) => void) | undefined;
+            let markReadyCommitted!: () => void;
+            const readyCommitted = new Promise<void>((resolve) => {
+                markReadyCommitted = resolve;
+            });
+
+            (filestore.files as any).put = async (
+                value: AbstractFile,
+                ...args: any[]
+            ) => {
+                if (!isLargeFileLike(value) || !value.ready) {
+                    return (originalPut as any)(value, ...args);
+                }
+
+                uploadId = value.id;
+                const options = args[0];
+                deliverySignal = options.delivery.signal;
+                const result = await (originalPut as any)(value, {
+                    ...options,
+                    delivery: false,
+                });
+                markReadyCommitted();
+                await new Promise<never>((_resolve, reject) => {
+                    rejectStaleDelivery = reject;
+                    const rejectAborted = () =>
+                        reject(
+                            deliverySignal?.reason ??
+                                new Error("Ready delivery was aborted")
+                        );
+                    if (deliverySignal!.aborted) {
+                        rejectAborted();
+                    } else {
+                        deliverySignal!.addEventListener(
+                            "abort",
+                            rejectAborted,
+                            { once: true }
+                        );
+                    }
+                });
+                return result;
+            };
+
+            const upload = filestore.addSource(
+                "stale ready delivery",
+                {
+                    size: BigInt(bytes.byteLength),
+                    readChunks: async function* () {
+                        yield bytes;
+                    },
+                },
+                { signal: controller.signal }
+            );
+
+            try {
+                await Promise.race([
+                    readyCommitted,
+                    delay(3_000).then(() => {
+                        throw new Error(
+                            "Ready manifest did not commit before abort test"
+                        );
+                    }),
+                ]);
+                expect(deliverySignal?.aborted).to.be.false;
+                expect(deliverySignal).not.to.eq(controller.signal);
+                controller.abort(new Error("cancel stale ready delivery"));
+                await expect(
+                    Promise.race([
+                        upload,
+                        delay(1_000).then(() => {
+                            throw new Error(
+                                "Upload did not observe the delivery abort"
+                            );
+                        }),
+                    ])
+                ).rejects.toThrow("cancel stale ready delivery");
+
+                expect(deliverySignal?.aborted).to.be.true;
+                const localReady = await filestore.files.index.get(uploadId!, {
+                    local: true,
+                    remote: false,
+                });
+                expect(isLargeFileLike(localReady)).to.be.true;
+                expect((localReady as LargeFile).ready).to.be.true;
+            } finally {
+                controller.abort();
+                rejectStaleDelivery?.(
+                    new Error("Release stale ready delivery test gate")
+                );
+                await Promise.race([
+                    upload.catch(() => undefined),
+                    delay(1_000),
+                ]);
+                (filestore.files as any).put = originalPut;
+            }
+        });
+
+        it("waits for a connected transport ACK while the remote indexes ready", async () => {
+            const writer = await peer.open(new Files());
+            const reader = await peer2.open<Files>(writer.address);
+            await writer.files.log.waitForReplicator(peer2.identity.publicKey);
+
+            const pendingFile = new LargeFile({
+                id: "ready-ack-contract",
+                name: "ready ACK contract",
+                size: 0n,
+                chunkCount: 0,
+                ready: false,
+            });
+            const pendingPut = await (writer as any).putAuthoredFile(
+                pendingFile
+            );
+            await waitForResolved(
+                async () => {
+                    const remotePending = await reader.files.index.get(
+                        pendingFile.id,
+                        { local: true, remote: false }
+                    );
+                    expect(isLargeFileLike(remotePending)).to.be.true;
+                    expect((remotePending as LargeFile).ready).to.be.false;
+                },
+                { timeout: 3_000, delayInterval: 25 }
+            );
+            const readyFile = new LargeFileWithChunkHeads({
+                id: pendingFile.id,
+                name: pendingFile.name,
+                size: pendingFile.size,
+                chunkCount: pendingFile.chunkCount,
+                ready: true,
+                finalHash: sha256Base64Sync(new Uint8Array()),
+                chunkEntryHeads: [],
+            });
+
+            const writerRpc: any = writer.files.log.rpc;
+            const writerPubsub: any = peer.services.pubsub;
+            const remotePubsub: any = peer2.services.pubsub;
+            const originalWriterSend = writerRpc.send.bind(writerRpc);
+            const originalWriterPublish =
+                writerPubsub.publishMessage.bind(writerPubsub);
+            const originalRemotePublish =
+                remotePubsub.publishMessage.bind(remotePubsub);
+            const remoteHash = peer2.identity.publicKey.hashcode();
+            const readyMessageIds = new Set<string>();
+            const toBase64 = (value: Uint8Array) =>
+                Buffer.from(value).toString("base64");
+            const controller = new AbortController();
+            let commit: Promise<void> | undefined;
+            let commitResolved = false;
+            let readyCommitInFlight = false;
+            let readyRpcSendCount = 0;
+            let releaseAcks!: () => void;
+            let markReadyMessageSent!: () => void;
+            let markAckAttempted!: () => void;
+            let markRemoteReadyIndexed!: () => void;
+            const ackGate = new Promise<void>((resolve) => {
+                releaseAcks = resolve;
+            });
+            const readyMessageSent = new Promise<void>((resolve) => {
+                markReadyMessageSent = resolve;
+            });
+            const ackAttempted = new Promise<void>((resolve) => {
+                markAckAttempted = resolve;
+            });
+            const remoteReadyIndexed = new Promise<void>((resolve) => {
+                markRemoteReadyIndexed = resolve;
+            });
+            const onReaderChange = (event: any) => {
+                if (
+                    event.detail.added.some(
+                        (value: AbstractFile) =>
+                            value.id === readyFile.id &&
+                            isLargeFileLike(value) &&
+                            value.ready
+                    )
+                ) {
+                    markRemoteReadyIndexed();
+                }
+            };
+            reader.files.events.addEventListener("change", onReaderChange);
+
+            writerRpc.send = async (...args: any[]) => {
+                if (!readyCommitInFlight) {
+                    return originalWriterSend(...args);
+                }
+                readyRpcSendCount += 1;
+                try {
+                    return await originalWriterSend(...args);
+                } finally {
+                    readyRpcSendCount -= 1;
+                }
+            };
+            writerPubsub.publishMessage = async (...args: any[]) => {
+                const message = args[1];
+                const mode = message?.header?.mode;
+                if (
+                    readyRpcSendCount > 0 &&
+                    message?.id instanceof Uint8Array &&
+                    message?.hasData === true &&
+                    Array.isArray(mode?.to) &&
+                    Array.isArray(mode?.hops) &&
+                    mode.to.includes(remoteHash)
+                ) {
+                    readyMessageIds.add(toBase64(message.id));
+                    markReadyMessageSent();
+                }
+                return originalWriterPublish(...args);
+            };
+            remotePubsub.publishMessage = async (...args: any[]) => {
+                const message = args[1];
+                const acknowledgedId = message?.messageIdToAcknowledge;
+                if (
+                    acknowledgedId instanceof Uint8Array &&
+                    Number.isInteger(message?.seenCounter) &&
+                    readyMessageIds.has(toBase64(acknowledgedId))
+                ) {
+                    markAckAttempted();
+                    await ackGate;
+                }
+                return originalRemotePublish(...args);
+            };
+
+            try {
+                readyCommitInFlight = true;
+                commit = (writer as any)
+                    .commitReadyManifest(
+                        pendingFile,
+                        pendingPut,
+                        readyFile,
+                        controller.signal
+                    )
+                    .then(() => {
+                        commitResolved = true;
+                    })
+                    .finally(() => {
+                        readyCommitInFlight = false;
+                    });
+                await Promise.race([
+                    Promise.all([
+                        readyMessageSent,
+                        ackAttempted,
+                        remoteReadyIndexed,
+                    ]),
+                    delay(3_000).then(() => {
+                        throw new Error(
+                            "Ready manifest ACK/index evidence was not observed"
+                        );
+                    }),
+                ]);
+                expect([...readyMessageIds]).to.have.length(1);
+                const remoteReady = await reader.files.index.get(readyFile.id, {
+                    local: true,
+                    remote: false,
+                });
+                expect(isLargeFileLike(remoteReady)).to.be.true;
+                expect((remoteReady as LargeFile).ready).to.be.true;
+                expect(commitResolved).to.be.false;
+
+                // Stream ACKs mean a selected remote transport received and
+                // verified the ready head. They are emitted before Files
+                // indexing, so this is healthy-path propagation evidence, not
+                // a remote-index or durable-replication guarantee.
+                releaseAcks();
+                await Promise.race([
+                    commit,
+                    delay(3_000).then(() => {
+                        throw new Error(
+                            "Ready manifest commit did not observe its ACK"
+                        );
+                    }),
+                ]);
+                expect(commitResolved).to.be.true;
+            } finally {
+                releaseAcks();
+                controller.abort();
+                await Promise.race([
+                    commit?.catch(() => undefined) ?? Promise.resolve(),
+                    delay(1_000),
+                ]);
+                reader.files.events.removeEventListener(
+                    "change",
+                    onReaderChange
+                );
+                writerRpc.send = originalWriterSend;
+                writerPubsub.publishMessage = originalWriterPublish;
+                remotePubsub.publishMessage = originalRemotePublish;
+            }
+        });
+
         for (const uploadPath of ["bytes", "source"] as const) {
             it(`does not leave a pending ${uploadPath} root after a precommit put rejection`, async () => {
                 const filestore = await peer.open(new Files());
@@ -1087,12 +1447,13 @@ describe("index", () => {
                 ).to.be.false;
             });
 
-            it(`accepts a committed ready ${uploadPath} manifest when put rejects`, async () => {
+            it(`recovers a locally committed ready ${uploadPath} manifest when delivery times out`, async () => {
                 const filestore = await peer.open(new Files());
                 const bytes = new Uint8Array(5_000_001);
                 bytes[bytes.length - 1] = 7;
                 const originalPut = filestore.files.put.bind(filestore.files);
-                let rejectedReadyPut = false;
+                let timedOutReadyDelivery = false;
+                let readyDeliverySignalWasAborted: boolean | undefined;
                 let pendingHead: string | undefined;
 
                 (filestore.files as any).put = async (
@@ -1106,10 +1467,14 @@ describe("index", () => {
                     if (
                         isLargeFileLike(value) &&
                         value.ready &&
-                        !rejectedReadyPut
+                        !timedOutReadyDelivery
                     ) {
-                        rejectedReadyPut = true;
-                        throw new Error("ready put rejected after commit");
+                        readyDeliverySignalWasAborted =
+                            args[0]?.delivery?.signal?.aborted;
+                        timedOutReadyDelivery = true;
+                        throw new TimeoutError(
+                            "Timeout waiting for ready manifest delivery"
+                        );
                     }
                     return result;
                 };
@@ -1130,7 +1495,8 @@ describe("index", () => {
                     local: true,
                     remote: false,
                 });
-                expect(rejectedReadyPut).to.be.true;
+                expect(timedOutReadyDelivery).to.be.true;
+                expect(readyDeliverySignalWasAborted).to.be.false;
                 expect(isLargeFileLike(ready)).to.be.true;
                 expect((ready as LargeFile).ready).to.be.true;
                 expect((ready as LargeFile).finalHash).to.eq(
