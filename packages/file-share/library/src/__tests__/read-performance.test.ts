@@ -8,6 +8,7 @@ import { AbstractFile, Files, LargeFile, TinyFile } from "../index.js";
 import {
     adaptRemotePersistedReadAhead,
     getRemotePersistedReadAheadLimit,
+    ManifestHeadBatchCircuit,
 } from "../read-scheduling.js";
 import {
     FairTransferOwner,
@@ -1086,6 +1087,79 @@ describe("large-file read scheduling", () => {
         ).toBe(3);
     });
 
+    it("does not let recovery success overwrite a terminal overlapping-batch error", async () => {
+        const circuit = new ManifestHeadBatchCircuit();
+        const zeroAttempt = circuit.tryStart(0, true)!;
+        const olderErrorAttempt = circuit.tryStart(3, true)!;
+        expect(circuit.observeZero(zeroAttempt, 2)).toBe("opened");
+        expect(circuit.noteManifestHeadResolution(2)).toBe("armed");
+        const recoveryAttempt = circuit.tryStart(6, true)!;
+        expect(recoveryAttempt.kind).toBe("recovery");
+
+        const terminalError = createDeferred<void>();
+        const recoverySuccess = createDeferred<void>();
+        const terminalOutcome = terminalError.promise.then(() =>
+            circuit.observeError(olderErrorAttempt)
+        );
+        const recoveryOutcome = recoverySuccess.promise.then(() =>
+            circuit.observeRecoverySuccess(recoveryAttempt)
+        );
+
+        terminalError.resolve();
+        await terminalOutcome;
+        expect(circuit.state).toBe("permanent-error");
+        recoverySuccess.resolve();
+        expect(await recoveryOutcome).toBe(false);
+        expect(circuit.state).toBe("permanent-error");
+        expect(circuit.epoch).toBeGreaterThan(recoveryAttempt.epoch);
+    });
+
+    it("ignores a pre-recovery zero that settles after probe success", async () => {
+        const circuit = new ManifestHeadBatchCircuit();
+        const zeroAttempt = circuit.tryStart(0, true)!;
+        const staleZeroAttempt = circuit.tryStart(3, true)!;
+        expect(circuit.observeZero(zeroAttempt, 2)).toBe("opened");
+        expect(circuit.noteManifestHeadResolution(2)).toBe("armed");
+        const recoveryAttempt = circuit.tryStart(6, true)!;
+        expect(recoveryAttempt.kind).toBe("recovery");
+
+        const recoverySuccess = createDeferred<void>();
+        const staleZero = createDeferred<void>();
+        const recoveryOutcome = recoverySuccess.promise.then(() =>
+            circuit.observeRecoverySuccess(recoveryAttempt)
+        );
+        const staleZeroOutcome = staleZero.promise.then(() =>
+            circuit.observeZero(staleZeroAttempt, 5)
+        );
+
+        recoverySuccess.resolve();
+        expect(await recoveryOutcome).toBe(true);
+        expect(circuit.state).toBe("enabled");
+        staleZero.resolve();
+        expect(await staleZeroOutcome).toBe("stale");
+        expect(circuit.state).toBe("enabled");
+        expect(circuit.epoch).toBe(recoveryAttempt.epoch);
+    });
+
+    it("recovers two independently proven transient zero cycles", () => {
+        const circuit = new ManifestHeadBatchCircuit();
+
+        for (const startIndex of [0, 9]) {
+            const zeroAttempt = circuit.tryStart(startIndex, true)!;
+            expect(zeroAttempt.kind).toBe("normal");
+            expect(circuit.observeZero(zeroAttempt, startIndex + 2)).toBe(
+                "opened"
+            );
+            expect(circuit.noteManifestHeadResolution(startIndex + 1)).toBe(
+                "armed"
+            );
+            const recoveryAttempt = circuit.tryStart(startIndex + 3, true)!;
+            expect(recoveryAttempt.kind).toBe("recovery");
+            expect(circuit.observeRecoverySuccess(recoveryAttempt)).toBe(true);
+            expect(circuit.state).toBe("enabled");
+        }
+    });
+
     it("starts complete persisted manifest reads at the bounded memory-derived limit", async () => {
         const chunks = Array.from(
             { length: 9 },
@@ -1397,6 +1471,24 @@ describe("large-file read scheduling", () => {
             expect(diagnostics.chunkManifestHeadRemoteBatchQueryCount).toBe(1);
             expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
             expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(mode);
+            expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
+                mode === "error" ? "permanent-error" : "zero-open"
+            );
+            expect(
+                diagnostics.chunkManifestHeadBatchFirstDisabledStartIndex
+            ).toBe(0);
+            expect(diagnostics.chunkManifestHeadBatchRecoveryProofCount).toBe(
+                0
+            );
+            expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(
+                0
+            );
+            expect(diagnostics.chunkManifestHeadBatchRecoverySuccessCount).toBe(
+                0
+            );
+            expect(
+                diagnostics.chunkManifestHeadBatchPermanentDisableReason
+            ).toBe(mode === "error" ? "error" : null);
             // The pessimistic decoder reservation caps the speculative batch
             // at three chunks. Once the
             // consumer resumes, three bounded scheduling windows record all
@@ -1425,6 +1517,207 @@ describe("large-file read scheduling", () => {
             );
         });
     }
+
+    it("admits one half-open batch after a per-index manifest-head proof", async () => {
+        const chunks = Array.from(
+            { length: 12 },
+            (_, index) => new Uint8Array([index + 1])
+        );
+        const { entriesByHead, file, files, heads, perIndexGets } =
+            createPersistedManifestStreamHarness(chunks);
+        const remoteBatchStarts: number[] = [];
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                if (options.remote === false) {
+                    return requestedHeads.map(() => undefined);
+                }
+                const firstIndex = heads.indexOf(requestedHeads[0]!);
+                remoteBatchStarts.push(firstIndex);
+                if (firstIndex === 3) {
+                    return requestedHeads.map(() => undefined);
+                }
+                return requestedHeads.map((head) => entriesByHead.get(head));
+            }
+        );
+        const get = vi.fn(async (head: string) => entriesByHead.get(head));
+        (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = get;
+        (files.files.index as any).get = async () => undefined;
+
+        const roundTrip = await file.getFile(files, { as: "joined" });
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(perIndexGets).toEqual([]);
+        expect(remoteBatchStarts).toContain(0);
+        expect(remoteBatchStarts).toContain(3);
+        expect(remoteBatchStarts.some((index) => index > 5)).toBe(true);
+        expect(get).toHaveBeenCalled();
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
+        expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(
+            "zero-accepted"
+        );
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe("enabled");
+        expect(diagnostics.chunkManifestHeadBatchFirstDisabledStartIndex).toBe(
+            3
+        );
+        expect(
+            diagnostics.chunkManifestHeadBatchRecoveryEligibleAfterIndex
+        ).toBe(5);
+        expect(
+            diagnostics.chunkManifestHeadBatchRecoveryProofCount
+        ).toBeGreaterThan(0);
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(1);
+        expect(
+            diagnostics.chunkManifestHeadBatchRecoveryProbeStartIndex
+        ).toBeGreaterThan(5);
+        expect(diagnostics.chunkManifestHeadBatchRecoverySuccessCount).toBe(1);
+        expect(
+            diagnostics.chunkManifestHeadBatchPermanentDisableReason
+        ).toBeNull();
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
+    });
+
+    it("recovers persisted batching after two transient zero batches", async () => {
+        const chunks = Array.from(
+            { length: 21 },
+            (_, index) => new Uint8Array([index + 1])
+        );
+        const { entriesByHead, file, files, heads, perIndexGets } =
+            createPersistedManifestStreamHarness(chunks);
+        const remoteBatchStarts: number[] = [];
+        const transientZeroStarts = new Set([3, 12]);
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                if (options.remote === false) {
+                    return requestedHeads.map(() => undefined);
+                }
+                const firstIndex = heads.indexOf(requestedHeads[0]!);
+                remoteBatchStarts.push(firstIndex);
+                return transientZeroStarts.has(firstIndex)
+                    ? requestedHeads.map(() => undefined)
+                    : requestedHeads.map((head) => entriesByHead.get(head));
+            }
+        );
+        const get = vi.fn(async (head: string) => entriesByHead.get(head));
+        (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = get;
+        (files.files.index as any).get = async () => undefined;
+
+        const roundTrip = await file.getFile(files, { as: "joined" });
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(perIndexGets).toEqual([]);
+        expect(remoteBatchStarts).toContain(3);
+        expect(remoteBatchStarts).toContain(12);
+        expect(get).toHaveBeenCalled();
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe("enabled");
+        expect(
+            diagnostics.chunkManifestHeadBatchRecoveryProofCount
+        ).toBeGreaterThanOrEqual(2);
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(2);
+        expect(diagnostics.chunkManifestHeadBatchRecoverySuccessCount).toBe(2);
+        expect(
+            diagnostics.chunkManifestHeadBatchPermanentDisableReason
+        ).toBeNull();
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
+    });
+
+    it("permanently opens after the one half-open batch also accepts zero entries", async () => {
+        const chunks = Array.from(
+            { length: 15 },
+            (_, index) => new Uint8Array([index + 1])
+        );
+        const { entriesByHead, file, files, heads, perIndexGets } =
+            createPersistedManifestStreamHarness(chunks);
+        const remoteBatchStarts: number[] = [];
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                if (options.remote === false) {
+                    return requestedHeads.map(() => undefined);
+                }
+                const firstIndex = heads.indexOf(requestedHeads[0]!);
+                remoteBatchStarts.push(firstIndex);
+                return firstIndex === 0
+                    ? requestedHeads.map((head) => entriesByHead.get(head))
+                    : requestedHeads.map(() => undefined);
+            }
+        );
+        const get = vi.fn(async (head: string) => entriesByHead.get(head));
+        (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = get;
+        (files.files.index as any).get = async () => undefined;
+
+        const roundTrip = await file.getFile(files, { as: "joined" });
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(perIndexGets).toEqual([]);
+        expect(remoteBatchStarts).toHaveLength(3);
+        expect(remoteBatchStarts.slice(0, 2)).toEqual([0, 3]);
+        expect(remoteBatchStarts[2]).toBeGreaterThan(5);
+        expect(get).toHaveBeenCalled();
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(true);
+        expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe(
+            "zero-accepted"
+        );
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
+            "permanent-zero"
+        );
+        expect(
+            diagnostics.chunkManifestHeadBatchRecoveryProofCount
+        ).toBeGreaterThan(0);
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(1);
+        expect(diagnostics.chunkManifestHeadBatchRecoverySuccessCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchPermanentDisableReason).toBe(
+            "zero-accepted"
+        );
+        expect(
+            diagnostics.chunkManifestHeadBatchDisabledSkipCount
+        ).toBeGreaterThan(0);
+        expect(diagnostics.maxManifestHeadBatchSize).toBe(3);
+    });
+
+    it("keeps batch errors terminal after per-index manifest-head successes", async () => {
+        const chunks = Array.from(
+            { length: 10 },
+            (_, index) => new Uint8Array([index + 1])
+        );
+        const { entriesByHead, file, files, perIndexGets } =
+            createPersistedManifestStreamHarness(chunks);
+        let remoteBatchCalls = 0;
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                if (options.remote === false) {
+                    return requestedHeads.map(() => undefined);
+                }
+                remoteBatchCalls += 1;
+                throw new Error("terminal manifest-head batch failure");
+            }
+        );
+        const get = vi.fn(async (head: string) => entriesByHead.get(head));
+        (files.files.log.log as any).getMany = getMany;
+        (files.files.log.log as any).get = get;
+        (files.files.index as any).get = async () => undefined;
+
+        const roundTrip = await file.getFile(files, { as: "joined" });
+
+        expect(roundTrip).toEqual(concat(chunks));
+        expect(perIndexGets).toEqual([]);
+        expect(remoteBatchCalls).toBe(1);
+        expect(get).toHaveBeenCalled();
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkManifestHeadBatchCircuitState).toBe(
+            "permanent-error"
+        );
+        expect(diagnostics.chunkManifestHeadBatchDisabledReason).toBe("error");
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProofCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchRecoveryProbeCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchPermanentDisableReason).toBe(
+            "error"
+        );
+    });
 
     it("rejects invalid parent and index entries before per-index fallback", async () => {
         const {
