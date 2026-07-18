@@ -2498,7 +2498,57 @@ export class LargeFile extends AbstractFile {
                       REMOTE_PERSISTED_READ_AHEAD_MIN,
                       readAheadLimit
                   );
-            const batchPromisesByIndex = new Map<number, Promise<void>>();
+            type BatchIndexCompletion = {
+                promise: Promise<void>;
+                resolve: () => void;
+                reject: (reason: unknown) => void;
+                resolveWhenAccepted: boolean;
+                settled: boolean;
+            };
+            const batchCompletionsByIndex = new Map<
+                number,
+                BatchIndexCompletion
+            >();
+            const createBatchIndexCompletion = (
+                index: number,
+                resolveWhenAccepted: boolean
+            ) => {
+                let resolvePromise!: () => void;
+                let rejectPromise!: (reason: unknown) => void;
+                const completion: BatchIndexCompletion = {
+                    promise: new Promise<void>((resolve, reject) => {
+                        resolvePromise = resolve;
+                        rejectPromise = reject;
+                    }),
+                    resolve: () => {
+                        if (completion.settled) {
+                            return;
+                        }
+                        completion.settled = true;
+                        batchCompletionsByIndex.delete(index);
+                        resolvePromise();
+                    },
+                    reject: (reason) => {
+                        if (completion.settled) {
+                            return;
+                        }
+                        completion.settled = true;
+                        batchCompletionsByIndex.delete(index);
+                        rejectPromise(reason);
+                    },
+                    resolveWhenAccepted,
+                    settled: false,
+                };
+                void completion.promise.catch(() => undefined);
+                batchCompletionsByIndex.set(index, completion);
+                return completion;
+            };
+            const resolveBatchIndexCompletion = (index: number) => {
+                const completion = batchCompletionsByIndex.get(index);
+                if (completion?.resolveWhenAccepted) {
+                    completion.resolve();
+                }
+            };
             const batchAttemptedIndices = new Set<number>();
             const intentionallySkippedBatchIndices = new Set<number>();
             type ScheduledChunk = {
@@ -2603,14 +2653,18 @@ export class LargeFile extends AbstractFile {
                 if (!readGenerationActive) {
                     return;
                 }
+                const cleanupReason =
+                    reason ?? getAbortReason(transfer.owner.signal);
                 readGenerationActive = false;
                 suspendedPayload = undefined;
                 for (const signal of readContext.fileChangeSignals ?? []) {
-                    signal.close(
-                        reason ?? getAbortReason(transfer.owner.signal)
-                    );
+                    signal.close(cleanupReason);
                 }
                 readContext.fileChangeSignals?.clear();
+                for (const completion of batchCompletionsByIndex.values()) {
+                    completion.reject(cleanupReason);
+                }
+                batchCompletionsByIndex.clear();
                 for (const [index, permit] of chunkPermitsByIndex) {
                     const operations = decodeOperationsByIndex.get(index);
                     if (operations && operations.size > 0) {
@@ -2627,7 +2681,6 @@ export class LargeFile extends AbstractFile {
                 decodeOperationsByIndex.clear();
                 inFlightChunks.clear();
                 knownChunks.clear();
-                batchPromisesByIndex.clear();
                 batchAttemptedIndices.clear();
                 intentionallySkippedBatchIndices.clear();
                 debug.finalKnownChunkCount = knownChunks.size;
@@ -2789,6 +2842,8 @@ export class LargeFile extends AbstractFile {
                 indices: number[],
                 from: string[] | undefined,
                 changeSignal: FileChangeSignal,
+                resolvedDuringBatch: Set<number>,
+                prefetchedDuringBatch: Set<number>,
                 fetchRemotelyMissing = true
             ) => {
                 if (indices.length === 0) {
@@ -2850,6 +2905,15 @@ export class LargeFile extends AbstractFile {
                 );
 
                 let accepted = 0;
+                // A locally accepted index can be consumed before remote
+                // siblings settle, so retain success beyond the cache lifetime
+                // and across every later lookup phase in this prefetch batch.
+                const getMissingIndices = () =>
+                    indices.filter(
+                        (index) =>
+                            !resolvedDuringBatch.has(index) &&
+                            !knownChunks.has(index)
+                    );
                 const acceptEntries = async (
                     candidates: typeof requested,
                     entries: ManifestHeadEntry[],
@@ -2938,6 +3002,9 @@ export class LargeFile extends AbstractFile {
                             );
                         }
                         knownChunks.set(index, chunk);
+                        resolvedDuringBatch.add(index);
+                        prefetchedDuringBatch.add(index);
+                        resolveBatchIndexCompletion(index);
                         if (persistChunkReads) {
                             files.retainResolvedChunk(chunk, persistChunkReads);
                         }
@@ -3010,7 +3077,7 @@ export class LargeFile extends AbstractFile {
                         indices,
                         circuitAttempt
                     );
-                    return indices.filter((index) => !knownChunks.has(index));
+                    return getMissingIndices();
                 } finally {
                     debug.activeManifestHeadBatches -= 1;
                 }
@@ -3049,14 +3116,17 @@ export class LargeFile extends AbstractFile {
                     }
                     syncManifestHeadBatchCircuitDiagnostics();
                 }
-                return indices.filter((index) => !knownChunks.has(index));
+                return getMissingIndices();
             };
             const queryChunkBatch = async (
                 indices: number[],
                 from: string[] | undefined,
                 remote: boolean,
                 fallback: boolean,
-                changeSignal: FileChangeSignal
+                changeSignal: FileChangeSignal,
+                resolvedDuringBatch: Set<number>,
+                prefetchedDuringBatch: Set<number>,
+                chunkBatchResultsDuringBatch: Set<number>
             ) => {
                 if (indices.length === 0) {
                     return [];
@@ -3143,7 +3213,11 @@ export class LargeFile extends AbstractFile {
                     (debug.chunkBatchErrors ||= []).push(
                         getErrorMessage(error)
                     );
-                    return indices.filter((index) => !knownChunks.has(index));
+                    return indices.filter(
+                        (index) =>
+                            !resolvedDuringBatch.has(index) &&
+                            !knownChunks.has(index)
+                    );
                 } finally {
                     if (remote) {
                         debug.activeRemoteChunkBatches -= 1;
@@ -3174,6 +3248,10 @@ export class LargeFile extends AbstractFile {
                             candidate.file.byteLength
                         );
                         knownChunks.set(expectedIndex, candidate);
+                        resolvedDuringBatch.add(expectedIndex);
+                        prefetchedDuringBatch.add(expectedIndex);
+                        chunkBatchResultsDuringBatch.add(expectedIndex);
+                        resolveBatchIndexCompletion(expectedIndex);
                         if (persistChunkReads) {
                             files.retainResolvedChunk(
                                 candidate,
@@ -3188,11 +3266,16 @@ export class LargeFile extends AbstractFile {
                     debug.chunkBatchFallbackResultCount += accepted;
                 }
                 debug.prefetchedChunkCount += accepted;
-                return indices.filter((index) => !knownChunks.has(index));
+                return indices.filter(
+                    (index) =>
+                        !resolvedDuringBatch.has(index) &&
+                        !knownChunks.has(index)
+                );
             };
             const queryLocalIndexedChunkBatch = async (
                 indices: number[],
-                changeSignal: FileChangeSignal
+                changeSignal: FileChangeSignal,
+                resolvedDuringBatch: Set<number>
             ) => {
                 const missing: number[] = [];
                 for (const index of indices) {
@@ -3244,6 +3327,8 @@ export class LargeFile extends AbstractFile {
                             );
                             settleChunkPermit(index, chunk.file.byteLength);
                             knownChunks.set(index, chunk);
+                            resolvedDuringBatch.add(index);
+                            resolveBatchIndexCompletion(index);
                             if (persistChunkReads) {
                                 files.retainResolvedChunk(
                                     chunk,
@@ -3269,6 +3354,22 @@ export class LargeFile extends AbstractFile {
                 indices: number[],
                 changeSignal: FileChangeSignal
             ) => {
+                // knownChunks is a bounded hand-off cache: the stream deletes an
+                // entry as soon as it takes ownership. Keep batch-local success
+                // separately so later awaits never turn an already-delivered
+                // chunk back into a remote miss.
+                const resolvedDuringBatch = new Set<number>();
+                // Reclassification can evict deferred local hits. Track which
+                // diagnostic families each hit incremented so rollback never
+                // attributes a manifest/indexed hit to chunk-batch counters.
+                const prefetchedDuringBatch = new Set<number>();
+                const chunkBatchResultsDuringBatch = new Set<number>();
+                const getUnresolvedIndices = (candidates: number[]) =>
+                    candidates.filter(
+                        (index) =>
+                            !resolvedDuringBatch.has(index) &&
+                            !knownChunks.has(index)
+                    );
                 changeSignal.throwIfClosed();
                 const hintedFrom =
                     readContext.lastReadPeerHints ??
@@ -3294,7 +3395,9 @@ export class LargeFile extends AbstractFile {
                     const missing = await queryPersistedManifestHeadBatch(
                         boundedIndices,
                         hintedFrom,
-                        changeSignal
+                        changeSignal,
+                        resolvedDuringBatch,
+                        prefetchedDuringBatch
                     );
                     skipPersistedRemoteBatch(missing);
                     updateKnownChunkPeak();
@@ -3314,6 +3417,8 @@ export class LargeFile extends AbstractFile {
                         indices,
                         hintedFrom,
                         changeSignal,
+                        resolvedDuringBatch,
+                        prefetchedDuringBatch,
                         false
                     );
                     if (missing.length === 0) {
@@ -3323,11 +3428,14 @@ export class LargeFile extends AbstractFile {
                     }
                 }
                 let missing = await queryChunkBatch(
-                    indices,
+                    getUnresolvedIndices(indices),
                     undefined,
                     false,
                     false,
-                    changeSignal
+                    changeSignal,
+                    resolvedDuringBatch,
+                    prefetchedDuringBatch,
+                    chunkBatchResultsDuringBatch
                 );
                 if (
                     missing.length > 0 &&
@@ -3338,7 +3446,8 @@ export class LargeFile extends AbstractFile {
                     const before = missing.length;
                     missing = await queryLocalIndexedChunkBatch(
                         missing,
-                        changeSignal
+                        changeSignal,
+                        resolvedDuringBatch
                     );
                     if (missing.length < before) {
                         usesLegacyLocalChunkIds = true;
@@ -3366,27 +3475,34 @@ export class LargeFile extends AbstractFile {
                 reclassifyAsRemotePersistedRead();
                 const boundedIndices = indices.slice(0, remoteReadAheadLimit);
                 const deferred = indices.slice(remoteReadAheadLimit);
-                let evictedLocalResults = 0;
                 // A batch may have been assembled under the former 32-chunk local
                 // window. Discard payload-bearing results outside the new network
                 // budget and unlock them for a later bounded local-first batch.
                 for (const index of deferred) {
                     if (wasVerifiedLocalRead && knownChunks.delete(index)) {
-                        evictedLocalResults += 1;
+                        if (chunkBatchResultsDuringBatch.delete(index)) {
+                            debug.chunkBatchResultCount -= 1;
+                        }
+                        if (prefetchedDuringBatch.delete(index)) {
+                            debug.prefetchedChunkCount -= 1;
+                        }
                     }
+                    // Deferred completions cannot resolve while a nominally
+                    // local batch is deciding whether to reclassify, so none of
+                    // these indices have been delivered. Once evicted, make
+                    // them eligible for their later bounded batch again.
+                    resolvedDuringBatch.delete(index);
                     releaseChunkPermit(index);
                     batchAttemptedIndices.delete(index);
                 }
-                debug.chunkBatchResultCount -= evictedLocalResults;
-                debug.prefetchedChunkCount -= evictedLocalResults;
-                missing = boundedIndices.filter(
-                    (index) => !knownChunks.has(index)
-                );
+                missing = getUnresolvedIndices(boundedIndices);
                 if (persistChunkReads && isRemotePersistedRead) {
                     missing = await queryPersistedManifestHeadBatch(
                         missing,
                         hintedFrom,
-                        changeSignal
+                        changeSignal,
+                        resolvedDuringBatch,
+                        prefetchedDuringBatch
                     );
                     skipPersistedRemoteBatch(missing);
                     updateKnownChunkPeak();
@@ -3398,7 +3514,10 @@ export class LargeFile extends AbstractFile {
                         hintedFrom,
                         true,
                         false,
-                        changeSignal
+                        changeSignal,
+                        resolvedDuringBatch,
+                        prefetchedDuringBatch,
+                        chunkBatchResultsDuringBatch
                     );
                 }
                 if (hintedFrom && missing.length > 0) {
@@ -3408,7 +3527,10 @@ export class LargeFile extends AbstractFile {
                         undefined,
                         true,
                         true,
-                        changeSignal
+                        changeSignal,
+                        resolvedDuringBatch,
+                        prefetchedDuringBatch,
+                        chunkBatchResultsDuringBatch
                     );
                 }
                 updateKnownChunkPeak();
@@ -3439,16 +3561,13 @@ export class LargeFile extends AbstractFile {
                     chunkPermitsByIndex.set(index, permits[offset]!);
                 }
             };
-            const prefetchBatchForIndex = (
-                index: number,
-                changeSignal: FileChangeSignal
-            ) => {
+            const prefetchBatchForIndex = (index: number) => {
                 if (knownChunks.has(index)) {
                     return Promise.resolve();
                 }
-                const existing = batchPromisesByIndex.get(index);
+                const existing = batchCompletionsByIndex.get(index);
                 if (existing) {
-                    return existing;
+                    return existing.promise;
                 }
                 if (batchAttemptedIndices.has(index)) {
                     return Promise.resolve();
@@ -3477,7 +3596,10 @@ export class LargeFile extends AbstractFile {
                     Math.min(resolvedFile.chunkCount, index + batchSize);
                     candidate++
                 ) {
-                    if (!knownChunks.has(candidate)) {
+                    if (
+                        !knownChunks.has(candidate) &&
+                        !batchAttemptedIndices.has(candidate)
+                    ) {
                         indices.push(candidate);
                         batchAttemptedIndices.add(candidate);
                     }
@@ -3485,20 +3607,69 @@ export class LargeFile extends AbstractFile {
                 if (indices.length === 0) {
                     return Promise.resolve();
                 }
-                const pending: Promise<void> = (async () => {
-                    await acquireChunkPermits(indices);
-                    await prefetchChunkBatch(indices, changeSignal);
-                })().finally(() => {
-                    for (const candidate of indices) {
-                        if (batchPromisesByIndex.get(candidate) === pending) {
-                            batchPromisesByIndex.delete(candidate);
+                // If a nominally local read is reclassified as remote, chunks
+                // outside the network window are deliberately evicted below.
+                // Do not release those resolvers until that decision is made.
+                const completions = new Map(
+                    indices.map(
+                        (candidate, offset) =>
+                            [
+                                candidate,
+                                createBatchIndexCompletion(
+                                    candidate,
+                                    !persistChunkReads ||
+                                        isRemotePersistedRead ||
+                                        offset < remoteReadAheadLimit
+                                ),
+                            ] as const
+                    )
+                );
+                const batchIndices = new Set(indices);
+                const batchChunkIds = new Set(
+                    indices.map((candidate) =>
+                        getChunkId(resolvedFile.id, candidate)
+                    )
+                );
+                // Each resolver owns a signal for its later single-index
+                // fallback. The batch needs its own lifetime because an early
+                // local hit may let one resolver finish while remote siblings
+                // are still being fetched.
+                const batchChangeSignal = files.createFileChangeSignal(
+                    (file) =>
+                        batchChunkIds.has(file.id) ||
+                        (file instanceof TinyFile &&
+                            file.parentId === resolvedFile.id &&
+                            file.index != null &&
+                            batchIndices.has(file.index)),
+                    transfer.owner.signal
+                );
+                readContext.fileChangeSignals!.add(batchChangeSignal);
+                const batchTask = transfer.owner.track(
+                    (async () => {
+                        try {
+                            await acquireChunkPermits(indices);
+                            await prefetchChunkBatch(
+                                indices,
+                                batchChangeSignal
+                            );
+                            for (const completion of completions.values()) {
+                                completion.resolve();
+                            }
+                        } catch (error) {
+                            for (const completion of completions.values()) {
+                                completion.reject(error);
+                            }
+                            throw error;
+                        } finally {
+                            batchChangeSignal.close();
+                            readContext.fileChangeSignals!.delete(
+                                batchChangeSignal
+                            );
                         }
-                    }
-                });
-                for (const candidate of indices) {
-                    batchPromisesByIndex.set(candidate, pending);
-                }
-                return pending;
+                    })()
+                );
+                void batchTask.catch(() => undefined);
+                return completions.get(index)!.promise;
             };
             const resolveChunkWithReadAhead = (index: number) => {
                 const cached = inFlightChunks.get(index);
@@ -3519,15 +3690,12 @@ export class LargeFile extends AbstractFile {
                         );
                         readContext.fileChangeSignals!.add(changeSignal);
                         try {
-                            await prefetchBatchForIndex(index, changeSignal);
+                            await prefetchBatchForIndex(index);
                             while (
                                 !knownChunks.has(index) &&
                                 !batchAttemptedIndices.has(index)
                             ) {
-                                await prefetchBatchForIndex(
-                                    index,
-                                    changeSignal
-                                );
+                                await prefetchBatchForIndex(index);
                             }
                             const intentionallySkippedBatch =
                                 intentionallySkippedBatchIndices.delete(index);

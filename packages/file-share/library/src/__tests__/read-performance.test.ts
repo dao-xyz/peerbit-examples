@@ -1778,6 +1778,236 @@ describe("large-file read scheduling", () => {
         expect(diagnostics.chunkManifestHeadBatchDisabled).toBe(false);
     });
 
+    it("yields a locally accepted batch index before a remote sibling settles", async () => {
+        const { entriesByHead, file, files, heads, perIndexGets } =
+            createPersistedManifestStreamHarness([
+                new Uint8Array([1]),
+                new Uint8Array([2]),
+                new Uint8Array([3]),
+            ]);
+        const remoteStarted = createDeferred<void>();
+        const remoteGate = createDeferred<void>();
+        let remoteSettled = false;
+        let remoteSignal: AbortSignal | undefined;
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                if (options.remote === false) {
+                    return requestedHeads.map((head) =>
+                        head === heads[0] ? entriesByHead.get(head) : undefined
+                    );
+                }
+                remoteSignal = options.remote.signal;
+                remoteStarted.resolve();
+                await remoteGate.promise;
+                remoteSettled = true;
+                return requestedHeads.map((head) => entriesByHead.get(head));
+            }
+        );
+        (files.files.log.log as any).getMany = getMany;
+
+        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        const firstRead = iterator.next();
+        try {
+            await remoteStarted.promise;
+            let firstReadTimeout!: ReturnType<typeof setTimeout>;
+            const first = await Promise.race([
+                firstRead,
+                new Promise<never>((_, reject) => {
+                    firstReadTimeout = setTimeout(
+                        () =>
+                            reject(
+                                new Error(
+                                    "local batch index waited for remote sibling"
+                                )
+                            ),
+                        1_000
+                    );
+                }),
+            ]).finally(() => clearTimeout(firstReadTimeout));
+            expect(first).toEqual({
+                done: false,
+                value: new Uint8Array([1]),
+            });
+            expect(remoteSettled).toBe(false);
+            expect(remoteSignal?.aborted).toBe(false);
+
+            remoteGate.resolve();
+            expect(await iterator.next()).toEqual({
+                done: false,
+                value: new Uint8Array([2]),
+            });
+            expect(await iterator.next()).toEqual({
+                done: false,
+                value: new Uint8Array([3]),
+            });
+            expect(await iterator.next()).toEqual({
+                done: true,
+                value: undefined,
+            });
+
+            expect(remoteSettled).toBe(true);
+            expect(perIndexGets).toEqual([]);
+            const diagnostics = files.lastReadDiagnostics!;
+            expect(diagnostics.chunkPersistedRemoteBatchSkippedIndexCount).toBe(
+                0
+            );
+            expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(0);
+            expect(diagnostics.activeManifestHeadBatches).toBe(0);
+            expect(diagnostics.finalKnownChunkCount).toBe(0);
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect(
+                files.getTransferSchedulerDiagnostics().download
+            ).toMatchObject({
+                activeCount: 0,
+                activeBytes: 0,
+                queuedCount: 0,
+            });
+            expect((files as any).activeFileChangeSignals.size).toBe(0);
+        } finally {
+            remoteGate.resolve();
+            await iterator.return?.();
+        }
+    });
+
+    it("does not re-request a consumed local hit while stale index rows reclassify the batch", async () => {
+        const { chunkFiles, entriesByHead, file, files, heads, perIndexGets } =
+            createPersistedManifestStreamHarness([
+                new Uint8Array([1]),
+                new Uint8Array([2]),
+                new Uint8Array([3]),
+            ]);
+        (files as any).countLocalChunks = async () => file.chunkCount;
+        (files as any).countLocalChunkBlocks = async () => 0;
+
+        const indexedLookupStarted = createDeferred<void>();
+        const indexedLookupGate = createDeferred<void>();
+        let searchCalls = 0;
+        (files.files.index as any).search = vi.fn(async () => {
+            searchCalls += 1;
+            if (searchCalls === 1) {
+                return [chunkFiles[0]];
+            }
+            indexedLookupStarted.resolve();
+            await indexedLookupGate.promise;
+            return [];
+        });
+
+        const requestedHeadBatches: string[][] = [];
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                requestedHeadBatches.push(requestedHeads);
+                if (options.remote === false) {
+                    return requestedHeads.map(() => undefined);
+                }
+                return requestedHeads.map((head) => entriesByHead.get(head));
+            }
+        );
+        (files.files.log.log as any).getMany = getMany;
+
+        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        const firstRead = iterator.next();
+        try {
+            await indexedLookupStarted.promise;
+            expect(await firstRead).toEqual({
+                done: false,
+                value: new Uint8Array([1]),
+            });
+            expect(getMany).not.toHaveBeenCalled();
+
+            indexedLookupGate.resolve();
+            expect(await iterator.next()).toEqual({
+                done: false,
+                value: new Uint8Array([2]),
+            });
+            expect(await iterator.next()).toEqual({
+                done: false,
+                value: new Uint8Array([3]),
+            });
+            expect(await iterator.next()).toEqual({
+                done: true,
+                value: undefined,
+            });
+
+            expect(requestedHeadBatches.flat()).not.toContain(heads[0]);
+            expect(
+                requestedHeadBatches.flat().filter((head) => head === heads[1])
+            ).toHaveLength(2);
+            expect(
+                requestedHeadBatches.flat().filter((head) => head === heads[2])
+            ).toHaveLength(2);
+            expect(perIndexGets).toEqual([]);
+            const diagnostics = files.lastReadDiagnostics!;
+            expect(diagnostics.chunkBatchRemoteReclassificationCount).toBe(1);
+            expect(diagnostics.chunkPersistedRemoteBatchSkippedIndexCount).toBe(
+                0
+            );
+            expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(0);
+            expect(diagnostics.activeManifestHeadBatches).toBe(0);
+            expect(diagnostics.finalKnownChunkCount).toBe(0);
+            expect(files.getActiveTransfers()).toEqual([]);
+            expect((files as any).activeFileChangeSignals.size).toBe(0);
+        } finally {
+            indexedLookupGate.resolve();
+            await iterator.return?.();
+        }
+    });
+
+    it("keeps optimistic deferred-hit counters source-correct during reclassification", async () => {
+        const chunks = Array.from(
+            { length: 12 },
+            (_, index) => new Uint8Array([index + 1])
+        );
+        const { entriesByHead, fallbackIndices, file, files, heads } =
+            createPersistedManifestStreamHarness(chunks);
+        for (let index = 0; index < file.chunkCount; index++) {
+            fallbackIndices.add(index);
+        }
+        (files as any).countLocalChunks = async () => file.chunkCount;
+        (files as any).countLocalChunkBlocks = async () => file.chunkCount;
+
+        const requestedChunkIds: string[][] = [];
+        (files.files.index as any).search = vi.fn(
+            async (request: any): Promise<any[]> => {
+                requestedChunkIds.push(
+                    request.query.flatMap((query: any) =>
+                        (query.or ?? [query]).map(
+                            (candidate: any) => candidate.value
+                        )
+                    )
+                );
+                return [];
+            }
+        );
+        const getMany = vi.fn(
+            async (requestedHeads: string[], options: any): Promise<any[]> => {
+                if (options.remote === false) {
+                    return requestedHeads.map((head) =>
+                        head === heads[3] ? undefined : entriesByHead.get(head)
+                    );
+                }
+                return requestedHeads.map((head) => entriesByHead.get(head));
+            }
+        );
+        (files.files.log.log as any).getMany = getMany;
+
+        expect(await file.getFile(files, { as: "joined" })).toEqual(
+            concat(chunks)
+        );
+
+        expect(requestedChunkIds.flat()).toEqual([`${file.id}:3`]);
+        expect(getMany).toHaveBeenCalled();
+        const diagnostics = files.lastReadDiagnostics!;
+        expect(diagnostics.chunkBatchRemoteReclassificationCount).toBe(1);
+        expect(diagnostics.chunkBatchResultCount).toBe(0);
+        expect(diagnostics.prefetchedChunkCount).toBe(file.chunkCount);
+        expect(diagnostics.chunkPersistedRemoteBatchSkippedIndexCount).toBe(0);
+        expect(diagnostics.chunkManifestHeadBatchMissingCount).toBe(0);
+        expect(diagnostics.activeManifestHeadBatches).toBe(0);
+        expect(diagnostics.finalKnownChunkCount).toBe(0);
+        expect(files.getActiveTransfers()).toEqual([]);
+        expect((files as any).activeFileChangeSignals.size).toBe(0);
+    });
+
     it("aborts a pending remote manifest-head batch and releases listeners when the stream closes", async () => {
         const { entriesByHead, file, files, heads, perIndexGets } =
             createPersistedManifestStreamHarness([
