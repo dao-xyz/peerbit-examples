@@ -2539,6 +2539,7 @@ export class LargeFile extends AbstractFile {
             chunkManifestEntryPersistenceSucceededCount: 0,
             chunkManifestEntryPersistenceFailedCount: 0,
             chunkManifestEntryRawFetchAttemptCount: 0,
+            chunkManifestEntryLocalDecodeMissCount: 0,
             chunkManifestEntryPersistenceErrors: [] as {
                 index: number;
                 message: string;
@@ -3026,9 +3027,13 @@ export class LargeFile extends AbstractFile {
                     // worst-case RPC duration would exhaust retries almost
                     // immediately when providers answer with a fast miss.
                     const maxAttempts = Math.max(sources.length, 64);
+                    let rawFetchAttempts = 0;
+                    let entry: Awaited<
+                        ReturnType<typeof files.files.log.log.get>
+                    > = undefined;
                     for (
                         let attempt = 0;
-                        !blockPresent && attempt < maxAttempts;
+                        entry == null && attempt < maxAttempts;
                         attempt++
                     ) {
                         persistenceSignal.throwIfClosed();
@@ -3040,47 +3045,85 @@ export class LargeFile extends AbstractFile {
                             1,
                             Math.min(attemptBudget, remaining)
                         );
-                        const source = sources[attempt % sources.length];
-                        debug.chunkManifestEntryRawFetchAttemptCount += 1;
-                        try {
-                            const rawEntry = await runChunkDecodeOperation(
-                                [index],
-                                persistenceSignal,
-                                () =>
-                                    blocks.get(head, {
-                                        remote: {
-                                            timeout: attemptTimeout,
-                                            replicate: true,
-                                            from: source,
-                                            signal: persistenceSignal.abortSignal,
-                                        },
-                                    }),
-                                "Raw manifest entry persistence cancelled"
-                            );
-                            if (rawEntry) {
-                                blockPresent = await hasLocalBlock();
-                                if (!blockPresent) {
+                        if (!blockPresent) {
+                            const source =
+                                sources[rawFetchAttempts % sources.length];
+                            rawFetchAttempts += 1;
+                            debug.chunkManifestEntryRawFetchAttemptCount += 1;
+                            try {
+                                const rawEntry = await runChunkDecodeOperation(
+                                    [index],
+                                    persistenceSignal,
+                                    () =>
+                                        blocks.get(head, {
+                                            remote: {
+                                                timeout: attemptTimeout,
+                                                replicate: true,
+                                                from: source,
+                                                signal: persistenceSignal.abortSignal,
+                                            },
+                                        }),
+                                    "Raw manifest entry persistence cancelled"
+                                );
+                                if (rawEntry) {
+                                    blockPresent = await hasLocalBlock();
+                                    if (!blockPresent) {
+                                        lastError = new Error(
+                                            `Raw manifest entry '${head}' was fetched but not stored locally`
+                                        );
+                                    }
+                                }
+                            } catch (error) {
+                                persistenceSignal.throwIfClosed();
+                                if (!isRetryableChunkLookupError(error)) {
+                                    throw error;
+                                }
+                                lastError = error;
+                            }
+                        }
+                        if (blockPresent) {
+                            let localDecodeMissed = false;
+                            try {
+                                entry = await runChunkDecodeOperation(
+                                    [index],
+                                    persistenceSignal,
+                                    () =>
+                                        files.files.log.log.get(head, {
+                                            remote: false,
+                                        }),
+                                    "Stored manifest entry decode cancelled"
+                                );
+                                localDecodeMissed = entry == null;
+                            } catch (error) {
+                                persistenceSignal.throwIfClosed();
+                                if (!isRetryableChunkLookupError(error)) {
+                                    throw error;
+                                }
+                                lastError = error;
+                            }
+                            if (!entry) {
+                                if (localDecodeMissed) {
+                                    debug.chunkManifestEntryLocalDecodeMissCount += 1;
                                     lastError = new Error(
-                                        `Raw manifest entry '${head}' was fetched but not stored locally`
+                                        `Stored manifest entry '${head}' could not be decoded for chunk ${index + 1}/${resolvedFile.chunkCount}`
                                     );
                                 }
+                                // Presence is only a point-in-time observation.
+                                // Adaptive pruning can remove the exact block
+                                // between has() and local decode, so recheck and
+                                // repair that one block on the next attempt.
+                                blockPresent = await hasLocalBlock();
                             }
-                        } catch (error) {
-                            persistenceSignal.throwIfClosed();
-                            if (!isRetryableChunkLookupError(error)) {
-                                throw error;
-                            }
-                            lastError = error;
                         }
                         if (
-                            !blockPresent &&
+                            !entry &&
                             attempt + 1 < maxAttempts &&
                             Date.now() < deadline
                         ) {
-                            // A provider-less block read can miss immediately.
-                            // Back off under the persistence signal so a full
-                            // transfer deadline cannot turn into a tight burst
-                            // of dozens of raw block requests.
+                            // An exact raw fetch or local decode can miss
+                            // immediately. Back off under the persistence signal
+                            // so a full transfer deadline cannot turn into a tight
+                            // burst of repeated block operations.
                             const retryDelay = Math.min(
                                 attemptBudget,
                                 25 * 2 ** Math.min(attempt, 8),
@@ -3096,27 +3139,12 @@ export class LargeFile extends AbstractFile {
                         }
                     }
                     persistenceSignal.throwIfClosed();
-                    if (!blockPresent) {
+                    if (!entry) {
                         throw (
                             lastError ??
                             new Error(
                                 `Failed to persist exact manifest entry '${head}' for chunk ${index + 1}/${resolvedFile.chunkCount}`
                             )
-                        );
-                    }
-                    const entry = await runChunkDecodeOperation(
-                        [index],
-                        persistenceSignal,
-                        () =>
-                            files.files.log.log.get(head, {
-                                remote: false,
-                            }),
-                        "Stored manifest entry decode cancelled"
-                    );
-                    persistenceSignal.throwIfClosed();
-                    if (!entry) {
-                        throw new Error(
-                            `Stored manifest entry '${head}' could not be decoded for chunk ${index + 1}/${resolvedFile.chunkCount}`
                         );
                     }
                     if (entry.hash && entry.hash !== head) {

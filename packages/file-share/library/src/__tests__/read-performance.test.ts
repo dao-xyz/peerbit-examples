@@ -1975,6 +1975,124 @@ describe("large-file read scheduling", () => {
         ).toBe(1);
     });
 
+    it("repairs an exact block pruned between presence and local decode", async () => {
+        const { chunkFiles, entriesByHead, file, files, heads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const head = heads[0]!;
+        const entry = entriesByHead.get(head)!;
+        let blockPresent = true;
+        let localDecodeAttempts = 0;
+        const rawGet = vi.fn(async (_head: string, options: any) => {
+            expect(options.remote).toMatchObject({
+                replicate: true,
+                from: ["writer-peer"],
+            });
+            blockPresent = true;
+            return new Uint8Array([1]);
+        });
+        const localDecode = vi.fn(async (_head: string, options: any) => {
+            expect(options).toEqual({ remote: false });
+            localDecodeAttempts += 1;
+            if (localDecodeAttempts === 1) {
+                blockPresent = false;
+                return undefined;
+            }
+            return entry;
+        });
+        const log = files.files.log.log as any;
+        Object.defineProperty(log, "getMany", {
+            configurable: true,
+            value: async (requestedHeads: string[]) =>
+                requestedHeads.map(() => undefined),
+        });
+        Object.defineProperty(log, "get", {
+            configurable: true,
+            value: localDecode,
+        });
+        Object.defineProperty(log, "blocks", {
+            configurable: true,
+            value: {
+                hasMany: async (requestedHeads: string[]) =>
+                    requestedHeads.map(() => blockPresent),
+                has: async () => blockPresent,
+                get: rawGet,
+            },
+        });
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        await expect(file.getFile(files, { as: "joined" })).resolves.toEqual(
+            new Uint8Array([1])
+        );
+
+        expect(localDecode).toHaveBeenCalledTimes(2);
+        expect(rawGet).toHaveBeenCalledOnce();
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryLocalDecodeMissCount
+        ).toBe(1);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryRawFetchAttemptCount
+        ).toBe(1);
+        expect(
+            files.lastReadDiagnostics
+                ?.chunkManifestEntryPersistenceSucceededCount
+        ).toBe(1);
+    });
+
+    it("bounds repeated exact local decode misses by the persistence deadline", async () => {
+        const { chunkFiles, file, files } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        const localDecode = vi.fn(async () => undefined);
+        const rawGet = vi.fn(async () => {
+            throw new Error(
+                "unexpected raw fetch while the block remains local"
+            );
+        });
+        const log = files.files.log.log as any;
+        Object.defineProperty(log, "getMany", {
+            configurable: true,
+            value: async (requestedHeads: string[]) =>
+                requestedHeads.map(() => undefined),
+        });
+        Object.defineProperty(log, "get", {
+            configurable: true,
+            value: localDecode,
+        });
+        Object.defineProperty(log, "blocks", {
+            configurable: true,
+            value: {
+                hasMany: async (requestedHeads: string[]) =>
+                    requestedHeads.map(() => true),
+                has: async () => true,
+                get: rawGet,
+            },
+        });
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        const iterator = file
+            .streamFile(files, { timeout: 500 })
+            [Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([1]),
+        });
+        await expect(iterator.next()).rejects.toThrow("could not be decoded");
+
+        expect(localDecode.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(localDecode.mock.calls.length).toBeLessThan(10);
+        expect(rawGet).not.toHaveBeenCalled();
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryLocalDecodeMissCount
+        ).toBe(localDecode.mock.calls.length);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryRawFetchAttemptCount
+        ).toBe(0);
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryPersistenceFailedCount
+        ).toBe(1);
+    });
+
     it("continues local exact-head batches before the remote circuit recovers", async () => {
         const chunks = Array.from(
             { length: 6 },

@@ -5276,18 +5276,35 @@ describe("index", () => {
 
             expect(firstHeadGets).to.be.greaterThan(1);
             expect(
-                filestore.lastReadDiagnostics?.chunkManifestHeadMisses?.[0]
+                filestore.lastReadDiagnostics
+                    ?.chunkManifestEntryLocalDecodeMissCount
             ).to.eq(1);
+            expect(
+                filestore.lastReadDiagnostics
+                    ?.chunkManifestEntryPersistenceSucceededCount
+            ).to.eq(1);
+            expect(
+                filestore.lastReadDiagnostics
+                    ?.chunkManifestEntryRawFetchAttemptCount
+            ).to.eq(0);
             const resolvedRoutes = Object.values(
                 filestore.lastReadDiagnostics?.chunkResolved ?? {}
             );
-            expect(resolvedRoutes[0]).to.eq("manifest-head-get");
+            expect(resolvedRoutes[0]).to.eq("manifest-entry-persistence");
             expect(
                 resolvedRoutes.every(
                     (route) =>
-                        route === "manifest-head-get" || route === "cached"
+                        route === "manifest-entry-persistence" ||
+                        route === "cached"
                 )
             ).to.be.true;
+            expect(
+                filestore.lastReadDiagnostics
+                    ?.chunkManifestEntryContentMismatchIndices
+            ).to.deep.eq([]);
+            expect((filestore as any).retainedChunkEntryHeads).to.deep.eq(
+                new Set(chunkEntryHeads)
+            );
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
