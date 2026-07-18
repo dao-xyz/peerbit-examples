@@ -15,23 +15,23 @@ on:
                 description: File size in MiB
                 required: true
                 type: number
-                default: 512
+                default: 1024
             runs:
-                description: Number of benchmark runs
+                description: Exact paired-run contract (must be 2)
                 required: true
                 type: number
-                default: 5
+                default: 2
             reader_cohort:
                 description: Reader benchmark cohort
                 required: true
                 type: choice
-                default: live-replicator
+                default: cold-persisted-read
                 options:
                     - live-replicator
                     - cold-observer
                     - cold-persisted-read
             download_sink:
-                description: Browser output sink (hash-only isolates Peerbit transfer; OPFS measures native browser persistence)
+                description: Browser output sink
                 required: true
                 type: choice
                 default: hash-only
@@ -40,12 +40,12 @@ on:
                     - opfs
                     - node-file
             min_upload_mbps:
-                description: Fail if median upload throughput is below this value (0 disables)
+                description: Unused by this temporary paired diagnostic
                 required: true
                 type: number
                 default: 0
             min_download_mbps:
-                description: Fail if median download throughput is below this value (0 disables)
+                description: Unused by this temporary paired diagnostic
                 required: true
                 type: number
                 default: 0
@@ -53,74 +53,519 @@ on:
 permissions:
     contents: read
 
-env:
-    FILE_SHARE_BENCHMARK_BASE_URL: https://files.apps.peerbit.org
-
 jobs:
-    benchmark:
+    provider_capacity_pair:
+        name: Exact 1 GiB provider-capacity pair
         runs-on: ubuntu-22.04
         timeout-minutes: 180
         concurrency:
-            group: file-share-bench-${{ github.ref_name }}-${{ inputs.scenario }}-${{ inputs.file_mb }}-${{ inputs.download_sink }}
+            group: fileshare-provider-capacity-pair-${{ github.ref_name }}
             cancel-in-progress: false
+        env:
+            BASE_CORE_COMMIT: b385da50f88b0cb17b77faf684ee869200dac3fd
+            HEAD_CORE_COMMIT: 88425fe4d865a2d924a07daaf3b74e54f173d967
+            EXAMPLES_COMMIT: e29c0c89eb44927e6c83b5e285b01d8da24d8d5b
+            EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
+            EXPECTED_SHA256_BASE64: bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=
+            EXPECTED_CRC32_HEX: 125fb916
+            HARNESS_ROOT: ${{ github.workspace }}/harness
+            BASE_CORE_ROOT: ${{ github.workspace }}/core-baseline
+            EXAMPLES_SOURCE: ${{ github.workspace }}/examples-source
+            RESULTS_ROOT: ${{ github.workspace }}/evidence
+            PREPARED_ROOT: /tmp/peerbit-fileshare-prepared
+            NODE_OPTIONS: --no-warnings
 
         steps:
-            - name: Checkout
+            - name: Initialize evidence directory
+              run: |
+                  set -euo pipefail
+                  mkdir -p "$RESULTS_ROOT/logs"
+                  date -u +%FT%TZ > "$RESULTS_ROOT/initialized-at.txt"
+
+            - name: Validate exact invocation
+              env:
+                  FILE_MB: ${{ inputs.file_mb }}
+                  PAIR_RUNS: ${{ inputs.runs }}
+                  SCENARIO: ${{ inputs.scenario }}
+                  READER_COHORT: ${{ inputs.reader_cohort }}
+                  DOWNLOAD_SINK: ${{ inputs.download_sink }}
+              run: |
+                  set -euo pipefail
+                  test "$FILE_MB" = "1024"
+                  test "$PAIR_RUNS" = "2"
+                  test "$SCENARIO" = "local"
+                  test "$READER_COHORT" = "cold-persisted-read"
+                  test "$DOWNLOAD_SINK" = "hash-only"
+
+            - name: Reclaim ephemeral runner disk
+              run: |
+                  set -euo pipefail
+                  cleanup_paths=(
+                    /usr/share/dotnet
+                    /usr/local/lib/android
+                    /opt/ghc
+                    /usr/local/.ghcup
+                    /opt/hostedtoolcache/CodeQL
+                  )
+                  sudo rm -rf "${cleanup_paths[@]}"
+                  df -h /
+
+            - name: Checkout immutable head harness
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit
+                  ref: ${{ env.HEAD_CORE_COMMIT }}
+                  path: harness
+                  fetch-depth: 1
+                  persist-credentials: false
+
+            - name: Checkout baseline core
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit
+                  ref: ${{ env.BASE_CORE_COMMIT }}
+                  path: core-baseline
+                  fetch-depth: 1
+                  persist-credentials: false
+
+            - name: Checkout pinned examples source
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit-examples
+                  ref: ${{ env.EXAMPLES_COMMIT }}
+                  path: examples-source
+                  fetch-depth: 1
+                  persist-credentials: false
 
             - name: Setup pnpm
               uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
               with:
+                  version: 10.26.1
                   run_install: false
 
             - name: Setup Node
               uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
-                  cache: pnpm
-                  cache-dependency-path: pnpm-lock.yaml
 
-            - name: Install dependencies
-              run: pnpm install --frozen-lockfile
-
-            - name: Install Playwright Chromium
-              run: pnpm exec playwright install --with-deps chromium
-
-            - name: Build file-share library
-              run: pnpm --filter @peerbit/please-lib build
-
-            - name: Run benchmark
-              env:
-                  PW_BENCH: "1"
-                  PW_BENCH_SCENARIO: ${{ inputs.scenario }}
-                  PW_READER_COHORT: ${{ inputs.reader_cohort }}
-                  PW_DOWNLOAD_SINK: ${{ inputs.download_sink }}
-                  PW_FILE_MB: ${{ inputs.file_mb }}
-                  PW_BASE_URL: ${{ inputs.scenario == 'prod' && env.FILE_SHARE_BENCHMARK_BASE_URL || '' }}
-              working-directory: packages/file-share/frontend
+            - name: Verify immutable inputs
               run: |
-                  mkdir -p "$GITHUB_WORKSPACE/bench-results"
-                  for i in $(seq 1 "${{ inputs.runs }}"); do
-                    echo "Starting file-share benchmark run $i/${{ inputs.runs }}"
-                    export PW_RESULT_FILE="$GITHUB_WORKSPACE/bench-results/run-$i.json"
-                    npx playwright test -c playwright.config.ts tests/transfer.bench.e2e.spec.ts --project chromium
-                  done
+                  set -euo pipefail
+                  test "$(git -C "$HARNESS_ROOT" rev-parse HEAD)" = "$HEAD_CORE_COMMIT"
+                  test "$(git -C "$BASE_CORE_ROOT" rev-parse HEAD)" = "$BASE_CORE_COMMIT"
+                  test "$(git -C "$EXAMPLES_SOURCE" rev-parse HEAD)" = "$EXAMPLES_COMMIT"
+                  test -z "$(git -C "$HARNESS_ROOT" status --porcelain)"
+                  test -z "$(git -C "$BASE_CORE_ROOT" status --porcelain)"
+                  test -z "$(git -C "$EXAMPLES_SOURCE" status --porcelain)"
+                  test "$(sha256sum "$EXAMPLES_SOURCE/pnpm-lock.yaml" | cut -d' ' -f1)" = "$EXAMPLES_LOCK_SHA256"
 
-            - name: Summarize results
+            - name: Install build and browser prerequisites
+              run: |
+                  set -euo pipefail
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  "$HARNESS_ROOT/scripts/ci/install-wasm-pack.sh"
+                  rustup target add wasm32-unknown-unknown
+                  pnpm dlx playwright@1.58.0 install --with-deps chromium
+
+            - name: Record environment and paired order
+              run: |
+                  set -euo pipefail
+                  mkdir -p "$RESULTS_ROOT/logs"
+                  {
+                    date -u +%FT%TZ
+                    uname -a
+                    lscpu
+                    free -b
+                    df -B1 /
+                    pnpm --version
+                    node --version
+                  } > "$RESULTS_ROOT/environment.txt"
+                  if (( GITHUB_RUN_ID % 2 == 0 )); then
+                    printf 'head\nbaseline\n' > "$RESULTS_ROOT/order.txt"
+                  else
+                    printf 'baseline\nhead\n' > "$RESULTS_ROOT/order.txt"
+                  fi
+                  cat "$RESULTS_ROOT/order.txt"
+
+            - name: Run exact paired benchmark
               env:
-                  BENCH_SCENARIO: ${{ inputs.scenario }}
-                  BENCH_READER_COHORT: ${{ inputs.reader_cohort }}
-                  BENCH_DOWNLOAD_SINK: ${{ inputs.download_sink }}
-                  BENCH_FILE_MB: ${{ inputs.file_mb }}
-                  BENCH_RUNS: ${{ inputs.runs }}
-                  BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
-                  BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
-              run: node scripts/summarize-file-share-benchmarks.mjs
+                  FILE_MB: ${{ inputs.file_mb }}
+              run: |
+                  set -uo pipefail
+                  mkdir -p "$RESULTS_ROOT/logs"
+                  overall=0
+                  sequence=0
 
-            - name: Upload artifacts
+                  terminate_group() {
+                    pgid="$1"
+                    lifecycle_log="$2"
+                    ps -eo pid,ppid,pgid,args |
+                      awk -v pgid="$pgid" 'NR == 1 || $3 == pgid' >> "$lifecycle_log"
+                    if kill -0 -- "-$pgid" 2>/dev/null; then
+                      kill -TERM -- "-$pgid" 2>/dev/null || true
+                      for _ in $(seq 1 10); do
+                        if ! kill -0 -- "-$pgid" 2>/dev/null; then
+                          break
+                        fi
+                        sleep 1
+                      done
+                    fi
+                    if kill -0 -- "-$pgid" 2>/dev/null; then
+                      kill -KILL -- "-$pgid" 2>/dev/null || true
+                      sleep 1
+                    fi
+                    ps -eo pid,ppid,pgid,args |
+                      awk -v pgid="$pgid" 'NR == 1 || $3 == pgid' >> "$lifecycle_log"
+                    ! kill -0 -- "-$pgid" 2>/dev/null
+                  }
+
+                  run_variant() {
+                    variant="$1"
+                    sequence=$((sequence + 1))
+                    if [[ "$variant" == "baseline" ]]; then
+                      core_root="$BASE_CORE_ROOT"
+                      core_commit="$BASE_CORE_COMMIT"
+                    else
+                      core_root="$HARNESS_ROOT"
+                      core_commit="$HEAD_CORE_COMMIT"
+                    fi
+                    prepared="$PREPARED_ROOT-$sequence-$variant"
+                    result_dir="$RESULTS_ROOT/$sequence-$variant"
+                    summary_file="$RESULTS_ROOT/$sequence-$variant-summary.json"
+                    log_file="$RESULTS_ROOT/logs/$sequence-$variant.log"
+                    exit_file="$RESULTS_ROOT/$sequence-$variant-exit-code.txt"
+                    disk_file="$RESULTS_ROOT/$sequence-$variant-disk.tsv"
+                    disk_marker="$RESULTS_ROOT/$sequence-$variant-disk-abort.txt"
+
+                    available="$(df --output=avail -B1 / | tail -1 | tr -d ' ')"
+                    if (( available < 8589934592 )); then
+                      printf 'insufficient pre-run disk: %s bytes\n' "$available" | tee "$disk_marker"
+                      printf '125\n' > "$exit_file"
+                      overall=1
+                      return
+                    fi
+
+                    test "$(git -C "$core_root" rev-parse HEAD)" = "$core_commit"
+                    test -z "$(git -C "$core_root" status --porcelain)"
+                    printf 'captured_at\tavailable_bytes\tmemory_available_bytes\n' > "$disk_file"
+                    sync
+                    sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true
+
+                    (
+                      cd "$HARNESS_ROOT"
+                      benchmark_args=(
+                        scripts/file-share/run-file-share-benchmark.mjs
+                        --scenario upload
+                        --integration-mode link
+                        --peerbit-root "$core_root"
+                        --examples-root "$prepared"
+                        --source "$EXAMPLES_SOURCE"
+                        --examples-ref "$EXAMPLES_COMMIT"
+                        --peerbit-ref-label "$core_commit"
+                        --expected-peerbit-commit "$core_commit"
+                        --require-clean-peerbit
+                        --expected-examples-commit "$EXAMPLES_COMMIT"
+                        --expected-examples-lockfile-sha256 "$EXAMPLES_LOCK_SHA256"
+                        --results-dir "$result_dir"
+                        --summary-file "$summary_file"
+                        --file-mb "$FILE_MB"
+                        --runs 1
+                        --mode fixed1
+                        --network local
+                        --fresh
+                        --upload-timeout-ms 1800000
+                        --download-timeout-ms 5400000
+                        --download-sink hash-only
+                        --post-upload-monitor-ms 5000
+                        --poll-ms 1000
+                        --min-ready-seeders 1
+                        --ready-timeout-ms 300000
+                        --sample-ms 15000
+                        --sample-count 4
+                        --target-seeders 2
+                        --reader-local-chunk-target 1024
+                        --reader-local-chunk-max-overshoot 8
+                        --fixture-seed peerbit-file-share-benchmark-v1
+                      )
+                      exec setsid timeout --signal=INT --kill-after=30s 75m node "${benchmark_args[@]}"
+                    ) > >(tee "$log_file") 2>&1 &
+                    benchmark_pid=$!
+                    benchmark_pgid=""
+                    for _ in $(seq 1 50); do
+                      benchmark_pgid="$(
+                        ps -o pgid= -p "$benchmark_pid" 2>/dev/null |
+                          tr -d ' ' ||
+                          true
+                      )"
+                      if [[ "$benchmark_pgid" == "$benchmark_pid" ]]; then
+                        break
+                      fi
+                      if ! kill -0 "$benchmark_pid" 2>/dev/null; then
+                        break
+                      fi
+                      sleep 0.1
+                    done
+                    if [[ -z "$benchmark_pgid" || "$benchmark_pgid" != "$benchmark_pid" ]]; then
+                      printf 'benchmark process group isolation failed: pid=%s pgid=%s\n' "$benchmark_pid" "$benchmark_pgid" |
+                        tee "$RESULTS_ROOT/$sequence-$variant-process-group-error.txt"
+                      kill -TERM "$benchmark_pid" 2>/dev/null || true
+                      wait "$benchmark_pid" 2>/dev/null || true
+                      sleep 2
+                      pkill -KILL -f "$prepared" 2>/dev/null || true
+                      printf '126\n' > "$exit_file"
+                      overall=1
+                      printf '%s\n' "$overall" > "$RESULTS_ROOT/overall-run-status.txt"
+                      exit 0
+                    fi
+
+                    (
+                      while kill -0 "$benchmark_pid" 2>/dev/null; do
+                        available="$(df --output=avail -B1 / | tail -1 | tr -d ' ')"
+                        memory="$(awk '/MemAvailable:/ { print $2 * 1024 }' /proc/meminfo)"
+                        printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$available" "$memory" >> "$disk_file"
+                        if (( available < 2147483648 )); then
+                          printf 'disk watchdog stopped %s at %s available bytes\n' "$variant" "$available" | tee "$disk_marker"
+                          kill -TERM -- "-$benchmark_pgid" 2>/dev/null || true
+                          break
+                        fi
+                        sleep 15
+                      done
+                    ) &
+                    monitor_pid=$!
+
+                    set +e
+                    wait "$benchmark_pid"
+                    code=$?
+                    set -e
+                    kill "$monitor_pid" 2>/dev/null || true
+                    wait "$monitor_pid" 2>/dev/null || true
+                    printf '%s\n' "$code" > "$exit_file"
+                    if (( code != 0 )); then
+                      overall=1
+                    fi
+
+                    lifecycle_log="$RESULTS_ROOT/logs/$sequence-$variant-process-group.log"
+                    if ! terminate_group "$benchmark_pgid" "$lifecycle_log"; then
+                      printf 'benchmark process group survived cleanup: %s\n' "$benchmark_pgid" |
+                        tee -a "$lifecycle_log"
+                      overall=1
+                    fi
+                    rm -rf "$prepared"
+                    rm -rf "$core_root/node_modules"
+                    find "$core_root/packages" -type d -name dist -prune -exec rm -rf {} +
+                    sync
+                    {
+                      free -b
+                      df -B1 /
+                    } >> "$RESULTS_ROOT/logs/$sequence-$variant-after-cleanup.log"
+                  }
+
+                  while IFS= read -r variant; do
+                    run_variant "$variant"
+                  done < "$RESULTS_ROOT/order.txt"
+                  printf '%s\n' "$overall" > "$RESULTS_ROOT/overall-run-status.txt"
+                  exit 0
+
+            - name: Build paired comparison
+              if: always()
+              run: |
+                  node --input-type=module <<'NODE'
+                  import fs from "node:fs";
+                  import path from "node:path";
+                  import { isDeepStrictEqual } from "node:util";
+
+                  const root = process.env.RESULTS_ROOT;
+                  fs.mkdirSync(root, { recursive: true });
+                  const expected = {
+                    harness: process.env.HEAD_CORE_COMMIT,
+                    baseline: process.env.BASE_CORE_COMMIT,
+                    head: process.env.HEAD_CORE_COMMIT,
+                    examples: process.env.EXAMPLES_COMMIT,
+                    lock: process.env.EXAMPLES_LOCK_SHA256,
+                    sha256: process.env.EXPECTED_SHA256_BASE64,
+                    crc32: process.env.EXPECTED_CRC32_HEX,
+                    cohort: "observer-persistent-prefix-b1026-i0",
+                  };
+                  const output = path.join(root, "paired-comparison.json");
+
+                  const loadVariant = (variant) => {
+                    const name = fs
+                      .readdirSync(root)
+                      .find((entry) => entry.endsWith("-" + variant + "-summary.json"));
+                    if (!name) throw new Error("Missing " + variant + " summary");
+                    const summary = JSON.parse(fs.readFileSync(path.join(root, name), "utf8"));
+                    const result = summary.results?.[0];
+                    if (!result) throw new Error("Missing " + variant + " result");
+                    const diagnostics = result.readerDiagnostics?.lastReadDiagnostics;
+                    const issues = [];
+                    const check = (condition, message) => {
+                      if (!condition) issues.push(message);
+                    };
+                    check(summary.status === "passed", "summary-status");
+                    check(summary.schema?.version === 4, "summary-schema");
+                    check(result.schema?.version === 7, "result-schema");
+                    check(result.invocation?.schema?.version === 3, "invocation-schema");
+                    check(summary.harnessProvenance?.resolvedCommit === expected.harness, "harness-commit");
+                    check(summary.harnessProvenance?.dirty === false, "harness-dirty");
+                    check(summary.peerbitProvenance?.resolvedCommit === expected[variant], "peerbit-commit");
+                    check(summary.peerbitProvenance?.dirty === false, "peerbit-dirty");
+                    check(summary.examplesProvenance?.resolvedCommit === expected.examples, "examples-commit");
+                    check(summary.examplesProvenance?.lockfileSha256 === expected.lock, "examples-lock");
+                    check(result.integrity?.sourceSha256Base64 === expected.sha256, "source-sha256");
+                    check(result.integrity?.libraryComputedSha256Base64 === expected.sha256, "library-sha256");
+                    check(result.integrity?.manifestSha256Base64 === expected.sha256, "manifest-sha256");
+                    check(result.integrity?.sourceCrc32Hex === expected.crc32, "source-crc32");
+                    check(result.integrity?.downloadedCrc32Hex === expected.crc32, "download-crc32");
+                    check(result.integrityVerified === true, "integrity-verified");
+                    check(result.errorCount === 0 && result.errorCollectionComplete === true, "errors");
+                    check(result.requestFailureCount === 0 && result.requestFailureCollectionComplete === true, "request-failures");
+                    check(result.readerLocalityControl?.status === "complete", "locality-control");
+                    check(result.readerLocalityCohortKey === expected.cohort, "locality-cohort");
+                    check(diagnostics?.chunkManifestEntryPersistenceFailedCount === 0, "persistence-failed");
+                    check(diagnostics?.chunkManifestEntryPersistenceMissingIndices?.length === 0, "persistence-missing");
+                    check(diagnostics?.chunkManifestEntryContentMismatchIndices?.length === 0, "persistence-content");
+                    const boundary = diagnostics?.chunkWriteFinishedAt?.["1023"];
+                    const firstHalfMs = boundary - diagnostics?.startedAt;
+                    const secondHalfMs = diagnostics?.finishedAt - boundary;
+                    const demandValues = Object.values(diagnostics?.chunkDemandWaitMs ?? {});
+                    const attempts = Object.values(diagnostics?.chunkAttempts ?? {});
+                    const sum = (values) => values.reduce((total, value) => total + value, 0);
+                    const firstHalfDemandWaitMs = sum(demandValues.slice(0, 1024));
+                    const secondHalfDemandWaitMs = sum(demandValues.slice(1024));
+                    const metrics = {
+                      libraryStreamWallMs: result.libraryStreamWallMs,
+                      firstHalfMs,
+                      secondHalfMs,
+                      demandWaitSumMs: result.readTransfer?.demandWait?.sumMs,
+                      firstHalfDemandWaitMs,
+                      secondHalfDemandWaitMs,
+                      maxDemandWaitMs: result.readTransfer?.demandWait?.maxMs,
+                      over10sDemandWaitCount: result.readTransfer?.demandWait?.over10sCount,
+                      maxChunkAttempts: Math.max(...attempts),
+                    };
+                    check(
+                      Object.values(metrics).every(
+                        (value) => typeof value === "number" && Number.isFinite(value),
+                      ),
+                      "metrics",
+                    );
+                    return { summary, result, issues, metrics, summaryFile: name };
+                  };
+
+                  try {
+                    const baseline = loadVariant("baseline");
+                    const head = loadVariant("head");
+                    const pairedIssues = [];
+                    if (!isDeepStrictEqual(baseline.result.invocation, head.result.invocation)) {
+                      pairedIssues.push("invocation-mismatch");
+                    }
+                    if (baseline.result.readerLocalityCohortKey !== head.result.readerLocalityCohortKey) {
+                      pairedIssues.push("cohort-mismatch");
+                    }
+                    const delta = {};
+                    for (const key of Object.keys(baseline.metrics)) {
+                      delta[key] = {
+                        baseline: baseline.metrics[key],
+                        head: head.metrics[key],
+                        delta: head.metrics[key] - baseline.metrics[key],
+                        headOverBaseline:
+                          baseline.metrics[key] === 0
+                            ? null
+                            : head.metrics[key] / baseline.metrics[key],
+                      };
+                    }
+                    const comparable =
+                      baseline.issues.length === 0 &&
+                      head.issues.length === 0 &&
+                      pairedIssues.length === 0;
+                    const performanceTargetsPassed =
+                      head.metrics.over10sDemandWaitCount === 0 &&
+                      head.metrics.maxChunkAttempts < 4 &&
+                      head.metrics.secondHalfMs <= 46_700 &&
+                      head.metrics.secondHalfDemandWaitMs <= 35_500;
+                    const withinNoiseTolerance = (headValue, baselineValue) =>
+                      headValue <= Math.max(baselineValue * 1.05, baselineValue + 1_000);
+                    const relativeNonRegressionPassed = [
+                      "libraryStreamWallMs",
+                      "secondHalfMs",
+                      "demandWaitSumMs",
+                      "secondHalfDemandWaitMs",
+                    ].every((key) =>
+                      withinNoiseTolerance(head.metrics[key], baseline.metrics[key]),
+                    );
+                    const report = {
+                      schema: { id: "peerbit-file-share-provider-capacity-pair", version: 1 },
+                      generatedAt: new Date().toISOString(),
+                      order: fs.readFileSync(path.join(root, "order.txt"), "utf8").trim().split(/\r?\n/),
+                      expected,
+                      comparable,
+                      performanceTargetsPassed,
+                      relativeNonRegressionPassed,
+                      performanceThresholds: {
+                        maxSecondHalfMs: 46_700,
+                        maxSecondHalfDemandWaitMs: 35_500,
+                        maxOver10sDemandWaitCount: 0,
+                        maxChunkAttemptsExclusive: 4,
+                        relativeNonRegression:
+                          "head <= max(baseline * 1.05, baseline + 1000 ms)",
+                      },
+                      strictGatePassed:
+                        comparable &&
+                        performanceTargetsPassed &&
+                        relativeNonRegressionPassed,
+                      pairedIssues,
+                      baseline: {
+                        summaryFile: baseline.summaryFile,
+                        issues: baseline.issues,
+                        cohort: baseline.result.readerLocalityCohortKey,
+                        metrics: baseline.metrics,
+                      },
+                      head: {
+                        summaryFile: head.summaryFile,
+                        issues: head.issues,
+                        cohort: head.result.readerLocalityCohortKey,
+                        metrics: head.metrics,
+                      },
+                      delta,
+                    };
+                    fs.writeFileSync(output, JSON.stringify(report, null, 2) + "\n");
+                    console.log(JSON.stringify(report, null, 2));
+                  } catch (error) {
+                    const report = {
+                      schema: { id: "peerbit-file-share-provider-capacity-pair", version: 1 },
+                      generatedAt: new Date().toISOString(),
+                      comparable: false,
+                      performanceTargetsPassed: false,
+                      strictGatePassed: false,
+                      error: error?.stack ?? String(error),
+                    };
+                    fs.writeFileSync(output, JSON.stringify(report, null, 2) + "\n");
+                    console.error(report.error);
+                  }
+                  NODE
+
+            - name: Upload paired evidence
               if: always()
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: file-share-benchmark-${{ github.run_id }}
-                  path: bench-results
+                  name: fileshare-provider-capacity-pair-${{ github.run_id }}
+                  path: evidence
                   retention-days: 7
+
+            - name: Enforce paired evidence gate
+              if: always()
+              run: |
+                  node --input-type=module <<'NODE'
+                  import fs from "node:fs";
+                  const root = process.env.RESULTS_ROOT;
+                  const report = JSON.parse(
+                    fs.readFileSync(root + "/paired-comparison.json", "utf8"),
+                  );
+                  const runStatus = fs.readFileSync(
+                    root + "/overall-run-status.txt",
+                    "utf8",
+                  ).trim();
+                  if (runStatus !== "0" || report.strictGatePassed !== true) {
+                    process.exit(1);
+                  }
+                  NODE
