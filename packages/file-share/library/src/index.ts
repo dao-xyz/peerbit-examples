@@ -23,6 +23,7 @@ import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { ReplicationOptions, SharedLog } from "@peerbit/shared-log";
+import { FOREGROUND_READ_MESSAGE_PRIORITY } from "@peerbit/stream-interface";
 import { SHA256 } from "@stablelib/sha256";
 import {
     adaptRemotePersistedReadAhead,
@@ -3061,6 +3062,8 @@ export class LargeFile extends AbstractFile {
                                                 replicate: true,
                                                 from: source,
                                                 signal: persistenceSignal.abortSignal,
+                                                priority:
+                                                    FOREGROUND_READ_MESSAGE_PRIORITY,
                                             },
                                         }),
                                     "Raw manifest entry persistence cancelled"
@@ -3367,6 +3370,7 @@ export class LargeFile extends AbstractFile {
                       replicate: true;
                       from: string[] | undefined;
                       signal: AbortSignal;
+                      priority: number;
                   };
             const readManifestHeadEntries = async (
                 heads: string[],
@@ -3668,6 +3672,8 @@ export class LargeFile extends AbstractFile {
                                             replicate: true,
                                             from,
                                             signal: changeSignal.abortSignal,
+                                            priority:
+                                                FOREGROUND_READ_MESSAGE_PRIORITY,
                                         },
                                         changeSignal
                                     ),

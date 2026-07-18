@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { PutOperation } from "@peerbit/document";
+import { FOREGROUND_READ_MESSAGE_PRIORITY } from "@peerbit/stream-interface";
 import vm from "node:vm";
 import v8 from "node:v8";
 import { concat } from "uint8arrays";
@@ -1524,6 +1525,9 @@ describe("large-file read scheduling", () => {
                 if (options.remote === false) {
                     return requestedHeads.map(() => undefined);
                 }
+                expect(options.remote.priority).toBe(
+                    FOREGROUND_READ_MESSAGE_PRIORITY
+                );
                 return requestedHeads.map((head) =>
                     head === heads[0] ? entriesByHead.get(head) : undefined
                 );
@@ -1929,6 +1933,7 @@ describe("large-file read scheduling", () => {
             expect(options.remote).toMatchObject({
                 replicate: true,
                 from: ["writer-peer"],
+                priority: FOREGROUND_READ_MESSAGE_PRIORITY,
             });
             rawBlockStored = true;
             return new Uint8Array([1]);
