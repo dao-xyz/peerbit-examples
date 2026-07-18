@@ -46,17 +46,18 @@ describe("file-share root list loading", () => {
         });
     });
 
-    it("keeps remote listing for observers", async () => {
+    it("keeps remote listing non-replicating for persisted-read observers", async () => {
         const roots = [{ id: "remote-root" }];
         const search = vi.fn();
         const list = vi.fn().mockResolvedValue(roots);
         const program = {
+            persistChunkReads: true,
             list,
             files: { index: { search } },
         } as unknown as Files;
 
         await expect(listRootFilesForRole(program, false)).resolves.toBe(roots);
-        expect(list).toHaveBeenCalledOnce();
+        expect(list).toHaveBeenCalledExactlyOnceWith({ replicate: false });
         expect(search).not.toHaveBeenCalled();
     });
 

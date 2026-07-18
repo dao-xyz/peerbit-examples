@@ -417,6 +417,65 @@ describe("index", () => {
             }
         );
 
+        it("applies list replication policy to root and ready-root searches", async () => {
+            const filestore = await peer.open(new Files());
+            const fileId = "list-replication-policy";
+            const pending = new LargeFile({
+                id: fileId,
+                name: "list-replication-policy.bin",
+                size: 1n,
+                chunkCount: 1,
+                ready: false,
+            });
+            const ready = new LargeFile({
+                id: fileId,
+                name: pending.name,
+                size: pending.size,
+                chunkCount: pending.chunkCount,
+                ready: true,
+                finalHash: sha256Base64Sync(new Uint8Array([1])),
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const searchOptions: any[] = [];
+            (filestore.files.index as any).search = async (
+                _request: unknown,
+                options: any
+            ) => {
+                searchOptions.push(options);
+                return searchOptions.length % 2 === 1 ? [pending] : [ready];
+            };
+
+            const expectListReplication = async (
+                expected: boolean,
+                options?: { replicate?: boolean }
+            ) => {
+                const firstCall = searchOptions.length;
+                const listed = await filestore.list(options);
+                expect(listed).to.deep.eq([ready]);
+                const calls = searchOptions.slice(firstCall);
+                expect(calls).to.have.length(2);
+                expect(calls.map((call) => call.remote.replicate)).to.deep.eq([
+                    expected,
+                    expected,
+                ]);
+            };
+
+            try {
+                filestore.persistChunkReads = true;
+                await expectListReplication(false, { replicate: false });
+
+                filestore.persistChunkReads = false;
+                await expectListReplication(false);
+
+                filestore.persistChunkReads = true;
+                await expectListReplication(true);
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+            }
+        });
+
         it("keeps only current or pending self-authored puts and signed deletes", async () => {
             const filestore = await peer.open(new Files());
             const fileId = "self-authored-pruning";
@@ -3139,6 +3198,115 @@ describe("index", () => {
             expect(reader.lastReadDiagnostics?.readAheadSource).to.eq(
                 "persisted-local"
             );
+        });
+
+        it("keeps a persisted observer prefix out of replication across root-list refreshes", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "persisted-observer-prefix";
+            const fileName = "persisted-observer-prefix.bin";
+            const chunks = Array.from(
+                { length: 16 },
+                (_, index) => new Uint8Array([index, index + 1, index + 2])
+            );
+            const chunkEntryHeads: string[] = [];
+            for (const [index, bytes] of chunks.entries()) {
+                const result = await writer.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+            const expected = concat(chunks);
+            await writer.files.put(
+                new LargeFileWithChunkHeads({
+                    id: fileId,
+                    name: fileName,
+                    size: BigInt(expected.byteLength),
+                    chunkCount: chunks.length,
+                    ready: true,
+                    finalHash: sha256Base64Sync(expected),
+                    chunkEntryHeads,
+                })
+            );
+
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            const writerHash = peer.identity.publicKey.hashcode();
+            const readerHash = peer2.identity.publicKey.hashcode();
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            await waitForResolved(async () => {
+                expect(
+                    [...(await writer.files.log.getReplicators())].sort()
+                ).to.deep.eq([writerHash]);
+                expect(
+                    [...(await reader.files.log.getReplicators())].sort()
+                ).to.deep.eq([writerHash]);
+            });
+
+            const file = await reader.resolveById(fileId, {
+                timeout: 10_000,
+                replicate: false,
+            });
+            expect(isLargeFileLike(file)).to.be.true;
+            expect(await reader.countLocalChunks(file as LargeFile)).to.eq(0);
+            expect(await reader.countLocalChunkBlocks(file as LargeFile)).to.eq(
+                0
+            );
+
+            reader.persistChunkReads = true;
+            const transferId = "persisted-observer-prefix-preload";
+            const iterator = (file as LargeFile)
+                .streamFile(reader, { timeout: 10_000, transferId })
+                [Symbol.asyncIterator]();
+            const first = await iterator.next();
+            expect(first.done).to.be.false;
+            expect(first.value).to.deep.eq(chunks[0]);
+            await iterator.return?.();
+
+            const blockPresence = await Promise.all(
+                chunkEntryHeads.map((head) =>
+                    reader.files.log.log.blocks.has(head)
+                )
+            );
+            const localBlockIndices = blockPresence.flatMap((present, index) =>
+                present ? [index] : []
+            );
+            expect(localBlockIndices.length).to.be.greaterThan(0);
+            expect(localBlockIndices.length).to.be.lessThan(chunks.length);
+            expect(localBlockIndices).to.deep.eq(
+                Array.from(
+                    { length: localBlockIndices.length },
+                    (_, index) => index
+                )
+            );
+            expect(await reader.countLocalChunks(file as LargeFile)).to.eq(0);
+            expect(reader.getActiveTransfers()).to.deep.eq([]);
+            expect(reader.getReadDiagnostics(transferId)?.chunkFailure).to.be
+                .null;
+
+            const listed = await reader.list({ replicate: false });
+            expect(listed.some((candidate) => candidate.id === fileId)).to.be
+                .true;
+            expect(await reader.countLocalChunks(file as LargeFile)).to.eq(0);
+            expect(await reader.countLocalChunkBlocks(file as LargeFile)).to.eq(
+                localBlockIndices.length
+            );
+
+            const writerReplicators = [
+                ...(await writer.files.log.getReplicators()),
+            ].sort();
+            const readerReplicators = [
+                ...(await reader.files.log.getReplicators()),
+            ].sort();
+            expect(writerReplicators).to.deep.eq([writerHash]);
+            expect(readerReplicators).to.deep.eq([writerHash]);
+            expect(readerReplicators).not.to.include(readerHash);
         });
 
         it("persists batched manifest-head reads for an offline local reread", async () => {

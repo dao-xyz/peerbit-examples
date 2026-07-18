@@ -44,7 +44,10 @@ export const listRootFilesForRole = (
     role: ReplicationOptions
 ) => {
     if (role === false) {
-        return program.list();
+        // Chunk persistence is independent from the observer's replication
+        // role. Keep root-list refreshes non-replicating even while a download
+        // is intentionally caching chunk blocks.
+        return program.list({ replicate: false });
     }
     return program.files.index.search(createRootSearchRequest(), {
         local: true,
