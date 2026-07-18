@@ -62,15 +62,18 @@ jobs:
             group: fileshare-provider-capacity-pair-${{ github.ref_name }}
             cancel-in-progress: false
         env:
-            BASE_CORE_COMMIT: b385da50f88b0cb17b77faf684ee869200dac3fd
-            HEAD_CORE_COMMIT: 88425fe4d865a2d924a07daaf3b74e54f173d967
-            EXAMPLES_COMMIT: e29c0c89eb44927e6c83b5e285b01d8da24d8d5b
-            EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
+            BASE_CORE_COMMIT: a21a308310b9d50a3489f0fe1fbf3595b7c81f57
+            HEAD_CORE_COMMIT: a21a308310b9d50a3489f0fe1fbf3595b7c81f57
+            BASE_EXAMPLES_COMMIT: e29c0c89eb44927e6c83b5e285b01d8da24d8d5b
+            HEAD_EXAMPLES_COMMIT: f0abd08c86acf435a2c7660eaa05484317935f3d
+            BASE_EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
+            HEAD_EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
             EXPECTED_SHA256_BASE64: bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=
             EXPECTED_CRC32_HEX: 125fb916
             HARNESS_ROOT: ${{ github.workspace }}/harness
             BASE_CORE_ROOT: ${{ github.workspace }}/core-baseline
-            EXAMPLES_SOURCE: ${{ github.workspace }}/examples-source
+            BASE_EXAMPLES_SOURCE: ${{ github.workspace }}/examples-baseline
+            HEAD_EXAMPLES_SOURCE: ${{ github.workspace }}/examples-head
             RESULTS_ROOT: ${{ github.workspace }}/evidence
             PREPARED_ROOT: /tmp/peerbit-fileshare-prepared
             NODE_OPTIONS: --no-warnings
@@ -128,12 +131,21 @@ jobs:
                   fetch-depth: 1
                   persist-credentials: false
 
-            - name: Checkout pinned examples source
+            - name: Checkout baseline examples source
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
               with:
                   repository: dao-xyz/peerbit-examples
-                  ref: ${{ env.EXAMPLES_COMMIT }}
-                  path: examples-source
+                  ref: ${{ env.BASE_EXAMPLES_COMMIT }}
+                  path: examples-baseline
+                  fetch-depth: 1
+                  persist-credentials: false
+
+            - name: Checkout head examples source
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit-examples
+                  ref: ${{ env.HEAD_EXAMPLES_COMMIT }}
+                  path: examples-head
                   fetch-depth: 1
                   persist-credentials: false
 
@@ -153,11 +165,14 @@ jobs:
                   set -euo pipefail
                   test "$(git -C "$HARNESS_ROOT" rev-parse HEAD)" = "$HEAD_CORE_COMMIT"
                   test "$(git -C "$BASE_CORE_ROOT" rev-parse HEAD)" = "$BASE_CORE_COMMIT"
-                  test "$(git -C "$EXAMPLES_SOURCE" rev-parse HEAD)" = "$EXAMPLES_COMMIT"
+                  test "$(git -C "$BASE_EXAMPLES_SOURCE" rev-parse HEAD)" = "$BASE_EXAMPLES_COMMIT"
+                  test "$(git -C "$HEAD_EXAMPLES_SOURCE" rev-parse HEAD)" = "$HEAD_EXAMPLES_COMMIT"
                   test -z "$(git -C "$HARNESS_ROOT" status --porcelain)"
                   test -z "$(git -C "$BASE_CORE_ROOT" status --porcelain)"
-                  test -z "$(git -C "$EXAMPLES_SOURCE" status --porcelain)"
-                  test "$(sha256sum "$EXAMPLES_SOURCE/pnpm-lock.yaml" | cut -d' ' -f1)" = "$EXAMPLES_LOCK_SHA256"
+                  test -z "$(git -C "$BASE_EXAMPLES_SOURCE" status --porcelain)"
+                  test -z "$(git -C "$HEAD_EXAMPLES_SOURCE" status --porcelain)"
+                  test "$(sha256sum "$BASE_EXAMPLES_SOURCE/pnpm-lock.yaml" | cut -d' ' -f1)" = "$BASE_EXAMPLES_LOCK_SHA256"
+                  test "$(sha256sum "$HEAD_EXAMPLES_SOURCE/pnpm-lock.yaml" | cut -d' ' -f1)" = "$HEAD_EXAMPLES_LOCK_SHA256"
 
             - name: Install build and browser prerequisites
               run: |
@@ -225,9 +240,15 @@ jobs:
                     if [[ "$variant" == "baseline" ]]; then
                       core_root="$BASE_CORE_ROOT"
                       core_commit="$BASE_CORE_COMMIT"
+                      examples_source="$BASE_EXAMPLES_SOURCE"
+                      examples_commit="$BASE_EXAMPLES_COMMIT"
+                      examples_lock="$BASE_EXAMPLES_LOCK_SHA256"
                     else
                       core_root="$HARNESS_ROOT"
                       core_commit="$HEAD_CORE_COMMIT"
+                      examples_source="$HEAD_EXAMPLES_SOURCE"
+                      examples_commit="$HEAD_EXAMPLES_COMMIT"
+                      examples_lock="$HEAD_EXAMPLES_LOCK_SHA256"
                     fi
                     prepared="$PREPARED_ROOT-$sequence-$variant"
                     result_dir="$RESULTS_ROOT/$sequence-$variant"
@@ -259,13 +280,13 @@ jobs:
                         --integration-mode link
                         --peerbit-root "$core_root"
                         --examples-root "$prepared"
-                        --source "$EXAMPLES_SOURCE"
-                        --examples-ref "$EXAMPLES_COMMIT"
+                        --source "$examples_source"
+                        --examples-ref "$examples_commit"
                         --peerbit-ref-label "$core_commit"
                         --expected-peerbit-commit "$core_commit"
                         --require-clean-peerbit
-                        --expected-examples-commit "$EXAMPLES_COMMIT"
-                        --expected-examples-lockfile-sha256 "$EXAMPLES_LOCK_SHA256"
+                        --expected-examples-commit "$examples_commit"
+                        --expected-examples-lockfile-sha256 "$examples_lock"
                         --results-dir "$result_dir"
                         --summary-file "$summary_file"
                         --file-mb "$FILE_MB"
@@ -380,8 +401,10 @@ jobs:
                     harness: process.env.HEAD_CORE_COMMIT,
                     baseline: process.env.BASE_CORE_COMMIT,
                     head: process.env.HEAD_CORE_COMMIT,
-                    examples: process.env.EXAMPLES_COMMIT,
-                    lock: process.env.EXAMPLES_LOCK_SHA256,
+                    baselineExamples: process.env.BASE_EXAMPLES_COMMIT,
+                    headExamples: process.env.HEAD_EXAMPLES_COMMIT,
+                    baselineLock: process.env.BASE_EXAMPLES_LOCK_SHA256,
+                    headLock: process.env.HEAD_EXAMPLES_LOCK_SHA256,
                     sha256: process.env.EXPECTED_SHA256_BASE64,
                     crc32: process.env.EXPECTED_CRC32_HEX,
                     cohort: "observer-persistent-prefix-b1026-i0",
@@ -394,7 +417,8 @@ jobs:
                       .find((entry) => entry.endsWith("-" + variant + "-summary.json"));
                     if (!name) throw new Error("Missing " + variant + " summary");
                     const summary = JSON.parse(fs.readFileSync(path.join(root, name), "utf8"));
-                    const result = summary.results?.[0];
+                    const rawResult = summary.results?.[0];
+                    const result = rawResult?.browserResult ?? rawResult;
                     if (!result) throw new Error("Missing " + variant + " result");
                     const diagnostics = result.readerDiagnostics?.lastReadDiagnostics;
                     const issues = [];
@@ -409,8 +433,8 @@ jobs:
                     check(summary.harnessProvenance?.dirty === false, "harness-dirty");
                     check(summary.peerbitProvenance?.resolvedCommit === expected[variant], "peerbit-commit");
                     check(summary.peerbitProvenance?.dirty === false, "peerbit-dirty");
-                    check(summary.examplesProvenance?.resolvedCommit === expected.examples, "examples-commit");
-                    check(summary.examplesProvenance?.lockfileSha256 === expected.lock, "examples-lock");
+                    check(summary.examplesProvenance?.resolvedCommit === expected[variant + "Examples"], "examples-commit");
+                    check(summary.examplesProvenance?.lockfileSha256 === expected[variant + "Lock"], "examples-lock");
                     check(result.integrity?.sourceSha256Base64 === expected.sha256, "source-sha256");
                     check(result.integrity?.libraryComputedSha256Base64 === expected.sha256, "library-sha256");
                     check(result.integrity?.manifestSha256Base64 === expected.sha256, "manifest-sha256");
@@ -424,6 +448,25 @@ jobs:
                     check(diagnostics?.chunkManifestEntryPersistenceFailedCount === 0, "persistence-failed");
                     check(diagnostics?.chunkManifestEntryPersistenceMissingIndices?.length === 0, "persistence-missing");
                     check(diagnostics?.chunkManifestEntryContentMismatchIndices?.length === 0, "persistence-content");
+                    check(diagnostics?.chunkManifestHeadBatchErrorCount === 0, "manifest-head-batch-errors");
+                    check(diagnostics?.chunkManifestHeadBatchInvalidCount === 0, "manifest-head-invalid");
+                    if (variant === "head") {
+                      check(diagnostics?.chunkManifestHeadBatchMissingCount === 0, "manifest-head-missing");
+                      check(
+                        diagnostics?.chunkManifestHeadPhysicalRemoteRequestErrorCount === 0,
+                        "manifest-head-physical-errors",
+                      );
+                      check(
+                        diagnostics?.chunkManifestHeadPhysicalRemoteRequestErrors?.length === 0,
+                        "manifest-head-physical-error-details",
+                      );
+                      check(
+                        diagnostics?.chunkManifestHeadPhysicalRemoteRequestCount > 0,
+                        "manifest-head-rolling-unused",
+                      );
+                      check(diagnostics?.maxManifestHeadBatchSize === 1, "manifest-head-physical-width");
+                      check(diagnostics?.maxManifestHeadLogicalWindowSize === 8, "manifest-head-logical-width");
+                    }
                     const boundary = diagnostics?.chunkWriteFinishedAt?.["1023"];
                     const firstHalfMs = boundary - diagnostics?.startedAt;
                     const secondHalfMs = diagnostics?.finishedAt - boundary;
@@ -432,15 +475,22 @@ jobs:
                     const sum = (values) => values.reduce((total, value) => total + value, 0);
                     const firstHalfDemandWaitMs = sum(demandValues.slice(0, 1024));
                     const secondHalfDemandWaitMs = sum(demandValues.slice(1024));
+                    const derivedLibraryStreamWallMs =
+                      diagnostics?.finishedAt - diagnostics?.startedAt;
                     const metrics = {
-                      libraryStreamWallMs: result.libraryStreamWallMs,
+                      libraryStreamWallMs:
+                        result.libraryStreamWallMs ?? derivedLibraryStreamWallMs,
                       firstHalfMs,
                       secondHalfMs,
-                      demandWaitSumMs: result.readTransfer?.demandWait?.sumMs,
+                      demandWaitSumMs:
+                        result.readTransfer?.demandWait?.sumMs ?? sum(demandValues),
                       firstHalfDemandWaitMs,
                       secondHalfDemandWaitMs,
-                      maxDemandWaitMs: result.readTransfer?.demandWait?.maxMs,
-                      over10sDemandWaitCount: result.readTransfer?.demandWait?.over10sCount,
+                      maxDemandWaitMs:
+                        result.readTransfer?.demandWait?.maxMs ?? Math.max(...demandValues),
+                      over10sDemandWaitCount:
+                        result.readTransfer?.demandWait?.over10sCount ??
+                        demandValues.filter((value) => value > 10_000).length,
                       maxChunkAttempts: Math.max(...attempts),
                     };
                     check(
