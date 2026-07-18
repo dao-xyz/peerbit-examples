@@ -1,4 +1,9 @@
-import { IndexableFile, TinyFile, isLargeFileLike } from "@peerbit/please-lib";
+import {
+    IndexableFile,
+    isDeterministicLargeFileChunkSlot,
+    isLargeFileLike,
+    type LargeFileChunkParentGeometry,
+} from "@peerbit/please-lib";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { useEffect, useState } from "react";
 import { FaSeedling } from "react-icons/fa";
@@ -11,21 +16,87 @@ const formatFileSize = (size: number | bigint) =>
 export const formatIndexedChunkRatio = (ratio: number) => `${ratio}% indexed`;
 
 const LOCAL_CHUNK_COUNT_REFRESH_DELAY_MS = 250;
+const LOCAL_CHUNK_SNAPSHOT_MAX_ATTEMPTS = 3;
+const LOCAL_CHUNK_SNAPSHOT_RETRY_DELAY_MS = 1_000;
+const LOCAL_CHUNK_EVENT_RECOVERY_COOLDOWN_MS = 5_000;
+
+export type FileChunkIdChange = {
+    added: string[];
+    removed: string[];
+};
+
+/**
+ * Tracks exact local chunk membership after one metadata-only snapshot. Change
+ * events received while the snapshot is in flight are compacted by id and
+ * replayed afterwards, so mounting during an active transfer cannot miss them.
+ */
+export class LocalChunkCountTracker {
+    private chunkIds?: Set<string>;
+    private pending = new Map<string, boolean>();
+
+    initialize(chunkIds: Iterable<string>) {
+        const next = new Set(chunkIds);
+        for (const [id, present] of this.pending) {
+            if (present) {
+                next.add(id);
+            } else {
+                next.delete(id);
+            }
+        }
+        this.pending.clear();
+        this.chunkIds = next;
+        return next.size;
+    }
+
+    apply(change: FileChunkIdChange) {
+        if (!this.chunkIds) {
+            for (const id of change.removed) {
+                this.pending.set(id, false);
+            }
+            for (const id of change.added) {
+                this.pending.set(id, true);
+            }
+            return false;
+        }
+
+        const before = this.chunkIds.size;
+        for (const id of change.removed) {
+            this.chunkIds.delete(id);
+        }
+        for (const id of change.added) {
+            this.chunkIds.add(id);
+        }
+        return this.chunkIds.size !== before;
+    }
+
+    get count() {
+        return this.chunkIds?.size;
+    }
+}
 
 export const shouldDisableFileDownload = (properties: {
     progress: number | null;
 }) => properties.progress != null;
 
+export const getFileChunkIdChange = (
+    detail: DocumentsChange<AbstractFile, IndexableFile>,
+    parent: LargeFileChunkParentGeometry
+): FileChunkIdChange => ({
+    added: detail.added
+        .filter((file) => isDeterministicLargeFileChunkSlot(parent, file))
+        .map((file) => file.id),
+    removed: detail.removed
+        .filter((file) => isDeterministicLargeFileChunkSlot(parent, file))
+        .map((file) => file.id),
+});
+
 export const hasFileChunkChange = (
-    detail: {
-        added?: AbstractFile[];
-        removed?: Pick<IndexableFile, "parentId">[];
-    },
-    fileId: string
-) =>
-    (detail.added ?? []).some(
-        (added) => added instanceof TinyFile && added.parentId === fileId
-    ) || (detail.removed ?? []).some((removed) => removed.parentId === fileId);
+    detail: DocumentsChange<AbstractFile, IndexableFile>,
+    parent: LargeFileChunkParentGeometry
+) => {
+    const change = getFileChunkIdChange(detail, parent);
+    return change.added.length > 0 || change.removed.length > 0;
+};
 
 export const File = (properties: {
     files: Files;
@@ -53,59 +124,101 @@ export const File = (properties: {
         }
 
         let disposed = false;
-        let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-        let refreshInFlight = false;
-        let refreshQueued = false;
+        const tracker = new LocalChunkCountTracker();
+        let publishTimer: ReturnType<typeof setTimeout> | undefined;
+        let snapshotRetryTimer: ReturnType<typeof setTimeout> | undefined;
+        let initialSnapshotAttempts = 0;
+        let initialSnapshotRetriesExhausted = false;
+        let snapshotInFlight = false;
+        let recoveryRequested = false;
+        let lastSnapshotFailureAt = 0;
 
-        const fetchLocalChunks = async () => {
-            refreshTimer = undefined;
-            if (disposed || refreshInFlight) {
+        const publishLocalChunkCount = (count: number) => {
+            if (disposed) {
                 return;
             }
-            refreshInFlight = true;
-            refreshQueued = false;
-            try {
-                const count =
-                    await properties.files.countLocalChunks(largeFile);
-                if (!disposed) {
-                    setReplicatedChunksRatio(
+            setReplicatedChunksRatio(
+                Math.min(
+                    100,
+                    Math.max(
+                        0,
                         Math.round((count * 100) / Math.max(chunkCount, 1))
-                    );
-                }
-            } catch (error) {
-                if (!disposed) {
-                    console.warn(
-                        "Failed to count local chunks for " +
-                            properties.file.name +
-                            ": " +
-                            (error instanceof Error
-                                ? error.message
-                                : String(error))
-                    );
-                }
-            } finally {
-                refreshInFlight = false;
-                if (refreshQueued && !disposed) {
-                    scheduleLocalChunkCountRefresh();
-                }
-            }
+                    )
+                )
+            );
         };
 
-        const scheduleLocalChunkCountRefresh = () => {
-            refreshQueued = true;
-            if (disposed || refreshInFlight || refreshTimer) {
+        const scheduleLocalChunkCountPublish = () => {
+            if (disposed || publishTimer || tracker.count == null) {
                 return;
             }
-            refreshTimer = setTimeout(() => {
-                void fetchLocalChunks();
+            publishTimer = setTimeout(() => {
+                publishTimer = undefined;
+                const count = tracker.count;
+                if (count != null) {
+                    publishLocalChunkCount(count);
+                }
             }, LOCAL_CHUNK_COUNT_REFRESH_DELAY_MS);
+        };
+
+        type SnapshotAttemptKind = "initial" | "recovery";
+
+        const scheduleSnapshotAttempt = (
+            kind: SnapshotAttemptKind,
+            delayMs: number
+        ) => {
+            if (
+                disposed ||
+                tracker.count != null ||
+                snapshotInFlight ||
+                snapshotRetryTimer
+            ) {
+                return;
+            }
+            snapshotRetryTimer = setTimeout(() => {
+                snapshotRetryTimer = undefined;
+                if (kind === "recovery") {
+                    recoveryRequested = false;
+                }
+                void runSnapshotAttempt(kind);
+            }, delayMs);
+        };
+
+        const requestSnapshotRecovery = () => {
+            if (disposed || tracker.count != null) {
+                return;
+            }
+            recoveryRequested = true;
+            if (
+                !initialSnapshotRetriesExhausted ||
+                snapshotInFlight ||
+                snapshotRetryTimer
+            ) {
+                return;
+            }
+            scheduleSnapshotAttempt(
+                "recovery",
+                Math.max(
+                    0,
+                    lastSnapshotFailureAt +
+                        LOCAL_CHUNK_EVENT_RECOVERY_COOLDOWN_MS -
+                        Date.now()
+                )
+            );
         };
 
         const changeListener = (
             event: CustomEvent<DocumentsChange<AbstractFile, IndexableFile>>
         ) => {
-            if (hasFileChunkChange(event.detail, properties.file.id)) {
-                scheduleLocalChunkCountRefresh();
+            const change = getFileChunkIdChange(event.detail, largeFile);
+            if (change.added.length === 0 && change.removed.length === 0) {
+                return;
+            }
+            if (tracker.apply(change)) {
+                scheduleLocalChunkCountPublish();
+            }
+            if (tracker.count == null) {
+                requestSnapshotRecovery();
             }
         };
 
@@ -113,11 +226,67 @@ export const File = (properties: {
             "change",
             changeListener
         );
-        void fetchLocalChunks();
+        async function runSnapshotAttempt(kind: SnapshotAttemptKind) {
+            if (disposed || tracker.count != null || snapshotInFlight) {
+                return;
+            }
+            snapshotInFlight = true;
+            if (kind === "initial") {
+                initialSnapshotAttempts += 1;
+            }
+            let nextInitialDelayMs: number | undefined;
+            try {
+                const chunkIds =
+                    await properties.files.listLocalChunkIds(largeFile);
+                if (!disposed) {
+                    recoveryRequested = false;
+                    publishLocalChunkCount(tracker.initialize(chunkIds));
+                }
+            } catch (error) {
+                if (disposed) {
+                    return;
+                }
+                lastSnapshotFailureAt = Date.now();
+                if (
+                    kind === "initial" &&
+                    initialSnapshotAttempts < LOCAL_CHUNK_SNAPSHOT_MAX_ATTEMPTS
+                ) {
+                    nextInitialDelayMs =
+                        LOCAL_CHUNK_SNAPSHOT_RETRY_DELAY_MS *
+                        initialSnapshotAttempts;
+                } else {
+                    initialSnapshotRetriesExhausted = true;
+                    if (kind === "initial") {
+                        console.warn(
+                            "Failed to list local chunks for " +
+                                properties.file.name +
+                                ": " +
+                                (error instanceof Error
+                                    ? error.message
+                                    : String(error))
+                        );
+                    }
+                }
+            } finally {
+                snapshotInFlight = false;
+            }
+            if (disposed || tracker.count != null) {
+                return;
+            }
+            if (nextInitialDelayMs != null) {
+                scheduleSnapshotAttempt("initial", nextInitialDelayMs);
+            } else if (recoveryRequested) {
+                requestSnapshotRecovery();
+            }
+        }
+        void runSnapshotAttempt("initial");
         return () => {
             disposed = true;
-            if (refreshTimer) {
-                clearTimeout(refreshTimer);
+            if (publishTimer) {
+                clearTimeout(publishTimer);
+            }
+            if (snapshotRetryTimer) {
+                clearTimeout(snapshotRetryTimer);
             }
             properties.files.files.events.removeEventListener(
                 "change",

@@ -808,6 +808,56 @@ const getChunkLookupAttemptTimeout = (
         totalTimeout
     );
 const getChunkId = (parentId: string, index: number) => `${parentId}:${index}`;
+
+export type LargeFileChunkParentGeometry = {
+    id: string;
+    chunkCount: number;
+};
+
+export const getDeterministicLargeFileChunkIndex = (
+    parent: LargeFileChunkParentGeometry,
+    chunkId: string
+): number | undefined => {
+    if (
+        !Number.isSafeInteger(parent.chunkCount) ||
+        parent.chunkCount < 0 ||
+        typeof chunkId !== "string"
+    ) {
+        return undefined;
+    }
+    const prefix = `${parent.id}:`;
+    if (!chunkId.startsWith(prefix)) {
+        return undefined;
+    }
+    const encodedIndex = chunkId.slice(prefix.length);
+    if (!/^(0|[1-9]\d*)$/.test(encodedIndex)) {
+        return undefined;
+    }
+    const index = Number(encodedIndex);
+    return Number.isSafeInteger(index) &&
+        index >= 0 &&
+        index < parent.chunkCount &&
+        chunkId === getChunkId(parent.id, index)
+        ? index
+        : undefined;
+};
+
+/**
+ * Whether indexed metadata occupies one canonical deterministic chunk slot.
+ * This intentionally validates slot identity, not the stored payload type;
+ * payload integrity and type remain read-time concerns. Legacy chunks with
+ * non-deterministic ids are outside this fast-path metric.
+ */
+export const isDeterministicLargeFileChunkSlot = (
+    parent: LargeFileChunkParentGeometry,
+    file: {
+        id: string;
+        parentId?: string;
+    }
+) =>
+    file.parentId === parent.id &&
+    getDeterministicLargeFileChunkIndex(parent, file.id) !== undefined;
+
 const createUploadId = () => toBase64URL(randomBytes(16));
 const getEntryHash = (entry: unknown) =>
     typeof (entry as { hash?: unknown })?.hash === "string"
@@ -6803,6 +6853,37 @@ export class Files extends Program<Args> {
             })
         );
         return count;
+    }
+
+    /**
+     * Snapshot locally indexed deterministic chunk slots without resolving
+     * their payloads. Canonical `parent:index` ids form a reserved namespace;
+     * payload type and integrity are verified only when read. Other nested files
+     * and legacy chunks with non-deterministic ids are intentionally excluded.
+     * Callers can seed a Set from this compact projection and maintain it from
+     * Documents change events using the same slot predicate.
+     */
+    async listLocalChunkIds(parent: LargeFileValue): Promise<string[]> {
+        const rows = await this.files.index.index
+            .iterate(
+                {
+                    query: new StringMatch({
+                        key: "parentId",
+                        value: parent.id,
+                    }),
+                },
+                {
+                    shape: {
+                        id: true,
+                        parentId: true,
+                    },
+                }
+            )
+            .all();
+        return rows
+            .map(({ value }) => value)
+            .filter((value) => isDeterministicLargeFileChunkSlot(parent, value))
+            .map((value) => value.id);
     }
 
     /**
