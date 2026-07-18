@@ -4977,8 +4977,10 @@ describe("index", () => {
             expect((files as any).retainedEntryHeadsByFileId.size).to.eq(0);
         });
 
-        it("falls back per chunk when ready manifest chunk heads are missing", async () => {
-            const filestore = await peer.open(new Files());
+        it("allows non-persisting reads to fall back per chunk when ready manifest heads are missing", async () => {
+            const filestore = await peer.open(new Files(), {
+                args: { replicate: false },
+            });
             const fileId = "missing-ready-heads";
             const fileName = "missing ready heads";
             const chunks = [
@@ -5005,8 +5007,17 @@ describe("index", () => {
                 }),
             ];
             const expected = concat(chunks.map((chunk) => chunk.file));
-            const chunkEntryHeads = chunks.map(
-                (_, index) => `missing-head-${index}`
+            const chunkEntryHeads = await Promise.all(
+                chunks.map((_, index) =>
+                    filestore.files.log.log.blocks.put(
+                        new Uint8Array([0xff, index])
+                    )
+                )
+            );
+            await Promise.all(
+                chunkEntryHeads.map((head) =>
+                    filestore.files.log.log.blocks.rm(head)
+                )
             );
             const pendingFile = new LargeFile({
                 id: fileId,
@@ -5109,7 +5120,7 @@ describe("index", () => {
                 Object.values(
                     filestore.lastReadDiagnostics?.chunkResolved ?? {}
                 )
-            ).to.deep.eq(chunks.map(() => "remote-get"));
+            ).to.deep.eq(chunks.map(() => "non-replicating-get"));
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 

@@ -1577,6 +1577,34 @@ describe("large-file read scheduling", () => {
         expect((files as any).retainedChunkEntryHeads).toEqual(new Set(heads));
     });
 
+    it("fails persistent finalization when an exact manifest head stays unavailable", async () => {
+        const { chunkFiles, file, files, heads, persistedHeads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        (files.files.log.log as any).getMany = async (
+            requestedHeads: string[]
+        ) => requestedHeads.map(() => undefined);
+        (files.files.log.log as any).get = async () => undefined;
+        (files.files.index as any).get = async (_id: string, options: any) =>
+            options.remote === false ? undefined : chunkFiles[0];
+
+        const iterator = file
+            .streamFile(files, { timeout: 100 })
+            [Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([1]),
+        });
+        await expect(iterator.next()).rejects.toThrow(
+            "Failed to persist exact manifest entry"
+        );
+
+        expect(persistedHeads).toEqual(new Set());
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryPersistenceFailedCount
+        ).toBe(1);
+        expect((files as any).retainedChunkEntryHeads).not.toContain(heads[0]);
+    });
+
     it("keeps manifest-backed demand reads ahead of causal replication after a zero batch", async () => {
         const chunks = [
             new Uint8Array([1]),
@@ -1804,6 +1832,51 @@ describe("large-file read scheduling", () => {
         expect((files as any).retainedChunkEntryHeads).toEqual(
             new Set([authoritativeHead])
         );
+    });
+
+    it("rejects hashless persistent reads when transient bytes differ from the exact entry", async () => {
+        const { entriesByHead, file, files, heads, persistedHeads } =
+            createPersistedManifestStreamHarness([new Uint8Array([1])]);
+        expect(file.finalHash).toBeUndefined();
+        const authoritativeHead = heads[0]!;
+        const transientChunk = new TinyFile({
+            id: `${file.id}:0`,
+            name: `${file.name}/0`,
+            file: new Uint8Array([2]),
+            parentId: file.id,
+            index: 0,
+        });
+        const rawImport = createDeferred<any>();
+        const exactGet = vi.fn(async () => rawImport.promise);
+        const localBatchSearch = vi.fn(
+            async (_request: unknown, options: any) => {
+                expect(options.remote).toBe(false);
+                return [transientChunk];
+            }
+        );
+        (files as any).countLocalChunks = async () => 1;
+        (files as any).countLocalChunkBlocks = async () => 0;
+        (files.files.log.log as any).get = exactGet;
+        (files.files.index as any).search = localBatchSearch;
+
+        const iterator = file.streamFile(files)[Symbol.asyncIterator]();
+        await expect(iterator.next()).resolves.toEqual({
+            done: false,
+            value: new Uint8Array([2]),
+        });
+        const finalization = iterator.next();
+        rawImport.resolve(entriesByHead.get(authoritativeHead));
+
+        await expect(finalization).rejects.toThrow(
+            "Persistent file read content did not match exact manifest entries for chunks 1"
+        );
+
+        expect(exactGet).toHaveBeenCalledOnce();
+        expect(persistedHeads).toEqual(new Set([authoritativeHead]));
+        expect(
+            files.lastReadDiagnostics?.chunkManifestEntryContentMismatchIndices
+        ).toEqual([0]);
+        expect(files.lastReadDiagnostics?.finishedAt).toBeNull();
     });
 
     it("rejects persistent finalization when an imported head has an invalid payload", async () => {

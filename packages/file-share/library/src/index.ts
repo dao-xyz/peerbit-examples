@@ -1054,6 +1054,21 @@ const validateLargeFileChunkPayload = (
     return chunk;
 };
 
+const validateAuthoritativeLargeFileChunk = (
+    file: LargeFileChunkGeometry,
+    chunk: TinyFile,
+    index: number
+) => {
+    validateLargeFileChunkPayload(file, chunk, index);
+    const actualHash = sha256Base64Sync(chunk.file);
+    if (actualHash !== chunk.hash) {
+        throw new Error(
+            `Manifest entry content hash mismatch for chunk ${index + 1}/${file.chunkCount}`
+        );
+    }
+    return actualHash;
+};
+
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
     @field({ type: "string" })
@@ -2529,6 +2544,7 @@ export class LargeFile extends AbstractFile {
                 message: string;
             }[],
             chunkManifestEntryPersistenceMissingIndices: [] as number[],
+            chunkManifestEntryContentMismatchIndices: [] as number[],
             chunkBatchAttemptTimeoutMs: 0,
             chunkBatchRemoteReclassificationCount: 0,
             chunkLocalIndexedBatchQueryCount: 0,
@@ -2769,7 +2785,10 @@ export class LargeFile extends AbstractFile {
                 number,
                 Set<Promise<unknown>>
             >();
-            const manifestPersistenceTasks = new Set<Promise<TinyFile>>();
+            // Track only void settlements through finalization. Keeping the
+            // resolved TinyFile promises here would retain every imported
+            // chunk payload until the whole read completed.
+            const manifestPersistenceSettlements = new Set<Promise<void>>();
             const manifestPersistenceTasksByIndex = new Map<
                 number,
                 Promise<TinyFile>
@@ -2778,6 +2797,8 @@ export class LargeFile extends AbstractFile {
             const detachedManifestPersistencePermitIndices = new Set<number>();
             const persistedManifestEntryIndices = new Set<number>();
             const resolvedChunkDocumentIdsByIndex = new Map<number, string>();
+            const resolvedChunkHashesByIndex = new Map<number, string>();
+            const authoritativeChunkHashesByIndex = new Map<number, string>();
             let readGenerationActive = true;
             let suspendedPayload: Uint8Array | undefined;
             const throwIfReadGenerationInactive = () => {
@@ -2785,6 +2806,35 @@ export class LargeFile extends AbstractFile {
                     throw getAbortReason(transfer.owner.signal);
                 }
                 transfer.owner.throwIfFailed();
+            };
+            const recordAuthoritativeChunkHash = (
+                index: number,
+                chunk: TinyFile
+            ) => {
+                throwIfReadGenerationInactive();
+                const hash = validateAuthoritativeLargeFileChunk(
+                    resolvedFile,
+                    chunk,
+                    index
+                );
+                const existing = authoritativeChunkHashesByIndex.get(index);
+                if (existing != null && existing !== hash) {
+                    throw new Error(
+                        `Conflicting exact manifest content for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                    );
+                }
+                authoritativeChunkHashesByIndex.set(index, hash);
+                return hash;
+            };
+            const recordResolvedChunkHash = (index: number, hash: string) => {
+                throwIfReadGenerationInactive();
+                const existing = resolvedChunkHashesByIndex.get(index);
+                if (existing != null && existing !== hash) {
+                    throw new Error(
+                        `Conflicting resolved content for chunk ${index + 1}/${resolvedFile.chunkCount}`
+                    );
+                }
+                resolvedChunkHashesByIndex.set(index, hash);
             };
             const releaseChunkPermit = (index: number) => {
                 const permit = chunkPermitsByIndex.get(index);
@@ -3098,14 +3148,17 @@ export class LargeFile extends AbstractFile {
                             `Manifest entry payload mismatch for chunk ${index + 1}/${resolvedFile.chunkCount}`
                         );
                     }
-                    validateLargeFileChunkPayload(resolvedFile, chunk, index);
+                    persistenceSignal.throwIfClosed();
+                    recordAuthoritativeChunkHash(index, chunk);
                     persistedManifestEntryIndices.add(index);
                     files.retainChunkEntryHead(head, resolvedFile.id, chunk.id);
                     files.retainResolvedChunk(chunk, true);
                     return chunk;
                 });
                 const task = transfer.owner.track(operation, false);
-                manifestPersistenceTasks.add(task);
+                const settlement = task.then(() => undefined);
+                manifestPersistenceSettlements.add(settlement);
+                void settlement.catch(() => undefined);
                 manifestPersistenceTasksByIndex.set(index, task);
                 pendingManifestPersistenceIndices.add(index);
                 debug.chunkManifestEntryPersistenceStartedCount += 1;
@@ -3124,6 +3177,11 @@ export class LargeFile extends AbstractFile {
                     )
                     .finally(() => {
                         pendingManifestPersistenceIndices.delete(index);
+                        if (
+                            manifestPersistenceTasksByIndex.get(index) === task
+                        ) {
+                            manifestPersistenceTasksByIndex.delete(index);
+                        }
                         persistenceSignal.close();
                         readContext.fileChangeSignals!.delete(
                             persistenceSignal
@@ -3162,12 +3220,14 @@ export class LargeFile extends AbstractFile {
                 }
                 chunkPermitsByIndex.clear();
                 decodeOperationsByIndex.clear();
-                manifestPersistenceTasks.clear();
+                manifestPersistenceSettlements.clear();
                 manifestPersistenceTasksByIndex.clear();
                 pendingManifestPersistenceIndices.clear();
                 detachedManifestPersistencePermitIndices.clear();
                 persistedManifestEntryIndices.clear();
                 resolvedChunkDocumentIdsByIndex.clear();
+                resolvedChunkHashesByIndex.clear();
+                authoritativeChunkHashesByIndex.clear();
                 inFlightChunks.clear();
                 knownChunks.clear();
                 batchAttemptedIndices.clear();
@@ -3494,6 +3554,8 @@ export class LargeFile extends AbstractFile {
                                 index
                             );
                             settleChunkPermit(index, chunk.file.byteLength);
+                            changeSignal.throwIfClosed();
+                            recordAuthoritativeChunkHash(index, chunk);
                         } catch (error) {
                             debug.chunkManifestHeadBatchInvalidCount += 1;
                             (debug.chunkManifestHeadBatchInvalidErrors ||=
@@ -4391,6 +4453,12 @@ export class LargeFile extends AbstractFile {
                                 `Chunk ${index + 1}/${resolvedFile.chunkCount} materialized without bytes`
                             );
                         }
+                        if (persistChunkReads && completeChunkEntryHeads) {
+                            recordResolvedChunkHash(
+                                index,
+                                scheduledChunk.chunkFile.hash
+                            );
+                        }
                         debug.chunkByteLength[index] = chunk.byteLength;
                         const nextProcessed =
                             processed + BigInt(chunk.byteLength);
@@ -4447,7 +4515,7 @@ export class LargeFile extends AbstractFile {
                 }
                 if (persistChunkReads && completeChunkEntryHeads) {
                     const persistenceResults = await raceWithSignal(
-                        Promise.allSettled([...manifestPersistenceTasks]),
+                        Promise.allSettled([...manifestPersistenceSettlements]),
                         transfer.owner.signal,
                         "Manifest entry persistence cancelled"
                     );
@@ -4458,6 +4526,27 @@ export class LargeFile extends AbstractFile {
                     );
                     if (rejectedPersistence) {
                         throw rejectedPersistence.reason;
+                    }
+                    const contentMismatchIndices =
+                        completeChunkEntryHeads.flatMap((_, index) => {
+                            const resolvedHash =
+                                resolvedChunkHashesByIndex.get(index);
+                            const authoritativeHash =
+                                authoritativeChunkHashesByIndex.get(index);
+                            return resolvedHash != null &&
+                                authoritativeHash != null &&
+                                resolvedHash === authoritativeHash
+                                ? []
+                                : [index];
+                        });
+                    debug.chunkManifestEntryContentMismatchIndices =
+                        contentMismatchIndices;
+                    if (contentMismatchIndices.length > 0) {
+                        throw new Error(
+                            `Persistent file read content did not match exact manifest entries for chunks ${contentMismatchIndices
+                                .map((index) => index + 1)
+                                .join(", ")}`
+                        );
                     }
                     const blocks = files.files.log.log.blocks;
                     const presence = blocks
