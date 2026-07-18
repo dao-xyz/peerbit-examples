@@ -1412,12 +1412,25 @@ describe("large-file read scheduling", () => {
                 expect(remoteStarts).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
             );
             expect(remoteStarts).not.toContain(8);
+            expect(files.getReadDiagnostics(transferId)).toMatchObject({
+                chunkManifestHeadLogicalWindowCount: 1,
+                chunkManifestHeadPhysicalRemoteRequestCount: 8,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            expect(files.getReadDiagnostics(transferId)).toMatchObject({
+                chunkManifestHeadLogicalWindowCount: 1,
+                chunkManifestHeadPhysicalRemoteRequestCount: 8,
+            });
 
             const secondRead = iterator.next().then(
                 (value) => ({ status: "fulfilled" as const, value }),
                 (reason) => ({ status: "rejected" as const, reason })
             );
             await vi.waitFor(() => expect(remoteStarts).toContain(8));
+            expect(files.getReadDiagnostics(transferId)).toMatchObject({
+                chunkManifestHeadLogicalWindowCount: 2,
+                chunkManifestHeadPhysicalRemoteRequestCount: 9,
+            });
             expect(remoteStarts.slice(0, 9)).toEqual([
                 0, 1, 2, 3, 4, 5, 6, 7, 8,
             ]);

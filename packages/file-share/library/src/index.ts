@@ -2709,6 +2709,11 @@ export class LargeFile extends AbstractFile {
                         resolvedFile.chunkCount);
             let isAdaptiveRemoteRead =
                 !persistChunkReads || isRemotePersistedRead;
+            const usesRollingManifestHeadAdmission = () =>
+                persistChunkReads &&
+                isRemotePersistedRead &&
+                hasCompleteChunkEntryHeads &&
+                resolvedFile.chunkCount > LARGE_FILE_PERSISTED_READ_AHEAD;
             let readAheadLimit = isAdaptiveRemoteRead
                 ? remoteReadAheadLimit
                 : localReadAheadLimit;
@@ -4419,11 +4424,7 @@ export class LargeFile extends AbstractFile {
                         ? remoteReadAheadLimit
                         : LARGE_FILE_PERSISTED_READ_AHEAD;
                 const admitManifestHeadsIndividually =
-                    lane === "remote" &&
-                    persistChunkReads &&
-                    isRemotePersistedRead &&
-                    hasCompleteChunkEntryHeads &&
-                    resolvedFile.chunkCount > LARGE_FILE_PERSISTED_READ_AHEAD;
+                    lane === "remote" && usesRollingManifestHeadAdmission();
                 // A consumed early hit can open one lane slot while its
                 // logical window is still deciding which earlier candidates
                 // need exact single-index fallbacks. Admit the next physical
@@ -4671,6 +4672,13 @@ export class LargeFile extends AbstractFile {
                 for (let index = 0; index < resolvedFile.chunkCount; index++) {
                     let scheduledChunk: ScheduledChunk | undefined;
                     try {
+                        // A normal next() has already run the prior chunk's
+                        // finally block, so the rolling refill can reuse its
+                        // released permit without doing hidden work while the
+                        // consumer is suspended at yield.
+                        if (usesRollingManifestHeadAdmission()) {
+                            fillReadAhead();
+                        }
                         const demandStartedAt = Date.now();
                         scheduledChunk = await resolveChunkWithReadAhead(index);
                         const demandWaitMs = Date.now() - demandStartedAt;
@@ -4698,6 +4706,13 @@ export class LargeFile extends AbstractFile {
                                     readAhead
                                 );
                             }
+                        }
+                        if (!usesRollingManifestHeadAdmission()) {
+                            // Keep ordinary growth behind the current in-flight
+                            // resolver. Deleting it only after the consumer
+                            // resumes prevents read-ahead listeners from being
+                            // retained across a suspended yield.
+                            fillReadAhead();
                         }
                         if (!scheduledChunk.chunkFile) {
                             throw new Error(
@@ -4750,7 +4765,6 @@ export class LargeFile extends AbstractFile {
                         );
                         transfer.owner.throwIfFailed();
                         inFlightChunks.delete(index);
-                        fillReadAhead();
                         knownChunks.delete(index);
                         scheduledChunk = undefined;
                         suspendedPayload = chunk;
