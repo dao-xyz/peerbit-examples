@@ -8,6 +8,7 @@ import {
     ParentedLargeFileWithChunkHeads,
     TINY_FILE_WRITE_SIZE_LIMIT_BYTES,
     TinyFile,
+    type UploadDiagnostics,
     isLargeFileLike,
 } from "../index.js";
 import { concat, equals } from "uint8arrays";
@@ -40,6 +41,83 @@ const uploadLargeThrough = (
                   yield bytes;
               },
           });
+
+const UPLOAD_PROGRESS_BASIS_POINTS = Array.from(
+    { length: 21 },
+    (_, index) => index * 500
+);
+
+const getExpectedUploadProgressTargetBytes = (
+    sizeBytes: number,
+    basisPoints: number
+) => Number((BigInt(sizeBytes) * BigInt(basisPoints) + 9_999n) / 10_000n);
+
+const expectUploadProgressPrefix = (diagnostics: UploadDiagnostics) => {
+    const telemetry = diagnostics.progressTelemetry;
+    expect(telemetry).to.deep.include({
+        schemaVersion: 1,
+        kind: "upload-chunk-commit",
+        clock: "unix-epoch-ms",
+    });
+    const milestones = telemetry!.milestones;
+    expect(milestones.length).to.be.within(
+        1,
+        UPLOAD_PROGRESS_BASIS_POINTS.length
+    );
+    expect(milestones.map((value) => value.basisPoints)).to.deep.eq(
+        UPLOAD_PROGRESS_BASIS_POINTS.slice(0, milestones.length)
+    );
+    expect(milestones[0]).to.deep.eq({
+        basisPoints: 0,
+        targetBytes: 0,
+        completedBytes: 0,
+        reachedAt: diagnostics.startedAt,
+        chunkIndex: null,
+    });
+    for (let index = 1; index < milestones.length; index++) {
+        const milestone = milestones[index];
+        const previous = milestones[index - 1];
+        expect(milestone.targetBytes).to.eq(
+            getExpectedUploadProgressTargetBytes(
+                diagnostics.sizeBytes,
+                milestone.basisPoints
+            )
+        );
+        expect(milestone.completedBytes).to.be.greaterThanOrEqual(
+            milestone.targetBytes
+        );
+        expect(milestone.completedBytes).to.be.lessThanOrEqual(
+            diagnostics.sizeBytes
+        );
+        expect(milestone.completedBytes - milestone.targetBytes).to.be.lessThan(
+            diagnostics.chunkSize
+        );
+        expect(milestone.completedBytes).to.be.greaterThanOrEqual(
+            previous.completedBytes
+        );
+        expect(milestone.reachedAt).to.be.greaterThanOrEqual(
+            previous.reachedAt
+        );
+        expect(Number.isInteger(milestone.chunkIndex)).to.be.true;
+        expect(milestone.chunkIndex!).to.be.within(
+            0,
+            diagnostics.chunkCount - 1
+        );
+    }
+    return milestones;
+};
+
+const expectCompleteUploadProgress = (diagnostics: UploadDiagnostics) => {
+    const milestones = expectUploadProgressPrefix(diagnostics);
+    expect(milestones).to.have.length(UPLOAD_PROGRESS_BASIS_POINTS.length);
+    expect(milestones.at(-1)).to.deep.include({
+        basisPoints: 10_000,
+        targetBytes: diagnostics.sizeBytes,
+        completedBytes: diagnostics.sizeBytes,
+        reachedAt: diagnostics.lastChunkFinishedAt,
+    });
+    return milestones;
+};
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -2541,6 +2619,7 @@ describe("index", () => {
             ).to.not.eq(null);
             expect(filestore.lastUploadDiagnostics?.finishedAt).to.not.eq(null);
             expect(filestore.lastUploadDiagnostics?.failureMessage).to.eq(null);
+            expectCompleteUploadProgress(filestore.lastUploadDiagnostics!);
         });
 
         it("copies reusable source buffers for tiny files", async () => {
@@ -2557,6 +2636,8 @@ describe("index", () => {
                 },
             });
 
+            expect(filestore.lastUploadDiagnostics?.progressTelemetry).to.be
+                .undefined;
             const file = await filestore.files.index.get(fileId, {
                 local: true,
                 remote: false,
@@ -2649,6 +2730,7 @@ describe("index", () => {
             let maxActiveBytes = 0;
             let readyManifestAfterDrain = false;
             const completedIndices = new Set<number>();
+            const completionOrder: number[] = [];
             const readIndices: number[] = [];
             const progress: number[] = [];
 
@@ -2668,6 +2750,7 @@ describe("index", () => {
                             ...args
                         );
                         completedIndices.add(value.index!);
+                        completionOrder.push(value.index!);
                         return result;
                     } finally {
                         activePuts -= 1;
@@ -2737,6 +2820,36 @@ describe("index", () => {
                 )
             ).to.be.true;
             expect(progress.at(-1)).to.eq(1);
+            expect(
+                completionOrder.some(
+                    (value, index) =>
+                        index > 0 && value < completionOrder[index - 1]
+                )
+            ).to.be.true;
+            const milestones = expectCompleteUploadProgress(diagnostics);
+            const expectedMilestoneChunkIndices: number[] = [];
+            let simulatedCompletedBytes = 0;
+            let nextMilestoneIndex = 1;
+            for (const chunkIndex of completionOrder) {
+                simulatedCompletedBytes += Math.min(
+                    diagnostics.chunkSize,
+                    diagnostics.sizeBytes - chunkIndex * diagnostics.chunkSize
+                );
+                while (
+                    nextMilestoneIndex < UPLOAD_PROGRESS_BASIS_POINTS.length &&
+                    simulatedCompletedBytes >=
+                        getExpectedUploadProgressTargetBytes(
+                            diagnostics.sizeBytes,
+                            UPLOAD_PROGRESS_BASIS_POINTS[nextMilestoneIndex]
+                        )
+                ) {
+                    expectedMilestoneChunkIndices.push(chunkIndex);
+                    nextMilestoneIndex += 1;
+                }
+            }
+            expect(
+                milestones.slice(1).map((milestone) => milestone.chunkIndex)
+            ).to.deep.eq(expectedMilestoneChunkIndices);
 
             const readyFile = await filestore.files.index.get(fileId!, {
                 local: true,
@@ -2832,6 +2945,11 @@ describe("index", () => {
             expect(diagnostics.failureMessage).to.eq(
                 "injected chunk put failure"
             );
+            const milestones = expectUploadProgressPrefix(diagnostics);
+            expect(milestones.length).to.be.lessThan(
+                UPLOAD_PROGRESS_BASIS_POINTS.length
+            );
+            expect(milestones.at(-1)!.basisPoints).to.be.lessThan(10_000);
             expect(deletedIds[0]).to.eq(diagnostics.uploadId);
             expect(
                 deletedIds
@@ -4051,6 +4169,7 @@ describe("index", () => {
             expect(diagnostics.chunkCount).to.eq(
                 Math.ceil(expected.byteLength / diagnostics.chunkSize)
             );
+            expectCompleteUploadProgress(diagnostics);
             for (let index = 0; index < diagnostics.chunkCount; index++) {
                 const chunk = (await filestore.files.index.get(
                     `${fileId}:${index}`,

@@ -4258,6 +4258,22 @@ export type UploadDiagnostics = {
     failureMessage: string | null;
     aggregatePeakChunkPuts: number;
     aggregatePeakChunkPutBytes: number;
+    /**
+     * Bounded aggregate committed-byte milestones for post-transfer analysis.
+     * These describe completed local chunk puts, not wire-byte progress.
+     */
+    progressTelemetry?: {
+        schemaVersion: 1;
+        kind: "upload-chunk-commit";
+        clock: "unix-epoch-ms";
+        milestones: {
+            basisPoints: number;
+            targetBytes: number;
+            completedBytes: number;
+            reachedAt: number;
+            chunkIndex: number | null;
+        }[];
+    };
 };
 
 type FileTransferKind = "read" | "upload";
@@ -4464,40 +4480,109 @@ const recordReadDiagnostics = (
     );
 };
 
-const createUploadDiagnostics = (properties: {
-    transferId: string;
-    uploadId: string;
-    fileName: string;
-    sizeBytes: number;
-    chunkSize: number;
-    chunkCount: number;
-}): UploadDiagnostics => ({
-    ...properties,
-    startedAt: Date.now(),
-    manifestStartedAt: null,
-    manifestFinishedAt: null,
-    firstChunkStartedAt: null,
-    firstChunkFinishedAt: null,
-    lastChunkFinishedAt: null,
-    chunkPutCount: 0,
-    chunkReadTotalMs: 0,
-    chunkReadMaxMs: 0,
-    chunkPutTotalMs: 0,
-    chunkPutMaxMs: 0,
-    chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-    chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
-    maxConcurrentChunkPuts: 0,
-    maxConcurrentChunkPutBytes: 0,
-    slowestChunkIndex: null,
-    slowestChunkPutMs: null,
-    readyManifestStartedAt: null,
-    readyManifestFinishedAt: null,
-    finishedAt: null,
-    failureAt: null,
-    failureMessage: null,
-    aggregatePeakChunkPuts: 0,
-    aggregatePeakChunkPutBytes: 0,
+const UPLOAD_PROGRESS_MILESTONE_BASIS_POINTS = [
+    0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500, 4_000, 4_500, 5_000,
+    5_500, 6_000, 6_500, 7_000, 7_500, 8_000, 8_500, 9_000, 9_500, 10_000,
+] as const;
+
+const getUploadProgressTargetBytes = (sizeBytes: number, basisPoints: number) =>
+    Number((BigInt(sizeBytes) * BigInt(basisPoints) + 9_999n) / 10_000n);
+
+const createUploadProgressTelemetry = (startedAt: number) => ({
+    schemaVersion: 1 as const,
+    kind: "upload-chunk-commit" as const,
+    clock: "unix-epoch-ms" as const,
+    milestones: [
+        {
+            basisPoints: 0,
+            targetBytes: 0,
+            completedBytes: 0,
+            reachedAt: startedAt,
+            chunkIndex: null,
+        },
+    ],
 });
+
+const recordUploadProgressMilestones = (
+    diagnostics: UploadDiagnostics,
+    completedBytes: bigint,
+    reachedAt: number,
+    chunkIndex: number
+) => {
+    const telemetry = diagnostics.progressTelemetry;
+    if (!telemetry) {
+        return;
+    }
+    while (
+        telemetry.milestones.length <
+        UPLOAD_PROGRESS_MILESTONE_BASIS_POINTS.length
+    ) {
+        const basisPoints =
+            UPLOAD_PROGRESS_MILESTONE_BASIS_POINTS[telemetry.milestones.length];
+        const targetBytes = getUploadProgressTargetBytes(
+            diagnostics.sizeBytes,
+            basisPoints
+        );
+        if (completedBytes < BigInt(targetBytes)) {
+            break;
+        }
+        telemetry.milestones.push({
+            basisPoints,
+            targetBytes,
+            completedBytes: Number(completedBytes),
+            reachedAt,
+            chunkIndex,
+        });
+    }
+};
+
+const createUploadDiagnostics = (
+    properties: {
+        transferId: string;
+        uploadId: string;
+        fileName: string;
+        sizeBytes: number;
+        chunkSize: number;
+        chunkCount: number;
+    },
+    trackProgress = false
+): UploadDiagnostics => {
+    const startedAt = Date.now();
+    const canTrackProgress =
+        trackProgress &&
+        Number.isSafeInteger(properties.sizeBytes) &&
+        properties.sizeBytes >= 0;
+    return {
+        ...properties,
+        startedAt,
+        manifestStartedAt: null,
+        manifestFinishedAt: null,
+        firstChunkStartedAt: null,
+        firstChunkFinishedAt: null,
+        lastChunkFinishedAt: null,
+        chunkPutCount: 0,
+        chunkReadTotalMs: 0,
+        chunkReadMaxMs: 0,
+        chunkPutTotalMs: 0,
+        chunkPutMaxMs: 0,
+        chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
+        chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
+        maxConcurrentChunkPuts: 0,
+        maxConcurrentChunkPutBytes: 0,
+        slowestChunkIndex: null,
+        slowestChunkPutMs: null,
+        readyManifestStartedAt: null,
+        readyManifestFinishedAt: null,
+        finishedAt: null,
+        failureAt: null,
+        failureMessage: null,
+        aggregatePeakChunkPuts: 0,
+        aggregatePeakChunkPutBytes: 0,
+        ...(canTrackProgress
+            ? { progressTelemetry: createUploadProgressTelemetry(startedAt) }
+            : {}),
+    };
+};
 
 const recordSinglePutCompletion = (
     diagnostics: UploadDiagnostics,
@@ -6009,38 +6094,17 @@ export class Files extends Program<Args> {
             normalized.transferId ?? uploadId
         );
         try {
-            const diagnostics: UploadDiagnostics = {
-                transferId: transfer.id,
-                uploadId,
-                fileName: name,
-                sizeBytes: Number(size),
-                chunkSize,
-                chunkCount: expectedChunkCount,
-                startedAt: Date.now(),
-                manifestStartedAt: null,
-                manifestFinishedAt: null,
-                firstChunkStartedAt: null,
-                firstChunkFinishedAt: null,
-                lastChunkFinishedAt: null,
-                chunkPutCount: 0,
-                chunkReadTotalMs: 0,
-                chunkReadMaxMs: 0,
-                chunkPutTotalMs: 0,
-                chunkPutMaxMs: 0,
-                chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-                chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
-                maxConcurrentChunkPuts: 0,
-                maxConcurrentChunkPutBytes: 0,
-                slowestChunkIndex: null,
-                slowestChunkPutMs: null,
-                readyManifestStartedAt: null,
-                readyManifestFinishedAt: null,
-                finishedAt: null,
-                failureAt: null,
-                failureMessage: null,
-                aggregatePeakChunkPuts: 0,
-                aggregatePeakChunkPutBytes: 0,
-            };
+            const diagnostics = createUploadDiagnostics(
+                {
+                    transferId: transfer.id,
+                    uploadId,
+                    fileName: name,
+                    sizeBytes: Number(size),
+                    chunkSize,
+                    chunkCount: expectedChunkCount,
+                },
+                true
+            );
             recordUploadDiagnostics(this, transfer.id, diagnostics);
             const manifest: LargeFileValue = parentId
                 ? new ParentedLargeFileWithChunkHeads({
@@ -6157,6 +6221,12 @@ export class Files extends Program<Args> {
                             diagnostics.slowestChunkIndex = chunkIndex;
                         }
                         committedBytes += BigInt(stableChunkBytes.byteLength);
+                        recordUploadProgressMilestones(
+                            diagnostics,
+                            committedBytes,
+                            putFinishedAt,
+                            chunkIndex
+                        );
                         progress?.(
                             Math.min(
                                 Number(committedBytes) /
@@ -6410,38 +6480,17 @@ export class Files extends Program<Args> {
             options?.transferId ?? uploadId
         );
         try {
-            const diagnostics: UploadDiagnostics = {
-                transferId: transfer.id,
-                uploadId,
-                fileName: name,
-                sizeBytes: Number(size),
-                chunkSize,
-                chunkCount,
-                startedAt: Date.now(),
-                manifestStartedAt: null,
-                manifestFinishedAt: null,
-                firstChunkStartedAt: null,
-                firstChunkFinishedAt: null,
-                lastChunkFinishedAt: null,
-                chunkPutCount: 0,
-                chunkReadTotalMs: 0,
-                chunkReadMaxMs: 0,
-                chunkPutTotalMs: 0,
-                chunkPutMaxMs: 0,
-                chunkPutConcurrencyLimit: LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-                chunkPutByteLimit: LARGE_FILE_CHUNK_PUT_BYTE_LIMIT,
-                maxConcurrentChunkPuts: 0,
-                maxConcurrentChunkPutBytes: 0,
-                slowestChunkIndex: null,
-                slowestChunkPutMs: null,
-                readyManifestStartedAt: null,
-                readyManifestFinishedAt: null,
-                finishedAt: null,
-                failureAt: null,
-                failureMessage: null,
-                aggregatePeakChunkPuts: 0,
-                aggregatePeakChunkPutBytes: 0,
-            };
+            const diagnostics = createUploadDiagnostics(
+                {
+                    transferId: transfer.id,
+                    uploadId,
+                    fileName: name,
+                    sizeBytes: Number(size),
+                    chunkSize,
+                    chunkCount,
+                },
+                true
+            );
             recordUploadDiagnostics(this, transfer.id, diagnostics);
             const manifest: LargeFileValue = parentId
                 ? new ParentedLargeFileWithChunkHeads({
@@ -6561,6 +6610,12 @@ export class Files extends Program<Args> {
                                 diagnostics.slowestChunkIndex = i;
                             }
                             committedBytes += stableChunkBytes.byteLength;
+                            recordUploadProgressMilestones(
+                                diagnostics,
+                                BigInt(committedBytes),
+                                putFinishedAt,
+                                i
+                            );
                             progress?.(
                                 Math.min(
                                     committedBytes / Math.max(Number(size), 1),
