@@ -1,5 +1,21 @@
 # @peerbit/please-lib
 
+## 2.0.7
+
+### Patch Changes
+
+- 67ac6e5: Prioritize bounded ready-manifest delivery so large uploads do not leave connected peers stuck on pending manifests behind bulk chunk traffic.
+- 0b5ce3e: Record bounded 5% committed-byte milestones for diagnosing large upload throughput changes.
+- 6e65ce9: Prioritize manifest and exact-entry reads ahead of background file replication,
+  and keep large persisted reads moving through a memory-bounded rolling manifest
+  window.
+- f618ab6: Expose compact deterministic local chunk-slot snapshots so live file-share progress can avoid repeated full-index counts.
+- 0a9f7fa: Allow locally resolved file chunks to proceed without waiting on remote batch siblings.
+- 8717991: Recover manifest-head batching after a transient empty remote batch.
+- a9ff1fc: Let callers keep remote root listing non-replicating while persisted file reads cache chunk blocks.
+- e96bacb: Keep persistent manifest-backed downloads responsive by importing exact entry blocks independently from non-replicating demand fallbacks, without weakening offline durability.
+- 282bd66: Expose per-chunk timestamps and sources when exact manifest-entry blocks are confirmed in the receiver's local Peerbit store, so benchmarks can distinguish data availability, Peerbit persistence, and sink acceptance.
+
 ## 2.0.6
 
 ### Patch Changes

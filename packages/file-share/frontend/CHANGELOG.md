@@ -1,5 +1,20 @@
 # file-share
 
+## 0.0.10
+
+### Patch Changes
+
+- Updated dependencies [67ac6e5]
+- Updated dependencies [0b5ce3e]
+- Updated dependencies [6e65ce9]
+- Updated dependencies [f618ab6]
+- Updated dependencies [0a9f7fa]
+- Updated dependencies [8717991]
+- Updated dependencies [a9ff1fc]
+- Updated dependencies [e96bacb]
+- Updated dependencies [282bd66]
+    - @peerbit/please-lib@2.0.7
+
 ## 0.0.9
 
 ### Patch Changes
