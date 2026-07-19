@@ -54,18 +54,18 @@ permissions:
     contents: read
 
 jobs:
-    provider_capacity_pair:
-        name: Exact 1 GiB provider-capacity pair
+    observer_root_persistence_pair:
+        name: Exact 1 GiB observer-root persistence pair
         runs-on: ubuntu-22.04
         timeout-minutes: 180
         concurrency:
-            group: fileshare-provider-capacity-pair-${{ github.ref_name }}
+            group: fileshare-observer-root-persistence-pair-${{ github.ref_name }}
             cancel-in-progress: false
         env:
-            BASE_CORE_COMMIT: a21a308310b9d50a3489f0fe1fbf3595b7c81f57
-            HEAD_CORE_COMMIT: a21a308310b9d50a3489f0fe1fbf3595b7c81f57
-            BASE_EXAMPLES_COMMIT: e29c0c89eb44927e6c83b5e285b01d8da24d8d5b
-            HEAD_EXAMPLES_COMMIT: d3bcac49c1037e0a1d676be1bc7988163b677d73
+            BASE_CORE_COMMIT: 33b4aa4f054a3db2d301df41bab56cf5c77d367c
+            HEAD_CORE_COMMIT: 33b4aa4f054a3db2d301df41bab56cf5c77d367c
+            BASE_EXAMPLES_COMMIT: d3bcac49c1037e0a1d676be1bc7988163b677d73
+            HEAD_EXAMPLES_COMMIT: 58853dcdac8e6dec952bd5107807473e59e19059
             BASE_EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
             HEAD_EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
             EXPECTED_SHA256_BASE64: bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=
@@ -243,12 +243,14 @@ jobs:
                       examples_source="$BASE_EXAMPLES_SOURCE"
                       examples_commit="$BASE_EXAMPLES_COMMIT"
                       examples_lock="$BASE_EXAMPLES_LOCK_SHA256"
+                      reader_terminal_topology="replicator"
                     else
                       core_root="$HARNESS_ROOT"
                       core_commit="$HEAD_CORE_COMMIT"
                       examples_source="$HEAD_EXAMPLES_SOURCE"
                       examples_commit="$HEAD_EXAMPLES_COMMIT"
                       examples_lock="$HEAD_EXAMPLES_LOCK_SHA256"
+                      reader_terminal_topology="observer"
                     fi
                     prepared="$PREPARED_ROOT-$sequence-$variant"
                     result_dir="$RESULTS_ROOT/$sequence-$variant"
@@ -305,7 +307,8 @@ jobs:
                         --sample-count 4
                         --target-seeders 2
                         --reader-local-chunk-target 1024
-                        --reader-local-chunk-max-overshoot 8
+                        --reader-local-chunk-max-overshoot 0
+                        --reader-terminal-topology "$reader_terminal_topology"
                         --fixture-seed peerbit-file-share-benchmark-v1
                       )
                       exec setsid timeout --signal=INT --kill-after=30s 75m node "${benchmark_args[@]}"
@@ -407,7 +410,29 @@ jobs:
                     headLock: process.env.HEAD_EXAMPLES_LOCK_SHA256,
                     sha256: process.env.EXPECTED_SHA256_BASE64,
                     crc32: process.env.EXPECTED_CRC32_HEX,
-                    cohort: "observer-persistent-prefix-b1026-i0",
+                    fileSizeBytes: 1024 * 1024 * 1024,
+                    locality: {
+                      profile: "observer-topology-exact-manifest-prefix",
+                      provisioningMethod: "exact-manifest-head-import",
+                      target: 1024,
+                      maxOvershoot: 0,
+                      indexRows: 0,
+                      cohortKey: "observer-persistent-prefix-b1024-i0",
+                    },
+                    terminalTopology: {
+                      baseline: {
+                        role: "replicator",
+                        replicatorCount: 2,
+                        readerSelfInReplicatorSet: true,
+                        terminalIndexMode: "full",
+                      },
+                      head: {
+                        role: "observer",
+                        replicatorCount: 1,
+                        readerSelfInReplicatorSet: false,
+                        terminalIndexMode: "empty",
+                      },
+                    },
                   };
                   const output = path.join(root, "paired-comparison.json");
 
@@ -421,14 +446,18 @@ jobs:
                     const result = rawResult?.browserResult ?? rawResult;
                     if (!result) throw new Error("Missing " + variant + " result");
                     const diagnostics = result.readerDiagnostics?.lastReadDiagnostics;
+                    const locality = result.readerLocalityControl;
+                    const memoryTelemetry = result.downloadMemoryTelemetry;
+                    const hostRss = memoryTelemetry?.hostRss;
+                    const expectedTopology = expected.terminalTopology[variant];
                     const issues = [];
                     const check = (condition, message) => {
                       if (!condition) issues.push(message);
                     };
                     check(summary.status === "passed", "summary-status");
-                    check(summary.schema?.version === 4, "summary-schema");
-                    check(result.schema?.version === 7, "result-schema");
-                    check(result.invocation?.schema?.version === 3, "invocation-schema");
+                    check(summary.schema?.version === 5, "summary-schema");
+                    check(result.schema?.version === 8, "result-schema");
+                    check(result.invocation?.schema?.version === 4, "invocation-schema");
                     check(summary.harnessProvenance?.resolvedCommit === expected.harness, "harness-commit");
                     check(summary.harnessProvenance?.dirty === false, "harness-dirty");
                     check(summary.peerbitProvenance?.resolvedCommit === expected[variant], "peerbit-commit");
@@ -440,32 +469,239 @@ jobs:
                     check(result.integrity?.manifestSha256Base64 === expected.sha256, "manifest-sha256");
                     check(result.integrity?.sourceCrc32Hex === expected.crc32, "source-crc32");
                     check(result.integrity?.downloadedCrc32Hex === expected.crc32, "download-crc32");
-                    check(result.integrityVerified === true, "integrity-verified");
+                    check(
+                      result.integrity?.expectedSizeBytes === expected.fileSizeBytes &&
+                        result.integrity?.sourceSizeBytes === expected.fileSizeBytes &&
+                        result.integrity?.manifestSizeBytes === expected.fileSizeBytes &&
+                        result.integrity?.downloadedSizeBytes === expected.fileSizeBytes &&
+                        result.integrity?.sizeVerified === true &&
+                        result.integrity?.sha256Verified === true &&
+                        result.integrity?.crc32Verified === true &&
+                        result.integrity?.manifestVerified === true &&
+                        result.integrity?.verified === true &&
+                        result.integrityVerified === true,
+                      "integrity-verified",
+                    );
                     check(result.errorCount === 0 && result.errorCollectionComplete === true, "errors");
                     check(result.requestFailureCount === 0 && result.requestFailureCollectionComplete === true, "request-failures");
+                    check(
+                      memoryTelemetry?.profile === "download-memory-v2" &&
+                        memoryTelemetry?.complete === true &&
+                        memoryTelemetry?.cleanupComplete === true,
+                      "memory-telemetry",
+                    );
                     check(result.readerLocalityControl?.status === "complete", "locality-control");
-                    check(result.readerLocalityCohortKey === expected.cohort, "locality-cohort");
+                    check(
+                      result.readerTerminalTopology === expectedTopology.role &&
+                        result.invocation?.readerTerminalTopology === expectedTopology.role &&
+                        locality?.expectedTerminalTopology === expectedTopology.role,
+                      "terminal-topology-contract",
+                    );
+                    check(locality?.profile === expected.locality.profile, "locality-profile");
+                    check(
+                      locality?.provisioningMethod === expected.locality.provisioningMethod,
+                      "locality-provisioning",
+                    );
+                    check(
+                      result.invocation?.readerLocalChunkTarget === expected.locality.target &&
+                        result.readerLocalChunkTarget === expected.locality.target,
+                      "locality-target",
+                    );
+                    check(
+                      result.invocation?.readerLocalChunkMaxOvershoot ===
+                          expected.locality.maxOvershoot &&
+                        result.readerLocalChunkMaxOvershoot === expected.locality.maxOvershoot &&
+                        locality?.requestedLocalChunkBlockCount ===
+                          expected.locality.target &&
+                        locality?.maxSpeculativeOvershootChunkCount ===
+                          expected.locality.maxOvershoot,
+                      "locality-max-overshoot",
+                    );
+                    const localBlockCount = locality?.actualLocalChunkBlockCount;
+                    const localIndexRowCount = locality?.actualLocalChunkIndexRowCount;
+                    const cohortWithinAllowedRange =
+                      Number.isSafeInteger(localBlockCount) &&
+                      localBlockCount >= expected.locality.target &&
+                      localBlockCount <=
+                        expected.locality.target + expected.locality.maxOvershoot;
+                    check(cohortWithinAllowedRange, "locality-block-count");
+                    check(
+                      localIndexRowCount === expected.locality.indexRows,
+                      "locality-index-row-count",
+                    );
+                    check(
+                      locality?.speculativeOvershootChunkCount ===
+                        localBlockCount - expected.locality.target,
+                      "locality-observed-overshoot",
+                    );
+                    check(
+                      result.readerLocalityCohortKey === expected.locality.cohortKey &&
+                        locality?.cohortKey === expected.locality.cohortKey,
+                      "locality-cohort",
+                    );
+                    const expectedPrefix = Array.from(
+                      { length: expected.locality.target },
+                      (_, index) => index,
+                    );
+                    const preDownload = locality?.preDownloadObservation;
+                    check(
+                      isDeepStrictEqual(
+                        locality?.preloadEvidence?.importedManifestEntryIndices,
+                        expectedPrefix,
+                      ) &&
+                        locality?.preloadEvidence?.requestedManifestEntryCount ===
+                          expected.locality.target &&
+                        locality?.preloadEvidence?.importedManifestEntryCount ===
+                          expected.locality.target &&
+                        isDeepStrictEqual(
+                          locality?.preloadEvidence?.localManifestEntryIndicesAfter,
+                          expectedPrefix,
+                      ),
+                      "locality-exact-imported-prefix",
+                    );
+                    check(
+                      preDownload?.blockCount === expected.locality.target &&
+                        preDownload?.indexRowCount === expected.locality.indexRows &&
+                        isDeepStrictEqual(
+                          preDownload?.blockChunkIndices,
+                          expectedPrefix,
+                        ) &&
+                        isDeepStrictEqual(preDownload?.indexedChunkIndices, []) &&
+                        preDownload?.persistChunkReads === true,
+                      "locality-exact-pre-read-prefix",
+                    );
+                    const terminalIdle = locality?.terminalIdleObservation;
+                    const terminalTopologies = locality?.terminalTopologyObservations;
+                    const writerPeerDiagnostics = result.writerDiagnostics;
+                    const readerPeerDiagnostics = result.readerDiagnostics;
+                    const writerPeerHash = locality?.writerTopologyBeforeUpload?.peerHash;
+                    const readerPeerHash = locality?.readerTopologyBeforeUpload?.peerHash;
+                    const writerSingletonMatches = (writerTopology, readerTopology) =>
+                      writerTopology?.peerHash === writerPeerHash &&
+                      readerTopology?.peerHash === readerPeerHash &&
+                      writerTopology?.replicatorCount === 1 &&
+                      readerTopology?.replicatorCount === 1 &&
+                      writerTopology?.selfInReplicatorSet === true &&
+                      readerTopology?.selfInReplicatorSet === false &&
+                      isDeepStrictEqual(writerTopology?.replicatorHashes, [writerPeerHash]) &&
+                      isDeepStrictEqual(readerTopology?.replicatorHashes, [writerPeerHash]);
+                    check(
+                      typeof writerPeerHash === "string" &&
+                        typeof readerPeerHash === "string" &&
+                        writerPeerHash !== readerPeerHash &&
+                        writerSingletonMatches(
+                          locality?.writerTopologyBeforeUpload,
+                          locality?.readerTopologyBeforeUpload,
+                        ) &&
+                        writerSingletonMatches(
+                          locality?.writerTopologyBeforeTimedRead,
+                          locality?.readerTopologyBeforeTimedRead,
+                        ),
+                      "pre-read-writer-singleton-topology",
+                    );
+                    const terminalChunkCount = result.readerManifestEvidence?.chunkCount;
+                    const expectedTerminalIndices = Number.isSafeInteger(terminalChunkCount)
+                      ? Array.from({ length: terminalChunkCount }, (_, index) => index)
+                      : [];
+                    const expectedTerminalIndexedIndices =
+                      expectedTopology.terminalIndexMode === "full"
+                        ? expectedTerminalIndices
+                        : [];
+                    check(
+                      Number.isSafeInteger(terminalChunkCount) &&
+                        terminalChunkCount > expected.locality.target &&
+                        terminalIdle?.chunkCount === terminalChunkCount &&
+                        terminalIdle?.blockCount === terminalIdle?.chunkCount &&
+                        isDeepStrictEqual(
+                          terminalIdle?.blockChunkIndices,
+                          expectedTerminalIndices,
+                        ) &&
+                        terminalIdle?.indexRowCount ===
+                          expectedTerminalIndexedIndices.length &&
+                        isDeepStrictEqual(
+                          terminalIdle?.indexedChunkIndices,
+                          expectedTerminalIndexedIndices,
+                        ) &&
+                        terminalIdle?.persistChunkReads === true,
+                      "terminal-reader-locality",
+                    );
+                    const expectedTerminalReplicatorHashes =
+                      expectedTopology.role === "replicator"
+                        ? [writerPeerHash, readerPeerHash].sort((left, right) =>
+                            left.localeCompare(right),
+                          )
+                        : [writerPeerHash];
+                    check(
+                      locality?.terminalTopologyRole === expectedTopology.role &&
+                        locality?.terminalTopologyExpectationSatisfied === true,
+                      "terminal-reader-role",
+                    );
+                    check(
+                      Array.isArray(terminalTopologies) &&
+                        terminalTopologies.length === 3 &&
+                        terminalTopologies.every(
+                          ({ writerTopology, readerTopology }) =>
+                            writerTopology?.peerHash === writerPeerHash &&
+                            readerTopology?.peerHash === readerPeerHash &&
+                            writerTopology?.replicatorCount ===
+                              expectedTopology.replicatorCount &&
+                            readerTopology?.replicatorCount ===
+                              expectedTopology.replicatorCount &&
+                            writerTopology?.selfInReplicatorSet === true &&
+                            readerTopology?.selfInReplicatorSet ===
+                              expectedTopology.readerSelfInReplicatorSet &&
+                            isDeepStrictEqual(
+                              writerTopology?.replicatorHashes,
+                              expectedTerminalReplicatorHashes,
+                            ) &&
+                            isDeepStrictEqual(
+                              readerTopology?.replicatorHashes,
+                              expectedTerminalReplicatorHashes,
+                            ),
+                        ),
+                      "terminal-expected-topology",
+                    );
+                    check(
+                      writerPeerDiagnostics?.replicatorCount ===
+                          expectedTopology.replicatorCount &&
+                        readerPeerDiagnostics?.replicatorCount ===
+                          expectedTopology.replicatorCount &&
+                        writerPeerDiagnostics?.replicationSetSize === 1 &&
+                        readerPeerDiagnostics?.replicationSetSize === 1,
+                      "terminal-peer-diagnostics",
+                    );
                     check(diagnostics?.chunkManifestEntryPersistenceFailedCount === 0, "persistence-failed");
                     check(diagnostics?.chunkManifestEntryPersistenceMissingIndices?.length === 0, "persistence-missing");
                     check(diagnostics?.chunkManifestEntryContentMismatchIndices?.length === 0, "persistence-content");
                     check(diagnostics?.chunkManifestHeadBatchErrorCount === 0, "manifest-head-batch-errors");
                     check(diagnostics?.chunkManifestHeadBatchInvalidCount === 0, "manifest-head-invalid");
                     if (variant === "head") {
-                      check(diagnostics?.chunkManifestHeadBatchMissingCount === 0, "manifest-head-missing");
                       check(
-                        diagnostics?.chunkManifestHeadPhysicalRemoteRequestErrorCount === 0,
-                        "manifest-head-physical-errors",
+                        diagnostics?.chunkManifestHeadBatchMissingCount === 0,
+                        "manifest-head-missing",
                       );
-                      check(
-                        diagnostics?.chunkManifestHeadPhysicalRemoteRequestErrors?.length === 0,
-                        "manifest-head-physical-error-details",
-                      );
+                    }
+                    check(
+                      diagnostics?.chunkManifestHeadPhysicalRemoteRequestErrorCount === 0,
+                      "manifest-head-physical-errors",
+                    );
+                    check(
+                      diagnostics?.chunkManifestHeadPhysicalRemoteRequestErrors?.length === 0,
+                      "manifest-head-physical-error-details",
+                    );
+                    if (variant === "head") {
                       check(
                         diagnostics?.chunkManifestHeadPhysicalRemoteRequestCount > 0,
                         "manifest-head-rolling-unused",
                       );
-                      check(diagnostics?.maxManifestHeadBatchSize === 1, "manifest-head-physical-width");
-                      check(diagnostics?.maxManifestHeadLogicalWindowSize === 8, "manifest-head-logical-width");
+                      check(
+                        diagnostics?.maxManifestHeadBatchSize === 1,
+                        "manifest-head-physical-width",
+                      );
+                      check(
+                        diagnostics?.maxManifestHeadLogicalWindowSize === 8,
+                        "manifest-head-logical-width",
+                      );
                     }
                     const boundary = diagnostics?.chunkWriteFinishedAt?.["1023"];
                     const firstHalfMs = boundary - diagnostics?.startedAt;
@@ -477,6 +713,30 @@ jobs:
                     const secondHalfDemandWaitMs = sum(demandValues.slice(1024));
                     const derivedLibraryStreamWallMs =
                       diagnostics?.finishedAt - diagnostics?.startedAt;
+                    const fileSizeBytes = result.invocation?.fileSizeBytes;
+                    const memoryCounters = [
+                      hostRss?.startBrowserBytes,
+                      hostRss?.peakBrowserBytes,
+                      hostRss?.startCombinedBytes,
+                      hostRss?.peakCombinedBytes,
+                    ];
+                    check(
+                      fileSizeBytes === expected.fileSizeBytes &&
+                        memoryCounters.every(
+                          (value) => Number.isSafeInteger(value) && value >= 0,
+                        ) &&
+                        hostRss?.peakBrowserBytes >= hostRss?.startBrowserBytes &&
+                        hostRss?.peakCombinedBytes >= hostRss?.startCombinedBytes,
+                      "memory-rss-counters",
+                    );
+                    const browserGrowthBytes = Math.max(
+                      0,
+                      hostRss?.peakBrowserBytes - hostRss?.startBrowserBytes,
+                    );
+                    const combinedGrowthBytes = Math.max(
+                      0,
+                      hostRss?.peakCombinedBytes - hostRss?.startCombinedBytes,
+                    );
                     const metrics = {
                       libraryStreamWallMs:
                         result.libraryStreamWallMs ?? derivedLibraryStreamWallMs,
@@ -492,6 +752,14 @@ jobs:
                         result.readTransfer?.demandWait?.over10sCount ??
                         demandValues.filter((value) => value > 10_000).length,
                       maxChunkAttempts: Math.max(...attempts),
+                      startBrowserBytes: hostRss?.startBrowserBytes,
+                      peakBrowserBytes: hostRss?.peakBrowserBytes,
+                      browserGrowthBytes,
+                      browserGrowthOverPayload: browserGrowthBytes / fileSizeBytes,
+                      startCombinedBytes: hostRss?.startCombinedBytes,
+                      peakCombinedBytes: hostRss?.peakCombinedBytes,
+                      combinedGrowthBytes,
+                      combinedGrowthOverPayload: combinedGrowthBytes / fileSizeBytes,
                     };
                     check(
                       Object.values(metrics).every(
@@ -499,17 +767,35 @@ jobs:
                       ),
                       "metrics",
                     );
-                    return { summary, result, issues, metrics, summaryFile: name };
+                    return {
+                      summary,
+                      result,
+                      issues,
+                      metrics,
+                      summaryFile: name,
+                      cohort: {
+                        key: result.readerLocalityCohortKey,
+                        blockCount: localBlockCount,
+                        indexRowCount: localIndexRowCount,
+                      },
+                    };
                   };
 
                   try {
                     const baseline = loadVariant("baseline");
                     const head = loadVariant("head");
                     const pairedIssues = [];
-                    if (!isDeepStrictEqual(baseline.result.invocation, head.result.invocation)) {
+                    const comparableInvocation = ({ readerTerminalTopology, ...invocation }) =>
+                      invocation;
+                    if (
+                      !isDeepStrictEqual(
+                        comparableInvocation(baseline.result.invocation),
+                        comparableInvocation(head.result.invocation),
+                      )
+                    ) {
                       pairedIssues.push("invocation-mismatch");
                     }
-                    if (baseline.result.readerLocalityCohortKey !== head.result.readerLocalityCohortKey) {
+                    if (!isDeepStrictEqual(baseline.cohort, head.cohort)) {
                       pairedIssues.push("cohort-mismatch");
                     }
                     const delta = {};
@@ -528,14 +814,18 @@ jobs:
                       baseline.issues.length === 0 &&
                       head.issues.length === 0 &&
                       pairedIssues.length === 0;
+                    const memoryTargetsPassed =
+                      head.metrics.browserGrowthOverPayload <= 2.0 &&
+                      head.metrics.combinedGrowthOverPayload <= 2.5;
                     const performanceTargetsPassed =
                       head.metrics.over10sDemandWaitCount === 0 &&
                       head.metrics.maxChunkAttempts < 4 &&
                       head.metrics.secondHalfMs <= 46_700 &&
-                      head.metrics.secondHalfDemandWaitMs <= 35_500;
+                      head.metrics.secondHalfDemandWaitMs <= 35_500 &&
+                      memoryTargetsPassed;
                     const withinNoiseTolerance = (headValue, baselineValue) =>
                       headValue <= Math.max(baselineValue * 1.05, baselineValue + 1_000);
-                    const relativeNonRegressionPassed = [
+                    const timingRelativeNonRegressionPassed = [
                       "libraryStreamWallMs",
                       "secondHalfMs",
                       "demandWaitSumMs",
@@ -543,21 +833,46 @@ jobs:
                     ].every((key) =>
                       withinNoiseTolerance(head.metrics[key], baseline.metrics[key]),
                     );
+                    const memoryGrowthWithinTolerance = (headValue, baselineValue) =>
+                      headValue <=
+                      Math.max(
+                        baselineValue * 1.10,
+                        baselineValue + 256 * 1024 * 1024,
+                      );
+                    const memoryRelativeNonRegressionPassed = [
+                      "browserGrowthBytes",
+                      "combinedGrowthBytes",
+                    ].every((key) =>
+                      memoryGrowthWithinTolerance(
+                        head.metrics[key],
+                        baseline.metrics[key],
+                      ),
+                    );
+                    const relativeNonRegressionPassed =
+                      timingRelativeNonRegressionPassed &&
+                      memoryRelativeNonRegressionPassed;
                     const report = {
-                      schema: { id: "peerbit-file-share-provider-capacity-pair", version: 1 },
+                      schema: { id: "peerbit-file-share-observer-root-persistence-pair", version: 1 },
                       generatedAt: new Date().toISOString(),
                       order: fs.readFileSync(path.join(root, "order.txt"), "utf8").trim().split(/\r?\n/),
                       expected,
                       comparable,
+                      memoryTargetsPassed,
                       performanceTargetsPassed,
+                      timingRelativeNonRegressionPassed,
+                      memoryRelativeNonRegressionPassed,
                       relativeNonRegressionPassed,
                       performanceThresholds: {
                         maxSecondHalfMs: 46_700,
                         maxSecondHalfDemandWaitMs: 35_500,
                         maxOver10sDemandWaitCount: 0,
                         maxChunkAttemptsExclusive: 4,
-                        relativeNonRegression:
+                        maxBrowserGrowthOverPayload: 2.0,
+                        maxCombinedGrowthOverPayload: 2.5,
+                        timingRelativeNonRegression:
                           "head <= max(baseline * 1.05, baseline + 1000 ms)",
+                        memoryGrowthRelativeNonRegression:
+                          "head <= max(baseline * 1.10, baseline + 256 MiB)",
                       },
                       strictGatePassed:
                         comparable &&
@@ -567,13 +882,13 @@ jobs:
                       baseline: {
                         summaryFile: baseline.summaryFile,
                         issues: baseline.issues,
-                        cohort: baseline.result.readerLocalityCohortKey,
+                        cohort: baseline.cohort,
                         metrics: baseline.metrics,
                       },
                       head: {
                         summaryFile: head.summaryFile,
                         issues: head.issues,
-                        cohort: head.result.readerLocalityCohortKey,
+                        cohort: head.cohort,
                         metrics: head.metrics,
                       },
                       delta,
@@ -582,7 +897,7 @@ jobs:
                     console.log(JSON.stringify(report, null, 2));
                   } catch (error) {
                     const report = {
-                      schema: { id: "peerbit-file-share-provider-capacity-pair", version: 1 },
+                      schema: { id: "peerbit-file-share-observer-root-persistence-pair", version: 1 },
                       generatedAt: new Date().toISOString(),
                       comparable: false,
                       performanceTargetsPassed: false,
@@ -598,7 +913,7 @@ jobs:
               if: always()
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: fileshare-provider-capacity-pair-${{ github.run_id }}
+                  name: fileshare-observer-root-persistence-pair-${{ github.run_id }}
                   path: evidence
                   retention-days: 7
 
