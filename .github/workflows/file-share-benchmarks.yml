@@ -1,126 +1,555 @@
-name: File Share Benchmarks
+name: File Share Outbound-Candidate Pruning Campaign
 
 on:
     workflow_dispatch:
         inputs:
-            scenario:
-                description: Benchmark scenario
+            pair_order:
+                description: Explicit counterbalanced execution order
                 required: true
                 type: choice
-                default: local
+                default: baseline-head
                 options:
-                    - local
-                    - prod
-            file_mb:
-                description: File size in MiB
-                required: true
-                type: number
-                default: 512
-            runs:
-                description: Number of benchmark runs
-                required: true
-                type: number
-                default: 5
-            reader_cohort:
-                description: Reader benchmark cohort
-                required: true
-                type: choice
-                default: live-replicator
-                options:
-                    - live-replicator
-                    - cold-observer
-                    - cold-persisted-read
-            download_sink:
-                description: Browser output sink (hash-only isolates Peerbit transfer; OPFS measures native browser persistence)
-                required: true
-                type: choice
-                default: hash-only
-                options:
-                    - hash-only
-                    - opfs
-                    - node-file
-            min_upload_mbps:
-                description: Fail if median upload throughput is below this value (0 disables)
-                required: true
-                type: number
-                default: 0
-            min_download_mbps:
-                description: Fail if median download throughput is below this value (0 disables)
-                required: true
-                type: number
-                default: 0
+                    - baseline-head
+                    - head-baseline
 
 permissions:
     contents: read
 
-env:
-    FILE_SHARE_BENCHMARK_BASE_URL: https://files.apps.peerbit.org
-
 jobs:
-    benchmark:
+    outbound_candidate_pruning:
+        name: Exact 1 GiB outbound-candidate pruning pair
         runs-on: ubuntu-22.04
-        timeout-minutes: 180
+        timeout-minutes: 360
         concurrency:
-            group: file-share-bench-${{ github.ref_name }}-${{ inputs.scenario }}-${{ inputs.file_mb }}-${{ inputs.download_sink }}
+            group: fileshare-outbound-pruning-${{ github.ref_name }}-${{ inputs.pair_order }}
             cancel-in-progress: false
+        defaults:
+            run:
+                shell: bash
+        env:
+            BASE_CORE_COMMIT: 8fc5533b14228b4091dffb3962fc8b1ff088bd89
+            HEAD_CORE_COMMIT: 221411b880189df02404e9957591147142423aa2
+            HARNESS_CORE_COMMIT: c3a1535e58bde474fef6fffdf447e42404b3a808
+            EXAMPLES_COMMIT: 0cc0bc74682cd1a7b741232f07f46fe6f67c1cbc
+            EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
+            FIXTURE_SEED: peerbit-file-share-benchmark-v1
+            EXPECTED_SHA256_BASE64: bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=
+            EXPECTED_CRC32_HEX: 125fb916
+            FILE_MB: "1024"
+            FILE_SIZE_BYTES: "1073741824"
+            CHUNK_COUNT: "2048"
+            CHUNK_SIZE_BYTES: "524288"
+            LOCAL_PREFIX_BLOCK_COUNT: "1024"
+            LOCAL_PREFIX_INDEX_ROW_COUNT: "0"
+            REMOTE_PAYLOAD_BYTES: "536870912"
+            REMOTE_PAYLOAD_UPPER_BYTES: "553648128"
+            COUNTERPART_BYTE_SKEW_BYTES: "1048576"
+            PUBSUB_PROTOCOL: /peerbit/topic-control-plane/2.0.0
+            CAMPAIGN_ROOT: ${{ github.workspace }}/campaign
+            HARNESS_ROOT: ${{ github.workspace }}/harness
+            BASE_CORE_ROOT: ${{ github.workspace }}/core-baseline
+            HEAD_CORE_ROOT: ${{ github.workspace }}/core-head
+            EXAMPLES_SOURCE: ${{ github.workspace }}/examples-source
+            RESULTS_ROOT: ${{ github.workspace }}/evidence
+            PREPARED_ROOT: /tmp/peerbit-fileshare-outbound-pruning
+            NODE_OPTIONS: --no-warnings
 
         steps:
-            - name: Checkout
+            - name: Initialize evidence directory
+              run: |
+                  set -euo pipefail
+                  mkdir -p "$RESULTS_ROOT/logs"
+                  date -u +%FT%TZ > "$RESULTS_ROOT/initialized-at.txt"
+                  printf '%s\n' "${{ inputs.pair_order }}" > "$RESULTS_ROOT/requested-pair-order.txt"
+
+            - name: Validate immutable campaign declaration
+              env:
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: |
+                  set -euo pipefail
+                  case "$PAIR_ORDER" in
+                    baseline-head|head-baseline) ;;
+                    *) printf 'Unsupported pair order: %s\n' "$PAIR_ORDER" >&2; exit 2 ;;
+                  esac
+                  for value in \
+                    "$BASE_CORE_COMMIT" \
+                    "$HEAD_CORE_COMMIT" \
+                    "$HARNESS_CORE_COMMIT" \
+                    "$EXAMPLES_COMMIT"; do
+                    [[ "$value" =~ ^[0-9a-f]{40}$ ]]
+                  done
+                  [[ "$EXAMPLES_LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+                  test "$BASE_CORE_COMMIT" != "$HEAD_CORE_COMMIT"
+                  test "$HARNESS_CORE_COMMIT" != "$BASE_CORE_COMMIT"
+                  test "$HARNESS_CORE_COMMIT" != "$HEAD_CORE_COMMIT"
+                  test "$FILE_MB" = "1024"
+                  test "$FILE_SIZE_BYTES" = "1073741824"
+                  test "$CHUNK_COUNT" = "2048"
+                  test "$CHUNK_SIZE_BYTES" = "524288"
+                  test "$LOCAL_PREFIX_BLOCK_COUNT" = "1024"
+                  test "$LOCAL_PREFIX_INDEX_ROW_COUNT" = "0"
+                  test "$REMOTE_PAYLOAD_BYTES" = "536870912"
+                  test "$REMOTE_PAYLOAD_UPPER_BYTES" = "553648128"
+                  test "$COUNTERPART_BYTE_SKEW_BYTES" = "1048576"
+                  test "$PUBSUB_PROTOCOL" = "/peerbit/topic-control-plane/2.0.0"
+
+            - name: Reclaim ephemeral runner disk
+              run: |
+                  set -euo pipefail
+                  cleanup_paths=(
+                    /usr/share/dotnet
+                    /usr/local/lib/android
+                    /opt/ghc
+                    /usr/local/.ghcup
+                    /opt/hostedtoolcache/CodeQL
+                  )
+                  sudo rm -rf "${cleanup_paths[@]}"
+                  df -h /
+
+            - name: Checkout campaign workflow source
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ github.workflow_sha }}
+                  path: campaign
+                  fetch-depth: 1
+                  persist-credentials: false
+
+            - name: Checkout immutable benchmark harness
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit
+                  ref: ${{ env.HARNESS_CORE_COMMIT }}
+                  path: harness
+                  fetch-depth: 2
+                  persist-credentials: false
+
+            - name: Checkout immutable baseline core
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit
+                  ref: ${{ env.BASE_CORE_COMMIT }}
+                  path: core-baseline
+                  fetch-depth: 1
+                  persist-credentials: false
+
+            - name: Checkout immutable head core
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit
+                  ref: ${{ env.HEAD_CORE_COMMIT }}
+                  path: core-head
+                  fetch-depth: 2
+                  persist-credentials: false
+
+            - name: Checkout immutable examples source and template
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  repository: dao-xyz/peerbit-examples
+                  ref: ${{ env.EXAMPLES_COMMIT }}
+                  path: examples-source
+                  fetch-depth: 1
+                  persist-credentials: false
 
             - name: Setup pnpm
               uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
               with:
+                  version: 10.26.1
                   run_install: false
 
             - name: Setup Node
               uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
-                  cache: pnpm
-                  cache-dependency-path: pnpm-lock.yaml
 
-            - name: Install dependencies
-              run: pnpm install --frozen-lockfile
-
-            - name: Install Playwright Chromium
-              run: pnpm exec playwright install --with-deps chromium
-
-            - name: Build file-share library
-              run: pnpm --filter @peerbit/please-lib build
-
-            - name: Run benchmark
-              env:
-                  PW_BENCH: "1"
-                  PW_BENCH_SCENARIO: ${{ inputs.scenario }}
-                  PW_READER_COHORT: ${{ inputs.reader_cohort }}
-                  PW_DOWNLOAD_SINK: ${{ inputs.download_sink }}
-                  PW_FILE_MB: ${{ inputs.file_mb }}
-                  PW_BASE_URL: ${{ inputs.scenario == 'prod' && env.FILE_SHARE_BENCHMARK_BASE_URL || '' }}
-              working-directory: packages/file-share/frontend
+            - name: Verify immutable checkouts and schemas
               run: |
-                  mkdir -p "$GITHUB_WORKSPACE/bench-results"
-                  for i in $(seq 1 "${{ inputs.runs }}"); do
-                    echo "Starting file-share benchmark run $i/${{ inputs.runs }}"
-                    export PW_RESULT_FILE="$GITHUB_WORKSPACE/bench-results/run-$i.json"
-                    npx playwright test -c playwright.config.ts tests/transfer.bench.e2e.spec.ts --project chromium
+                  set -euo pipefail
+                  test "$(git -C "$CAMPAIGN_ROOT" rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+                  test "$(git -C "$HARNESS_ROOT" rev-parse HEAD)" = "$HARNESS_CORE_COMMIT"
+                  test "$(git -C "$HARNESS_ROOT" rev-parse HEAD^1)" = "$HEAD_CORE_COMMIT"
+                  test "$(git -C "$BASE_CORE_ROOT" rev-parse HEAD)" = "$BASE_CORE_COMMIT"
+                  test "$(git -C "$HEAD_CORE_ROOT" rev-parse HEAD)" = "$HEAD_CORE_COMMIT"
+                  test "$(git -C "$HEAD_CORE_ROOT" rev-parse HEAD^1)" = "$BASE_CORE_COMMIT"
+                  test "$(git -C "$EXAMPLES_SOURCE" rev-parse HEAD)" = "$EXAMPLES_COMMIT"
+                  for root in \
+                    "$CAMPAIGN_ROOT" \
+                    "$HARNESS_ROOT" \
+                    "$BASE_CORE_ROOT" \
+                    "$HEAD_CORE_ROOT" \
+                    "$EXAMPLES_SOURCE"; do
+                    test -z "$(git -C "$root" status --porcelain=v1 --untracked-files=all)"
                   done
+                  test "$(sha256sum "$EXAMPLES_SOURCE/pnpm-lock.yaml" | cut -d' ' -f1)" = "$EXAMPLES_LOCK_SHA256"
+                  test -f "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs"
+                  test -f "$HARNESS_ROOT/scripts/file-share/run-file-share-benchmark.mjs"
+                  node --input-type=module <<'NODE'
+                  import assert from "node:assert/strict";
+                  const {
+                    BENCHMARK_RESULT_SCHEMA,
+                    BENCHMARK_SUMMARY_SCHEMA,
+                  } = await import(
+                    `${process.env.HARNESS_ROOT}/scripts/file-share/benchmark-orchestration.mjs`
+                  );
+                  assert.deepEqual(BENCHMARK_RESULT_SCHEMA, {
+                    id: "peerbit-file-share-benchmark",
+                    version: 9,
+                  });
+                  assert.deepEqual(BENCHMARK_SUMMARY_SCHEMA, {
+                    id: "peerbit-file-share-benchmark-summary",
+                    version: 5,
+                  });
+                  NODE
+                  node --test "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.test.mjs"
 
-            - name: Summarize results
+            - name: Install build and browser prerequisites
+              run: |
+                  set -euo pipefail
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  "$HARNESS_ROOT/scripts/ci/install-wasm-pack.sh"
+                  rustup target add wasm32-unknown-unknown
+                  pnpm dlx playwright@1.58.0 install --with-deps chromium
+
+            - name: Record environment and explicit order
               env:
-                  BENCH_SCENARIO: ${{ inputs.scenario }}
-                  BENCH_READER_COHORT: ${{ inputs.reader_cohort }}
-                  BENCH_DOWNLOAD_SINK: ${{ inputs.download_sink }}
-                  BENCH_FILE_MB: ${{ inputs.file_mb }}
-                  BENCH_RUNS: ${{ inputs.runs }}
-                  BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
-                  BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
-              run: node scripts/summarize-file-share-benchmarks.mjs
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: |
+                  set -euo pipefail
+                  {
+                    date -u +%FT%TZ
+                    uname -a
+                    lscpu
+                    free -b
+                    df -B1 /
+                    pnpm --version
+                    node --version
+                    printf 'run_url=%s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+                    printf 'workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+                    printf 'workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+                  } > "$RESULTS_ROOT/environment.txt"
+                  case "$PAIR_ORDER" in
+                    baseline-head) printf 'baseline\nhead\n' > "$RESULTS_ROOT/order.txt" ;;
+                    head-baseline) printf 'head\nbaseline\n' > "$RESULTS_ROOT/order.txt" ;;
+                    *) printf 'Unsupported pair order: %s\n' "$PAIR_ORDER" >&2; exit 2 ;;
+                  esac
+                  printf '%s\n' "$PAIR_ORDER" > "$RESULTS_ROOT/pair-order.txt"
+                  {
+                    printf 'harness=%s\n' "$HARNESS_CORE_COMMIT"
+                    printf 'baseline=%s\n' "$BASE_CORE_COMMIT"
+                    printf 'head=%s\n' "$HEAD_CORE_COMMIT"
+                    printf 'head_first_parent=%s\n' "$(git -C "$HEAD_CORE_ROOT" rev-parse HEAD^1)"
+                    printf 'examples=%s\n' "$EXAMPLES_COMMIT"
+                    printf 'examples_lock_sha256=%s\n' "$EXAMPLES_LOCK_SHA256"
+                  } > "$RESULTS_ROOT/immutable-provenance.txt"
+                  cat "$RESULTS_ROOT/order.txt"
 
-            - name: Upload artifacts
+            - name: Run exact counterbalanced benchmark pair
+              env:
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p "$RESULTS_ROOT/logs"
+                  overall=0
+                  sequence=0
+                  active_pgid=""
+                  active_monitor_pid=""
+
+                  terminate_group() {
+                    local pgid="$1"
+                    local lifecycle_log="$2"
+                    if [[ -z "$pgid" ]]; then
+                      return 0
+                    fi
+                    ps -eo pid,ppid,pgid,args |
+                      awk -v pgid="$pgid" 'NR == 1 || $3 == pgid' >> "$lifecycle_log"
+                    if kill -0 -- "-$pgid" 2>/dev/null; then
+                      kill -TERM -- "-$pgid" 2>/dev/null || true
+                      for _ in $(seq 1 10); do
+                        if ! kill -0 -- "-$pgid" 2>/dev/null; then
+                          break
+                        fi
+                        sleep 1
+                      done
+                    fi
+                    if kill -0 -- "-$pgid" 2>/dev/null; then
+                      kill -KILL -- "-$pgid" 2>/dev/null || true
+                      sleep 1
+                    fi
+                    ps -eo pid,ppid,pgid,args |
+                      awk -v pgid="$pgid" 'NR == 1 || $3 == pgid' >> "$lifecycle_log"
+                    ! kill -0 -- "-$pgid" 2>/dev/null
+                  }
+
+                  cleanup_active_group() {
+                    if [[ -n "$active_monitor_pid" ]]; then
+                      if kill -0 "$active_monitor_pid" 2>/dev/null; then
+                        kill -TERM "$active_monitor_pid" 2>/dev/null || true
+                      fi
+                      wait "$active_monitor_pid" 2>/dev/null || true
+                      active_monitor_pid=""
+                    fi
+                    if [[ -n "$active_pgid" ]]; then
+                      terminate_group \
+                        "$active_pgid" \
+                        "$RESULTS_ROOT/logs/trap-process-group.log" || true
+                    fi
+                  }
+                  cleanup_and_exit() {
+                    local status="$1"
+                    trap - EXIT INT TERM
+                    cleanup_active_group
+                    exit "$status"
+                  }
+                  trap cleanup_active_group EXIT
+                  trap 'cleanup_and_exit 130' INT
+                  trap 'cleanup_and_exit 143' TERM
+
+                  run_variant() {
+                    local variant="$1"
+                    local core_root
+                    local core_commit
+                    local prepared
+                    local result_dir
+                    local summary_file
+                    local log_file
+                    local exit_file
+                    local resource_file
+                    local resource_marker
+                    local available
+                    local memory
+                    local memory_kib
+                    local benchmark_pid
+                    local benchmark_pgid
+                    local monitor_pid
+                    local monitor_code
+                    local code
+                    local lifecycle_log
+
+                    sequence=$((sequence + 1))
+                    if [[ "$variant" == "baseline" ]]; then
+                      core_root="$BASE_CORE_ROOT"
+                      core_commit="$BASE_CORE_COMMIT"
+                    elif [[ "$variant" == "head" ]]; then
+                      core_root="$HEAD_CORE_ROOT"
+                      core_commit="$HEAD_CORE_COMMIT"
+                    else
+                      printf 'Unknown variant: %s\n' "$variant" >&2
+                      overall=1
+                      return
+                    fi
+                    prepared="$PREPARED_ROOT-$sequence-$variant"
+                    result_dir="$RESULTS_ROOT/$sequence-$variant"
+                    summary_file="$RESULTS_ROOT/$sequence-$variant-summary.json"
+                    log_file="$RESULTS_ROOT/logs/$sequence-$variant.log"
+                    exit_file="$RESULTS_ROOT/$sequence-$variant-exit-code.txt"
+                    resource_file="$RESULTS_ROOT/$sequence-$variant-resources.tsv"
+                    resource_marker="$RESULTS_ROOT/$sequence-$variant-resource-abort.txt"
+
+                    available="$(df --output=avail -B1 / | tail -1 | tr -d ' ')"
+                    memory_kib="$(awk '/MemAvailable:/ { print $2; exit }' /proc/meminfo)"
+                    if [[ ! "$available" =~ ^[0-9]+$ || ! "$memory_kib" =~ ^[0-9]+$ ]]; then
+                      printf 'invalid pre-run resource reading: disk=%s memory_kib=%s\n' "$available" "$memory_kib" |
+                        tee "$resource_marker"
+                      printf '125\n' > "$exit_file"
+                      overall=1
+                      return
+                    fi
+                    memory=$((memory_kib * 1024))
+                    if (( available < 8589934592 || memory < 2147483648 )); then
+                      printf 'insufficient pre-run resources: disk=%s memory=%s\n' "$available" "$memory" |
+                        tee "$resource_marker"
+                      printf '125\n' > "$exit_file"
+                      overall=1
+                      return
+                    fi
+                    if [[ "$(git -C "$core_root" rev-parse HEAD)" != "$core_commit" ]] ||
+                      [[ -n "$(git -C "$core_root" status --porcelain=v1 --untracked-files=all)" ]] ||
+                      [[ "$(git -C "$EXAMPLES_SOURCE" rev-parse HEAD)" != "$EXAMPLES_COMMIT" ]] ||
+                      [[ -n "$(git -C "$EXAMPLES_SOURCE" status --porcelain=v1 --untracked-files=all)" ]]; then
+                      printf 'variant provenance changed before run\n' | tee "$resource_marker"
+                      printf '124\n' > "$exit_file"
+                      overall=1
+                      return
+                    fi
+                    printf 'captured_at\tavailable_bytes\tmemory_available_bytes\n' > "$resource_file"
+                    sync
+                    sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true
+
+                    (
+                      cd "$HARNESS_ROOT" || exit 127
+                      benchmark_args=(
+                        scripts/file-share/run-file-share-benchmark.mjs
+                        --scenario upload
+                        --integration-mode link
+                        --peerbit-root "$core_root"
+                        --examples-root "$prepared"
+                        --template "$EXAMPLES_SOURCE"
+                        --source "$EXAMPLES_SOURCE"
+                        --examples-ref "$EXAMPLES_COMMIT"
+                        --peerbit-ref-label "$core_commit"
+                        --expected-peerbit-commit "$core_commit"
+                        --require-clean-peerbit
+                        --expected-examples-commit "$EXAMPLES_COMMIT"
+                        --expected-examples-lockfile-sha256 "$EXAMPLES_LOCK_SHA256"
+                        --results-dir "$result_dir"
+                        --summary-file "$summary_file"
+                        --file-mb "$FILE_MB"
+                        --runs 1
+                        --mode fixed1
+                        --network local
+                        --fresh
+                        --upload-timeout-ms 1200000
+                        # The harness outer deadline is 147m20s with these exact
+                        # phase budgets; the 165m wrapper retains 17m40s for
+                        # preparation while staying 10m above the observed 45m
+                        # slow-half transfer.
+                        --download-timeout-ms 3300000
+                        --download-sink hash-only
+                        --post-upload-monitor-ms 5000
+                        --poll-ms 1000
+                        --min-ready-seeders 1
+                        --ready-timeout-ms 120000
+                        --sample-ms 15000
+                        --sample-count 4
+                        --target-seeders 2
+                        --reader-local-chunk-target 1024
+                        --reader-local-chunk-max-overshoot 0
+                        --reader-terminal-topology replicator
+                        --fixture-seed "$FIXTURE_SEED"
+                      )
+                      exec setsid timeout --signal=INT --kill-after=30s 165m node "${benchmark_args[@]}"
+                    ) > >(tee "$log_file") 2>&1 &
+                    benchmark_pid=$!
+                    benchmark_pgid=""
+                    for _ in $(seq 1 50); do
+                      benchmark_pgid="$(
+                        ps -o pgid= -p "$benchmark_pid" 2>/dev/null |
+                          tr -d ' ' ||
+                          true
+                      )"
+                      if [[ "$benchmark_pgid" == "$benchmark_pid" ]]; then
+                        break
+                      fi
+                      if ! kill -0 "$benchmark_pid" 2>/dev/null; then
+                        break
+                      fi
+                      sleep 0.1
+                    done
+                    if [[ -z "$benchmark_pgid" || "$benchmark_pgid" != "$benchmark_pid" ]]; then
+                      printf 'benchmark process-group isolation failed: pid=%s pgid=%s\n' "$benchmark_pid" "$benchmark_pgid" |
+                        tee "$RESULTS_ROOT/$sequence-$variant-process-group-error.txt"
+                      kill -TERM "$benchmark_pid" 2>/dev/null || true
+                      wait "$benchmark_pid" 2>/dev/null || true
+                      pkill -KILL -f "$prepared" 2>/dev/null || true
+                      rm -rf "$prepared"
+                      rm -rf "$core_root/node_modules" "$core_root/target"
+                      find "$core_root/packages" -type d -name dist -prune -exec rm -rf {} +
+                      printf '126\n' > "$exit_file"
+                      overall=1
+                      return
+                    fi
+                    active_pgid="$benchmark_pgid"
+                    lifecycle_log="$RESULTS_ROOT/logs/$sequence-$variant-process-group.log"
+
+                    (
+                      while kill -0 "$benchmark_pid" 2>/dev/null; do
+                        available="$(df --output=avail -B1 / | tail -1 | tr -d ' ')"
+                        memory_kib="$(awk '/MemAvailable:/ { print $2; exit }' /proc/meminfo)"
+                        if [[ ! "$available" =~ ^[0-9]+$ || ! "$memory_kib" =~ ^[0-9]+$ ]]; then
+                          printf 'resource watchdog obtained invalid reading for %s: disk=%s memory_kib=%s\n' \
+                            "$variant" "$available" "$memory_kib" |
+                            tee "$resource_marker"
+                          terminate_group "$benchmark_pgid" "$lifecycle_log" || true
+                          break
+                        fi
+                        memory=$((memory_kib * 1024))
+                        printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$available" "$memory" >> "$resource_file"
+                        if (( available < 2147483648 || memory < 1073741824 )); then
+                          printf 'resource watchdog stopped %s: disk=%s memory=%s\n' "$variant" "$available" "$memory" |
+                            tee "$resource_marker"
+                          terminate_group "$benchmark_pgid" "$lifecycle_log" || true
+                          break
+                        fi
+                        sleep 15
+                      done
+                    ) &
+                    monitor_pid=$!
+                    active_monitor_pid="$monitor_pid"
+
+                    set +e
+                    wait "$benchmark_pid"
+                    code=$?
+                    wait "$monitor_pid"
+                    monitor_code=$?
+                    set -e
+                    active_monitor_pid=""
+                    if (( monitor_code != 0 )); then
+                      printf 'resource watchdog exited unexpectedly for %s: %s\n' \
+                        "$variant" "$monitor_code" |
+                        tee -a "$resource_marker"
+                      overall=1
+                    fi
+                    if [[ -s "$resource_marker" ]]; then
+                      overall=1
+                      if (( code == 0 )); then
+                        code=125
+                      fi
+                    fi
+                    printf '%s\n' "$code" > "$exit_file"
+                    if (( code != 0 )); then
+                      overall=1
+                    fi
+                    if ! terminate_group "$benchmark_pgid" "$lifecycle_log"; then
+                      printf 'benchmark process group survived cleanup: %s\n' "$benchmark_pgid" |
+                        tee -a "$lifecycle_log"
+                      overall=1
+                    fi
+                    active_pgid=""
+                    rm -rf "$prepared"
+                    rm -rf "$core_root/node_modules" "$core_root/target"
+                    find "$core_root/packages" -type d -name dist -prune -exec rm -rf {} +
+                    sync
+                    {
+                      free -b
+                      df -B1 /
+                    } >> "$RESULTS_ROOT/logs/$sequence-$variant-after-cleanup.log"
+                  }
+
+                  while IFS= read -r variant; do
+                    run_variant "$variant"
+                  done < "$RESULTS_ROOT/order.txt"
+                  printf '%s\n' "$overall" > "$RESULTS_ROOT/overall-run-status.txt"
+                  trap - EXIT INT TERM
+                  cleanup_active_group
+                  exit 0
+
+            - name: Build outbound-candidate pruning comparison
+              if: always()
+              env:
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" build
+
+            - name: Upload outbound-candidate pruning evidence
               if: always()
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: file-share-benchmark-${{ github.run_id }}
-                  path: bench-results
-                  retention-days: 7
+                  name: fileshare-outbound-candidate-pruning-${{ github.run_id }}
+                  path: evidence
+                  retention-days: 14
+
+            - name: Report separated campaign assessments
+              if: always()
+              env:
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" summary
+
+            - name: Enforce correctness and pubsub carrier evidence
+              if: always()
+              env:
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" enforce-correctness
+
+            - name: Enforce per-pair performance safety
+              if: always()
+              env:
+                  PAIR_ORDER: ${{ inputs.pair_order }}
+              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" enforce-performance
