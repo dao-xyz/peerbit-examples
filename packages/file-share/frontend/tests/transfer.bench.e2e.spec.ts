@@ -184,6 +184,20 @@ type PageStorageSnapshot = {
     role: "reader" | "writer";
     capturedAt: number;
     origin: string;
+    backend: {
+        requestedMode: "memory" | "opfs" | null;
+        directoryConfigured: boolean | null;
+        directoryConfigurationError: string | null;
+        persistence: Record<
+            "navigatorStorage" | "peerStorage" | "peerBlocks" | "peerIndexer",
+            {
+                api: string;
+                available: boolean;
+                persisted: boolean | null;
+                error: string | null;
+            }
+        >;
+    };
     peerbitLog: {
         api: string;
         scope: string;

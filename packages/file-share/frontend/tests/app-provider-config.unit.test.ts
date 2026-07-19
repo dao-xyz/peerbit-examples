@@ -40,6 +40,11 @@ describe("App PeerProvider lifecycle", () => {
     afterEach(() => {
         document.body.innerHTML = "";
         window.history.replaceState(null, "", "/");
+        delete (
+            window as Window & {
+                __peerbitFileShareBenchmarkStorageMode?: unknown;
+            }
+        ).__peerbitFileShareBenchmarkStorageMode;
         appHarness.providerConfigs = [];
         appHarness.dial.mockReset();
         appHarness.hasLocalProgram.mockReset();
@@ -72,6 +77,61 @@ describe("App PeerProvider lifecycle", () => {
                 >;
             }
         ).__peerbitFileShareAppDiagnostics?.();
+
+    it("leaves normal users on the existing provider configuration", async () => {
+        const { root } = await renderApp();
+
+        const config = appHarness.providerConfigs.at(-1) as Record<
+            string,
+            unknown
+        >;
+        expect(Object.hasOwn(config, "inMemory")).toBe(false);
+        expect(getAppDiagnostics()).toMatchObject({
+            benchmarkStorageMode: null,
+        });
+
+        await act(async () => root.unmount());
+    });
+
+    it.each([
+        ["memory", true],
+        ["opfs", false],
+    ] as const)(
+        "applies the page-init %s storage cohort without changing config identity",
+        async (mode, inMemory) => {
+            (
+                window as Window & {
+                    __peerbitFileShareBenchmarkStorageMode?: unknown;
+                }
+            ).__peerbitFileShareBenchmarkStorageMode = mode;
+
+            const { root } = await renderApp();
+
+            expect(appHarness.providerConfigs.length).toBeGreaterThan(0);
+            expect(new Set(appHarness.providerConfigs).size).toBe(1);
+            expect(appHarness.providerConfigs.at(-1)).toMatchObject({
+                inMemory,
+            });
+            expect(getAppDiagnostics()).toMatchObject({
+                benchmarkStorageMode: mode,
+            });
+
+            await act(async () => root.unmount());
+        }
+    );
+
+    it("fails closed before creating a provider for an invalid storage cohort", async () => {
+        (
+            window as Window & {
+                __peerbitFileShareBenchmarkStorageMode?: unknown;
+            }
+        ).__peerbitFileShareBenchmarkStorageMode = "disk";
+
+        await expect(renderApp()).rejects.toThrow(
+            'expected "memory" or "opfs"'
+        );
+        expect(appHarness.providerConfigs).toHaveLength(0);
+    });
 
     it("keeps the provider config identity stable when explicit dialing becomes ready", async () => {
         window.history.replaceState(
