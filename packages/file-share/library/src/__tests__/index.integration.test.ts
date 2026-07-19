@@ -3765,6 +3765,18 @@ describe("index", () => {
                 });
                 expect(equals(firstRead, expected)).to.be.true;
                 expect(
+                    Object.keys(
+                        reader.lastReadDiagnostics
+                            ?.chunkPersistenceConfirmedAt ?? {}
+                    )
+                ).to.deep.eq(chunks.map((_, index) => String(index)));
+                expect(
+                    Object.values(
+                        reader.lastReadDiagnostics
+                            ?.chunkPersistenceConfirmationSource ?? {}
+                    )
+                ).to.deep.eq(chunks.map(() => "manifest-head-batch-remote"));
+                expect(
                     reader.lastReadDiagnostics?.initialLocalChunkBlockCount
                 ).to.eq(0);
                 // Demand persistence stores exact entry blocks without joining
@@ -3815,6 +3827,12 @@ describe("index", () => {
                 });
 
                 expect(equals(offlineRead, expected)).to.be.true;
+                expect(
+                    Object.values(
+                        reader.lastReadDiagnostics
+                            ?.chunkPersistenceConfirmationSource ?? {}
+                    )
+                ).to.deep.eq(chunks.map(() => "manifest-head-batch-local"));
                 expect(perIndexChunkGets).to.eq(0);
                 expect(batchCalls.length).to.be.greaterThan(0);
                 expect(
@@ -3850,6 +3868,82 @@ describe("index", () => {
                 (reader.files.index as any).get = originalIndexGet;
                 (reader as any).getReadPeerHints = originalHints;
             }
+        });
+
+        it("records an initially local persistence prefix separately from its remote tail", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "hybrid-persistence-confirmation";
+            const fileName = "hybrid-persistence-confirmation.bin";
+            const chunks = [
+                new Uint8Array([1, 2]),
+                new Uint8Array([3, 4]),
+                new Uint8Array([5, 6]),
+                new Uint8Array([7, 8]),
+            ];
+            const chunkEntryHeads: string[] = [];
+            for (const [index, bytes] of chunks.entries()) {
+                const result = await writer.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+            const expected = concat(chunks);
+            const manifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            reader.persistChunkReads = true;
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+
+            for (const head of chunkEntryHeads.slice(0, 2)) {
+                const rawEntry = await writer.files.log.log.blocks.get(head, {
+                    remote: false,
+                });
+                expect(rawEntry).not.to.be.undefined;
+                expect(await reader.files.log.log.blocks.put(rawEntry!)).to.eq(
+                    head
+                );
+            }
+            expect(await reader.countLocalChunkBlocks(manifest)).to.eq(2);
+
+            const roundTrip = await manifest.getFile(reader, {
+                as: "joined",
+                timeout: 10_000,
+            });
+            expect(equals(roundTrip, expected)).to.be.true;
+            expect(
+                reader.lastReadDiagnostics?.chunkPersistenceConfirmationSource
+            ).to.deep.eq({
+                0: "manifest-head-batch-local",
+                1: "manifest-head-batch-local",
+                2: "manifest-head-batch-remote",
+                3: "manifest-head-batch-remote",
+            });
+            expect(
+                Object.values(
+                    reader.lastReadDiagnostics?.chunkPersistenceConfirmedAt ??
+                        {}
+                ).every(
+                    (timestamp) =>
+                        typeof timestamp === "number" &&
+                        timestamp >= reader.lastReadDiagnostics!.startedAt &&
+                        timestamp <= reader.lastReadDiagnostics!.finishedAt
+                )
+            ).to.be.true;
         });
 
         it("batch reads a fully local persisted file without peer hints", async () => {
@@ -5080,6 +5174,12 @@ describe("index", () => {
             expect((files as any).retainedChunkIds.size).to.eq(0);
             expect((files as any).retainedChunkEntryHeads.size).to.eq(0);
             expect((files as any).retainedEntryHeadsByFileId.size).to.eq(0);
+            expect(
+                files.lastReadDiagnostics?.chunkPersistenceConfirmedAt
+            ).to.deep.eq({});
+            expect(
+                files.lastReadDiagnostics?.chunkPersistenceConfirmationSource
+            ).to.deep.eq({});
         });
 
         it("allows non-persisting reads to fall back per chunk when ready manifest heads are missing", async () => {
@@ -5227,6 +5327,118 @@ describe("index", () => {
                 )
             ).to.deep.eq(chunks.map(() => "non-replicating-get"));
             expect(equals(concat(streamedChunks), expected)).to.be.true;
+        });
+
+        it("records exact raw manifest entry imports only after local persistence", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "raw-manifest-entry-import";
+            const fileName = "raw manifest entry import.bin";
+            const bytes = new Uint8Array([1, 2, 3, 4]);
+            const chunk = new TinyFile({
+                id: `${fileId}:0`,
+                name: `${fileName}/0`,
+                file: bytes,
+                parentId: fileId,
+                index: 0,
+            });
+            const chunkPut = await writer.files.put(chunk);
+            const head = chunkPut.entry.hash;
+            const manifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(bytes.byteLength),
+                chunkCount: 1,
+                ready: true,
+                finalHash: sha256Base64Sync(bytes),
+                chunkEntryHeads: [head],
+            });
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            reader.persistChunkReads = true;
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+
+            const readerLog = reader.files.log.log as any;
+            const getManyOwner =
+                typeof readerLog.getMany === "function"
+                    ? readerLog
+                    : readerLog.entryIndex;
+            const originalGetManyMethod = getManyOwner?.getMany;
+            expect(originalGetManyMethod).to.be.a("function");
+            const originalIndexGet = reader.files.index.get.bind(
+                reader.files.index
+            );
+            const readerBlocks = readerLog.blocks;
+            const originalBlocksGet = readerBlocks.get.bind(readerBlocks);
+            const rawImportCalls: Array<{ hash: string; options: any }> = [];
+
+            expect(await readerBlocks.has(head)).to.be.false;
+            expect(await reader.countLocalChunkBlocks(manifest)).to.eq(0);
+
+            // Force the exact-entry fallback while leaving its raw block fetch
+            // on the real two-peer transport. A decoded batch result would be
+            // classified as manifest-head-batch-remote instead.
+            getManyOwner.getMany = async (heads: string[]) =>
+                heads.map(() => undefined);
+            (reader.files.index as any).get = async (
+                id: unknown,
+                options: unknown
+            ) => {
+                if (id === chunk.id) {
+                    return undefined;
+                }
+                return originalIndexGet(id as never, options as never);
+            };
+            readerBlocks.get = async (hash: string, options: any) => {
+                if (hash === head && options?.remote) {
+                    rawImportCalls.push({ hash, options });
+                }
+                return originalBlocksGet(hash, options);
+            };
+
+            let roundTrip: Uint8Array;
+            try {
+                roundTrip = await manifest.getFile(reader, {
+                    as: "joined",
+                    timeout: 10_000,
+                });
+            } finally {
+                getManyOwner.getMany = originalGetManyMethod;
+                (reader.files.index as any).get = originalIndexGet;
+                readerBlocks.get = originalBlocksGet;
+            }
+
+            expect(equals(roundTrip!, bytes)).to.be.true;
+            expect(rawImportCalls.length).to.be.greaterThan(0);
+            expect(
+                rawImportCalls.every(
+                    (call) =>
+                        call.hash === head &&
+                        call.options.remote.replicate === true &&
+                        call.options.remote.signal instanceof AbortSignal
+                )
+            ).to.be.true;
+            expect(
+                reader.lastReadDiagnostics
+                    ?.chunkManifestEntryRawFetchAttemptCount
+            ).to.be.greaterThan(0);
+            expect(
+                reader.lastReadDiagnostics
+                    ?.chunkPersistenceConfirmationSource?.[0]
+            ).to.eq("manifest-entry-import");
+            const confirmedAt =
+                reader.lastReadDiagnostics?.chunkPersistenceConfirmedAt?.[0];
+            expect(confirmedAt).to.be.a("number");
+            expect(confirmedAt).to.be.within(
+                reader.lastReadDiagnostics!.startedAt,
+                reader.lastReadDiagnostics!.finishedAt
+            );
+            expect(await readerBlocks.has(head)).to.be.true;
+            const exactLocalEntry = await readerLog.get(head, {
+                remote: false,
+            });
+            expect(exactLocalEntry?.hash).to.eq(head);
+            expect(await reader.countLocalChunkBlocks(manifest)).to.eq(1);
         });
 
         it("retries transient ready manifest chunk head misses", async () => {
@@ -5396,6 +5608,13 @@ describe("index", () => {
                 filestore.lastReadDiagnostics?.chunkResolved ?? {}
             );
             expect(resolvedRoutes[0]).to.eq("manifest-entry-persistence");
+            expect(
+                filestore.lastReadDiagnostics
+                    ?.chunkPersistenceConfirmationSource?.[0]
+            ).to.eq("manifest-entry-local");
+            expect(
+                filestore.lastReadDiagnostics?.chunkPersistenceConfirmedAt?.[0]
+            ).to.be.a("number");
             expect(
                 resolvedRoutes.every(
                     (route) =>

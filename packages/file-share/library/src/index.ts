@@ -325,6 +325,12 @@ const normalizeFileWriteOptions = (
 
 export type FileReadDiagnostics = Record<string, any>;
 
+export type ChunkPersistenceConfirmationSource =
+    | "manifest-head-batch-local"
+    | "manifest-head-batch-remote"
+    | "manifest-entry-local"
+    | "manifest-entry-import";
+
 type FileReadDiagnosticsContext = {
     diagnostics?: FileReadDiagnostics;
 };
@@ -2553,6 +2559,11 @@ export class LargeFile extends AbstractFile {
                 index: number;
                 message: string;
             }[],
+            chunkPersistenceConfirmedAt: {} as Record<number, number>,
+            chunkPersistenceConfirmationSource: {} as Record<
+                number,
+                ChunkPersistenceConfirmationSource
+            >,
             chunkManifestEntryPersistenceMissingIndices: [] as number[],
             chunkManifestEntryContentMismatchIndices: [] as number[],
             chunkBatchAttemptTimeoutMs: 0,
@@ -2816,6 +2827,19 @@ export class LargeFile extends AbstractFile {
             const authoritativeChunkHashesByIndex = new Map<number, string>();
             let readGenerationActive = true;
             let suspendedPayload: Uint8Array | undefined;
+            const recordChunkPersistenceConfirmation = (
+                index: number,
+                source: ChunkPersistenceConfirmationSource
+            ) => {
+                if (
+                    !persistChunkReads ||
+                    debug.chunkPersistenceConfirmedAt[index] != null
+                ) {
+                    return;
+                }
+                debug.chunkPersistenceConfirmedAt[index] = Date.now();
+                debug.chunkPersistenceConfirmationSource[index] = source;
+            };
             const throwIfReadGenerationInactive = () => {
                 if (!readGenerationActive) {
                     throw getAbortReason(transfer.owner.signal);
@@ -3026,6 +3050,7 @@ export class LargeFile extends AbstractFile {
                             "Manifest entry presence check cancelled"
                         );
                     let blockPresent = await hasLocalBlock();
+                    let confirmedByImport = false;
                     let lastError: unknown;
                     const attemptBudget = Math.max(
                         1,
@@ -3083,6 +3108,7 @@ export class LargeFile extends AbstractFile {
                                 );
                                 if (rawEntry) {
                                     blockPresent = await hasLocalBlock();
+                                    confirmedByImport = blockPresent;
                                     if (!blockPresent) {
                                         lastError = new Error(
                                             `Raw manifest entry '${head}' was fetched but not stored locally`
@@ -3194,6 +3220,12 @@ export class LargeFile extends AbstractFile {
                     }
                     persistenceSignal.throwIfClosed();
                     recordAuthoritativeChunkHash(index, chunk);
+                    recordChunkPersistenceConfirmation(
+                        index,
+                        confirmedByImport
+                            ? "manifest-entry-import"
+                            : "manifest-entry-local"
+                    );
                     persistedManifestEntryIndices.add(index);
                     files.retainChunkEntryHead(head, resolvedFile.id, chunk.id);
                     files.retainResolvedChunk(chunk, true);
@@ -3623,6 +3655,12 @@ export class LargeFile extends AbstractFile {
                         }
 
                         if (persistChunkReads) {
+                            recordChunkPersistenceConfirmation(
+                                index,
+                                phase === "local"
+                                    ? "manifest-head-batch-local"
+                                    : "manifest-head-batch-remote"
+                            );
                             persistedManifestEntryIndices.add(index);
                             files.retainChunkEntryHead(
                                 head,

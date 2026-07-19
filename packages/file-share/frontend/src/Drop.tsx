@@ -168,6 +168,323 @@ const getProgramHookErrorMessage = (error: unknown) => {
     return String(error);
 };
 
+export const BENCHMARK_RUNTIME_SNAPSHOT_LIMITS = Object.freeze({
+    maxDepth: 5,
+    maxObjectKeys: 32,
+    maxArrayItems: 32,
+    maxStringLength: 512,
+    maxKeyLength: 128,
+    maxValues: 512,
+});
+
+export type FileShareBenchmarkRuntimeSnapshot = {
+    capturedAt: number;
+    programReady: boolean;
+    identity: {
+        programAddress: string | null;
+        peerId: string | null;
+        peerHash: string | null;
+        sessionId: string | null;
+    };
+    nativeGraph: {
+        active: boolean | null;
+        useHeads: boolean | null;
+    };
+    eagerBlocks: {
+        telemetryAvailable: boolean;
+        enabled: boolean | null;
+        telemetry: Record<string, unknown> | null;
+    };
+    pubsub: {
+        runtimeSnapshotAvailable: boolean;
+        snapshot: Record<string, unknown> | null;
+        error: string | null;
+    };
+};
+
+export type FileShareBenchmarkShutdownPostconditions = {
+    programClosed: boolean;
+    peerStopped: boolean;
+};
+
+export type FileShareBenchmarkRuntimeSession = Readonly<{
+    peer: unknown;
+    program: Files;
+    sessionId: string;
+}>;
+
+export const useFileShareBenchmarkRuntimeSession = (
+    peer: unknown,
+    program: Files | null | undefined
+) => {
+    const sessionRef = useRef<FileShareBenchmarkRuntimeSession | null>(null);
+    useEffect(() => {
+        const session =
+            peer && program
+                ? Object.freeze({
+                      peer,
+                      program,
+                      sessionId: crypto.randomUUID(),
+                  })
+                : null;
+        sessionRef.current = session;
+        return () => {
+            if (sessionRef.current === session) {
+                sessionRef.current = null;
+            }
+        };
+    }, [peer, program]);
+    return sessionRef;
+};
+
+export const getFileShareBenchmarkShutdownPostconditions = (
+    program: Files | null | undefined,
+    peer: unknown
+): FileShareBenchmarkShutdownPostconditions => ({
+    programClosed: program?.closed === true,
+    peerStopped: (peer as any)?.libp2p?.status === "stopped",
+});
+
+const toBoundedBenchmarkValue = (
+    value: unknown,
+    state: { values: number; seen: WeakSet<object> },
+    depth = 0
+): unknown => {
+    const limits = BENCHMARK_RUNTIME_SNAPSHOT_LIMITS;
+    if (state.values >= limits.maxValues) {
+        return "[truncated-values]";
+    }
+    state.values += 1;
+    if (value == null || typeof value === "boolean") {
+        return value ?? null;
+    }
+    if (typeof value === "string") {
+        return value.slice(0, limits.maxStringLength);
+    }
+    if (typeof value === "number") {
+        return Number.isFinite(value) ? value : String(value);
+    }
+    if (typeof value === "bigint") {
+        return value.toString().slice(0, limits.maxStringLength);
+    }
+    if (typeof value !== "object") {
+        return `[unsupported-${typeof value}]`;
+    }
+    if (depth >= limits.maxDepth) {
+        return "[truncated-depth]";
+    }
+    if (state.seen.has(value)) {
+        return "[circular]";
+    }
+    state.seen.add(value);
+    try {
+        if (Array.isArray(value)) {
+            return value
+                .slice(0, limits.maxArrayItems)
+                .map((entry) =>
+                    toBoundedBenchmarkValue(entry, state, depth + 1)
+                );
+        }
+        const prototype = Object.getPrototypeOf(value);
+        if (prototype !== Object.prototype && prototype !== null) {
+            const name = (value as { constructor?: { name?: unknown } })
+                .constructor?.name;
+            return `[unsupported-object:${
+                typeof name === "string" ? name : "unknown"
+            }]`.slice(0, limits.maxStringLength);
+        }
+        const output = Object.create(null) as Record<string, unknown>;
+        const keys: string[] = [];
+        for (const key in value) {
+            if (Object.prototype.hasOwnProperty.call(value, key)) {
+                keys.push(key);
+                if (keys.length === limits.maxObjectKeys) {
+                    break;
+                }
+            }
+        }
+        keys.sort();
+        for (const key of keys) {
+            const initialBoundedKey = key.slice(0, limits.maxKeyLength);
+            let boundedKey = initialBoundedKey;
+            for (let collision = 1; boundedKey in output; collision++) {
+                const suffix = `~${collision}`;
+                boundedKey = `${initialBoundedKey.slice(
+                    0,
+                    Math.max(0, limits.maxKeyLength - suffix.length)
+                )}${suffix}`;
+            }
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            Object.defineProperty(output, boundedKey, {
+                configurable: true,
+                enumerable: true,
+                value:
+                    descriptor && "value" in descriptor
+                        ? toBoundedBenchmarkValue(
+                              descriptor.value,
+                              state,
+                              depth + 1
+                          )
+                        : "[accessor]",
+                writable: true,
+            });
+        }
+        return output;
+    } finally {
+        state.seen.delete(value);
+    }
+};
+
+const toBoundedBenchmarkRecord = (
+    value: unknown
+): Record<string, unknown> | null => {
+    if (value == null || typeof value !== "object" || Array.isArray(value)) {
+        return null;
+    }
+    const bounded = toBoundedBenchmarkValue(value, {
+        values: 0,
+        seen: new WeakSet(),
+    });
+    return bounded != null &&
+        typeof bounded === "object" &&
+        !Array.isArray(bounded)
+        ? (bounded as Record<string, unknown>)
+        : null;
+};
+
+export const getFileShareBenchmarkRuntimeSnapshot = (
+    program: Files | null | undefined,
+    peer: unknown,
+    sessionId: string | null = null,
+    capturedAt = Date.now()
+): FileShareBenchmarkRuntimeSnapshot => {
+    const programReady = Boolean(program && !program.closed);
+    const sharedLog = programReady ? (program as any)?.files?.log : undefined;
+    const sharedLogRuntimeGetter = sharedLog?.getRuntimeSnapshot;
+    let nativeGraphActive: boolean | null = null;
+    let nativeGraphUseHeads: boolean | null = null;
+    if (typeof sharedLogRuntimeGetter === "function") {
+        try {
+            const runtimeSnapshot = sharedLogRuntimeGetter.call(sharedLog);
+            const nativeGraph = runtimeSnapshot?.nativeGraph;
+            if (
+                nativeGraph != null &&
+                typeof nativeGraph === "object" &&
+                !Array.isArray(nativeGraph) &&
+                typeof nativeGraph.active === "boolean" &&
+                typeof nativeGraph.useHeads === "boolean" &&
+                (nativeGraph.active || !nativeGraph.useHeads)
+            ) {
+                nativeGraphActive = nativeGraph.active;
+                nativeGraphUseHeads = nativeGraph.useHeads;
+            }
+        } catch {
+            // Missing evidence fails closed as null/null below.
+        }
+    }
+
+    const eagerTelemetryGetter = sharedLog?.getEagerBlockCacheTelemetry;
+    const telemetryAvailable = typeof eagerTelemetryGetter === "function";
+    let eagerTelemetry: Record<string, unknown> | null = null;
+    let eagerEnabled: boolean | null = telemetryAvailable ? false : null;
+    if (telemetryAvailable) {
+        try {
+            const telemetry = eagerTelemetryGetter.call(sharedLog);
+            if (telemetry != null) {
+                eagerTelemetry = toBoundedBenchmarkRecord(telemetry);
+                eagerEnabled = eagerTelemetry != null ? true : null;
+            }
+        } catch {
+            eagerEnabled = null;
+        }
+    }
+
+    const pubsub = (peer as any)?.services?.pubsub;
+    const pubsubRuntimeGetter = pubsub?.getRuntimeSnapshot;
+    const runtimeSnapshotAvailable = typeof pubsubRuntimeGetter === "function";
+    let pubsubSnapshot: Record<string, unknown> | null = null;
+    let pubsubError: string | null = null;
+    if (runtimeSnapshotAvailable) {
+        try {
+            const snapshot = pubsubRuntimeGetter.call(pubsub);
+            pubsubSnapshot = toBoundedBenchmarkRecord(snapshot);
+            if (pubsubSnapshot == null) {
+                pubsubError = "Pubsub runtime snapshot was not a plain object";
+            }
+        } catch (error) {
+            let errorMessage: string | null = null;
+            try {
+                errorMessage = getProgramHookErrorMessage(error);
+            } catch {
+                // A thrown value can itself reject string coercion.
+            }
+            pubsubError = (
+                errorMessage && errorMessage.length > 0
+                    ? errorMessage
+                    : "Pubsub runtime snapshot getter threw without an error message"
+            ).slice(0, BENCHMARK_RUNTIME_SNAPSHOT_LIMITS.maxStringLength);
+        }
+    }
+
+    return {
+        capturedAt,
+        programReady,
+        identity: {
+            programAddress: (() => {
+                try {
+                    return programReady &&
+                        typeof program?.address === "string" &&
+                        program.address.length > 0
+                        ? program.address
+                        : null;
+                } catch {
+                    return null;
+                }
+            })(),
+            peerId: (() => {
+                try {
+                    const value = (peer as any)?.peerId?.toString?.();
+                    return typeof value === "string" && value.length > 0
+                        ? value
+                        : null;
+                } catch {
+                    return null;
+                }
+            })(),
+            peerHash: (() => {
+                try {
+                    const value = (
+                        peer as any
+                    )?.identity?.publicKey?.hashcode?.();
+                    return typeof value === "string" && value.length > 0
+                        ? value
+                        : null;
+                } catch {
+                    return null;
+                }
+            })(),
+            sessionId:
+                typeof sessionId === "string" && sessionId.length > 0
+                    ? sessionId
+                    : null,
+        },
+        nativeGraph: {
+            active: nativeGraphActive,
+            useHeads: nativeGraphUseHeads,
+        },
+        eagerBlocks: {
+            telemetryAvailable,
+            enabled: eagerEnabled,
+            telemetry: eagerTelemetry,
+        },
+        pubsub: {
+            runtimeSnapshotAvailable,
+            snapshot: pubsubSnapshot,
+            error: pubsubError,
+        },
+    };
+};
+
 const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 10_000;
 const LARGE_FILE_DOWNLOAD_MIN_TIMEOUT_MS = 5 * 60_000;
 const LARGE_FILE_DOWNLOAD_TIMEOUT_PER_MB_MS = 1_000;
@@ -345,6 +662,10 @@ export const Drop = () => {
             replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
         },
     });
+    const benchmarkRuntimeSessionRef = useFileShareBenchmarkRuntimeSession(
+        peer,
+        files.program
+    );
     listRefreshProgramRef.current = files.program ?? null;
 
     useEffect(() => {
@@ -675,16 +996,28 @@ export const Drop = () => {
                 ) => Promise<void>;
                 setPersistChunkReads: (persist: boolean) => boolean;
                 getLightweightSnapshot: () => Record<string, unknown>;
+                getBenchmarkRuntimeSnapshot: () => FileShareBenchmarkRuntimeSnapshot;
                 getTopologySnapshot: () => Promise<Record<string, unknown>>;
                 getStorageSnapshot: () => Promise<Record<string, unknown>>;
                 getDiagnostics: () => Promise<Record<string, unknown>>;
-                shutdown: () => Promise<void>;
+                shutdown: () => Promise<{
+                    programClosed: boolean;
+                    peerStopped: boolean;
+                    identity: FileShareBenchmarkRuntimeSnapshot["identity"];
+                }>;
             };
             __peerbitFileShareBenchmarkStats?: {
                 updateListCalls?: Array<Record<string, unknown>>;
             };
         };
         const program = files.program;
+        const runtimeSession = benchmarkRuntimeSessionRef.current;
+        const sessionId =
+            runtimeSession?.peer === peer && runtimeSession?.program === program
+                ? runtimeSession.sessionId
+                : null;
+        const getBenchmarkRuntimeSnapshot = () =>
+            getFileShareBenchmarkRuntimeSnapshot(program, peer, sessionId);
         const testHooks = {
             setReplicationRole: async (roleOptions) => {
                 if (!program || program.closed) {
@@ -720,6 +1053,7 @@ export const Drop = () => {
                         : undefined,
                 })),
             }),
+            getBenchmarkRuntimeSnapshot,
             getTopologySnapshot: async () => {
                 const activeProgram =
                     program && !program.closed ? program : undefined;
@@ -982,10 +1316,18 @@ export const Drop = () => {
                 };
             },
             shutdown: async () => {
+                const identity = getBenchmarkRuntimeSnapshot().identity;
                 if (program && !program.closed) {
                     await program.close();
                 }
                 await (peer as any)?.stop?.();
+                return {
+                    ...getFileShareBenchmarkShutdownPostconditions(
+                        program,
+                        peer
+                    ),
+                    identity,
+                };
             },
         };
         testWindow.__peerbitFileShareTestHooks = testHooks;
@@ -995,6 +1337,7 @@ export const Drop = () => {
             }
         };
     }, [
+        benchmarkRuntimeSessionRef,
         files.program,
         files.program?.address,
         files.program?.closed,
