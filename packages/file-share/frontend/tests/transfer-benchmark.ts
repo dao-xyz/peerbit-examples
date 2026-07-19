@@ -478,6 +478,90 @@ const nearestRank = (values: number[], percentile: number) => {
 const sum = (values: number[]) =>
     values.reduce((total, value) => total + value, 0);
 
+export const RECEIVER_PROGRESS_PERCENTAGES = Object.freeze(
+    Array.from({ length: 21 }, (_, index) => index * 5)
+);
+
+export type ContiguousPrefixMilestone = {
+    percent: number;
+    targetBytes: number;
+    contiguousBytes: number;
+    chunkIndex: number | null;
+    confirmedAt: number;
+    elapsedMs: number;
+};
+
+const PERSISTENCE_CONFIRMATION_SOURCES = new Set([
+    "manifest-head-batch-local",
+    "manifest-head-batch-remote",
+    "manifest-entry-local",
+    "manifest-entry-import",
+]);
+
+const buildContiguousPrefixMilestones = (
+    chunkBytes: number[],
+    confirmedAt: number[],
+    startedAt: number,
+    finishedAt: number,
+    totalBytes: number,
+    label: string
+): ContiguousPrefixMilestone[] => {
+    if (confirmedAt.length !== chunkBytes.length) {
+        throw new Error(`${label} must cover every chunk`);
+    }
+    const prefixBytes: number[] = [];
+    const prefixConfirmedAt: number[] = [];
+    let cumulativeBytes = 0;
+    let cumulativeConfirmedAt = startedAt;
+    for (const [index, bytes] of chunkBytes.entries()) {
+        const timestamp = confirmedAt[index];
+        if (
+            !Number.isSafeInteger(timestamp) ||
+            timestamp < startedAt ||
+            timestamp > finishedAt
+        ) {
+            throw new Error(
+                `${label}[${index}] must be a safe-integer timestamp inside the completed read interval`
+            );
+        }
+        cumulativeBytes += bytes;
+        cumulativeConfirmedAt = Math.max(cumulativeConfirmedAt, timestamp);
+        prefixBytes.push(cumulativeBytes);
+        prefixConfirmedAt.push(cumulativeConfirmedAt);
+    }
+
+    return RECEIVER_PROGRESS_PERCENTAGES.map((percent) => {
+        if (percent === 0) {
+            return {
+                percent,
+                targetBytes: 0,
+                contiguousBytes: 0,
+                chunkIndex: null,
+                confirmedAt: startedAt,
+                elapsedMs: 0,
+            };
+        }
+        const targetBytes = Math.ceil((totalBytes * percent) / 100);
+        const chunkIndex = prefixBytes.findIndex(
+            (bytes) => bytes >= targetBytes
+        );
+        if (chunkIndex < 0) {
+            throw new Error(
+                `${label} did not reach its ${percent}% byte milestone`
+            );
+        }
+        const milestoneConfirmedAt = prefixConfirmedAt[chunkIndex];
+        return {
+            percent,
+            targetBytes,
+            contiguousBytes: prefixBytes[chunkIndex],
+            chunkIndex,
+            confirmedAt: milestoneConfirmedAt,
+            elapsedMs: milestoneConfirmedAt - startedAt,
+        };
+    });
+};
+
 /**
  * Converts the per-chunk library diagnostics into stable benchmark evidence.
  * `streamReadExclusiveMs` removes time spent awaiting the configured output
@@ -486,7 +570,8 @@ const sum = (values: number[]) =>
  */
 export const summarizeReadTransferDiagnostics = (
     diagnostics: ReadDiagnostics,
-    expectedSizeBytes: number
+    expectedSizeBytes: number,
+    options: { downloadSink?: BenchmarkDownloadSink } = {}
 ) => {
     const sources = requireDiagnosticRecord(diagnostics, "chunkResolved");
     const indices = Object.keys(sources)
@@ -562,6 +647,14 @@ export const summarizeReadTransferDiagnostics = (
     if (libraryStreamFinishedAt < libraryStreamStartedAt) {
         throw new Error("read finishedAt preceded startedAt");
     }
+    if (
+        !Number.isSafeInteger(libraryStreamStartedAt) ||
+        !Number.isSafeInteger(libraryStreamFinishedAt)
+    ) {
+        throw new Error(
+            "read startedAt and finishedAt must be safe-integer timestamps"
+        );
+    }
     const libraryStreamWallMs =
         libraryStreamFinishedAt - libraryStreamStartedAt;
     const sinkWriteAwaitMs = sum(sinkWriteMs);
@@ -572,6 +665,34 @@ export const summarizeReadTransferDiagnostics = (
     const demandWaitSumMs = sum(demandWaitMs);
     const materializeSumMs = sum(materializeMs);
     const hashSumMs = sum(hashMs);
+    const receiverAvailableAt = readNumberSeries("chunkMaterializeFinishedAt");
+    const sinkAcceptedAt = readNumberSeries("chunkWriteFinishedAt");
+    const persistChunkReads = diagnostics.persistChunkReads === true;
+    const persistenceSources = persistChunkReads
+        ? requireDiagnosticRecord(
+              diagnostics,
+              "chunkPersistenceConfirmationSource"
+          )
+        : undefined;
+    const peerbitDurableAt = persistChunkReads
+        ? readNumberSeries("chunkPersistenceConfirmedAt")
+        : undefined;
+    const peerbitDurableSourceCounts: Record<string, number> = {};
+    if (persistenceSources) {
+        for (const index of indices) {
+            const source = persistenceSources[index];
+            if (
+                typeof source !== "string" ||
+                !PERSISTENCE_CONFIRMATION_SOURCES.has(source)
+            ) {
+                throw new Error(
+                    `chunkPersistenceConfirmationSource[${index}] is not a recognized persistence source`
+                );
+            }
+            peerbitDurableSourceCounts[source] =
+                (peerbitDurableSourceCounts[source] ?? 0) + 1;
+        }
+    }
 
     const sourceSummary: Record<string, { chunkCount: number; bytes: number }> =
         {};
@@ -623,6 +744,59 @@ export const summarizeReadTransferDiagnostics = (
                     materializeSumMs -
                     hashSumMs
             ),
+        },
+        receiverProgress: {
+            percentages: [...RECEIVER_PROGRESS_PERCENTAGES],
+            available: {
+                definition:
+                    "contiguous file-prefix bytes materialized and available to the receiver library",
+                source: "chunkMaterializeFinishedAt",
+                milestones: buildContiguousPrefixMilestones(
+                    chunkBytes,
+                    receiverAvailableAt,
+                    libraryStreamStartedAt,
+                    libraryStreamFinishedAt,
+                    totalBytes,
+                    "chunkMaterializeFinishedAt"
+                ),
+            },
+            peerbitDurable: {
+                definition:
+                    "contiguous file-prefix bytes whose exact signed manifest-entry blocks were confirmed in the receiver's local Peerbit block store",
+                source: "chunkPersistenceConfirmedAt",
+                claimed: persistChunkReads,
+                sourceCounts: Object.fromEntries(
+                    Object.entries(peerbitDurableSourceCounts).sort(
+                        ([left], [right]) => left.localeCompare(right)
+                    )
+                ),
+                milestones:
+                    peerbitDurableAt == null
+                        ? null
+                        : buildContiguousPrefixMilestones(
+                              chunkBytes,
+                              peerbitDurableAt,
+                              libraryStreamStartedAt,
+                              libraryStreamFinishedAt,
+                              totalBytes,
+                              "chunkPersistenceConfirmedAt"
+                          ),
+            },
+            sinkAccepted: {
+                definition:
+                    "contiguous file-prefix bytes accepted by the configured benchmark sink; this is not a Peerbit or filesystem durability claim",
+                source: "chunkWriteFinishedAt",
+                sink: options.downloadSink ?? "hash-only",
+                durable: false,
+                milestones: buildContiguousPrefixMilestones(
+                    chunkBytes,
+                    sinkAcceptedAt,
+                    libraryStreamStartedAt,
+                    libraryStreamFinishedAt,
+                    totalBytes,
+                    "chunkWriteFinishedAt"
+                ),
+            },
         },
     };
 };

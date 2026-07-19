@@ -77,12 +77,14 @@ describe("file-share transfer benchmark cohorts", () => {
                 },
                 chunkByteLength: record([4, 4, 4, 2]),
                 chunkDemandWaitMs: record([0, 1_001, 5_001, 10_001]),
-                chunkWriteStartedAt: record([10, 20, 30, 40]),
-                chunkWriteFinishedAt: record([110, 120, 130, 140]),
-                chunkMaterializeStartedAt: record([1, 2, 3, 4]),
-                chunkMaterializeFinishedAt: record([2, 3, 4, 5]),
-                chunkHashStartedAt: record([5, 6, 7, 8]),
-                chunkHashFinishedAt: record([6, 7, 8, 9]),
+                chunkWriteStartedAt: record([1_010, 1_020, 1_030, 1_040]),
+                chunkWriteFinishedAt: record([1_110, 1_120, 1_130, 1_140]),
+                chunkMaterializeStartedAt: record([1_001, 1_002, 1_003, 1_004]),
+                chunkMaterializeFinishedAt: record([
+                    1_002, 1_003, 1_004, 1_005,
+                ]),
+                chunkHashStartedAt: record([1_005, 1_006, 1_007, 1_008]),
+                chunkHashFinishedAt: record([1_006, 1_007, 1_008, 1_009]),
             },
             14
         );
@@ -109,6 +111,84 @@ describe("file-share transfer benchmark cohorts", () => {
             materializeMs: 4,
             contentHashMs: 4,
         });
+        expect(summary.receiverProgress.percentages).toEqual(
+            Array.from({ length: 21 }, (_, index) => index * 5)
+        );
+        expect(summary.receiverProgress.available.milestones).toHaveLength(21);
+        expect(summary.receiverProgress.peerbitDurable).toMatchObject({
+            claimed: false,
+            milestones: null,
+        });
+        expect(summary.receiverProgress.sinkAccepted).toMatchObject({
+            sink: "hash-only",
+            durable: false,
+        });
+    });
+
+    it("derives contiguous receiver, Peerbit, and sink milestones without calling the sink durable", () => {
+        const record = (values: number[]) =>
+            Object.fromEntries(values.map((value, index) => [index, value]));
+        const summary = summarizeReadTransferDiagnostics(
+            {
+                persistChunkReads: true,
+                startedAt: 100,
+                finishedAt: 500,
+                chunkResolved: { 0: "cached", 1: "manifest-head-get" },
+                chunkByteLength: record([4, 6]),
+                chunkDemandWaitMs: record([0, 0]),
+                chunkWriteStartedAt: record([200, 300]),
+                chunkWriteFinishedAt: record([210, 310]),
+                chunkMaterializeStartedAt: record([140, 130]),
+                chunkMaterializeFinishedAt: record([150, 140]),
+                chunkHashStartedAt: record([160, 150]),
+                chunkHashFinishedAt: record([170, 160]),
+                chunkPersistenceConfirmedAt: record([250, 180]),
+                chunkPersistenceConfirmationSource: {
+                    0: "manifest-head-batch-local",
+                    1: "manifest-head-batch-remote",
+                },
+            },
+            10,
+            { downloadSink: "opfs" }
+        );
+
+        const availableHalf =
+            summary.receiverProgress.available.milestones.find(
+                (milestone) => milestone.percent === 50
+            );
+        const durableHalf =
+            summary.receiverProgress.peerbitDurable.milestones?.find(
+                (milestone) => milestone.percent === 50
+            );
+        const sinkHalf = summary.receiverProgress.sinkAccepted.milestones.find(
+            (milestone) => milestone.percent === 50
+        );
+        expect(availableHalf).toMatchObject({
+            targetBytes: 5,
+            contiguousBytes: 10,
+            chunkIndex: 1,
+            confirmedAt: 150,
+            elapsedMs: 50,
+        });
+        expect(durableHalf).toMatchObject({
+            confirmedAt: 250,
+            elapsedMs: 150,
+        });
+        expect(sinkHalf).toMatchObject({
+            confirmedAt: 310,
+            elapsedMs: 210,
+        });
+        expect(summary.receiverProgress.peerbitDurable).toMatchObject({
+            claimed: true,
+            sourceCounts: {
+                "manifest-head-batch-local": 1,
+                "manifest-head-batch-remote": 1,
+            },
+        });
+        expect(summary.receiverProgress.sinkAccepted).toMatchObject({
+            sink: "opfs",
+            durable: false,
+        });
     });
 
     it("fails closed when read attribution omits bytes or exact coverage", () => {
@@ -134,6 +214,52 @@ describe("file-share transfer benchmark cohorts", () => {
                 4
             )
         ).toThrow("chunkByteLength[0]");
+    });
+
+    it("rejects unknown persistence sources and timestamps outside the completed read", () => {
+        const diagnostics = {
+            persistChunkReads: true,
+            startedAt: 1,
+            finishedAt: 2,
+            chunkResolved: { 0: "cached" },
+            chunkByteLength: { 0: 4 },
+            chunkDemandWaitMs: { 0: 0 },
+            chunkWriteStartedAt: { 0: 1 },
+            chunkWriteFinishedAt: { 0: 2 },
+            chunkMaterializeStartedAt: { 0: 1 },
+            chunkMaterializeFinishedAt: { 0: 2 },
+            chunkHashStartedAt: { 0: 1 },
+            chunkHashFinishedAt: { 0: 2 },
+            chunkPersistenceConfirmedAt: { 0: 2 },
+            chunkPersistenceConfirmationSource: { 0: "unknown-source" },
+        };
+        expect(() => summarizeReadTransferDiagnostics(diagnostics, 4)).toThrow(
+            "is not a recognized persistence source"
+        );
+        expect(() =>
+            summarizeReadTransferDiagnostics(
+                {
+                    ...diagnostics,
+                    chunkPersistenceConfirmationSource: {
+                        0: "manifest-entry-local",
+                    },
+                    chunkPersistenceConfirmedAt: { 0: 3 },
+                },
+                4
+            )
+        ).toThrow("inside the completed read interval");
+        expect(() =>
+            summarizeReadTransferDiagnostics(
+                {
+                    ...diagnostics,
+                    chunkPersistenceConfirmationSource: {
+                        0: "manifest-entry-local",
+                    },
+                    chunkPersistenceConfirmedAt: { 0: 1.5 },
+                },
+                4
+            )
+        ).toThrow("safe-integer timestamp");
     });
 
     it("prefers explicit index-row diagnostics and rejects alias drift", () => {

@@ -1517,7 +1517,8 @@ test.describe("file-share transfer benchmark", () => {
             }
             readTransfer = summarizeReadTransferDiagnostics(
                 read,
-                FILE_SIZE_BYTES
+                FILE_SIZE_BYTES,
+                { downloadSink: DOWNLOAD_SINK }
             );
             const libraryStreamStartedAt = asNumber(read?.startedAt);
             const libraryStreamFinishedAt = asNumber(read?.finishedAt);
