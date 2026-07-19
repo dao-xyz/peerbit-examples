@@ -77,6 +77,7 @@ import {
     sanitizeDownloadFileName,
     type BrowserFileWriter,
 } from "./download-sink";
+import { getPeerConnectionDiagnostics } from "./connection-diagnostics";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -755,8 +756,8 @@ export const Drop = () => {
                         };
                     }
                 ).__peerbitFileShareAppDiagnostics?.();
-                const connections =
-                    (peer as any)?.libp2p?.getConnections?.() ?? [];
+                const connectionDiagnostics =
+                    getPeerConnectionDiagnostics(peer);
 
                 return {
                     capturedAt: Date.now(),
@@ -766,7 +767,12 @@ export const Drop = () => {
                     appConnectionState: appDiagnostics?.connectionState ?? null,
                     appDialStartedAt: appDiagnostics?.dialStartedAt ?? null,
                     appDialFinishedAt: appDiagnostics?.dialFinishedAt ?? null,
-                    connectionCount: connections.length,
+                    connectionCount: connectionDiagnostics.connections.length,
+                    peerId: connectionDiagnostics.peerId,
+                    connectionDetails: connectionDiagnostics.connections,
+                    transportStreams: connectionDiagnostics.transportStreams,
+                    directBlockStreams:
+                        connectionDiagnostics.directBlockStreams,
                     peerHash,
                     replicatorCount:
                         replicators && typeof replicators.size === "number"
@@ -849,11 +855,10 @@ export const Drop = () => {
                           ).catch(() => false),
                       ])
                     : [undefined, null];
-                const connections = (
-                    (peer as any)?.libp2p?.getConnections?.() ?? []
-                ).map(
-                    (connection) =>
-                        connection?.remotePeer?.toString?.() ?? "unknown"
+                const connectionDiagnostics =
+                    getPeerConnectionDiagnostics(peer);
+                const connections = connectionDiagnostics.connections.map(
+                    (connection) => connection.remotePeer ?? "unknown"
                 );
                 const peerAddresses = getPeerDialAddresses(peer);
                 const listedFiles = await Promise.all(
@@ -952,6 +957,11 @@ export const Drop = () => {
                     programHookError: getProgramHookErrorMessage(files.error),
                     connectionCount: connections.length,
                     connectionPeers: connections,
+                    peerId: connectionDiagnostics.peerId,
+                    connectionDetails: connectionDiagnostics.connections,
+                    transportStreams: connectionDiagnostics.transportStreams,
+                    directBlockStreams:
+                        connectionDiagnostics.directBlockStreams,
                     programOpenDiagnostics: program?.openDiagnostics ?? null,
                     programBlockPresent,
                     lastUploadDiagnostics:
