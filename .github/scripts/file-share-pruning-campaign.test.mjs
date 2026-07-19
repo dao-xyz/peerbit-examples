@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+    COHORT_PROFILES,
     PUBSUB_PROTOCOL,
     TRANSPORT_COUNTER_KEY_FIELDS,
     auditEndpointTransport,
@@ -386,6 +387,33 @@ test("separates baseline carrier safety from duplicate-condition evidence", () =
     );
 });
 
+test("uses the selected cohort payload when evaluating carrier envelopes", () => {
+    const halfLocalCarrier = {
+        carrierCount: 1,
+        dominantDeltaBytes: P,
+        totalDeltaBytes: P,
+        dominantShare: 1,
+        duplicationFactor: 1,
+    };
+
+    assert.equal(
+        evaluateVariantCarrierGate(
+            "head",
+            halfLocalCarrier,
+            COHORT_PROFILES["half-local"]
+        ),
+        true
+    );
+    assert.equal(
+        evaluateVariantCarrierGate(
+            "head",
+            halfLocalCarrier,
+            COHORT_PROFILES["cold-progress"]
+        ),
+        false
+    );
+});
+
 test("rejects writer and reader totals more than one MiB apart", () => {
     const within = evaluateCounterpartDeltaSkew(
         { totalDeltaBytes: P },
@@ -432,6 +460,9 @@ const makeCampaignFixture = ({
     baselineWriterCarrierCount = baselineCarrierCount,
     baselineReaderCarrierCount = baselineCarrierCount,
 }) => {
+    const localPrefixBlockCount = contract.localPrefixBlockCount;
+    const remoteChunkCount = 2048 - localPrefixBlockCount;
+    const remotePayloadBytes = contract.remotePayloadBytes;
     const writerHash = "writer-hash";
     const readerHash = "reader-hash";
     const writerPeerId = "writer-peer-id";
@@ -457,7 +488,7 @@ const makeCampaignFixture = ({
                     id: `${direction}-local-stream-${index}`,
                     multiplexer:
                         index === 0 ? "/yamux/1.0.0" : "/peerbit/yamux/1.0.0",
-                    bytes: 100 + index + (before ? 0 : P),
+                    bytes: 100 + index + (before ? 0 : remotePayloadBytes),
                 })
         );
     const singleton = [writerHash];
@@ -513,15 +544,26 @@ const makeCampaignFixture = ({
         })
     );
     const fullRange = Array.from({ length: 2048 }, (_, index) => index);
-    const prefixRange = fullRange.slice(0, 1024);
+    const prefixRange = fullRange.slice(0, localPrefixBlockCount);
     const libraryStreamWallMs = variant === "baseline" ? 100_000 : 90_000;
-    const firstHalfMs = variant === "baseline" ? 40_000 : 36_000;
+    const payloadStreamWallMs = variant === "baseline" ? 96_000 : 86_400;
     const readStartedAt = 1_000_000;
     const demandWait = indexedRecord(2048, 10);
+    const chunkWriteFinishedAt = indexedRecord(
+        2048,
+        (index) =>
+            readStartedAt +
+            Math.ceil((payloadStreamWallMs * (index + 1)) / 2048)
+    );
     const readDiagnostics = {
         startedAt: readStartedAt,
         finishedAt: readStartedAt + libraryStreamWallMs,
-        chunkWriteFinishedAt: { 1023: readStartedAt + firstHalfMs },
+        persistChunkReads: true,
+        programPersistChunkReads: true,
+        initialLocalChunkBlockCount: localPrefixBlockCount,
+        initialLocalChunkIndexRowCount: 0,
+        initialLocalChunkCount: 0,
+        chunkWriteFinishedAt,
         chunkByteLength: indexedRecord(2048, 524_288),
         chunkDemandWaitMs: demandWait,
         chunkAttempts: indexedRecord(2048, 1),
@@ -533,7 +575,15 @@ const makeCampaignFixture = ({
         chunkManifestHeadBatchMissingCount: 0,
         chunkManifestHeadPhysicalRemoteRequestErrorCount: 0,
         chunkManifestHeadPhysicalRemoteRequestErrors: [],
-        chunkManifestHeadPhysicalRemoteRequestCount: 1,
+        chunkManifestHeadBatchRequestedIndexCount: 2048,
+        chunkManifestHeadBatchAcceptedCount: 2048,
+        chunkManifestHeadLocalBatchAcceptedCount: localPrefixBlockCount,
+        chunkManifestHeadRemoteBatchAcceptedCount: remoteChunkCount,
+        chunkManifestHeadPhysicalRemoteRequestCount: remoteChunkCount,
+        chunkManifestHeadBatchResolved: indexedRecord(
+            2048,
+            (index) => `manifest-entry-${index}`
+        ),
         maxManifestHeadBatchSize: 1,
         maxManifestHeadLogicalWindowSize: 8,
     };
@@ -573,7 +623,7 @@ const makeCampaignFixture = ({
         fixtureSeed: "peerbit-file-share-benchmark-v1",
         downloadSink: "hash-only",
         uploadTimeoutMs: 1_200_000,
-        downloadTimeoutMs: 3_300_000,
+        downloadTimeoutMs: contract.downloadTimeoutMs,
         postUploadMonitorMs: 5_000,
         pollMs: 1_000,
         minReadySeeders: 1,
@@ -581,7 +631,7 @@ const makeCampaignFixture = ({
         sampleMs: 15_000,
         sampleCount: 4,
         targetSeeders: 2,
-        readerLocalChunkTarget: 1024,
+        readerLocalChunkTarget: localPrefixBlockCount,
         readerLocalChunkMaxOvershoot: 0,
         readerTerminalTopology: "observer",
         baseUrl: null,
@@ -657,35 +707,35 @@ const makeCampaignFixture = ({
         requestFailureCount: 0,
         droppedSeeders: false,
         unexpectedSeederDrop: false,
-        readerLocalChunkTarget: 1024,
+        readerLocalChunkTarget: localPrefixBlockCount,
         readerLocalChunkMaxOvershoot: 0,
         readerTerminalTopology: "observer",
-        readerLocalChunkBlockCount: 1024,
+        readerLocalChunkBlockCount: localPrefixBlockCount,
         readerLocalChunkIndexRowCount: 0,
-        readerLocalityCohortKey: "observer-persistent-prefix-b1024-i0",
+        readerLocalityCohortKey: `observer-persistent-prefix-b${localPrefixBlockCount}-i0`,
         readerLocalityControl: {
             status: "complete",
             failure: null,
             profile: "observer-topology-exact-manifest-prefix",
             provisioningMethod: "exact-manifest-head-import",
-            requestedLocalChunkBlockCount: 1024,
+            requestedLocalChunkBlockCount: localPrefixBlockCount,
             maxSpeculativeOvershootChunkCount: 0,
             writerUploadRole: "fixed1",
             readerUploadRole: "observer",
             readerTimedReadPolicy: "persist-chunk-reads",
             expectedTerminalTopology: "observer",
-            actualLocalChunkBlockCount: 1024,
+            actualLocalChunkBlockCount: localPrefixBlockCount,
             actualLocalChunkIndexRowCount: 0,
             speculativeOvershootChunkCount: 0,
-            cohortKey: "observer-persistent-prefix-b1024-i0",
+            cohortKey: `observer-persistent-prefix-b${localPrefixBlockCount}-i0`,
             preloadEvidence: {
-                requestedManifestEntryCount: 1024,
-                importedManifestEntryCount: 1024,
+                requestedManifestEntryCount: localPrefixBlockCount,
+                importedManifestEntryCount: localPrefixBlockCount,
                 importedManifestEntryIndices: prefixRange,
                 localManifestEntryIndicesAfter: prefixRange,
             },
             preDownloadObservation: {
-                blockCount: 1024,
+                blockCount: localPrefixBlockCount,
                 indexRowCount: 0,
                 blockChunkIndices: prefixRange,
                 indexedChunkIndices: [],
@@ -753,22 +803,31 @@ const buildFixtureReport = (
         baselineCarrierCount = 2,
         baselineWriterCarrierCount = baselineCarrierCount,
         baselineReaderCarrierCount = baselineCarrierCount,
+        cohortProfile = "half-local",
+        environmentOverrides = {},
         mutate,
     } = {}
 ) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pruning-report-test-"));
     context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const profileContract = COHORT_PROFILES[cohortProfile];
+    assert.ok(profileContract);
+    const fixtureContract = {
+        ...CAMPAIGN_FIXTURE_CONTRACT,
+        ...profileContract,
+        cohortProfile,
+    };
     const summaries = {
         baseline: makeCampaignFixture({
             variant: "baseline",
-            contract: CAMPAIGN_FIXTURE_CONTRACT,
+            contract: fixtureContract,
             baselineCarrierCount,
             baselineWriterCarrierCount,
             baselineReaderCarrierCount,
         }),
         head: makeCampaignFixture({
             variant: "head",
-            contract: CAMPAIGN_FIXTURE_CONTRACT,
+            contract: fixtureContract,
         }),
     };
     mutate?.(summaries);
@@ -792,6 +851,16 @@ const buildFixtureReport = (
         EXPECTED_SHA256_BASE64: CAMPAIGN_FIXTURE_CONTRACT.sha256,
         EXPECTED_CRC32_HEX: CAMPAIGN_FIXTURE_CONTRACT.crc32,
         FIXTURE_SEED: "peerbit-file-share-benchmark-v1",
+        COHORT_PROFILE: cohortProfile,
+        LOCAL_PREFIX_BLOCK_COUNT: String(profileContract.localPrefixBlockCount),
+        LOCAL_PREFIX_INDEX_ROW_COUNT: String(
+            profileContract.localPrefixIndexRowCount
+        ),
+        REMOTE_PAYLOAD_BYTES: String(profileContract.remotePayloadBytes),
+        REMOTE_PAYLOAD_UPPER_BYTES: String(
+            profileContract.remotePayloadUpperBytes
+        ),
+        DOWNLOAD_TIMEOUT_MS: String(profileContract.downloadTimeoutMs),
         GITHUB_SERVER_URL: "https://github.com",
         GITHUB_REPOSITORY: "dao-xyz/peerbit-examples",
         GITHUB_RUN_ID: runId,
@@ -801,7 +870,37 @@ const buildFixtureReport = (
         GITHUB_WORKFLOW_REF:
             "dao-xyz/peerbit-examples/.github/workflows/file-share-benchmarks.yml@refs/heads/test",
         GITHUB_WORKFLOW_SHA: "a".repeat(40),
+        ...environmentOverrides,
     });
+};
+
+const setUniformProgressTimings = (
+    metrics,
+    { quarterMs, postPayloadFinalizeMs }
+) => {
+    const quarterPayloadMiB = 256;
+    const halfPayloadMiB = 512;
+    metrics.quarter1Ms = quarterMs;
+    metrics.quarter2Ms = quarterMs;
+    metrics.quarter3Ms = quarterMs;
+    metrics.quarter4Ms = quarterMs;
+    metrics.firstHalfMs = quarterMs * 2;
+    metrics.secondHalfMs = quarterMs * 2;
+    metrics.payloadStreamWallMs = quarterMs * 4;
+    metrics.postPayloadFinalizeMs = postPayloadFinalizeMs;
+    metrics.libraryStreamWallMs =
+        metrics.payloadStreamWallMs + postPayloadFinalizeMs;
+    metrics.firstHalfMiBPerSecond =
+        halfPayloadMiB / (metrics.firstHalfMs / 1_000);
+    metrics.secondHalfMiBPerSecond =
+        halfPayloadMiB / (metrics.secondHalfMs / 1_000);
+    metrics.secondHalfOverFirstHalfDuration = 1;
+    metrics.quarter1MiBPerSecond = quarterPayloadMiB / (quarterMs / 1_000);
+    metrics.quarter2MiBPerSecond = quarterPayloadMiB / (quarterMs / 1_000);
+    metrics.quarter3MiBPerSecond = quarterPayloadMiB / (quarterMs / 1_000);
+    metrics.quarter4MiBPerSecond = quarterPayloadMiB / (quarterMs / 1_000);
+    metrics.fourthQuarterOverFirstQuarterDuration = 1;
+    metrics.fourthQuarterOverThirdQuarterDuration = 1;
 };
 
 test("builds valid pair evidence while leaving aggregate acceptance unevaluated", (context) => {
@@ -855,6 +954,134 @@ test("keeps a safe single-carrier baseline correct and benefit unevaluated", (co
         report.assessments.correctnessAndTransportEvidence
             .comparativeCarrierTotals.writer.passed,
         null
+    );
+});
+
+test("builds an exact all-remote cold-progress pair with fixed quarter metrics", (context) => {
+    const report = buildFixtureReport(context, {
+        cohortProfile: "cold-progress",
+        baselineCarrierCount: 1,
+    });
+
+    assert.equal(report.workflowGatePassed, true);
+    assert.equal(report.campaignContract.cohortProfile, "cold-progress");
+    assert.equal(report.campaignContract.localPrefixBlockCount, 0);
+    assert.equal(report.campaignContract.allPayloadRemote, true);
+    assert.equal(report.campaignContract.remotePayloadBytes, 1_073_741_824);
+    assert.equal(report.campaignContract.downloadTimeoutMs, 5_400_000);
+    assert.deepEqual(report.baseline.cohort, {
+        key: "observer-persistent-prefix-b0-i0",
+        blockCount: 0,
+        indexRowCount: 0,
+    });
+    assert.equal(report.baseline.metrics.quarter1Ms, 24_000);
+    assert.equal(report.baseline.metrics.quarter2Ms, 24_000);
+    assert.equal(report.baseline.metrics.quarter3Ms, 24_000);
+    assert.equal(report.baseline.metrics.quarter4Ms, 24_000);
+    assert.equal(report.baseline.metrics.postPayloadFinalizeMs, 4_000);
+    assert.equal(report.baseline.metrics.firstHalfDemandWaitMs, 10_240);
+    assert.equal(report.baseline.metrics.secondHalfDemandWaitMs, 10_240);
+    assert.equal(report.baseline.metrics.quarter1DemandWaitMs, 5_120);
+    assert.equal(
+        report.baseline.transport.writer.totalDeltaBytes,
+        1_073_741_824
+    );
+    assert.equal(report.assessments.pruningBenefitEvidence.passed, null);
+});
+
+test("rejects a cold cohort missing one physical remote request", (context) => {
+    const report = buildFixtureReport(context, {
+        cohortProfile: "cold-progress",
+        mutate: ({ baseline }) => {
+            baseline.results[0].readerDiagnostics.lastReadDiagnostics.chunkManifestHeadPhysicalRemoteRequestCount = 2047;
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.correctnessIssues.includes(
+            "manifest-persistence-and-head-geometry"
+        )
+    );
+});
+
+test("rejects any locally accepted chunk in the all-remote cohort", (context) => {
+    const report = buildFixtureReport(context, {
+        cohortProfile: "cold-progress",
+        mutate: ({ baseline }) => {
+            const read =
+                baseline.results[0].readerDiagnostics.lastReadDiagnostics;
+            read.chunkManifestHeadLocalBatchAcceptedCount = 1;
+            read.chunkManifestHeadRemoteBatchAcceptedCount = 2047;
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.correctnessIssues.includes(
+            "manifest-persistence-and-head-geometry"
+        )
+    );
+});
+
+test("rejects declared geometry that does not exactly match the cohort profile", (context) => {
+    assert.throws(
+        () =>
+            buildFixtureReport(context, {
+                cohortProfile: "cold-progress",
+                environmentOverrides: {
+                    LOCAL_PREFIX_BLOCK_COUNT: "1",
+                },
+            }),
+        /LOCAL_PREFIX_BLOCK_COUNT does not match cohort profile cold-progress/
+    );
+});
+
+test("rejects an incomplete all-chunk progress timestamp series", (context) => {
+    const report = buildFixtureReport(context, {
+        cohortProfile: "cold-progress",
+        mutate: ({ baseline }) => {
+            delete baseline.results[0].readerDiagnostics.lastReadDiagnostics
+                .chunkWriteFinishedAt[2047];
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.performanceIssues.includes(
+            "chunk-write-finished-series"
+        )
+    );
+});
+
+test("rejects a progress timestamp outside the read interval", (context) => {
+    const report = buildFixtureReport(context, {
+        cohortProfile: "cold-progress",
+        mutate: ({ baseline }) => {
+            baseline.results[0].readerDiagnostics.lastReadDiagnostics.chunkWriteFinishedAt[0] = 999_999;
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.performanceIssues.includes("read-quarter-boundaries")
+    );
+});
+
+test("rejects an out-of-order interior progress timestamp", (context) => {
+    const report = buildFixtureReport(context, {
+        cohortProfile: "cold-progress",
+        mutate: ({ baseline }) => {
+            const timestamps =
+                baseline.results[0].readerDiagnostics.lastReadDiagnostics
+                    .chunkWriteFinishedAt;
+            timestamps[1000] = timestamps[999] - 1;
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.performanceIssues.includes("read-quarter-boundaries")
     );
 });
 
@@ -928,14 +1155,22 @@ test("combines opposite orders and removes a noisy single-order timing effect", 
         runId: "2",
         baselineCarrierCount: 1,
     });
-    baselineHead.head.metrics.libraryStreamWallMs = 112;
-    baselineHead.baseline.metrics.libraryStreamWallMs = 100;
-    baselineHead.head.metrics.secondHalfMs = 112;
-    baselineHead.baseline.metrics.secondHalfMs = 100;
-    headBaseline.head.metrics.libraryStreamWallMs = 96;
-    headBaseline.baseline.metrics.libraryStreamWallMs = 100;
-    headBaseline.head.metrics.secondHalfMs = 96;
-    headBaseline.baseline.metrics.secondHalfMs = 100;
+    setUniformProgressTimings(baselineHead.baseline.metrics, {
+        quarterMs: 25,
+        postPayloadFinalizeMs: 0,
+    });
+    setUniformProgressTimings(baselineHead.head.metrics, {
+        quarterMs: 28,
+        postPayloadFinalizeMs: 0,
+    });
+    setUniformProgressTimings(headBaseline.baseline.metrics, {
+        quarterMs: 25,
+        postPayloadFinalizeMs: 0,
+    });
+    setUniformProgressTimings(headBaseline.head.metrics, {
+        quarterMs: 24,
+        postPayloadFinalizeMs: 0,
+    });
     baselineHead.delta.libraryStreamWallMs.headOverBaseline = 99;
     baselineHead.delta.secondHalfMs.headOverBaseline = 99;
 
@@ -948,9 +1183,165 @@ test("combines opposite orders and removes a noisy single-order timing effect", 
         false
     );
     assert.equal(combined.assessments.pruningBenefit.passed, null);
+    assert.equal(
+        combined.assessments.progressSlowdownDiagnostic.evaluated,
+        false
+    );
     assert.equal(combined.assessments.campaignAcceptance.passed, true);
     assert.equal(combined.workflowGatePassed, true);
     assert.ok(combined.aggregateRatios.libraryStreamWallHeadOverBaseline < 1.1);
+});
+
+test("combines all-remote progress metrics across opposite orders", (context) => {
+    const reports = [
+        buildFixtureReport(context, {
+            order: "baseline-head",
+            runId: "1",
+            cohortProfile: "cold-progress",
+            baselineCarrierCount: 1,
+        }),
+        buildFixtureReport(context, {
+            order: "head-baseline",
+            runId: "2",
+            cohortProfile: "cold-progress",
+            baselineCarrierCount: 1,
+        }),
+    ];
+    setUniformProgressTimings(reports[0].baseline.metrics, {
+        quarterMs: 24_000,
+        postPayloadFinalizeMs: 0,
+    });
+    setUniformProgressTimings(reports[1].baseline.metrics, {
+        quarterMs: 6_000,
+        postPayloadFinalizeMs: 6_000,
+    });
+    setUniformProgressTimings(reports[0].head.metrics, {
+        quarterMs: 21_600,
+        postPayloadFinalizeMs: 0,
+    });
+    setUniformProgressTimings(reports[1].head.metrics, {
+        quarterMs: 5_400,
+        postPayloadFinalizeMs: 7_200,
+    });
+
+    const combined = combineCampaignReports(reports);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, true);
+    assert.equal(combined.campaignContract.cohortProfile, "cold-progress");
+    assert.ok(
+        Math.abs(combined.aggregateProgress.baseline.quarter1Ms - 12_000) < 1e-9
+    );
+    assert.ok(
+        Math.abs(combined.aggregateProgress.baseline.quarter4Ms - 12_000) < 1e-9
+    );
+    assert.equal(
+        combined.aggregateProgress.baseline.secondHalfOverFirstHalfDuration,
+        1
+    );
+    assert.equal(
+        combined.aggregateProgress.baseline
+            .fourthQuarterOverThirdQuarterDuration,
+        1
+    );
+    assert.ok(
+        Math.abs(combined.aggregateProgress.head.quarter1Ms - 10_800) < 1e-9
+    );
+    assert.ok(
+        Math.abs(combined.aggregateProgress.head.quarter4Ms - 10_800) < 1e-9
+    );
+    assert.equal(
+        combined.aggregateProgress.baseline.postPayloadFinalizeMs,
+        3_000
+    );
+    assert.equal(combined.aggregateProgress.head.postPayloadFinalizeMs, 3_600);
+    assert.equal(
+        combined.assessments.progressSlowdownDiagnostic.gatesWorkflow,
+        false
+    );
+    assert.equal(
+        combined.assessments.progressSlowdownDiagnostic.evaluated,
+        true
+    );
+    assert.equal(combined.assessments.pruningBenefit.passed, null);
+    assert.equal(combined.workflowGatePassed, true);
+});
+
+test("combiner rejects mixed locality cohort reports", (context) => {
+    const halfLocal = buildFixtureReport(context, {
+        order: "baseline-head",
+        runId: "1",
+        cohortProfile: "half-local",
+        baselineCarrierCount: 1,
+    });
+    const cold = buildFixtureReport(context, {
+        order: "head-baseline",
+        runId: "2",
+        cohortProfile: "cold-progress",
+        baselineCarrierCount: 1,
+    });
+
+    const combined = combineCampaignReports([halfLocal, cold]);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, false);
+    assert.equal(combined.workflowGatePassed, false);
+    assert.ok(
+        combined.validationIssues.includes("identical-campaign-contract")
+    );
+});
+
+test("combiner rejects identically mislabeled cohort contracts", (context) => {
+    const reports = [
+        buildFixtureReport(context, {
+            order: "baseline-head",
+            runId: "1",
+            cohortProfile: "cold-progress",
+            baselineCarrierCount: 1,
+        }),
+        buildFixtureReport(context, {
+            order: "head-baseline",
+            runId: "2",
+            cohortProfile: "cold-progress",
+            baselineCarrierCount: 1,
+        }),
+    ];
+    for (const report of reports) {
+        report.campaignContract.cohortProfile = "half-local";
+    }
+
+    const combined = combineCampaignReports(reports);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, false);
+    assert.equal(combined.workflowGatePassed, false);
+    assert.ok(combined.validationIssues.includes("pair-1-cohort-contract"));
+    assert.ok(combined.validationIssues.includes("pair-2-cohort-contract"));
+});
+
+test("combiner rejects finite but semantically invalid progress metrics", (context) => {
+    const reports = [
+        buildFixtureReport(context, {
+            order: "baseline-head",
+            runId: "1",
+            cohortProfile: "cold-progress",
+            baselineCarrierCount: 1,
+        }),
+        buildFixtureReport(context, {
+            order: "head-baseline",
+            runId: "2",
+            cohortProfile: "cold-progress",
+            baselineCarrierCount: 1,
+        }),
+    ];
+    reports[1].head.metrics.quarter1Ms = 0;
+
+    const combined = combineCampaignReports(reports);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, false);
+    assert.equal(combined.workflowGatePassed, false);
+    assert.ok(
+        combined.validationIssues.includes(
+            "pair-2-raw-performance-metric-semantics"
+        )
+    );
 });
 
 test("combiner fails closed on same orders, contracts, URLs, and raw evidence", (context) => {
@@ -1045,10 +1436,14 @@ test("combiner rejects an aggregate regression and an observed failed benefit", 
         }),
     ];
     for (const report of reports) {
-        report.head.metrics.libraryStreamWallMs = 111;
-        report.baseline.metrics.libraryStreamWallMs = 100;
-        report.head.metrics.secondHalfMs = 111;
-        report.baseline.metrics.secondHalfMs = 100;
+        setUniformProgressTimings(report.baseline.metrics, {
+            quarterMs: 25,
+            postPayloadFinalizeMs: 0,
+        });
+        setUniformProgressTimings(report.head.metrics, {
+            quarterMs: 27.75,
+            postPayloadFinalizeMs: 0,
+        });
     }
 
     const combined = combineCampaignReports(reports);

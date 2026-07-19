@@ -3,6 +3,14 @@ name: File Share Outbound-Candidate Pruning Campaign
 on:
     workflow_dispatch:
         inputs:
+            cohort_profile:
+                description: Reader locality cohort to benchmark
+                required: true
+                type: choice
+                default: half-local
+                options:
+                    - half-local
+                    - cold-progress
             pair_order:
                 description: Explicit counterbalanced execution order
                 required: true
@@ -17,11 +25,11 @@ permissions:
 
 jobs:
     outbound_candidate_pruning:
-        name: Exact 1 GiB outbound-candidate pruning pair
+        name: Exact 1 GiB ${{ inputs.cohort_profile }} pruning pair
         runs-on: ubuntu-22.04
         timeout-minutes: 360
         concurrency:
-            group: fileshare-outbound-pruning-${{ github.ref_name }}-${{ inputs.pair_order }}
+            group: fileshare-outbound-pruning-${{ github.ref_name }}-${{ inputs.cohort_profile }}-${{ inputs.pair_order }}
             cancel-in-progress: false
         defaults:
             run:
@@ -39,10 +47,12 @@ jobs:
             FILE_SIZE_BYTES: "1073741824"
             CHUNK_COUNT: "2048"
             CHUNK_SIZE_BYTES: "524288"
-            LOCAL_PREFIX_BLOCK_COUNT: "1024"
+            COHORT_PROFILE: ${{ inputs.cohort_profile }}
+            LOCAL_PREFIX_BLOCK_COUNT: ${{ inputs.cohort_profile == 'cold-progress' && '0' || '1024' }}
             LOCAL_PREFIX_INDEX_ROW_COUNT: "0"
-            REMOTE_PAYLOAD_BYTES: "536870912"
-            REMOTE_PAYLOAD_UPPER_BYTES: "553648128"
+            REMOTE_PAYLOAD_BYTES: ${{ inputs.cohort_profile == 'cold-progress' && '1073741824' || '536870912' }}
+            REMOTE_PAYLOAD_UPPER_BYTES: ${{ inputs.cohort_profile == 'cold-progress' && '1090519040' || '553648128' }}
+            DOWNLOAD_TIMEOUT_MS: ${{ inputs.cohort_profile == 'cold-progress' && '5400000' || '3300000' }}
             COUNTERPART_BYTE_SKEW_BYTES: "1048576"
             PUBSUB_PROTOCOL: /peerbit/topic-control-plane/2.0.0
             CAMPAIGN_ROOT: ${{ github.workspace }}/campaign
@@ -60,6 +70,7 @@ jobs:
                   set -euo pipefail
                   mkdir -p "$RESULTS_ROOT/logs"
                   date -u +%FT%TZ > "$RESULTS_ROOT/initialized-at.txt"
+                  printf '%s\n' "$COHORT_PROFILE" > "$RESULTS_ROOT/requested-cohort-profile.txt"
                   printf '%s\n' "${{ inputs.pair_order }}" > "$RESULTS_ROOT/requested-pair-order.txt"
 
             - name: Validate immutable campaign declaration
@@ -86,10 +97,25 @@ jobs:
                   test "$FILE_SIZE_BYTES" = "1073741824"
                   test "$CHUNK_COUNT" = "2048"
                   test "$CHUNK_SIZE_BYTES" = "524288"
-                  test "$LOCAL_PREFIX_BLOCK_COUNT" = "1024"
                   test "$LOCAL_PREFIX_INDEX_ROW_COUNT" = "0"
-                  test "$REMOTE_PAYLOAD_BYTES" = "536870912"
-                  test "$REMOTE_PAYLOAD_UPPER_BYTES" = "553648128"
+                  case "$COHORT_PROFILE" in
+                    half-local)
+                      test "$LOCAL_PREFIX_BLOCK_COUNT" = "1024"
+                      test "$REMOTE_PAYLOAD_BYTES" = "536870912"
+                      test "$REMOTE_PAYLOAD_UPPER_BYTES" = "553648128"
+                      test "$DOWNLOAD_TIMEOUT_MS" = "3300000"
+                      ;;
+                    cold-progress)
+                      test "$LOCAL_PREFIX_BLOCK_COUNT" = "0"
+                      test "$REMOTE_PAYLOAD_BYTES" = "1073741824"
+                      test "$REMOTE_PAYLOAD_UPPER_BYTES" = "1090519040"
+                      test "$DOWNLOAD_TIMEOUT_MS" = "5400000"
+                      ;;
+                    *)
+                      printf 'Unsupported cohort profile: %s\n' "$COHORT_PROFILE" >&2
+                      exit 2
+                      ;;
+                  esac
                   test "$COUNTERPART_BYTE_SKEW_BYTES" = "1048576"
                   test "$PUBSUB_PROTOCOL" = "/peerbit/topic-control-plane/2.0.0"
 
@@ -225,12 +251,14 @@ jobs:
                     printf 'run_url=%s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
                     printf 'workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
                     printf 'workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+                    printf 'cohort_profile=%s\n' "$COHORT_PROFILE"
                   } > "$RESULTS_ROOT/environment.txt"
                   case "$PAIR_ORDER" in
                     baseline-head) printf 'baseline\nhead\n' > "$RESULTS_ROOT/order.txt" ;;
                     head-baseline) printf 'head\nbaseline\n' > "$RESULTS_ROOT/order.txt" ;;
                     *) printf 'Unsupported pair order: %s\n' "$PAIR_ORDER" >&2; exit 2 ;;
                   esac
+                  printf '%s\n' "$COHORT_PROFILE" > "$RESULTS_ROOT/cohort-profile.txt"
                   printf '%s\n' "$PAIR_ORDER" > "$RESULTS_ROOT/pair-order.txt"
                   {
                     printf 'harness=%s\n' "$HARNESS_CORE_COMMIT"
@@ -398,11 +426,10 @@ jobs:
                         --network local
                         --fresh
                         --upload-timeout-ms 1200000
-                        # The harness outer deadline is 147m20s with these exact
-                        # phase budgets; the 165m wrapper retains 17m40s for
-                        # preparation while staying 10m above the observed 45m
-                        # slow-half transfer.
-                        --download-timeout-ms 3300000
+                        # The 90m cold timeout can capture the reported ~60m
+                        # transfer through final integrity/progress evidence;
+                        # the 165m process wrapper still bounds every variant.
+                        --download-timeout-ms "$DOWNLOAD_TIMEOUT_MS"
                         --download-sink hash-only
                         --post-upload-monitor-ms 5000
                         --poll-ms 1000
@@ -411,7 +438,7 @@ jobs:
                         --sample-ms 15000
                         --sample-count 4
                         --target-seeders 2
-                        --reader-local-chunk-target 1024
+                        --reader-local-chunk-target "$LOCAL_PREFIX_BLOCK_COUNT"
                         --reader-local-chunk-max-overshoot 0
                         --reader-terminal-topology observer
                         --fixture-seed "$FIXTURE_SEED"

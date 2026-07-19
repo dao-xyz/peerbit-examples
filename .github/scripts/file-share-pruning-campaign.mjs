@@ -5,12 +5,12 @@ import { isDeepStrictEqual } from "node:util";
 
 export const CAMPAIGN_REPORT_SCHEMA = Object.freeze({
     id: "peerbit-file-share-outbound-candidate-pruning-comparison",
-    version: 2,
+    version: 3,
 });
 
 export const COMBINED_CAMPAIGN_REPORT_SCHEMA = Object.freeze({
     id: "peerbit-file-share-outbound-candidate-pruning-counterbalanced",
-    version: 1,
+    version: 2,
 });
 
 export const BENCHMARK_SUMMARY_SCHEMA = Object.freeze({
@@ -41,23 +41,55 @@ export const TRANSPORT_COUNTER_KEY_FIELDS = Object.freeze([
 ]);
 
 const MIB = 1024 * 1024;
-const DEFAULT_CONTRACT = Object.freeze({
+const BASE_CONTRACT = Object.freeze({
     fileSizeBytes: 1024 * MIB,
     chunkCount: 2048,
     chunkSizeBytes: 512 * 1024,
-    localPrefixBlockCount: 1024,
-    localPrefixIndexRowCount: 0,
-    remotePayloadBytes: 1024 * 512 * 1024,
-    remotePayloadUpperBytes: 1024 * 512 * 1024 + 16 * MIB,
     counterpartByteSkewBytes: MIB,
 });
+export const COHORT_PROFILES = Object.freeze({
+    "half-local": Object.freeze({
+        localPrefixBlockCount: 1024,
+        localPrefixIndexRowCount: 0,
+        remotePayloadBytes: 512 * MIB,
+        remotePayloadUpperBytes: 512 * MIB + 16 * MIB,
+        downloadTimeoutMs: 3_300_000,
+    }),
+    "cold-progress": Object.freeze({
+        localPrefixBlockCount: 0,
+        localPrefixIndexRowCount: 0,
+        remotePayloadBytes: 1024 * MIB,
+        remotePayloadUpperBytes: 1024 * MIB + 16 * MIB,
+        downloadTimeoutMs: 5_400_000,
+    }),
+});
+const DEFAULT_PROFILE_CONTRACT = COHORT_PROFILES["half-local"];
 const PERFORMANCE_METRIC_KEYS = Object.freeze([
     "libraryStreamWallMs",
+    "payloadStreamWallMs",
+    "postPayloadFinalizeMs",
     "firstHalfMs",
     "secondHalfMs",
+    "firstHalfMiBPerSecond",
+    "secondHalfMiBPerSecond",
+    "secondHalfOverFirstHalfDuration",
+    "quarter1Ms",
+    "quarter2Ms",
+    "quarter3Ms",
+    "quarter4Ms",
+    "quarter1MiBPerSecond",
+    "quarter2MiBPerSecond",
+    "quarter3MiBPerSecond",
+    "quarter4MiBPerSecond",
+    "fourthQuarterOverFirstQuarterDuration",
+    "fourthQuarterOverThirdQuarterDuration",
     "demandWaitSumMs",
     "firstHalfDemandWaitMs",
     "secondHalfDemandWaitMs",
+    "quarter1DemandWaitMs",
+    "quarter2DemandWaitMs",
+    "quarter3DemandWaitMs",
+    "quarter4DemandWaitMs",
     "maxDemandWaitMs",
     "over10sDemandWaitCount",
     "maxChunkAttempts",
@@ -69,6 +101,26 @@ const PERFORMANCE_METRIC_KEYS = Object.freeze([
     "peakCombinedBytes",
     "combinedGrowthBytes",
     "combinedGrowthOverFile",
+]);
+const PROGRESS_METRIC_KEYS = Object.freeze([
+    "libraryStreamWallMs",
+    "payloadStreamWallMs",
+    "postPayloadFinalizeMs",
+    "firstHalfMs",
+    "secondHalfMs",
+    "firstHalfMiBPerSecond",
+    "secondHalfMiBPerSecond",
+    "secondHalfOverFirstHalfDuration",
+    "quarter1Ms",
+    "quarter2Ms",
+    "quarter3Ms",
+    "quarter4Ms",
+    "quarter1MiBPerSecond",
+    "quarter2MiBPerSecond",
+    "quarter3MiBPerSecond",
+    "quarter4MiBPerSecond",
+    "fourthQuarterOverFirstQuarterDuration",
+    "fourthQuarterOverThirdQuarterDuration",
 ]);
 
 const isRecord = (value) =>
@@ -154,6 +206,12 @@ const requireContractEnvironment = (environment) => {
         "EXPECTED_SHA256_BASE64",
         "EXPECTED_CRC32_HEX",
         "FIXTURE_SEED",
+        "COHORT_PROFILE",
+        "LOCAL_PREFIX_BLOCK_COUNT",
+        "LOCAL_PREFIX_INDEX_ROW_COUNT",
+        "REMOTE_PAYLOAD_BYTES",
+        "REMOTE_PAYLOAD_UPPER_BYTES",
+        "DOWNLOAD_TIMEOUT_MS",
     ];
     for (const name of required) {
         if (!environment[name]) {
@@ -178,8 +236,29 @@ const requireContractEnvironment = (environment) => {
     if (!["baseline-head", "head-baseline"].includes(environment.PAIR_ORDER)) {
         throw new Error(`Unsupported pair order ${environment.PAIR_ORDER}`);
     }
+    const cohortProfile = environment.COHORT_PROFILE;
+    const profileContract = COHORT_PROFILES[cohortProfile];
+    if (!profileContract) {
+        throw new Error(`Unsupported cohort profile ${cohortProfile}`);
+    }
+    const declaredGeometry = {
+        LOCAL_PREFIX_BLOCK_COUNT: profileContract.localPrefixBlockCount,
+        LOCAL_PREFIX_INDEX_ROW_COUNT: profileContract.localPrefixIndexRowCount,
+        REMOTE_PAYLOAD_BYTES: profileContract.remotePayloadBytes,
+        REMOTE_PAYLOAD_UPPER_BYTES: profileContract.remotePayloadUpperBytes,
+        DOWNLOAD_TIMEOUT_MS: profileContract.downloadTimeoutMs,
+    };
+    for (const [name, expected] of Object.entries(declaredGeometry)) {
+        if (environment[name] !== String(expected)) {
+            throw new Error(
+                `${name} does not match cohort profile ${cohortProfile}`
+            );
+        }
+    }
     return {
-        ...DEFAULT_CONTRACT,
+        ...BASE_CONTRACT,
+        ...profileContract,
+        cohortProfile,
         baselineCoreCommit: environment.BASE_CORE_COMMIT,
         headCoreCommit: environment.HEAD_CORE_COMMIT,
         harnessCoreCommit: environment.HARNESS_CORE_COMMIT,
@@ -275,6 +354,7 @@ export const auditEndpointTransport = ({
     expectedRemotePeerHash,
     expectedRemotePeerId,
     label,
+    remotePayloadBytes = DEFAULT_PROFILE_CONTRACT.remotePayloadBytes,
 }) => {
     const before = auditTransportSnapshot(beforeTopology, {
         direction,
@@ -317,7 +397,7 @@ export const auditEndpointTransport = ({
         ...deltas.map(({ deltaBytes }) => deltaBytes)
     );
     const carrierCount = deltas.filter(
-        ({ deltaBytes }) => deltaBytes >= DEFAULT_CONTRACT.remotePayloadBytes
+        ({ deltaBytes }) => deltaBytes >= remotePayloadBytes
     ).length;
     const dominantShare =
         totalDeltaBytes === 0 ? 0 : dominantDeltaBytes / totalDeltaBytes;
@@ -340,9 +420,13 @@ export const auditEndpointTransport = ({
     };
 };
 
-export const evaluateVariantCarrierGate = (variant, endpoint) => {
-    const P = DEFAULT_CONTRACT.remotePayloadBytes;
-    const U = DEFAULT_CONTRACT.remotePayloadUpperBytes;
+export const evaluateVariantCarrierGate = (
+    variant,
+    endpoint,
+    contract = DEFAULT_PROFILE_CONTRACT
+) => {
+    const P = contract.remotePayloadBytes;
+    const U = contract.remotePayloadUpperBytes;
     if (
         !isRecord(endpoint) ||
         !isNonNegativeSafeInteger(endpoint.dominantDeltaBytes) ||
@@ -380,8 +464,11 @@ export const evaluateVariantCarrierGate = (variant, endpoint) => {
     throw new Error(`Unknown variant ${variant}`);
 };
 
-export const baselineDuplicateCarrierObserved = (endpoint) =>
-    evaluateVariantCarrierGate("baseline", endpoint) &&
+export const baselineDuplicateCarrierObserved = (
+    endpoint,
+    contract = DEFAULT_PROFILE_CONTRACT
+) =>
+    evaluateVariantCarrierGate("baseline", endpoint, contract) &&
     endpoint.carrierCount >= 2 &&
     endpoint.totalDeltaBytes >= 1.8 * endpoint.dominantDeltaBytes &&
     endpoint.duplicationFactor >= 1.8;
@@ -389,7 +476,7 @@ export const baselineDuplicateCarrierObserved = (endpoint) =>
 export const evaluateCounterpartDeltaSkew = (
     writer,
     reader,
-    maxSkewBytes = DEFAULT_CONTRACT.counterpartByteSkewBytes
+    maxSkewBytes = BASE_CONTRACT.counterpartByteSkewBytes
 ) => {
     if (
         !isNonNegativeSafeInteger(writer?.totalDeltaBytes) ||
@@ -450,7 +537,7 @@ const validateExactInvocation = (issues, invocation, contract) => {
         fixtureSeed: contract.fixtureSeed,
         downloadSink: "hash-only",
         uploadTimeoutMs: 1_200_000,
-        downloadTimeoutMs: 3_300_000,
+        downloadTimeoutMs: contract.downloadTimeoutMs,
         postUploadMonitorMs: 5_000,
         pollMs: 1_000,
         minReadySeeders: 1,
@@ -542,6 +629,8 @@ const validateIntegrity = (issues, result, contract) => {
 const validateChunkGeometry = (issues, result, contract) => {
     const upload = result?.writerDiagnostics?.lastUploadDiagnostics;
     const read = result?.readerDiagnostics?.lastReadDiagnostics;
+    const expectedRemoteChunkCount =
+        contract.chunkCount - contract.localPrefixBlockCount;
     check(
         issues,
         contract.chunkCount * contract.chunkSizeBytes ===
@@ -566,6 +655,17 @@ const validateChunkGeometry = (issues, result, contract) => {
     );
     check(
         issues,
+        read?.persistChunkReads === true &&
+            read?.programPersistChunkReads === true &&
+            read?.initialLocalChunkBlockCount ===
+                contract.localPrefixBlockCount &&
+            read?.initialLocalChunkIndexRowCount ===
+                contract.localPrefixIndexRowCount &&
+            read?.initialLocalChunkCount === contract.localPrefixIndexRowCount,
+        "exact-read-initial-locality"
+    );
+    check(
+        issues,
         read?.chunkManifestEntryPersistenceFailedCount === 0 &&
             read?.chunkManifestEntryPersistenceMissingIndices?.length === 0 &&
             read?.chunkManifestEntryContentMismatchIndices?.length === 0 &&
@@ -574,7 +674,24 @@ const validateChunkGeometry = (issues, result, contract) => {
             read?.chunkManifestHeadBatchMissingCount === 0 &&
             read?.chunkManifestHeadPhysicalRemoteRequestErrorCount === 0 &&
             read?.chunkManifestHeadPhysicalRemoteRequestErrors?.length === 0 &&
-            read?.chunkManifestHeadPhysicalRemoteRequestCount > 0 &&
+            read?.chunkManifestHeadBatchRequestedIndexCount ===
+                contract.chunkCount &&
+            read?.chunkManifestHeadBatchAcceptedCount === contract.chunkCount &&
+            read?.chunkManifestHeadLocalBatchAcceptedCount ===
+                contract.localPrefixBlockCount &&
+            read?.chunkManifestHeadRemoteBatchAcceptedCount ===
+                expectedRemoteChunkCount &&
+            read?.chunkManifestHeadPhysicalRemoteRequestCount ===
+                expectedRemoteChunkCount &&
+            exactIntegerKeys(
+                read?.chunkManifestHeadBatchResolved,
+                contract.chunkCount
+            ) &&
+            Object.values(read.chunkManifestHeadBatchResolved).every(
+                (value) => typeof value === "string" && value.length > 0
+            ) &&
+            exactIntegerKeys(read?.chunkAttempts, contract.chunkCount) &&
+            Object.values(read.chunkAttempts).every((value) => value === 1) &&
             read?.maxManifestHeadBatchSize === 1 &&
             read?.maxManifestHeadLogicalWindowSize === 8,
         "manifest-persistence-and-head-geometry"
@@ -841,6 +958,7 @@ const validateLocalityAndTransport = (issues, result, contract) => {
             expectedRemotePeerHash: readerHash,
             expectedRemotePeerId: readerPeerId,
             label: "writer",
+            remotePayloadBytes: contract.remotePayloadBytes,
         });
         const reader = auditEndpointTransport({
             beforeTopology: readerPre,
@@ -849,6 +967,7 @@ const validateLocalityAndTransport = (issues, result, contract) => {
             expectedRemotePeerHash: writerHash,
             expectedRemotePeerId: writerPeerId,
             label: "reader",
+            remotePayloadBytes: contract.remotePayloadBytes,
         });
         const skew = evaluateCounterpartDeltaSkew(
             writer,
@@ -883,6 +1002,7 @@ const collectPerformanceMetrics = (issues, result, contract) => {
     const diagnostics = result?.readerDiagnostics?.lastReadDiagnostics;
     let demandValues = [];
     let attempts = [];
+    let writeFinishedValues = [];
     try {
         demandValues = safeRecordValuesByIndex(
             diagnostics?.chunkDemandWaitMs,
@@ -899,36 +1019,82 @@ const collectPerformanceMetrics = (issues, result, contract) => {
     } catch {
         issues.push("chunk-attempt-series");
     }
+    try {
+        writeFinishedValues = safeRecordValuesByIndex(
+            diagnostics?.chunkWriteFinishedAt,
+            contract.chunkCount
+        );
+    } catch {
+        issues.push("chunk-write-finished-series");
+    }
     const startedAt = diagnostics?.startedAt;
-    const boundary = diagnostics?.chunkWriteFinishedAt?.[1023];
     const finishedAt = diagnostics?.finishedAt;
+    const quarterChunkCount = contract.chunkCount / 4;
+    const quarterBoundaryIndices = [1, 2, 3, 4].map(
+        (quarter) => quarter * quarterChunkCount - 1
+    );
+    const quarterBoundaries = quarterBoundaryIndices.map(
+        (index) => writeFinishedValues[index]
+    );
     check(
         issues,
-        isNonNegativeSafeInteger(startedAt) &&
-            isNonNegativeSafeInteger(boundary) &&
+        Number.isSafeInteger(quarterChunkCount) &&
+            quarterChunkCount > 0 &&
+            isNonNegativeSafeInteger(startedAt) &&
             isNonNegativeSafeInteger(finishedAt) &&
-            startedAt <= boundary &&
-            boundary <= finishedAt,
-        "read-half-boundary"
+            writeFinishedValues.length === contract.chunkCount &&
+            writeFinishedValues.every(isNonNegativeSafeInteger) &&
+            writeFinishedValues.every(
+                (value) => startedAt <= value && value <= finishedAt
+            ) &&
+            writeFinishedValues.every(
+                (value, index) =>
+                    index === 0 || value >= writeFinishedValues[index - 1]
+            ) &&
+            quarterBoundaries.every(isNonNegativeSafeInteger) &&
+            startedAt <= quarterBoundaries[0] &&
+            quarterBoundaries[0] <= quarterBoundaries[1] &&
+            quarterBoundaries[1] <= quarterBoundaries[2] &&
+            quarterBoundaries[2] <= quarterBoundaries[3] &&
+            quarterBoundaries[3] <= finishedAt,
+        "read-quarter-boundaries"
     );
-    const firstHalfMs = boundary - startedAt;
-    const secondHalfMs = finishedAt - boundary;
+    const quarter1Ms = quarterBoundaries[0] - startedAt;
+    const quarter2Ms = quarterBoundaries[1] - quarterBoundaries[0];
+    const quarter3Ms = quarterBoundaries[2] - quarterBoundaries[1];
+    const quarter4Ms = quarterBoundaries[3] - quarterBoundaries[2];
+    const firstHalfMs = quarter1Ms + quarter2Ms;
+    const secondHalfMs = quarter3Ms + quarter4Ms;
+    const payloadStreamWallMs = quarterBoundaries[3] - startedAt;
+    const postPayloadFinalizeMs = finishedAt - quarterBoundaries[3];
     const derivedLibraryStreamWallMs = finishedAt - startedAt;
     const libraryStreamWallMs =
         result?.libraryStreamWallMs ?? derivedLibraryStreamWallMs;
+    const quarterPayloadMiB = contract.fileSizeBytes / MIB / 4;
+    const halfPayloadMiB = contract.fileSizeBytes / MIB / 2;
     check(
         issues,
         isPositiveFiniteNumber(libraryStreamWallMs) &&
             libraryStreamWallMs === derivedLibraryStreamWallMs &&
+            isPositiveFiniteNumber(payloadStreamWallMs) &&
+            isNonNegativeSafeInteger(postPayloadFinalizeMs) &&
             isPositiveFiniteNumber(firstHalfMs) &&
-            isPositiveFiniteNumber(secondHalfMs),
+            isPositiveFiniteNumber(secondHalfMs) &&
+            [quarter1Ms, quarter2Ms, quarter3Ms, quarter4Ms].every(
+                isPositiveFiniteNumber
+            ),
         "primary-performance-metrics"
     );
-    const firstHalfDemandWaitMs = sum(
-        demandValues.slice(0, contract.localPrefixBlockCount)
-    );
-    const secondHalfDemandWaitMs = sum(
-        demandValues.slice(contract.localPrefixBlockCount)
+    const firstHalfBoundary = contract.chunkCount / 2;
+    const firstHalfDemandWaitMs = sum(demandValues.slice(0, firstHalfBoundary));
+    const secondHalfDemandWaitMs = sum(demandValues.slice(firstHalfBoundary));
+    const quarterDemandWaitMs = [0, 1, 2, 3].map((quarter) =>
+        sum(
+            demandValues.slice(
+                quarter * quarterChunkCount,
+                (quarter + 1) * quarterChunkCount
+            )
+        )
     );
     const demandWaitSumMs = sum(demandValues);
     check(
@@ -981,11 +1147,30 @@ const collectPerformanceMetrics = (issues, result, contract) => {
     );
     const metrics = {
         libraryStreamWallMs,
+        payloadStreamWallMs,
+        postPayloadFinalizeMs,
         firstHalfMs,
         secondHalfMs,
+        firstHalfMiBPerSecond: halfPayloadMiB / (firstHalfMs / 1_000),
+        secondHalfMiBPerSecond: halfPayloadMiB / (secondHalfMs / 1_000),
+        secondHalfOverFirstHalfDuration: secondHalfMs / firstHalfMs,
+        quarter1Ms,
+        quarter2Ms,
+        quarter3Ms,
+        quarter4Ms,
+        quarter1MiBPerSecond: quarterPayloadMiB / (quarter1Ms / 1_000),
+        quarter2MiBPerSecond: quarterPayloadMiB / (quarter2Ms / 1_000),
+        quarter3MiBPerSecond: quarterPayloadMiB / (quarter3Ms / 1_000),
+        quarter4MiBPerSecond: quarterPayloadMiB / (quarter4Ms / 1_000),
+        fourthQuarterOverFirstQuarterDuration: quarter4Ms / quarter1Ms,
+        fourthQuarterOverThirdQuarterDuration: quarter4Ms / quarter3Ms,
         demandWaitSumMs,
         firstHalfDemandWaitMs,
         secondHalfDemandWaitMs,
+        quarter1DemandWaitMs: quarterDemandWaitMs[0],
+        quarter2DemandWaitMs: quarterDemandWaitMs[1],
+        quarter3DemandWaitMs: quarterDemandWaitMs[2],
+        quarter4DemandWaitMs: quarterDemandWaitMs[3],
         maxDemandWaitMs:
             demandValues.length > 0 ? Math.max(...demandValues) : Number.NaN,
         over10sDemandWaitCount: demandValues.filter((value) => value > 10_000)
@@ -1118,11 +1303,13 @@ const analyzeVariant = (root, variant, contract) => {
     if (transport) {
         const writerGate = evaluateVariantCarrierGate(
             variant,
-            transport.writer
+            transport.writer,
+            contract
         );
         const readerGate = evaluateVariantCarrierGate(
             variant,
-            transport.reader
+            transport.reader,
+            contract
         );
         check(
             correctnessIssues,
@@ -1272,7 +1459,8 @@ export const buildCampaignReport = (environment = process.env) => {
         const baselineTotal = baseline.transport?.[endpoint]?.totalDeltaBytes;
         const headTotal = head.transport?.[endpoint]?.totalDeltaBytes;
         const conditionObserved = baselineDuplicateCarrierObserved(
-            baseline.transport?.[endpoint]
+            baseline.transport?.[endpoint],
+            contract
         );
         const headOverBaseline =
             isPositiveFiniteNumber(baselineTotal) &&
@@ -1353,6 +1541,7 @@ export const buildCampaignReport = (environment = process.env) => {
         correctnessAndTransportPassed && performanceEvidenceComplete;
     const currentRunUrl = resolveRunUrl(environment);
     const campaignContract = {
+        cohortProfile: contract.cohortProfile,
         workflowSource,
         harnessCoreCommit: contract.harnessCoreCommit,
         baselineCoreCommit: contract.baselineCoreCommit,
@@ -1361,8 +1550,15 @@ export const buildCampaignReport = (environment = process.env) => {
         examplesLockSha256: contract.examplesLockSha256,
         invocation: baseline.invocation,
         transportCounterKeyFields: [...TRANSPORT_COUNTER_KEY_FIELDS],
+        fileSizeBytes: contract.fileSizeBytes,
+        chunkCount: contract.chunkCount,
+        chunkSizeBytes: contract.chunkSizeBytes,
+        localPrefixBlockCount: contract.localPrefixBlockCount,
+        localPrefixIndexRowCount: contract.localPrefixIndexRowCount,
+        allPayloadRemote: contract.localPrefixBlockCount === 0,
         remotePayloadBytes: contract.remotePayloadBytes,
         remotePayloadUpperBytes: contract.remotePayloadUpperBytes,
+        downloadTimeoutMs: contract.downloadTimeoutMs,
     };
     return {
         schema: CAMPAIGN_REPORT_SCHEMA,
@@ -1479,6 +1675,13 @@ const geometricMean = (values) => {
     );
 };
 
+const arithmeticMean = (values) =>
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((value) => typeof value === "number" && Number.isFinite(value))
+        ? sum(values) / values.length
+        : null;
+
 const hasCompleteRawPerformanceMetrics = (metrics) =>
     isRecord(metrics) &&
     isDeepStrictEqual(
@@ -1488,6 +1691,151 @@ const hasCompleteRawPerformanceMetrics = (metrics) =>
     Object.values(metrics).every(
         (value) => typeof value === "number" && Number.isFinite(value)
     );
+
+const approximatelyEqual = (actual, expected) =>
+    typeof actual === "number" &&
+    Number.isFinite(actual) &&
+    typeof expected === "number" &&
+    Number.isFinite(expected) &&
+    Math.abs(actual - expected) <=
+        Math.max(1e-9, Math.abs(expected) * Number.EPSILON * 8);
+
+const hasSemanticallyValidPerformanceMetrics = (metrics, contract) => {
+    if (!hasCompleteRawPerformanceMetrics(metrics) || !isRecord(contract)) {
+        return false;
+    }
+    const positiveKeys = [
+        "libraryStreamWallMs",
+        "payloadStreamWallMs",
+        "firstHalfMs",
+        "secondHalfMs",
+        "firstHalfMiBPerSecond",
+        "secondHalfMiBPerSecond",
+        "secondHalfOverFirstHalfDuration",
+        "quarter1Ms",
+        "quarter2Ms",
+        "quarter3Ms",
+        "quarter4Ms",
+        "quarter1MiBPerSecond",
+        "quarter2MiBPerSecond",
+        "quarter3MiBPerSecond",
+        "quarter4MiBPerSecond",
+        "fourthQuarterOverFirstQuarterDuration",
+        "fourthQuarterOverThirdQuarterDuration",
+    ];
+    const nonNegativeKeys = [
+        "postPayloadFinalizeMs",
+        "demandWaitSumMs",
+        "firstHalfDemandWaitMs",
+        "secondHalfDemandWaitMs",
+        "quarter1DemandWaitMs",
+        "quarter2DemandWaitMs",
+        "quarter3DemandWaitMs",
+        "quarter4DemandWaitMs",
+        "maxDemandWaitMs",
+        "startBrowserBytes",
+        "peakBrowserBytes",
+        "browserGrowthBytes",
+        "browserGrowthOverFile",
+        "startCombinedBytes",
+        "peakCombinedBytes",
+        "combinedGrowthBytes",
+        "combinedGrowthOverFile",
+    ];
+    if (
+        !positiveKeys.every((key) => isPositiveFiniteNumber(metrics[key])) ||
+        !nonNegativeKeys.every(
+            (key) =>
+                typeof metrics[key] === "number" &&
+                Number.isFinite(metrics[key]) &&
+                metrics[key] >= 0
+        ) ||
+        !isNonNegativeSafeInteger(metrics.over10sDemandWaitCount) ||
+        !Number.isSafeInteger(metrics.maxChunkAttempts) ||
+        metrics.maxChunkAttempts < 1 ||
+        metrics.peakBrowserBytes < metrics.startBrowserBytes ||
+        metrics.peakCombinedBytes < metrics.startCombinedBytes
+    ) {
+        return false;
+    }
+    const quarterPayloadMiB = contract.fileSizeBytes / MIB / 4;
+    const halfPayloadMiB = contract.fileSizeBytes / MIB / 2;
+    return (
+        metrics.firstHalfMs === metrics.quarter1Ms + metrics.quarter2Ms &&
+        metrics.secondHalfMs === metrics.quarter3Ms + metrics.quarter4Ms &&
+        metrics.payloadStreamWallMs ===
+            metrics.firstHalfMs + metrics.secondHalfMs &&
+        metrics.libraryStreamWallMs ===
+            metrics.payloadStreamWallMs + metrics.postPayloadFinalizeMs &&
+        metrics.firstHalfDemandWaitMs ===
+            metrics.quarter1DemandWaitMs + metrics.quarter2DemandWaitMs &&
+        metrics.secondHalfDemandWaitMs ===
+            metrics.quarter3DemandWaitMs + metrics.quarter4DemandWaitMs &&
+        metrics.demandWaitSumMs ===
+            metrics.firstHalfDemandWaitMs + metrics.secondHalfDemandWaitMs &&
+        metrics.browserGrowthBytes ===
+            metrics.peakBrowserBytes - metrics.startBrowserBytes &&
+        metrics.combinedGrowthBytes ===
+            metrics.peakCombinedBytes - metrics.startCombinedBytes &&
+        approximatelyEqual(
+            metrics.firstHalfMiBPerSecond,
+            halfPayloadMiB / (metrics.firstHalfMs / 1_000)
+        ) &&
+        approximatelyEqual(
+            metrics.secondHalfMiBPerSecond,
+            halfPayloadMiB / (metrics.secondHalfMs / 1_000)
+        ) &&
+        approximatelyEqual(
+            metrics.secondHalfOverFirstHalfDuration,
+            metrics.secondHalfMs / metrics.firstHalfMs
+        ) &&
+        [1, 2, 3, 4].every((quarter) =>
+            approximatelyEqual(
+                metrics[`quarter${quarter}MiBPerSecond`],
+                quarterPayloadMiB / (metrics[`quarter${quarter}Ms`] / 1_000)
+            )
+        ) &&
+        approximatelyEqual(
+            metrics.fourthQuarterOverFirstQuarterDuration,
+            metrics.quarter4Ms / metrics.quarter1Ms
+        ) &&
+        approximatelyEqual(
+            metrics.fourthQuarterOverThirdQuarterDuration,
+            metrics.quarter4Ms / metrics.quarter3Ms
+        ) &&
+        approximatelyEqual(
+            metrics.browserGrowthOverFile,
+            metrics.browserGrowthBytes / contract.fileSizeBytes
+        ) &&
+        approximatelyEqual(
+            metrics.combinedGrowthOverFile,
+            metrics.combinedGrowthBytes / contract.fileSizeBytes
+        )
+    );
+};
+
+const campaignContractMatchesProfile = (contract) => {
+    const profile = COHORT_PROFILES[contract?.cohortProfile];
+    return (
+        isRecord(contract) &&
+        profile != null &&
+        contract.fileSizeBytes === BASE_CONTRACT.fileSizeBytes &&
+        contract.chunkCount === BASE_CONTRACT.chunkCount &&
+        contract.chunkSizeBytes === BASE_CONTRACT.chunkSizeBytes &&
+        contract.localPrefixBlockCount === profile.localPrefixBlockCount &&
+        contract.localPrefixIndexRowCount ===
+            profile.localPrefixIndexRowCount &&
+        contract.allPayloadRemote === (profile.localPrefixBlockCount === 0) &&
+        contract.remotePayloadBytes === profile.remotePayloadBytes &&
+        contract.remotePayloadUpperBytes === profile.remotePayloadUpperBytes &&
+        contract.downloadTimeoutMs === profile.downloadTimeoutMs &&
+        contract.invocation?.readerLocalChunkTarget ===
+            profile.localPrefixBlockCount &&
+        contract.invocation?.downloadTimeoutMs === profile.downloadTimeoutMs &&
+        contract.invocation?.readerLocalChunkMaxOvershoot === 0 &&
+        contract.invocation?.readerTerminalTopology === "observer"
+    );
+};
 
 export const combineCampaignReports = (reports) => {
     const validationIssues = [];
@@ -1502,6 +1850,11 @@ export const combineCampaignReports = (reports) => {
             validationIssues,
             isDeepStrictEqual(report?.schema, CAMPAIGN_REPORT_SCHEMA),
             `pair-${index + 1}-schema`
+        );
+        check(
+            validationIssues,
+            campaignContractMatchesProfile(report?.campaignContract),
+            `pair-${index + 1}-cohort-contract`
         );
         check(
             validationIssues,
@@ -1549,6 +1902,18 @@ export const combineCampaignReports = (reports) => {
         );
         check(
             validationIssues,
+            hasSemanticallyValidPerformanceMetrics(
+                report?.baseline?.metrics,
+                report?.campaignContract
+            ) &&
+                hasSemanticallyValidPerformanceMetrics(
+                    report?.head?.metrics,
+                    report?.campaignContract
+                ),
+            `pair-${index + 1}-raw-performance-metric-semantics`
+        );
+        check(
+            validationIssues,
             Array.isArray(report?.pairedIssues) &&
                 report.pairedIssues.length === 0 &&
                 Array.isArray(report?.baseline?.correctnessIssues) &&
@@ -1565,19 +1930,23 @@ export const combineCampaignReports = (reports) => {
             validationIssues,
             evaluateVariantCarrierGate(
                 "baseline",
-                report?.baseline?.transport?.writer
+                report?.baseline?.transport?.writer,
+                report?.campaignContract
             ) &&
                 evaluateVariantCarrierGate(
                     "baseline",
-                    report?.baseline?.transport?.reader
+                    report?.baseline?.transport?.reader,
+                    report?.campaignContract
                 ) &&
                 evaluateVariantCarrierGate(
                     "head",
-                    report?.head?.transport?.writer
+                    report?.head?.transport?.writer,
+                    report?.campaignContract
                 ) &&
                 evaluateVariantCarrierGate(
                     "head",
-                    report?.head?.transport?.reader
+                    report?.head?.transport?.reader,
+                    report?.campaignContract
                 ),
             `pair-${index + 1}-raw-carrier-envelope`
         );
@@ -1640,10 +2009,12 @@ export const combineCampaignReports = (reports) => {
 
     const ratios = pairReports.map((report, index) => {
         const writerCondition = baselineDuplicateCarrierObserved(
-            report?.baseline?.transport?.writer
+            report?.baseline?.transport?.writer,
+            report?.campaignContract
         );
         const readerCondition = baselineDuplicateCarrierObserved(
-            report?.baseline?.transport?.reader
+            report?.baseline?.transport?.reader,
+            report?.campaignContract
         );
         const conditionClassificationConsistent =
             writerCondition === readerCondition;
@@ -1681,6 +2052,17 @@ export const combineCampaignReports = (reports) => {
                     carrierPruningEvidencePassed,
             `pair-${index + 1}-assessment-consistency`
         );
+        const progress = Object.fromEntries(
+            ["baseline", "head"].map((variant) => [
+                variant,
+                Object.fromEntries(
+                    PROGRESS_METRIC_KEYS.map((key) => [
+                        key,
+                        report?.[variant]?.metrics?.[key] ?? null,
+                    ])
+                ),
+            ])
+        );
         return {
             order:
                 report?.assessments?.campaignAcceptance?.currentOrder ?? null,
@@ -1706,6 +2088,7 @@ export const combineCampaignReports = (reports) => {
             baselineDuplicateCarrierConditionObserved,
             carrierRatios,
             carrierPruningEvidencePassed,
+            progress,
         };
     });
     check(
@@ -1725,7 +2108,27 @@ export const combineCampaignReports = (reports) => {
     const secondHalfHeadOverBaseline = geometricMean(
         ratios.map((ratio) => ratio.secondHalfHeadOverBaseline)
     );
+    const aggregateProgress = Object.fromEntries(
+        ["baseline", "head"].map((variant) => [
+            variant,
+            Object.fromEntries(
+                PROGRESS_METRIC_KEYS.map((key) => {
+                    const values = ratios.map(
+                        (ratio) => ratio.progress[variant][key]
+                    );
+                    return [
+                        key,
+                        key === "postPayloadFinalizeMs"
+                            ? arithmeticMean(values)
+                            : geometricMean(values),
+                    ];
+                })
+            ),
+        ])
+    );
     const aggregateEvidenceValid = validationIssues.length === 0;
+    const progressDiagnosticEvaluated =
+        aggregateEvidenceValid && campaignContract?.allPayloadRemote === true;
     const regressionSafetyPassed = aggregateEvidenceValid
         ? libraryStreamWallHeadOverBaseline <= 1.1 &&
           secondHalfHeadOverBaseline <= 1.1
@@ -1760,6 +2163,7 @@ export const combineCampaignReports = (reports) => {
             libraryStreamWallHeadOverBaseline,
             secondHalfHeadOverBaseline,
         },
+        aggregateProgress,
         assessments: {
             evidenceValidity: {
                 passed: aggregateEvidenceValid,
@@ -1777,6 +2181,15 @@ export const combineCampaignReports = (reports) => {
             baselineDuplicateCarrierCondition: {
                 evaluated: aggregateEvidenceValid,
                 observedInBoth: duplicateCarrierConditionObservedInBoth,
+            },
+            progressSlowdownDiagnostic: {
+                evaluated: progressDiagnosticEvaluated,
+                gatesWorkflow: false,
+                cohortProfile: campaignContract?.cohortProfile ?? null,
+                allPayloadRemote: campaignContract?.allPayloadRemote === true,
+                aggregateByVariant: aggregateProgress,
+                definition:
+                    "counterbalanced quarter and half metrics evaluate within-transfer network progress only for an all-remote cohort; no slowdown threshold is enforced until the cold cohort establishes an empirical envelope",
             },
             pruningBenefit: {
                 evaluated: pruningBenefitEvaluated,
@@ -1889,24 +2302,41 @@ const combineAndPersist = (inputPaths, outputPath) => {
     return report;
 };
 
+const formatMetric = (value) =>
+    typeof value === "number" && Number.isFinite(value)
+        ? String(Number(value.toFixed(3)))
+        : "unavailable";
+
+const progressSummaryLine = (label, metrics, aggregate = false) =>
+    `- ${label} progress${aggregate ? " (counterbalanced)" : ""}: payload ${formatMetric(metrics?.payloadStreamWallMs)} ms; second/first duration ${formatMetric(metrics?.secondHalfOverFirstHalfDuration)}x; Q4/Q3 duration ${formatMetric(metrics?.fourthQuarterOverThirdQuarterDuration)}x; Q1/Q4 throughput ${formatMetric(metrics?.quarter1MiBPerSecond)}/${formatMetric(metrics?.quarter4MiBPerSecond)} MiB/s`;
+
 const appendCombinedStepSummary = (environment, combinedPath) => {
     const report = readJson(combinedPath);
     const mark = (passed) =>
         passed === true ? "PASS" : passed === false ? "FAIL" : "UNEVALUATED";
     const regression = report.assessments?.regressionSafety;
     const condition = report.assessments?.baselineDuplicateCarrierCondition;
+    const progress = report.assessments?.progressSlowdownDiagnostic;
     const benefit = report.assessments?.pruningBenefit;
     const acceptance = report.assessments?.campaignAcceptance;
     const summary = [
         "## Counterbalanced outbound-candidate pruning campaign",
         "",
+        `- Cohort profile: ${report.campaignContract?.cohortProfile ?? "unavailable"}`,
         `- Evidence validity: ${mark(report.assessments?.evidenceValidity?.passed)}`,
         `- Aggregate regression safety: ${mark(regression?.passed)}`,
+        `- All-remote progress diagnostic: ${progress?.evaluated === true ? "EVALUATED" : "UNEVALUATED"}`,
         `- Baseline duplicate-carrier condition in both orders: ${condition?.evaluated !== true ? "UNEVALUATED" : condition.observedInBoth === true ? "OBSERVED" : "NOT OBSERVED"}`,
         `- Pruning benefit: ${mark(benefit?.passed)}`,
         `- Aggregate workflow gate: ${mark(acceptance?.passed)}`,
         `- Library wall geometric mean (head/baseline): ${report.aggregateRatios?.libraryStreamWallHeadOverBaseline ?? "unavailable"}`,
         `- Second-half geometric mean (head/baseline): ${report.aggregateRatios?.secondHalfHeadOverBaseline ?? "unavailable"}`,
+        progressSummaryLine(
+            "Baseline",
+            report.aggregateProgress?.baseline,
+            true
+        ),
+        progressSummaryLine("Head", report.aggregateProgress?.head, true),
         "",
     ].join("\n");
     if (environment.GITHUB_STEP_SUMMARY) {
@@ -1945,12 +2375,15 @@ const appendStepSummary = (environment) => {
         "## Exact 1 GiB outbound-candidate pruning pair",
         "",
         `- Run URL: ${report.currentRunUrl ?? "unavailable"}`,
+        `- Cohort profile: ${report.campaignContract?.cohortProfile ?? "unavailable"}`,
         `- Explicit order: ${campaign?.currentOrder ?? "unavailable"}`,
         `- Correctness and transport evidence (workflow gate): ${mark(correctness?.passed)}`,
         `- Performance evidence completeness (workflow gate): ${mark(performanceEvidence?.passed)}`,
         `- Baseline duplicate-carrier condition: ${observed(condition?.observed)}`,
         `- Per-pair carrier pruning evidence: ${mark(pruningBenefit?.passed)}`,
         `- Per-pair performance comparison (diagnostic): ${mark(performance?.passed)}`,
+        progressSummaryLine("Baseline", report.baseline?.metrics),
+        progressSummaryLine("Head", report.head?.metrics),
         "",
         "This single run does **not** evaluate final campaign acceptance.",
         "Combine two correct reports with opposite orders and identical immutable campaign contracts. Aggregate regression safety requires both timing geometric means to be `<= 1.10`. Pruning benefit is evaluated only if both baselines reproduce duplicate carriers, then requires `secondHalf <= 0.90` and `libraryStreamWall <= 0.95`.",
