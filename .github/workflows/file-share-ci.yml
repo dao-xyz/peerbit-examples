@@ -3,8 +3,10 @@ name: File Share CI
 on:
     pull_request:
         paths:
+            - ".github/scripts/file-share-pruning-campaign*.mjs"
             - ".github/workflows/file-share-benchmarks.yml"
             - ".github/workflows/file-share-ci.yml"
+            - ".github/workflows/file-share-pruning-campaign-combine.yml"
             - ".github/workflows/file-share-two-runner-artifact-benchmarks.yml"
             - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - "package.json"
@@ -17,8 +19,10 @@ on:
     push:
         branches: [master]
         paths:
+            - ".github/scripts/file-share-pruning-campaign*.mjs"
             - ".github/workflows/file-share-benchmarks.yml"
             - ".github/workflows/file-share-ci.yml"
+            - ".github/workflows/file-share-pruning-campaign-combine.yml"
             - ".github/workflows/file-share-two-runner-artifact-benchmarks.yml"
             - ".github/workflows/file-share-two-runner-benchmarks.yml"
             - "package.json"
@@ -70,6 +74,9 @@ jobs:
 
             - name: Test benchmark result validation and reporting
               run: node --test scripts/summarize-file-share-benchmarks.test.mjs
+
+            - name: Test pruning campaign analysis and combination
+              run: node --test .github/scripts/file-share-pruning-campaign.test.mjs
 
             - name: Test file-share library
               run: pnpm --filter @peerbit/please-lib run test

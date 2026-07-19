@@ -1,0 +1,160 @@
+name: File Share Pruning Campaign Combine
+
+on:
+    workflow_dispatch:
+        inputs:
+            baseline_head_run_id:
+                description: Baseline-head pair workflow run ID
+                required: true
+                type: string
+            head_baseline_run_id:
+                description: Head-baseline pair workflow run ID
+                required: true
+                type: string
+
+permissions:
+    actions: read
+    contents: read
+
+jobs:
+    combine:
+        name: Validate counterbalanced pruning evidence
+        runs-on: ubuntu-22.04
+        timeout-minutes: 15
+        concurrency:
+            group: fileshare-pruning-combine-${{ inputs.baseline_head_run_id }}-${{ inputs.head_baseline_run_id }}
+            cancel-in-progress: false
+        env:
+            CAMPAIGN_ROOT: ${{ github.workspace }}/campaign
+            EVIDENCE_ROOT: ${{ github.workspace }}/evidence
+            BASELINE_HEAD_RUN_ID: ${{ inputs.baseline_head_run_id }}
+            HEAD_BASELINE_RUN_ID: ${{ inputs.head_baseline_run_id }}
+
+        steps:
+            - name: Validate run IDs
+              run: |
+                  set -euo pipefail
+                  [[ "$BASELINE_HEAD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+                  [[ "$HEAD_BASELINE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+                  test "$BASELINE_HEAD_RUN_ID" != "$HEAD_BASELINE_RUN_ID"
+                  test "$GITHUB_ACTOR" = "peerbit-org"
+                  test "$GITHUB_TRIGGERING_ACTOR" = "peerbit-org"
+                  mkdir -p "$EVIDENCE_ROOT"
+
+            - name: Checkout immutable combiner source
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ github.workflow_sha }}
+                  path: campaign
+                  fetch-depth: 1
+                  persist-credentials: false
+
+            - name: Download baseline-head evidence
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: fileshare-outbound-candidate-pruning-${{ inputs.baseline_head_run_id }}
+                  path: evidence/baseline-head
+                  github-token: ${{ github.token }}
+                  repository: ${{ github.repository }}
+                  run-id: ${{ inputs.baseline_head_run_id }}
+
+            - name: Download head-baseline evidence
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  name: fileshare-outbound-candidate-pruning-${{ inputs.head_baseline_run_id }}
+                  path: evidence/head-baseline
+                  github-token: ${{ github.token }}
+                  repository: ${{ github.repository }}
+                  run-id: ${{ inputs.head_baseline_run_id }}
+
+            - name: Verify run URL and order provenance
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  baseline_report="$EVIDENCE_ROOT/baseline-head/outbound-candidate-pruning-comparison.json"
+                  head_report="$EVIDENCE_ROOT/head-baseline/outbound-candidate-pruning-comparison.json"
+                  test -f "$baseline_report"
+                  test -f "$head_report"
+                  pair_workflow_sha="$(jq -r '.campaignContract.workflowSource.sha' "$baseline_report")"
+                  [[ "$pair_workflow_sha" =~ ^[0-9a-f]{40}$ ]]
+                  test "$(jq -r '.campaignContract.workflowSource.sha' "$head_report")" = \
+                    "$pair_workflow_sha"
+                  validate_run() {
+                    local run_id="$1"
+                    local expected_order="$2"
+                    local report="$EVIDENCE_ROOT/$expected_order/outbound-candidate-pruning-comparison.json"
+                    local metadata="$EVIDENCE_ROOT/$expected_order/workflow-run-metadata.json"
+                    test -f "$report"
+                    gh api \
+                      -H "Accept: application/vnd.github+json" \
+                      -H "X-GitHub-Api-Version: 2022-11-28" \
+                      "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$metadata"
+                    jq -e \
+                      --arg run_id "$run_id" \
+                      --arg repository "$GITHUB_REPOSITORY" \
+                      --arg workflow_sha "$pair_workflow_sha" \
+                      '(.id | tostring) == $run_id and
+                       .repository.full_name == $repository and
+                       .head_repository.full_name == $repository and
+                       .path == ".github/workflows/file-share-benchmarks.yml" and
+                       .head_branch == "master" and
+                       .event == "workflow_dispatch" and
+                       .status == "completed" and
+                       .conclusion == "success" and
+                       .head_sha == $workflow_sha and
+                       .actor.login == "peerbit-org" and
+                       .triggering_actor.login == "peerbit-org"' \
+                      "$metadata" >/dev/null
+                    test "$(jq -r '.currentRunUrl' "$report")" = \
+                      "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+                    test "$(jq -r '.workflowExecution.runId' "$report")" = "$run_id"
+                    test "$(jq -r '.workflowExecution.runAttempt' "$report")" = \
+                      "$(jq -r '.run_attempt' "$metadata")"
+                    test "$(jq -r '.workflowExecution.actor' "$report")" = "peerbit-org"
+                    test "$(jq -r '.workflowExecution.triggeringActor' "$report")" = \
+                      "peerbit-org"
+                    test "$(jq -r '.assessments.campaignAcceptance.currentOrder' "$report")" = \
+                      "$expected_order"
+                    test "$(jq -r '.campaignContract.workflowSource.repository' "$report")" = \
+                      "$GITHUB_REPOSITORY"
+                    test "$(jq -r '.campaignContract.workflowSource.sha' "$report")" = \
+                      "$pair_workflow_sha"
+                    test "$(jq -r '.campaignContract.workflowSource.ref' "$report")" = \
+                      "$GITHUB_REPOSITORY/.github/workflows/file-share-benchmarks.yml@refs/heads/master"
+                  }
+                  validate_run "$BASELINE_HEAD_RUN_ID" "baseline-head"
+                  validate_run "$HEAD_BASELINE_RUN_ID" "head-baseline"
+
+            - name: Combine counterbalanced reports
+              run: |
+                  set -euo pipefail
+                  node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" \
+                    combine \
+                    "$EVIDENCE_ROOT/baseline-head/outbound-candidate-pruning-comparison.json" \
+                    "$EVIDENCE_ROOT/head-baseline/outbound-candidate-pruning-comparison.json" \
+                    "$EVIDENCE_ROOT/counterbalanced-pruning-campaign.json"
+
+            - name: Upload counterbalanced assessment
+              if: always()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: fileshare-counterbalanced-pruning-${{ github.run_id }}
+                  path: evidence
+                  retention-days: 14
+
+            - name: Report counterbalanced assessment
+              if: always()
+              run: |
+                  set -euo pipefail
+                  node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" \
+                    summary-combined \
+                    "$EVIDENCE_ROOT/counterbalanced-pruning-campaign.json"
+
+            - name: Enforce counterbalanced assessment
+              if: always()
+              run: |
+                  set -euo pipefail
+                  node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" \
+                    enforce-combined \
+                    "$EVIDENCE_ROOT/counterbalanced-pruning-campaign.json"
