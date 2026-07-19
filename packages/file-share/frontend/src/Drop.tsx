@@ -1984,15 +1984,14 @@ export const Drop = () => {
                 }
 
                 try {
-                    // Root-list reconciliation is intentionally
-                    // non-replicating. Join only the selected root so it remains
-                    // discoverable after restart without caching the catalog.
+                    // Persist only the selected signed root so it remains
+                    // discoverable after restart. This must not advertise a
+                    // replication range: doing so starts bulk catch-up while
+                    // the foreground file stream is still active.
                     downloadFile =
-                        (await program.resolveById(file.id, {
+                        (await program.persistFileRoot(file, {
                             timeout: Math.min(timeout, 10_000),
-                            replicate: true,
                             from: await program.getReadPeerHints(),
-                            wait: false,
                         })) ?? file;
                 } catch (error) {
                     console.warn(

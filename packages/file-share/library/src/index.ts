@@ -23,6 +23,7 @@ import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { ReplicationOptions, SharedLog } from "@peerbit/shared-log";
+import { FOREGROUND_READ_MESSAGE_PRIORITY } from "@peerbit/stream-interface";
 import { SHA256 } from "@stablelib/sha256";
 import {
     adaptRemotePersistedReadAhead,
@@ -2483,8 +2484,15 @@ export class LargeFile extends AbstractFile {
             chunkPersistedRemoteBatchSkipCount: 0,
             chunkPersistedRemoteBatchSkippedIndexCount: 0,
             chunkManifestHeadBatchQueryCount: 0,
+            chunkManifestHeadLogicalWindowCount: 0,
             chunkManifestHeadLocalBatchQueryCount: 0,
             chunkManifestHeadRemoteBatchQueryCount: 0,
+            chunkManifestHeadPhysicalRemoteRequestCount: 0,
+            chunkManifestHeadPhysicalRemoteRequestErrorCount: 0,
+            chunkManifestHeadPhysicalRemoteRequestErrors: [] as {
+                indices: number[];
+                message: string;
+            }[],
             chunkManifestHeadBatchRequestedIndexCount: 0,
             chunkManifestHeadBatchAcceptedCount: 0,
             chunkManifestHeadLocalBatchAcceptedCount: 0,
@@ -2532,6 +2540,7 @@ export class LargeFile extends AbstractFile {
             chunkManifestHeadBatchDisabledSkippedIndexCount: 0,
             chunkManifestHeadBatchAttemptTimeoutMs: 0,
             maxManifestHeadBatchSize: 0,
+            maxManifestHeadLogicalWindowSize: 0,
             activeManifestHeadBatches: 0,
             maxConcurrentManifestHeadBatches: 0,
             chunkManifestHeadBatchResolved: {} as Record<number, string>,
@@ -2700,6 +2709,11 @@ export class LargeFile extends AbstractFile {
                         resolvedFile.chunkCount);
             let isAdaptiveRemoteRead =
                 !persistChunkReads || isRemotePersistedRead;
+            const usesRollingManifestHeadAdmission = () =>
+                persistChunkReads &&
+                isRemotePersistedRead &&
+                hasCompleteChunkEntryHeads &&
+                resolvedFile.chunkCount > LARGE_FILE_PERSISTED_READ_AHEAD;
             let readAheadLimit = isAdaptiveRemoteRead
                 ? remoteReadAheadLimit
                 : localReadAheadLimit;
@@ -3061,6 +3075,8 @@ export class LargeFile extends AbstractFile {
                                                 replicate: true,
                                                 from: source,
                                                 signal: persistenceSignal.abortSignal,
+                                                priority:
+                                                    FOREGROUND_READ_MESSAGE_PRIORITY,
                                             },
                                         }),
                                     "Raw manifest entry persistence cancelled"
@@ -3367,6 +3383,7 @@ export class LargeFile extends AbstractFile {
                       replicate: true;
                       from: string[] | undefined;
                       signal: AbortSignal;
+                      priority: number;
                   };
             const readManifestHeadEntries = async (
                 heads: string[],
@@ -3421,7 +3438,8 @@ export class LargeFile extends AbstractFile {
                 changeSignal: FileChangeSignal,
                 resolvedDuringBatch: Set<number>,
                 prefetchedDuringBatch: Set<number>,
-                fetchRemotelyMissing = true
+                fetchRemotelyMissing = true,
+                admitIndividually = false
             ) => {
                 if (indices.length === 0) {
                     return indices;
@@ -3435,6 +3453,10 @@ export class LargeFile extends AbstractFile {
                     return indices;
                 }
 
+                const overlapsOlderManifestHeadLogicalWindow =
+                    admitIndividually &&
+                    requested.length === 1 &&
+                    debug.activeManifestHeadBatches > 0;
                 const circuitAttempt = manifestHeadBatchCircuit.tryStart(
                     requested[0]!.index,
                     fetchRemotelyMissing
@@ -3450,10 +3472,15 @@ export class LargeFile extends AbstractFile {
                 }
 
                 debug.chunkManifestHeadBatchQueryCount += 1;
+                debug.chunkManifestHeadLogicalWindowCount += 1;
                 debug.chunkManifestHeadBatchRequestedIndexCount +=
                     requested.length;
                 debug.maxManifestHeadBatchSize = Math.max(
                     debug.maxManifestHeadBatchSize,
+                    admitIndividually ? 1 : requested.length
+                );
+                debug.maxManifestHeadLogicalWindowSize = Math.max(
+                    debug.maxManifestHeadLogicalWindowSize,
                     requested.length
                 );
                 const attemptTimeout = Math.min(
@@ -3472,6 +3499,7 @@ export class LargeFile extends AbstractFile {
                 );
 
                 let accepted = 0;
+                let suppressCircuitOutcome = false;
                 // A locally accepted index can be consumed before remote
                 // siblings settle, so retain success beyond the cache lifetime
                 // and across every later lookup phase in this prefetch batch.
@@ -3624,63 +3652,257 @@ export class LargeFile extends AbstractFile {
 
                 try {
                     debug.chunkManifestHeadLocalBatchQueryCount += 1;
-                    const localEntries = await runChunkDecodeOperation(
-                        requested.map(({ index }) => index),
-                        changeSignal,
-                        () =>
-                            readManifestHeadEntries(
-                                requested.map(({ head }) => head),
-                                false,
-                                changeSignal
-                            ),
-                        "Manifest-head batch lookup cancelled"
-                    );
-                    changeSignal.throwIfClosed();
-                    const remotelyMissing = await acceptEntries(
-                        requested,
-                        localEntries,
-                        "local"
-                    );
-                    if (!fetchRemotelyMissing) {
+                    if (admitIndividually) {
+                        type CandidateOutcome = {
+                            index: number;
+                            remoteAttempted: boolean;
+                            error: unknown | undefined;
+                        };
+                        let recordedRemoteQuery = false;
+                        let physicalRemoteRequestCount = 0;
+                        const outcomes = await Promise.allSettled(
+                            requested.map(
+                                async (
+                                    candidate
+                                ): Promise<CandidateOutcome> => {
+                                    const { head, index } = candidate;
+                                    let remoteAttempted = false;
+                                    try {
+                                        await acquireChunkPermits([index]);
+                                        const localEntries =
+                                            await runChunkDecodeOperation(
+                                                [index],
+                                                changeSignal,
+                                                () =>
+                                                    readManifestHeadEntries(
+                                                        [head],
+                                                        false,
+                                                        changeSignal
+                                                    ),
+                                                "Manifest-head batch lookup cancelled"
+                                            );
+                                        changeSignal.throwIfClosed();
+                                        const remotelyMissing =
+                                            await acceptEntries(
+                                                [candidate],
+                                                localEntries,
+                                                "local"
+                                            );
+                                        if (!fetchRemotelyMissing) {
+                                            debug.chunkManifestHeadBatchMissingCount +=
+                                                remotelyMissing.length;
+                                        } else if (remotelyMissing.length > 0) {
+                                            // The circuit protects speculative
+                                            // network reads only. Exact heads may
+                                            // have arrived locally through another
+                                            // read or background sync after the
+                                            // remote circuit opened, so never
+                                            // suppress the cheap local lookup.
+                                            if (!circuitAttempt) {
+                                                debug.chunkManifestHeadBatchDisabledSkipCount += 1;
+                                                debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
+                                                    remotelyMissing.length;
+                                                debug.chunkManifestHeadBatchMissingCount +=
+                                                    remotelyMissing.length;
+                                            } else {
+                                                if (!recordedRemoteQuery) {
+                                                    recordedRemoteQuery = true;
+                                                    debug.chunkManifestHeadRemoteBatchQueryCount += 1;
+                                                }
+                                                remoteAttempted = true;
+                                                physicalRemoteRequestCount += 1;
+                                                debug.chunkManifestHeadPhysicalRemoteRequestCount += 1;
+                                                const remoteEntries =
+                                                    await runChunkDecodeOperation(
+                                                        [index],
+                                                        changeSignal,
+                                                        () =>
+                                                            readManifestHeadEntries(
+                                                                [head],
+                                                                {
+                                                                    timeout:
+                                                                        attemptTimeout,
+                                                                    replicate: true,
+                                                                    from,
+                                                                    signal: changeSignal.abortSignal,
+                                                                    priority:
+                                                                        FOREGROUND_READ_MESSAGE_PRIORITY,
+                                                                },
+                                                                changeSignal
+                                                            ),
+                                                        "Manifest-head remote batch lookup cancelled"
+                                                    );
+                                                changeSignal.throwIfClosed();
+                                                const stillMissing =
+                                                    await acceptEntries(
+                                                        remotelyMissing,
+                                                        remoteEntries,
+                                                        "remote"
+                                                    );
+                                                debug.chunkManifestHeadBatchMissingCount +=
+                                                    stillMissing.length;
+                                            }
+                                        }
+                                        return {
+                                            index,
+                                            remoteAttempted,
+                                            error: undefined,
+                                        };
+                                    } catch (error) {
+                                        changeSignal.throwIfClosed();
+                                        return {
+                                            index,
+                                            remoteAttempted,
+                                            error,
+                                        };
+                                    } finally {
+                                        // An unresolved candidate must not keep a
+                                        // pessimistic five-megabyte reservation
+                                        // while later heads in the logical window
+                                        // wait for admission. Its single-index
+                                        // fallback reacquires a permit below.
+                                        if (
+                                            !resolvedDuringBatch.has(index) &&
+                                            !knownChunks.has(index)
+                                        ) {
+                                            releaseChunkPermit(index);
+                                        }
+                                    }
+                                }
+                            )
+                        );
+                        changeSignal.throwIfClosed();
+                        const candidateOutcomes = outcomes.map(
+                            (outcome, position) =>
+                                outcome.status === "fulfilled"
+                                    ? outcome.value
+                                    : {
+                                          index: requested[position]!.index,
+                                          remoteAttempted: false,
+                                          error: outcome.reason,
+                                      }
+                        );
+                        const failures = candidateOutcomes.filter(
+                            (outcome) => outcome.error != null
+                        );
+                        const remoteFailures = failures.filter(
+                            (outcome) => outcome.remoteAttempted
+                        );
+                        debug.chunkManifestHeadPhysicalRemoteRequestErrorCount +=
+                            remoteFailures.length;
+                        debug.chunkManifestHeadPhysicalRemoteRequestErrors.push(
+                            ...remoteFailures.map(({ index, error }) => ({
+                                indices: [index],
+                                message: getErrorMessage(error),
+                            }))
+                        );
+                        const everyPhysicalRemoteRequestFailed =
+                            accepted === 0 &&
+                            physicalRemoteRequestCount > 0 &&
+                            remoteFailures.length ===
+                                physicalRemoteRequestCount;
+                        if (everyPhysicalRemoteRequestFailed) {
+                            if (
+                                overlapsOlderManifestHeadLogicalWindow &&
+                                circuitAttempt?.kind === "normal"
+                            ) {
+                                // A one-head refill overlaps an older cohort
+                                // that still owns the evidence needed to judge
+                                // batching health. Fall back for this exact
+                                // head without poisoning the circuit or
+                                // claiming a half-open recovery token.
+                                suppressCircuitOutcome = true;
+                            } else {
+                                throw new AggregateError(
+                                    remoteFailures.map(({ error }) => error),
+                                    "All rolling manifest-head requests failed"
+                                );
+                            }
+                        }
                         debug.chunkManifestHeadBatchMissingCount +=
-                            remotelyMissing.length;
-                    } else if (remotelyMissing.length > 0) {
-                        // The circuit protects speculative network reads only.
-                        // Exact heads may have arrived locally through another
-                        // read or background sync after the remote circuit
-                        // opened, so never suppress the cheap local batch.
-                        if (!circuitAttempt) {
-                            debug.chunkManifestHeadBatchDisabledSkipCount += 1;
-                            debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
-                                remotelyMissing.length;
+                            failures.length;
+                    } else {
+                        const localEntries = await runChunkDecodeOperation(
+                            requested.map(({ index }) => index),
+                            changeSignal,
+                            () =>
+                                readManifestHeadEntries(
+                                    requested.map(({ head }) => head),
+                                    false,
+                                    changeSignal
+                                ),
+                            "Manifest-head batch lookup cancelled"
+                        );
+                        changeSignal.throwIfClosed();
+                        const remotelyMissing = await acceptEntries(
+                            requested,
+                            localEntries,
+                            "local"
+                        );
+                        if (!fetchRemotelyMissing) {
                             debug.chunkManifestHeadBatchMissingCount +=
                                 remotelyMissing.length;
-                        } else {
-                            debug.chunkManifestHeadRemoteBatchQueryCount += 1;
-                            const remoteEntries = await runChunkDecodeOperation(
-                                remotelyMissing.map(({ index }) => index),
-                                changeSignal,
-                                () =>
-                                    readManifestHeadEntries(
-                                        remotelyMissing.map(({ head }) => head),
+                        } else if (remotelyMissing.length > 0) {
+                            // The circuit protects speculative network reads only.
+                            // Exact heads may have arrived locally through another
+                            // read or background sync after the remote circuit
+                            // opened, so never suppress the cheap local batch.
+                            if (!circuitAttempt) {
+                                debug.chunkManifestHeadBatchDisabledSkipCount += 1;
+                                debug.chunkManifestHeadBatchDisabledSkippedIndexCount +=
+                                    remotelyMissing.length;
+                                debug.chunkManifestHeadBatchMissingCount +=
+                                    remotelyMissing.length;
+                            } else {
+                                debug.chunkManifestHeadRemoteBatchQueryCount += 1;
+                                debug.chunkManifestHeadPhysicalRemoteRequestCount += 1;
+                                let remoteEntries: ManifestHeadEntry[];
+                                try {
+                                    remoteEntries =
+                                        await runChunkDecodeOperation(
+                                            remotelyMissing.map(
+                                                ({ index }) => index
+                                            ),
+                                            changeSignal,
+                                            () =>
+                                                readManifestHeadEntries(
+                                                    remotelyMissing.map(
+                                                        ({ head }) => head
+                                                    ),
+                                                    {
+                                                        timeout: attemptTimeout,
+                                                        replicate: true,
+                                                        from,
+                                                        signal: changeSignal.abortSignal,
+                                                        priority:
+                                                            FOREGROUND_READ_MESSAGE_PRIORITY,
+                                                    },
+                                                    changeSignal
+                                                ),
+                                            "Manifest-head remote batch lookup cancelled"
+                                        );
+                                } catch (error) {
+                                    changeSignal.throwIfClosed();
+                                    debug.chunkManifestHeadPhysicalRemoteRequestErrorCount += 1;
+                                    debug.chunkManifestHeadPhysicalRemoteRequestErrors.push(
                                         {
-                                            timeout: attemptTimeout,
-                                            replicate: true,
-                                            from,
-                                            signal: changeSignal.abortSignal,
-                                        },
-                                        changeSignal
-                                    ),
-                                "Manifest-head remote batch lookup cancelled"
-                            );
-                            changeSignal.throwIfClosed();
-                            const stillMissing = await acceptEntries(
-                                remotelyMissing,
-                                remoteEntries,
-                                "remote"
-                            );
-                            debug.chunkManifestHeadBatchMissingCount +=
-                                stillMissing.length;
+                                            indices: remotelyMissing.map(
+                                                ({ index }) => index
+                                            ),
+                                            message: getErrorMessage(error),
+                                        }
+                                    );
+                                    throw error;
+                                }
+                                changeSignal.throwIfClosed();
+                                const stillMissing = await acceptEntries(
+                                    remotelyMissing,
+                                    remoteEntries,
+                                    "remote"
+                                );
+                                debug.chunkManifestHeadBatchMissingCount +=
+                                    stillMissing.length;
+                            }
                         }
                     }
                 } catch (error) {
@@ -3701,7 +3923,12 @@ export class LargeFile extends AbstractFile {
                     debug.activeManifestHeadBatches -= 1;
                 }
 
-                if (circuitAttempt && accepted === 0 && fetchRemotelyMissing) {
+                if (
+                    circuitAttempt &&
+                    accepted === 0 &&
+                    fetchRemotelyMissing &&
+                    !suppressCircuitOutcome
+                ) {
                     const zeroResult = manifestHeadBatchCircuit.observeZero(
                         circuitAttempt,
                         indices[indices.length - 1] ?? -1
@@ -3961,7 +4188,8 @@ export class LargeFile extends AbstractFile {
             };
             const prefetchChunkBatch = async (
                 indices: number[],
-                changeSignal: FileChangeSignal
+                changeSignal: FileChangeSignal,
+                admitManifestHeadsIndividually = false
             ) => {
                 // knownChunks is a bounded hand-off cache: the stream deletes an
                 // entry as soon as it takes ownership. Keep batch-local success
@@ -4006,7 +4234,9 @@ export class LargeFile extends AbstractFile {
                         hintedFrom,
                         changeSignal,
                         resolvedDuringBatch,
-                        prefetchedDuringBatch
+                        prefetchedDuringBatch,
+                        true,
+                        admitManifestHeadsIndividually
                     );
                     skipPersistedRemoteBatch(missing);
                     updateKnownChunkPeak();
@@ -4193,10 +4423,24 @@ export class LargeFile extends AbstractFile {
                     lane === "remote"
                         ? remoteReadAheadLimit
                         : LARGE_FILE_PERSISTED_READ_AHEAD;
+                const admitManifestHeadsIndividually =
+                    lane === "remote" && usesRollingManifestHeadAdmission();
+                // A consumed early hit can open one lane slot while its
+                // logical window is still deciding which earlier candidates
+                // need exact single-index fallbacks. Admit the next physical
+                // head into that slot, but do not queue a younger group ahead
+                // of those fallbacks on the transfer owner's FIFO.
+                const rollingLogicalWindowLimit =
+                    admitManifestHeadsIndividually &&
+                    debug.activeManifestHeadBatches > 0
+                        ? 1
+                        : remoteReadAheadLimit;
                 const batchSize = Math.min(
                     Math.max(readAhead, 1),
                     LARGE_FILE_CHUNK_PUT_CONCURRENCY,
-                    LARGE_FILE_DECODE_BATCH_LIMIT,
+                    admitManifestHeadsIndividually
+                        ? rollingLogicalWindowLimit
+                        : LARGE_FILE_DECODE_BATCH_LIMIT,
                     Math.max(1, laneLimit - activeInLane)
                 );
                 for (
@@ -4256,10 +4500,13 @@ export class LargeFile extends AbstractFile {
                 const batchTask = transfer.owner.track(
                     (async () => {
                         try {
-                            await acquireChunkPermits(indices);
+                            if (!admitManifestHeadsIndividually) {
+                                await acquireChunkPermits(indices);
+                            }
                             await prefetchChunkBatch(
                                 indices,
-                                batchChangeSignal
+                                batchChangeSignal,
+                                admitManifestHeadsIndividually
                             );
                             for (const completion of completions.values()) {
                                 completion.resolve();
@@ -4425,6 +4672,13 @@ export class LargeFile extends AbstractFile {
                 for (let index = 0; index < resolvedFile.chunkCount; index++) {
                     let scheduledChunk: ScheduledChunk | undefined;
                     try {
+                        // A normal next() has already run the prior chunk's
+                        // finally block, so the rolling refill can reuse its
+                        // released permit without doing hidden work while the
+                        // consumer is suspended at yield.
+                        if (usesRollingManifestHeadAdmission()) {
+                            fillReadAhead();
+                        }
                         const demandStartedAt = Date.now();
                         scheduledChunk = await resolveChunkWithReadAhead(index);
                         const demandWaitMs = Date.now() - demandStartedAt;
@@ -4453,7 +4707,13 @@ export class LargeFile extends AbstractFile {
                                 );
                             }
                         }
-                        fillReadAhead();
+                        if (!usesRollingManifestHeadAdmission()) {
+                            // Keep ordinary growth behind the current in-flight
+                            // resolver. Deleting it only after the consumer
+                            // resumes prevents read-ahead listeners from being
+                            // retained across a suspended yield.
+                            fillReadAhead();
+                        }
                         if (!scheduledChunk.chunkFile) {
                             throw new Error(
                                 `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`
@@ -5334,6 +5594,7 @@ export class Files extends Program<Args> {
     private retainedEntryHeadDocumentIds = new Map<string, Set<string>>();
     private unscopedRetainedChunkEntryHeads = new Set<string>();
     private pendingAuthoredDocumentIds = new Map<string, number>();
+    private pendingPersistedRootHeads = new Map<string, number>();
     private activeFileChangeSignals = new Set<FileChangeSignal>();
     private fileMutationTails = new Map<string, Promise<void>>();
     private pendingLargeFileDeletions = new Map<string, LargeFileValue>();
@@ -6222,6 +6483,7 @@ export class Files extends Program<Args> {
         this.retainedChunkIds ??= new Set();
         this.retainedLargeFileChunkCounts ??= new Map();
         this.retainedChunkEntryHeads ??= new Set();
+        this.pendingPersistedRootHeads ??= new Map();
         const isSignedBySelf = (
             signatures:
                 | { publicKey?: { equals?: (key: unknown) => boolean } }[]
@@ -6231,6 +6493,9 @@ export class Files extends Program<Args> {
                 signature.publicKey?.equals?.(this.node.identity.publicKey)
             ) === true;
         const hash = getEntryHash(entryLike);
+        if (hash && (this.pendingPersistedRootHeads.get(hash) ?? 0) > 0) {
+            return true;
+        }
         if (hash && this.retainedChunkEntryHeads.has(hash)) {
             const status = await this.retainedEntryHeadStatus(hash);
             if (status === "current" || status === "unknown") {
@@ -7655,6 +7920,151 @@ export class Files extends Program<Args> {
         });
     }
 
+    /**
+     * Persist one already-resolved root document without taking on a network
+     * replication range. A regular remote query with `replicate: true` joins
+     * the result as a replicator; for a durable observer download that can
+     * start an unrelated range catch-up while the requested file is streaming.
+     *
+     * The exact signed entry is fetched into the local block store and then
+     * joined with `replicate: false`, which makes the root discoverable after a
+     * restart while leaving the reader's replication role unchanged.
+     */
+    async persistFileRoot(
+        file: AbstractFile,
+        properties?: {
+            timeout?: number;
+            from?: string[];
+        }
+    ): Promise<AbstractFile> {
+        if (file.parentId != null) {
+            throw new Error("Only root files can be persisted as bookmarks");
+        }
+        const head = getContextHead(file);
+        if (!head) {
+            throw new Error(
+                `Cannot persist file root '${file.id}' without an exact entry head`
+            );
+        }
+
+        this.pendingPersistedRootHeads ??= new Map();
+        this.pendingPersistedRootHeads.set(
+            head,
+            (this.pendingPersistedRootHeads.get(head) ?? 0) + 1
+        );
+        try {
+            const blocks = this.files.log.log.blocks;
+            const local = await this.files.index.get(file.id, {
+                local: true,
+                remote: false,
+            });
+            if (
+                local instanceof AbstractFile &&
+                getContextHead(local) === head &&
+                this.isExactFileVersion(local, file) &&
+                (await blocks.has(head))
+            ) {
+                this.retainResolvedChunk(local, true);
+                this.retainFileRead(local);
+                return local;
+            }
+
+            const timeout = properties?.timeout ?? 10_000;
+            const from = properties?.from ?? (await this.getReadPeerHints());
+            const entryBytes = await blocks.get(head, {
+                remote: {
+                    timeout,
+                    replicate: true,
+                    from,
+                    priority: FOREGROUND_READ_MESSAGE_PRIORITY,
+                },
+            });
+            if (!entryBytes) {
+                throw new Error(`Failed to resolve file root entry '${head}'`);
+            }
+            const storedEntryHead = await blocks.put(entryBytes);
+            if (storedEntryHead !== head || !(await blocks.has(head))) {
+                throw new Error(
+                    `File root entry block '${head}' has a wrong hash`
+                );
+            }
+            const entry = await this.files.log.log.get(head, {
+                remote: false,
+            });
+            if (!entry) {
+                throw new Error(`Failed to decode file root entry '${head}'`);
+            }
+            if (entry.hash !== head) {
+                throw new Error(
+                    `Resolved file root entry '${head}' has a wrong hash`
+                );
+            }
+
+            const operation = await entry.getPayloadValue();
+            if (!isPutOperation(operation)) {
+                throw new Error(
+                    `File root entry '${head}' is not a put operation`
+                );
+            }
+            const decoded = this.files.index.valueEncoding.decoder(
+                operation.data
+            );
+            if (
+                !(decoded instanceof AbstractFile) ||
+                decoded.parentId != null ||
+                !this.isExactFileVersion(decoded, file)
+            ) {
+                throw new Error(
+                    `File root entry '${head}' does not match '${file.id}'`
+                );
+            }
+
+            const ensureEntryBlock = async () => {
+                if (await blocks.has(head)) {
+                    return;
+                }
+                // Recompute the CID from the exact fetched bytes instead of
+                // using putKnown or reserializing a reconstructed Entry.
+                const storedHead = await blocks.put(entryBytes);
+                if (storedHead !== head || !(await blocks.has(head))) {
+                    throw new Error(
+                        `Failed to persist file root entry block '${head}'`
+                    );
+                }
+            };
+            await ensureEntryBlock();
+            await this.files.log.join([entry], {
+                timeout,
+                replicate: false,
+                verifySignatures: true,
+            });
+            const persisted = await this.files.index.get(file.id, {
+                local: true,
+                remote: false,
+            });
+            if (
+                !(persisted instanceof AbstractFile) ||
+                getContextHead(persisted) !== head ||
+                !this.isExactFileVersion(persisted, file)
+            ) {
+                throw new Error(
+                    `Failed to persist exact file root '${file.id}'`
+                );
+            }
+            await ensureEntryBlock();
+            this.retainResolvedChunk(persisted, true);
+            this.retainFileRead(persisted);
+            return persisted;
+        } finally {
+            const pending = (this.pendingPersistedRootHeads.get(head) ?? 1) - 1;
+            if (pending > 0) {
+                this.pendingPersistedRootHeads.set(head, pending);
+            } else {
+                this.pendingPersistedRootHeads.delete(head);
+            }
+        }
+    }
+
     private withFileMutation<T>(id: string, operation: () => Promise<T>) {
         this.fileMutationTails ??= new Map();
         const previous = this.fileMutationTails.get(id) ?? Promise.resolve();
@@ -7914,6 +8324,7 @@ export class Files extends Program<Args> {
         this.retainedEntryHeadDocumentIds?.clear();
         this.unscopedRetainedChunkEntryHeads?.clear();
         this.pendingAuthoredDocumentIds?.clear();
+        this.pendingPersistedRootHeads?.clear();
         this.fileMutationTails?.clear();
         this.pendingLargeFileDeletions?.clear();
     }
