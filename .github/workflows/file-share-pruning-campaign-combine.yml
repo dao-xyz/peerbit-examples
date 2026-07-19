@@ -41,14 +41,6 @@ jobs:
                   test "$GITHUB_TRIGGERING_ACTOR" = "peerbit-org"
                   mkdir -p "$EVIDENCE_ROOT"
 
-            - name: Checkout immutable combiner source
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-              with:
-                  ref: ${{ github.workflow_sha }}
-                  path: campaign
-                  fetch-depth: 1
-                  persist-credentials: false
-
             - name: Download baseline-head evidence
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
               with:
@@ -68,6 +60,7 @@ jobs:
                   run-id: ${{ inputs.head_baseline_run_id }}
 
             - name: Verify run URL and order provenance
+              id: verify
               env:
                   GH_TOKEN: ${{ github.token }}
               run: |
@@ -125,6 +118,15 @@ jobs:
                   }
                   validate_run "$BASELINE_HEAD_RUN_ID" "baseline-head"
                   validate_run "$HEAD_BASELINE_RUN_ID" "head-baseline"
+                  printf 'pair_workflow_sha=%s\n' "$pair_workflow_sha" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout immutable pair combiner source
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ steps.verify.outputs.pair_workflow_sha }}
+                  path: campaign
+                  fetch-depth: 1
+                  persist-credentials: false
 
             - name: Combine counterbalanced reports
               run: |
