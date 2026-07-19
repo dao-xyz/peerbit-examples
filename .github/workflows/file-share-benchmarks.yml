@@ -65,7 +65,7 @@ jobs:
             BASE_CORE_COMMIT: 33b4aa4f054a3db2d301df41bab56cf5c77d367c
             HEAD_CORE_COMMIT: 33b4aa4f054a3db2d301df41bab56cf5c77d367c
             BASE_EXAMPLES_COMMIT: d3bcac49c1037e0a1d676be1bc7988163b677d73
-            HEAD_EXAMPLES_COMMIT: 58853dcdac8e6dec952bd5107807473e59e19059
+            HEAD_EXAMPLES_COMMIT: 6e65ce9b69c83fa9f50026f57cd5499dfb2dc31d
             BASE_EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
             HEAD_EXAMPLES_LOCK_SHA256: 7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1
             EXPECTED_SHA256_BASE64: bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=
@@ -599,7 +599,7 @@ jobs:
                         ),
                       "pre-read-writer-singleton-topology",
                     );
-                    const terminalChunkCount = result.readerManifestEvidence?.chunkCount;
+                    const terminalChunkCount = result.readTransfer?.chunkCount;
                     const expectedTerminalIndices = Number.isSafeInteger(terminalChunkCount)
                       ? Array.from({ length: terminalChunkCount }, (_, index) => index)
                       : [];
