@@ -413,7 +413,7 @@ jobs:
                         --target-seeders 2
                         --reader-local-chunk-target 1024
                         --reader-local-chunk-max-overshoot 0
-                        --reader-terminal-topology replicator
+                        --reader-terminal-topology observer
                         --fixture-seed "$FIXTURE_SEED"
                       )
                       exec setsid timeout --signal=INT --kill-after=30s 165m node "${benchmark_args[@]}"
@@ -542,14 +542,8 @@ jobs:
                   PAIR_ORDER: ${{ inputs.pair_order }}
               run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" summary
 
-            - name: Enforce correctness and pubsub carrier evidence
+            - name: Enforce pair evidence validity
               if: always()
               env:
                   PAIR_ORDER: ${{ inputs.pair_order }}
-              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" enforce-correctness
-
-            - name: Enforce per-pair performance safety
-              if: always()
-              env:
-                  PAIR_ORDER: ${{ inputs.pair_order }}
-              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" enforce-performance
+              run: node "$CAMPAIGN_ROOT/.github/scripts/file-share-pruning-campaign.mjs" enforce-pair-evidence

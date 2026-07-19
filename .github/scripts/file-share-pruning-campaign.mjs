@@ -5,6 +5,11 @@ import { isDeepStrictEqual } from "node:util";
 
 export const CAMPAIGN_REPORT_SCHEMA = Object.freeze({
     id: "peerbit-file-share-outbound-candidate-pruning-comparison",
+    version: 2,
+});
+
+export const COMBINED_CAMPAIGN_REPORT_SCHEMA = Object.freeze({
+    id: "peerbit-file-share-outbound-candidate-pruning-counterbalanced",
     version: 1,
 });
 
@@ -46,6 +51,25 @@ const DEFAULT_CONTRACT = Object.freeze({
     remotePayloadUpperBytes: 1024 * 512 * 1024 + 16 * MIB,
     counterpartByteSkewBytes: MIB,
 });
+const PERFORMANCE_METRIC_KEYS = Object.freeze([
+    "libraryStreamWallMs",
+    "firstHalfMs",
+    "secondHalfMs",
+    "demandWaitSumMs",
+    "firstHalfDemandWaitMs",
+    "secondHalfDemandWaitMs",
+    "maxDemandWaitMs",
+    "over10sDemandWaitCount",
+    "maxChunkAttempts",
+    "startBrowserBytes",
+    "peakBrowserBytes",
+    "browserGrowthBytes",
+    "browserGrowthOverFile",
+    "startCombinedBytes",
+    "peakCombinedBytes",
+    "combinedGrowthBytes",
+    "combinedGrowthOverFile",
+]);
 
 const isRecord = (value) =>
     value != null && typeof value === "object" && !Array.isArray(value);
@@ -109,6 +133,14 @@ const resolveRunUrl = (environment) =>
     environment.GITHUB_RUN_ID
         ? `${environment.GITHUB_SERVER_URL}/${environment.GITHUB_REPOSITORY}/actions/runs/${environment.GITHUB_RUN_ID}`
         : null;
+
+const parsePositiveSafeInteger = (value) => {
+    if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) {
+        return null;
+    }
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+};
 
 const requireContractEnvironment = (environment) => {
     const required = [
@@ -311,28 +343,48 @@ export const auditEndpointTransport = ({
 export const evaluateVariantCarrierGate = (variant, endpoint) => {
     const P = DEFAULT_CONTRACT.remotePayloadBytes;
     const U = DEFAULT_CONTRACT.remotePayloadUpperBytes;
+    if (
+        !isRecord(endpoint) ||
+        !isNonNegativeSafeInteger(endpoint.dominantDeltaBytes) ||
+        !isNonNegativeSafeInteger(endpoint.totalDeltaBytes)
+    ) {
+        return false;
+    }
     if (variant === "head") {
         return (
             endpoint.carrierCount === 1 &&
             endpoint.dominantDeltaBytes >= P &&
+            endpoint.totalDeltaBytes >= endpoint.dominantDeltaBytes &&
             endpoint.totalDeltaBytes <= U &&
             endpoint.dominantShare >= 0.99 &&
+            endpoint.dominantShare <= 1 &&
             endpoint.duplicationFactor != null &&
+            endpoint.duplicationFactor >= 1 &&
             endpoint.duplicationFactor <= 1.01
         );
     }
     if (variant === "baseline") {
         return (
-            endpoint.carrierCount >= 2 &&
+            Number.isSafeInteger(endpoint.carrierCount) &&
+            endpoint.carrierCount >= 1 &&
             endpoint.dominantDeltaBytes >= P &&
             endpoint.dominantDeltaBytes <= U &&
-            endpoint.totalDeltaBytes >= 1.8 * endpoint.dominantDeltaBytes &&
+            endpoint.totalDeltaBytes >= endpoint.dominantDeltaBytes &&
+            endpoint.totalDeltaBytes <= endpoint.carrierCount * U &&
+            endpoint.dominantShare > 0 &&
+            endpoint.dominantShare <= 1 &&
             endpoint.duplicationFactor != null &&
-            endpoint.duplicationFactor >= 1.8
+            endpoint.duplicationFactor >= 1
         );
     }
     throw new Error(`Unknown variant ${variant}`);
 };
+
+export const baselineDuplicateCarrierObserved = (endpoint) =>
+    evaluateVariantCarrierGate("baseline", endpoint) &&
+    endpoint.carrierCount >= 2 &&
+    endpoint.totalDeltaBytes >= 1.8 * endpoint.dominantDeltaBytes &&
+    endpoint.duplicationFactor >= 1.8;
 
 export const evaluateCounterpartDeltaSkew = (
     writer,
@@ -408,7 +460,7 @@ const validateExactInvocation = (issues, invocation, contract) => {
         targetSeeders: 2,
         readerLocalChunkTarget: contract.localPrefixBlockCount,
         readerLocalChunkMaxOvershoot: 0,
-        readerTerminalTopology: "replicator",
+        readerTerminalTopology: "observer",
         baseUrl: null,
         protocol: "http",
         viteMode: null,
@@ -557,7 +609,7 @@ const validateLocalityAndTransport = (issues, result, contract) => {
             locality?.writerUploadRole === "fixed1" &&
             locality?.readerUploadRole === "observer" &&
             locality?.readerTimedReadPolicy === "persist-chunk-reads" &&
-            locality?.expectedTerminalTopology === "replicator",
+            locality?.expectedTerminalTopology === "observer",
         "locality-contract"
     );
     const expectedCohort = `observer-persistent-prefix-b${contract.localPrefixBlockCount}-i${contract.localPrefixIndexRowCount}`;
@@ -565,7 +617,7 @@ const validateLocalityAndTransport = (issues, result, contract) => {
         issues,
         result?.readerLocalChunkTarget === contract.localPrefixBlockCount &&
             result?.readerLocalChunkMaxOvershoot === 0 &&
-            result?.readerTerminalTopology === "replicator" &&
+            result?.readerTerminalTopology === "observer" &&
             result?.readerLocalChunkBlockCount ===
                 contract.localPrefixBlockCount &&
             result?.readerLocalChunkIndexRowCount ===
@@ -672,53 +724,109 @@ const validateLocalityAndTransport = (issues, result, contract) => {
             }),
         "pre-read-writer-only-singleton"
     );
+    check(
+        issues,
+        validateTopologyRole(writerPost, {
+            ownPeerHash: writerHash,
+            expectedReplicatorHashes: singleton,
+            expectedSelfInReplicatorSet: true,
+            expectedReplicatorCount: 1,
+        }) &&
+            validateTopologyRole(readerPost, {
+                ownPeerHash: readerHash,
+                expectedReplicatorHashes: singleton,
+                expectedSelfInReplicatorSet: false,
+                expectedReplicatorCount: 1,
+            }),
+        "post-read-writer-only-singleton"
+    );
 
-    const terminalHashes = [writerHash, readerHash]
-        .filter((value) => typeof value === "string")
-        .sort((left, right) => left.localeCompare(right));
     const terminalIdle = locality?.terminalIdleObservation;
     check(
         issues,
         terminalIdle?.chunkCount === contract.chunkCount &&
             terminalIdle?.blockCount === contract.chunkCount &&
-            terminalIdle?.indexRowCount === contract.chunkCount &&
+            terminalIdle?.indexRowCount === 0 &&
             exactRange(terminalIdle?.blockChunkIndices, contract.chunkCount) &&
-            exactRange(
-                terminalIdle?.indexedChunkIndices,
-                contract.chunkCount
-            ) &&
+            isDeepStrictEqual(terminalIdle?.indexedChunkIndices, []) &&
             terminalIdle?.persistChunkReads === true &&
-            locality?.terminalTopologyRole === "replicator" &&
+            locality?.terminalTopologyRole === "observer" &&
             locality?.terminalTopologyExpectationSatisfied === true,
-        "terminal-full-replicator-index"
+        "terminal-full-observer-block-persistence"
+    );
+    const terminalObservations = locality?.terminalTopologyObservations;
+    const terminalStartedAt = locality?.terminalTopologyStartedAt;
+    const terminalDeadlineAt = locality?.terminalTopologyDeadlineAt;
+    const terminalFinishedAt = locality?.terminalTopologyFinishedAt;
+    const stabilityPollIntervalMs = locality?.stabilityPollIntervalMs;
+    check(
+        issues,
+        isNonNegativeSafeInteger(terminalIdle?.capturedAt) &&
+            isNonNegativeSafeInteger(terminalStartedAt) &&
+            isNonNegativeSafeInteger(terminalDeadlineAt) &&
+            isNonNegativeSafeInteger(terminalFinishedAt) &&
+            Number.isSafeInteger(stabilityPollIntervalMs) &&
+            stabilityPollIntervalMs > 0 &&
+            terminalIdle.capturedAt <= terminalStartedAt &&
+            terminalDeadlineAt ===
+                terminalStartedAt + result?.invocation?.readyTimeoutMs &&
+            terminalStartedAt <= terminalFinishedAt &&
+            terminalFinishedAt <= terminalDeadlineAt &&
+            Array.isArray(terminalObservations) &&
+            terminalObservations.length === 3 &&
+            terminalObservations.every(
+                (observation, index) =>
+                    isNonNegativeSafeInteger(observation?.capturedAt) &&
+                    isNonNegativeSafeInteger(
+                        observation?.writerTopology?.capturedAt
+                    ) &&
+                    isNonNegativeSafeInteger(
+                        observation?.readerTopology?.capturedAt
+                    ) &&
+                    observation.writerTopology.capturedAt <=
+                        observation.capturedAt &&
+                    observation.readerTopology.capturedAt <=
+                        observation.capturedAt &&
+                    observation.writerTopology.capturedAt >=
+                        terminalStartedAt &&
+                    observation.readerTopology.capturedAt >=
+                        terminalStartedAt &&
+                    observation.capturedAt >= terminalStartedAt &&
+                    observation.capturedAt <= terminalFinishedAt &&
+                    (index === 0 ||
+                        observation.capturedAt -
+                            terminalObservations[index - 1].capturedAt >=
+                            stabilityPollIntervalMs)
+            ),
+        "terminal-topology-chronology"
     );
     check(
         issues,
-        Array.isArray(locality?.terminalTopologyObservations) &&
-            locality.terminalTopologyObservations.length === 3 &&
-            locality.terminalTopologyObservations.every(
+        Array.isArray(terminalObservations) &&
+            terminalObservations.length === 3 &&
+            terminalObservations.every(
                 (observation) =>
                     validateTopologyRole(observation?.writerTopology, {
                         ownPeerHash: writerHash,
-                        expectedReplicatorHashes: terminalHashes,
+                        expectedReplicatorHashes: singleton,
                         expectedSelfInReplicatorSet: true,
-                        expectedReplicatorCount: 2,
+                        expectedReplicatorCount: 1,
                     }) &&
                     validateTopologyRole(observation?.readerTopology, {
                         ownPeerHash: readerHash,
-                        expectedReplicatorHashes: terminalHashes,
-                        expectedSelfInReplicatorSet: true,
-                        expectedReplicatorCount: 2,
+                        expectedReplicatorHashes: singleton,
+                        expectedSelfInReplicatorSet: false,
+                        expectedReplicatorCount: 1,
                     })
             ),
-        "terminal-reader-included-topology"
+        "terminal-reader-excluded-observer-topology"
     );
     check(
         issues,
         result?.writerDiagnostics?.peerHash === writerHash &&
             result?.readerDiagnostics?.peerHash === readerHash &&
-            result?.writerDiagnostics?.replicatorCount === 2 &&
-            result?.readerDiagnostics?.replicatorCount === 2 &&
+            result?.writerDiagnostics?.replicatorCount === 1 &&
+            result?.readerDiagnostics?.replicatorCount === 1 &&
             result?.writerDiagnostics?.replicationSetSize === 1 &&
             result?.readerDiagnostics?.replicationSetSize === 1,
         "terminal-peer-diagnostics"
@@ -1141,26 +1249,69 @@ export const buildCampaignReport = (environment = process.env) => {
             /^[0-9a-f]{40}$/.test(workflowSource.sha ?? ""),
         "workflow-source-provenance"
     );
+    const workflowExecution = {
+        runId: parsePositiveSafeInteger(environment.GITHUB_RUN_ID),
+        runAttempt: parsePositiveSafeInteger(environment.GITHUB_RUN_ATTEMPT),
+        actor: environment.GITHUB_ACTOR ?? null,
+        triggeringActor: environment.GITHUB_TRIGGERING_ACTOR ?? null,
+    };
+    check(
+        pairedIssues,
+        workflowExecution.runId != null &&
+            workflowExecution.runAttempt != null &&
+            typeof workflowExecution.actor === "string" &&
+            workflowExecution.actor.length > 0 &&
+            typeof workflowExecution.triggeringActor === "string" &&
+            workflowExecution.triggeringActor.length > 0,
+        "workflow-execution-provenance"
+    );
 
+    const benefitIssues = [];
     const carrierComparisons = {};
     for (const endpoint of ["writer", "reader"]) {
         const baselineTotal = baseline.transport?.[endpoint]?.totalDeltaBytes;
         const headTotal = head.transport?.[endpoint]?.totalDeltaBytes;
+        const conditionObserved = baselineDuplicateCarrierObserved(
+            baseline.transport?.[endpoint]
+        );
         const headOverBaseline =
             isPositiveFiniteNumber(baselineTotal) &&
             isNonNegativeSafeInteger(headTotal)
                 ? headTotal / baselineTotal
                 : null;
-        const passed = headOverBaseline != null && headOverBaseline <= 0.6;
+        const passed =
+            conditionObserved && headOverBaseline != null
+                ? headOverBaseline <= 0.6
+                : null;
         carrierComparisons[endpoint] = {
             baselineTotalDeltaBytes: baselineTotal ?? null,
             headTotalDeltaBytes: headTotal ?? null,
             headOverBaseline,
+            duplicateCarrierConditionObserved: conditionObserved,
+            evaluated: conditionObserved,
             threshold: 0.6,
             passed,
         };
-        check(pairedIssues, passed, `comparative-${endpoint}-carrier-total`);
+        if (conditionObserved) {
+            check(
+                benefitIssues,
+                passed === true,
+                `comparative-${endpoint}-carrier-total`
+            );
+        }
     }
+    const duplicateCarrierConditionConsistent =
+        carrierComparisons.writer.duplicateCarrierConditionObserved ===
+        carrierComparisons.reader.duplicateCarrierConditionObserved;
+    check(
+        benefitIssues,
+        duplicateCarrierConditionConsistent,
+        "baseline-duplicate-carrier-condition-endpoint-mismatch"
+    );
+    const duplicateCarrierConditionObserved =
+        duplicateCarrierConditionConsistent
+            ? carrierComparisons.writer.duplicateCarrierConditionObserved
+            : null;
 
     const evaluatedPerformance = evaluatePerformanceGate(
         baseline.metrics,
@@ -1189,14 +1340,17 @@ export const buildCampaignReport = (environment = process.env) => {
                     : head.metrics[key] / baseline.metrics[key],
         };
     }
-    const correctnessAndCarrierPassed =
+    const performanceEvidenceComplete =
+        baseline.performanceIssues.length === 0 &&
+        head.performanceIssues.length === 0;
+    const correctnessAndTransportPassed =
         baseline.correctnessPassed &&
         head.correctnessPassed &&
         baseline.carrierGatePassed &&
         head.carrierGatePassed &&
-        carrierComparisons.writer.passed &&
-        carrierComparisons.reader.passed &&
         pairedIssues.length === 0;
+    const pairEvidencePassed =
+        correctnessAndTransportPassed && performanceEvidenceComplete;
     const currentRunUrl = resolveRunUrl(environment);
     const campaignContract = {
         workflowSource,
@@ -1214,42 +1368,83 @@ export const buildCampaignReport = (environment = process.env) => {
         schema: CAMPAIGN_REPORT_SCHEMA,
         generatedAt: new Date().toISOString(),
         currentRunUrl,
+        workflowExecution,
         order,
         runStatus,
         campaignContract,
         assessments: {
-            correctnessAndCarrierEvidence: {
-                passed: correctnessAndCarrierPassed,
+            correctnessAndTransportEvidence: {
+                passed: correctnessAndTransportPassed,
                 gatesWorkflow: true,
                 definition:
-                    "both immutable variants must pass deterministic integrity, exact chunk/locality/topology/provenance checks and independently audited pre/post pubsub counter envelopes on writer outbound and reader inbound endpoints",
+                    "both immutable variants must pass deterministic integrity, exact chunk/locality/observer-topology/provenance checks and independently audited pre/post pubsub counter safety envelopes on writer outbound and reader inbound endpoints",
                 comparativeCarrierTotals: carrierComparisons,
+            },
+            baselineDuplicateCarrierCondition: {
+                evaluated: duplicateCarrierConditionConsistent,
+                observed: duplicateCarrierConditionObserved,
+                endpointClassificationConsistent:
+                    duplicateCarrierConditionConsistent,
+                gatesWorkflow: false,
+                definition:
+                    "the historical baseline condition is observed only when both endpoints carry at least 1.8 copies of the dominant remote payload across two or more stable pubsub carriers",
+            },
+            performanceEvidenceValidity: {
+                passed: performanceEvidenceComplete,
+                gatesWorkflow: true,
+                evidenceIssues: {
+                    baseline: baseline.performanceIssues,
+                    head: head.performanceIssues,
+                },
+                definition:
+                    "both variants must provide complete finite timing, demand-wait, chunk-attempt, and memory telemetry before the pair report can be combined",
+            },
+            pruningBenefitEvidence: {
+                passed:
+                    duplicateCarrierConditionObserved === true
+                        ? carrierComparisons.writer.passed === true &&
+                          carrierComparisons.reader.passed === true
+                        : null,
+                evaluated: duplicateCarrierConditionObserved === true,
+                gatesWorkflow: false,
+                evidenceIssues: benefitIssues,
+                definition:
+                    "per-pair carrier-byte reduction is evaluated only when the duplicate-carrier condition is actually observed on both baseline endpoints; otherwise pruning benefit remains explicitly unevaluated",
             },
             perPairPerformanceSafety: {
                 ...performance,
-                gatesWorkflow: true,
+                evidenceComplete: performanceEvidenceComplete,
+                gatesWorkflow: false,
                 definition:
-                    "this single order only rejects a greater-than-10% regression in either primary timing and retains conservative relative demand-wait and memory-growth safety bounds; it does not establish the two-order campaign benefit",
+                    "this single-order timing, demand-wait, and memory comparison is diagnostic because execution-order effects are removed only by the counterbalanced aggregate",
             },
             campaignAcceptance: {
                 passed: null,
                 evaluatedBySingleRun: false,
-                requiresTwoGreenRunUrls: true,
+                requiresTwoValidatedPairReports: true,
                 requiredOrders: ["baseline-head", "head-baseline"],
                 currentOrder: contract.pairOrder,
                 currentRunUrl,
                 requiredIdenticalContractAcrossRuns: true,
                 compareExactFieldAcrossRunUrls: "campaignContract",
+                requiresDuplicateCarrierConditionInBothRunsForPruningBenefit: true,
                 geometricMeanThresholds: {
-                    secondHalfHeadOverBaseline: 0.9,
-                    libraryStreamWallHeadOverBaseline: 0.95,
+                    regressionSafety: {
+                        secondHalfHeadOverBaseline: 1.1,
+                        libraryStreamWallHeadOverBaseline: 1.1,
+                    },
+                    pruningBenefit: {
+                        secondHalfHeadOverBaseline: 0.9,
+                        libraryStreamWallHeadOverBaseline: 0.95,
+                    },
                 },
                 definition:
-                    "final acceptance requires two green run URLs with opposite explicit orders, identical immutable campaignContract values, geometric mean(head secondHalfMs / baseline secondHalfMs) <= 0.90, and geometric mean(head libraryStreamWallMs / baseline libraryStreamWallMs) <= 0.95",
+                    "final assessment requires two correct reports with opposite explicit orders and identical immutable campaignContract values; aggregate regression safety uses <= 1.10 timing geometric means, while pruning benefit remains unevaluated unless both baselines reproduce the duplicate-carrier condition",
             },
         },
-        comparisonGatePassed: correctnessAndCarrierPassed && performance.passed,
+        workflowGatePassed: pairEvidencePassed,
         pairedIssues,
+        benefitIssues,
         baseline: {
             summaryFile: baseline.summaryFile,
             correctnessIssues: baseline.correctnessIssues,
@@ -1270,33 +1465,397 @@ export const buildCampaignReport = (environment = process.env) => {
     };
 };
 
+const geometricMean = (values) => {
+    if (
+        !Array.isArray(values) ||
+        values.length === 0 ||
+        values.some((value) => !isPositiveFiniteNumber(value))
+    ) {
+        return null;
+    }
+    return Math.exp(
+        values.reduce((total, value) => total + Math.log(value), 0) /
+            values.length
+    );
+};
+
+const hasCompleteRawPerformanceMetrics = (metrics) =>
+    isRecord(metrics) &&
+    isDeepStrictEqual(
+        Object.keys(metrics).sort(),
+        [...PERFORMANCE_METRIC_KEYS].sort()
+    ) &&
+    Object.values(metrics).every(
+        (value) => typeof value === "number" && Number.isFinite(value)
+    );
+
+export const combineCampaignReports = (reports) => {
+    const validationIssues = [];
+    check(
+        validationIssues,
+        Array.isArray(reports) && reports.length === 2,
+        "exactly-two-pair-reports"
+    );
+    const pairReports = Array.isArray(reports) ? reports : [];
+    for (const [index, report] of pairReports.entries()) {
+        check(
+            validationIssues,
+            isDeepStrictEqual(report?.schema, CAMPAIGN_REPORT_SCHEMA),
+            `pair-${index + 1}-schema`
+        );
+        check(
+            validationIssues,
+            report?.error == null,
+            `pair-${index + 1}-report-error`
+        );
+        check(
+            validationIssues,
+            report?.runStatus === "0",
+            `pair-${index + 1}-run-status`
+        );
+        check(
+            validationIssues,
+            Number.isSafeInteger(report?.workflowExecution?.runId) &&
+                report.workflowExecution.runId > 0 &&
+                Number.isSafeInteger(report?.workflowExecution?.runAttempt) &&
+                report.workflowExecution.runAttempt > 0 &&
+                typeof report.workflowExecution.actor === "string" &&
+                report.workflowExecution.actor.length > 0 &&
+                typeof report.workflowExecution.triggeringActor === "string" &&
+                report.workflowExecution.triggeringActor.length > 0 &&
+                typeof report?.currentRunUrl === "string" &&
+                report.currentRunUrl.endsWith(
+                    `/actions/runs/${report.workflowExecution.runId}`
+                ),
+            `pair-${index + 1}-workflow-execution`
+        );
+        check(
+            validationIssues,
+            report?.assessments?.correctnessAndTransportEvidence?.passed ===
+                true && report?.workflowGatePassed === true,
+            `pair-${index + 1}-correctness`
+        );
+        check(
+            validationIssues,
+            report?.assessments?.perPairPerformanceSafety?.evidenceComplete ===
+                true,
+            `pair-${index + 1}-performance-evidence`
+        );
+        check(
+            validationIssues,
+            hasCompleteRawPerformanceMetrics(report?.baseline?.metrics) &&
+                hasCompleteRawPerformanceMetrics(report?.head?.metrics),
+            `pair-${index + 1}-raw-performance-metrics`
+        );
+        check(
+            validationIssues,
+            Array.isArray(report?.pairedIssues) &&
+                report.pairedIssues.length === 0 &&
+                Array.isArray(report?.baseline?.correctnessIssues) &&
+                report.baseline.correctnessIssues.length === 0 &&
+                Array.isArray(report?.head?.correctnessIssues) &&
+                report.head.correctnessIssues.length === 0 &&
+                Array.isArray(report?.baseline?.performanceIssues) &&
+                report.baseline.performanceIssues.length === 0 &&
+                Array.isArray(report?.head?.performanceIssues) &&
+                report.head.performanceIssues.length === 0,
+            `pair-${index + 1}-raw-evidence-issues`
+        );
+        check(
+            validationIssues,
+            evaluateVariantCarrierGate(
+                "baseline",
+                report?.baseline?.transport?.writer
+            ) &&
+                evaluateVariantCarrierGate(
+                    "baseline",
+                    report?.baseline?.transport?.reader
+                ) &&
+                evaluateVariantCarrierGate(
+                    "head",
+                    report?.head?.transport?.writer
+                ) &&
+                evaluateVariantCarrierGate(
+                    "head",
+                    report?.head?.transport?.reader
+                ),
+            `pair-${index + 1}-raw-carrier-envelope`
+        );
+    }
+
+    const requiredOrders = ["baseline-head", "head-baseline"];
+    const actualOrders = pairReports
+        .map(
+            (report) =>
+                report?.assessments?.campaignAcceptance?.currentOrder ?? null
+        )
+        .sort();
+    check(
+        validationIssues,
+        isDeepStrictEqual(actualOrders, [...requiredOrders].sort()),
+        "opposite-pair-orders"
+    );
+    for (const report of pairReports) {
+        const order =
+            report?.assessments?.campaignAcceptance?.currentOrder ?? null;
+        const expectedOrder =
+            order === "baseline-head"
+                ? ["baseline", "head"]
+                : order === "head-baseline"
+                  ? ["head", "baseline"]
+                  : null;
+        check(
+            validationIssues,
+            expectedOrder != null &&
+                isDeepStrictEqual(report?.order, expectedOrder),
+            `pair-order-evidence:${order ?? "missing"}`
+        );
+    }
+
+    const runUrls = pairReports.map((report) => report?.currentRunUrl ?? null);
+    const runIds = pairReports.map(
+        (report) => report?.workflowExecution?.runId ?? null
+    );
+    check(
+        validationIssues,
+        runUrls.every(
+            (runUrl) => typeof runUrl === "string" && runUrl.length > 0
+        ) &&
+            new Set(runUrls).size === 2 &&
+            runIds.every((runId) => Number.isSafeInteger(runId) && runId > 0) &&
+            new Set(runIds).size === 2,
+        "distinct-workflow-runs"
+    );
+    const campaignContract = pairReports[0]?.campaignContract ?? null;
+    check(
+        validationIssues,
+        pairReports.length === 2 &&
+            isRecord(campaignContract) &&
+            isDeepStrictEqual(
+                campaignContract,
+                pairReports[1]?.campaignContract
+            ),
+        "identical-campaign-contract"
+    );
+
+    const ratios = pairReports.map((report, index) => {
+        const writerCondition = baselineDuplicateCarrierObserved(
+            report?.baseline?.transport?.writer
+        );
+        const readerCondition = baselineDuplicateCarrierObserved(
+            report?.baseline?.transport?.reader
+        );
+        const conditionClassificationConsistent =
+            writerCondition === readerCondition;
+        const baselineDuplicateCarrierConditionObserved =
+            conditionClassificationConsistent ? writerCondition : null;
+        const carrierRatios = Object.fromEntries(
+            ["writer", "reader"].map((endpoint) => {
+                const baselineTotal =
+                    report?.baseline?.transport?.[endpoint]?.totalDeltaBytes;
+                const headTotal =
+                    report?.head?.transport?.[endpoint]?.totalDeltaBytes;
+                return [
+                    endpoint,
+                    isPositiveFiniteNumber(baselineTotal) &&
+                    isNonNegativeSafeInteger(headTotal)
+                        ? headTotal / baselineTotal
+                        : null,
+                ];
+            })
+        );
+        const carrierPruningEvidencePassed =
+            baselineDuplicateCarrierConditionObserved === true
+                ? isPositiveFiniteNumber(carrierRatios.writer) &&
+                  isPositiveFiniteNumber(carrierRatios.reader) &&
+                  carrierRatios.writer <= 0.6 &&
+                  carrierRatios.reader <= 0.6
+                : null;
+        check(
+            validationIssues,
+            report?.assessments?.baselineDuplicateCarrierCondition
+                ?.evaluated === conditionClassificationConsistent &&
+                report?.assessments?.baselineDuplicateCarrierCondition
+                    ?.observed === baselineDuplicateCarrierConditionObserved &&
+                report?.assessments?.pruningBenefitEvidence?.passed ===
+                    carrierPruningEvidencePassed,
+            `pair-${index + 1}-assessment-consistency`
+        );
+        return {
+            order:
+                report?.assessments?.campaignAcceptance?.currentOrder ?? null,
+            runUrl: report?.currentRunUrl ?? null,
+            libraryStreamWallHeadOverBaseline:
+                isPositiveFiniteNumber(
+                    report?.baseline?.metrics?.libraryStreamWallMs
+                ) &&
+                isPositiveFiniteNumber(
+                    report?.head?.metrics?.libraryStreamWallMs
+                )
+                    ? report.head.metrics.libraryStreamWallMs /
+                      report.baseline.metrics.libraryStreamWallMs
+                    : null,
+            secondHalfHeadOverBaseline:
+                isPositiveFiniteNumber(
+                    report?.baseline?.metrics?.secondHalfMs
+                ) && isPositiveFiniteNumber(report?.head?.metrics?.secondHalfMs)
+                    ? report.head.metrics.secondHalfMs /
+                      report.baseline.metrics.secondHalfMs
+                    : null,
+            conditionClassificationConsistent,
+            baselineDuplicateCarrierConditionObserved,
+            carrierRatios,
+            carrierPruningEvidencePassed,
+        };
+    });
+    check(
+        validationIssues,
+        ratios.every(
+            (ratio) =>
+                isPositiveFiniteNumber(
+                    ratio.libraryStreamWallHeadOverBaseline
+                ) && isPositiveFiniteNumber(ratio.secondHalfHeadOverBaseline)
+        ),
+        "finite-positive-timing-ratios"
+    );
+
+    const libraryStreamWallHeadOverBaseline = geometricMean(
+        ratios.map((ratio) => ratio.libraryStreamWallHeadOverBaseline)
+    );
+    const secondHalfHeadOverBaseline = geometricMean(
+        ratios.map((ratio) => ratio.secondHalfHeadOverBaseline)
+    );
+    const aggregateEvidenceValid = validationIssues.length === 0;
+    const regressionSafetyPassed = aggregateEvidenceValid
+        ? libraryStreamWallHeadOverBaseline <= 1.1 &&
+          secondHalfHeadOverBaseline <= 1.1
+        : null;
+    const duplicateCarrierConditionObservedInBoth =
+        aggregateEvidenceValid &&
+        ratios.every(
+            (ratio) => ratio.baselineDuplicateCarrierConditionObserved
+        );
+    const carrierPruningEvidencePassedInBoth =
+        duplicateCarrierConditionObservedInBoth &&
+        ratios.every((ratio) => ratio.carrierPruningEvidencePassed === true);
+    const pruningBenefitEvaluated =
+        aggregateEvidenceValid && duplicateCarrierConditionObservedInBoth;
+    const pruningBenefitPassed = pruningBenefitEvaluated
+        ? carrierPruningEvidencePassedInBoth &&
+          libraryStreamWallHeadOverBaseline <= 0.95 &&
+          secondHalfHeadOverBaseline <= 0.9
+        : null;
+    const campaignAcceptancePassed = aggregateEvidenceValid
+        ? regressionSafetyPassed === true && pruningBenefitPassed !== false
+        : null;
+    const aggregateWorkflowGatePassed = campaignAcceptancePassed === true;
+
+    return {
+        schema: COMBINED_CAMPAIGN_REPORT_SCHEMA,
+        generatedAt: new Date().toISOString(),
+        campaignContract,
+        validationIssues,
+        pairReports: ratios,
+        aggregateRatios: {
+            libraryStreamWallHeadOverBaseline,
+            secondHalfHeadOverBaseline,
+        },
+        assessments: {
+            evidenceValidity: {
+                passed: aggregateEvidenceValid,
+                definition:
+                    "exactly two correct reports must have opposite explicit orders, distinct run URLs, identical immutable campaign contracts, and complete performance evidence",
+            },
+            regressionSafety: {
+                evaluated: aggregateEvidenceValid,
+                passed: regressionSafetyPassed,
+                thresholds: {
+                    libraryStreamWallHeadOverBaseline: 1.1,
+                    secondHalfHeadOverBaseline: 1.1,
+                },
+            },
+            baselineDuplicateCarrierCondition: {
+                evaluated: aggregateEvidenceValid,
+                observedInBoth: duplicateCarrierConditionObservedInBoth,
+            },
+            pruningBenefit: {
+                evaluated: pruningBenefitEvaluated,
+                passed: pruningBenefitPassed,
+                carrierPruningEvidencePassedInBoth:
+                    carrierPruningEvidencePassedInBoth,
+                thresholds: {
+                    libraryStreamWallHeadOverBaseline: 0.95,
+                    secondHalfHeadOverBaseline: 0.9,
+                },
+                definition:
+                    "benefit is evaluated only when both correct counterbalanced reports reproduce the baseline duplicate-carrier condition",
+            },
+            campaignAcceptance: {
+                evaluated: aggregateEvidenceValid,
+                passed: campaignAcceptancePassed,
+                definition:
+                    "acceptance requires valid evidence and aggregate regression safety; an observed duplicate-carrier condition additionally requires pruning benefit, while absent conditions remain explicitly unevaluated",
+            },
+        },
+        workflowGatePassed: aggregateWorkflowGatePassed,
+    };
+};
+
 const failureReport = (environment, error) => ({
     schema: CAMPAIGN_REPORT_SCHEMA,
     generatedAt: new Date().toISOString(),
     currentRunUrl: resolveRunUrl(environment),
+    workflowExecution: {
+        runId: parsePositiveSafeInteger(environment.GITHUB_RUN_ID),
+        runAttempt: parsePositiveSafeInteger(environment.GITHUB_RUN_ATTEMPT),
+        actor: environment.GITHUB_ACTOR ?? null,
+        triggeringActor: environment.GITHUB_TRIGGERING_ACTOR ?? null,
+    },
     assessments: {
-        correctnessAndCarrierEvidence: {
+        correctnessAndTransportEvidence: {
             passed: false,
             gatesWorkflow: true,
         },
-        perPairPerformanceSafety: {
+        baselineDuplicateCarrierCondition: {
+            evaluated: false,
+            observed: null,
+            endpointClassificationConsistent: false,
+            gatesWorkflow: false,
+        },
+        performanceEvidenceValidity: {
             passed: false,
             gatesWorkflow: true,
+        },
+        pruningBenefitEvidence: {
+            passed: null,
+            evaluated: false,
+            gatesWorkflow: false,
+        },
+        perPairPerformanceSafety: {
+            passed: false,
+            evidenceComplete: false,
+            gatesWorkflow: false,
         },
         campaignAcceptance: {
             passed: null,
             evaluatedBySingleRun: false,
-            requiresTwoGreenRunUrls: true,
+            requiresTwoValidatedPairReports: true,
             requiredOrders: ["baseline-head", "head-baseline"],
             currentOrder: environment.PAIR_ORDER ?? null,
             currentRunUrl: resolveRunUrl(environment),
             geometricMeanThresholds: {
-                secondHalfHeadOverBaseline: 0.9,
-                libraryStreamWallHeadOverBaseline: 0.95,
+                regressionSafety: {
+                    secondHalfHeadOverBaseline: 1.1,
+                    libraryStreamWallHeadOverBaseline: 1.1,
+                },
+                pruningBenefit: {
+                    secondHalfHeadOverBaseline: 0.9,
+                    libraryStreamWallHeadOverBaseline: 0.95,
+                },
             },
         },
     },
-    comparisonGatePassed: false,
+    workflowGatePassed: false,
     error: error?.stack ?? String(error),
 });
 
@@ -1318,10 +1877,68 @@ const buildAndPersist = (environment) => {
     return report;
 };
 
+const combineAndPersist = (inputPaths, outputPath) => {
+    if (inputPaths.length !== 2 || !outputPath) {
+        throw new Error(
+            "combine requires exactly two pair-report paths and one output path"
+        );
+    }
+    const report = combineCampaignReports(inputPaths.map(readJson));
+    writeJson(outputPath, report);
+    console.log(JSON.stringify(report, null, 2));
+    return report;
+};
+
+const appendCombinedStepSummary = (environment, combinedPath) => {
+    const report = readJson(combinedPath);
+    const mark = (passed) =>
+        passed === true ? "PASS" : passed === false ? "FAIL" : "UNEVALUATED";
+    const regression = report.assessments?.regressionSafety;
+    const condition = report.assessments?.baselineDuplicateCarrierCondition;
+    const benefit = report.assessments?.pruningBenefit;
+    const acceptance = report.assessments?.campaignAcceptance;
+    const summary = [
+        "## Counterbalanced outbound-candidate pruning campaign",
+        "",
+        `- Evidence validity: ${mark(report.assessments?.evidenceValidity?.passed)}`,
+        `- Aggregate regression safety: ${mark(regression?.passed)}`,
+        `- Baseline duplicate-carrier condition in both orders: ${condition?.evaluated !== true ? "UNEVALUATED" : condition.observedInBoth === true ? "OBSERVED" : "NOT OBSERVED"}`,
+        `- Pruning benefit: ${mark(benefit?.passed)}`,
+        `- Aggregate workflow gate: ${mark(acceptance?.passed)}`,
+        `- Library wall geometric mean (head/baseline): ${report.aggregateRatios?.libraryStreamWallHeadOverBaseline ?? "unavailable"}`,
+        `- Second-half geometric mean (head/baseline): ${report.aggregateRatios?.secondHalfHeadOverBaseline ?? "unavailable"}`,
+        "",
+    ].join("\n");
+    if (environment.GITHUB_STEP_SUMMARY) {
+        fs.appendFileSync(environment.GITHUB_STEP_SUMMARY, summary);
+    }
+    console.log(summary);
+};
+
+const enforceCombined = (combinedPath) => {
+    const report = readJson(combinedPath);
+    if (
+        !isDeepStrictEqual(report?.schema, COMBINED_CAMPAIGN_REPORT_SCHEMA) ||
+        report?.workflowGatePassed !== true
+    ) {
+        process.exitCode = 1;
+    }
+};
+
 const appendStepSummary = (environment) => {
     const report = readJson(reportPath(environment));
-    const mark = (passed) => (passed ? "PASS" : "FAIL");
-    const correctness = report.assessments?.correctnessAndCarrierEvidence;
+    const mark = (passed) =>
+        passed === true ? "PASS" : passed === false ? "FAIL" : "UNEVALUATED";
+    const observed = (value) =>
+        value === true
+            ? "OBSERVED"
+            : value === false
+              ? "NOT OBSERVED"
+              : "UNEVALUATED";
+    const correctness = report.assessments?.correctnessAndTransportEvidence;
+    const condition = report.assessments?.baselineDuplicateCarrierCondition;
+    const performanceEvidence = report.assessments?.performanceEvidenceValidity;
+    const pruningBenefit = report.assessments?.pruningBenefitEvidence;
     const performance = report.assessments?.perPairPerformanceSafety;
     const campaign = report.assessments?.campaignAcceptance;
     const summary = [
@@ -1329,11 +1946,14 @@ const appendStepSummary = (environment) => {
         "",
         `- Run URL: ${report.currentRunUrl ?? "unavailable"}`,
         `- Explicit order: ${campaign?.currentOrder ?? "unavailable"}`,
-        `- Correctness and pubsub carrier evidence (gating): ${mark(correctness?.passed)}`,
-        `- Per-pair performance safety (gating): ${mark(performance?.passed)}`,
+        `- Correctness and transport evidence (workflow gate): ${mark(correctness?.passed)}`,
+        `- Performance evidence completeness (workflow gate): ${mark(performanceEvidence?.passed)}`,
+        `- Baseline duplicate-carrier condition: ${observed(condition?.observed)}`,
+        `- Per-pair carrier pruning evidence: ${mark(pruningBenefit?.passed)}`,
+        `- Per-pair performance comparison (diagnostic): ${mark(performance?.passed)}`,
         "",
         "This single run does **not** evaluate final campaign acceptance.",
-        "Final acceptance requires two green run URLs with opposite orders, identical immutable campaign contracts, geometric mean `head secondHalfMs / baseline secondHalfMs <= 0.90`, and geometric mean `head libraryStreamWallMs / baseline libraryStreamWallMs <= 0.95`.",
+        "Combine two correct reports with opposite orders and identical immutable campaign contracts. Aggregate regression safety requires both timing geometric means to be `<= 1.10`. Pruning benefit is evaluated only if both baselines reproduce duplicate carriers, then requires `secondHalf <= 0.90` and `libraryStreamWall <= 0.95`.",
         "No stream multiplexer is prescribed; the evidence records the actual negotiated values.",
         "",
     ].join("\n");
@@ -1343,12 +1963,9 @@ const appendStepSummary = (environment) => {
     console.log(summary);
 };
 
-const enforce = (environment, assessment) => {
+const enforceWorkflowGate = (environment) => {
     const report = readJson(reportPath(environment));
-    if (
-        report.error != null ||
-        report.assessments?.[assessment]?.passed !== true
-    ) {
+    if (report.error != null || report.workflowGatePassed !== true) {
         process.exitCode = 1;
     }
 };
@@ -1362,16 +1979,35 @@ export const main = (
         buildAndPersist(environment);
         return;
     }
+    if (command === "combine") {
+        if (argv.length !== 4) {
+            throw new Error(
+                "combine requires REPORT_A REPORT_B OUTPUT arguments"
+            );
+        }
+        combineAndPersist(argv.slice(1, 3), argv[3]);
+        return;
+    }
+    if (command === "summary-combined") {
+        if (!argv[1]) {
+            throw new Error("summary-combined requires a combined report path");
+        }
+        appendCombinedStepSummary(environment, argv[1]);
+        return;
+    }
+    if (command === "enforce-combined") {
+        if (!argv[1]) {
+            throw new Error("enforce-combined requires a combined report path");
+        }
+        enforceCombined(argv[1]);
+        return;
+    }
     if (command === "summary") {
         appendStepSummary(environment);
         return;
     }
-    if (command === "enforce-correctness") {
-        enforce(environment, "correctnessAndCarrierEvidence");
-        return;
-    }
-    if (command === "enforce-performance") {
-        enforce(environment, "perPairPerformanceSafety");
+    if (command === "enforce-pair-evidence") {
+        enforceWorkflowGate(environment);
         return;
     }
     throw new Error(`Unknown command ${command}`);

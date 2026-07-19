@@ -7,7 +7,9 @@ import {
     PUBSUB_PROTOCOL,
     TRANSPORT_COUNTER_KEY_FIELDS,
     auditEndpointTransport,
+    baselineDuplicateCarrierObserved,
     buildCampaignReport,
+    combineCampaignReports,
     evaluateCounterpartDeltaSkew,
     evaluatePerformanceGate,
     evaluateVariantCarrierGate,
@@ -327,7 +329,7 @@ test("performance safety permits at most a ten-percent primary timing regression
     assert.equal(evaluatePerformanceGate(baseline, regression).passed, false);
 });
 
-test("enforces exact head and baseline carrier-envelope boundaries", () => {
+test("separates baseline carrier safety from duplicate-condition evidence", () => {
     const headAtBoundary = {
         carrierCount: 1,
         dominantDeltaBytes: P,
@@ -335,13 +337,15 @@ test("enforces exact head and baseline carrier-envelope boundaries", () => {
         dominantShare: 1,
         duplicationFactor: 1,
     };
+    const duplicateBoundaryTotal = Math.ceil(1.8 * P);
     const baselineAtBoundary = {
         carrierCount: 2,
         dominantDeltaBytes: P,
-        totalDeltaBytes: 1.8 * P,
-        dominantShare: 1 / 1.8,
-        duplicationFactor: 1.8,
+        totalDeltaBytes: duplicateBoundaryTotal,
+        dominantShare: P / duplicateBoundaryTotal,
+        duplicationFactor: duplicateBoundaryTotal / P,
     };
+    const baselineSingle = { ...headAtBoundary };
     assert.equal(evaluateVariantCarrierGate("head", headAtBoundary), true);
     assert.equal(
         evaluateVariantCarrierGate("head", {
@@ -354,10 +358,29 @@ test("enforces exact head and baseline carrier-envelope boundaries", () => {
         evaluateVariantCarrierGate("baseline", baselineAtBoundary),
         true
     );
+    assert.equal(evaluateVariantCarrierGate("baseline", baselineSingle), true);
+    assert.equal(baselineDuplicateCarrierObserved(baselineSingle), false);
+    assert.equal(
+        evaluateVariantCarrierGate("baseline", {
+            ...baselineSingle,
+            totalDeltaBytes: P + 1,
+            dominantShare: P / (P + 1),
+            duplicationFactor: (P + 1) / P,
+        }),
+        true
+    );
+    assert.equal(baselineDuplicateCarrierObserved(baselineAtBoundary), true);
+    assert.equal(
+        baselineDuplicateCarrierObserved({
+            ...baselineAtBoundary,
+            duplicationFactor: 1.799,
+        }),
+        false
+    );
     assert.equal(
         evaluateVariantCarrierGate("baseline", {
             ...baselineAtBoundary,
-            duplicationFactor: 1.799,
+            totalDeltaBytes: 2 * 553_648_128 + 1,
         }),
         false
     );
@@ -392,35 +415,60 @@ const cleanProvenance = (commit, extra = {}) => ({
     ...extra,
 });
 
-const makeCampaignFixture = ({ variant, contract }) => {
+const CAMPAIGN_FIXTURE_CONTRACT = Object.freeze({
+    baseline: "8fc5533b14228b4091dffb3962fc8b1ff088bd89",
+    head: "221411b880189df02404e9957591147142423aa2",
+    harness: "20a398dcaea3e94e49b886315221cd0a1c562832",
+    examples: "0cc0bc74682cd1a7b741232f07f46fe6f67c1cbc",
+    lock: "7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1",
+    sha256: "bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=",
+    crc32: "125fb916",
+});
+
+const makeCampaignFixture = ({
+    variant,
+    contract,
+    baselineCarrierCount = 2,
+    baselineWriterCarrierCount = baselineCarrierCount,
+    baselineReaderCarrierCount = baselineCarrierCount,
+}) => {
     const writerHash = "writer-hash";
     const readerHash = "reader-hash";
     const writerPeerId = "writer-peer-id";
     const readerPeerId = "reader-peer-id";
-    const carrierCount = variant === "baseline" ? 2 : 1;
     const makeStreams = ({ direction, before }) =>
-        Array.from({ length: carrierCount }, (_, index) =>
-            transportStream({
-                direction,
-                remotePeerHash:
-                    direction === "outbound" ? readerHash : writerHash,
-                remotePeer:
-                    direction === "outbound" ? readerPeerId : writerPeerId,
-                connectionId: `${direction}-local-connection-${index}`,
-                id: `${direction}-local-stream-${index}`,
-                multiplexer:
-                    index === 0 ? "/yamux/1.0.0" : "/peerbit/yamux/1.0.0",
-                bytes: 100 + index + (before ? 0 : P),
-            })
+        Array.from(
+            {
+                length:
+                    variant === "baseline"
+                        ? direction === "outbound"
+                            ? baselineWriterCarrierCount
+                            : baselineReaderCarrierCount
+                        : 1,
+            },
+            (_, index) =>
+                transportStream({
+                    direction,
+                    remotePeerHash:
+                        direction === "outbound" ? readerHash : writerHash,
+                    remotePeer:
+                        direction === "outbound" ? readerPeerId : writerPeerId,
+                    connectionId: `${direction}-local-connection-${index}`,
+                    id: `${direction}-local-stream-${index}`,
+                    multiplexer:
+                        index === 0 ? "/yamux/1.0.0" : "/peerbit/yamux/1.0.0",
+                    bytes: 100 + index + (before ? 0 : P),
+                })
         );
     const singleton = [writerHash];
-    const pair = [writerHash, readerHash].sort();
     const topologySnapshot = ({
         owner,
         replicatorHashes,
         selfInReplicatorSet,
         streams,
+        capturedAt,
     }) => ({
+        capturedAt,
         peerHash: owner === "writer" ? writerHash : readerHash,
         peerId: owner === "writer" ? writerPeerId : readerPeerId,
         replicatorHashes,
@@ -433,29 +481,37 @@ const makeCampaignFixture = ({ variant, contract }) => {
         replicatorHashes: singleton,
         selfInReplicatorSet: true,
         streams: makeStreams({ direction: "outbound", before: true }),
+        capturedAt: 1_000,
     });
     const readerPre = topologySnapshot({
         owner: "reader",
         replicatorHashes: singleton,
         selfInReplicatorSet: false,
         streams: makeStreams({ direction: "inbound", before: true }),
+        capturedAt: 1_001,
     });
     const writerPost = topologySnapshot({
         owner: "writer",
-        replicatorHashes: pair,
+        replicatorHashes: singleton,
         selfInReplicatorSet: true,
         streams: makeStreams({ direction: "outbound", before: false }),
+        capturedAt: 100_000,
     });
     const readerPost = topologySnapshot({
         owner: "reader",
-        replicatorHashes: pair,
-        selfInReplicatorSet: true,
+        replicatorHashes: singleton,
+        selfInReplicatorSet: false,
         streams: makeStreams({ direction: "inbound", before: false }),
+        capturedAt: 100_001,
     });
-    const terminalObservations = Array.from({ length: 3 }, () => ({
-        writerTopology: writerPost,
-        readerTopology: readerPost,
-    }));
+    const terminalTopologyStartedAt = 110_000;
+    const terminalObservations = [110_000, 110_100, 110_200].map(
+        (capturedAt) => ({
+            capturedAt,
+            writerTopology: { ...writerPost, capturedAt },
+            readerTopology: { ...readerPost, capturedAt },
+        })
+    );
     const fullRange = Array.from({ length: 2048 }, (_, index) => index);
     const prefixRange = fullRange.slice(0, 1024);
     const libraryStreamWallMs = variant === "baseline" ? 100_000 : 90_000;
@@ -527,7 +583,7 @@ const makeCampaignFixture = ({ variant, contract }) => {
         targetSeeders: 2,
         readerLocalChunkTarget: 1024,
         readerLocalChunkMaxOvershoot: 0,
-        readerTerminalTopology: "replicator",
+        readerTerminalTopology: "observer",
         baseUrl: null,
         protocol: "http",
         viteMode: null,
@@ -603,7 +659,7 @@ const makeCampaignFixture = ({ variant, contract }) => {
         unexpectedSeederDrop: false,
         readerLocalChunkTarget: 1024,
         readerLocalChunkMaxOvershoot: 0,
-        readerTerminalTopology: "replicator",
+        readerTerminalTopology: "observer",
         readerLocalChunkBlockCount: 1024,
         readerLocalChunkIndexRowCount: 0,
         readerLocalityCohortKey: "observer-persistent-prefix-b1024-i0",
@@ -617,7 +673,7 @@ const makeCampaignFixture = ({ variant, contract }) => {
             writerUploadRole: "fixed1",
             readerUploadRole: "observer",
             readerTimedReadPolicy: "persist-chunk-reads",
-            expectedTerminalTopology: "replicator",
+            expectedTerminalTopology: "observer",
             actualLocalChunkBlockCount: 1024,
             actualLocalChunkIndexRowCount: 0,
             speculativeOvershootChunkCount: 0,
@@ -642,20 +698,25 @@ const makeCampaignFixture = ({ variant, contract }) => {
             writerTopologyAfterTimedRead: writerPost,
             readerTopologyAfterTimedRead: readerPost,
             terminalIdleObservation: {
+                capturedAt: 109_999,
                 chunkCount: 2048,
                 blockCount: 2048,
-                indexRowCount: 2048,
+                indexRowCount: 0,
                 blockChunkIndices: fullRange,
-                indexedChunkIndices: fullRange,
+                indexedChunkIndices: [],
                 persistChunkReads: true,
             },
-            terminalTopologyRole: "replicator",
+            terminalTopologyRole: "observer",
             terminalTopologyExpectationSatisfied: true,
+            stabilityPollIntervalMs: 100,
+            terminalTopologyStartedAt,
+            terminalTopologyDeadlineAt: terminalTopologyStartedAt + 120_000,
+            terminalTopologyFinishedAt: 110_200,
             terminalTopologyObservations: terminalObservations,
         },
         writerDiagnostics: {
             peerHash: writerHash,
-            replicatorCount: 2,
+            replicatorCount: 1,
             replicationSetSize: 1,
             lastUploadDiagnostics: {
                 sizeBytes: 1_073_741_824,
@@ -666,7 +727,7 @@ const makeCampaignFixture = ({ variant, contract }) => {
         },
         readerDiagnostics: {
             peerHash: readerHash,
-            replicatorCount: 2,
+            replicatorCount: 1,
             replicationSetSize: 1,
             lastReadDiagnostics: readDiagnostics,
         },
@@ -684,58 +745,316 @@ const makeCampaignFixture = ({ variant, contract }) => {
     };
 };
 
-test("builds a passing report while leaving two-order campaign acceptance unevaluated", (context) => {
+const buildFixtureReport = (
+    context,
+    {
+        order = "baseline-head",
+        runId = "1",
+        baselineCarrierCount = 2,
+        baselineWriterCarrierCount = baselineCarrierCount,
+        baselineReaderCarrierCount = baselineCarrierCount,
+        mutate,
+    } = {}
+) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pruning-report-test-"));
     context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const contract = {
-        baseline: "8fc5533b14228b4091dffb3962fc8b1ff088bd89",
-        head: "221411b880189df02404e9957591147142423aa2",
-        harness: "20a398dcaea3e94e49b886315221cd0a1c562832",
-        examples: "0cc0bc74682cd1a7b741232f07f46fe6f67c1cbc",
-        lock: "7a306a1baaea4c1374674a56ffe6381e502915fd32670a9cd66814ce5fe114b1",
-        sha256: "bvqiNpaxF0jivbi8SZBjuQ2/qU4wXlT+j22AhO6ywHU=",
-        crc32: "125fb916",
+    const summaries = {
+        baseline: makeCampaignFixture({
+            variant: "baseline",
+            contract: CAMPAIGN_FIXTURE_CONTRACT,
+            baselineCarrierCount,
+            baselineWriterCarrierCount,
+            baselineReaderCarrierCount,
+        }),
+        head: makeCampaignFixture({
+            variant: "head",
+            contract: CAMPAIGN_FIXTURE_CONTRACT,
+        }),
     };
-    fs.writeFileSync(
-        path.join(root, "1-baseline-summary.json"),
-        JSON.stringify(makeCampaignFixture({ variant: "baseline", contract }))
-    );
-    fs.writeFileSync(
-        path.join(root, "2-head-summary.json"),
-        JSON.stringify(makeCampaignFixture({ variant: "head", contract }))
-    );
-    fs.writeFileSync(path.join(root, "order.txt"), "baseline\nhead\n");
+    mutate?.(summaries);
+    const variants = order.split("-");
+    for (const [index, variant] of variants.entries()) {
+        fs.writeFileSync(
+            path.join(root, `${index + 1}-${variant}-summary.json`),
+            JSON.stringify(summaries[variant])
+        );
+    }
+    fs.writeFileSync(path.join(root, "order.txt"), `${variants.join("\n")}\n`);
     fs.writeFileSync(path.join(root, "overall-run-status.txt"), "0\n");
-    const report = buildCampaignReport({
+    return buildCampaignReport({
         RESULTS_ROOT: root,
-        PAIR_ORDER: "baseline-head",
-        BASE_CORE_COMMIT: contract.baseline,
-        HEAD_CORE_COMMIT: contract.head,
-        HARNESS_CORE_COMMIT: contract.harness,
-        EXAMPLES_COMMIT: contract.examples,
-        EXAMPLES_LOCK_SHA256: contract.lock,
-        EXPECTED_SHA256_BASE64: contract.sha256,
-        EXPECTED_CRC32_HEX: contract.crc32,
+        PAIR_ORDER: order,
+        BASE_CORE_COMMIT: CAMPAIGN_FIXTURE_CONTRACT.baseline,
+        HEAD_CORE_COMMIT: CAMPAIGN_FIXTURE_CONTRACT.head,
+        HARNESS_CORE_COMMIT: CAMPAIGN_FIXTURE_CONTRACT.harness,
+        EXAMPLES_COMMIT: CAMPAIGN_FIXTURE_CONTRACT.examples,
+        EXAMPLES_LOCK_SHA256: CAMPAIGN_FIXTURE_CONTRACT.lock,
+        EXPECTED_SHA256_BASE64: CAMPAIGN_FIXTURE_CONTRACT.sha256,
+        EXPECTED_CRC32_HEX: CAMPAIGN_FIXTURE_CONTRACT.crc32,
         FIXTURE_SEED: "peerbit-file-share-benchmark-v1",
         GITHUB_SERVER_URL: "https://github.com",
         GITHUB_REPOSITORY: "dao-xyz/peerbit-examples",
-        GITHUB_RUN_ID: "1",
+        GITHUB_RUN_ID: runId,
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_ACTOR: "peerbit-org",
+        GITHUB_TRIGGERING_ACTOR: "peerbit-org",
         GITHUB_WORKFLOW_REF:
             "dao-xyz/peerbit-examples/.github/workflows/file-share-benchmarks.yml@refs/heads/test",
         GITHUB_WORKFLOW_SHA: "a".repeat(40),
     });
+};
 
-    assert.equal(report.assessments.correctnessAndCarrierEvidence.passed, true);
+test("builds valid pair evidence while leaving aggregate acceptance unevaluated", (context) => {
+    const report = buildFixtureReport(context);
+
+    assert.equal(
+        report.assessments.correctnessAndTransportEvidence.passed,
+        true
+    );
+    assert.equal(report.assessments.performanceEvidenceValidity.passed, true);
     assert.equal(report.assessments.perPairPerformanceSafety.passed, true);
-    assert.equal(report.comparisonGatePassed, true);
+    assert.equal(report.workflowGatePassed, true);
     assert.equal(report.assessments.campaignAcceptance.passed, null);
     assert.equal(
         report.assessments.campaignAcceptance.evaluatedBySingleRun,
         false
     );
     assert.equal(
-        report.assessments.correctnessAndCarrierEvidence
+        report.assessments.baselineDuplicateCarrierCondition.observed,
+        true
+    );
+    assert.equal(report.assessments.pruningBenefitEvidence.passed, true);
+    assert.equal(
+        report.assessments.correctnessAndTransportEvidence
             .comparativeCarrierTotals.writer.headOverBaseline,
         0.5
     );
+});
+
+test("keeps a safe single-carrier baseline correct and benefit unevaluated", (context) => {
+    const report = buildFixtureReport(context, { baselineCarrierCount: 1 });
+
+    assert.equal(
+        report.assessments.correctnessAndTransportEvidence.passed,
+        true
+    );
+    assert.equal(report.workflowGatePassed, true);
+    assert.equal(
+        report.assessments.baselineDuplicateCarrierCondition.observed,
+        false
+    );
+    assert.deepEqual(report.assessments.pruningBenefitEvidence, {
+        passed: null,
+        evaluated: false,
+        gatesWorkflow: false,
+        evidenceIssues: [],
+        definition:
+            "per-pair carrier-byte reduction is evaluated only when the duplicate-carrier condition is actually observed on both baseline endpoints; otherwise pruning benefit remains explicitly unevaluated",
+    });
+    assert.equal(
+        report.assessments.correctnessAndTransportEvidence
+            .comparativeCarrierTotals.writer.passed,
+        null
+    );
+});
+
+test("rejects a post-read reader promotion from the observer cohort", (context) => {
+    const report = buildFixtureReport(context, {
+        mutate: ({ baseline }) => {
+            const locality = baseline.results[0].readerLocalityControl;
+            locality.readerTopologyAfterTimedRead.selfInReplicatorSet = true;
+            locality.readerTopologyAfterTimedRead.replicatorCount = 2;
+            locality.readerTopologyAfterTimedRead.replicatorHashes = [
+                "reader-hash",
+                "writer-hash",
+            ].sort();
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.correctnessIssues.includes(
+            "post-read-writer-only-singleton"
+        )
+    );
+});
+
+test("rejects terminal observer snapshots without the required stable spacing", (context) => {
+    const report = buildFixtureReport(context, {
+        mutate: ({ baseline }) => {
+            const observations =
+                baseline.results[0].readerLocalityControl
+                    .terminalTopologyObservations;
+            observations[1].capturedAt = observations[0].capturedAt + 99;
+        },
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.ok(
+        report.baseline.correctnessIssues.includes(
+            "terminal-topology-chronology"
+        )
+    );
+});
+
+test("fails inconsistent endpoint transport while leaving benefit unevaluated", (context) => {
+    const report = buildFixtureReport(context, {
+        baselineWriterCarrierCount: 2,
+        baselineReaderCarrierCount: 1,
+    });
+
+    assert.equal(report.workflowGatePassed, false);
+    assert.equal(
+        report.assessments.baselineDuplicateCarrierCondition
+            .endpointClassificationConsistent,
+        false
+    );
+    assert.equal(report.assessments.pruningBenefitEvidence.passed, null);
+    assert.ok(
+        report.benefitIssues.includes(
+            "baseline-duplicate-carrier-condition-endpoint-mismatch"
+        )
+    );
+});
+
+test("combines opposite orders and removes a noisy single-order timing effect", (context) => {
+    const baselineHead = buildFixtureReport(context, {
+        order: "baseline-head",
+        runId: "1",
+        baselineCarrierCount: 1,
+    });
+    const headBaseline = buildFixtureReport(context, {
+        order: "head-baseline",
+        runId: "2",
+        baselineCarrierCount: 1,
+    });
+    baselineHead.head.metrics.libraryStreamWallMs = 112;
+    baselineHead.baseline.metrics.libraryStreamWallMs = 100;
+    baselineHead.head.metrics.secondHalfMs = 112;
+    baselineHead.baseline.metrics.secondHalfMs = 100;
+    headBaseline.head.metrics.libraryStreamWallMs = 96;
+    headBaseline.baseline.metrics.libraryStreamWallMs = 100;
+    headBaseline.head.metrics.secondHalfMs = 96;
+    headBaseline.baseline.metrics.secondHalfMs = 100;
+    baselineHead.delta.libraryStreamWallMs.headOverBaseline = 99;
+    baselineHead.delta.secondHalfMs.headOverBaseline = 99;
+
+    const combined = combineCampaignReports([baselineHead, headBaseline]);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, true);
+    assert.equal(combined.assessments.regressionSafety.passed, true);
+    assert.equal(
+        combined.assessments.baselineDuplicateCarrierCondition.observedInBoth,
+        false
+    );
+    assert.equal(combined.assessments.pruningBenefit.passed, null);
+    assert.equal(combined.assessments.campaignAcceptance.passed, true);
+    assert.equal(combined.workflowGatePassed, true);
+    assert.ok(combined.aggregateRatios.libraryStreamWallHeadOverBaseline < 1.1);
+});
+
+test("combiner fails closed on same orders, contracts, URLs, and raw evidence", (context) => {
+    const first = buildFixtureReport(context, {
+        order: "baseline-head",
+        runId: "1",
+    });
+    const second = buildFixtureReport(context, {
+        order: "baseline-head",
+        runId: "1",
+    });
+    second.campaignContract = {
+        ...second.campaignContract,
+        headCoreCommit: "f".repeat(40),
+    };
+    second.head.performanceIssues.push("missing-memory-evidence");
+    delete second.head.metrics.combinedGrowthOverFile;
+
+    const combined = combineCampaignReports([first, second]);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, false);
+    assert.equal(combined.workflowGatePassed, false);
+    assert.equal(combined.assessments.regressionSafety.passed, null);
+    assert.ok(combined.validationIssues.includes("opposite-pair-orders"));
+    assert.ok(combined.validationIssues.includes("distinct-workflow-runs"));
+    assert.ok(
+        combined.validationIssues.includes("identical-campaign-contract")
+    );
+    assert.ok(combined.validationIssues.includes("pair-2-raw-evidence-issues"));
+    assert.ok(
+        combined.validationIssues.includes("pair-2-raw-performance-metrics")
+    );
+});
+
+test("combiner evaluates and passes pruning benefit only when both baselines duplicate", (context) => {
+    const reports = [
+        buildFixtureReport(context, {
+            order: "baseline-head",
+            runId: "1",
+        }),
+        buildFixtureReport(context, {
+            order: "head-baseline",
+            runId: "2",
+        }),
+    ];
+
+    const combined = combineCampaignReports(reports);
+
+    assert.equal(
+        combined.assessments.baselineDuplicateCarrierCondition.observedInBoth,
+        true
+    );
+    assert.equal(combined.assessments.pruningBenefit.evaluated, true);
+    assert.equal(combined.assessments.pruningBenefit.passed, true);
+    assert.equal(combined.workflowGatePassed, true);
+});
+
+test("combiner leaves benefit unevaluated when only one order duplicates", (context) => {
+    const reports = [
+        buildFixtureReport(context, {
+            order: "baseline-head",
+            runId: "1",
+        }),
+        buildFixtureReport(context, {
+            order: "head-baseline",
+            runId: "2",
+            baselineCarrierCount: 1,
+        }),
+    ];
+
+    const combined = combineCampaignReports(reports);
+
+    assert.equal(combined.assessments.evidenceValidity.passed, true);
+    assert.equal(
+        combined.assessments.baselineDuplicateCarrierCondition.observedInBoth,
+        false
+    );
+    assert.equal(combined.assessments.pruningBenefit.evaluated, false);
+    assert.equal(combined.assessments.pruningBenefit.passed, null);
+    assert.equal(combined.workflowGatePassed, true);
+});
+
+test("combiner rejects an aggregate regression and an observed failed benefit", (context) => {
+    const reports = [
+        buildFixtureReport(context, {
+            order: "baseline-head",
+            runId: "1",
+        }),
+        buildFixtureReport(context, {
+            order: "head-baseline",
+            runId: "2",
+        }),
+    ];
+    for (const report of reports) {
+        report.head.metrics.libraryStreamWallMs = 111;
+        report.baseline.metrics.libraryStreamWallMs = 100;
+        report.head.metrics.secondHalfMs = 111;
+        report.baseline.metrics.secondHalfMs = 100;
+    }
+
+    const combined = combineCampaignReports(reports);
+
+    assert.equal(combined.assessments.regressionSafety.passed, false);
+    assert.equal(combined.assessments.pruningBenefit.passed, false);
+    assert.equal(combined.assessments.campaignAcceptance.passed, false);
+    assert.equal(combined.workflowGatePassed, false);
 });
