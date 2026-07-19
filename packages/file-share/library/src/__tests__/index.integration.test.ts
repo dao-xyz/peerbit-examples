@@ -3480,6 +3480,7 @@ describe("index", () => {
 
         it("keeps a persisted observer prefix out of replication across root-list refreshes", async () => {
             const writer = await peer.open(new Files());
+            const writerAddress = writer.address;
             const fileId = "persisted-observer-prefix";
             const fileName = "persisted-observer-prefix.bin";
             const chunks = Array.from(
@@ -3512,7 +3513,7 @@ describe("index", () => {
                 })
             );
 
-            const reader = await peer2.open<Files>(writer.address, {
+            let reader = await peer2.open<Files>(writerAddress, {
                 args: { replicate: false },
             });
             const writerHash = peer.identity.publicKey.hashcode();
@@ -3527,7 +3528,7 @@ describe("index", () => {
                 ).to.deep.eq([writerHash]);
             });
 
-            const file = await reader.resolveById(fileId, {
+            let file = await reader.resolveById(fileId, {
                 timeout: 10_000,
                 replicate: false,
             });
@@ -3536,6 +3537,85 @@ describe("index", () => {
             expect(await reader.countLocalChunkBlocks(file as LargeFile)).to.eq(
                 0
             );
+
+            const selectedRootHead = (file as any).__context.head as string;
+            const rootBlocks = reader.files.log.log.blocks;
+            const originalRootBlockGet = rootBlocks.get.bind(rootBlocks);
+            let releaseRootBlockFetch!: () => void;
+            let markRootBlockFetchStarted!: () => void;
+            const rootBlockFetchGate = new Promise<void>((resolve) => {
+                releaseRootBlockFetch = resolve;
+            });
+            const rootBlockFetchStarted = new Promise<void>((resolve) => {
+                markRootBlockFetchStarted = resolve;
+            });
+            (rootBlocks as any).get = async (
+                hash: string,
+                options: unknown
+            ) => {
+                if (hash === selectedRootHead) {
+                    markRootBlockFetchStarted();
+                    await rootBlockFetchGate;
+                }
+                return originalRootBlockGet(hash, options as never);
+            };
+            try {
+                const persistRoot = reader.persistFileRoot(file!, {
+                    timeout: 10_000,
+                    from: [writerHash],
+                });
+                await rootBlockFetchStarted;
+                expect(
+                    await (reader as any).shouldKeepFileEntry({
+                        hash: selectedRootHead,
+                    })
+                ).to.be.true;
+                releaseRootBlockFetch();
+                file = await persistRoot;
+            } finally {
+                releaseRootBlockFetch();
+                (rootBlocks as any).get = originalRootBlockGet;
+            }
+            const persistedRoot = await reader.files.index.get(fileId, {
+                local: true,
+                remote: false,
+            });
+            expect((persistedRoot as any)?.__context?.head).to.eq(
+                (file as any).__context.head
+            );
+            const persistedRootHead = (file as any).__context.head as string;
+            await reader.files.log.log.blocks.rm(persistedRootHead);
+            expect(await reader.files.log.log.blocks.has(persistedRootHead)).to
+                .be.false;
+            file = await reader.persistFileRoot(file, {
+                timeout: 10_000,
+                from: [writerHash],
+            });
+            expect(await reader.files.log.log.blocks.has(persistedRootHead)).to
+                .be.true;
+            // Let any prune requested while the root was being indexed settle.
+            await delay(1_200);
+            expect(await reader.files.log.log.blocks.has(persistedRootHead)).to
+                .be.true;
+            expect(
+                (
+                    await reader.files.index.get(fileId, {
+                        local: true,
+                        remote: false,
+                    })
+                )?.id
+            ).to.eq(fileId);
+            expect(
+                await reader.files.log.getMyReplicationSegments()
+            ).to.have.length(0);
+            await waitForResolved(async () => {
+                expect(
+                    [...(await writer.files.log.getReplicators())].sort()
+                ).to.deep.eq([writerHash]);
+                expect(
+                    [...(await reader.files.log.getReplicators())].sort()
+                ).to.deep.eq([writerHash]);
+            });
 
             reader.persistChunkReads = true;
             const transferId = "persisted-observer-prefix-preload";
@@ -3585,6 +3665,31 @@ describe("index", () => {
             expect(writerReplicators).to.deep.eq([writerHash]);
             expect(readerReplicators).to.deep.eq([writerHash]);
             expect(readerReplicators).not.to.include(readerHash);
+            expect(
+                await reader.files.log.getMyReplicationSegments()
+            ).to.have.length(0);
+
+            await writer.close();
+            await reader.close();
+            reader = await peer2.open<Files>(writerAddress, {
+                args: { replicate: false },
+            });
+            await delay(1_200);
+            expect(
+                await reader.files.log.getMyReplicationSegments()
+            ).to.have.length(0);
+            expect(await reader.files.log.log.blocks.has(persistedRootHead)).to
+                .be.true;
+            const offlineRoots = await reader.list({ replicate: false });
+            expect(offlineRoots.some((candidate) => candidate.id === fileId)).to
+                .be.true;
+            const offlineRoot = await reader.resolveById(fileId, {
+                replicate: false,
+            });
+            expect(isLargeFileLike(offlineRoot)).to.be.true;
+            expect((offlineRoot as any).__context.head).to.eq(
+                (file as any).__context.head
+            );
         });
 
         it("persists batched manifest-head reads for an offline local reread", async () => {

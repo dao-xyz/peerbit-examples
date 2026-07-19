@@ -5594,6 +5594,7 @@ export class Files extends Program<Args> {
     private retainedEntryHeadDocumentIds = new Map<string, Set<string>>();
     private unscopedRetainedChunkEntryHeads = new Set<string>();
     private pendingAuthoredDocumentIds = new Map<string, number>();
+    private pendingPersistedRootHeads = new Map<string, number>();
     private activeFileChangeSignals = new Set<FileChangeSignal>();
     private fileMutationTails = new Map<string, Promise<void>>();
     private pendingLargeFileDeletions = new Map<string, LargeFileValue>();
@@ -6482,6 +6483,7 @@ export class Files extends Program<Args> {
         this.retainedChunkIds ??= new Set();
         this.retainedLargeFileChunkCounts ??= new Map();
         this.retainedChunkEntryHeads ??= new Set();
+        this.pendingPersistedRootHeads ??= new Map();
         const isSignedBySelf = (
             signatures:
                 | { publicKey?: { equals?: (key: unknown) => boolean } }[]
@@ -6491,6 +6493,9 @@ export class Files extends Program<Args> {
                 signature.publicKey?.equals?.(this.node.identity.publicKey)
             ) === true;
         const hash = getEntryHash(entryLike);
+        if (hash && (this.pendingPersistedRootHeads.get(hash) ?? 0) > 0) {
+            return true;
+        }
         if (hash && this.retainedChunkEntryHeads.has(hash)) {
             const status = await this.retainedEntryHeadStatus(hash);
             if (status === "current" || status === "unknown") {
@@ -7915,6 +7920,151 @@ export class Files extends Program<Args> {
         });
     }
 
+    /**
+     * Persist one already-resolved root document without taking on a network
+     * replication range. A regular remote query with `replicate: true` joins
+     * the result as a replicator; for a durable observer download that can
+     * start an unrelated range catch-up while the requested file is streaming.
+     *
+     * The exact signed entry is fetched into the local block store and then
+     * joined with `replicate: false`, which makes the root discoverable after a
+     * restart while leaving the reader's replication role unchanged.
+     */
+    async persistFileRoot(
+        file: AbstractFile,
+        properties?: {
+            timeout?: number;
+            from?: string[];
+        }
+    ): Promise<AbstractFile> {
+        if (file.parentId != null) {
+            throw new Error("Only root files can be persisted as bookmarks");
+        }
+        const head = getContextHead(file);
+        if (!head) {
+            throw new Error(
+                `Cannot persist file root '${file.id}' without an exact entry head`
+            );
+        }
+
+        this.pendingPersistedRootHeads ??= new Map();
+        this.pendingPersistedRootHeads.set(
+            head,
+            (this.pendingPersistedRootHeads.get(head) ?? 0) + 1
+        );
+        try {
+            const blocks = this.files.log.log.blocks;
+            const local = await this.files.index.get(file.id, {
+                local: true,
+                remote: false,
+            });
+            if (
+                local instanceof AbstractFile &&
+                getContextHead(local) === head &&
+                this.isExactFileVersion(local, file) &&
+                (await blocks.has(head))
+            ) {
+                this.retainResolvedChunk(local, true);
+                this.retainFileRead(local);
+                return local;
+            }
+
+            const timeout = properties?.timeout ?? 10_000;
+            const from = properties?.from ?? (await this.getReadPeerHints());
+            const entryBytes = await blocks.get(head, {
+                remote: {
+                    timeout,
+                    replicate: true,
+                    from,
+                    priority: FOREGROUND_READ_MESSAGE_PRIORITY,
+                },
+            });
+            if (!entryBytes) {
+                throw new Error(`Failed to resolve file root entry '${head}'`);
+            }
+            const storedEntryHead = await blocks.put(entryBytes);
+            if (storedEntryHead !== head || !(await blocks.has(head))) {
+                throw new Error(
+                    `File root entry block '${head}' has a wrong hash`
+                );
+            }
+            const entry = await this.files.log.log.get(head, {
+                remote: false,
+            });
+            if (!entry) {
+                throw new Error(`Failed to decode file root entry '${head}'`);
+            }
+            if (entry.hash !== head) {
+                throw new Error(
+                    `Resolved file root entry '${head}' has a wrong hash`
+                );
+            }
+
+            const operation = await entry.getPayloadValue();
+            if (!isPutOperation(operation)) {
+                throw new Error(
+                    `File root entry '${head}' is not a put operation`
+                );
+            }
+            const decoded = this.files.index.valueEncoding.decoder(
+                operation.data
+            );
+            if (
+                !(decoded instanceof AbstractFile) ||
+                decoded.parentId != null ||
+                !this.isExactFileVersion(decoded, file)
+            ) {
+                throw new Error(
+                    `File root entry '${head}' does not match '${file.id}'`
+                );
+            }
+
+            const ensureEntryBlock = async () => {
+                if (await blocks.has(head)) {
+                    return;
+                }
+                // Recompute the CID from the exact fetched bytes instead of
+                // using putKnown or reserializing a reconstructed Entry.
+                const storedHead = await blocks.put(entryBytes);
+                if (storedHead !== head || !(await blocks.has(head))) {
+                    throw new Error(
+                        `Failed to persist file root entry block '${head}'`
+                    );
+                }
+            };
+            await ensureEntryBlock();
+            await this.files.log.join([entry], {
+                timeout,
+                replicate: false,
+                verifySignatures: true,
+            });
+            const persisted = await this.files.index.get(file.id, {
+                local: true,
+                remote: false,
+            });
+            if (
+                !(persisted instanceof AbstractFile) ||
+                getContextHead(persisted) !== head ||
+                !this.isExactFileVersion(persisted, file)
+            ) {
+                throw new Error(
+                    `Failed to persist exact file root '${file.id}'`
+                );
+            }
+            await ensureEntryBlock();
+            this.retainResolvedChunk(persisted, true);
+            this.retainFileRead(persisted);
+            return persisted;
+        } finally {
+            const pending = (this.pendingPersistedRootHeads.get(head) ?? 1) - 1;
+            if (pending > 0) {
+                this.pendingPersistedRootHeads.set(head, pending);
+            } else {
+                this.pendingPersistedRootHeads.delete(head);
+            }
+        }
+    }
+
     private withFileMutation<T>(id: string, operation: () => Promise<T>) {
         this.fileMutationTails ??= new Map();
         const previous = this.fileMutationTails.get(id) ?? Promise.resolve();
@@ -8174,6 +8324,7 @@ export class Files extends Program<Args> {
         this.retainedEntryHeadDocumentIds?.clear();
         this.unscopedRetainedChunkEntryHeads?.clear();
         this.pendingAuthoredDocumentIds?.clear();
+        this.pendingPersistedRootHeads?.clear();
         this.fileMutationTails?.clear();
         this.pendingLargeFileDeletions?.clear();
     }
