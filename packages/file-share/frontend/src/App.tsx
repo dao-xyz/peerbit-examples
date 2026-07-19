@@ -15,6 +15,10 @@ import {
     type PeerDial,
     type PeerHintSource,
 } from "./app-connection";
+import {
+    getFileShareBenchmarkStorageMode,
+    type FileShareBenchmarkStorageMode,
+} from "./benchmark-storage";
 /* import { enable } from "@libp2p/logger";
 enable("libp2p:*"); */
 /* import { logger } from "@peerbit/logger";
@@ -31,6 +35,7 @@ type AppConnectionState = "pending" | "ready" | "ready-local" | "failed";
 
 type AppDiagnostics = {
     mountedAt: number;
+    benchmarkStorageMode: FileShareBenchmarkStorageMode | null;
     peersProvided: boolean;
     peerHintSource: PeerHintSource;
     peerAddressCount: number;
@@ -62,9 +67,11 @@ type AppDiagnostics = {
 const createAppDiagnostics = (
     peers: string[] | undefined,
     peerHintSource: PeerHintSource,
-    connectionState: AppDiagnostics["connectionState"]
+    connectionState: AppDiagnostics["connectionState"],
+    benchmarkStorageMode: FileShareBenchmarkStorageMode | null
 ): AppDiagnostics => ({
     mountedAt: Date.now(),
+    benchmarkStorageMode,
     peersProvided: peers !== undefined,
     peerHintSource,
     peerAddressCount: peers?.length ?? 0,
@@ -300,6 +307,10 @@ const PeerOverride = ({
 };
 
 export const App = () => {
+    const benchmarkStorageMode = useMemo(
+        () => getFileShareBenchmarkStorageMode(),
+        []
+    );
     const peerConfiguration = useMemo(
         () => getPeerAddressConfiguration(window.location.href),
         []
@@ -313,8 +324,14 @@ export const App = () => {
         peers !== undefined && peers.length > 0 ? "pending" : "ready"
     );
     const diagnosticsRef = useRef(
-        createAppDiagnostics(peers, peerConfiguration.source, connectionState)
+        createAppDiagnostics(
+            peers,
+            peerConfiguration.source,
+            connectionState,
+            benchmarkStorageMode
+        )
     );
+    diagnosticsRef.current.benchmarkStorageMode = benchmarkStorageMode;
     diagnosticsRef.current.connectionState = connectionState;
     diagnosticsRef.current.peersProvided = peers !== undefined;
     diagnosticsRef.current.peerHintSource = peerConfiguration.source;
@@ -352,6 +369,9 @@ export const App = () => {
     const peerProviderConfig = useMemo(
         () => ({
             runtime: "node" as const,
+            ...(benchmarkStorageMode == null
+                ? {}
+                : { inMemory: benchmarkStorageMode === "memory" }),
             network:
                 peers !== undefined
                     ? { bootstrap: [] }
@@ -363,7 +383,7 @@ export const App = () => {
                     ? true
                     : ("in-flight" as const),
         }),
-        [peers]
+        [benchmarkStorageMode, peers]
     );
 
     return (

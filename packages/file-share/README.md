@@ -3,9 +3,11 @@
 An example how one can use a Document store to store files.
 
 ## Library
+
 In the library folder you can find all code that is handling the file data.
 
-## Frontend 
+## Frontend
+
 <img src="./demo-frontend.gif" width="600" />
 
 In the frontend folder you can find a React application using the library as a dependency.
@@ -35,6 +37,16 @@ storage is an estimate (and includes the OPFS output for the `opfs` sink), while
 renderer RSS cannot be assigned reliably to one page; the result schema labels
 both limitations explicitly.
 
+Benchmark runners can select the Peerbit storage cohort before navigation by
+setting `window.__peerbitFileShareBenchmarkStorageMode` to `memory` or `opfs`
+with a Playwright init script. `memory` forces an ephemeral Peerbit backend;
+`opfs` uses the normal persistent-browser path. The hook is intentionally not a
+URL option, unsupported values stop app initialization, and an absent hook
+leaves normal app behavior unchanged. Storage snapshots report the requested
+mode, whether Peerbit configured a directory (without recording its path), and
+the public persistence status of browser storage, Peerbit storage, blocks, and
+the indexer.
+
 For a local focused run after building `@peerbit/please-lib`:
 
 ```sh
@@ -53,38 +65,38 @@ There is a CLI application inside [./cli](./cli), that allows you to do the basi
 
 By default the CLI stores its Peerbit state in `~/peerbit-file-share`, so uploaded files can be resumed from a persistent local directory. Pass `--directory null` if you want to run it in ephemeral mode instead.
 
-Install from remote: 
+Install from remote:
 
 ```sh
 npm install @peerbit/please
 ```
 
-Now you can do 
+Now you can do
 
 ```sh
-please put FILE 
+please put FILE
 ```
 
 Keep the `please put ...` process running while you want to seed the file.
 
-and 
+and
 
 ```sh
 please get HASH [OPTIONAL_SAVE_PATH]
 ```
 
-e.g. 
+e.g.
 
 ```sh
-please put test.txt 
+please put test.txt
 ```
 
 ```sh
 please get HASH ./some-folder
 ```
 
-
 ### Run CLI locally
+
 To run it locally:
 
 First go to the root folder of the examples repo and build it
@@ -93,9 +105,9 @@ First go to the root folder of the examples repo and build it
 pnpm build
 ```
 
-Then go back to the [./cli](./cli) folder and now you can do: 
+Then go back to the [./cli](./cli) folder and now you can do:
 
-```node  ./cli/lib/esm/bin.js``` instead of ```please``` to invoke the cli. 
+`node  ./cli/lib/esm/bin.js` instead of `please` to invoke the cli.
 
 You can dial a local peer by passing its address with `--peer`.
 The older `--bootstrap` and `--relay` flags are still accepted as aliases, but the CLI now dials the peer directly and lets Peerbit discover shard roots automatically.

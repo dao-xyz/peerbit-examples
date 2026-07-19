@@ -78,6 +78,10 @@ import {
     type BrowserFileWriter,
 } from "./download-sink";
 import { getPeerConnectionDiagnostics } from "./connection-diagnostics";
+import {
+    getFileShareBenchmarkStorageBackendEvidence,
+    type FileShareBenchmarkStorageMode,
+} from "./benchmark-storage";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -1121,21 +1125,36 @@ export const Drop = () => {
             getStorageSnapshot: async () => {
                 const activeProgram =
                     program && !program.closed ? program : undefined;
-                const [peerbitLogUsage, originStorageEstimate] =
-                    await Promise.allSettled([
-                        activeProgram
-                            ? activeProgram.files.log.getMemoryUsage()
-                            : Promise.reject(
-                                  new Error("File-share program is not ready")
-                              ),
-                        navigator.storage?.estimate
-                            ? navigator.storage.estimate()
-                            : Promise.reject(
-                                  new Error(
-                                      "navigator.storage.estimate is unavailable"
-                                  )
-                              ),
-                    ]);
+                const appDiagnostics = (
+                    window as Window & {
+                        __peerbitFileShareAppDiagnostics?: () => {
+                            benchmarkStorageMode?: FileShareBenchmarkStorageMode | null;
+                        };
+                    }
+                ).__peerbitFileShareAppDiagnostics?.();
+                const [
+                    peerbitLogUsage,
+                    originStorageEstimate,
+                    backendEvidence,
+                ] = await Promise.allSettled([
+                    activeProgram
+                        ? activeProgram.files.log.getMemoryUsage()
+                        : Promise.reject(
+                              new Error("File-share program is not ready")
+                          ),
+                    navigator.storage?.estimate
+                        ? navigator.storage.estimate()
+                        : Promise.reject(
+                              new Error(
+                                  "navigator.storage.estimate is unavailable"
+                              )
+                          ),
+                    getFileShareBenchmarkStorageBackendEvidence({
+                        peer,
+                        requestedMode:
+                            appDiagnostics?.benchmarkStorageMode ?? null,
+                    }),
+                ]);
                 const estimate =
                     originStorageEstimate.status === "fulfilled"
                         ? (originStorageEstimate.value as StorageEstimate & {
@@ -1144,9 +1163,51 @@ export const Drop = () => {
                         : undefined;
                 const errorMessage = (error: unknown) =>
                     error instanceof Error ? error.message : String(error);
+                const boundedBackendError =
+                    backendEvidence.status === "rejected"
+                        ? errorMessage(backendEvidence.reason).slice(
+                              0,
+                              BENCHMARK_RUNTIME_SNAPSHOT_LIMITS.maxStringLength
+                          )
+                        : null;
+                const unavailablePersistenceEvidence = (api: string) => ({
+                    api,
+                    available: false,
+                    persisted: null,
+                    error: boundedBackendError,
+                });
                 return {
                     capturedAt: Date.now(),
                     origin: window.location.origin,
+                    backend:
+                        backendEvidence.status === "fulfilled"
+                            ? backendEvidence.value
+                            : {
+                                  requestedMode:
+                                      appDiagnostics?.benchmarkStorageMode ??
+                                      null,
+                                  directoryConfigured: null,
+                                  directoryConfigurationError:
+                                      boundedBackendError,
+                                  persistence: {
+                                      navigatorStorage:
+                                          unavailablePersistenceEvidence(
+                                              "navigator.storage.persisted"
+                                          ),
+                                      peerStorage:
+                                          unavailablePersistenceEvidence(
+                                              "peer.storage.persisted"
+                                          ),
+                                      peerBlocks:
+                                          unavailablePersistenceEvidence(
+                                              "peer.services.blocks.persisted"
+                                          ),
+                                      peerIndexer:
+                                          unavailablePersistenceEvidence(
+                                              "peer.indexer.persisted"
+                                          ),
+                                  },
+                              },
                     peerbitLog: {
                         api: "SharedLog.getMemoryUsage",
                         scope: "file-share-log-logical-usage",
