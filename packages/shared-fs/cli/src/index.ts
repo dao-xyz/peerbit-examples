@@ -26,6 +26,8 @@ import {
 } from "./native-adapter.js";
 
 const DEFAULT_DIRECTORY_NAME = "peerbit-shared-fs";
+const DEFAULT_ADDRESS_RESOLVE_TIMEOUT_MS = 60_000;
+const DEFAULT_ADDRESS_RESOLVE_RETRY_INTERVAL_MS = 2_000;
 const CLI_REPLICATION_ARGS = {
     replicate: {
         limits: {
@@ -42,6 +44,20 @@ type CliProgramArgs =
     | {
           replicate: false;
       };
+
+type AddressResolveRetryOptions = {
+    address?: string;
+    timeoutMs?: number;
+    retryIntervalMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    onRetry?: (event: {
+        attempt: number;
+        elapsedMs: number;
+        retryInMs: number;
+        error: Error;
+    }) => void;
+};
 
 let peerbitRejectionGuardInstalled = false;
 
@@ -87,6 +103,82 @@ const installPeerbitRejectionGuard = () => {
         }
         throw reason instanceof Error ? reason : new Error(String(reason));
     });
+};
+
+const sleep = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const normalizeDurationMs = (
+    value: number | undefined,
+    fallback: number,
+    minimum: number
+) => {
+    if (value === undefined || !Number.isFinite(value)) {
+        return fallback;
+    }
+    return Math.max(minimum, value);
+};
+
+export const isRetryableSharedFsAddressOpenError = (
+    error: unknown
+): error is Error => {
+    return (
+        error instanceof Error &&
+        (error.message.includes("Failed to load program") ||
+            error.message.includes("Failed to resolve program with address"))
+    );
+};
+
+export const openWithSharedFsAddressResolveRetry = async <T>(
+    open: () => Promise<T>,
+    options: AddressResolveRetryOptions = {}
+) => {
+    const timeoutMs = normalizeDurationMs(
+        options.timeoutMs,
+        DEFAULT_ADDRESS_RESOLVE_TIMEOUT_MS,
+        0
+    );
+    if (!options.address || timeoutMs === 0) {
+        return open();
+    }
+
+    const retryIntervalMs = normalizeDurationMs(
+        options.retryIntervalMs,
+        DEFAULT_ADDRESS_RESOLVE_RETRY_INTERVAL_MS,
+        1
+    );
+    const now = options.now ?? Date.now;
+    const wait = options.sleep ?? sleep;
+    const startedAt = now();
+    let attempt = 0;
+
+    while (true) {
+        attempt += 1;
+        try {
+            return await open();
+        } catch (error) {
+            if (!isRetryableSharedFsAddressOpenError(error)) {
+                throw error;
+            }
+
+            const elapsedMs = now() - startedAt;
+            if (elapsedMs >= timeoutMs) {
+                throw new Error(
+                    `Timed out resolving shared filesystem address after ${timeoutMs}ms`,
+                    { cause: error }
+                );
+            }
+
+            const retryInMs = Math.min(retryIntervalMs, timeoutMs - elapsedMs);
+            options.onRetry?.({
+                attempt,
+                elapsedMs,
+                retryInMs,
+                error,
+            });
+            await wait(retryInMs);
+        }
+    }
 };
 
 const resolveDirectory = (directoryArg?: string) => {
@@ -548,6 +640,18 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "string",
                         description:
                             "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER.",
+                    })
+                    .option("resolve-timeout", {
+                        type: "number",
+                        default: DEFAULT_ADDRESS_RESOLVE_TIMEOUT_MS,
+                        description:
+                            "Milliseconds to wait for a remote filesystem address to become loadable before mounting.",
+                    })
+                    .option("resolve-retry-interval", {
+                        type: "number",
+                        default: DEFAULT_ADDRESS_RESOLVE_RETRY_INTERVAL_MS,
+                        description:
+                            "Milliseconds between remote filesystem address resolve attempts.",
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
@@ -563,11 +667,26 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: argv.replicate !== false,
                     });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: argv.replicate,
-                    });
+                    const fsHandle = await openWithSharedFsAddressResolveRetry(
+                        () =>
+                            openCliFs(peerbit, {
+                                address: argv.address,
+                                machineLabel: argv.machine,
+                                replicate: argv.replicate,
+                            }),
+                        {
+                            address: argv.address,
+                            timeoutMs: argv.resolveTimeout,
+                            retryIntervalMs: argv.resolveRetryInterval,
+                            onRetry: ({ attempt, retryInMs, error }) => {
+                                console.warn(
+                                    chalk.yellow(
+                                        `Shared filesystem address is not loadable yet (${error.message}); retrying in ${retryInMs}ms, attempt ${attempt}.`
+                                    )
+                                );
+                            },
+                        }
+                    );
                     const backend = createSharedFsMountBackend(fsHandle);
                     const externalAdapter = await resolveExternalNativeAdapter(
                         argv.nativeAdapter
