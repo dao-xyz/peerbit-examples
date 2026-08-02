@@ -4,13 +4,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const appHarness = vi.hoisted(() => {
     const dial = vi.fn();
+    const bootstrap = vi.fn();
     const hasLocalProgram = vi.fn();
     return {
         providerConfigs: [] as unknown[],
         dial,
+        bootstrap,
         hasLocalProgram,
         peer: {
             dial,
+            bootstrap,
             services: { blocks: { has: hasLocalProgram } },
         },
     };
@@ -47,6 +50,7 @@ describe("App PeerProvider lifecycle", () => {
         ).__peerbitFileShareBenchmarkStorageMode;
         appHarness.providerConfigs = [];
         appHarness.dial.mockReset();
+        appHarness.bootstrap.mockReset();
         appHarness.hasLocalProgram.mockReset();
     });
 
@@ -150,6 +154,48 @@ describe("App PeerProvider lifecycle", () => {
         await act(async () => root.unmount());
     });
 
+    it("uses Peerbit bootstrap semantics for explicit bootstrap overrides", async () => {
+        window.history.replaceState(
+            null,
+            "",
+            "/?bootstrap=%2Fip4%2F127.0.0.1%2Ftcp%2F9000%2Fws%2Fp2p%2Froot,%2Fip4%2F127.0.0.1%2Ftcp%2F9001%2Fws%2Fp2p%2Foffline-root#/s/share"
+        );
+        const bootstrapResult = {
+            connectedPeerIds: ["root"],
+            failures: [
+                {
+                    peerId: "offline-root",
+                    reason: "connection refused",
+                },
+            ],
+        };
+        appHarness.bootstrap.mockResolvedValue(bootstrapResult);
+
+        const { root } = await renderApp();
+        await flushApp();
+
+        expect(appHarness.bootstrap).toHaveBeenCalledWith([
+            "/ip4/127.0.0.1/tcp/9000/ws/p2p/root",
+            "/ip4/127.0.0.1/tcp/9001/ws/p2p/offline-root",
+        ]);
+        expect(appHarness.dial).not.toHaveBeenCalled();
+        expect(getAppDiagnostics()).toMatchObject({
+            bootstrapResult,
+            connectionState: "ready",
+            dialResults: [
+                expect.objectContaining({
+                    address:
+                        "/ip4/127.0.0.1/tcp/9000/ws/p2p/root,/ip4/127.0.0.1/tcp/9001/ws/p2p/offline-root",
+                    status: "fulfilled",
+                }),
+            ],
+            peerAddressCount: 2,
+            peerHintSource: "bootstrap",
+        });
+
+        await act(async () => root.unmount());
+    });
+
     it("opens a saved local share after every direct peer hint fails", async () => {
         window.history.replaceState(
             null,
@@ -206,7 +252,9 @@ describe("App PeerProvider lifecycle", () => {
             "",
             "/?bootstrap=stale-bootstrap#/s/saved-share"
         );
-        appHarness.dial.mockRejectedValue(new Error("bootstrap unavailable"));
+        appHarness.bootstrap.mockRejectedValue(
+            new Error("bootstrap unavailable")
+        );
         appHarness.hasLocalProgram.mockResolvedValue(true);
 
         const { root } = await renderApp();

@@ -5,6 +5,7 @@ import { HashRouter } from "react-router";
 import { Footer } from "./Footer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Spinner } from "./Spinner";
+import type { BootstrapResult } from "peerbit";
 import {
     dialPeerWithTimeout,
     getLocalShareFallbackOutcome,
@@ -45,6 +46,7 @@ type AppDiagnostics = {
     dialStartedAt: number | null;
     dialFinishedAt: number | null;
     dialError: string | null;
+    bootstrapResult: BootstrapResult | null;
     localFallbackState:
         | "not-attempted"
         | "checking"
@@ -81,6 +83,7 @@ const createAppDiagnostics = (
     dialStartedAt: null,
     dialFinishedAt: null,
     dialError: null,
+    bootstrapResult: null,
     localFallbackState: "not-attempted",
     localFallbackAddress: null,
     localFallbackStartedAt: null,
@@ -140,57 +143,97 @@ const PeerOverride = ({
         let cancelled = false;
         const dialController = new AbortController();
         const startedAt = Date.now();
-        const dialResults: AppDiagnostics["dialResults"] = peers.map(
-            (address) => ({
+        const connectionTargets =
+            peerHintSource === "bootstrap" ? [peers.join(",")] : peers;
+        const dialResults: AppDiagnostics["dialResults"] =
+            connectionTargets.map((address) => ({
                 address,
                 status: "pending",
                 startedAt,
                 finishedAt: null,
-            })
-        );
+            }));
         onDiagnostics({
             peerReadyAt: startedAt,
             dialStartedAt: startedAt,
             dialFinishedAt: null,
             dialError: null,
+            bootstrapResult: null,
             dialResults,
         });
-        const dial: PeerDial = (address, options) =>
-            (peer.dial as unknown as PeerDial).call(peer, address, options);
-        const dialPromises = peers.map((address, index) =>
-            Promise.resolve()
-                .then(() =>
-                    dialPeerWithTimeout(
-                        dial,
-                        address,
-                        EXPLICIT_PEER_DIAL_TIMEOUT_MS,
-                        dialController.signal
-                    )
-                )
-                .then(() => {
-                    dialResults[index] = {
-                        ...dialResults[index],
-                        status: "fulfilled",
-                        finishedAt: Date.now(),
-                    };
-                    if (!cancelled) {
-                        onDiagnostics({ dialResults: [...dialResults] });
-                    }
-                })
-                .catch((error) => {
-                    dialResults[index] = {
-                        ...dialResults[index],
-                        status: "rejected",
-                        finishedAt: Date.now(),
-                        error: getErrorMessage(error),
-                    };
-                    if (!cancelled) {
-                        onDiagnostics({ dialResults: [...dialResults] });
-                    }
-                    throw error;
-                })
-        );
-        void Promise.allSettled(dialPromises).then(async () => {
+        const updateDialResult = (
+            index: number,
+            status: "fulfilled" | "rejected",
+            error?: unknown
+        ) => {
+            dialResults[index] = {
+                ...dialResults[index],
+                status,
+                finishedAt: Date.now(),
+                ...(status === "rejected"
+                    ? { error: getErrorMessage(error) }
+                    : {}),
+            };
+            if (!cancelled) {
+                onDiagnostics({ dialResults: [...dialResults] });
+            }
+        };
+        const connectionPromises =
+            peerHintSource === "bootstrap"
+                ? [
+                      Promise.resolve()
+                          .then(() => peer.bootstrap(peers))
+                          .then((bootstrapResult) => {
+                              const normalizedBootstrapResult: BootstrapResult =
+                                  bootstrapResult
+                                      ? {
+                                            connectedPeerIds:
+                                                bootstrapResult.connectedPeerIds ??
+                                                [],
+                                            failures:
+                                                bootstrapResult.failures ?? [],
+                                        }
+                                      : {
+                                            connectedPeerIds: [],
+                                            failures: [],
+                                        };
+                              if (!cancelled) {
+                                  onDiagnostics({
+                                      bootstrapResult:
+                                          normalizedBootstrapResult,
+                                  });
+                              }
+                              updateDialResult(0, "fulfilled");
+                          })
+                          .catch((error) => {
+                              updateDialResult(0, "rejected", error);
+                              throw error;
+                          }),
+                  ]
+                : peers.map((address, index) => {
+                      const dial: PeerDial = (target, options) =>
+                          (peer.dial as unknown as PeerDial).call(
+                              peer,
+                              target,
+                              options
+                          );
+                      return Promise.resolve()
+                          .then(() =>
+                              dialPeerWithTimeout(
+                                  dial,
+                                  address,
+                                  EXPLICIT_PEER_DIAL_TIMEOUT_MS,
+                                  dialController.signal
+                              )
+                          )
+                          .then(() => {
+                              updateDialResult(index, "fulfilled");
+                          })
+                          .catch((error) => {
+                              updateDialResult(index, "rejected", error);
+                              throw error;
+                          });
+                  });
+        void Promise.allSettled(connectionPromises).then(async () => {
             if (cancelled) {
                 return;
             }
@@ -358,6 +401,18 @@ export const App = () => {
         };
         testWindow.__peerbitFileShareAppDiagnostics = () => ({
             ...diagnosticsRef.current,
+            bootstrapResult: diagnosticsRef.current.bootstrapResult
+                ? {
+                      connectedPeerIds: [
+                          ...diagnosticsRef.current.bootstrapResult
+                              .connectedPeerIds,
+                      ],
+                      failures:
+                          diagnosticsRef.current.bootstrapResult.failures.map(
+                              (failure) => ({ ...failure })
+                          ),
+                  }
+                : null,
             dialResults: diagnosticsRef.current.dialResults.map((result) => ({
                 ...result,
             })),
