@@ -50,6 +50,7 @@ export default defineConfig({
         ],
     },
     optimizeDeps: {
+        exclude: ["@peerbit/shared-log-rust"],
         include: [
             "peerbit",
             "@peerbit/crypto",
