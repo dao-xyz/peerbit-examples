@@ -40,13 +40,13 @@
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/document": "^13.1.0",
-        "@peerbit/program": "^6.0.32",
-        "@peerbit/shared-log": "^13.2.0",
-        "@peerbit/stream-interface": "6.0.11",
-        "@peerbit/trusted-network": "^6.0.45",
+        "@peerbit/document": "^13.1.17",
+        "@peerbit/program": "^6.0.41",
+        "@peerbit/shared-log": "^13.2.16",
+        "@peerbit/stream-interface": "6.0.13",
+        "@peerbit/trusted-network": "^6.0.62",
         "@stablelib/sha256": "^2.0.1",
-        "peerbit": "^5.3.0",
+        "peerbit": "^5.3.13",
         "uint8arrays": "^5.1.0",
         "uuid": "^10.0.0"
     }
