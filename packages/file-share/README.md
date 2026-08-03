@@ -28,14 +28,16 @@ File System persistence. `node-file` is retained as a diagnostic comparison
 with the older loopback HTTP sink. Compare sinks in separate workflow runs; a
 second read in the same browser would measure a warmed reader.
 
-Each result keeps click-to-sink timing but reports sink-exclusive stream time as
-the primary download throughput. It also records awaited sink-write time,
-per-source chunk and byte totals, chunk demand-wait p50/p95/p99/max and long-wait
-counts, reader and writer JS heap, Chromium RSS grouped by process role, Peerbit
-logical log usage, and `navigator.storage.estimate()` snapshots. Browser origin
-storage is an estimate (and includes the OPFS output for the `opfs` sink), while
-renderer RSS cannot be assigned reliably to one page; the result schema labels
-both limitations explicitly.
+Each result keeps click-to-sink timing and reports the fixed-sink library stream
+wall time as the primary download throughput. The sink-wait subtraction remains
+a diagnostic only because read-ahead can overlap awaited sink writes. Results
+also record awaited sink-write time, per-source chunk and byte totals, chunk
+demand-wait p50/p95/p99/max and long-wait counts, reader and writer JS heap,
+Chromium RSS grouped by process role, Peerbit logical log usage, and
+`navigator.storage.estimate()` snapshots. Browser origin storage is an estimate
+(and includes the OPFS output for the `opfs` sink), while renderer RSS cannot be
+assigned reliably to one page; the result schema labels both limitations
+explicitly.
 
 Benchmark runners can select the Peerbit storage cohort before navigation by
 setting `window.__peerbitFileShareBenchmarkStorageMode` to `memory` or `opfs`

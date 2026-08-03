@@ -155,10 +155,19 @@ test("summarizes throughput, latency, JS heap, and host RSS tails", () => {
     assert.equal(summary.p95UploadSeconds, 10);
     assert.equal(
         summary.medianDownloadMbps,
+        (toMbps(sizeBytes, 4_200) + toMbps(sizeBytes, 8_200)) / 2
+    );
+    assert.equal(summary.p05DownloadMbps, toMbps(sizeBytes, 20_200));
+    assert.equal(summary.p95DownloadSeconds, 20.2);
+    assert.equal(
+        summary.medianSinkExclusiveDownloadMbps,
         (toMbps(sizeBytes, 4_000) + toMbps(sizeBytes, 8_000)) / 2
     );
-    assert.equal(summary.p05DownloadMbps, toMbps(sizeBytes, 20_000));
-    assert.equal(summary.p95DownloadSeconds, 20);
+    assert.equal(
+        summary.p05SinkExclusiveDownloadMbps,
+        toMbps(sizeBytes, 20_000)
+    );
+    assert.equal(summary.p95SinkExclusiveDownloadSeconds, 20);
     assert.equal(summary.p95DiscoverySeconds, 3);
     assert.equal(summary.p95ReaderPeakHeapBytes, 128 * 1024 * 1024);
     assert.equal(summary.medianPeakCombinedRssBytes, 448 * 1024 * 1024);
@@ -194,7 +203,8 @@ test("accepts equivalent floating-point read-stage durations", () => {
         fileSizeMb: 256,
     });
 
-    assert.equal(summary.medianDownloadSeconds, 0.0001);
+    assert.equal(summary.medianDownloadSeconds, 0.0003);
+    assert.equal(summary.medianSinkExclusiveDownloadSeconds, 0.0001);
 });
 
 test("fails closed on inconsistent demand-wait summary evidence", () => {
@@ -654,7 +664,25 @@ test("requires the exact run file set and writes machine and human summaries", a
         );
         const markdown = await readFile(stepSummary, "utf8");
         assert.match(markdown, /p95 latency/);
+        assert.match(markdown, /fixed-sink wall time/);
+        assert.match(markdown, /diagnostic only/);
         assert.match(markdown, /Host peak combined RSS/);
+
+        const primaryDownloadMbps = toMbps(256 * 1024 * 1024, 2_000);
+        const sinkExclusiveDownloadMbps = toMbps(256 * 1024 * 1024, 1_800);
+        assert.throws(
+            () =>
+                runBenchmarkSummary({
+                    environment: {
+                        ...environment,
+                        BENCH_MIN_DOWNLOAD_MBPS: String(
+                            (primaryDownloadMbps + sinkExclusiveDownloadMbps) /
+                                2
+                        ),
+                    },
+                }),
+            /Median download throughput .* is below threshold/
+        );
 
         await writeFile(
             path.join(directory, "run-3.json"),
