@@ -26,7 +26,7 @@
         "access": "public"
     },
     "engines": {
-        "node": ">=16.15.1"
+        "node": ">=22"
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
@@ -35,13 +35,13 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "3.1.14",
+        "@peerbit/test-utils": "3.1.17",
         "typescript": "^5.6.3"
     },
     "dependencies": {
         "@peerbit/please-lib": "workspace:*",
         "chalk": "^5.3.0",
-        "peerbit": "^5.3.14",
+        "peerbit": "^5.3.17",
         "yargs": "^17.7.2"
     }
 }
