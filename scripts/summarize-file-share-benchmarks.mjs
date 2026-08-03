@@ -149,6 +149,74 @@ const requireMatchingResultNumber = (value, expected, label) => {
 
 const throughputMbps = (bytes, durationMs) => (bytes * 8) / (durationMs * 1000);
 
+const requireReceiverAvailableProgressRatios = (
+    readTransfer,
+    expectedSizeBytes,
+    libraryStreamWallMs,
+    label
+) => {
+    const progress = readTransfer.receiverProgress?.available;
+    if (
+        progress?.source !== "chunkMaterializeFinishedAt" ||
+        !Array.isArray(progress.milestones) ||
+        progress.milestones.length !== 21 ||
+        progress.summary?.windowSizePercent !== 5
+    ) {
+        throw new Error(
+            `${label} did not provide receiver-available 0/50/100 half-ratio evidence`
+        );
+    }
+    const [start, half, end] = [0, 10, 20].map((index) => {
+        const milestone = progress.milestones[index];
+        const percent = index * 5;
+        if (
+            milestone?.percent !== percent ||
+            milestone?.targetBytes !==
+                Math.ceil((expectedSizeBytes * percent) / 100)
+        ) {
+            throw new Error(
+                `${label} receiver-available ${percent}% milestone did not match its exact byte target`
+            );
+        }
+        return {
+            targetBytes: milestone.targetBytes,
+            elapsedMs: requireResultNonNegativeSafeInteger(
+                milestone.elapsedMs,
+                `${label} receiver-available ${percent}% elapsed time`
+            ),
+        };
+    });
+    const firstHalfBytes = half.targetBytes - start.targetBytes;
+    const secondHalfBytes = end.targetBytes - half.targetBytes;
+    const firstHalfDurationMs = half.elapsedMs - start.elapsedMs;
+    const secondHalfDurationMs = end.elapsedMs - half.elapsedMs;
+    if (
+        start.elapsedMs !== 0 ||
+        firstHalfDurationMs <= 0 ||
+        secondHalfDurationMs <= 0 ||
+        end.elapsedMs > libraryStreamWallMs
+    ) {
+        throw new Error(
+            `${label} contained inconsistent receiver-available half durations`
+        );
+    }
+    const expectedThroughputRatio =
+        throughputMbps(secondHalfBytes, secondHalfDurationMs) /
+        throughputMbps(firstHalfBytes, firstHalfDurationMs);
+    const expectedDurationRatio = secondHalfDurationMs / firstHalfDurationMs;
+    const throughputRatio = requireMatchingResultNumber(
+        progress.summary?.secondToFirstHalfThroughputRatio,
+        expectedThroughputRatio,
+        `${label} receiver-available second/first half throughput ratio`
+    );
+    const durationRatio = requireMatchingResultNumber(
+        progress.summary?.secondToFirstHalfDurationRatio,
+        expectedDurationRatio,
+        `${label} receiver-available second/first half duration ratio`
+    );
+    return { throughputRatio, durationRatio };
+};
+
 export const median = (values) => {
     if (values.length === 0) {
         throw new Error("median requires at least one value");
@@ -381,6 +449,13 @@ const requireResultEvidence = (
         `${label} library stream-wall duration`,
         { minimum: Number.MIN_VALUE }
     );
+    const receiverAvailableProgressRatios =
+        requireReceiverAvailableProgressRatios(
+            readTransfer,
+            expectedSizeBytes,
+            libraryStreamWallMs,
+            label
+        );
     const demandWaitSumMs = requireResultNonNegativeSafeInteger(
         readTransfer.demandWait?.sumMs,
         `${label} demand-wait sum`
@@ -542,6 +617,10 @@ const requireResultEvidence = (
         demandWaitOver1sCount,
         demandWaitOver5sCount,
         demandWaitOver10sCount,
+        receiverAvailableSecondToFirstHalfThroughputRatio:
+            receiverAvailableProgressRatios.throughputRatio,
+        receiverAvailableSecondToFirstHalfDurationRatio:
+            receiverAvailableProgressRatios.durationRatio,
         sources: readTransfer.sources,
         discoverySeconds:
             requireResultNumber(
@@ -674,6 +753,12 @@ export const summarizeBenchmarkResults = (
         totalDemandWaitOver1sCount: sum(values("demandWaitOver1sCount")),
         totalDemandWaitOver5sCount: sum(values("demandWaitOver5sCount")),
         totalDemandWaitOver10sCount: sum(values("demandWaitOver10sCount")),
+        medianReceiverAvailableSecondToFirstHalfThroughputRatio: median(
+            values("receiverAvailableSecondToFirstHalfThroughputRatio")
+        ),
+        medianReceiverAvailableSecondToFirstHalfDurationRatio: median(
+            values("receiverAvailableSecondToFirstHalfDurationRatio")
+        ),
         sources: Object.fromEntries(
             Object.entries(aggregateSources).sort(([left], [right]) =>
                 left.localeCompare(right)
@@ -740,6 +825,7 @@ export const formatBenchmarkSummary = (summary) => {
         `- Sink-wait subtraction (diagnostic only): p50 \`${summary.medianSinkExclusiveDownloadSeconds.toFixed(2)}s\` at \`${summary.medianSinkExclusiveDownloadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95SinkExclusiveDownloadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05SinkExclusiveDownloadMbps.toFixed(2)} Mbps\`; summed awaited sink writes p50 \`${summary.medianSinkWriteSeconds.toFixed(2)}s\``,
         `- Click to sink complete: p50 \`${summary.medianClickToSinkSeconds.toFixed(2)}s\` at \`${summary.medianClickToSinkMbps.toFixed(2)} Mbps\``,
         `- Chunk demand wait: p50 \`${summary.medianDemandWaitP50Ms.toFixed(0)}ms\`, p95 \`${summary.medianDemandWaitP95Ms.toFixed(0)}ms\`, p99 \`${summary.medianDemandWaitP99Ms.toFixed(0)}ms\`, max p50 \`${summary.medianDemandWaitMaxMs.toFixed(0)}ms\`; totals over 1s/5s/10s: \`${summary.totalDemandWaitOver1sCount}/${summary.totalDemandWaitOver5sCount}/${summary.totalDemandWaitOver10sCount}\``,
+        `- Receiver-available second/first half: throughput ratio p50 \`${summary.medianReceiverAvailableSecondToFirstHalfThroughputRatio.toFixed(3)}x\`; duration ratio p50 \`${summary.medianReceiverAvailableSecondToFirstHalfDurationRatio.toFixed(3)}x\``,
         `- Reader peak JS heap: p50 \`${toMiB(summary.medianReaderPeakHeapBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95ReaderPeakHeapBytes).toFixed(2)} MiB\``,
         `- Writer peak JS heap: p50 \`${toMiB(summary.medianWriterPeakHeapBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95WriterPeakHeapBytes).toFixed(2)} MiB\``,
         `- Host peak combined RSS (Chromium + Playwright Node): p50 \`${toMiB(summary.medianPeakCombinedRssBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95PeakCombinedRssBytes).toFixed(2)} MiB\``,
@@ -757,7 +843,7 @@ export const formatBenchmarkSummary = (summary) => {
 
     summary.rawResults.forEach((result, index) => {
         lines.push(
-            `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, library-stream-wall=${(Number(result.libraryStreamDurationMs) / 1000).toFixed(2)}s (${throughputMbps(Number(result.sizeBytes), Number(result.libraryStreamDurationMs)).toFixed(2)} Mbps), sink-exclusive-diagnostic=${(Number(result.streamReadExclusiveMs) / 1000).toFixed(2)}s (${Number(result.streamReadExclusiveMbps).toFixed(2)} Mbps), sink-wait=${(Number(result.sinkWriteAwaitMs) / 1000).toFixed(2)}s, click-to-sink=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s, demand-p95=${Number(result.readTransfer.demandWait.p95Ms).toFixed(0)}ms, reader/writer-peak-heap=${toMiB(Number(result.readerJsHeap.peakBytes)).toFixed(2)}/${toMiB(Number(result.writerJsHeap.peakBytes)).toFixed(2)} MiB, peak-combined-rss=${toMiB(Number(result.hostRss.peakCombinedBytes)).toFixed(2)} MiB`
+            `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, library-stream-wall=${(Number(result.libraryStreamDurationMs) / 1000).toFixed(2)}s (${throughputMbps(Number(result.sizeBytes), Number(result.libraryStreamDurationMs)).toFixed(2)} Mbps), sink-exclusive-diagnostic=${(Number(result.streamReadExclusiveMs) / 1000).toFixed(2)}s (${Number(result.streamReadExclusiveMbps).toFixed(2)} Mbps), sink-wait=${(Number(result.sinkWriteAwaitMs) / 1000).toFixed(2)}s, click-to-sink=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s, demand-p95=${Number(result.readTransfer.demandWait.p95Ms).toFixed(0)}ms, receiver-available-second-to-first-half-throughput=${Number(result.readTransfer.receiverProgress.available.summary.secondToFirstHalfThroughputRatio).toFixed(3)}x, receiver-available-second-to-first-half-duration=${Number(result.readTransfer.receiverProgress.available.summary.secondToFirstHalfDurationRatio).toFixed(3)}x, reader/writer-peak-heap=${toMiB(Number(result.readerJsHeap.peakBytes)).toFixed(2)}/${toMiB(Number(result.writerJsHeap.peakBytes)).toFixed(2)} MiB, peak-combined-rss=${toMiB(Number(result.hostRss.peakCombinedBytes)).toFixed(2)} MiB`
         );
     });
     return `${lines.join("\n")}\n`;

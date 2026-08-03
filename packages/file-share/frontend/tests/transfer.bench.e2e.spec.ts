@@ -494,6 +494,12 @@ type HostRssMeasurement = {
     startNodeBytes: number | null;
     endNodeBytes: number | null;
     peakNodeBytes: number | null;
+    startNodeExternalBytes: number | null;
+    endNodeExternalBytes: number | null;
+    peakNodeExternalBytes: number | null;
+    startNodeArrayBuffersBytes: number | null;
+    endNodeArrayBuffersBytes: number | null;
+    peakNodeArrayBuffersBytes: number | null;
     peakCombinedBytes: number | null;
     startBrowserProcessCount: number | null;
     endBrowserProcessCount: number | null;
@@ -552,7 +558,7 @@ const startHostRssSampler = async (
         metric: "RSS",
         attribution: "aggregate-rss-with-chromium-process-role-groups",
         attributionLimitations:
-            "Chromium renderer RSS is grouped by process role and cannot be assigned reliably to the reader or writer page; per-page attribution uses CDP JS heap instead. RSS is not PSS or USS.",
+            "Chromium renderer RSS is grouped by process role and cannot be assigned reliably to the reader or writer page; per-page attribution uses CDP JS heap instead. RSS is not PSS or USS. Node external and arrayBuffers are non-RSS Playwright Node allocation counters, not browser backing-storage usage; arrayBuffers is included in external, so do not sum them.",
         unit: "bytes",
         sampleIntervalMs: JS_HEAP_SAMPLE_INTERVAL_MS,
         startedAt: Date.now(),
@@ -566,6 +572,12 @@ const startHostRssSampler = async (
         startNodeBytes: null,
         endNodeBytes: null,
         peakNodeBytes: null,
+        startNodeExternalBytes: null,
+        endNodeExternalBytes: null,
+        peakNodeExternalBytes: null,
+        startNodeArrayBuffersBytes: null,
+        endNodeArrayBuffersBytes: null,
+        peakNodeArrayBuffersBytes: null,
         peakCombinedBytes: null,
         startBrowserProcessCount: null,
         endBrowserProcessCount: null,
@@ -604,10 +616,13 @@ const startHostRssSampler = async (
                         )
                 ),
             ];
-            const [browserProcessBytes, nodeBytes] = await Promise.all([
+            const [browserProcessBytes, nodeMemory] = await Promise.all([
                 readProcessRssBytes(processIds),
-                Promise.resolve(process.memoryUsage().rss),
+                Promise.resolve(process.memoryUsage()),
             ]);
+            const nodeBytes = nodeMemory.rss;
+            const nodeExternalBytes = nodeMemory.external;
+            const nodeArrayBuffersBytes = nodeMemory.arrayBuffers;
             const browserRoleBytes: Record<string, number> = {};
             for (const process of processInfo) {
                 const bytes = browserProcessBytes.get(Number(process.id));
@@ -627,12 +642,16 @@ const startHostRssSampler = async (
                 measurement.firstSampleAt = capturedAt;
                 measurement.startBrowserBytes = browserBytes;
                 measurement.startNodeBytes = nodeBytes;
+                measurement.startNodeExternalBytes = nodeExternalBytes;
+                measurement.startNodeArrayBuffersBytes = nodeArrayBuffersBytes;
                 measurement.startBrowserProcessCount = browserProcessBytes.size;
                 measurement.startBrowserRoleBytes = { ...browserRoleBytes };
             }
             measurement.lastSampleAt = capturedAt;
             measurement.endBrowserBytes = browserBytes;
             measurement.endNodeBytes = nodeBytes;
+            measurement.endNodeExternalBytes = nodeExternalBytes;
+            measurement.endNodeArrayBuffersBytes = nodeArrayBuffersBytes;
             measurement.endBrowserProcessCount = browserProcessBytes.size;
             measurement.endBrowserRoleBytes = { ...browserRoleBytes };
             for (const [role, bytes] of Object.entries(browserRoleBytes)) {
@@ -648,6 +667,14 @@ const startHostRssSampler = async (
             measurement.peakNodeBytes = Math.max(
                 measurement.peakNodeBytes ?? nodeBytes,
                 nodeBytes
+            );
+            measurement.peakNodeExternalBytes = Math.max(
+                measurement.peakNodeExternalBytes ?? nodeExternalBytes,
+                nodeExternalBytes
+            );
+            measurement.peakNodeArrayBuffersBytes = Math.max(
+                measurement.peakNodeArrayBuffersBytes ?? nodeArrayBuffersBytes,
+                nodeArrayBuffersBytes
             );
             measurement.peakCombinedBytes = Math.max(
                 measurement.peakCombinedBytes ?? combinedBytes,

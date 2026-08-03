@@ -12,6 +12,32 @@ import {
 
 const toMbps = (bytes, durationMs) => (bytes * 8) / (durationMs * 1000);
 
+const createReceiverProgress = (sizeBytes) => {
+    const milestones = Array.from({ length: 21 }, (_, index) => {
+        const percent = index * 5;
+        const targetBytes = Math.ceil((sizeBytes * percent) / 100);
+        return {
+            percent,
+            targetBytes,
+            elapsedMs: percent <= 50 ? percent : 50 + (percent - 50) * 2,
+        };
+    });
+    const firstHalfBytes = milestones[10].targetBytes;
+    const secondHalfBytes = sizeBytes - firstHalfBytes;
+    return {
+        available: {
+            source: "chunkMaterializeFinishedAt",
+            milestones,
+            summary: {
+                windowSizePercent: 5,
+                secondToFirstHalfThroughputRatio:
+                    toMbps(secondHalfBytes, 100) / toMbps(firstHalfBytes, 50),
+                secondToFirstHalfDurationRatio: 2,
+            },
+        },
+    };
+};
+
 const validResult = (overrides = {}) => {
     const fileSizeMb = overrides.fileSizeMb ?? 256;
     const sizeBytes = overrides.sizeBytes ?? fileSizeMb * 1024 * 1024;
@@ -85,6 +111,7 @@ const validResult = (overrides = {}) => {
                 streamReadExclusiveMs,
                 demandWaitMs: 1_000,
             },
+            receiverProgress: createReceiverProgress(sizeBytes),
         },
         storageAttribution: {
             reader: {
@@ -172,15 +199,23 @@ test("summarizes throughput, latency, JS heap, and host RSS tails", () => {
     assert.equal(summary.p95ReaderPeakHeapBytes, 128 * 1024 * 1024);
     assert.equal(summary.medianPeakCombinedRssBytes, 448 * 1024 * 1024);
     assert.equal(summary.p95PeakCombinedRssBytes, 640 * 1024 * 1024);
+    assert.equal(
+        summary.medianReceiverAvailableSecondToFirstHalfThroughputRatio,
+        0.5
+    );
+    assert.equal(
+        summary.medianReceiverAvailableSecondToFirstHalfDurationRatio,
+        2
+    );
 });
 
 test("accepts equivalent floating-point read-stage durations", () => {
     const result = validResult({
-        downloadDurationMs: 0.3,
-        streamReadExclusiveMs: 0.1,
+        downloadDurationMs: 300.3,
+        streamReadExclusiveMs: 300.1,
         sinkWriteAwaitMs: 0.2,
     });
-    result.libraryStreamDurationMs = 0.3;
+    result.libraryStreamDurationMs = 300.3;
     result.readTransfer.demandWait = {
         ...result.readTransfer.demandWait,
         sumMs: 0,
@@ -191,7 +226,7 @@ test("accepts equivalent floating-point read-stage durations", () => {
     };
     result.readTransfer.stages = {
         ...result.readTransfer.stages,
-        libraryStreamWallMs: 0.3,
+        libraryStreamWallMs: 300.3,
         demandWaitMs: 0,
     };
 
@@ -203,8 +238,8 @@ test("accepts equivalent floating-point read-stage durations", () => {
         fileSizeMb: 256,
     });
 
-    assert.equal(summary.medianDownloadSeconds, 0.0003);
-    assert.equal(summary.medianSinkExclusiveDownloadSeconds, 0.0001);
+    assert.equal(summary.medianDownloadSeconds, 0.3003);
+    assert.equal(summary.medianSinkExclusiveDownloadSeconds, 300.1 / 1_000);
 });
 
 test("fails closed on inconsistent demand-wait summary evidence", () => {
@@ -484,6 +519,9 @@ test("fails closed on missing samples or unverifiable result evidence", () => {
                                     bytes: 6 * 1024 * 1024,
                                 },
                             },
+                            receiverProgress: createReceiverProgress(
+                                6 * 1024 * 1024
+                            ),
                         },
                     }),
                     validResult({
@@ -498,6 +536,9 @@ test("fails closed on missing samples or unverifiable result evidence", () => {
                                     bytes: 6 * 1024 * 1024,
                                 },
                             },
+                            receiverProgress: createReceiverProgress(
+                                6 * 1024 * 1024
+                            ),
                         },
                         fixture: {
                             ...validResult().fixture,
@@ -549,6 +590,23 @@ test("fails closed on missing samples or unverifiable result evidence", () => {
             ),
         /peak combined RSS must be a finite number/
     );
+    for (const ratio of [
+        "secondToFirstHalfThroughputRatio",
+        "secondToFirstHalfDurationRatio",
+    ]) {
+        const mismatchedProgressRatio = validResult();
+        mismatchedProgressRatio.readTransfer.receiverProgress.available.summary[
+            ratio
+        ] = 0.75;
+        assert.throws(
+            () =>
+                summarizeBenchmarkResults(
+                    [validResult(), mismatchedProgressRatio],
+                    options
+                ),
+            /receiver-available second\/first half .* ratio did not match exact bytes and duration/
+        );
+    }
     assert.throws(
         () =>
             summarizeBenchmarkResults(
@@ -656,17 +714,30 @@ test("requires the exact run file set and writes machine and human summaries", a
 
         const summary = runBenchmarkSummary({ environment });
         assert.equal(summary.runs, 2);
+        const writtenSummary = JSON.parse(
+            await readFile(path.join(directory, "summary.json"), "utf8")
+        );
         assert.equal(
-            JSON.parse(
-                await readFile(path.join(directory, "summary.json"), "utf8")
-            ).medianUploadMbps,
+            writtenSummary.medianUploadMbps,
             toMbps(256 * 1024 * 1024, 1_000)
+        );
+        assert.equal(
+            writtenSummary.medianReceiverAvailableSecondToFirstHalfThroughputRatio,
+            0.5
         );
         const markdown = await readFile(stepSummary, "utf8");
         assert.match(markdown, /p95 latency/);
         assert.match(markdown, /fixed-sink wall time/);
         assert.match(markdown, /diagnostic only/);
         assert.match(markdown, /Host peak combined RSS/);
+        assert.match(
+            markdown,
+            /Receiver-available second\/first half: throughput ratio p50 `0\.500x`.*duration ratio p50 `2\.000x`/
+        );
+        assert.match(
+            markdown,
+            /receiver-available-second-to-first-half-throughput=0\.500x/
+        );
 
         const primaryDownloadMbps = toMbps(256 * 1024 * 1024, 2_000);
         const sinkExclusiveDownloadMbps = toMbps(256 * 1024 * 1024, 1_800);
