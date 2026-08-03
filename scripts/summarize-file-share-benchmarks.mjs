@@ -493,10 +493,11 @@ const requireResultEvidence = (
         throw new Error(`${label} contained inconsistent read-stage durations`);
     }
     const uploadMbps = throughputMbps(expectedSizeBytes, uploadDurationMs);
-    const downloadMbps = throughputMbps(
+    const sinkExclusiveDownloadMbps = throughputMbps(
         expectedSizeBytes,
         streamReadExclusiveMs
     );
+    const downloadMbps = throughputMbps(expectedSizeBytes, libraryStreamWallMs);
     const clickToSinkMbps = throughputMbps(
         expectedSizeBytes,
         clickToSinkDurationMs
@@ -508,7 +509,7 @@ const requireResultEvidence = (
     );
     requireMatchingResultNumber(
         result.streamReadExclusiveMbps,
-        downloadMbps,
+        sinkExclusiveDownloadMbps,
         `${label} sink-exclusive stream-read Mbps`
     );
     requireMatchingResultNumber(
@@ -526,9 +527,11 @@ const requireResultEvidence = (
     return {
         uploadMbps,
         downloadMbps,
+        sinkExclusiveDownloadMbps,
         clickToSinkMbps,
         uploadSeconds: uploadDurationMs / 1000,
-        downloadSeconds: streamReadExclusiveMs / 1000,
+        downloadSeconds: libraryStreamWallMs / 1000,
+        sinkExclusiveDownloadSeconds: streamReadExclusiveMs / 1000,
         clickToSinkSeconds: clickToSinkDurationMs / 1000,
         sinkWriteSeconds: sinkWriteAwaitMs / 1000,
         demandWaitSumSeconds: demandWaitSumMs / 1000,
@@ -639,11 +642,25 @@ export const summarizeBenchmarkResults = (
         p05UploadMbps: nearestRankPercentile(values("uploadMbps"), 5),
         medianDownloadMbps: median(values("downloadMbps")),
         p05DownloadMbps: nearestRankPercentile(values("downloadMbps"), 5),
+        medianSinkExclusiveDownloadMbps: median(
+            values("sinkExclusiveDownloadMbps")
+        ),
+        p05SinkExclusiveDownloadMbps: nearestRankPercentile(
+            values("sinkExclusiveDownloadMbps"),
+            5
+        ),
         medianUploadSeconds: median(values("uploadSeconds")),
         p95UploadSeconds: nearestRankPercentile(values("uploadSeconds"), 95),
         medianDownloadSeconds: median(values("downloadSeconds")),
         p95DownloadSeconds: nearestRankPercentile(
             values("downloadSeconds"),
+            95
+        ),
+        medianSinkExclusiveDownloadSeconds: median(
+            values("sinkExclusiveDownloadSeconds")
+        ),
+        p95SinkExclusiveDownloadSeconds: nearestRankPercentile(
+            values("sinkExclusiveDownloadSeconds"),
             95
         ),
         medianClickToSinkSeconds: median(values("clickToSinkSeconds")),
@@ -719,8 +736,9 @@ export const formatBenchmarkSummary = (summary) => {
         `- Runs: \`${summary.runs}\``,
         `- Upload: p50 \`${summary.medianUploadSeconds.toFixed(2)}s\` at \`${summary.medianUploadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95UploadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05UploadMbps.toFixed(2)} Mbps\``,
         `- Discovery lag: p50 \`${summary.medianDiscoverySeconds.toFixed(2)}s\`; p95 \`${summary.p95DiscoverySeconds.toFixed(2)}s\``,
-        `- Peerbit stream read (sink waits excluded): p50 \`${summary.medianDownloadSeconds.toFixed(2)}s\` at \`${summary.medianDownloadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95DownloadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05DownloadMbps.toFixed(2)} Mbps\``,
-        `- Click to sink complete: p50 \`${summary.medianClickToSinkSeconds.toFixed(2)}s\` at \`${summary.medianClickToSinkMbps.toFixed(2)} Mbps\`; awaited sink writes p50 \`${summary.medianSinkWriteSeconds.toFixed(2)}s\``,
+        `- Peerbit library stream (fixed-sink wall time): p50 \`${summary.medianDownloadSeconds.toFixed(2)}s\` at \`${summary.medianDownloadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95DownloadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05DownloadMbps.toFixed(2)} Mbps\``,
+        `- Sink-wait subtraction (diagnostic only): p50 \`${summary.medianSinkExclusiveDownloadSeconds.toFixed(2)}s\` at \`${summary.medianSinkExclusiveDownloadMbps.toFixed(2)} Mbps\`; p95 latency \`${summary.p95SinkExclusiveDownloadSeconds.toFixed(2)}s\`, p5 throughput \`${summary.p05SinkExclusiveDownloadMbps.toFixed(2)} Mbps\`; summed awaited sink writes p50 \`${summary.medianSinkWriteSeconds.toFixed(2)}s\``,
+        `- Click to sink complete: p50 \`${summary.medianClickToSinkSeconds.toFixed(2)}s\` at \`${summary.medianClickToSinkMbps.toFixed(2)} Mbps\``,
         `- Chunk demand wait: p50 \`${summary.medianDemandWaitP50Ms.toFixed(0)}ms\`, p95 \`${summary.medianDemandWaitP95Ms.toFixed(0)}ms\`, p99 \`${summary.medianDemandWaitP99Ms.toFixed(0)}ms\`, max p50 \`${summary.medianDemandWaitMaxMs.toFixed(0)}ms\`; totals over 1s/5s/10s: \`${summary.totalDemandWaitOver1sCount}/${summary.totalDemandWaitOver5sCount}/${summary.totalDemandWaitOver10sCount}\``,
         `- Reader peak JS heap: p50 \`${toMiB(summary.medianReaderPeakHeapBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95ReaderPeakHeapBytes).toFixed(2)} MiB\``,
         `- Writer peak JS heap: p50 \`${toMiB(summary.medianWriterPeakHeapBytes).toFixed(2)} MiB\`; p95 \`${toMiB(summary.p95WriterPeakHeapBytes).toFixed(2)} MiB\``,
@@ -739,7 +757,7 @@ export const formatBenchmarkSummary = (summary) => {
 
     summary.rawResults.forEach((result, index) => {
         lines.push(
-            `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, stream-read=${(Number(result.streamReadExclusiveMs) / 1000).toFixed(2)}s (${Number(result.streamReadExclusiveMbps).toFixed(2)} Mbps), sink-wait=${(Number(result.sinkWriteAwaitMs) / 1000).toFixed(2)}s, click-to-sink=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s, demand-p95=${Number(result.readTransfer.demandWait.p95Ms).toFixed(0)}ms, reader/writer-peak-heap=${toMiB(Number(result.readerJsHeap.peakBytes)).toFixed(2)}/${toMiB(Number(result.writerJsHeap.peakBytes)).toFixed(2)} MiB, peak-combined-rss=${toMiB(Number(result.hostRss.peakCombinedBytes)).toFixed(2)} MiB`
+            `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, library-stream-wall=${(Number(result.libraryStreamDurationMs) / 1000).toFixed(2)}s (${throughputMbps(Number(result.sizeBytes), Number(result.libraryStreamDurationMs)).toFixed(2)} Mbps), sink-exclusive-diagnostic=${(Number(result.streamReadExclusiveMs) / 1000).toFixed(2)}s (${Number(result.streamReadExclusiveMbps).toFixed(2)} Mbps), sink-wait=${(Number(result.sinkWriteAwaitMs) / 1000).toFixed(2)}s, click-to-sink=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s, demand-p95=${Number(result.readTransfer.demandWait.p95Ms).toFixed(0)}ms, reader/writer-peak-heap=${toMiB(Number(result.readerJsHeap.peakBytes)).toFixed(2)}/${toMiB(Number(result.writerJsHeap.peakBytes)).toFixed(2)} MiB, peak-combined-rss=${toMiB(Number(result.hostRss.peakCombinedBytes)).toFixed(2)} MiB`
         );
     });
     return `${lines.join("\n")}\n`;
