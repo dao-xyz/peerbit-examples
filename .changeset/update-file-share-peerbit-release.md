@@ -3,4 +3,4 @@
 "@peerbit/please-lib": patch
 ---
 
-Adopt the Peerbit release containing bounded legacy heads-exchange memory fixes and the raw heads-exchange capability. Align the Vite-deduplicated runtime packages and keep one stream-interface version so direct-peer control messages are recognized correctly; raw exchange remains disabled.
+Adopt the current Peerbit runtime cohort in File Share, including bounded legacy heads-exchange memory fixes and copy-stable delivery-mode recognition. Keep the updated File Share and legacy application dependency identities isolated; raw heads exchange remains disabled.
