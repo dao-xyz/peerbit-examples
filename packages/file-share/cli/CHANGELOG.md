@@ -1,5 +1,22 @@
 # @peerbit/please
 
+## 2.0.7
+
+### Patch Changes
+
+- c167dfe: Adopt Peerbit 5.3.17 and its matching File Share runtime cohort, including bounded legacy heads-exchange memory, copy-stable delivery modes, and coalesced and cancelable automatic topic-root reconciliation. Keep the updated File Share and legacy application dependency identities isolated, require Node.js 22 for the published File Share packages, and leave raw heads exchange disabled.
+- Updated dependencies [67ac6e5]
+- Updated dependencies [0b5ce3e]
+- Updated dependencies [6e65ce9]
+- Updated dependencies [f618ab6]
+- Updated dependencies [0a9f7fa]
+- Updated dependencies [8717991]
+- Updated dependencies [a9ff1fc]
+- Updated dependencies [e96bacb]
+- Updated dependencies [282bd66]
+- Updated dependencies [c167dfe]
+    - @peerbit/please-lib@2.0.7
+
 ## 2.0.6
 
 ### Patch Changes
