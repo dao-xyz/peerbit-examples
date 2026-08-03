@@ -96,6 +96,12 @@ export type HostRssMeasurementSummary = {
     startNodeBytes: number | null;
     endNodeBytes: number | null;
     peakNodeBytes: number | null;
+    startNodeExternalBytes: number | null;
+    endNodeExternalBytes: number | null;
+    peakNodeExternalBytes: number | null;
+    startNodeArrayBuffersBytes: number | null;
+    endNodeArrayBuffersBytes: number | null;
+    peakNodeArrayBuffersBytes: number | null;
     peakCombinedBytes: number | null;
     samplingErrors: string[];
 };
@@ -124,6 +130,18 @@ export const validateHostRssMeasurement = (
         ["peak-combined", measurement.peakCombinedBytes],
     ] as const) {
         if (!isFiniteHeapByteValue(value) || value === 0) {
+            validationReasons.push(`invalid-host-rss-${name}-bytes`);
+        }
+    }
+    for (const [name, value] of [
+        ["start-node-external", measurement.startNodeExternalBytes],
+        ["end-node-external", measurement.endNodeExternalBytes],
+        ["peak-node-external", measurement.peakNodeExternalBytes],
+        ["start-node-array-buffers", measurement.startNodeArrayBuffersBytes],
+        ["end-node-array-buffers", measurement.endNodeArrayBuffersBytes],
+        ["peak-node-array-buffers", measurement.peakNodeArrayBuffersBytes],
+    ] as const) {
+        if (!isFiniteHeapByteValue(value)) {
             validationReasons.push(`invalid-host-rss-${name}-bytes`);
         }
     }
@@ -491,6 +509,69 @@ export type ContiguousPrefixMilestone = {
     elapsedMs: number;
 };
 
+/**
+ * Summarizes the exact 5%-spaced byte milestones without consulting mutable
+ * benchmark state. A throughput ratio below 1 or a duration ratio above 1
+ * means the second half was slower than the first half.
+ */
+export const summarizeFivePercentProgressWindows = (
+    milestones: readonly ContiguousPrefixMilestone[]
+) => {
+    if (milestones.length !== RECEIVER_PROGRESS_PERCENTAGES.length) {
+        throw new Error(
+            `Progress milestones must contain exactly ${RECEIVER_PROGRESS_PERCENTAGES.length} 5% samples`
+        );
+    }
+    if (
+        milestones.some(
+            (milestone, index) =>
+                milestone.percent !== RECEIVER_PROGRESS_PERCENTAGES[index]
+        )
+    ) {
+        throw new Error("Progress milestones must use exact 5% steps");
+    }
+
+    const windows = milestones.slice(1).map((end, index) => {
+        const start = milestones[index];
+        const bytes = end.targetBytes - start.targetBytes;
+        const durationMs = end.elapsedMs - start.elapsedMs;
+        return {
+            startPercent: start.percent,
+            endPercent: end.percent,
+            bytes,
+            durationMs,
+            throughputMbps:
+                bytes > 0 && durationMs > 0
+                    ? (bytes * 8) / (durationMs * 1_000)
+                    : null,
+        };
+    });
+    const firstHalfBytes = milestones[10].targetBytes;
+    const secondHalfBytes =
+        milestones[20].targetBytes - milestones[10].targetBytes;
+    const firstHalfDurationMs = milestones[10].elapsedMs;
+    const secondHalfDurationMs =
+        milestones[20].elapsedMs - milestones[10].elapsedMs;
+
+    return {
+        windowSizePercent: 5,
+        windows,
+        secondToFirstHalfThroughputRatio:
+            firstHalfBytes > 0 &&
+            secondHalfBytes > 0 &&
+            firstHalfDurationMs > 0 &&
+            secondHalfDurationMs > 0
+                ? secondHalfBytes /
+                  secondHalfDurationMs /
+                  (firstHalfBytes / firstHalfDurationMs)
+                : null,
+        secondToFirstHalfDurationRatio:
+            firstHalfDurationMs > 0
+                ? secondHalfDurationMs / firstHalfDurationMs
+                : null,
+    };
+};
+
 const PERSISTENCE_CONFIRMATION_SOURCES = new Set([
     "manifest-head-batch-local",
     "manifest-head-batch-remote",
@@ -561,6 +642,11 @@ const buildContiguousPrefixMilestones = (
         };
     });
 };
+
+const summarizeProgress = (milestones: ContiguousPrefixMilestone[]) => ({
+    milestones,
+    summary: summarizeFivePercentProgressWindows(milestones),
+});
 
 /**
  * Converts the per-chunk library diagnostics into stable benchmark evidence.
@@ -694,6 +780,40 @@ export const summarizeReadTransferDiagnostics = (
         }
     }
 
+    const receiverAvailableProgress = summarizeProgress(
+        buildContiguousPrefixMilestones(
+            chunkBytes,
+            receiverAvailableAt,
+            libraryStreamStartedAt,
+            libraryStreamFinishedAt,
+            totalBytes,
+            "chunkMaterializeFinishedAt"
+        )
+    );
+    const peerbitDurableProgress =
+        peerbitDurableAt == null
+            ? null
+            : summarizeProgress(
+                  buildContiguousPrefixMilestones(
+                      chunkBytes,
+                      peerbitDurableAt,
+                      libraryStreamStartedAt,
+                      libraryStreamFinishedAt,
+                      totalBytes,
+                      "chunkPersistenceConfirmedAt"
+                  )
+              );
+    const sinkAcceptedProgress = summarizeProgress(
+        buildContiguousPrefixMilestones(
+            chunkBytes,
+            sinkAcceptedAt,
+            libraryStreamStartedAt,
+            libraryStreamFinishedAt,
+            totalBytes,
+            "chunkWriteFinishedAt"
+        )
+    );
+
     const sourceSummary: Record<string, { chunkCount: number; bytes: number }> =
         {};
     for (const [position, index] of indices.entries()) {
@@ -751,14 +871,7 @@ export const summarizeReadTransferDiagnostics = (
                 definition:
                     "contiguous file-prefix bytes materialized and available to the receiver library",
                 source: "chunkMaterializeFinishedAt",
-                milestones: buildContiguousPrefixMilestones(
-                    chunkBytes,
-                    receiverAvailableAt,
-                    libraryStreamStartedAt,
-                    libraryStreamFinishedAt,
-                    totalBytes,
-                    "chunkMaterializeFinishedAt"
-                ),
+                ...receiverAvailableProgress,
             },
             peerbitDurable: {
                 definition:
@@ -770,17 +883,8 @@ export const summarizeReadTransferDiagnostics = (
                         ([left], [right]) => left.localeCompare(right)
                     )
                 ),
-                milestones:
-                    peerbitDurableAt == null
-                        ? null
-                        : buildContiguousPrefixMilestones(
-                              chunkBytes,
-                              peerbitDurableAt,
-                              libraryStreamStartedAt,
-                              libraryStreamFinishedAt,
-                              totalBytes,
-                              "chunkPersistenceConfirmedAt"
-                          ),
+                milestones: peerbitDurableProgress?.milestones ?? null,
+                summary: peerbitDurableProgress?.summary ?? null,
             },
             sinkAccepted: {
                 definition:
@@ -788,14 +892,7 @@ export const summarizeReadTransferDiagnostics = (
                 source: "chunkWriteFinishedAt",
                 sink: options.downloadSink ?? "hash-only",
                 durable: false,
-                milestones: buildContiguousPrefixMilestones(
-                    chunkBytes,
-                    sinkAcceptedAt,
-                    libraryStreamStartedAt,
-                    libraryStreamFinishedAt,
-                    totalBytes,
-                    "chunkWriteFinishedAt"
-                ),
+                ...sinkAcceptedProgress,
             },
         },
     };

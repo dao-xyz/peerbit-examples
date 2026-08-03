@@ -8,12 +8,14 @@ import {
     resolveCompatibleIndexRowCount,
     resolveReaderCohort,
     stopSamplerAtCompletion,
+    summarizeFivePercentProgressWindows,
     summarizeReadTransferDiagnostics,
     TINY_FILE_SIZE_LIMIT_BYTES,
     validateLargeFileBenchmarkSizeMb,
     validateJsHeapMeasurement,
     validateHostRssMeasurement,
     type ReaderCohortEvidence,
+    type ContiguousPrefixMilestone,
     type ReaderTopologyEvidence,
 } from "./transfer-benchmark";
 
@@ -50,6 +52,46 @@ const readyTopology = (
 });
 
 describe("file-share transfer benchmark cohorts", () => {
+    it("summarizes 5% progress windows and names both half ratios unambiguously", () => {
+        const milestones: ContiguousPrefixMilestone[] = Array.from(
+            { length: 21 },
+            (_, index) => {
+                const percent = index * 5;
+                const elapsedMs =
+                    percent <= 50 ? percent * 2 : 100 + (percent - 50) * 4;
+                return {
+                    percent,
+                    targetBytes: percent * 10,
+                    contiguousBytes: percent * 10,
+                    chunkIndex: index === 0 ? null : index - 1,
+                    confirmedAt: 1_000 + elapsedMs,
+                    elapsedMs,
+                };
+            }
+        );
+
+        const summary = summarizeFivePercentProgressWindows(milestones);
+
+        expect(summary.windowSizePercent).toBe(5);
+        expect(summary.windows).toHaveLength(20);
+        expect(summary.windows[0]).toEqual({
+            startPercent: 0,
+            endPercent: 5,
+            bytes: 50,
+            durationMs: 10,
+            throughputMbps: 0.04,
+        });
+        expect(summary.windows[10]).toEqual({
+            startPercent: 50,
+            endPercent: 55,
+            bytes: 50,
+            durationMs: 20,
+            throughputMbps: 0.02,
+        });
+        expect(summary.secondToFirstHalfThroughputRatio).toBe(0.5);
+        expect(summary.secondToFirstHalfDurationRatio).toBe(2);
+    });
+
     it("uses the browser-local hash sink by default and validates overrides", () => {
         expect(resolveBenchmarkDownloadSink()).toBe("hash-only");
         expect(resolveBenchmarkDownloadSink("opfs")).toBe("opfs");
@@ -115,9 +157,13 @@ describe("file-share transfer benchmark cohorts", () => {
             Array.from({ length: 21 }, (_, index) => index * 5)
         );
         expect(summary.receiverProgress.available.milestones).toHaveLength(21);
+        expect(summary.receiverProgress.available.summary.windows).toHaveLength(
+            20
+        );
         expect(summary.receiverProgress.peerbitDurable).toMatchObject({
             claimed: false,
             milestones: null,
+            summary: null,
         });
         expect(summary.receiverProgress.sinkAccepted).toMatchObject({
             sink: "hash-only",
@@ -185,10 +231,16 @@ describe("file-share transfer benchmark cohorts", () => {
                 "manifest-head-batch-remote": 1,
             },
         });
+        expect(
+            summary.receiverProgress.peerbitDurable.summary?.windows
+        ).toHaveLength(20);
         expect(summary.receiverProgress.sinkAccepted).toMatchObject({
             sink: "opfs",
             durable: false,
         });
+        expect(
+            summary.receiverProgress.sinkAccepted.summary.windows
+        ).toHaveLength(20);
     });
 
     it("fails closed when read attribution omits bytes or exact coverage", () => {
@@ -394,6 +446,12 @@ describe("file-share transfer benchmark cohorts", () => {
                 startNodeBytes: 20,
                 endNodeBytes: 25,
                 peakNodeBytes: 30,
+                startNodeExternalBytes: 5,
+                endNodeExternalBytes: 6,
+                peakNodeExternalBytes: 7,
+                startNodeArrayBuffersBytes: 1,
+                endNodeArrayBuffersBytes: 2,
+                peakNodeArrayBuffersBytes: 3,
                 peakCombinedBytes: 170,
                 samplingErrors: [],
             })
@@ -414,6 +472,12 @@ describe("file-share transfer benchmark cohorts", () => {
                 startNodeBytes: 20,
                 endNodeBytes: 25,
                 peakNodeBytes: 30,
+                startNodeExternalBytes: 0,
+                endNodeExternalBytes: 0,
+                peakNodeExternalBytes: null,
+                startNodeArrayBuffersBytes: 0,
+                endNodeArrayBuffersBytes: Number.POSITIVE_INFINITY,
+                peakNodeArrayBuffersBytes: 0,
                 peakCombinedBytes: 0,
                 samplingErrors: ["ps failed"],
             }).validationReasons
@@ -421,6 +485,8 @@ describe("file-share transfer benchmark cohorts", () => {
             "invalid-host-rss-sample-count",
             "invalid-host-rss-start-browser-bytes",
             "invalid-host-rss-peak-combined-bytes",
+            "invalid-host-rss-peak-node-external-bytes",
+            "invalid-host-rss-end-node-array-buffers-bytes",
             "host-rss-sampling-errors",
         ]);
     });
