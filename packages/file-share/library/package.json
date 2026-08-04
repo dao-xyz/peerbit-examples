@@ -35,19 +35,19 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "3.1.17",
+        "@peerbit/test-utils": "3.1.21",
         "typescript": "^5.6.3"
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/crypto": "3.1.4",
-        "@peerbit/document": "^13.1.23",
-        "@peerbit/program": "^6.0.45",
-        "@peerbit/shared-log": "^13.2.21",
-        "@peerbit/stream-interface": "6.0.14",
-        "@peerbit/trusted-network": "^6.0.68",
+        "@peerbit/crypto": "3.1.5",
+        "@peerbit/document": "^13.1.28",
+        "@peerbit/program": "^6.0.48",
+        "@peerbit/shared-log": "^13.2.26",
+        "@peerbit/stream-interface": "6.0.15",
+        "@peerbit/trusted-network": "^6.0.73",
         "@stablelib/sha256": "^2.0.1",
-        "peerbit": "^5.3.17",
+        "peerbit": "^5.3.21",
         "uint8arrays": "^5.1.0",
         "uuid": "^10.0.0"
     }

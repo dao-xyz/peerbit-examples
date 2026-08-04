@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getPeerConnectionDiagnostics } from "../src/connection-diagnostics";
 
 const PROTOCOLS = {
-    pubsub: "/peerbit/topic-control-plane/2.0.0",
+    pubsub: "/peerbit/topic-control-plane/2.1.0",
     blocks: "/peerbit/direct-block/1.0.0",
     fanout: "/peerbit/fanout-tree/0.5.0",
 } as const;

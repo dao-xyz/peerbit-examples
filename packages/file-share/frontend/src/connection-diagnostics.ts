@@ -45,7 +45,7 @@ const TRANSPORT_SERVICE_PROTOCOLS: ReadonlyArray<{
 }> = [
     {
         service: "pubsub",
-        expectedProtocol: "/peerbit/topic-control-plane/2.0.0",
+        expectedProtocol: "/peerbit/topic-control-plane/2.1.0",
     },
     {
         service: "blocks",
