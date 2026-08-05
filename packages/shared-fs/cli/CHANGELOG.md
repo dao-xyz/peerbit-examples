@@ -1,5 +1,13 @@
 # @peerbit/shared-fs-cli
 
+## 0.0.6
+
+### Patch Changes
+
+- bb5c9ac: Align Shared FS with the Peerbit 5.3.22 runtime cohort and Node.js 22 so trusted-writer keys and log entries share one package identity graph.
+- Updated dependencies [bb5c9ac]
+    - @peerbit/shared-fs@0.0.6
+
 ## 0.0.5
 
 ### Patch Changes
