@@ -1,5 +1,6 @@
 import {
     NativeMountUnavailableError,
+    Peerbit,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
     decodePublicSignKey,
@@ -16,7 +17,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Peerbit } from "peerbit";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import {
@@ -116,9 +116,10 @@ export const normalizeNativeMountpoint = (
 };
 
 const coerceAddresses = (addrs: string | string[]) => {
-    return (Array.isArray(addrs) ? addrs : [addrs]).map((address) =>
-        multiaddr(address)
-    );
+    return (Array.isArray(addrs) ? addrs : [addrs]).map((address) => {
+        multiaddr(address); // validate early with a clear error
+        return address;
+    });
 };
 
 const connectToNetwork = async (
@@ -127,7 +128,11 @@ const connectToNetwork = async (
     options?: { bootstrap?: boolean }
 ) => {
     if (peer) {
-        await peerbit.dial(coerceAddresses(peer));
+        // Dial plain strings so no foreign Multiaddr instances cross module
+        // graphs; the client parses them with its own multiaddr copy.
+        for (const address of coerceAddresses(peer)) {
+            await peerbit.dial(address);
+        }
         return;
     }
     if (options?.bootstrap === false) {

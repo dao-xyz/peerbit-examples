@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { openSharedFs } from "@peerbit/shared-fs";
-import { Peerbit } from "peerbit";
+import { Peerbit, openSharedFs } from "@peerbit/shared-fs";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeNativeMountpoint, runCli } from "../index.js";
 

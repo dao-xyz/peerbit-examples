@@ -47,6 +47,15 @@ export * from "./mount-backend.js";
 export * from "./native-mount.js";
 export * from "./path.js";
 
+/**
+ * Re-export the Peerbit client so embedders (including the CLI) construct the
+ * client from the same physical module graph as the filesystem program.
+ * Hoisted installs can otherwise give the client and the program separate
+ * copies of the same @peerbit/* versions, whose message classes fail identity
+ * checks — peers then connect but never exchange replication info.
+ */
+export { Peerbit } from "peerbit";
+
 export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
 

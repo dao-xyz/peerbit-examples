@@ -54,6 +54,14 @@ Mount correctness:
   `versionId`/`headVersionIds`/`contentHash`; same-named concurrent creates
   resolve deterministically on every peer.
 
+Module-graph integrity: `@peerbit/shared-fs` now re-exports `Peerbit`, and the
+CLI constructs the client through it. Hoisted installs previously gave the CLI
+its own physical copies of the same `@peerbit/*` versions as the library, so
+message classes failed identity checks — peers connected but never exchanged
+replication info. Building the client from the library's module graph removes
+the split; the CLI no longer declares its own `peerbit` dependency and dials
+plain multiaddr strings.
+
 Dependencies: peerbit 5.3.25, @peerbit/document 15.0.6, @peerbit/program
 6.0.51, @peerbit/trusted-network 6.0.92, @peerbit/crypto 3.1.6. Note: the
 underlying replication protocol requires all peers of a shared filesystem
