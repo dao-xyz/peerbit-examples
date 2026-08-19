@@ -39,11 +39,11 @@
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/crypto": "3.1.5",
-        "@peerbit/document": "13.1.29",
-        "@peerbit/program": "6.0.48",
-        "@peerbit/trusted-network": "6.0.74",
-        "peerbit": "5.3.22",
+        "@peerbit/crypto": "3.1.6",
+        "@peerbit/document": "15.0.6",
+        "@peerbit/program": "6.0.51",
+        "@peerbit/trusted-network": "6.0.92",
+        "peerbit": "5.3.25",
         "uint8arrays": "^5.1.0"
     }
 }
