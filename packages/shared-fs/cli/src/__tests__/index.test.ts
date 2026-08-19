@@ -4,7 +4,12 @@ import path from "node:path";
 import { openSharedFs } from "@peerbit/shared-fs";
 import { Peerbit } from "peerbit";
 import { describe, expect, it, vi } from "vitest";
-import { normalizeNativeMountpoint, runCli } from "../index.js";
+import {
+    isRetryableSharedFsAddressOpenError,
+    normalizeNativeMountpoint,
+    openWithSharedFsAddressResolveRetry,
+    runCli,
+} from "../index.js";
 
 const stopPeer = async (peer: Peerbit) => {
     await peer.stop();
@@ -98,5 +103,96 @@ describe("peerbit-fs cli", () => {
         } finally {
             await Promise.all([stopPeer(writerPeer), stopPeer(readerPeer)]);
         }
+    });
+
+    it("classifies only transient address-open failures as retryable", () => {
+        expect(
+            isRetryableSharedFsAddressOpenError(
+                new Error("Failed to load program")
+            )
+        ).toBe(true);
+        expect(
+            isRetryableSharedFsAddressOpenError(
+                new Error(
+                    "Failed to resolve program with address: zb2rhExample"
+                )
+            )
+        ).toBe(true);
+        expect(
+            isRetryableSharedFsAddressOpenError(
+                new Error("Not allowed to append")
+            )
+        ).toBe(false);
+    });
+
+    it("retries transient shared-fs address-open failures", async () => {
+        let attempts = 0;
+        const retries: number[] = [];
+        const result = await openWithSharedFsAddressResolveRetry(
+            async () => {
+                attempts += 1;
+                if (attempts === 1) {
+                    throw new Error("Failed to load program");
+                }
+                return "mounted";
+            },
+            {
+                address: "zb2rhExample",
+                timeoutMs: 10,
+                retryIntervalMs: 1,
+                sleep: async () => {},
+                onRetry: ({ attempt }) => retries.push(attempt),
+            }
+        );
+
+        expect(result).toBe("mounted");
+        expect(attempts).toBe(2);
+        expect(retries).toEqual([1]);
+    });
+
+    it("times out bounded shared-fs address-open retries", async () => {
+        let now = 0;
+        let attempts = 0;
+
+        await expect(
+            openWithSharedFsAddressResolveRetry(
+                async () => {
+                    attempts += 1;
+                    throw new Error("Failed to load program");
+                },
+                {
+                    address: "zb2rhExample",
+                    timeoutMs: 5,
+                    retryIntervalMs: 2,
+                    now: () => now,
+                    sleep: async (ms) => {
+                        now += ms;
+                    },
+                }
+            )
+        ).rejects.toThrow(
+            "Timed out resolving shared filesystem address after 5ms"
+        );
+        expect(attempts).toBe(4);
+    });
+
+    it("does not retry non-resolution open failures", async () => {
+        let attempts = 0;
+
+        await expect(
+            openWithSharedFsAddressResolveRetry(
+                async () => {
+                    attempts += 1;
+                    throw new Error("Not allowed to append");
+                },
+                {
+                    address: "zb2rhExample",
+                    timeoutMs: 10,
+                    retryIntervalMs: 1,
+                    sleep: async () => {},
+                }
+            )
+        ).rejects.toThrow("Not allowed to append");
+        expect(attempts).toBe(1);
     });
 });
