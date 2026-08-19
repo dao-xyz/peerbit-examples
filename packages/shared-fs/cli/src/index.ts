@@ -1,6 +1,5 @@
 import {
     NativeMountUnavailableError,
-    createSharedFsIpcClient,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
     decodePublicSignKey,
@@ -26,14 +25,14 @@ import {
 } from "./native-adapter.js";
 
 const DEFAULT_DIRECTORY_NAME = "peerbit-shared-fs";
+// Every syncing machine keeps a full replica: a mount must be able to serve
+// the entire namespace from its local index, and a writer must never see its
+// own files pruned because it stopped being a leader for them. (The previous
+// cpu limit was a no-op and left the adaptive replicator free to shard the
+// filesystem across peers, which fragments the mounted view.)
 const CLI_REPLICATION_ARGS = {
     replicate: {
-        limits: {
-            cpu: {
-                max: 1,
-                monitor: undefined,
-            },
-        },
+        factor: 1,
     },
 } as const;
 
@@ -575,28 +574,32 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     const mountpoint = normalizeNativeMountpoint(
                         String(argv.mountpoint)
                     );
-                    ipc = await createSharedFsIpcServer(
-                        backend,
-                        externalAdapter ? "tcp://127.0.0.1:0" : undefined
-                    );
-                    mounted = externalAdapter
-                        ? await mountExternalNativeAdapter(
-                              externalAdapter,
-                              ipc.endpoint,
-                              mountpoint
-                          )
-                        : await mountNativeSharedFs(
-                              createSharedFsIpcClient(ipc.endpoint),
-                              {
-                                  mountpoint,
-                              }
-                          );
+                    if (externalAdapter) {
+                        ipc = await createSharedFsIpcServer(
+                            backend,
+                            "tcp://127.0.0.1:0"
+                        );
+                        mounted = await mountExternalNativeAdapter(
+                            externalAdapter,
+                            ipc.endpoint,
+                            mountpoint
+                        );
+                    } else {
+                        // In-process fuse-native mounts talk to the backend
+                        // directly; a loopback JSON hop would only add
+                        // latency and base64 CPU.
+                        mounted = await mountNativeSharedFs(backend, {
+                            mountpoint,
+                        });
+                    }
                     console.log(
                         chalk.green(
                             `Mounted ${fsHandle.address} at ${mounted.mountpoint}`
                         )
                     );
-                    console.log(`IPC endpoint: ${ipc.endpoint}`);
+                    if (ipc) {
+                        console.log(`IPC endpoint: ${ipc.endpoint}`);
+                    }
                     await waitForTermination(async () => {
                         await mounted?.unmount();
                         await ipc?.close();

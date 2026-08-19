@@ -7,6 +7,7 @@ import {
     createSharedFsMountBackend,
     encodeConflictPathName,
     openSharedFs,
+    parseFlags,
     type SharedFsHandle,
 } from "../index.js";
 
@@ -108,6 +109,127 @@ describe("shared fs mount backend", () => {
         } finally {
             await server.close();
         }
+    });
+
+    it("truncates open handles and paths, shrinking and zero-fill growing", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        await fs.writeFile("/trunc.txt", "long original content");
+
+        // ftruncate-style: shrink via an open handle, then commit.
+        const handle = await backend.open("/trunc.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.truncate(handle, 4);
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/trunc.txt"))).toBe("long");
+
+        // truncate-style: grow by path; the tail must be zero-filled.
+        await backend.truncate("/trunc.txt", 6);
+        const grown = await fs.readFile("/trunc.txt");
+        expect(grown).toBeDefined();
+        expect(grown!.byteLength).toBe(6);
+        expect(decode(grown!.subarray(0, 4))).toBe("long");
+        expect([...grown!.subarray(4)]).toEqual([0, 0]);
+
+        // Overwrite-shorter through open+truncate flags must not keep a stale tail.
+        const rewrite = await backend.open("/trunc.txt", {
+            write: true,
+            truncate: true,
+        });
+        await backend.write(rewrite, encode("hi"), 0);
+        await backend.release(rewrite);
+        expect(decode(await fs.readFile("/trunc.txt"))).toBe("hi");
+    });
+
+    it("zero-fills sparse write gaps and bounds reads to the logical length", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        const handle = await backend.open("/sparse.bin", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("ab"), 0);
+        await backend.write(handle, encode("cd"), 6);
+        const read = await backend.read(handle, 1024, 0);
+        expect(read.byteLength).toBe(8);
+        expect([...read]).toEqual([
+            ..."ab".split("").map((c) => c.charCodeAt(0)),
+            0,
+            0,
+            0,
+            0,
+            ..."cd".split("").map((c) => c.charCodeAt(0)),
+        ]);
+        await backend.release(handle);
+        expect((await fs.readFile("/sparse.bin"))!.byteLength).toBe(8);
+    });
+
+    it("does not mint a new version when flushing unchanged content", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        await fs.writeFile("/stable.txt", "same content");
+        const versionsBefore = (await fs.versions("/stable.txt")).length;
+
+        const handle = await backend.open("/stable.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.flush(handle);
+        await backend.fsync(handle);
+        await backend.release(handle);
+        expect((await fs.versions("/stable.txt")).length).toBe(versionsBefore);
+
+        // A dirty handle with identical bytes is also a no-op save.
+        const rewrite = await backend.open("/stable.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(rewrite, encode("same content"), 0);
+        await backend.flush(rewrite);
+        await backend.release(rewrite);
+        expect((await fs.versions("/stable.txt")).length).toBe(versionsBefore);
+
+        // Changed bytes create exactly one new version across flush+release.
+        const change = await backend.open("/stable.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(change, encode("different!!!"), 0);
+        await backend.flush(change);
+        await backend.release(change);
+        expect((await fs.versions("/stable.txt")).length).toBe(
+            versionsBefore + 1
+        );
+    });
+
+    it("parses numeric open flags with per-platform constants", () => {
+        // Darwin: O_WRONLY|O_CREAT|O_TRUNC = 0x1|0x200|0x400
+        expect(parseFlags(0x601, "darwin")).toMatchObject({
+            write: true,
+            create: true,
+            truncate: true,
+            append: false,
+        });
+        // Darwin O_APPEND (0x8) must not read as Linux O_APPEND.
+        expect(parseFlags(0x1 | 0x8, "darwin")).toMatchObject({
+            write: true,
+            append: true,
+            truncate: false,
+        });
+        // Linux: O_WRONLY|O_CREAT|O_TRUNC = 0o1|0o100|0o1000
+        expect(parseFlags(0o1101, "linux")).toMatchObject({
+            write: true,
+            create: true,
+            truncate: true,
+            append: false,
+        });
+        // Windows (MSVC/WinFsp): O_WRONLY|O_CREAT|O_TRUNC = 0x1|0x100|0x200
+        expect(parseFlags(0x301, "win32")).toMatchObject({
+            write: true,
+            create: true,
+            truncate: true,
+            append: false,
+        });
     });
 
     it("round-trips backend calls through TCP IPC for external adapters", async () => {

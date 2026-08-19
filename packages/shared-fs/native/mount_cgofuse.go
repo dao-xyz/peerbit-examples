@@ -215,25 +215,13 @@ func (fs *peerbitFS) Create(path string, flags int, mode uint32) (int, uint64) {
 }
 
 func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) int {
-	if fh != 0 {
-		if size == 0 {
-			_, err := fs.client.request("write", fh, []byte{}, 0)
-			return errno(err)
-		}
-		return -fuse.ENOTSUP
-	}
-	if size != 0 {
-		return -fuse.ENOTSUP
-	}
-	result, err := fs.client.request("open", path, map[string]interface{}{
-		"write":    true,
-		"create":   true,
-		"truncate": true,
-	})
-	if err != nil {
+	// cgofuse passes ^uint64(0) when no file handle is associated with the
+	// truncate (path-based SETATTR).
+	if fh != ^uint64(0) {
+		_, err := fs.client.request("truncate", fh, size)
 		return errno(err)
 	}
-	_, err = fs.client.request("release", uint64FromResult(result))
+	_, err := fs.client.request("truncate", path, size)
 	return errno(err)
 }
 
@@ -379,6 +367,10 @@ func errno(err error) int {
 			return -fuse.EACCES
 		case "EBADF":
 			return -fuse.EBADF
+		case "EINVAL":
+			return -fuse.EINVAL
+		case "ENOTEMPTY":
+			return -fuse.ENOTEMPTY
 		case "EROFS":
 			return -fuse.EROFS
 		}

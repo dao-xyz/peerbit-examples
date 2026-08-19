@@ -105,6 +105,75 @@ describe("shared fs library", () => {
         expect(decode(await fs.readFile("/target.txt"))).toBe("source");
     });
 
+    it("rejects renaming a directory into its own subtree", async () => {
+        await fs.mkdir("/a");
+        await fs.mkdir("/a/b");
+        await fs.writeFile("/a/b/keep.txt", "keep");
+
+        await expect(fs.rename("/a", "/a/b/c")).rejects.toThrow(/own subtree/);
+        // The tree is untouched and still reachable.
+        expect(decode(await fs.readFile("/a/b/keep.txt"))).toBe("keep");
+    });
+
+    it("stats paths without listing their parents", async () => {
+        await fs.mkdir("/docs");
+        await fs.writeFile("/docs/hello.txt", "hello");
+
+        const file = await fs.stat("/docs/hello.txt");
+        expect(file).toMatchObject({
+            kind: "file",
+            name: "hello.txt",
+            size: BigInt("hello".length),
+            conflict: false,
+        });
+        expect(file?.versionId).toBeDefined();
+        expect(file?.headVersionIds).toHaveLength(1);
+
+        const dir = await fs.stat("/docs");
+        expect(dir).toMatchObject({ kind: "directory", name: "docs" });
+        expect(await fs.stat("/missing")).toBeUndefined();
+        expect((await fs.stat("/"))?.kind).toBe("directory");
+    });
+
+    it("serves metadata operations without scanning unrelated documents", async () => {
+        // A directory full of files plus one small file elsewhere. Metadata
+        // operations on /b must not resolve /a's records or chunk bytes.
+        await fs.mkdir("/a");
+        for (let i = 0; i < 40; i++) {
+            await fs.writeFile(`/a/file-${i}.txt`, `content ${i}`);
+        }
+        await fs.mkdir("/b");
+        await fs.writeFile("/b/one.txt", "one");
+
+        const index = fs.program.entries.index;
+        const originalIterate = index.iterate.bind(index);
+        let resolvedDocuments = 0;
+        index.iterate = ((request: unknown, options: any) => {
+            const iterator = originalIterate(request as never, options);
+            const all = iterator.all.bind(iterator);
+            iterator.all = async () => {
+                const results = await all();
+                resolvedDocuments += results.length;
+                return results;
+            };
+            return iterator;
+        }) as typeof index.iterate;
+
+        resolvedDocuments = 0;
+        expect((await fs.list("/b")).map((entry) => entry.name)).toEqual([
+            "one.txt",
+        ]);
+        expect(resolvedDocuments).toBeLessThan(10);
+
+        resolvedDocuments = 0;
+        expect(decode(await fs.readFile("/b/one.txt"))).toBe("one");
+        expect(resolvedDocuments).toBeLessThan(10);
+
+        resolvedDocuments = 0;
+        expect((await fs.stat("/b/one.txt"))?.kind).toBe("file");
+        expect(resolvedDocuments).toBeLessThan(10);
+    });
+
     it("chunks and reads large files", async () => {
         const bytes = patternedBytes(DEFAULT_FILE_CHUNK_SIZE * 2 + 17);
         await fs.writeFile("/large.bin", bytes);
@@ -162,15 +231,19 @@ describe("shared fs library", () => {
         expect(result.smallFiles.bytesPerFile).toBe(16);
     });
 
-    it("keeps filesystem projections local-only", async () => {
-        const originalSearch = fs.program.entries.index.search.bind(
-            fs.program.entries.index
-        );
+    it("keeps filesystem metadata reads local-only", async () => {
+        const index = fs.program.entries.index;
+        const originalIterate = index.iterate.bind(index);
+        const originalGet = index.get.bind(index);
         const remoteOptions: unknown[] = [];
-        fs.program.entries.index.search = ((request: unknown, options: any) => {
+        index.iterate = ((request: unknown, options: any) => {
             remoteOptions.push(options?.remote);
-            return originalSearch(request as never, options);
-        }) as typeof fs.program.entries.index.search;
+            return originalIterate(request as never, options);
+        }) as typeof index.iterate;
+        index.get = ((key: unknown, options: any) => {
+            remoteOptions.push(options?.remote);
+            return originalGet(key as never, options);
+        }) as typeof index.get;
 
         await fs.writeFile("/local.txt", "fast local write");
         expect(decode(await fs.readFile("/local.txt"))).toBe(

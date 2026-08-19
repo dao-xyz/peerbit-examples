@@ -42,7 +42,10 @@ const errno = {
     EEXIST: -17,
     ENOTDIR: -20,
     EISDIR: -21,
+    EINVAL: -22,
     EROFS: -30,
+    // ENOTEMPTY differs per platform (Linux 39, Darwin/BSD 66).
+    ENOTEMPTY: process.platform === "darwin" ? -66 : -39,
 };
 
 const importOptional = async (specifier: string) => {
@@ -302,7 +305,7 @@ export const mountNativeSharedFs = async (
                         buffer.set(bytes);
                         callback(bytes.byteLength);
                     },
-                    () => callback(0)
+                    (error) => callback(toErrno(error))
                 );
             },
             write(
@@ -321,8 +324,23 @@ export const mountNativeSharedFs = async (
                     )
                     .then(
                         (written) => callback(written),
-                        () => callback(0)
+                        (error) => callback(toErrno(error))
                     );
+            },
+            truncate(
+                path: string,
+                size: number,
+                callback: (errno: number) => void
+            ) {
+                withCallback(() => backend.truncate(path, size), callback);
+            },
+            ftruncate(
+                _path: string,
+                fd: number,
+                size: number,
+                callback: (errno: number) => void
+            ) {
+                withCallback(() => backend.truncate(fd, size), callback);
             },
             flush(
                 _path: string,
