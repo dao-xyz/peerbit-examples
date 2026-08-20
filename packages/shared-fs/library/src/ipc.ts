@@ -26,6 +26,22 @@ type IpcRequest = {
     args: unknown[];
 };
 
+const IPC_OPS: ReadonlySet<string> = new Set([
+    "getattr",
+    "readdir",
+    "open",
+    "read",
+    "write",
+    "truncate",
+    "flush",
+    "fsync",
+    "release",
+    "mkdir",
+    "rmdir",
+    "rename",
+    "unlink",
+] satisfies (keyof SharedFsMountBackend)[]);
+
 type IpcResponse =
     | {
           id: number;
@@ -148,6 +164,16 @@ export const createSharedFsIpcServer = async (
 ): Promise<SharedFsIpcServer> => {
     const server: Server = createServer((socket) => {
         let buffered = "";
+        // A client abort (ECONNRESET/EPIPE) must never take the mount daemon
+        // down; drop the connection and keep serving the others.
+        socket.on("error", () => {
+            socket.destroy();
+        });
+        const respond = (value: IpcResponse) => {
+            if (!socket.destroyed && socket.writable) {
+                writeJsonLine(socket, value);
+            }
+        };
         socket.on("data", (chunk) => {
             buffered += chunk.toString("utf8");
             const lines = buffered.split("\n");
@@ -161,18 +187,24 @@ export const createSharedFsIpcServer = async (
                     try {
                         const request = JSON.parse(line) as IpcRequest;
                         requestId = request.id;
+                        if (!IPC_OPS.has(request.op)) {
+                            throw new SharedFsBackendError(
+                                "EINVAL",
+                                `Unknown IPC operation: ${String(request.op)}`
+                            );
+                        }
                         const args = decodeBytes(request.args) as unknown[];
                         const method = backend[request.op] as (
                             ...args: unknown[]
                         ) => Promise<unknown>;
-                        const result = await method(...args);
-                        writeJsonLine(socket, {
+                        const result = await method.apply(backend, args);
+                        respond({
                             id: request.id,
                             ok: true,
                             result: encodeResult(result),
                         } satisfies IpcResponse);
                     } catch (error) {
-                        writeJsonLine(socket, {
+                        respond({
                             id: requestId,
                             ok: false,
                             error: {
@@ -220,7 +252,24 @@ export const createSharedFsIpcClient = (
         return new Promise<unknown>((resolve, reject) => {
             const socket = connectEndpoint(endpoint);
             let buffered = "";
-            socket.on("error", reject);
+            let settled = false;
+            const fail = (error: Error) => {
+                if (!settled) {
+                    settled = true;
+                    reject(error);
+                }
+                socket.destroy();
+            };
+            socket.on("error", fail);
+            socket.on("close", () => {
+                // A dropped connection must not hang the FUSE op forever.
+                fail(
+                    new SharedFsBackendError(
+                        "EIO",
+                        `IPC connection closed before a response for ${op}`
+                    )
+                );
+            });
             socket.on("connect", () => {
                 writeJsonLine(socket, {
                     id,
@@ -237,6 +286,7 @@ export const createSharedFsIpcClient = (
                 const response = JSON.parse(
                     buffered.slice(0, newline)
                 ) as IpcResponse;
+                settled = true;
                 socket.end();
                 if (response.ok) {
                     resolve(decodeBytes(response.result));
@@ -261,6 +311,8 @@ export const createSharedFsIpcClient = (
             request("read", [handle, size, offset]) as Promise<Uint8Array>,
         write: (handle, data, offset) =>
             request("write", [handle, data, offset]) as Promise<number>,
+        truncate: (target, size) =>
+            request("truncate", [target, size]) as Promise<void>,
         flush: (handle) => request("flush", [handle]) as Promise<void>,
         fsync: (handle) => request("fsync", [handle]) as Promise<void>,
         release: (handle) => request("release", [handle]) as Promise<void>,

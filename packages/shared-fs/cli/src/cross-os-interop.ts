@@ -2,8 +2,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { openSharedFs } from "@peerbit/shared-fs";
-import { Peerbit } from "peerbit";
+import { Peerbit, openSharedFs } from "@peerbit/shared-fs";
 
 type Options = {
     role: "seed" | "join";

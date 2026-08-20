@@ -30,6 +30,14 @@ The v0 model is commit-on-close for mounted writes, local-first, and conflict
 preserving. Concurrent versions are never overwritten silently; they are exposed
 through `conflicts()` and can be resolved with `resolveConflict()`.
 
+Metadata operations (`stat`, `list`, `readFile`, path resolution) are served by
+indexed queries against the local document index — cost scales with the result,
+not with the total store size, and file content chunks are only loaded by
+reads. Every syncing peer keeps a full replica by default
+(`replicate: { factor: 1 }`); pass `replicate: false` for a peer that should
+not store content — reads then fall back to bounded remote chunk fetches
+(`remoteChunkFetch`), and locally authored entries are always kept.
+
 When `rootKey` is provided while creating a filesystem, writes are
 access-controlled by a trusted-writer graph rooted at that key. Entries must be
 signed by a trusted Peerbit identity, and the stored `authorKey` must match the
@@ -97,7 +105,10 @@ work; v0 does not optimize the small-file workload yet.
 
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
 JSON-lines IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
-`flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`, and `unlink`.
+`truncate`, `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`, and
+`unlink`. Numeric open flags are parsed with the host platform's `O_*`
+constants, truncate shrinks and zero-fill grows both open handles and paths,
+and flushing unchanged content does not mint a new version.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 

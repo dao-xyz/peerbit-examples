@@ -27,3 +27,6 @@ test-results
 .wrangler-config
 .wrangler-dry-run
 tools/wrangler/node_modules
+
+# local credentials (direnv) — never commit
+.envrc
