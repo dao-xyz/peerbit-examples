@@ -87,7 +87,6 @@ export class IndexableSharedFsEntry {
             this.versionId = value.id;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
-            this.versionId = value.versionId;
         } else if (value instanceof DeleteMarker) {
             this.kind = "delete-marker";
             this.nodeId = value.nodeId;
@@ -222,6 +221,17 @@ export class FileRecord extends SharedFsEntry {
     }
 }
 
+/** Content-addressed chunk id: derived from the chunk bytes alone. */
+export const chunkIdForBytes = (bytes: Uint8Array) =>
+    `chunk:${sha256Base64Sync(bytes)}`;
+
+/**
+ * A content-addressed block of file bytes. The id is derived from the bytes
+ * (`chunk:<sha256>`), so identical content — across versions of one file or
+ * across different files — is stored exactly once and shared by every
+ * FileVersion that references it. Ordering and multiplicity live in
+ * FileVersion.chunkIds, not in the chunk itself.
+ */
 @variant("shared_fs_file_chunk")
 export class FileChunk extends SharedFsEntry {
     kind: SharedFsEntryKind = "file-chunk";
@@ -229,32 +239,18 @@ export class FileChunk extends SharedFsEntry {
     @field({ type: "string" })
     id: string;
 
-    @field({ type: "string" })
-    versionId: string;
-
-    @field({ type: "u32" })
-    index: number;
-
     @field({ type: Uint8Array })
     bytes: Uint8Array;
 
     @field({ type: "string" })
     hash: string;
 
-    constructor(properties?: {
-        id: string;
-        versionId: string;
-        index: number;
-        bytes: Uint8Array;
-        hash?: string;
-    }) {
+    constructor(properties?: { bytes: Uint8Array; hash?: string }) {
         super();
         if (properties) {
-            this.id = properties.id;
-            this.versionId = properties.versionId;
-            this.index = properties.index;
-            this.bytes = properties.bytes;
             this.hash = properties.hash ?? sha256Base64Sync(properties.bytes);
+            this.id = `chunk:${this.hash}`;
+            this.bytes = properties.bytes;
         }
     }
 }

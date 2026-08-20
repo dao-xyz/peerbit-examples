@@ -147,7 +147,9 @@ describe("shared fs library", () => {
 
         const index = fs.program.entries.index;
         const originalIterate = index.iterate.bind(index);
+        const originalGet = index.get.bind(index);
         let resolvedDocuments = 0;
+        let resolvedChunkBytes = 0;
         index.iterate = ((request: unknown, options: any) => {
             const iterator = originalIterate(request as never, options);
             const all = iterator.all.bind(iterator);
@@ -158,6 +160,16 @@ describe("shared fs library", () => {
             };
             return iterator;
         }) as typeof index.iterate;
+        index.get = (async (key: unknown, options: any) => {
+            const result = await originalGet(key as never, options);
+            if (result != null && options?.resolve !== false) {
+                resolvedDocuments += 1;
+                if (String(key).startsWith("chunk:")) {
+                    resolvedChunkBytes += 1;
+                }
+            }
+            return result;
+        }) as typeof index.get;
 
         resolvedDocuments = 0;
         expect((await fs.list("/b")).map((entry) => entry.name)).toEqual([
@@ -172,6 +184,71 @@ describe("shared fs library", () => {
         resolvedDocuments = 0;
         expect((await fs.stat("/b/one.txt"))?.kind).toBe("file");
         expect(resolvedDocuments).toBeLessThan(10);
+
+        // Writing content whose chunks are already stored must not resolve
+        // any chunk bytes: the dedup probe is index-only.
+        resolvedChunkBytes = 0;
+        await fs.writeFile("/b/two.txt", "one");
+        expect(resolvedChunkBytes).toBe(0);
+        expect(decode(await fs.readFile("/b/two.txt"))).toBe("one");
+    });
+
+    it("deduplicates content-addressed chunks across versions and files", async () => {
+        const countChunkDocs = async () =>
+            (
+                await fs.program.entries.index
+                    .iterate(
+                        { query: { kind: "file-chunk" } },
+                        { local: true, remote: false, resolve: false }
+                    )
+                    .all()
+            ).length;
+
+        const twoChunks = patternedBytes(DEFAULT_FILE_CHUNK_SIZE * 2);
+        await fs.writeFile("/original.bin", twoChunks);
+        const afterFirst = await countChunkDocs();
+        expect(afterFirst).toBe(2);
+
+        // Identical content under a different path shares every chunk.
+        await fs.writeFile("/copy.bin", twoChunks);
+        expect(await countChunkDocs()).toBe(afterFirst);
+        expect(await fs.readFile("/copy.bin")).toEqual(twoChunks);
+
+        // Changing one chunk of a version stores only the changed chunk.
+        const edited = new Uint8Array(twoChunks);
+        edited[0] = (edited[0] + 1) % 251;
+        await fs.writeFile("/original.bin", edited);
+        expect(await countChunkDocs()).toBe(afterFirst + 1);
+        expect(await fs.readFile("/original.bin")).toEqual(edited);
+        expect(await fs.readFile("/copy.bin")).toEqual(twoChunks);
+
+        // A file of repeated identical blocks stores that block once.
+        const repeated = new Uint8Array(DEFAULT_FILE_CHUNK_SIZE * 3); // zeros
+        await fs.writeFile("/zeros.bin", repeated);
+        expect(await countChunkDocs()).toBe(afterFirst + 2);
+        expect(await fs.readFile("/zeros.bin")).toEqual(repeated);
+    });
+
+    it("treats saving identical content as a no-op", async () => {
+        await fs.writeFile("/stable.txt", "same content");
+        const [head] = await fs.versions("/stable.txt");
+
+        const result = await fs.writeFile("/stable.txt", "same content");
+        expect(result.id).toBe(head.id);
+        expect(await fs.versions("/stable.txt")).toHaveLength(1);
+
+        // Different content still creates a new version...
+        await fs.writeFile("/stable.txt", "different content");
+        expect(await fs.versions("/stable.txt")).toHaveLength(2);
+
+        // ...and explicit baseVersionIds always publish (conflict flows).
+        const heads = (await fs.versions("/stable.txt"))
+            .filter((version) => version.head)
+            .map((version) => version.id);
+        await fs.writeFile("/stable.txt", "different content", {
+            baseVersionIds: heads,
+        });
+        expect(await fs.versions("/stable.txt")).toHaveLength(3);
     });
 
     it("chunks and reads large files", async () => {

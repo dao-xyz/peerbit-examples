@@ -38,6 +38,16 @@ reads. Every syncing peer keeps a full replica by default
 not store content — reads then fall back to bounded remote chunk fetches
 (`remoteChunkFetch`), and locally authored entries are always kept.
 
+File content is content-addressed: a chunk's id is the hash of its bytes, so
+identical content — across versions of one file or across different files — is
+stored and replicated exactly once, saving an unchanged file is a no-op, and a
+small edit to a large file stores only the changed chunks (fixed-size
+chunking: in-place edits dedupe; inserts shift subsequent chunks). Chunk
+documents are self-certifying — peers reject any chunk whose bytes do not hash
+to its id, at replication time and again on read. Note the standard dedup
+trade-off: chunk ids reveal content equality, so anyone with the filesystem
+address can confirm whether known content exists in it.
+
 When `rootKey` is provided while creating a filesystem, writes are
 access-controlled by a trusted-writer graph rooted at that key. Entries must be
 signed by a trusted Peerbit identity, and the stored `authorKey` must match the
