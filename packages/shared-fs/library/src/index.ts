@@ -384,6 +384,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async canPerformEntry(operation: any) {
+        // Content-addressed chunks are self-certifying: the bytes must hash
+        // to the id, regardless of who signed the entry. Rejecting mismatches
+        // at ingest (local puts and replicated entries alike) keeps a single
+        // malformed document from ever entering the index, where it would
+        // break every file sharing that chunk.
+        if (operation?.type === "put" && operation.value instanceof FileChunk) {
+            const chunk = operation.value as FileChunk;
+            const hash = sha256Base64Sync(chunk.bytes);
+            if (hash !== chunk.hash || chunk.id !== `chunk:${hash}`) {
+                return false;
+            }
+        }
         if (!this.trustGraph) {
             return true;
         }
@@ -461,6 +473,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             remote: false,
         });
         return (result ?? undefined) as unknown as T | undefined;
+    }
+
+    /** Index-only presence probe: never resolves document bytes. */
+    private async hasDocument(id: string): Promise<boolean> {
+        const result = await this.entries.index.get(id, {
+            local: true,
+            remote: false,
+            resolve: false,
+        });
+        return result != null;
     }
 
     private async nodeRecord(nodeId: string): Promise<NodeRecord | undefined> {
@@ -841,22 +863,61 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 : createId("file");
         const currentHeads =
             existing?.kind === "file" ? await this.headsForNode(nodeId) : [];
+        const contentHash = sha256Base64Sync(bytes);
+        // Idempotent save: identical content over a single unchanged head is
+        // a no-op — no new version, no new chunks, nothing to replicate.
+        // Explicit baseVersionIds (conflict flows) and explicit chunk sizes
+        // (re-chunking migrations) always create a version.
+        if (
+            options.baseVersionIds === undefined &&
+            options.chunkSize === undefined &&
+            currentHeads.length === 1 &&
+            currentHeads[0] instanceof FileVersion &&
+            currentHeads[0].contentHash === contentHash
+        ) {
+            return this.versionInfo(currentHeads[0], normalized, currentHeads);
+        }
         const parentVersionIds =
             options.baseVersionIds ?? currentHeads.map((head) => head.id);
         const versionId = createId("version");
-        const chunks = chunkBytes(bytes, options.chunkSize).map(
-            (chunk, index) =>
-                new FileChunk({
-                    id: `${versionId}:${index}`,
-                    versionId,
-                    index,
-                    bytes: chunk,
-                })
+        // Content-addressed chunks: identical bytes — across versions of
+        // this file or across entirely different files — share one chunk
+        // document. Chunks are append-only and immortal by design; a future
+        // garbage collector must revisit this check-then-skip dedup and the
+        // delete/put ordering before it may remove anything.
+        const orderedChunks = chunkBytes(bytes, options.chunkSize).map(
+            (chunk) => new FileChunk({ bytes: chunk })
         );
-        // Content first, then the version that references it, then the
-        // naming record. Chunk ids are fresh, so skip the existing-key lookup.
-        await mapWithConcurrency(chunks, CHUNK_IO_CONCURRENCY, (chunk) =>
-            this.entries.put(chunk, { unique: true })
+        const uniqueChunks = [
+            ...new Map(
+                orderedChunks.map((chunk) => [chunk.id, chunk])
+            ).values(),
+        ];
+        // Skipping the put is only safe on a full replica: on a partial
+        // replicator the existing copy may be remote-authored, and skipping
+        // would leave this writer's content unprotected by keep:"self".
+        // Re-putting identical bytes is LWW-safe.
+        const fullReplica =
+            this.replicate !== false && this.replicate?.factor === 1;
+        await mapWithConcurrency(
+            uniqueChunks,
+            CHUNK_IO_CONCURRENCY,
+            async (chunk) => {
+                if (fullReplica) {
+                    if (await this.hasDocument(chunk.id)) {
+                        return;
+                    }
+                    // Absence just verified; skip the internal existing-key
+                    // lookup. Duplicate-id races are idempotent by
+                    // construction under content addressing.
+                    await this.entries.put(chunk, { unique: true });
+                    return;
+                }
+                // Partial replicator: put unconditionally (identical bytes
+                // are LWW-safe) and let the internal existing-key lookup
+                // link same-id heads.
+                await this.entries.put(chunk);
+            }
         );
         const version = new FileVersion({
             id: versionId,
@@ -864,9 +925,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentId,
             name: basename(normalized),
             parentVersionIds,
-            contentHash: sha256Base64Sync(bytes),
+            contentHash,
             size: BigInt(bytes.byteLength),
-            chunkIds: chunks.map((chunk) => chunk.id),
+            chunkIds: orderedChunks.map((chunk) => chunk.id),
             createdAt: metadata.timestamp,
             authorKey: metadata.authorKey,
             machineLabel: metadata.machineLabel,
@@ -895,45 +956,69 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return this.versionInfo(version, normalized, heads);
     }
 
+    /**
+     * Content addressing makes integrity a pure function of the id: served
+     * bytes must hash to the id the version asked for.
+     */
+    private verifyChunk(chunk: unknown, id: string): FileChunk | undefined {
+        if (!(chunk instanceof FileChunk)) {
+            return undefined;
+        }
+        const hash = sha256Base64Sync(chunk.bytes);
+        if (hash !== chunk.hash || `chunk:${hash}` !== id) {
+            return undefined;
+        }
+        return chunk;
+    }
+
     private async fetchChunk(
         id: string,
         normalizedPath: string
     ): Promise<FileChunk> {
-        let chunk = await this.getDocument<FileChunk>(id);
-        if (!chunk && this.remoteChunkFetch) {
+        const local = await this.getDocument<FileChunk>(id);
+        let verified = this.verifyChunk(local, id);
+        // Missing locally — or locally corrupt: verification is trustless
+        // (any responder either supplies bytes that hash to the id or is
+        // rejected), so a remote copy can heal either case.
+        if (!verified && this.remoteChunkFetch) {
             try {
                 const remote = await this.entries.index.get(id, {
-                    local: true,
+                    local: false,
                     remote: { timeout: this.remoteChunkFetch.timeoutMs } as any,
                 });
-                chunk = (remote ?? undefined) as unknown as
-                    | FileChunk
-                    | undefined;
+                verified = this.verifyChunk(remote ?? undefined, id);
             } catch {
-                chunk = undefined;
+                verified = undefined;
             }
         }
-        if (!(chunk instanceof FileChunk)) {
+        if (!verified) {
             throw new SharedFsError(
                 "EIO",
-                `Missing chunk ${id} for ${normalizedPath}`
+                local
+                    ? `Chunk hash mismatch ${id}`
+                    : `Missing chunk ${id} for ${normalizedPath}`
             );
         }
-        if (sha256Base64Sync(chunk.bytes) !== chunk.hash) {
-            throw new SharedFsError("EIO", `Chunk hash mismatch ${id}`);
-        }
-        return chunk;
+        return verified;
     }
 
     private async readFileVersion(
         version: FileVersion,
         normalizedPath: string
     ) {
-        const chunks = await mapWithConcurrency(
-            version.chunkIds,
+        // A file can reference the same content-addressed chunk many times
+        // (repeated blocks); fetch each distinct chunk once.
+        const chunkIds = version.chunkIds;
+        const uniqueIds = [...new Set(chunkIds)];
+        const fetched = await mapWithConcurrency(
+            uniqueIds,
             CHUNK_IO_CONCURRENCY,
             async (id) => (await this.fetchChunk(id, normalizedPath)).bytes
         );
+        const byId = new Map(
+            uniqueIds.map((id, index) => [id, fetched[index]])
+        );
+        const chunks = chunkIds.map((id) => byId.get(id)!);
         const bytes = chunks.length === 0 ? new Uint8Array(0) : concat(chunks);
         if (sha256Base64Sync(bytes) !== version.contentHash) {
             throw new SharedFsError(

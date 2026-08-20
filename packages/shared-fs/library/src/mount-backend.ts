@@ -531,8 +531,11 @@ export const createSharedFsMountBackend = (
             dirty,
             readOnly: false,
             baseVersionIds: entry?.headVersionIds,
-            baseContentHash:
-                entry && !parsedFlags.truncate ? entry.contentHash : undefined,
+            // The no-op-save check compares the FINAL buffer hash against
+            // the opened head, so it applies to truncate opens too: shell
+            // `> file` / editor rewrite-in-place of identical content must
+            // not mint a new version.
+            baseContentHash: entry?.contentHash,
         });
         return handle;
     };

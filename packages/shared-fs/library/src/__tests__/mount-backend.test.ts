@@ -200,6 +200,18 @@ describe("shared fs mount backend", () => {
         expect((await fs.versions("/stable.txt")).length).toBe(
             versionsBefore + 1
         );
+
+        // O_TRUNC rewrite with identical content (shell `> file`, editors
+        // that rewrite in place) is also a no-op save.
+        const truncated = await backend.open("/stable.txt", {
+            write: true,
+            truncate: true,
+        });
+        await backend.write(truncated, encode("different!!!"), 0);
+        await backend.release(truncated);
+        expect((await fs.versions("/stable.txt")).length).toBe(
+            versionsBefore + 1
+        );
     });
 
     it("parses numeric open flags with per-platform constants", () => {
