@@ -9,24 +9,16 @@ import {
     toBase64,
     toBase64URL,
 } from "@peerbit/crypto";
-import {
-    BoolQuery,
-    Documents,
-    Or,
-    StringMatch,
-    type Query,
-} from "@peerbit/document";
+import { Documents, Or, StringMatch, type Query } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
 import {
-    DeleteMarker,
-    DirectoryRecord,
     FileChunk,
-    FileRecord,
     FileVersion,
     IndexableSharedFsEntry,
+    NamingEvent,
     SharedFsEntry,
     isFileHead,
     type FileHead,
@@ -73,7 +65,7 @@ const CHUNK_IO_CONCURRENCY = 4;
  */
 const REMOTE_CHUNK_FETCH_TIMEOUT_MS = 10_000;
 
-/** Number of node ids per batched head query. */
+/** Number of node ids per batched history query. */
 const HEAD_QUERY_BATCH = 64;
 
 type OpenReplicateOptions =
@@ -127,6 +119,11 @@ export type SharedFsEntryInfo = {
     headVersionIds?: string[];
     /** Content hash of the visible head version for files. */
     contentHash?: string;
+    /**
+     * True when this node's naming has unresolved concurrent assertions
+     * (multiple naming heads) or the path slot has shadowed claimants.
+     */
+    namingConflict?: boolean;
 };
 
 export type SharedFsVersionInfo = {
@@ -139,6 +136,7 @@ export type SharedFsVersionInfo = {
     createdAt: bigint;
     authorKey: string;
     machineLabel: string;
+    /** @deprecated Deletion lives in naming events now; always false. */
     deleted: boolean;
     head: boolean;
 };
@@ -148,6 +146,26 @@ export type SharedFsConflict = {
     nodeId: string;
     versions: SharedFsVersionInfo[];
 };
+
+export type SharedFsNamingConflict = {
+    type: "multi-head" | "duplicate-name" | "delete-vs-edit" | "unreachable";
+    /** Node the conflict is on (for duplicate-name: the visible winner). */
+    nodeId: string;
+    /** Best-effort path (former path for deleted/unreachable nodes). */
+    path: string;
+    /** For duplicate-name: shadowed claimant node ids (losers). */
+    shadowedNodeIds?: string[];
+    /** Naming head event ids involved. */
+    eventIds: string[];
+    /** For delete-vs-edit: content versions the delete did not observe. */
+    recoverableVersionIds?: string[];
+};
+
+export type ResolveNamingAction =
+    | { type: "keep" }
+    | { type: "restore" }
+    | { type: "delete" }
+    | { type: "move"; to: string };
 
 export type WriteFileOptions = {
     /**
@@ -182,17 +200,25 @@ export class SharedFsError extends Error {
     }
 }
 
-type NodeRecord = DirectoryRecord | FileRecord;
-
 type ResolvedPath =
     | { kind: "root"; nodeId: typeof ROOT_NODE_ID; path: "/" }
-    | { kind: "directory"; record: DirectoryRecord; path: string }
-    | { kind: "file"; record: FileRecord; path: string };
+    | {
+          kind: "directory" | "file";
+          nodeId: string;
+          winner: NamingEvent;
+          state: NodeNamingState;
+          /** True when other claimants are shadowed at this path slot. */
+          contested: boolean;
+          path: string;
+      };
 
 const now = () => BigInt(Date.now());
 
 const createId = (prefix: string) =>
     `${prefix}:${toBase64URL(randomBytes(32))}`;
+
+const nodeKindOf = (nodeId: string): "directory" | "file" =>
+    nodeId.startsWith("dir:") ? "directory" : "file";
 
 export const encodePublicSignKey = (key: PublicSignKey) => toBase64(key.bytes);
 
@@ -237,37 +263,102 @@ const chunkBytes = (bytes: Uint8Array, chunkSize = DEFAULT_FILE_CHUNK_SIZE) => {
     return chunks;
 };
 
-const newestFirst = <
-    T extends { createdAt?: bigint; updatedAt?: bigint; id: string },
->(
-    a: T,
-    b: T
-) => {
-    const aTime = Number(a.updatedAt ?? a.createdAt ?? 0n);
-    const bTime = Number(b.updatedAt ?? b.createdAt ?? 0n);
-    return bTime - aTime || b.id.localeCompare(a.id);
-};
+/**
+ * Convergence-relevant string order: plain code-unit comparison (ids are
+ * ASCII, so this equals byte order and is identical on every platform —
+ * unlike localeCompare, which is banned from winner logic).
+ */
+const compareIds = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Deterministic winner among records that share (parentId, name). Two peers
- * creating the same name concurrently produce two nodes; every peer must pick
- * the same one so the namespace converges. Oldest creation wins, then lowest
- * node id.
+ * Heads and depths of a causal DAG restricted to the locally present
+ * document set. References to absent ids are ignored, and reference cycles
+ * (malformed documents) are treated as absent edges — both keep the result a
+ * pure, order-independent function of the replicated set.
  */
-const oldestFirst = (a: NodeRecord, b: NodeRecord) => {
-    const diff = Number(a.createdAt) - Number(b.createdAt);
-    return diff || a.nodeId.localeCompare(b.nodeId);
+const computeDag = <T extends { id: string }>(
+    docs: T[],
+    parentsOf: (doc: T) => string[]
+): { heads: T[]; depths: Map<string, number> } => {
+    const byId = new Map(docs.map((doc) => [doc.id, doc]));
+    const referenced = new Set<string>();
+    for (const doc of docs) {
+        for (const parent of parentsOf(doc)) {
+            if (byId.has(parent)) {
+                referenced.add(parent);
+            }
+        }
+    }
+    const heads = docs.filter((doc) => !referenced.has(doc.id));
+    const depths = new Map<string, number>();
+    const visiting = new Set<string>();
+    const depthOf = (doc: T): number => {
+        const memo = depths.get(doc.id);
+        if (memo !== undefined) {
+            return memo;
+        }
+        if (visiting.has(doc.id)) {
+            // Back-edge from a malformed reference; treat as absent.
+            return 0;
+        }
+        visiting.add(doc.id);
+        let depth = 1;
+        for (const parentId of parentsOf(doc)) {
+            const parent = byId.get(parentId);
+            if (parent) {
+                depth = Math.max(depth, 1 + depthOf(parent));
+            }
+        }
+        visiting.delete(doc.id);
+        depths.set(doc.id, depth);
+        return depth;
+    };
+    for (const doc of docs) {
+        depthOf(doc);
+    }
+    return { heads, depths };
 };
 
-const kindIs = (...kinds: string[]): Query =>
-    kinds.length === 1
-        ? new StringMatch({ key: "kind", value: kinds[0] })
-        : new Or(
-              kinds.map((kind) => new StringMatch({ key: "kind", value: kind }))
-          );
+type NodeNamingState = {
+    nodeId: string;
+    events: NamingEvent[];
+    heads: NamingEvent[];
+    winner: NamingEvent;
+    depths: Map<string, number>;
+    /** Multiple heads with genuinely different payloads. */
+    conflicted: boolean;
+};
 
-const NODE_KINDS_QUERY = kindIs("directory", "file");
-const HEAD_KINDS_QUERY = kindIs("file-version", "delete-marker");
+const samePayload = (a: NamingEvent, b: NamingEvent) =>
+    a.parentId === b.parentId && a.name === b.name && a.deleted === b.deleted;
+
+const computeNamingState = (
+    nodeId: string,
+    events: NamingEvent[]
+): NodeNamingState | undefined => {
+    if (events.length === 0) {
+        return undefined;
+    }
+    const { heads, depths } = computeDag(
+        events,
+        (event) => event.parentNamingIds
+    );
+    const sorted = [...heads].sort((a, b) => {
+        const depthDiff = (depths.get(b.id) ?? 0) - (depths.get(a.id) ?? 0);
+        if (depthDiff !== 0) {
+            return depthDiff;
+        }
+        // Data-preserving bias: a non-delete head beats a delete head.
+        if (a.deleted !== b.deleted) {
+            return a.deleted ? 1 : -1;
+        }
+        return compareIds(a.id, b.id);
+    });
+    const winner = sorted[0];
+    const conflicted =
+        sorted.length > 1 && !sorted.every((head) => samePayload(head, winner));
+    return { nodeId, events, heads: sorted, winner, depths, conflicted };
+};
 
 const mapWithConcurrency = async <T, R>(
     items: T[],
@@ -290,6 +381,21 @@ const mapWithConcurrency = async <T, R>(
     );
     await Promise.all(workers);
     return results;
+};
+
+const VALID_NAME = (name: string) =>
+    name.length > 0 && !name.includes("/") && name !== "." && name !== "..";
+
+const decodesToStringArray = (value: string) => {
+    try {
+        const parsed = JSON.parse(value);
+        return (
+            Array.isArray(parsed) &&
+            parsed.every((item) => typeof item === "string")
+        );
+    } catch {
+        return false;
+    }
 };
 
 @variant("peerbit_shared_fs")
@@ -318,8 +424,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   rootTrust: properties.rootKey,
               })
             : undefined;
+        // v3: causal-naming schema — the salt bump guarantees 0.2.x and
+        // 0.3.x peers can never attach to the same log and fail confusingly
+        // mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v3")])),
         });
     }
 
@@ -349,8 +458,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             type: SharedFsEntry,
             replicate: this.replicate as any,
             replicas: { min: 3 },
-            // Never prune locally authored entries, even when this peer is not
-            // a replicator for them (e.g. replicate: false).
+            // Never prune locally authored entries, even when this peer is
+            // not a replicator for them (e.g. replicate: false).
             keep: "self",
             canPerform: (operation) => this.canPerformEntry(operation),
             index: {
@@ -372,28 +481,45 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private entryAuthorKey(entry: unknown) {
-        if (
-            entry instanceof DirectoryRecord ||
-            entry instanceof FileRecord ||
-            entry instanceof FileVersion ||
-            entry instanceof DeleteMarker
-        ) {
+        if (entry instanceof NamingEvent || entry instanceof FileVersion) {
             return entry.authorKey;
         }
         return undefined;
     }
 
     private async canPerformEntry(operation: any) {
-        // Content-addressed chunks are self-certifying: the bytes must hash
-        // to the id, regardless of who signed the entry. Rejecting mismatches
-        // at ingest (local puts and replicated entries alike) keeps a single
-        // malformed document from ever entering the index, where it would
-        // break every file sharing that chunk.
-        if (operation?.type === "put" && operation.value instanceof FileChunk) {
-            const chunk = operation.value as FileChunk;
-            const hash = sha256Base64Sync(chunk.bytes);
-            if (hash !== chunk.hash || chunk.id !== `chunk:${hash}`) {
-                return false;
+        // Structural, state-independent validation — acceptance must never
+        // depend on replication order or local history.
+        if (operation?.type === "put") {
+            const value = operation.value;
+            if (value instanceof FileChunk) {
+                // Content-addressed chunks are self-certifying: the bytes
+                // must hash to the id, regardless of who signed the entry.
+                const hash = sha256Base64Sync(value.bytes);
+                if (hash !== value.hash || value.id !== `chunk:${hash}`) {
+                    return false;
+                }
+            } else if (value instanceof NamingEvent) {
+                if (
+                    !value.id.startsWith("naming:") ||
+                    !(
+                        value.nodeId.startsWith("dir:") ||
+                        value.nodeId.startsWith("file:")
+                    ) ||
+                    !(
+                        value.parentId === ROOT_NODE_ID ||
+                        value.parentId.startsWith("dir:")
+                    ) ||
+                    !VALID_NAME(value.name) ||
+                    !decodesToStringArray(value.parentNamingIdsJson) ||
+                    !decodesToStringArray(value.observedContentHeadsJson)
+                ) {
+                    return false;
+                }
+            } else if (value instanceof FileVersion) {
+                if (!value.nodeId.startsWith("file:")) {
+                    return false;
+                }
             }
         }
         if (!this.trustGraph) {
@@ -450,10 +576,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     // ------------------------------------------------------------------
-    // Index access. Every lookup is an indexed query on the local sqlite
-    // index (kind, nodeId, parentId, name, versionId, deleted) and only
-    // resolves the small metadata documents it needs. Chunk bytes are fetched
-    // by id, never scanned.
+    // Index access. Every lookup is an indexed query on the local index
+    // (kind, nodeId, parentId, name, deleted) and only resolves the small
+    // metadata documents it needs. Chunk bytes are fetched by id, only on
+    // reads.
     // ------------------------------------------------------------------
 
     private async queryDocuments<T extends SharedFsEntry>(
@@ -485,66 +611,118 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return result != null;
     }
 
-    private async nodeRecord(nodeId: string): Promise<NodeRecord | undefined> {
-        if (nodeId === ROOT_NODE_ID) {
-            return undefined;
+    // ------------------------------------------------------------------
+    // Naming layer
+    // ------------------------------------------------------------------
+
+    /** Full naming histories for many nodes, batched. */
+    private async namingStatesForNodes(
+        nodeIds: string[]
+    ): Promise<Map<string, NodeNamingState>> {
+        const unique = [...new Set(nodeIds)];
+        const byNode = new Map<string, NamingEvent[]>();
+        for (const nodeId of unique) {
+            byNode.set(nodeId, []);
         }
-        const record = await this.getDocument(nodeId);
-        return record instanceof FileRecord || record instanceof DirectoryRecord
-            ? record
-            : undefined;
+        for (let i = 0; i < unique.length; i += HEAD_QUERY_BATCH) {
+            const batch = unique.slice(i, i + HEAD_QUERY_BATCH);
+            const documents = await this.queryDocuments<NamingEvent>([
+                new StringMatch({ key: "kind", value: "naming" }),
+                batch.length === 1
+                    ? new StringMatch({ key: "nodeId", value: batch[0] })
+                    : new Or(
+                          batch.map(
+                              (nodeId) =>
+                                  new StringMatch({
+                                      key: "nodeId",
+                                      value: nodeId,
+                                  })
+                          )
+                      ),
+            ]);
+            for (const document of documents) {
+                if (document instanceof NamingEvent) {
+                    byNode.get(document.nodeId)?.push(document);
+                }
+            }
+        }
+        const states = new Map<string, NodeNamingState>();
+        for (const [nodeId, events] of byNode) {
+            const state = computeNamingState(nodeId, events);
+            if (state) {
+                states.set(nodeId, state);
+            }
+        }
+        return states;
     }
 
-    /** Live (non-deleted) child records of a directory node. */
-    private async childRecords(parentId: string): Promise<NodeRecord[]> {
-        const records = await this.queryDocuments<NodeRecord>([
-            new StringMatch({ key: "parentId", value: parentId }),
-            NODE_KINDS_QUERY,
-            new BoolQuery({ key: "deleted", value: false }),
-        ]);
-        return records.filter(
-            (record): record is NodeRecord =>
-                (record instanceof FileRecord ||
-                    record instanceof DirectoryRecord) &&
-                !record.deleted
-        );
+    private async namingStateForNode(
+        nodeId: string
+    ): Promise<NodeNamingState | undefined> {
+        return (await this.namingStatesForNodes([nodeId])).get(nodeId);
     }
 
     /**
-     * Deduplicate same-named children deterministically so every peer exposes
-     * the same node at a path even after concurrent creates.
+     * The visible node at (parentId, name): every node that ever asserted
+     * this placement is a candidate; a node claims the slot when its current
+     * winning event still places it here, live; among claimants the one
+     * whose winning head sorts first (depth desc, id asc) is visible, the
+     * rest are shadowed (surfaced as duplicate-name conflicts).
      */
-    private dedupeByName(records: NodeRecord[]): NodeRecord[] {
-        const byName = new Map<string, NodeRecord>();
-        for (const record of records) {
-            const existing = byName.get(record.name);
-            if (!existing || oldestFirst(record, existing) < 0) {
-                byName.set(record.name, record);
-            }
-        }
-        return [...byName.values()];
-    }
-
-    private async childByName(
+    private async slotResolution(
         parentId: string,
         name: string
-    ): Promise<NodeRecord | undefined> {
-        const records = await this.queryDocuments<NodeRecord>([
+    ): Promise<
+        | {
+              nodeId: string;
+              state: NodeNamingState;
+              shadowed: string[];
+          }
+        | undefined
+    > {
+        const slotDocs = await this.queryDocuments<NamingEvent>([
+            new StringMatch({ key: "kind", value: "naming" }),
             new StringMatch({ key: "parentId", value: parentId }),
             new StringMatch({ key: "name", value: name }),
-            NODE_KINDS_QUERY,
-            new BoolQuery({ key: "deleted", value: false }),
         ]);
-        const live = records.filter(
-            (record): record is NodeRecord =>
-                (record instanceof FileRecord ||
-                    record instanceof DirectoryRecord) &&
-                !record.deleted
-        );
-        if (live.length === 0) {
+        const candidates = [...new Set(slotDocs.map((event) => event.nodeId))];
+        if (candidates.length === 0) {
             return undefined;
         }
-        return live.sort(oldestFirst)[0];
+        const states = await this.namingStatesForNodes(candidates);
+        return this.pickSlotWinner(parentId, name, states);
+    }
+
+    private pickSlotWinner(
+        parentId: string,
+        name: string,
+        states: Map<string, NodeNamingState>
+    ):
+        | { nodeId: string; state: NodeNamingState; shadowed: string[] }
+        | undefined {
+        const claimants = [...states.values()].filter(
+            (state) =>
+                state.winner.parentId === parentId &&
+                state.winner.name === name &&
+                !state.winner.deleted
+        );
+        if (claimants.length === 0) {
+            return undefined;
+        }
+        claimants.sort((a, b) => {
+            const depthDiff =
+                (b.depths.get(b.winner.id) ?? 0) -
+                (a.depths.get(a.winner.id) ?? 0);
+            if (depthDiff !== 0) {
+                return depthDiff;
+            }
+            return compareIds(a.winner.id, b.winner.id);
+        });
+        return {
+            nodeId: claimants[0].nodeId,
+            state: claimants[0],
+            shadowed: claimants.slice(1).map((state) => state.nodeId),
+        };
     }
 
     private async resolvePath(path: string): Promise<ResolvedPath | undefined> {
@@ -559,23 +737,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             const name = segments[i];
             currentPath = joinFsPath(currentPath, name);
             const isLast = i === segments.length - 1;
-            const record = await this.childByName(parentId, name);
-            if (!record) {
+            const slot = await this.slotResolution(parentId, name);
+            if (!slot) {
                 return undefined;
             }
-            if (record instanceof DirectoryRecord) {
+            const kind = nodeKindOf(slot.nodeId);
+            if (kind === "directory") {
                 if (isLast) {
                     return {
-                        kind: "directory",
-                        record,
+                        kind,
+                        nodeId: slot.nodeId,
+                        winner: slot.state.winner,
+                        state: slot.state,
+                        contested: slot.shadowed.length > 0,
                         path: currentPath,
                     };
                 }
-                parentId = record.nodeId;
+                parentId = slot.nodeId;
                 continue;
             }
             if (isLast) {
-                return { kind: "file", record, path: currentPath };
+                return {
+                    kind,
+                    nodeId: slot.nodeId,
+                    winner: slot.state.winner,
+                    state: slot.state,
+                    contested: slot.shadowed.length > 0,
+                    path: currentPath,
+                };
             }
             // A file in the middle of the path.
             return undefined;
@@ -598,108 +787,42 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `Parent path is a file: ${parentPath}`
             );
         }
-        return resolved.kind === "root" ? ROOT_NODE_ID : resolved.record.nodeId;
-    }
-
-    private headsFromDocuments(documents: FileHead[]): FileHead[] {
-        const referenced = new Set<string>();
-        for (const head of documents) {
-            for (const parentId of head.parentVersionIds) {
-                referenced.add(parentId);
-            }
-        }
-        return documents
-            .filter((head) => !referenced.has(head.id))
-            .sort(newestFirst);
-    }
-
-    /** All version / delete-marker documents for a node, newest first. */
-    private async headDocumentsForNode(nodeId: string): Promise<FileHead[]> {
-        const documents = await this.queryDocuments<SharedFsEntry>([
-            new StringMatch({ key: "nodeId", value: nodeId }),
-            HEAD_KINDS_QUERY,
-        ]);
-        return documents.filter(isFileHead).sort(newestFirst);
-    }
-
-    private async headsForNode(nodeId: string): Promise<FileHead[]> {
-        return this.headsFromDocuments(await this.headDocumentsForNode(nodeId));
-    }
-
-    /** Heads for many nodes with batched queries. */
-    private async headsForNodes(
-        nodeIds: string[]
-    ): Promise<Map<string, FileHead[]>> {
-        const byNode = new Map<string, FileHead[]>();
-        for (const nodeId of nodeIds) {
-            byNode.set(nodeId, []);
-        }
-        for (let i = 0; i < nodeIds.length; i += HEAD_QUERY_BATCH) {
-            const batch = nodeIds.slice(i, i + HEAD_QUERY_BATCH);
-            const documents = await this.queryDocuments<SharedFsEntry>([
-                batch.length === 1
-                    ? new StringMatch({ key: "nodeId", value: batch[0] })
-                    : new Or(
-                          batch.map(
-                              (nodeId) =>
-                                  new StringMatch({
-                                      key: "nodeId",
-                                      value: nodeId,
-                                  })
-                          )
-                      ),
-                HEAD_KINDS_QUERY,
-            ]);
-            for (const document of documents) {
-                if (isFileHead(document)) {
-                    byNode.get(document.nodeId)?.push(document);
-                }
-            }
-        }
-        for (const [nodeId, documents] of byNode) {
-            byNode.set(nodeId, this.headsFromDocuments(documents));
-        }
-        return byNode;
-    }
-
-    private async visibleFileHead(nodeId: string) {
-        return (await this.headsForNode(nodeId))[0];
+        return resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
     }
 
     /**
-     * Path of a record by walking parent pointers. Guards against cycles that
-     * concurrent cross-peer moves can create; unreachable records resolve to
-     * their name under "/".
+     * Best-effort path of a node by walking winner parents upward. Used by
+     * conflict reporting only; unreachable chains resolve under "/".
      */
-    private async pathForRecord(
-        record: NodeRecord,
-        cache?: Map<string, NodeRecord | undefined>
-    ) {
-        const names = [record.name];
-        const visited = new Set<string>([record.nodeId]);
-        let parentId = record.parentId;
-        while (parentId !== ROOT_NODE_ID) {
-            if (visited.has(parentId)) {
+    private async pathForNode(
+        nodeId: string,
+        stateCache: Map<string, NodeNamingState>
+    ): Promise<string> {
+        const names: string[] = [];
+        const visited = new Set<string>();
+        let current: string = nodeId;
+        while (current !== ROOT_NODE_ID) {
+            if (visited.has(current)) {
                 break;
             }
-            visited.add(parentId);
-            let parent: NodeRecord | undefined;
-            if (cache?.has(parentId)) {
-                parent = cache.get(parentId);
-            } else {
-                parent = await this.nodeRecord(parentId);
-                cache?.set(parentId, parent);
+            visited.add(current);
+            let state = stateCache.get(current);
+            if (!state) {
+                state = await this.namingStateForNode(current);
+                if (state) {
+                    stateCache.set(current, state);
+                }
             }
-            if (!parent) {
+            if (!state) {
                 break;
             }
-            names.unshift(parent.name);
-            parentId = parent.parentId;
+            names.unshift(state.winner.name);
+            current = state.winner.parentId;
         }
         return "/" + names.join("/");
     }
 
-    /** True if `ancestorNodeId` is the node or one of its ancestors. */
+    /** True if `ancestorNodeId` is the node or one of its winner ancestors. */
     private async isWithinSubtree(nodeId: string, ancestorNodeId: string) {
         const visited = new Set<string>();
         let current: string = nodeId;
@@ -711,72 +834,169 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 return false;
             }
             visited.add(current);
-            const record = await this.nodeRecord(current);
-            if (!record) {
+            const state = await this.namingStateForNode(current);
+            if (!state || state.winner.deleted) {
                 return false;
             }
-            current = record.parentId;
+            current = state.winner.parentId;
         }
         return false;
     }
 
+    private async appendNamingEvent(properties: {
+        nodeId: string;
+        parentId: string;
+        name: string;
+        deleted?: boolean;
+        parentNamingIds: string[];
+        observedContentHeads?: string[];
+    }) {
+        const metadata = this.signedMetadata();
+        const event = new NamingEvent({
+            id: createId("naming"),
+            nodeId: properties.nodeId,
+            parentId: properties.parentId,
+            name: properties.name,
+            deleted: properties.deleted ?? false,
+            parentNamingIds: properties.parentNamingIds,
+            observedContentHeads: properties.observedContentHeads ?? [],
+            createdAt: metadata.timestamp,
+            authorKey: metadata.authorKey,
+            machineLabel: metadata.machineLabel,
+        });
+        await this.entries.put(event, { unique: true });
+        return event;
+    }
+
+    // ------------------------------------------------------------------
+    // Content layer
+    // ------------------------------------------------------------------
+
+    /** All version documents for a node. */
+    private async versionDocumentsForNode(
+        nodeId: string
+    ): Promise<FileVersion[]> {
+        const documents = await this.queryDocuments<SharedFsEntry>([
+            new StringMatch({ key: "nodeId", value: nodeId }),
+            new StringMatch({ key: "kind", value: "file-version" }),
+        ]);
+        return documents.filter(isFileHead);
+    }
+
+    private contentHeads(documents: FileVersion[]): FileVersion[] {
+        const { heads, depths } = computeDag(
+            documents,
+            (doc) => doc.parentVersionIds
+        );
+        return [...heads].sort((a, b) => {
+            const depthDiff = (depths.get(b.id) ?? 0) - (depths.get(a.id) ?? 0);
+            return depthDiff !== 0 ? depthDiff : compareIds(a.id, b.id);
+        });
+    }
+
+    private async headsForNode(nodeId: string): Promise<FileVersion[]> {
+        return this.contentHeads(await this.versionDocumentsForNode(nodeId));
+    }
+
+    /** Content heads for many nodes with batched queries. */
+    private async headsForNodes(
+        nodeIds: string[]
+    ): Promise<Map<string, FileVersion[]>> {
+        const byNode = new Map<string, FileVersion[]>();
+        for (const nodeId of nodeIds) {
+            byNode.set(nodeId, []);
+        }
+        for (let i = 0; i < nodeIds.length; i += HEAD_QUERY_BATCH) {
+            const batch = nodeIds.slice(i, i + HEAD_QUERY_BATCH);
+            const documents = await this.queryDocuments<SharedFsEntry>([
+                new StringMatch({ key: "kind", value: "file-version" }),
+                batch.length === 1
+                    ? new StringMatch({ key: "nodeId", value: batch[0] })
+                    : new Or(
+                          batch.map(
+                              (nodeId) =>
+                                  new StringMatch({
+                                      key: "nodeId",
+                                      value: nodeId,
+                                  })
+                          )
+                      ),
+            ]);
+            for (const document of documents) {
+                if (isFileHead(document)) {
+                    byNode.get(document.nodeId)?.push(document);
+                }
+            }
+        }
+        const result = new Map<string, FileVersion[]>();
+        for (const [nodeId, documents] of byNode) {
+            result.set(nodeId, this.contentHeads(documents));
+        }
+        return result;
+    }
+
     private versionInfo(
-        head: FileHead,
+        head: FileVersion,
         path: string,
-        heads: FileHead[]
+        heads: FileVersion[]
     ): SharedFsVersionInfo {
         return {
             id: head.id,
             nodeId: head.nodeId,
             path,
-            size: head instanceof FileVersion ? head.size : 0n,
-            contentHash:
-                head instanceof FileVersion ? head.contentHash : undefined,
+            size: head.size,
+            contentHash: head.contentHash,
             parentVersionIds: head.parentVersionIds,
             createdAt: head.createdAt,
             authorKey: head.authorKey,
             machineLabel: head.machineLabel,
-            deleted: head instanceof DeleteMarker,
+            deleted: false,
             head: heads.some((candidate) => candidate.id === head.id),
         };
     }
 
     private entryInfoFor(
-        record: NodeRecord,
+        winner: NamingEvent,
         path: string,
-        heads?: FileHead[]
+        options: {
+            heads?: FileVersion[];
+            namingConflict?: boolean;
+        } = {}
     ): SharedFsEntryInfo | undefined {
-        if (record instanceof DirectoryRecord) {
+        const kind = nodeKindOf(winner.nodeId);
+        if (kind === "directory") {
             return {
                 path,
-                nodeId: record.nodeId,
-                name: record.name,
-                kind: "directory",
+                nodeId: winner.nodeId,
+                name: winner.name,
+                kind,
                 size: 0n,
-                updatedAt: record.updatedAt,
-                authorKey: record.authorKey,
-                machineLabel: record.machineLabel,
+                updatedAt: winner.createdAt,
+                authorKey: winner.authorKey,
+                machineLabel: winner.machineLabel,
                 conflict: false,
+                namingConflict: options.namingConflict || undefined,
             };
         }
-        const visible = heads?.[0];
-        if (!(visible instanceof FileVersion)) {
-            // Deleted (delete marker visible) or not yet materialized.
+        const visible = options.heads?.[0];
+        if (!visible) {
+            // File node without any replicated content yet.
             return undefined;
         }
         return {
             path,
-            nodeId: record.nodeId,
-            name: record.name,
-            kind: "file",
+            nodeId: winner.nodeId,
+            name: winner.name,
+            kind,
             size: visible.size,
-            updatedAt: record.updatedAt,
-            authorKey: record.authorKey,
-            machineLabel: record.machineLabel,
-            conflict: (heads?.length ?? 0) > 1,
+            updatedAt: visible.createdAt,
+            authorKey: winner.authorKey,
+            machineLabel: winner.machineLabel,
+            conflict: (options.heads?.length ?? 0) > 1,
             versionId: visible.id,
-            headVersionIds: heads?.map((head) => head.id) ?? [],
+            headVersionIds: options.heads?.map((head) => head.id) ?? [],
             contentHash: visible.contentHash,
+            namingConflict: options.namingConflict || undefined,
         };
     }
 
@@ -786,7 +1006,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * Metadata for a single path. `undefined` when the path does not exist.
-     * Cost is O(depth) indexed lookups plus one head query for files.
      */
     async stat(path: string): Promise<SharedFsEntryInfo | undefined> {
         const normalized = normalizeFsPath(path);
@@ -807,11 +1026,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 conflict: false,
             };
         }
+        const namingConflict = resolved.state.conflicted || resolved.contested;
         if (resolved.kind === "directory") {
-            return this.entryInfoFor(resolved.record, resolved.path);
+            return this.entryInfoFor(resolved.winner, resolved.path, {
+                namingConflict,
+            });
         }
-        const heads = await this.headsForNode(resolved.record.nodeId);
-        return this.entryInfoFor(resolved.record, resolved.path, heads);
+        const heads = await this.headsForNode(resolved.nodeId);
+        return this.entryInfoFor(resolved.winner, resolved.path, {
+            heads,
+            namingConflict,
+        });
     }
 
     async mkdir(path: string) {
@@ -826,16 +1051,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         const parentId = await this.resolveParent(normalized);
-        const metadata = this.signedMetadata();
-        const directory = new DirectoryRecord({
+        await this.appendNamingEvent({
             nodeId: createId("dir"),
             parentId,
             name: basename(normalized),
-            createdAt: metadata.timestamp,
-            authorKey: metadata.authorKey,
-            machineLabel: metadata.machineLabel,
+            parentNamingIds: [],
         });
-        await this.entries.put(directory);
     }
 
     async writeFile(
@@ -848,21 +1069,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             throw new SharedFsError("EISDIR", "Cannot write to root");
         }
         const bytes = await toBytes(source);
-        const existing = await this.resolvePath(normalized);
-        if (existing?.kind === "directory") {
+        const resolved = await this.resolvePath(normalized);
+        if (resolved?.kind === "directory" || resolved?.kind === "root") {
             throw new SharedFsError(
                 "EISDIR",
                 `Path is a directory: ${normalized}`
             );
         }
-        const parentId = await this.resolveParent(normalized);
-        const metadata = this.signedMetadata();
-        const nodeId =
-            existing?.kind === "file"
-                ? existing.record.nodeId
-                : createId("file");
-        const currentHeads =
-            existing?.kind === "file" ? await this.headsForNode(nodeId) : [];
+        const existingNodeId = resolved?.nodeId;
+        const currentHeads = existingNodeId
+            ? await this.headsForNode(existingNodeId)
+            : [];
         const contentHash = sha256Base64Sync(bytes);
         // Idempotent save: identical content over a single unchanged head is
         // a no-op — no new version, no new chunks, nothing to replicate.
@@ -872,7 +1089,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             options.baseVersionIds === undefined &&
             options.chunkSize === undefined &&
             currentHeads.length === 1 &&
-            currentHeads[0] instanceof FileVersion &&
             currentHeads[0].contentHash === contentHash
         ) {
             return this.versionInfo(currentHeads[0], normalized, currentHeads);
@@ -919,11 +1135,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 await this.entries.put(chunk);
             }
         );
+        const metadata = this.signedMetadata();
+        const nodeId = existingNodeId ?? createId("file");
         const version = new FileVersion({
             id: versionId,
             nodeId,
-            parentId,
-            name: basename(normalized),
             parentVersionIds,
             contentHash,
             size: BigInt(bytes.byteLength),
@@ -933,21 +1149,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             machineLabel: metadata.machineLabel,
         });
         await this.entries.put(version, { unique: true });
-        await this.entries.put(
-            new FileRecord({
+        if (!existingNodeId) {
+            // Brand-new path: content first, then the naming event that
+            // makes it visible. Writes to existing files never touch naming
+            // — a concurrent rename can no longer be reverted by a save.
+            const parentId = await this.resolveParent(normalized);
+            await this.appendNamingEvent({
                 nodeId,
                 parentId,
                 name: basename(normalized),
-                currentVersionId: versionId,
-                createdAt:
-                    existing?.kind === "file"
-                        ? existing.record.createdAt
-                        : metadata.timestamp,
-                updatedAt: metadata.timestamp,
-                authorKey: metadata.authorKey,
-                machineLabel: metadata.machineLabel,
-            })
-        );
+                parentNamingIds: [],
+            });
+        }
         const referenced = new Set(parentVersionIds);
         const heads = [
             version,
@@ -1035,12 +1248,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!resolved || resolved.kind !== "file") {
             return undefined;
         }
-        const heads = await this.headsForNode(resolved.record.nodeId);
+        const heads = await this.headsForNode(resolved.nodeId);
         const visible = heads[0];
-        if (!(visible instanceof FileVersion)) {
+        if (!visible) {
             return undefined;
         }
-        // A version can replicate before its chunks. Prefer the newest head
+        // A version can replicate before its chunks. Prefer the visible head
         // but fall back to the newest complete ancestor version instead of
         // failing the read outright.
         let firstError: unknown;
@@ -1077,7 +1290,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const version = await this.getDocument<SharedFsEntry>(versionId);
         if (
             !(version instanceof FileVersion) ||
-            version.nodeId !== resolved.record.nodeId
+            version.nodeId !== resolved.nodeId
         ) {
             return undefined;
         }
@@ -1097,20 +1310,61 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             throw new SharedFsError("ENOTDIR", `Path is a file: ${normalized}`);
         }
         const parentId =
-            resolved.kind === "root" ? ROOT_NODE_ID : resolved.record.nodeId;
-        const children = this.dedupeByName(await this.childRecords(parentId));
-        const fileNodeIds = children
-            .filter((record) => record instanceof FileRecord)
-            .map((record) => record.nodeId);
+            resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
+        // Every event that ever asserted a placement under this directory is
+        // a candidate; slot resolution filters to current live winners.
+        const slotDocs = await this.queryDocuments<NamingEvent>([
+            new StringMatch({ key: "kind", value: "naming" }),
+            new StringMatch({ key: "parentId", value: parentId }),
+        ]);
+        const nodesByName = new Map<string, Set<string>>();
+        for (const event of slotDocs) {
+            const set = nodesByName.get(event.name) ?? new Set<string>();
+            set.add(event.nodeId);
+            nodesByName.set(event.name, set);
+        }
+        const allNodeIds = [...new Set(slotDocs.map((event) => event.nodeId))];
+        const states = await this.namingStatesForNodes(allNodeIds);
+        const winners: {
+            name: string;
+            nodeId: string;
+            state: NodeNamingState;
+            contested: boolean;
+        }[] = [];
+        for (const [name, nodeIds] of nodesByName) {
+            const scoped = new Map<string, NodeNamingState>();
+            for (const nodeId of nodeIds) {
+                const state = states.get(nodeId);
+                if (state) {
+                    scoped.set(nodeId, state);
+                }
+            }
+            const slot = this.pickSlotWinner(parentId, name, scoped);
+            if (slot) {
+                winners.push({
+                    name,
+                    nodeId: slot.nodeId,
+                    state: slot.state,
+                    contested: slot.shadowed.length > 0,
+                });
+            }
+        }
+        const fileNodeIds = winners
+            .filter((winner) => nodeKindOf(winner.nodeId) === "file")
+            .map((winner) => winner.nodeId);
         const heads = await this.headsForNodes(fileNodeIds);
         const infos: SharedFsEntryInfo[] = [];
-        for (const record of children) {
+        for (const winner of winners) {
             const info = this.entryInfoFor(
-                record,
-                joinFsPath(normalized, record.name),
-                record instanceof FileRecord
-                    ? heads.get(record.nodeId)
-                    : undefined
+                winner.state.winner,
+                joinFsPath(normalized, winner.name),
+                {
+                    heads:
+                        nodeKindOf(winner.nodeId) === "file"
+                            ? heads.get(winner.nodeId)
+                            : undefined,
+                    namingConflict: winner.state.conflicted || winner.contested,
+                }
             );
             if (info) {
                 infos.push(info);
@@ -1125,27 +1379,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!resolved || resolved.kind !== "file") {
             return [];
         }
-        const documents = await this.headDocumentsForNode(
-            resolved.record.nodeId
-        );
-        const heads = this.headsFromDocuments(documents);
-        return documents.map((entry) =>
-            this.versionInfo(entry, normalized, heads)
-        );
+        const documents = await this.versionDocumentsForNode(resolved.nodeId);
+        const heads = this.contentHeads(documents);
+        return documents
+            .sort(
+                (a, b) =>
+                    Number(b.createdAt) - Number(a.createdAt) ||
+                    compareIds(b.id, a.id)
+            )
+            .map((entry) => this.versionInfo(entry, normalized, heads));
     }
 
     async conflicts(path?: string): Promise<SharedFsConflict[]> {
         if (path) {
             const target = await this.resolvePath(path);
             if (target?.kind === "file") {
-                const heads = await this.headsForNode(target.record.nodeId);
+                const heads = await this.headsForNode(target.nodeId);
                 if (heads.length <= 1) {
                     return [];
                 }
                 return [
                     {
                         path: target.path,
-                        nodeId: target.record.nodeId,
+                        nodeId: target.nodeId,
                         versions: heads.map((head) =>
                             this.versionInfo(head, target.path, heads)
                         ),
@@ -1158,9 +1414,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         // Whole-tree scan over version metadata (no chunk bytes).
         const documents = await this.queryDocuments<SharedFsEntry>([
-            HEAD_KINDS_QUERY,
+            new StringMatch({ key: "kind", value: "file-version" }),
         ]);
-        const byNode = new Map<string, FileHead[]>();
+        const byNode = new Map<string, FileVersion[]>();
         for (const document of documents) {
             if (!isFileHead(document)) {
                 continue;
@@ -1170,18 +1426,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             byNode.set(document.nodeId, list);
         }
         const prefix = path ? normalizeFsPath(path) : undefined;
-        const recordCache = new Map<string, NodeRecord | undefined>();
+        const stateCache = new Map<string, NodeNamingState>();
         const conflicts: SharedFsConflict[] = [];
         for (const [nodeId, nodeDocuments] of byNode) {
-            const heads = this.headsFromDocuments(nodeDocuments);
+            const heads = this.contentHeads(nodeDocuments);
             if (heads.length <= 1) {
                 continue;
             }
-            const record = await this.nodeRecord(nodeId);
-            if (!(record instanceof FileRecord) || record.deleted) {
+            const state =
+                stateCache.get(nodeId) ??
+                (await this.namingStateForNode(nodeId));
+            if (!state || state.winner.deleted) {
                 continue;
             }
-            const recordPath = await this.pathForRecord(record, recordCache);
+            stateCache.set(nodeId, state);
+            const recordPath = await this.pathForNode(nodeId, stateCache);
             if (
                 prefix &&
                 prefix !== "/" &&
@@ -1213,20 +1472,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const selected = await this.getDocument<SharedFsEntry>(versionId);
         if (
             !(selected instanceof FileVersion) ||
-            selected.nodeId !== resolved.record.nodeId
+            selected.nodeId !== resolved.nodeId
         ) {
             throw new SharedFsError(
                 "ENOENT",
                 `Version ${versionId} does not exist for ${normalized}`
             );
         }
-        const heads = await this.headsForNode(resolved.record.nodeId);
+        const heads = await this.headsForNode(resolved.nodeId);
         const metadata = this.signedMetadata();
         const resolution = new FileVersion({
             id: createId("version"),
             nodeId: selected.nodeId,
-            parentId: resolved.record.parentId,
-            name: resolved.record.name,
             parentVersionIds: heads.map((head) => head.id),
             contentHash: selected.contentHash,
             size: selected.size,
@@ -1237,19 +1494,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             conflictResolution: true,
         });
         await this.entries.put(resolution, { unique: true });
-        await this.entries.put(
-            new FileRecord({
-                nodeId: resolved.record.nodeId,
-                parentId: resolved.record.parentId,
-                name: resolved.record.name,
-                currentVersionId: resolution.id,
-                createdAt: resolved.record.createdAt,
-                updatedAt: metadata.timestamp,
-                authorKey: metadata.authorKey,
-                machineLabel: metadata.machineLabel,
-                deleted: resolved.record.deleted,
-            })
-        );
         return this.versionInfo(resolution, normalized, [resolution]);
     }
 
@@ -1265,7 +1509,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (resolved.kind === "root") {
             throw new SharedFsError("EINVAL", "Cannot remove root");
         }
-        const metadata = this.signedMetadata();
         if (resolved.kind === "directory") {
             const children = await this.list(normalized);
             if (children.length > 0) {
@@ -1274,45 +1517,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     `Directory is not empty: ${normalized}`
                 );
             }
-            await this.entries.put(
-                new DirectoryRecord({
-                    nodeId: resolved.record.nodeId,
-                    parentId: resolved.record.parentId,
-                    name: resolved.record.name,
-                    createdAt: resolved.record.createdAt,
-                    updatedAt: metadata.timestamp,
-                    authorKey: metadata.authorKey,
-                    machineLabel: metadata.machineLabel,
-                    deleted: true,
-                })
-            );
+            await this.appendNamingEvent({
+                nodeId: resolved.nodeId,
+                parentId: resolved.winner.parentId,
+                name: resolved.winner.name,
+                deleted: true,
+                parentNamingIds: resolved.state.heads.map((head) => head.id),
+            });
             return;
         }
-        const heads = await this.headsForNode(resolved.record.nodeId);
-        const marker = new DeleteMarker({
-            id: createId("delete"),
-            nodeId: resolved.record.nodeId,
-            parentId: resolved.record.parentId,
-            name: resolved.record.name,
-            parentVersionIds: heads.map((head) => head.id),
-            createdAt: metadata.timestamp,
-            authorKey: metadata.authorKey,
-            machineLabel: metadata.machineLabel,
+        // Record which content the delete observed, so a concurrent edit is
+        // detectable (and recoverable) as a delete-vs-edit conflict instead
+        // of silently vanishing.
+        const contentHeads = await this.headsForNode(resolved.nodeId);
+        await this.appendNamingEvent({
+            nodeId: resolved.nodeId,
+            parentId: resolved.winner.parentId,
+            name: resolved.winner.name,
+            deleted: true,
+            parentNamingIds: resolved.state.heads.map((head) => head.id),
+            observedContentHeads: contentHeads.map((head) => head.id),
         });
-        await this.entries.put(marker, { unique: true });
-        await this.entries.put(
-            new FileRecord({
-                nodeId: resolved.record.nodeId,
-                parentId: resolved.record.parentId,
-                name: resolved.record.name,
-                currentVersionId: marker.id,
-                createdAt: resolved.record.createdAt,
-                updatedAt: metadata.timestamp,
-                authorKey: metadata.authorKey,
-                machineLabel: metadata.machineLabel,
-                deleted: true,
-            })
-        );
     }
 
     async rename(from: string, to: string) {
@@ -1336,7 +1561,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     `Cannot replace root path: ${toPath}`
                 );
             }
-            if (destination.record.nodeId === resolved.record.nodeId) {
+            if (destination.nodeId === resolved.nodeId) {
                 return;
             }
             if (
@@ -1352,8 +1577,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const parentId = await this.resolveParent(toPath);
         if (
             resolved.kind === "directory" &&
-            (parentId === resolved.record.nodeId ||
-                (await this.isWithinSubtree(parentId, resolved.record.nodeId)))
+            (parentId === resolved.nodeId ||
+                (await this.isWithinSubtree(parentId, resolved.nodeId)))
         ) {
             throw new SharedFsError(
                 "EINVAL",
@@ -1363,35 +1588,242 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (destination) {
             await this.rm(toPath);
         }
-        const metadata = this.signedMetadata();
-        if (resolved.kind === "directory") {
-            await this.entries.put(
-                new DirectoryRecord({
-                    nodeId: resolved.record.nodeId,
-                    parentId,
-                    name: basename(toPath),
-                    createdAt: resolved.record.createdAt,
-                    updatedAt: metadata.timestamp,
-                    authorKey: metadata.authorKey,
-                    machineLabel: metadata.machineLabel,
-                    deleted: resolved.record.deleted,
-                })
-            );
-        } else {
-            await this.entries.put(
-                new FileRecord({
-                    nodeId: resolved.record.nodeId,
-                    parentId,
-                    name: basename(toPath),
-                    currentVersionId: resolved.record.currentVersionId,
-                    createdAt: resolved.record.createdAt,
-                    updatedAt: metadata.timestamp,
-                    authorKey: metadata.authorKey,
-                    machineLabel: metadata.machineLabel,
-                    deleted: resolved.record.deleted,
-                })
-            );
+        await this.appendNamingEvent({
+            nodeId: resolved.nodeId,
+            parentId,
+            name: basename(toPath),
+            parentNamingIds: resolved.state.heads.map((head) => head.id),
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Naming conflict surfacing and resolution
+    // ------------------------------------------------------------------
+
+    async namingConflicts(path?: string): Promise<SharedFsNamingConflict[]> {
+        const documents = await this.queryDocuments<NamingEvent>([
+            new StringMatch({ key: "kind", value: "naming" }),
+        ]);
+        const byNode = new Map<string, NamingEvent[]>();
+        for (const event of documents) {
+            const list = byNode.get(event.nodeId) ?? [];
+            list.push(event);
+            byNode.set(event.nodeId, list);
         }
+        const states = new Map<string, NodeNamingState>();
+        for (const [nodeId, events] of byNode) {
+            const state = computeNamingState(nodeId, events);
+            if (state) {
+                states.set(nodeId, state);
+            }
+        }
+        const conflicts: SharedFsNamingConflict[] = [];
+        const stateCache = states;
+
+        // (a) multi-head: unresolved concurrent naming assertions on a node.
+        for (const state of states.values()) {
+            if (state.conflicted) {
+                conflicts.push({
+                    type: "multi-head",
+                    nodeId: state.nodeId,
+                    path: await this.pathForNode(state.nodeId, stateCache),
+                    eventIds: state.heads.map((head) => head.id),
+                });
+            }
+        }
+
+        // (b) duplicate-name: multiple live claimants at one slot.
+        const bySlot = new Map<string, NodeNamingState[]>();
+        for (const state of states.values()) {
+            if (state.winner.deleted) {
+                continue;
+            }
+            const key = `${state.winner.parentId} ${state.winner.name}`;
+            const list = bySlot.get(key) ?? [];
+            list.push(state);
+            bySlot.set(key, list);
+        }
+        for (const claimants of bySlot.values()) {
+            if (claimants.length <= 1) {
+                continue;
+            }
+            const slot = this.pickSlotWinner(
+                claimants[0].winner.parentId,
+                claimants[0].winner.name,
+                new Map(claimants.map((state) => [state.nodeId, state]))
+            );
+            if (!slot) {
+                continue;
+            }
+            conflicts.push({
+                type: "duplicate-name",
+                nodeId: slot.nodeId,
+                path: await this.pathForNode(slot.nodeId, stateCache),
+                shadowedNodeIds: slot.shadowed,
+                eventIds: claimants.map((state) => state.winner.id),
+            });
+        }
+
+        // (c) delete-vs-edit: winner is a delete that did not observe all
+        // current content heads — the unobserved versions are recoverable.
+        const deletedFileNodes = [...states.values()].filter(
+            (state) =>
+                state.winner.deleted && nodeKindOf(state.nodeId) === "file"
+        );
+        if (deletedFileNodes.length > 0) {
+            const heads = await this.headsForNodes(
+                deletedFileNodes.map((state) => state.nodeId)
+            );
+            for (const state of deletedFileNodes) {
+                const observed = new Set(state.winner.observedContentHeads);
+                const recoverable = (heads.get(state.nodeId) ?? []).filter(
+                    (head) => !observed.has(head.id)
+                );
+                if (recoverable.length > 0) {
+                    conflicts.push({
+                        type: "delete-vs-edit",
+                        nodeId: state.nodeId,
+                        path: await this.pathForNode(state.nodeId, stateCache),
+                        eventIds: [state.winner.id],
+                        recoverableVersionIds: recoverable.map(
+                            (head) => head.id
+                        ),
+                    });
+                }
+            }
+        }
+
+        // (d) unreachable: a live node whose winner parent chain never
+        // reaches the root (deleted/missing parent, or a move cycle).
+        for (const state of states.values()) {
+            if (state.winner.deleted) {
+                continue;
+            }
+            const visited = new Set<string>();
+            let current = state.winner.parentId;
+            let verdict: "reachable" | "unreachable" = "reachable";
+            while (current !== ROOT_NODE_ID) {
+                if (visited.has(current)) {
+                    verdict = "unreachable";
+                    break;
+                }
+                visited.add(current);
+                const parent = states.get(current);
+                if (!parent || parent.winner.deleted) {
+                    verdict = "unreachable";
+                    break;
+                }
+                current = parent.winner.parentId;
+            }
+            if (verdict === "unreachable") {
+                conflicts.push({
+                    type: "unreachable",
+                    nodeId: state.nodeId,
+                    path: await this.pathForNode(state.nodeId, stateCache),
+                    eventIds: state.heads.map((head) => head.id),
+                });
+            }
+        }
+
+        const prefix = path ? normalizeFsPath(path) : undefined;
+        const filtered =
+            prefix && prefix !== "/"
+                ? conflicts.filter(
+                      (conflict) =>
+                          conflict.path === prefix ||
+                          conflict.path.startsWith(prefix + "/")
+                  )
+                : conflicts;
+        return filtered.sort(
+            (a, b) =>
+                compareIds(a.nodeId, b.nodeId) || a.type.localeCompare(b.type)
+        );
+    }
+
+    /**
+     * Settle a naming conflict on a node by appending one event that
+     * causally dominates every current head. No-op when the heads already
+     * agree with the asserted payload (quiescence — concurrent identical
+     * resolutions converge without ping-pong).
+     */
+    async resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
+        const state = await this.namingStateForNode(nodeId);
+        if (!state) {
+            throw new SharedFsError("ENOENT", `Unknown node: ${nodeId}`);
+        }
+        let payload: {
+            parentId: string;
+            name: string;
+            deleted: boolean;
+            observedContentHeads?: string[];
+        };
+        switch (action.type) {
+            case "keep": {
+                payload = {
+                    parentId: state.winner.parentId,
+                    name: state.winner.name,
+                    deleted: state.winner.deleted,
+                };
+                break;
+            }
+            case "restore": {
+                payload = {
+                    parentId: state.winner.parentId,
+                    name: state.winner.name,
+                    deleted: false,
+                };
+                break;
+            }
+            case "delete": {
+                const heads =
+                    nodeKindOf(nodeId) === "file"
+                        ? await this.headsForNode(nodeId)
+                        : [];
+                payload = {
+                    parentId: state.winner.parentId,
+                    name: state.winner.name,
+                    deleted: true,
+                    observedContentHeads: heads.map((head) => head.id),
+                };
+                break;
+            }
+            case "move": {
+                const toPath = normalizeFsPath(action.to);
+                const parentId = await this.resolveParent(toPath);
+                if (
+                    nodeKindOf(nodeId) === "directory" &&
+                    (parentId === nodeId ||
+                        (await this.isWithinSubtree(parentId, nodeId)))
+                ) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        `Cannot move a directory into its own subtree: ${toPath}`
+                    );
+                }
+                payload = {
+                    parentId,
+                    name: basename(toPath),
+                    deleted: false,
+                };
+                break;
+            }
+        }
+        const settled =
+            state.heads.length === 1 &&
+            state.winner.parentId === payload.parentId &&
+            state.winner.name === payload.name &&
+            state.winner.deleted === payload.deleted;
+        if (settled) {
+            return;
+        }
+        await this.appendNamingEvent({
+            nodeId,
+            parentId: payload.parentId,
+            name: payload.name,
+            deleted: payload.deleted,
+            parentNamingIds: state.heads.map((head) => head.id),
+            observedContentHeads: payload.observedContentHeads,
+        });
     }
 }
 
@@ -1460,6 +1892,14 @@ export class SharedFsHandle {
 
     resolveConflict(path: string, versionId: string) {
         return this.program.resolveConflict(path, versionId);
+    }
+
+    namingConflicts(path?: string) {
+        return this.program.namingConflicts(path);
+    }
+
+    resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
+        return this.program.resolveNamingConflict(nodeId, action);
     }
 
     authorizeWriter(publicKey: PublicSignKey) {

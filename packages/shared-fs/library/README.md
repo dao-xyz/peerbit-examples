@@ -26,9 +26,18 @@ console.log(await fs.readFile("/docs/hello.txt"));
 console.log(fs.address);
 ```
 
-The v0 model is commit-on-close for mounted writes, local-first, and conflict
+The model is commit-on-close for mounted writes, local-first, and conflict
 preserving. Concurrent versions are never overwritten silently; they are exposed
 through `conflicts()` and can be resolved with `resolveConflict()`.
+
+Naming (placement and deletion) is a per-node causal event DAG, mirroring the
+content version DAG: renames and deletes append immutable events, content
+writes never touch naming, and every visible choice is a pure clock-free
+function of the replicated documents. Concurrent renames, delete-vs-edit
+races, duplicate-name creates, and unreachable nodes are surfaced through
+`namingConflicts()` and settled with `resolveNamingConflict(nodeId, action)`
+(`keep` / `restore` / `delete` / `move`) — a delete that raced a concurrent
+edit is recoverable, not lost.
 
 Metadata operations (`stat`, `list`, `readFile`, path resolution) are served by
 indexed queries against the local document index — cost scales with the result,

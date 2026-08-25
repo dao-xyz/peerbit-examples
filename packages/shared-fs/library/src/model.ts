@@ -17,12 +17,7 @@ const decodeStringList = (value?: string) => {
     }
 };
 
-export type SharedFsEntryKind =
-    | "directory"
-    | "file"
-    | "file-version"
-    | "file-chunk"
-    | "delete-marker";
+export type SharedFsEntryKind = "naming" | "file-version" | "file-chunk";
 
 export abstract class SharedFsEntry {
     abstract id: string;
@@ -52,9 +47,6 @@ export class IndexableSharedFsEntry {
     @field({ type: option("string") })
     name?: string;
 
-    @field({ type: option("string") })
-    versionId?: string;
-
     @field({ type: "bool" })
     deleted: boolean;
 
@@ -67,14 +59,8 @@ export class IndexableSharedFsEntry {
         }
         this.id = value.id;
         this.deleted = false;
-        if (value instanceof DirectoryRecord) {
-            this.kind = "directory";
-            this.nodeId = value.nodeId;
-            this.parentId = value.parentId;
-            this.name = value.name;
-            this.deleted = value.deleted;
-        } else if (value instanceof FileRecord) {
-            this.kind = "file";
+        if (value instanceof NamingEvent) {
+            this.kind = "naming";
             this.nodeId = value.nodeId;
             this.parentId = value.parentId;
             this.name = value.name;
@@ -82,27 +68,25 @@ export class IndexableSharedFsEntry {
         } else if (value instanceof FileVersion) {
             this.kind = "file-version";
             this.nodeId = value.nodeId;
-            this.parentId = value.parentId;
-            this.name = value.name;
-            this.versionId = value.id;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
-        } else if (value instanceof DeleteMarker) {
-            this.kind = "delete-marker";
-            this.nodeId = value.nodeId;
-            this.parentId = value.parentId;
-            this.name = value.name;
-            this.versionId = value.id;
-            this.deleted = true;
         } else {
             this.kind = value.kind;
         }
     }
 }
 
-@variant("shared_fs_directory_record")
-export class DirectoryRecord extends SharedFsEntry {
-    kind: SharedFsEntryKind = "directory";
+/**
+ * One immutable placement assertion for a node: "node N is (or is not) at
+ * (parentId, name)". Naming is the sole authority for placement and deletion;
+ * content documents carry no location. Events form a per-node causal DAG via
+ * parentNamingIds (exactly like FileVersion.parentVersionIds), so the visible
+ * naming state is a pure function of the replicated set — no wall clocks.
+ * Events are append-only and never re-put.
+ */
+@variant("shared_fs_naming_event")
+export class NamingEvent extends SharedFsEntry {
+    kind: SharedFsEntryKind = "naming";
 
     @field({ type: "string" })
     id: string;
@@ -116,11 +100,24 @@ export class DirectoryRecord extends SharedFsEntry {
     @field({ type: "string" })
     name: string;
 
+    @field({ type: "bool" })
+    deleted: boolean;
+
+    @field({ type: "string" })
+    parentNamingIdsJson: string;
+
+    /**
+     * Content head version ids the author observed when deleting a file
+     * node; lets peers distinguish "delete confirmed everything" from
+     * "delete raced a concurrent edit" (delete-vs-edit conflicts). Empty for
+     * non-delete events and directories.
+     */
+    @field({ type: "string" })
+    observedContentHeadsJson: string;
+
+    /** Wall clock, display only — never part of winner selection. */
     @field({ type: "u64" })
     createdAt: bigint;
-
-    @field({ type: "u64" })
-    updatedAt: bigint;
 
     @field({ type: "string" })
     authorKey: string;
@@ -128,96 +125,47 @@ export class DirectoryRecord extends SharedFsEntry {
     @field({ type: "string" })
     machineLabel: string;
 
-    @field({ type: "bool" })
-    deleted: boolean;
-
     constructor(properties?: {
+        id: string;
         nodeId: string;
         parentId: string;
         name: string;
+        deleted?: boolean;
+        parentNamingIds?: string[];
+        observedContentHeads?: string[];
         createdAt: bigint | number;
-        updatedAt?: bigint | number;
         authorKey: string;
         machineLabel: string;
-        deleted?: boolean;
     }) {
         super();
         if (properties) {
-            this.id = properties.nodeId;
+            this.id = properties.id;
             this.nodeId = properties.nodeId;
             this.parentId = properties.parentId;
             this.name = properties.name;
+            this.deleted = properties.deleted ?? false;
+            this.parentNamingIds = properties.parentNamingIds ?? [];
+            this.observedContentHeads = properties.observedContentHeads ?? [];
             this.createdAt = BigInt(properties.createdAt);
-            this.updatedAt = BigInt(
-                properties.updatedAt ?? properties.createdAt
-            );
             this.authorKey = properties.authorKey;
             this.machineLabel = properties.machineLabel;
-            this.deleted = properties.deleted ?? false;
         }
     }
-}
 
-@variant("shared_fs_file_record")
-export class FileRecord extends SharedFsEntry {
-    kind: SharedFsEntryKind = "file";
+    get parentNamingIds() {
+        return decodeStringList(this.parentNamingIdsJson);
+    }
 
-    @field({ type: "string" })
-    id: string;
+    set parentNamingIds(value: string[]) {
+        this.parentNamingIdsJson = encodeStringList(value);
+    }
 
-    @field({ type: "string" })
-    nodeId: string;
+    get observedContentHeads() {
+        return decodeStringList(this.observedContentHeadsJson);
+    }
 
-    @field({ type: "string" })
-    parentId: string;
-
-    @field({ type: "string" })
-    name: string;
-
-    @field({ type: option("string") })
-    currentVersionId?: string;
-
-    @field({ type: "u64" })
-    createdAt: bigint;
-
-    @field({ type: "u64" })
-    updatedAt: bigint;
-
-    @field({ type: "string" })
-    authorKey: string;
-
-    @field({ type: "string" })
-    machineLabel: string;
-
-    @field({ type: "bool" })
-    deleted: boolean;
-
-    constructor(properties?: {
-        nodeId: string;
-        parentId: string;
-        name: string;
-        currentVersionId?: string;
-        createdAt: bigint | number;
-        updatedAt?: bigint | number;
-        authorKey: string;
-        machineLabel: string;
-        deleted?: boolean;
-    }) {
-        super();
-        if (properties) {
-            this.id = properties.nodeId;
-            this.nodeId = properties.nodeId;
-            this.parentId = properties.parentId;
-            this.name = properties.name;
-            this.currentVersionId = properties.currentVersionId;
-            this.createdAt = BigInt(properties.createdAt);
-            this.updatedAt = BigInt(
-                properties.updatedAt ?? properties.createdAt
-            );
-            this.authorKey = properties.authorKey;
-            this.machineLabel = properties.machineLabel;
-            this.deleted = properties.deleted ?? false;
-        }
+    set observedContentHeads(value: string[]) {
+        this.observedContentHeadsJson = encodeStringList(value);
     }
 }
 
@@ -255,6 +203,10 @@ export class FileChunk extends SharedFsEntry {
     }
 }
 
+/**
+ * One immutable content state of a file node. Location lives in naming
+ * events only.
+ */
 @variant("shared_fs_file_version")
 export class FileVersion extends SharedFsEntry {
     kind: SharedFsEntryKind = "file-version";
@@ -264,12 +216,6 @@ export class FileVersion extends SharedFsEntry {
 
     @field({ type: "string" })
     nodeId: string;
-
-    @field({ type: "string" })
-    parentId: string;
-
-    @field({ type: "string" })
-    name: string;
 
     @field({ type: "string" })
     parentVersionIdsJson: string;
@@ -283,6 +229,7 @@ export class FileVersion extends SharedFsEntry {
     @field({ type: "string" })
     chunkIdsJson: string;
 
+    /** Wall clock, display only — never part of winner selection. */
     @field({ type: "u64" })
     createdAt: bigint;
 
@@ -298,8 +245,6 @@ export class FileVersion extends SharedFsEntry {
     constructor(properties?: {
         id: string;
         nodeId: string;
-        parentId: string;
-        name: string;
         parentVersionIds?: string[];
         contentHash: string;
         size: bigint | number;
@@ -313,8 +258,6 @@ export class FileVersion extends SharedFsEntry {
         if (properties) {
             this.id = properties.id;
             this.nodeId = properties.nodeId;
-            this.parentId = properties.parentId;
-            this.name = properties.name;
             this.parentVersionIds = properties.parentVersionIds ?? [];
             this.contentHash = properties.contentHash;
             this.size = BigInt(properties.size);
@@ -343,67 +286,7 @@ export class FileVersion extends SharedFsEntry {
     }
 }
 
-@variant("shared_fs_delete_marker")
-export class DeleteMarker extends SharedFsEntry {
-    kind: SharedFsEntryKind = "delete-marker";
-
-    @field({ type: "string" })
-    id: string;
-
-    @field({ type: "string" })
-    nodeId: string;
-
-    @field({ type: "string" })
-    parentId: string;
-
-    @field({ type: "string" })
-    name: string;
-
-    @field({ type: "string" })
-    parentVersionIdsJson: string;
-
-    @field({ type: "u64" })
-    createdAt: bigint;
-
-    @field({ type: "string" })
-    authorKey: string;
-
-    @field({ type: "string" })
-    machineLabel: string;
-
-    constructor(properties?: {
-        id: string;
-        nodeId: string;
-        parentId: string;
-        name: string;
-        parentVersionIds?: string[];
-        createdAt: bigint | number;
-        authorKey: string;
-        machineLabel: string;
-    }) {
-        super();
-        if (properties) {
-            this.id = properties.id;
-            this.nodeId = properties.nodeId;
-            this.parentId = properties.parentId;
-            this.name = properties.name;
-            this.parentVersionIds = properties.parentVersionIds ?? [];
-            this.createdAt = BigInt(properties.createdAt);
-            this.authorKey = properties.authorKey;
-            this.machineLabel = properties.machineLabel;
-        }
-    }
-
-    get parentVersionIds() {
-        return decodeStringList(this.parentVersionIdsJson);
-    }
-
-    set parentVersionIds(value: string[]) {
-        this.parentVersionIdsJson = encodeStringList(value);
-    }
-}
-
-export type FileHead = FileVersion | DeleteMarker;
+export type FileHead = FileVersion;
 
 export const isFileHead = (entry: SharedFsEntry): entry is FileHead =>
-    entry instanceof FileVersion || entry instanceof DeleteMarker;
+    entry instanceof FileVersion;

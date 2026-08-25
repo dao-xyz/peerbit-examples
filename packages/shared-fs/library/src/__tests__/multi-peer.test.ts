@@ -384,18 +384,13 @@ describe("shared fs multi-peer", () => {
                 b.writeFile("/contested.txt", "overwritten while deleting"),
             ]);
 
-            // Which side wins is timing-dependent under the v0 LWW model,
-            // but the agreed state must be a legitimate outcome: the file is
-            // either absent everywhere, or present everywhere with the
+            // The agreed state must be a legitimate outcome: absent
+            // everywhere (delete-head bias may still hide the file when the
+            // heads merge that way), or present everywhere with the
             // concurrent write's content. Uniform "base" would mean the race
             // resurrected superseded content.
             await expectSettledAgreement(handles, (reference) => {
                 if (reference.names.length === 0) {
-                    // Known v0 limitation, asserted so any future change in
-                    // recoverability is a deliberate test update: when the
-                    // delete wins, the concurrently written bytes are
-                    // unreachable through the public API (the deleted record
-                    // makes the path unresolvable, so versions() is empty).
                     return;
                 }
                 expect(reference.names).toEqual(["file:contested.txt"]);
@@ -404,10 +399,97 @@ describe("shared fs multi-peer", () => {
                 );
             });
 
+            // Causal naming makes the hidden write recoverable: when the
+            // delete won, the unobserved concurrent version is surfaced as a
+            // delete-vs-edit naming conflict, and restore resurrects it —
+            // with the edit intact — on every peer.
             const finalState = await snapshot(handles[0]);
             if (finalState.names.length === 0) {
-                expect(await handles[2].versions("/contested.txt")).toEqual([]);
+                let conflict:
+                    | Awaited<
+                          ReturnType<SharedFsHandle["namingConflicts"]>
+                      >[number]
+                    | undefined;
+                await waitUntil(async () => {
+                    const conflicts = await handles[2].namingConflicts();
+                    conflict = conflicts.find(
+                        (candidate) => candidate.type === "delete-vs-edit"
+                    );
+                    expect(conflict).toBeDefined();
+                    expect(
+                        conflict!.recoverableVersionIds?.length
+                    ).toBeGreaterThan(0);
+                });
+                await handles[2].resolveNamingConflict(conflict!.nodeId, {
+                    type: "restore",
+                });
+                await waitUntil(async () => {
+                    for (const handle of handles) {
+                        expect(
+                            decode(await handle.readFile("/contested.txt"))
+                        ).toBe("overwritten while deleting");
+                    }
+                });
             }
+        }
+    );
+
+    it(
+        "surfaces concurrent renames as a naming conflict and settles with keep",
+        { retry: 1 },
+        async () => {
+            const network = await createNetwork(5);
+            const handles = await openAll(network);
+            const [a, b] = handles;
+
+            await a.writeFile("/subject.txt", "content");
+            await waitUntil(async () => {
+                for (const handle of handles) {
+                    expect(decode(await handle.readFile("/subject.txt"))).toBe(
+                        "content"
+                    );
+                }
+            });
+
+            await Promise.all([
+                a.rename("/subject.txt", "/from-a.txt"),
+                b.rename("/subject.txt", "/from-b.txt"),
+            ]);
+
+            // Both renames are naming heads on one node: every peer shows
+            // the same deterministic winner name (no clock involvement) and
+            // reports the losing head as a multi-head naming conflict.
+            let winnerName: string | undefined;
+            let nodeId: string | undefined;
+            await waitUntil(async () => {
+                const reference = await expectAllAgree(handles);
+                expect(reference.names).toHaveLength(1);
+                winnerName = reference.names[0].replace("file:", "");
+                expect(["from-a.txt", "from-b.txt"]).toContain(winnerName);
+                const conflicts = await handles[3].namingConflicts();
+                const multiHead = conflicts.find(
+                    (candidate) => candidate.type === "multi-head"
+                );
+                expect(multiHead).toBeDefined();
+                nodeId = multiHead!.nodeId;
+            });
+
+            // keep settles the conflict; a second keep is a quiescent no-op.
+            await handles[3].resolveNamingConflict(nodeId!, { type: "keep" });
+            await waitUntil(async () => {
+                for (const handle of handles) {
+                    expect(
+                        (await handle.namingConflicts()).filter(
+                            (candidate) => candidate.type === "multi-head"
+                        )
+                    ).toEqual([]);
+                    expect(
+                        decode(await handle.readFile(`/${winnerName}`))
+                    ).toBe("content");
+                }
+            });
+            await handles[0].resolveNamingConflict(nodeId!, { type: "keep" });
+            await expectAllAgree(handles);
         }
     );
 
@@ -433,19 +515,29 @@ describe("shared fs multi-peer", () => {
                 b.writeFile("/doc.txt", "edited during rename"),
             ]);
 
-            // The naming register is LWW so the surviving name is
-            // timing-dependent, but exactly one of the two names must
-            // survive (the file may not vanish or duplicate), and once both
-            // operations replicated, the write's version is the only head —
-            // the edited content must win wherever the file is visible.
+            // Causal naming makes silent rename loss impossible: the rename
+            // is a naming event the content write never touches. Legitimate
+            // outcomes: the common case — the file lives at /renamed.txt
+            // with the edited bytes — or, when the rename replicated to the
+            // writer before its path lookup, the writer legitimately created
+            // a fresh node at the old path (both names visible, edited bytes
+            // at the old path, original bytes at the new).
             await expectSettledAgreement(handles, (reference) => {
-                expect([["file:doc.txt"], ["file:renamed.txt"]]).toContainEqual(
-                    reference.names
-                );
-                const content =
-                    reference.files["/doc.txt"] ??
-                    reference.files["/renamed.txt"];
-                expect(content).toBe("edited during rename");
+                if (reference.names.length === 1) {
+                    expect(reference.names).toEqual(["file:renamed.txt"]);
+                    expect(reference.files["/renamed.txt"]).toBe(
+                        "edited during rename"
+                    );
+                } else {
+                    expect(reference.names).toEqual([
+                        "file:doc.txt",
+                        "file:renamed.txt",
+                    ]);
+                    expect(reference.files["/doc.txt"]).toBe(
+                        "edited during rename"
+                    );
+                    expect(reference.files["/renamed.txt"]).toBe("original");
+                }
             });
         }
     );
