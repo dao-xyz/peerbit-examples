@@ -251,6 +251,53 @@ describe("shared fs library", () => {
         expect(await fs.versions("/stable.txt")).toHaveLength(3);
     });
 
+    it("recreates deleted paths on fresh nodes and heals restore collisions", async () => {
+        await fs.writeFile("/note.txt", "first life");
+        const first = await fs.stat("/note.txt");
+        await fs.rm("/note.txt");
+        expect(await fs.stat("/note.txt")).toBeUndefined();
+
+        // Writing over a deleted slot creates a brand-new node.
+        await fs.writeFile("/note.txt", "second life");
+        const second = await fs.stat("/note.txt");
+        expect(second?.nodeId).not.toBe(first?.nodeId);
+        expect(decode(await fs.readFile("/note.txt"))).toBe("second life");
+
+        // Restoring the deleted node creates a duplicate-name conflict at
+        // the slot, deterministically arbitrated and surfaced.
+        await fs.program.resolveNamingConflict(first!.nodeId, {
+            type: "restore",
+        });
+        const conflicts = await fs.namingConflicts();
+        const duplicate = conflicts.find(
+            (candidate) => candidate.type === "duplicate-name"
+        );
+        expect(duplicate).toBeDefined();
+        expect(
+            [duplicate!.nodeId, ...(duplicate!.shadowedNodeIds ?? [])].sort()
+        ).toEqual([first!.nodeId, second!.nodeId].sort());
+
+        // Moving the shadowed claimant heals the collision; both files are
+        // visible afterwards.
+        const shadowed = duplicate!.shadowedNodeIds![0];
+        await fs.program.resolveNamingConflict(shadowed, {
+            type: "move",
+            to: "/note-restored.txt",
+        });
+        expect(
+            (await fs.namingConflicts()).filter(
+                (candidate) => candidate.type === "duplicate-name"
+            )
+        ).toEqual([]);
+        const names = (await fs.list("/")).map((entry) => entry.name).sort();
+        expect(names).toEqual(["note-restored.txt", "note.txt"]);
+        const contents = new Set([
+            decode(await fs.readFile("/note.txt")),
+            decode(await fs.readFile("/note-restored.txt")),
+        ]);
+        expect(contents).toEqual(new Set(["first life", "second life"]));
+    });
+
     it("chunks and reads large files", async () => {
         const bytes = patternedBytes(DEFAULT_FILE_CHUNK_SIZE * 2 + 17);
         await fs.writeFile("/large.bin", bytes);
