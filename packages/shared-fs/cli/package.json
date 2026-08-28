@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/shared-fs-cli",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "author": "Peerbit contributors",
     "repository": "https://github.com/dao-xyz/peerbit-examples",
     "license": "Apache-2.0",

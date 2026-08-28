@@ -1,5 +1,72 @@
 # @peerbit/shared-fs-cli
 
+## 0.4.0
+
+### Minor Changes
+
+- 4033782: Garbage collection: bounded version history, naming compaction, and real
+  chunk-byte reclamation — explicit-only, converging, and layered against data
+  loss.
+    - `SharedFsHandle.collectGarbage(options)` / `peerbit-fs gc <address>`:
+      retires superseded file versions (always keeping current heads, the newest
+      `keepVersions`, everything younger than retention/grace, conflict-recoverable
+      versions, and in-flight reads), compacts settled per-node naming histories,
+      purges fully-deleted nodes after a barrier, and deletes chunks no surviving
+      version references. `--dry-run` and `--json` supported.
+    - Safety stack: winner selection now reads a stored causal depth (validated at
+      ingest), so compaction can never change visible winners on any peer; plans
+      are pure functions of the local set with a grace-closure fixpoint (deleting
+      history can never promote spurious heads); a two-run ledger barrier means a
+      freshly-bootstrapped or long-offline replica records candidates and deletes
+      nothing; every deletion is head-verified with automatic restore on races;
+      and every full replica runs a resurrection guard that re-puts any removed
+      chunk still referenced, removed content head, or removed naming head.
+    - Writers close the dedup/GC race: a chunk put is skipped only when a version
+      younger than the skip horizon references it, presence is re-verified after
+      every save, and partial replicas always re-put (`dedup: "off"` forces
+      re-puts everywhere).
+    - Restoring a deleted file now carries content (a fresh version reference) and
+      fails loudly with ENOENT when nothing recoverable survives, instead of
+      resurrecting a contentless ghost. Deletion tombstones are kept forever, so
+      purges stay sticky against stale writers.
+    - Honesty note: version/naming GC reclaims index rows and hot-path CPU;
+      metadata deletions each leave a small permanent log tombstone. Only chunk
+      GC reclaims real bytes, and by default it lags one run (the safety barrier).
+
+    Schema note: breaking (store salt bumped to /shared-fs/v4; stored causal
+    depth and a chunk reference index were added). Recreate filesystems and
+    upgrade all peers together.
+
+- 0682058: Index-served metadata plane with per-node row caches: flat hot-path latency
+  under high-churn multi-party workloads.
+    - Causal references, depths, sizes, content hashes and attribution are
+      projected into the document index; head selection and path resolution run
+      on index rows and, for warm nodes, entirely on in-memory row caches
+      maintained from change events (local writes upsert directly). Reads resolve
+      exactly the winning version document.
+    - Measured on the new multi-party workload benchmark: stat/read of a file
+      with 300 retained versions dropped from ~6.5 ms (linear in versions) to
+      ~0.3–0.6 ms (flat); listing a directory containing hot files 6.7 ms →
+      0.4 ms; 2000-entry directory listing 169 ms → 80 ms; cross-peer write→
+      visible latency unchanged at ~16 ms.
+    - New benchmark suite (multi-party-workload.test.ts) with budgets: hot-file
+      version pileup, 100-file write bursts, wide directories, write→visible
+      propagation, and 500-file cold joins — medians print to CI for trend
+      tracking.
+    - The dedup-skip witness horizon is configurable per deployment
+      (`dedupSkipHorizonMs`, floor 5 minutes; all writers should agree), and GC
+      retention clamps to horizon + grace — enabling short-retention
+      deployments where files are saved hundreds of times a day.
+
+    Schema note: breaking (index projection widened; store salt bumped to
+    /shared-fs/v5). Recreate filesystems and upgrade all peers together.
+
+### Patch Changes
+
+- Updated dependencies [4033782]
+- Updated dependencies [0682058]
+    - @peerbit/shared-fs@0.4.0
+
 ## 0.3.0
 
 ### Minor Changes
