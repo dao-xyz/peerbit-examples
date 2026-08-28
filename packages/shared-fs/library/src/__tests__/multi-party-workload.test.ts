@@ -113,6 +113,15 @@ describe("shared fs multi-party workload", () => {
                 fs.readFile("/src/hot.ts")
             );
             const listHot = await measureMedian(10, () => fs.list("/src"));
+
+            // Machine-speed-independent contract: warm metadata operations
+            // must issue ZERO row queries — served purely from the caches.
+            const rowQueriesBefore = fs.program.rowQueries;
+            for (let i = 0; i < 20; i++) {
+                await fs.stat("/src/hot.ts");
+                await fs.list("/src");
+            }
+            expect(fs.program.rowQueries).toBe(rowQueriesBefore);
             report("hot-file", {
                 statCold,
                 statHot,
@@ -155,7 +164,12 @@ describe("shared fs multi-party workload", () => {
             const first = await burst(0);
             const second = await burst(1); // overwrites: version churn
             const third = await burst(2);
-            report("burst-100-files", { first, second, third });
+            report("burst-100-files", {
+                first,
+                second,
+                third,
+                median: median([first, second, third]),
+            });
             // A 100-file burst must stay comfortably interactive, and
             // overwrite bursts must not degrade versus creation bursts.
             expect(third).toBeLessThan(first * 4 + 2_000);

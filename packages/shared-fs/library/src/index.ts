@@ -611,6 +611,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private versionRowCache = new Map<string, Map<string, VersionLike>>();
     private namingRowCache = new Map<string, Map<string, NamingLike>>();
+    /**
+     * Per-node change counters (bumped for added AND removed, whether or
+     * not a bucket exists) plus a global epoch bumped on evictions: a cache
+     * fill only installs its snapshot when nothing changed for that node
+     * during the fill's awaits — otherwise the node stays cold and the next
+     * access re-queries. Closes the fill/event race that would otherwise
+     * leave a warm bucket stale forever.
+     */
+    private cacheEpochs = new Map<string, number>();
+    private cacheGlobalEpoch = 0;
+    /**
+     * Per-directory naming-event sweeps ("which events ever asserted a
+     * placement under parent P"). A sweep only changes when a naming event
+     * with that parentId is added or removed, so invalidation is exact.
+     */
+    private slotSweepCache = new Map<string, Map<string, NamingLike>>();
+    private changeListener: ((event: any) => void) | undefined;
+    /** Row queries issued; tests assert warm paths issue none. */
+    rowQueries = 0;
 
     constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
         super();
@@ -664,6 +683,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.memoryLedger = undefined;
         this.versionRowCache = new Map();
         this.namingRowCache = new Map();
+        this.cacheEpochs = new Map();
+        this.cacheGlobalEpoch = 0;
+        this.slotSweepCache = new Map();
+        this.pendingGuardVersions = new Map();
+        this.pendingGuardNaming = new Map();
+        if (this.guardFlushTimer) {
+            clearTimeout(this.guardFlushTimer);
+            this.guardFlushTimer = undefined;
+        }
         await this.entries.open({
             type: SharedFsEntry,
             replicate: this.replicate as any,
@@ -678,16 +706,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
         // Cache maintenance runs on every peer; the resurrection guard only
         // on full replicas. Registering a change consumer also makes
-        // Documents materialize removed VALUES on delete — required, because
-        // by the time a handler runs the log entry is physically gone.
-        this.entries.events.addEventListener("change", (event: any) => {
+        // Documents materialize removed VALUES on delete. Deduped so a
+        // close→reopen of the same instance never stacks listeners.
+        if (this.changeListener) {
+            this.entries.events.removeEventListener(
+                "change",
+                this.changeListener
+            );
+        }
+        this.changeListener = (event: any) => {
             const added = event?.detail?.added ?? [];
             const removed = event?.detail?.removed ?? [];
             this.applyCacheChanges(added, removed);
             if (this.isFullReplica()) {
                 void this.guardAgainstLiveRemovals(removed).catch(() => {});
             }
-        });
+        };
+        this.entries.events.addEventListener("change", this.changeListener);
         if (this.isFullReplica()) {
             // Warm the chunkRefs child-table index so the first writeFile's
             // dedup freshness probe is a planned indexed join, not a scan.
@@ -880,17 +915,48 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     /** Bound the caches so pathological trees cannot grow memory forever. */
     private static CACHE_NODE_LIMIT = 50_000;
 
+    private bumpEpoch(nodeId: string) {
+        this.cacheEpochs.set(nodeId, (this.cacheEpochs.get(nodeId) ?? 0) + 1);
+    }
+
+    private epochOf(nodeId: string) {
+        return `${this.cacheGlobalEpoch}:${this.cacheEpochs.get(nodeId) ?? 0}`;
+    }
+
+    /** Evict the oldest ~10% (Map iteration order) instead of thrashing. */
+    private boundCache(cache: Map<string, unknown>) {
+        if (cache.size <= SharedFileSystem.CACHE_NODE_LIMIT) {
+            return;
+        }
+        this.cacheGlobalEpoch++;
+        const evict = Math.ceil(cache.size / 10);
+        let count = 0;
+        for (const key of cache.keys()) {
+            cache.delete(key);
+            if (++count >= evict) {
+                break;
+            }
+        }
+    }
+
     private applyCacheChanges(added: unknown[], removed: unknown[]) {
         for (const value of added) {
             if (value instanceof FileVersion) {
+                this.bumpEpoch(value.nodeId);
                 const bucket = this.versionRowCache.get(value.nodeId);
                 if (bucket) {
                     bucket.set(value.id, versionRowOf(value));
                 }
             } else if (value instanceof NamingEvent) {
+                this.bumpEpoch(value.nodeId);
                 const bucket = this.namingRowCache.get(value.nodeId);
                 if (bucket) {
                     bucket.set(value.id, namingRowOf(value));
+                }
+                this.bumpEpoch(`slot:${value.parentId}`);
+                const sweep = this.slotSweepCache.get(value.parentId);
+                if (sweep) {
+                    sweep.set(value.id, namingRowOf(value));
                 }
             }
         }
@@ -898,17 +964,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // the index.
         for (const value of removed) {
             if (value instanceof FileVersion) {
+                this.bumpEpoch(value.nodeId);
                 this.versionRowCache.delete(value.nodeId);
             } else if (value instanceof NamingEvent) {
+                this.bumpEpoch(value.nodeId);
                 this.namingRowCache.delete(value.nodeId);
+                this.bumpEpoch(`slot:${value.parentId}`);
+                this.slotSweepCache.delete(value.parentId);
             }
         }
-        if (this.versionRowCache.size > SharedFileSystem.CACHE_NODE_LIMIT) {
-            this.versionRowCache.clear();
-        }
-        if (this.namingRowCache.size > SharedFileSystem.CACHE_NODE_LIMIT) {
-            this.namingRowCache.clear();
-        }
+        this.boundCache(this.versionRowCache);
+        this.boundCache(this.namingRowCache);
+        this.boundCache(this.slotSweepCache);
     }
 
     /** Upsert a locally written document into a warm cache immediately. */
@@ -918,6 +985,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /** Index-only rows for a query; never resolves documents. */
     private async queryRows(query: Query[]): Promise<any[]> {
+        this.rowQueries++;
         return (await this.entries.index
             .iterate({ query }, { local: true, remote: false, resolve: false })
             .all()) as any[];
@@ -933,6 +1001,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const unique = [...new Set(nodeIds)];
         const byNode = new Map<string, NamingLike[]>();
         const misses: string[] = [];
+        const fillEpochs = new Map<string, string>();
         for (const nodeId of unique) {
             const cached = this.namingRowCache.get(nodeId);
             if (cached) {
@@ -940,6 +1009,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             } else {
                 byNode.set(nodeId, []);
                 misses.push(nodeId);
+                fillEpochs.set(nodeId, this.epochOf(nodeId));
             }
         }
         for (let i = 0; i < misses.length; i += HEAD_QUERY_BATCH) {
@@ -985,6 +1055,30 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return (await this.namingStatesForNodes([nodeId])).get(nodeId);
     }
 
+    /** Cache-first per-directory naming sweep; epoch-gated fill. */
+    private async sweepRows(parentId: string): Promise<NamingLike[]> {
+        const cached = this.slotSweepCache.get(parentId);
+        if (cached) {
+            return [...cached.values()];
+        }
+        const epochKey = `slot:${parentId}`;
+        const fillEpoch = this.epochOf(epochKey);
+        const rows = (
+            await this.queryRows([
+                new StringMatch({ key: "kind", value: "naming" }),
+                new StringMatch({ key: "parentId", value: parentId }),
+            ])
+        ).map(namingRowOf);
+        if (this.epochOf(epochKey) === fillEpoch) {
+            this.slotSweepCache.set(
+                parentId,
+                new Map(rows.map((row) => [row.id, row]))
+            );
+            this.boundCache(this.slotSweepCache);
+        }
+        return rows;
+    }
+
     /**
      * The visible node at (parentId, name): every node that ever asserted
      * this placement is a candidate; a node claims the slot when its current
@@ -1003,14 +1097,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
           }
         | undefined
     > {
-        const slotRows = await this.queryRows([
-            new StringMatch({ key: "kind", value: "naming" }),
-            new StringMatch({ key: "parentId", value: parentId }),
-            new StringMatch({ key: "name", value: name }),
-        ]);
-        const candidates = [
-            ...new Set(slotRows.map((row) => row.nodeId as string)),
-        ];
+        const slotRows = (await this.sweepRows(parentId)).filter(
+            (row) => row.name === name
+        );
+        const candidates = [...new Set(slotRows.map((row) => row.nodeId))];
         if (candidates.length === 0) {
             return undefined;
         }
@@ -1179,6 +1269,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         observedContentHeads?: string[];
     }) {
         const metadata = this.signedMetadata();
+        if (properties.parentHeads.length > 8000) {
+            throw new SharedFsError(
+                "EINVAL",
+                "too many concurrent naming heads to supersede in one event"
+            );
+        }
         const event = new NamingEvent({
             id: createId("naming"),
             nodeId: properties.nodeId,
@@ -1307,6 +1403,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     ): Promise<Map<string, VersionLike[]>> {
         const byNode = new Map<string, VersionLike[]>();
         const misses: string[] = [];
+        const fillEpochs = new Map<string, string>();
         for (const nodeId of nodeIds) {
             const cached = this.versionRowCache.get(nodeId);
             if (cached) {
@@ -1314,6 +1411,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             } else {
                 byNode.set(nodeId, []);
                 misses.push(nodeId);
+                fillEpochs.set(nodeId, this.epochOf(nodeId));
             }
         }
         for (let i = 0; i < misses.length; i += HEAD_QUERY_BATCH) {
@@ -1508,6 +1606,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return this.versionInfo(currentHeads[0], normalized, currentHeads);
         }
+        if ((options.baseVersionIds?.length ?? 0) > 8000) {
+            // The indexer's batched child-table insert has a bound-variable
+            // ceiling (~8191 rows), same as chunk references.
+            throw new SharedFsError(
+                "EINVAL",
+                "too many base versions for one write"
+            );
+        }
         let parentVersionIds: string[];
         let parentVersions: VersionLike[];
         if (options.baseVersionIds !== undefined) {
@@ -1686,23 +1792,39 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let firstError: unknown;
         const seen = new Set<string>([visible.id]);
         this.pinVersions(heads.map((head) => head.id));
+        // Walk candidate ids ancestor-ward; a missing version DOCUMENT does
+        // not dead-end the walk because the row graph still supplies its
+        // parents.
+        const rowsByIds = new Map(
+            (await this.headsForNode(resolved.nodeId)).map((row) => [
+                row.id,
+                row,
+            ])
+        );
+        const allRows = this.versionRowCache.get(resolved.nodeId);
+        const rowParents = (id: string): string[] =>
+            allRows?.get(id)?.parentVersionIds ??
+            rowsByIds.get(id)?.parentVersionIds ??
+            [];
         const candidates: FileVersion[] = [];
-        const visibleDoc = await this.getDocument<SharedFsEntry>(visible.id);
-        if (visibleDoc instanceof FileVersion) {
-            candidates.push(visibleDoc);
-        } else {
-            firstError = new SharedFsError(
-                "EIO",
-                `Missing version document ${visible.id} for ${normalized}`
-            );
-            for (const parentId of visible.parentVersionIds) {
+        const idQueue: string[] = [visible.id];
+        while (idQueue.length > 0 && candidates.length === 0) {
+            const id = idQueue.shift()!;
+            const doc = await this.getDocument<SharedFsEntry>(id);
+            if (doc instanceof FileVersion) {
+                candidates.push(doc);
+                break;
+            }
+            firstError =
+                firstError ??
+                new SharedFsError(
+                    "EIO",
+                    `Missing version document ${id} for ${normalized}`
+                );
+            for (const parentId of rowParents(id)) {
                 if (!seen.has(parentId)) {
                     seen.add(parentId);
-                    const parent =
-                        await this.getDocument<SharedFsEntry>(parentId);
-                    if (parent instanceof FileVersion) {
-                        candidates.push(parent);
-                    }
+                    idQueue.push(parentId);
                 }
             }
         }
@@ -1761,20 +1883,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
         // Every event that ever asserted a placement under this directory is
         // a candidate; slot resolution filters to current live winners.
-        const slotRows = await this.queryRows([
-            new StringMatch({ key: "kind", value: "naming" }),
-            new StringMatch({ key: "parentId", value: parentId }),
-        ]);
+        const slotRows = await this.sweepRows(parentId);
         const nodesByName = new Map<string, Set<string>>();
-        for (const raw of slotRows) {
-            const set =
-                nodesByName.get(raw.name as string) ?? new Set<string>();
-            set.add(raw.nodeId as string);
-            nodesByName.set(raw.name as string, set);
+        for (const row of slotRows) {
+            const set = nodesByName.get(row.name) ?? new Set<string>();
+            set.add(row.nodeId);
+            nodesByName.set(row.name, set);
         }
-        const allNodeIds = [
-            ...new Set(slotRows.map((row) => row.nodeId as string)),
-        ];
+        const allNodeIds = [...new Set(slotRows.map((row) => row.nodeId))];
         const states = await this.namingStatesForNodes(allNodeIds);
         const winners: {
             name: string;
@@ -2225,7 +2341,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             case "restore": {
                 if (
                     nodeKindOf(nodeId) === "file" &&
-                    (await this.headsForNode(nodeId)).length === 0
+                    (await this.versionDocumentsForNode(nodeId)).length === 0
                 ) {
                     // Never produce a contentless ghost: if every version of
                     // this node has been reclaimed, say so loudly.
@@ -2296,11 +2412,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // re-referencing the visible head and re-put/touch its chunks,
             // so the restored file is race-proof against a concurrent chunk
             // sweep exactly like a fresh edit is.
-            const heads = await this.headsForNode(nodeId);
-            const visibleDoc = heads[0]
-                ? await this.getDocument<SharedFsEntry>(heads[0].id)
-                : undefined;
-            if (visibleDoc instanceof FileVersion) {
+            const docs = await this.versionDocumentsForNode(nodeId);
+            const heads = this.contentHeads(docs);
+            const visibleDoc = heads[0];
+            if (!(visibleDoc instanceof FileVersion)) {
+                throw new SharedFsError(
+                    "EIO",
+                    "restored node's winning version document is unavailable"
+                );
+            }
+            {
                 const visible = visibleDoc;
                 const chunkDocs: FileChunk[] = [];
                 for (const chunkId of new Set(visible.chunkIds)) {
@@ -2457,7 +2578,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.pendingGuardNaming.clear();
         for (const [nodeId, values] of removedVersions) {
             try {
-                const naming = await this.namingStateForNode(nodeId);
+                // Decisions run on the resolved-document plane end to end:
+                // mixing cache-backed naming with fresh version queries can
+                // act on inconsistent snapshots.
+                const namingDocs = await this.queryDocuments<NamingEvent>([
+                    new StringMatch({ key: "kind", value: "naming" }),
+                    new StringMatch({ key: "nodeId", value: nodeId }),
+                ]);
+                const naming = computeNamingState(
+                    nodeId,
+                    namingDocs.filter(
+                        (doc): doc is NamingEvent => doc instanceof NamingEvent
+                    )
+                );
                 if (!naming) {
                     continue;
                 }
@@ -2466,12 +2599,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     await this.versionDocumentsForNode(nodeId)
                 ).filter((doc) => !removedIds.has(doc.id));
                 const heads = this.contentHeads([...remaining, ...values]);
-                const winnerDoc = naming.winner.deleted
-                    ? await this.getDocument<NamingEvent>(naming.winner.id)
-                    : undefined;
                 const observed = new Set(
-                    winnerDoc instanceof NamingEvent
-                        ? winnerDoc.observedContentHeads
+                    naming.winner.deleted
+                        ? (naming.winner as NamingEvent).observedContentHeads
                         : []
                 );
                 // Purge discriminator: a genuine delete-vs-edit recoverable
@@ -2503,9 +2633,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         for (const [nodeId, values] of removedNaming) {
             try {
                 const removedIds = new Set(values.map((value) => value.id));
-                const remaining = (
-                    (await this.namingStateForNode(nodeId))?.events ?? []
-                ).filter((event) => !removedIds.has(event.id));
+                const namingDocs = await this.queryDocuments<NamingEvent>([
+                    new StringMatch({ key: "kind", value: "naming" }),
+                    new StringMatch({ key: "nodeId", value: nodeId }),
+                ]);
+                const remaining = namingDocs
+                    .filter(
+                        (doc): doc is NamingEvent => doc instanceof NamingEvent
+                    )
+                    .filter((event) => !removedIds.has(event.id));
                 const state = computeNamingState(nodeId, [
                     ...remaining,
                     ...values,
@@ -2688,9 +2824,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // horizon must be unretirable everywhere while a new write
         // propagates. The horizon is fixed at authoring time, so retention
         // is clamped up rather than letting an aggressive option break W1.
+        // Fixed 48h propagation slack regardless of horizon: short horizons
+        // must not also shorten the window a slow replica has to object.
         const retentionFloor =
-            this.skipHorizonMs +
-            Math.max(config.graceMs, Math.min(2 * DAY_MS, this.skipHorizonMs));
+            this.skipHorizonMs + Math.max(config.graceMs, 2 * DAY_MS);
         if (config.retentionMs < retentionFloor) {
             report.warnings.push(
                 `retentionMs raised to ${retentionFloor} to preserve the dedup-skip safety invariant`
