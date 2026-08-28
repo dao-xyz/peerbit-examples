@@ -358,13 +358,36 @@ const openCliFs = async (
         options.replicate === false
             ? { replicate: false }
             : CLI_REPLICATION_ARGS;
-    return openSharedFs({
-        peerbit,
-        address: options.address,
-        machineLabel: options.machineLabel || os.hostname(),
-        rootKey: options.rootKey,
-        ...programArgs,
-    });
+    const open = () =>
+        openSharedFs({
+            peerbit,
+            address: options.address,
+            machineLabel: options.machineLabel || os.hostname(),
+            rootKey: options.rootKey,
+            ...programArgs,
+        });
+    if (!options.address) {
+        return open();
+    }
+    // Opening by address right after connecting can race the network:
+    // the program manifest may not be fetchable for a few seconds.
+    // Transient resolution failures are retried within a bounded window;
+    // auth/config errors stay fail-fast.
+    const deadline = Date.now() + 20_000;
+    while (true) {
+        try {
+            return await open();
+        } catch (error: any) {
+            const transient =
+                /not found|timed? ?out|resolve|missing|abort/i.test(
+                    String(error?.message ?? "")
+                );
+            if (!transient || Date.now() >= deadline) {
+                throw error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+    }
 };
 
 export const runCli = async (args = hideBin(process.argv)) => {
@@ -648,8 +671,18 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         replicate: argv.replicate,
                     });
                     const rootEntries = await fsHandle.list("/");
-                    const conflicts = await fsHandle.conflicts();
+                    const bootstrap = fsHandle.bootstrapStatus();
+                    // Partial results are fine for a status display while
+                    // a cold-start bootstrap overlay is still active.
+                    const conflicts = await fsHandle.conflicts(undefined, {
+                        allowPartial: true,
+                    });
                     console.log(`address: ${fsHandle.address}`);
+                    if (bootstrap.phase !== "off") {
+                        console.log(
+                            `bootstrap: ${bootstrap.phase} (${bootstrap.pendingDocs} documents pending)`
+                        );
+                    }
                     console.log(`local public key: ${fsHandle.localPublicKey}`);
                     console.log(
                         `access controlled: ${
@@ -686,6 +719,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: argv.replicate,
                     });
+                    // Conflict listings need the converged view.
+                    await fsHandle.awaitBootstrapConverged();
                     const conflicts = await fsHandle.conflicts();
                     if (conflicts.length === 0) {
                         console.log("No conflicts");
@@ -939,6 +974,106 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             )
                         );
                         process.exitCode = 1;
+                    }
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
+            "snapshot <address>",
+            "materialize and publish a cold-start snapshot from a fully synced replica",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                        demandOption: true,
+                    })
+                    .option("settle-seconds", {
+                        type: "number",
+                        default: 5,
+                        description:
+                            "Quiet period with no document arrivals required before materializing.",
+                    })
+                    .option("json", {
+                        type: "boolean",
+                        default: false,
+                        description: "Print machine-readable JSON.",
+                    }),
+            async (argv) => {
+                if (argv.replicate === false) {
+                    console.error(
+                        chalk.red(
+                            "snapshot requires a full replica; --no-replicate is not allowed."
+                        )
+                    );
+                    process.exitCode = 1;
+                    return;
+                }
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: true,
+                    });
+                    const fsHandle = await openCliFs(peerbit, {
+                        address: argv.address,
+                        machineLabel: argv.machine,
+                        replicate: true,
+                    });
+                    // A one-shot CLI peer starts empty: wait for its own
+                    // bootstrap/sync to settle before materializing, or the
+                    // snapshot would describe a lagging view as current.
+                    // Settle = no document ARRIVALS for the settle window,
+                    // observed twice — root-listing size is not a
+                    // convergence signal.
+                    await fsHandle.awaitBootstrapConverged();
+                    const settleMs = Math.max(
+                        1000,
+                        (argv.settleSeconds ?? 5) * 1000
+                    );
+                    let quietChecks = 0;
+                    while (quietChecks < 2) {
+                        const status = fsHandle.bootstrapStatus();
+                        // Infinity (nothing ever arrived) counts as quiet;
+                        // the empty-tree refusal below catches dead links.
+                        if (status.msSinceLastArrival > settleMs) {
+                            quietChecks++;
+                        } else {
+                            quietChecks = 0;
+                        }
+                        await new Promise((resolve) =>
+                            setTimeout(resolve, Math.min(settleMs, 2000))
+                        );
+                    }
+                    if ((await fsHandle.list("/")).length === 0) {
+                        console.error(
+                            chalk.red(
+                                "refusing to publish a snapshot of an empty tree — is the network reachable?"
+                            )
+                        );
+                        process.exitCode = 1;
+                        return;
+                    }
+                    const result = await fsHandle.snapshotWrite();
+                    if (argv.json) {
+                        console.log(
+                            JSON.stringify(
+                                result,
+                                (key, value) =>
+                                    typeof value === "bigint"
+                                        ? value.toString()
+                                        : value,
+                                2
+                            )
+                        );
+                    } else {
+                        console.log(chalk.bold("snapshot published"));
+                        console.log(`manifest:  ${result.manifestId}`);
+                        console.log(`sequence:  ${result.snapshotSeq}`);
+                        console.log(
+                            `contents:  ${result.docs} documents over ${result.nodes} nodes in ${result.segments} segments (${result.bytes} bytes)`
+                        );
                     }
                 } finally {
                     await stopPeerbitForCli(peerbit);

@@ -1,4 +1,4 @@
-import { field, option, variant, vec } from "@dao-xyz/borsh";
+import { field, fixedArray, option, variant, vec } from "@dao-xyz/borsh";
 import { sha256Base64Sync } from "@peerbit/crypto";
 
 const encodeStringList = (values?: string[]) => JSON.stringify(values ?? []);
@@ -17,7 +17,11 @@ const decodeStringList = (value?: string) => {
     }
 };
 
-export type SharedFsEntryKind = "naming" | "file-version" | "file-chunk";
+export type SharedFsEntryKind =
+    | "naming"
+    | "file-version"
+    | "file-chunk"
+    | "bootstrap-manifest";
 
 export abstract class SharedFsEntry {
     abstract id: string;
@@ -388,3 +392,171 @@ export type FileHead = FileVersion;
 
 export const isFileHead = (entry: SharedFsEntry): entry is FileHead =>
     entry instanceof FileVersion;
+
+// ---------------------------------------------------------------------
+// Cold-start bootstrap snapshots
+// ---------------------------------------------------------------------
+
+export const SNAPSHOT_FORMAT_VERSION = 1;
+
+/** One content-addressed snapshot shard in the block store. */
+export class SegmentRef {
+    /** Block-store CID of the serialized SnapshotSegment. */
+    @field({ type: "string" })
+    cid: string;
+
+    /**
+     * sha256 (base64) of the segment bytes, bound by the manifest
+     * signature — a joiner re-hashes what it fetched and never trusts the
+     * transport or the CID computation alone.
+     */
+    @field({ type: "string" })
+    sha256: string;
+
+    @field({ type: "u32" })
+    docCount: number;
+
+    @field({ type: "u64" })
+    byteLength: bigint;
+
+    constructor(properties?: {
+        cid: string;
+        sha256: string;
+        docCount: number;
+        byteLength: bigint | number;
+    }) {
+        if (properties) {
+            this.cid = properties.cid;
+            this.sha256 = properties.sha256;
+            this.docCount = properties.docCount;
+            this.byteLength = BigInt(properties.byteLength);
+        }
+    }
+}
+
+export class SnapshotCounts {
+    @field({ type: "u64" })
+    nodes: bigint;
+
+    @field({ type: "u64" })
+    docs: bigint;
+
+    @field({ type: "u64" })
+    bytes: bigint;
+
+    constructor(properties?: {
+        nodes: bigint | number;
+        docs: bigint | number;
+        bytes: bigint | number;
+    }) {
+        if (properties) {
+            this.nodes = BigInt(properties.nodes);
+            this.docs = BigInt(properties.docs);
+            this.bytes = BigInt(properties.bytes);
+        }
+    }
+}
+
+/**
+ * The signed body of a bootstrap manifest: which segments make up one
+ * head-state snapshot of the filesystem. Contains no log heads — a
+ * joiner's convergence is tracked per document, not against prunable log
+ * state.
+ */
+export class SnapshotManifestPayload {
+    @field({ type: "u32" })
+    formatVersion: number;
+
+    /** The program id (salt input): binds a manifest to one filesystem. */
+    @field({ type: fixedArray("u8", 32) })
+    storeId: Uint8Array;
+
+    /** Per-author monotonic sequence; meaningless across authors. */
+    @field({ type: "u64" })
+    snapshotSeq: bigint;
+
+    /** Wall clock at materialization; ranks candidates across authors. */
+    @field({ type: "u64" })
+    createdAtWallMs: bigint;
+
+    @field({ type: SnapshotCounts })
+    counts: SnapshotCounts;
+
+    @field({ type: vec(SegmentRef) })
+    segments: SegmentRef[];
+
+    constructor(properties?: {
+        storeId: Uint8Array;
+        snapshotSeq: bigint | number;
+        createdAtWallMs: bigint | number;
+        counts: SnapshotCounts;
+        segments: SegmentRef[];
+    }) {
+        if (properties) {
+            this.formatVersion = SNAPSHOT_FORMAT_VERSION;
+            this.storeId = properties.storeId;
+            this.snapshotSeq = BigInt(properties.snapshotSeq);
+            this.createdAtWallMs = BigInt(properties.createdAtWallMs);
+            this.counts = properties.counts;
+            this.segments = properties.segments;
+        }
+    }
+}
+
+/**
+ * One snapshot shard: full naming/version HEAD documents (deletes
+ * included, never chunks), reusing the exact variant-tagged classes and
+ * decoder used everywhere else. Serialized standalone into the block
+ * store; unchanged shards re-serialize to identical bytes and dedup
+ * across snapshots.
+ */
+export class SnapshotSegment {
+    @field({ type: "u32" })
+    formatVersion: number;
+
+    @field({ type: vec(SharedFsEntry) })
+    entries: SharedFsEntry[];
+
+    constructor(properties?: { entries: SharedFsEntry[] }) {
+        if (properties) {
+            this.formatVersion = SNAPSHOT_FORMAT_VERSION;
+            this.entries = properties.entries;
+        }
+    }
+}
+
+/**
+ * A signed pointer to the newest snapshot, published as an ordinary
+ * document (one per author, superseded in place). The inner signature
+ * covers payloadBytes, so a joiner verifies the snapshot against its OWN
+ * trust graph without trusting whichever peer served the document.
+ */
+@variant("shared_fs_bootstrap_manifest")
+export class BootstrapManifest extends SharedFsEntry {
+    kind: SharedFsEntryKind = "bootstrap-manifest";
+
+    /** "bootstrap:" + the author key encoding the signature must match. */
+    @field({ type: "string" })
+    id: string;
+
+    /** Serialized SnapshotManifestPayload. */
+    @field({ type: Uint8Array })
+    payloadBytes: Uint8Array;
+
+    /** Serialized SignatureWithKey over payloadBytes. */
+    @field({ type: Uint8Array })
+    signatureBytes: Uint8Array;
+
+    constructor(properties?: {
+        id: string;
+        payloadBytes: Uint8Array;
+        signatureBytes: Uint8Array;
+    }) {
+        super();
+        if (properties) {
+            this.id = properties.id;
+            this.payloadBytes = properties.payloadBytes;
+            this.signatureBytes = properties.signatureBytes;
+        }
+    }
+}
