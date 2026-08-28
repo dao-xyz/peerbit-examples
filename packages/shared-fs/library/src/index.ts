@@ -1,13 +1,15 @@
-import { deserialize, field, option, variant } from "@dao-xyz/borsh";
+import { deserialize, field, option, serialize, variant } from "@dao-xyz/borsh";
 import {
     type PublicSignKey,
     PublicSignKey as PublicSignKeyType,
+    SignatureWithKey,
     fromBase64,
     randomBytes,
     sha256Base64Sync,
     sha256Sync,
     toBase64,
     toBase64URL,
+    verify,
 } from "@peerbit/crypto";
 import {
     Compare,
@@ -23,11 +25,16 @@ import { TrustedNetwork } from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
 import {
+    BootstrapManifest,
     FileChunk,
     FileVersion,
     IndexableSharedFsEntry,
     NamingEvent,
+    SegmentRef,
     SharedFsEntry,
+    SnapshotCounts,
+    SnapshotManifestPayload,
+    SnapshotSegment,
     isFileHead,
     type FileHead,
 } from "./model.js";
@@ -195,7 +202,93 @@ export type SharedFsOpenArgs = {
      * value. Default 15 days; floor 5 minutes.
      */
     dedupSkipHorizonMs?: number;
+    /**
+     * Cold-start bootstrap behavior when opening an existing filesystem
+     * with an empty local store. "auto" (default): fetch and verify the
+     * newest trusted snapshot, serve reads from it immediately, and
+     * converge to a normal full replica in the background — falling back
+     * silently to a plain join on any failure. "require" throws instead of
+     * falling back. "off" (or false) keeps today's plain join.
+     */
+    bootstrap?: false | "auto" | BootstrapOptions;
+    /** Snapshot publication policy for trusted full replicas. */
+    snapshot?: SnapshotPublishOptions;
 };
+
+export type BootstrapOptions = {
+    mode?: "auto" | "require" | "off";
+    /** Reject snapshots older than this (default 2h). */
+    maxSnapshotAgeMs?: number;
+    /** How long to look for (and verify) manifest candidates (default 5s). */
+    discoveryTimeoutMs?: number;
+    segmentFetchConcurrency?: number;
+    /**
+     * How long the read-through overlay may wait for per-document
+     * convergence before retiring unverified (default 15min).
+     */
+    retirementTimeoutMs?: number;
+};
+
+export type SnapshotPublishOptions = {
+    /** Periodic publication interval for trusted full replicas (default 30min). */
+    publishIntervalMs?: number;
+    /** Skip a scheduled publication when fewer documents changed (default 50). */
+    minChangesBetween?: number;
+    /** Disable automatic publication (snapshotWrite() stays available). */
+    disabled?: boolean;
+};
+
+export type BootstrapPhase =
+    | "off"
+    | "fetching"
+    | "overlay-active"
+    | "converged"
+    | "unverified";
+
+export type BootstrapStatus = {
+    phase: BootstrapPhase;
+    manifest?: {
+        authorKey: string;
+        snapshotSeq: bigint;
+        createdAtWallMs: bigint;
+        ageMs: number;
+        docs: bigint;
+    };
+    /** Snapshot documents not yet covered by arrival/removal/supersession. */
+    pendingDocs: number;
+    guardArmed: boolean;
+    /** Why the last bootstrap fell back to a plain join, when it did. */
+    lastFailure?: string;
+    /**
+     * Milliseconds since the last document arrival (Infinity when none
+     * yet); a settle signal for callers that need a quiet store.
+     */
+    msSinceLastArrival: number;
+};
+
+export type SnapshotWriteResult = {
+    snapshotSeq: bigint;
+    createdAtWallMs: bigint;
+    nodes: bigint;
+    docs: bigint;
+    bytes: bigint;
+    segments: number;
+    manifestId: string;
+};
+
+/**
+ * Thrown by whole-store conflict/changeset queries while a bootstrap
+ * overlay is active: those scans bypass the overlay's read points and
+ * would otherwise report a different world than the tree view. Pass
+ * `{ allowPartial: true }` to accept partial-index results.
+ */
+export class BootstrapPendingError extends Error {
+    constructor(operation: string) {
+        super(
+            `${operation} is unavailable while the cold-start bootstrap overlay is active; pass { allowPartial: true } for partial-index results or await bootstrap convergence`
+        );
+    }
+}
 
 export type OpenSharedFsOptions = SharedFsOpenArgs & {
     peerbit: Peerbit;
@@ -627,6 +720,73 @@ const validChangesetId = (value: string | undefined) =>
 /** How long a negative trust verdict may be served from cache. */
 const TRUST_NEGATIVE_TTL_MS = 1000;
 
+// ---------------------------------------------------------------------
+// Cold-start bootstrap constants
+// ---------------------------------------------------------------------
+
+const SNAPSHOT_MAX_SEGMENT_COUNT = 256;
+const SNAPSHOT_TARGET_SEGMENT_BYTES = 384_000;
+const SNAPSHOT_EST_DOC_BYTES = 384;
+const MANIFEST_PAYLOAD_CAP_BYTES = 100_000;
+const BOOTSTRAP_DEFAULTS = {
+    maxSnapshotAgeMs: 2 * 60 * 60 * 1000,
+    discoveryTimeoutMs: 5_000,
+    segmentFetchConcurrency: 16,
+    retirementTimeoutMs: 15 * 60 * 1000,
+};
+const SNAPSHOT_DEFAULTS = {
+    publishIntervalMs: 30 * 60 * 1000,
+    minChangesBetween: 50,
+};
+/** Overlay supersession sweep cadence while bootstrap is active. */
+const SUPERSESSION_SWEEP_MS = 5_000;
+/** Double-check delay before verified retirement (one guard-coalescing window). */
+const RETIRE_DOUBLE_CHECK_MS = 300;
+/** Post-timeout arming: no arrivals for this long counts as quiescent... */
+const QUIESCENCE_WINDOW_MS = 60_000;
+/** ...on two consecutive checks this far apart. */
+const QUIESCENCE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+const equalBytes = (a: Uint8Array, b: Uint8Array) =>
+    a.byteLength === b.byteLength && a.every((value, i) => value === b[i]);
+
+/**
+ * Structural, state-independent document validation shared by ingest
+ * (canPerform) and bootstrap segment installation: acceptance must never
+ * depend on replication order or local history.
+ */
+const structurallyValidEntry = (value: SharedFsEntry): boolean => {
+    if (value instanceof FileChunk) {
+        // Content-addressed chunks are self-certifying: the bytes must
+        // hash to the id, regardless of who signed the entry.
+        const hash = sha256Base64Sync(value.bytes);
+        return hash === value.hash && value.id === `chunk:${hash}`;
+    }
+    if (value instanceof NamingEvent) {
+        return (
+            value.id.startsWith("naming:") &&
+            (value.nodeId.startsWith("dir:") ||
+                value.nodeId.startsWith("file:")) &&
+            (value.parentId === ROOT_NODE_ID ||
+                value.parentId.startsWith("dir:")) &&
+            VALID_NAME(value.name) &&
+            decodesToStringArray(value.parentNamingIdsJson) &&
+            decodesToStringArray(value.observedContentHeadsJson) &&
+            value.causalDepth >= 1n &&
+            validChangesetId(value.changesetId)
+        );
+    }
+    if (value instanceof FileVersion) {
+        return (
+            value.id.startsWith("version:") &&
+            value.nodeId.startsWith("file:") &&
+            value.causalDepth >= 1n &&
+            validChangesetId(value.changesetId)
+        );
+    }
+    return true;
+};
+
 @variant("peerbit_shared_fs")
 export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     @field({ type: Uint8Array })
@@ -683,6 +843,57 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeBatchChain: Promise<unknown> = Promise.resolve();
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
+    // --- Cold-start bootstrap state (all re-initialized in open()) ---
+    private bootstrapPhase: BootstrapPhase = "off";
+    /**
+     * Guard D arming: false from the moment a bootstrap is decided until
+     * verified retirement (or post-timeout quiescence), so a partial
+     * replica can never resurrect history network-wide.
+     */
+    private guardArmed = true;
+    /**
+     * Read-through overlay over the snapshot's head documents. HARD
+     * INVARIANT: visible ONLY to the five enumerated metadata read points
+     * (namingStatesForNodes, sweepRows, headsForNodes, getDocument-on-miss
+     * for naming/version ids, versionDocumentsForNode) — never to
+     * touchChunks, hasDocument, GC planning, or Guard D. Nothing in the
+     * overlay ever enters the log, index, or block store.
+     */
+    private overlayNaming = new Map<string, Map<string, NamingLike>>();
+    private overlayVersions = new Map<string, Map<string, VersionLike>>();
+    private overlaySweep = new Map<string, Map<string, NamingLike>>();
+    private overlayDocs = new Map<string, SharedFsEntry>();
+    private overlayPending = new Map<
+        string,
+        { nodeId: string; kind: "naming" | "file-version" }
+    >();
+    private bootstrapConfig = {
+        mode: "off" as "auto" | "require" | "off",
+        ...BOOTSTRAP_DEFAULTS,
+    };
+    private snapshotConfig = { ...SNAPSHOT_DEFAULTS, disabled: false };
+    private bootstrapManifestMeta: BootstrapStatus["manifest"];
+    private lastArrivalMs = 0;
+    private docsSinceSnapshot = 0;
+    private quiescentChecks = 0;
+    private bootstrapTimers: ReturnType<typeof setTimeout>[] = [];
+    private snapshotTimer: ReturnType<typeof setInterval> | undefined;
+    private supersessionTimer: ReturnType<typeof setInterval> | undefined;
+    private quiescenceTimer: ReturnType<typeof setInterval> | undefined;
+    private bootstrapWaiters: Array<(result: { verified: boolean }) => void> =
+        [];
+    /** Settles once the bootstrap decision (run, fall back, resume) is made. */
+    private bootstrapDecision: Promise<void> = Promise.resolve();
+    /** True only after a VERIFIED retirement (never for quiescence arming). */
+    private bootstrapVerified = false;
+    /** Human-readable summary of the last bootstrap fallback, for status. */
+    private bootstrapFailure: string | undefined;
+    /** Serializes bootstrap state-file writes. */
+    private stateWriteChain: Promise<unknown> = Promise.resolve();
+    private snapshotRunning = false;
+    private sweepRunning = false;
+    /** Last arrival authored by ANOTHER peer (local writes excluded). */
+    private lastRemoteArrivalMs = 0;
 
     constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
         super();
@@ -693,11 +904,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   rootTrust: properties.rootKey,
               })
             : undefined;
-        // v6: write-set identities (changesetId) — the salt bump guarantees
-        // older peers can never attach to the same log and fail confusingly
-        // mid-replication.
+        // v7: bootstrap manifests (cold-start snapshots) — the salt bump
+        // guarantees older peers can never attach to the same log and fail
+        // confusingly mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v6")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v7")])),
         });
     }
 
@@ -708,6 +919,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // pruned because it is not a leader for them.
         this.replicate =
             args?.replicate === undefined ? { factor: 1 } : args.replicate;
+        // Unconditional (borsh bypasses field initializers on
+        // address-opened programs — a conditional assignment here left
+        // remote chunk fetch silently DISABLED for every peer that opened
+        // an existing address with default options).
+        this.remoteChunkFetch = { timeoutMs: REMOTE_CHUNK_FETCH_TIMEOUT_MS };
         if (args?.remoteChunkFetch === false) {
             this.remoteChunkFetch = false;
         } else if (
@@ -742,6 +958,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.trustVerdicts = new Map();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
+        this.bootstrapPhase = "off";
+        this.guardArmed = true;
+        this.overlayNaming = new Map();
+        this.overlayVersions = new Map();
+        this.overlaySweep = new Map();
+        this.overlayDocs = new Map();
+        this.overlayPending = new Map();
+        this.bootstrapManifestMeta = undefined;
+        this.lastArrivalMs = 0;
+        this.lastRemoteArrivalMs = 0;
+        this.docsSinceSnapshot = 0;
+        this.quiescentChecks = 0;
+        this.clearBootstrapTimers();
+        this.bootstrapWaiters = [];
+        this.bootstrapVerified = false;
+        this.bootstrapFailure = undefined;
+        this.stateWriteChain = Promise.resolve();
+        this.snapshotRunning = false;
+        this.sweepRunning = false;
+        const bootstrapArg = args?.bootstrap;
+        this.bootstrapConfig = {
+            ...BOOTSTRAP_DEFAULTS,
+            ...(typeof bootstrapArg === "object" ? bootstrapArg : {}),
+            mode:
+                bootstrapArg === false
+                    ? ("off" as const)
+                    : typeof bootstrapArg === "object"
+                      ? (bootstrapArg.mode ?? "auto")
+                      : "auto",
+        };
+        this.snapshotConfig = {
+            ...SNAPSHOT_DEFAULTS,
+            disabled: false,
+            ...(args?.snapshot ?? {}),
+        };
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
@@ -763,6 +1014,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.trustChangeListener
             );
         }
+        // The persisted state is read BEFORE the entries store opens: an
+        // interrupted-bootstrap marker must disarm the resurrection guard
+        // ahead of any listener registration or ingest, REGARDLESS of the
+        // configured bootstrap mode — a partial store must never judge
+        // removals.
+        const persisted = await this.readBootstrapState();
+        const marker = persisted.bootstrap;
+        if (marker !== undefined) {
+            this.guardArmed = false;
+        }
+        const bootstrapCandidate =
+            this.bootstrapConfig.mode !== "off" && this.isFullReplica();
+        // Replication is ALWAYS announced at open. An earlier design
+        // deferred the announcement until the snapshot overlay installed
+        // (to keep ingest off the install's critical path), but an
+        // observer-to-replicator upgrade broadcast over a still-forming
+        // relayed mesh proved lossy in cross-network interop — the joiner
+        // stayed a silent observer. The overlay install runs beside the
+        // ingest instead; it is chunked with yields and still lands in
+        // low single-digit seconds.
         await this.entries.open({
             type: SharedFsEntry,
             replicate: this.replicate as any,
@@ -783,9 +1054,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             },
         });
         // Cache maintenance runs on every peer; the resurrection guard only
-        // on full replicas. Registering a change consumer also makes
-        // Documents materialize removed VALUES on delete. Deduped so a
-        // close→reopen of the same instance never stacks listeners.
+        // on full replicas (and only while armed — see guardArmed).
+        // Registering a change consumer also makes Documents materialize
+        // removed VALUES on delete. Deduped so a close→reopen of the same
+        // instance never stacks listeners.
         if (this.changeListener) {
             this.entries.events.removeEventListener(
                 "change",
@@ -795,12 +1067,70 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.changeListener = (event: any) => {
             const added = event?.detail?.added ?? [];
             const removed = event?.detail?.removed ?? [];
+            this.lastArrivalMs = this.clock();
+            const localKey = this.authorKey();
+            for (const value of added) {
+                if (
+                    value instanceof NamingEvent ||
+                    value instanceof FileVersion
+                ) {
+                    // Only metadata counts toward "documents changed";
+                    // remote arrivals (not our own writes) drive the
+                    // supersession-sweep pacing.
+                    this.docsSinceSnapshot++;
+                    if (value.authorKey !== localKey) {
+                        this.lastRemoteArrivalMs = this.clock();
+                    }
+                }
+            }
             this.applyCacheChanges(added, removed);
-            if (this.isFullReplica()) {
+            if (this.overlayPending.size > 0) {
+                for (const value of [...added, ...removed]) {
+                    const id = (value as any)?.id;
+                    if (typeof id === "string") {
+                        this.overlayPending.delete(id);
+                    }
+                }
+            }
+            if (this.guardArmed && this.isFullReplica()) {
                 void this.guardAgainstLiveRemovals(removed).catch(() => {});
             }
         };
         this.entries.events.addEventListener("change", this.changeListener);
+        this.bootstrapDecision = Promise.resolve();
+        if (bootstrapCandidate) {
+            if (this.bootstrapConfig.mode === "require") {
+                // "require" surfaces the failing stage to the opener
+                // instead of falling back silently.
+                await this.startBootstrap(marker);
+            } else {
+                const run = this.startBootstrap(marker).catch(() => {
+                    // startBootstrap chooses its posture on expected
+                    // failures; an unexpected throw keeps the safe side:
+                    // a resumed (marker-bearing) store must stay gated.
+                    if (
+                        this.bootstrapPhase === "fetching" ||
+                        this.bootstrapPhase === "off"
+                    ) {
+                        if (marker !== undefined) {
+                            this.enterUnverified();
+                        } else {
+                            this.abandonBootstrap();
+                        }
+                    }
+                });
+                this.bootstrapDecision = run;
+            }
+        } else if (marker !== undefined) {
+            // An unfinished bootstrap on disk, but this open is not a
+            // candidate (mode off, or a partial replica): hold the
+            // unverified posture until the store settles.
+            this.bootstrapPhase = "unverified";
+            this.startQuiescenceChecker();
+        }
+        // Stamp the warm-reopen marker (never clears the bootstrap key).
+        void this.writeBootstrapState({ openedBefore: true }).catch(() => {});
+        this.startSnapshotPublisher();
         if (this.isFullReplica()) {
             // Warm the chunkRefs child-table index so the first writeFile's
             // dedup freshness probe is a planned indexed join, not a scan.
@@ -854,37 +1184,46 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // depend on replication order or local history.
         if (operation?.type === "put") {
             const value = operation.value;
-            if (value instanceof FileChunk) {
-                // Content-addressed chunks are self-certifying: the bytes
-                // must hash to the id, regardless of who signed the entry.
-                const hash = sha256Base64Sync(value.bytes);
-                if (hash !== value.hash || value.id !== `chunk:${hash}`) {
-                    return false;
-                }
-            } else if (value instanceof NamingEvent) {
+            if (!structurallyValidEntry(value)) {
+                return false;
+            }
+            if (value instanceof BootstrapManifest) {
+                // A signed snapshot pointer: the payload is bounded, the
+                // id is bound to the INNER signer, the inner signature
+                // verifies, the payload decodes and names THIS store, and
+                // (when access-controlled) the inner signer is trusted —
+                // so a joiner can verify a manifest against its own trust
+                // graph without trusting whichever peer served it.
                 if (
-                    !value.id.startsWith("naming:") ||
-                    !(
-                        value.nodeId.startsWith("dir:") ||
-                        value.nodeId.startsWith("file:")
-                    ) ||
-                    !(
-                        value.parentId === ROOT_NODE_ID ||
-                        value.parentId.startsWith("dir:")
-                    ) ||
-                    !VALID_NAME(value.name) ||
-                    !decodesToStringArray(value.parentNamingIdsJson) ||
-                    !decodesToStringArray(value.observedContentHeadsJson) ||
-                    value.causalDepth < 1n ||
-                    !validChangesetId(value.changesetId)
+                    value.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES
                 ) {
                     return false;
                 }
-            } else if (value instanceof FileVersion) {
+                let signature: SignatureWithKey;
+                let payload: SnapshotManifestPayload;
+                try {
+                    signature = deserialize(
+                        value.signatureBytes,
+                        SignatureWithKey
+                    );
+                    payload = deserialize(
+                        value.payloadBytes,
+                        SnapshotManifestPayload
+                    );
+                } catch {
+                    return false;
+                }
                 if (
-                    !value.nodeId.startsWith("file:") ||
-                    value.causalDepth < 1n ||
-                    !validChangesetId(value.changesetId)
+                    value.id !==
+                        `bootstrap:${encodePublicSignKey(signature.publicKey)}` ||
+                    !equalBytes(payload.storeId, this.id) ||
+                    !(await verify(signature, value.payloadBytes))
+                ) {
+                    return false;
+                }
+                if (
+                    this.trustGraph &&
+                    !(await this.trustGraph.isTrusted(signature.publicKey))
                 ) {
                     return false;
                 }
@@ -983,6 +1322,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             local: true,
             remote: false,
         });
+        if (
+            result == null &&
+            this.bootstrapPhase === "overlay-active" &&
+            (id.startsWith("naming:") || id.startsWith("version:"))
+        ) {
+            // Overlay read point: metadata documents only — chunk lookups
+            // (and with them touchChunks/hasDocument/GC/Guard D, which
+            // never see the overlay) are structurally excluded.
+            return this.overlayDocs.get(id) as unknown as T | undefined;
+        }
         return (result ?? undefined) as unknown as T | undefined;
     }
 
@@ -1150,7 +1499,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.boundCache(this.namingRowCache);
         const states = new Map<string, NodeNamingState>();
         for (const [nodeId, events] of byNode) {
-            const state = computeNamingState(nodeId, events);
+            // Bootstrap overlay union happens AFTER the cache install
+            // above: overlay rows are merged into the returned view only,
+            // never into the real caches or index.
+            const state = computeNamingState(
+                nodeId,
+                this.overlayUnionNaming(nodeId, events)
+            );
             if (state) {
                 states.set(nodeId, state);
             }
@@ -1168,7 +1523,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async sweepRows(parentId: string): Promise<NamingLike[]> {
         const cached = this.slotSweepCache.get(parentId);
         if (cached) {
-            return [...cached.values()];
+            return this.overlayUnionSweep(parentId, [...cached.values()]);
         }
         const epochKey = `slot:${parentId}`;
         const fillEpoch = this.epochOf(epochKey);
@@ -1185,7 +1540,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.boundCache(this.slotSweepCache);
         }
-        return rows;
+        // Overlay union after the cache install: read view only.
+        return this.overlayUnionSweep(parentId, rows);
     }
 
     /**
@@ -1483,7 +1839,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             new StringMatch({ key: "nodeId", value: nodeId }),
             new StringMatch({ key: "kind", value: "file-version" }),
         ]);
-        return documents.filter(isFileHead);
+        const versions = documents.filter(isFileHead);
+        if (this.bootstrapPhase !== "overlay-active") {
+            return versions;
+        }
+        // Overlay read point: union the snapshot's full version documents
+        // for this node (read view only; nothing enters the store).
+        const bucket = this.overlayVersions.get(nodeId);
+        if (!bucket || bucket.size === 0) {
+            return versions;
+        }
+        const seen = new Set(versions.map((doc) => doc.id));
+        for (const id of bucket.keys()) {
+            if (!seen.has(id)) {
+                const doc = this.overlayDocs.get(id);
+                if (doc instanceof FileVersion) {
+                    versions.push(doc);
+                }
+            }
+        }
+        return versions;
     }
 
     private contentHeads<T extends VersionLike>(documents: T[]): T[] {
@@ -1557,7 +1932,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.boundCache(this.versionRowCache);
         const result = new Map<string, VersionLike[]>();
         for (const [nodeId, rows] of byNode) {
-            result.set(nodeId, this.contentHeads(rows));
+            // Overlay union after the cache install: read view only.
+            result.set(
+                nodeId,
+                this.contentHeads(this.overlayUnionVersions(nodeId, rows))
+            );
         }
         return result;
     }
@@ -2149,10 +2528,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * writer's rows are wanted. The first call builds the (kind,
      * changesetId) index lazily; subsequent calls are indexed lookups.
      */
-    async versionsByChangeset(changesetId: string): Promise<{
+    async versionsByChangeset(
+        changesetId: string,
+        options: { allowPartial?: boolean } = {}
+    ): Promise<{
         versions: SharedFsVersionInfo[];
         namingEventIds: string[];
     }> {
+        this.assertNotBootstrapPartial(
+            "versionsByChangeset",
+            options.allowPartial
+        );
         const versionRows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "file-version" }),
@@ -2203,16 +2589,43 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let verified = this.verifyChunk(local, id);
         // Missing locally — or locally corrupt: verification is trustless
         // (any responder either supplies bytes that hash to the id or is
-        // rejected), so a remote copy can heal either case.
+        // rejected), so a remote copy can heal either case. The configured
+        // timeout is a BUDGET: a remote answer can come back empty fast
+        // while the serving peer is saturated (a cold start's background
+        // log ingest, most visibly), so empty answers are retried with
+        // backoff until the budget is spent — re-checking locally between
+        // attempts, since the ongoing sync may deliver the chunk itself.
         if (!verified && this.remoteChunkFetch) {
-            try {
-                const remote = await this.entries.index.get(id, {
-                    local: false,
-                    remote: { timeout: this.remoteChunkFetch.timeoutMs } as any,
-                });
-                verified = this.verifyChunk(remote ?? undefined, id);
-            } catch {
-                verified = undefined;
+            const budgetMs = this.remoteChunkFetch.timeoutMs;
+            const deadline = this.clock() + budgetMs;
+            let attempt = 0;
+            while (!verified) {
+                try {
+                    const remote = await this.entries.index.get(id, {
+                        local: false,
+                        // Remaining budget, so retries can never overrun
+                        // the configured timeout.
+                        remote: {
+                            timeout: Math.max(
+                                1,
+                                Math.floor(deadline - this.clock())
+                            ),
+                        } as any,
+                    });
+                    verified = this.verifyChunk(remote ?? undefined, id);
+                } catch {
+                    verified = undefined;
+                }
+                if (verified || this.clock() >= deadline) {
+                    break;
+                }
+                await new Promise((resolve) =>
+                    setTimeout(resolve, Math.min(250 * 2 ** attempt++, 2_000))
+                );
+                verified = this.verifyChunk(
+                    await this.getDocument<FileChunk>(id),
+                    id
+                );
             }
         }
         if (!verified) {
@@ -2437,8 +2850,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             .map((entry) => this.versionInfo(entry, normalized, heads));
     }
 
-    async conflicts(path?: string): Promise<SharedFsConflict[]> {
+    async conflicts(
+        path?: string,
+        options: { allowPartial?: boolean } = {}
+    ): Promise<SharedFsConflict[]> {
         if (path) {
+            // The single-file branch reads only overlay-aware points
+            // (resolvePath, headsForNode) — same world as the tree view,
+            // so it stays available during a bootstrap overlay.
             const target = await this.resolvePath(path);
             if (target?.kind === "file") {
                 const heads = await this.headsForNode(target.nodeId);
@@ -2459,6 +2878,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 return [];
             }
         }
+        this.assertNotBootstrapPartial("conflicts", options.allowPartial);
         // Whole-tree scan over version metadata (no chunk bytes).
         const documents = await this.queryDocuments<SharedFsEntry>([
             new StringMatch({ key: "kind", value: "file-version" }),
@@ -2649,7 +3069,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     // Naming conflict surfacing and resolution
     // ------------------------------------------------------------------
 
-    async namingConflicts(path?: string): Promise<SharedFsNamingConflict[]> {
+    async namingConflicts(
+        path?: string,
+        options: { allowPartial?: boolean } = {}
+    ): Promise<SharedFsNamingConflict[]> {
+        this.assertNotBootstrapPartial("namingConflicts", options.allowPartial);
         const documents = await this.queryDocuments<NamingEvent>([
             new StringMatch({ key: "kind", value: "naming" }),
         ]);
@@ -2931,6 +3355,1195 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     // ------------------------------------------------------------------
+    // Cold-start bootstrap
+    // ------------------------------------------------------------------
+
+    private clearBootstrapTimers() {
+        // Borsh bypasses field initializers on address-opened programs;
+        // this also runs from open() before per-instance re-init.
+        for (const timer of this.bootstrapTimers ?? []) {
+            clearTimeout(timer);
+        }
+        this.bootstrapTimers = [];
+        if (this.supersessionTimer) {
+            clearInterval(this.supersessionTimer);
+            this.supersessionTimer = undefined;
+        }
+        if (this.quiescenceTimer) {
+            clearInterval(this.quiescenceTimer);
+            this.quiescenceTimer = undefined;
+        }
+        if (this.snapshotTimer) {
+            clearInterval(this.snapshotTimer);
+            this.snapshotTimer = undefined;
+        }
+    }
+
+    async close(from?: any): Promise<boolean> {
+        this.clearBootstrapTimers();
+        this.resolveBootstrapWaiters({ verified: false });
+        return super.close(from);
+    }
+
+    /** Fire the deferred replication announcement (idempotent). */
+    private async bootstrapStatePath(): Promise<string | undefined> {
+        const directory = (this.node as any)?.directory as string | undefined;
+        if (!directory) {
+            return undefined;
+        }
+        const { mkdir } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const dir = join(directory, "shared-fs-bootstrap");
+        await mkdir(dir, { recursive: true });
+        return join(dir, `${this.address?.toString() ?? "unaddressed"}.json`);
+    }
+
+    /**
+     * Persisted per-address open state: whether this directory has opened
+     * the address before (governs announce deferral — a warm reopen must
+     * never unreplicate its persisted ranges), and the bootstrap marker
+     * that keeps Guard D disarmed and GC gated across a crash. An
+     * UNREADABLE state file (not merely absent) fails SAFE: treated as an
+     * interrupted bootstrap on a previously opened store.
+     */
+    private async readBootstrapState(): Promise<{
+        openedBefore: boolean;
+        bootstrap?: "active" | "unverified";
+    }> {
+        const path = await this.bootstrapStatePath();
+        if (!path) {
+            return { openedBefore: false };
+        }
+        try {
+            const { readFile } = await import("node:fs/promises");
+            const parsed = JSON.parse(await readFile(path, "utf8"));
+            return {
+                openedBefore: parsed?.openedBefore === true,
+                bootstrap:
+                    parsed?.bootstrap === "active" ||
+                    parsed?.bootstrap === "unverified"
+                        ? parsed.bootstrap
+                        : undefined,
+            };
+        } catch (error: any) {
+            if (error?.code === "ENOENT") {
+                return { openedBefore: false };
+            }
+            return { openedBefore: true, bootstrap: "active" };
+        }
+    }
+
+    /** Serialized read-merge-write so concurrent patches never clobber. */
+    private writeBootstrapState(patch: {
+        openedBefore?: boolean;
+        bootstrap?: "active" | "unverified" | null;
+    }): Promise<void> {
+        const run = this.stateWriteChain.then(async () => {
+            const path = await this.bootstrapStatePath();
+            if (!path) {
+                return;
+            }
+            try {
+                const current = await this.readBootstrapState();
+                const next: any = {
+                    openedBefore:
+                        patch.openedBefore ?? current.openedBefore ?? false,
+                    bootstrap:
+                        patch.bootstrap === null
+                            ? undefined
+                            : (patch.bootstrap ?? current.bootstrap),
+                };
+                const { writeFile } = await import("node:fs/promises");
+                await writeFile(path, JSON.stringify(next));
+            } catch {
+                // In-memory or read-only peers proceed without crash
+                // safety; an interrupted bootstrap there restarts from an
+                // empty store.
+            }
+        });
+        this.stateWriteChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    /**
+     * Decide and run the cold-start bootstrap. Eligibility: an empty local
+     * store, or a persisted marker from an interrupted bootstrap (which
+     * also keeps Guard D disarmed and GC gated across the reopen — a
+     * partial store must never resurrect retired history network-wide).
+     * A failure over a fresh empty store falls back to today's plain
+     * join; a failure over a resumed partial store takes the unverified
+     * posture instead — guard down and GC gated until the store settles.
+     */
+    private async startBootstrap(marker: "active" | "unverified" | undefined) {
+        if (marker === "unverified") {
+            // A previous bootstrap retired on timeout: no overlay, but
+            // Guard D stays disarmed and GC gated until quiescence.
+            this.bootstrapPhase = "unverified";
+            this.guardArmed = false;
+            this.startQuiescenceChecker();
+            return;
+        }
+        const iterator = this.entries.index.iterate(
+            { query: [] },
+            { local: true, remote: false, resolve: false }
+        );
+        let empty: boolean;
+        try {
+            empty = (await iterator.next(1)).length === 0;
+        } finally {
+            await (iterator as any).close?.();
+        }
+        if (!empty && !marker) {
+            return;
+        }
+        // A resumed bootstrap (marker, or non-empty store) holds a
+        // PARTIAL doc set: its failure path must never arm the guard.
+        const resumed = marker !== undefined && !empty;
+        this.bootstrapPhase = "fetching";
+        this.guardArmed = false;
+        await this.writeBootstrapState({ bootstrap: "active" });
+        let installed = false;
+        let failure: unknown;
+        try {
+            installed = await this.fetchAndInstallOverlay();
+        } catch (error) {
+            failure = error;
+        }
+        if (!installed) {
+            if (resumed) {
+                this.enterUnverified();
+            } else {
+                this.abandonBootstrap();
+            }
+            if (this.bootstrapConfig.mode === "require") {
+                throw (
+                    failure ??
+                    new SharedFsError(
+                        "EIO",
+                        `cold-start bootstrap failed: ${this.bootstrapFailure ?? "no usable snapshot manifest was found in time"}`
+                    )
+                );
+            }
+            return;
+        }
+        this.bootstrapPhase = "overlay-active";
+        this.events.dispatchEvent(
+            new CustomEvent("bootstrap:ready", {
+                detail: this.bootstrapStatus(),
+            })
+        );
+        this.startRetirementTracking();
+    }
+
+    /**
+     * Fall back to a plain join over a FRESH store; clears any partial
+     * overlay state and re-arms the guard. Never valid for a resumed
+     * partial store — that path takes enterUnverified().
+     */
+    private abandonBootstrap() {
+        this.overlayNaming = new Map();
+        this.overlayVersions = new Map();
+        this.overlaySweep = new Map();
+        this.overlayDocs = new Map();
+        this.overlayPending = new Map();
+        this.bootstrapManifestMeta = undefined;
+        this.bootstrapPhase = "off";
+        this.guardArmed = true;
+        void this.writeBootstrapState({ bootstrap: null }).catch(() => {});
+        this.resolveBootstrapWaiters({ verified: false });
+    }
+
+    /**
+     * The safety posture for any partial store that cannot verify: guard
+     * disarmed, GC gated, marker persisted, arming deferred to the
+     * quiescence checker.
+     */
+    private enterUnverified() {
+        this.overlayNaming = new Map();
+        this.overlayVersions = new Map();
+        this.overlaySweep = new Map();
+        this.overlayDocs = new Map();
+        this.overlayPending = new Map();
+        this.bootstrapManifestMeta = undefined;
+        this.bootstrapPhase = "unverified";
+        this.guardArmed = false;
+        void this.writeBootstrapState({ bootstrap: "unverified" }).catch(
+            () => {}
+        );
+        this.startQuiescenceChecker();
+        this.resolveBootstrapWaiters({ verified: false });
+    }
+
+    /**
+     * Discover, verify, fetch and install the newest trusted snapshot.
+     * Returns false when no usable manifest exists (caller falls back).
+     */
+    private async fetchAndInstallOverlay(): Promise<boolean> {
+        const config = this.bootstrapConfig;
+        const results = await this.entries.index
+            .iterate(
+                {
+                    query: [
+                        new StringMatch({
+                            key: "kind",
+                            value: "bootstrap-manifest",
+                        }),
+                    ],
+                },
+                {
+                    local: true,
+                    remote: { timeout: config.discoveryTimeoutMs } as any,
+                    resolve: true,
+                }
+            )
+            .all();
+        const deadline = this.clock() + config.discoveryTimeoutMs;
+        type Candidate = {
+            payload: SnapshotManifestPayload;
+            signerKey: PublicSignKey;
+            authorKey: string;
+        };
+        // Per-stage rejection tally: surfaced in bootstrapStatus and the
+        // "require" error so clock-skew or trust failures are diagnosable
+        // instead of a silent fallback.
+        let invalid = 0;
+        let stale = 0;
+        const candidates: Candidate[] = [];
+        for (const raw of results) {
+            if (!(raw instanceof BootstrapManifest)) {
+                continue;
+            }
+            // The manifest arrived via query, pre-canPerform: verify it
+            // here against OUR trust graph — never trust the serving peer.
+            let signature: SignatureWithKey;
+            let payload: SnapshotManifestPayload;
+            try {
+                signature = deserialize(raw.signatureBytes, SignatureWithKey);
+                payload = deserialize(
+                    raw.payloadBytes,
+                    SnapshotManifestPayload
+                );
+            } catch {
+                invalid++;
+                continue;
+            }
+            const authorKey = encodePublicSignKey(signature.publicKey);
+            if (
+                raw.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES ||
+                raw.id !== `bootstrap:${authorKey}` ||
+                !equalBytes(payload.storeId, this.id) ||
+                !(await verify(signature, raw.payloadBytes))
+            ) {
+                invalid++;
+                continue;
+            }
+            const age = this.clock() - Number(payload.createdAtWallMs);
+            if (age > config.maxSnapshotAgeMs) {
+                stale++;
+                continue;
+            }
+            candidates.push({
+                payload,
+                signerKey: signature.publicKey,
+                authorKey,
+            });
+        }
+        if (candidates.length === 0) {
+            this.bootstrapFailure =
+                invalid + stale === 0
+                    ? "no snapshot manifest candidates were discovered in time"
+                    : `no usable snapshot manifest (${invalid} invalid, ${stale} older than the staleness cap — check clock skew if unexpected)`;
+            return false;
+        }
+        // Trust-race tolerance: the trust graph may still be replicating,
+        // so an untrusted verdict is final only at the deadline.
+        const trusted: Candidate[] = [];
+        while (trusted.length === 0) {
+            for (const candidate of candidates) {
+                if (
+                    !this.trustGraph ||
+                    (await this.trustGraph.isTrusted(candidate.signerKey))
+                ) {
+                    trusted.push(candidate);
+                }
+            }
+            if (trusted.length > 0 || this.clock() >= deadline) {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        if (trusted.length === 0) {
+            this.bootstrapFailure = `${candidates.length} snapshot candidate(s) found, none from a trusted signer by the discovery deadline`;
+            return false;
+        }
+        // Rank by wall clock across authors (snapshotSeq is per-author).
+        // Future-dated timestamps are clamped to now so an author with a
+        // fast clock cannot permanently dominate ranking.
+        const now = BigInt(Math.floor(this.clock()));
+        const rankOf = (candidate: Candidate) =>
+            candidate.payload.createdAtWallMs > now
+                ? now
+                : candidate.payload.createdAtWallMs;
+        trusted.sort((a, b) => compareBigint(rankOf(b), rankOf(a)));
+        const chosen = trusted[0];
+        this.bootstrapFailure = undefined;
+        // Restrict block fetches to CURRENTLY CONNECTED peers: the
+        // replicator-derived provider set can contain dead ex-members
+        // (machines join and leave constantly in this workload), and a
+        // request routed at one stalls for its full delivery timeout.
+        const connectedPeers = [
+            ...(((this.node.services.pubsub as any)?.peers?.keys?.() ??
+                []) as Iterable<string>),
+        ].slice(0, 16);
+        const segments = await mapWithConcurrency(
+            chosen.payload.segments,
+            config.segmentFetchConcurrency,
+            async (ref) => {
+                const bytes = (await (this.node.services.blocks as any).get(
+                    ref.cid,
+                    {
+                        remote: {
+                            timeout: config.discoveryTimeoutMs * 4,
+                            ...(connectedPeers.length > 0
+                                ? { from: connectedPeers }
+                                : {}),
+                        },
+                    }
+                )) as Uint8Array | undefined;
+                if (!bytes) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `bootstrap segment unavailable: ${ref.cid}`
+                    );
+                }
+                // Bind fetched bytes to the SIGNED manifest, not transport.
+                if (sha256Base64Sync(bytes) !== ref.sha256) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `bootstrap segment hash mismatch: ${ref.cid}`
+                    );
+                }
+                const segment = deserialize(bytes, SnapshotSegment);
+                if (segment.entries.length !== ref.docCount) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `bootstrap segment count mismatch: ${ref.cid}`
+                    );
+                }
+                return segment;
+            }
+        );
+        // Install, chunked with OCCASIONAL yields: each burst is tens of
+        // milliseconds of pure CPU, and yielding per segment would make
+        // the install queue 256 macrotask hops behind the concurrently
+        // running log ingest.
+        let sinceYield = 0;
+        for (const segment of segments) {
+            for (const doc of segment.entries) {
+                if (
+                    !(doc instanceof NamingEvent) &&
+                    !(doc instanceof FileVersion)
+                ) {
+                    throw new SharedFsError(
+                        "EIO",
+                        "bootstrap segment contains a non-metadata document"
+                    );
+                }
+                if (!structurallyValidEntry(doc)) {
+                    throw new SharedFsError(
+                        "EIO",
+                        "bootstrap segment contains a structurally invalid document"
+                    );
+                }
+                this.installOverlayDoc(doc);
+            }
+            if (++sinceYield >= 16) {
+                sinceYield = 0;
+                await new Promise((resolve) => setImmediate(resolve));
+            }
+        }
+        this.bootstrapManifestMeta = {
+            authorKey: chosen.authorKey,
+            snapshotSeq: chosen.payload.snapshotSeq,
+            createdAtWallMs: chosen.payload.createdAtWallMs,
+            ageMs: this.clock() - Number(chosen.payload.createdAtWallMs),
+            docs: chosen.payload.counts.docs,
+        };
+        return true;
+    }
+
+    private installOverlayDoc(doc: NamingEvent | FileVersion) {
+        if (this.overlayDocs.has(doc.id)) {
+            return; // idempotent across marker resumes
+        }
+        this.overlayDocs.set(doc.id, doc);
+        if (doc instanceof NamingEvent) {
+            const row = namingRowOf(doc);
+            let bucket = this.overlayNaming.get(doc.nodeId);
+            if (!bucket) {
+                bucket = new Map();
+                this.overlayNaming.set(doc.nodeId, bucket);
+            }
+            bucket.set(doc.id, row);
+            let sweep = this.overlaySweep.get(doc.parentId);
+            if (!sweep) {
+                sweep = new Map();
+                this.overlaySweep.set(doc.parentId, sweep);
+            }
+            sweep.set(doc.id, row);
+            this.overlayPending.set(doc.id, {
+                nodeId: doc.nodeId,
+                kind: "naming",
+            });
+        } else {
+            let bucket = this.overlayVersions.get(doc.nodeId);
+            if (!bucket) {
+                bucket = new Map();
+                this.overlayVersions.set(doc.nodeId, bucket);
+            }
+            bucket.set(doc.id, versionRowOf(doc));
+            this.overlayPending.set(doc.id, {
+                nodeId: doc.nodeId,
+                kind: "file-version",
+            });
+        }
+    }
+
+    // Overlay union helpers: called ONLY from the enumerated read points.
+    private overlayUnionNaming(
+        nodeId: string,
+        rows: NamingLike[]
+    ): NamingLike[] {
+        if (this.bootstrapPhase !== "overlay-active") {
+            return rows;
+        }
+        const bucket = this.overlayNaming.get(nodeId);
+        if (!bucket || bucket.size === 0) {
+            return rows;
+        }
+        const seen = new Set(rows.map((row) => row.id));
+        const merged = [...rows];
+        for (const [id, row] of bucket) {
+            if (!seen.has(id)) {
+                merged.push(row);
+            }
+        }
+        return merged;
+    }
+
+    private overlayUnionVersions(
+        nodeId: string,
+        rows: VersionLike[]
+    ): VersionLike[] {
+        if (this.bootstrapPhase !== "overlay-active") {
+            return rows;
+        }
+        const bucket = this.overlayVersions.get(nodeId);
+        if (!bucket || bucket.size === 0) {
+            return rows;
+        }
+        const seen = new Set(rows.map((row) => row.id));
+        const merged = [...rows];
+        for (const [id, row] of bucket) {
+            if (!seen.has(id)) {
+                merged.push(row);
+            }
+        }
+        return merged;
+    }
+
+    private overlayUnionSweep(
+        parentId: string,
+        rows: NamingLike[]
+    ): NamingLike[] {
+        if (this.bootstrapPhase !== "overlay-active") {
+            return rows;
+        }
+        const bucket = this.overlaySweep.get(parentId);
+        if (!bucket || bucket.size === 0) {
+            return rows;
+        }
+        const seen = new Set(rows.map((row) => row.id));
+        const merged = [...rows];
+        for (const [id, row] of bucket) {
+            if (!seen.has(id)) {
+                merged.push(row);
+            }
+        }
+        return merged;
+    }
+
+    /**
+     * Convergence tracking: a snapshot document is covered by arrival or
+     * removal (change events drain overlayPending directly) or by
+     * supersession — the pending id appears in the ancestor closure of a
+     * locally present row (a descendant proves it was superseded and may
+     * legitimately have been retired network-wide); a bare strictly-
+     * deeper row counts only for single-head nodes, where the one branch
+     * makes depth imply descent. Known limitation: a node PURGED
+     * network-wide between snapshot and join leaves its pending entries
+     * undrainable and takes the retirement-timeout path — unreachable
+     * under default configs (GC grace 3d >> snapshot staleness cap 2h);
+     * deployments shortening graceMs below maxSnapshotAgeMs +
+     * retirementTimeoutMs accept that detour.
+     */
+    private startRetirementTracking() {
+        this.supersessionTimer = setInterval(() => {
+            void this.supersessionSweep().catch(() => {});
+        }, SUPERSESSION_SWEEP_MS);
+        (this.supersessionTimer as any)?.unref?.();
+        this.bootstrapTimers.push(
+            setTimeout(() => {
+                if (this.bootstrapPhase === "overlay-active") {
+                    this.retireOverlay(false);
+                }
+            }, this.bootstrapConfig.retirementTimeoutMs)
+        );
+    }
+
+    private async supersessionSweep() {
+        if (this.bootstrapPhase !== "overlay-active" || this.sweepRunning) {
+            return;
+        }
+        if (this.overlayPending.size === 0) {
+            this.maybeRetireVerified();
+            return;
+        }
+        // While REMOTE arrivals are streaming, coverage comes from change
+        // events for free; the batched query sweep only runs once the
+        // stream is quiet or the residue is small. The joiner's own
+        // writes must not postpone it.
+        if (
+            this.overlayPending.size > 5000 &&
+            this.clock() - this.lastRemoteArrivalMs < SUPERSESSION_SWEEP_MS
+        ) {
+            return;
+        }
+        this.sweepRunning = true;
+        try {
+            await this.supersessionSweepInner();
+        } finally {
+            this.sweepRunning = false;
+        }
+    }
+
+    private async supersessionSweepInner() {
+        const byNode = new Map<string, Map<string, string>>(); // nodeId -> pendingId -> kind
+        for (const [id, pending] of this.overlayPending) {
+            let bucket = byNode.get(pending.nodeId);
+            if (!bucket) {
+                bucket = new Map();
+                byNode.set(pending.nodeId, bucket);
+            }
+            bucket.set(id, pending.kind);
+        }
+        const nodeIds = [...byNode.keys()];
+        for (let i = 0; i < nodeIds.length; i += HEAD_QUERY_BATCH) {
+            if (this.bootstrapPhase !== "overlay-active") {
+                return;
+            }
+            const batch = nodeIds.slice(i, i + HEAD_QUERY_BATCH);
+            const rows = await this.queryRows([
+                batch.length === 1
+                    ? new StringMatch({ key: "nodeId", value: batch[0] })
+                    : new Or(
+                          batch.map(
+                              (nodeId) =>
+                                  new StringMatch({
+                                      key: "nodeId",
+                                      value: nodeId,
+                                  })
+                          )
+                      ),
+            ]);
+            const present = new Set<string>();
+            const rowsByNodeKind = new Map<string, any[]>();
+            for (const row of rows) {
+                present.add(row.id);
+                const key = `${row.nodeId}:${row.kind}`;
+                let bucket = rowsByNodeKind.get(key);
+                if (!bucket) {
+                    bucket = [];
+                    rowsByNodeKind.set(key, bucket);
+                }
+                bucket.push(row);
+            }
+            // Ancestor closure of the locally present rows: every id a
+            // present row references, walked transitively through present
+            // intermediates. Membership proves the pending head was
+            // superseded by a DESCENDANT (a deeper row on a sibling
+            // branch proves nothing — genuine conflict heads must wait
+            // for the arrival cover).
+            const closureOf = (key: string): Set<string> => {
+                const bucket = rowsByNodeKind.get(key) ?? [];
+                const byId = new Map(bucket.map((row) => [row.id, row]));
+                const referenced = new Set<string>();
+                const queue: any[] = [...bucket];
+                while (queue.length > 0) {
+                    const row = queue.pop();
+                    for (const ref of row.causalRefs ?? []) {
+                        if (referenced.has(ref)) {
+                            continue;
+                        }
+                        referenced.add(ref);
+                        const parent = byId.get(ref);
+                        if (parent) {
+                            queue.push(parent);
+                        }
+                    }
+                }
+                return referenced;
+            };
+            const closures = new Map<string, Set<string>>();
+            for (const nodeId of batch) {
+                for (const [pendingId, kind] of byNode.get(nodeId) ?? []) {
+                    const rowKind =
+                        kind === "naming" ? "naming" : "file-version";
+                    const key = `${nodeId}:${rowKind}`;
+                    let closure = closures.get(key);
+                    if (!closure) {
+                        closure = closureOf(key);
+                        closures.set(key, closure);
+                    }
+                    // A compacted chain can break the closure walk; the
+                    // depth fallback stays sound only when the node has a
+                    // SINGLE union head (one branch: strictly deeper
+                    // implies descendant).
+                    const overlayRow =
+                        kind === "naming"
+                            ? this.overlayNaming.get(nodeId)?.get(pendingId)
+                            : this.overlayVersions.get(nodeId)?.get(pendingId);
+                    let depthCovered = false;
+                    if (overlayRow) {
+                        const localRows = rowsByNodeKind.get(key) ?? [];
+                        const union = [
+                            ...localRows.map((row) =>
+                                kind === "naming"
+                                    ? namingRowOf(row)
+                                    : versionRowOf(row)
+                            ),
+                            ...((kind === "naming"
+                                ? [
+                                      ...(this.overlayNaming
+                                          .get(nodeId)
+                                          ?.values() ?? []),
+                                  ]
+                                : [
+                                      ...(this.overlayVersions
+                                          .get(nodeId)
+                                          ?.values() ?? []),
+                                  ]) as any[]),
+                        ];
+                        const deduped = [
+                            ...new Map(
+                                union.map((row) => [row.id, row])
+                            ).values(),
+                        ];
+                        const heads =
+                            kind === "naming"
+                                ? (computeNamingState(nodeId, deduped as any)
+                                      ?.heads ?? [])
+                                : this.contentHeads(deduped as any);
+                        if (heads.length === 1) {
+                            const localMax = localRows.reduce(
+                                (max: bigint, row: any) => {
+                                    const depth = BigInt(row.causalDepth ?? 0);
+                                    return depth > max ? depth : max;
+                                },
+                                0n
+                            );
+                            depthCovered = localMax > overlayRow.causalDepth;
+                        }
+                    }
+                    if (
+                        present.has(pendingId) ||
+                        closure.has(pendingId) ||
+                        depthCovered
+                    ) {
+                        this.overlayPending.delete(pendingId);
+                    }
+                }
+            }
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        if (this.overlayPending.size === 0) {
+            this.maybeRetireVerified();
+        }
+    }
+
+    private maybeRetireVerified() {
+        if (this.bootstrapPhase !== "overlay-active") {
+            return;
+        }
+        // One guard-coalescing window plus a double check: retirement must
+        // not race a burst of arrivals.
+        this.bootstrapTimers.push(
+            setTimeout(() => {
+                if (
+                    this.bootstrapPhase === "overlay-active" &&
+                    this.overlayPending.size === 0
+                ) {
+                    this.retireOverlay(true);
+                }
+            }, RETIRE_DOUBLE_CHECK_MS)
+        );
+    }
+
+    private retireOverlay(verified: boolean) {
+        this.overlayNaming = new Map();
+        this.overlayVersions = new Map();
+        this.overlaySweep = new Map();
+        this.overlayDocs = new Map();
+        this.overlayPending = new Map();
+        // The row caches were filled from union reads while the overlay
+        // was active; an epoch bump alone is not enough (warm buckets are
+        // never re-validated on read), so clear them outright.
+        this.versionRowCache = new Map();
+        this.namingRowCache = new Map();
+        this.slotSweepCache = new Map();
+        this.cacheGlobalEpoch++;
+        if (this.supersessionTimer) {
+            clearInterval(this.supersessionTimer);
+            this.supersessionTimer = undefined;
+        }
+        if (verified) {
+            this.bootstrapPhase = "converged";
+            this.bootstrapVerified = true;
+            this.guardArmed = true;
+            void this.writeBootstrapState({ bootstrap: null }).catch(() => {});
+            this.events.dispatchEvent(
+                new CustomEvent("bootstrap:converged", {
+                    detail: { verified: true },
+                })
+            );
+            this.resolveBootstrapWaiters({ verified: true });
+        } else {
+            // Timeout: the local store is a valid lagging-replica view —
+            // no worse than a plain join mid-sync — but Guard D stays
+            // disarmed and GC gated until the store is quiescent.
+            this.bootstrapPhase = "unverified";
+            void this.writeBootstrapState({ bootstrap: "unverified" }).catch(
+                () => {}
+            );
+            this.startQuiescenceChecker();
+            this.events.dispatchEvent(
+                new CustomEvent("bootstrap:converged", {
+                    detail: { verified: false },
+                })
+            );
+            this.resolveBootstrapWaiters({ verified: false });
+        }
+    }
+
+    /**
+     * Post-timeout arming: Guard D and GC come back only when the store
+     * has been quiet (no document arrivals for a full window) on two
+     * consecutive checks — an honest heuristic, still strictly stronger
+     * than today's config-only arming.
+     */
+    private startQuiescenceChecker() {
+        this.quiescentChecks = 0;
+        this.quiescenceTimer = setInterval(() => {
+            if (this.bootstrapPhase !== "unverified") {
+                clearInterval(this.quiescenceTimer!);
+                this.quiescenceTimer = undefined;
+                return;
+            }
+            const quiet =
+                this.clock() - this.lastArrivalMs > QUIESCENCE_WINDOW_MS;
+            this.quiescentChecks = quiet ? this.quiescentChecks + 1 : 0;
+            if (this.quiescentChecks >= 2) {
+                clearInterval(this.quiescenceTimer!);
+                this.quiescenceTimer = undefined;
+                this.bootstrapPhase = "converged";
+                this.guardArmed = true;
+                void this.writeBootstrapState({ bootstrap: null }).catch(
+                    () => {}
+                );
+                this.events.dispatchEvent(
+                    new CustomEvent("bootstrap:converged", {
+                        detail: { verified: false },
+                    })
+                );
+                this.resolveBootstrapWaiters({ verified: false });
+            }
+        }, QUIESCENCE_CHECK_INTERVAL_MS);
+        (this.quiescenceTimer as any)?.unref?.();
+    }
+
+    /**
+     * Whole-store conflict/changeset scans bypass the overlay's read
+     * points; while the overlay is active they would report a different
+     * world than the tree view, so they are gated (see
+     * BootstrapPendingError).
+     */
+    private assertNotBootstrapPartial(
+        operation: string,
+        allowPartial: boolean | undefined
+    ) {
+        if (this.bootstrapPhase === "overlay-active" && !allowPartial) {
+            throw new BootstrapPendingError(operation);
+        }
+    }
+
+    private resolveBootstrapWaiters(result: { verified: boolean }) {
+        const waiters = this.bootstrapWaiters.splice(0);
+        for (const waiter of waiters) {
+            waiter(result);
+        }
+    }
+
+    bootstrapStatus(): BootstrapStatus {
+        return {
+            phase: this.bootstrapPhase,
+            manifest: this.bootstrapManifestMeta
+                ? {
+                      ...this.bootstrapManifestMeta,
+                      ageMs:
+                          this.clock() -
+                          Number(this.bootstrapManifestMeta.createdAtWallMs),
+                  }
+                : undefined,
+            pendingDocs: this.overlayPending.size,
+            guardArmed: this.guardArmed,
+            lastFailure: this.bootstrapFailure,
+            msSinceLastArrival:
+                this.lastArrivalMs === 0
+                    ? Number.POSITIVE_INFINITY
+                    : this.clock() - this.lastArrivalMs,
+        };
+    }
+
+    awaitBootstrapConverged(): Promise<{ verified: boolean }> {
+        if (this.bootstrapPhase === "off") {
+            return Promise.resolve({ verified: true });
+        }
+        if (this.bootstrapPhase === "converged") {
+            return Promise.resolve({ verified: this.bootstrapVerified });
+        }
+        if (this.bootstrapPhase === "unverified") {
+            // The overlay is already retired; only the arming heuristic
+            // remains. Resolving immediately keeps callers (the CLI most
+            // visibly) from blocking on a multi-minute quiescence wait.
+            return Promise.resolve({ verified: false });
+        }
+        return new Promise((resolve) => {
+            this.bootstrapWaiters.push(resolve);
+        });
+    }
+
+    /**
+     * Materialize this replica's GC-retained head state — every naming
+     * head (deletes included) and every version head per node, as full
+     * documents, no history, no chunks — into content-addressed segments
+     * plus a signed manifest other parties bootstrap from. One
+     * O(retained-heads) scan, same order as a GC planning pass.
+     */
+    async snapshotWrite(): Promise<SnapshotWriteResult> {
+        if (!this.isFullReplica()) {
+            throw new SharedFsError(
+                "EINVAL",
+                "snapshotWrite requires a full replica (replicate: { factor: 1 })"
+            );
+        }
+        if (
+            this.trustGraph &&
+            !(await this.isTrustedWriter(this.node.identity.publicKey))
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "snapshotWrite requires a trusted writer key"
+            );
+        }
+        if (
+            this.bootstrapPhase !== "off" &&
+            this.bootstrapPhase !== "converged"
+        ) {
+            // Mirrors the GC gate: "unverified" positively asserts a
+            // partial view, and a fresh-timestamped partial snapshot
+            // would OUTRANK complete ones for every future joiner.
+            throw new SharedFsError(
+                "EINVAL",
+                "cannot materialize a snapshot from a partial (bootstrapping or unverified) view"
+            );
+        }
+        if (this.snapshotRunning) {
+            throw new SharedFsError(
+                "EINVAL",
+                "snapshotWrite is already running on this instance"
+            );
+        }
+        this.snapshotRunning = true;
+        try {
+            return await this.snapshotWriteInner();
+        } finally {
+            this.snapshotRunning = false;
+        }
+    }
+
+    private async snapshotWriteInner(): Promise<SnapshotWriteResult> {
+        const namingRows = (
+            await this.queryRows([
+                new StringMatch({ key: "kind", value: "naming" }),
+            ])
+        ).map(namingRowOf);
+        const versionRows = (
+            await this.queryRows([
+                new StringMatch({ key: "kind", value: "file-version" }),
+            ])
+        ).map(versionRowOf);
+        const headIds = new Set<string>();
+        const nodes = new Set<string>();
+        const namingByNode = new Map<string, NamingLike[]>();
+        for (const row of namingRows) {
+            nodes.add(row.nodeId);
+            let bucket = namingByNode.get(row.nodeId);
+            if (!bucket) {
+                bucket = [];
+                namingByNode.set(row.nodeId, bucket);
+            }
+            bucket.push(row);
+        }
+        for (const [nodeId, rows] of namingByNode) {
+            const state = computeNamingState(nodeId, rows);
+            for (const head of state?.heads ?? []) {
+                headIds.add(head.id);
+            }
+        }
+        const versionsByNode = new Map<string, VersionLike[]>();
+        for (const row of versionRows) {
+            nodes.add(row.nodeId);
+            let bucket = versionsByNode.get(row.nodeId);
+            if (!bucket) {
+                bucket = [];
+                versionsByNode.set(row.nodeId, bucket);
+            }
+            bucket.push(row);
+        }
+        for (const rows of versionsByNode.values()) {
+            for (const head of this.contentHeads(rows)) {
+                headIds.add(head.id);
+            }
+        }
+        // Resolve exactly the head documents, in batches. The shard count
+        // scales with snapshot size: each segment costs the joiner one
+        // block round trip against a possibly warmup-saturated donor, so
+        // tiny snapshots ship in few large-ish segments while big ones
+        // stay under the per-block target. (Shard assignment therefore
+        // changes when the count does; cross-snapshot CID dedup is an
+        // optimization, not a contract.)
+        const ids = [...headIds];
+        const shardCount = Math.max(
+            8,
+            Math.min(
+                SNAPSHOT_MAX_SEGMENT_COUNT,
+                Math.ceil(
+                    (ids.length * SNAPSHOT_EST_DOC_BYTES) /
+                        SNAPSHOT_TARGET_SEGMENT_BYTES
+                )
+            )
+        );
+        const shards = new Map<number, SharedFsEntry[]>();
+        let totalBytes = 0n;
+        for (let i = 0; i < ids.length; i += HEAD_QUERY_BATCH) {
+            const batch = ids.slice(i, i + HEAD_QUERY_BATCH);
+            const docs = await this.queryDocuments<SharedFsEntry>([
+                batch.length === 1
+                    ? new StringMatch({ key: "id", value: batch[0] })
+                    : new Or(
+                          batch.map(
+                              (id) => new StringMatch({ key: "id", value: id })
+                          )
+                      ),
+            ]);
+            for (const doc of docs) {
+                if (
+                    !(doc instanceof NamingEvent) &&
+                    !(doc instanceof FileVersion)
+                ) {
+                    continue;
+                }
+                const shard =
+                    sha256Sync(fromString(doc.nodeId))[0] % shardCount;
+                let bucket = shards.get(shard);
+                if (!bucket) {
+                    bucket = [];
+                    shards.set(shard, bucket);
+                }
+                bucket.push(doc);
+            }
+        }
+        const segments: SegmentRef[] = [];
+        let docCount = 0n;
+        for (const shard of [...shards.keys()].sort((a, b) => a - b)) {
+            const docs = shards
+                .get(shard)!
+                .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+            const bytes = serialize(new SnapshotSegment({ entries: docs }));
+            const cid = (await (this.node.services.blocks as any).put(
+                bytes
+            )) as string;
+            segments.push(
+                new SegmentRef({
+                    cid,
+                    sha256: sha256Base64Sync(bytes),
+                    docCount: docs.length,
+                    byteLength: bytes.byteLength,
+                })
+            );
+            docCount += BigInt(docs.length);
+            totalBytes += BigInt(bytes.byteLength);
+        }
+        // Per-author sequence: read our previous manifest, if any.
+        const manifestId = `bootstrap:${this.authorKey()}`;
+        let snapshotSeq = 1n;
+        const previous = await this.getDocument<SharedFsEntry>(manifestId);
+        if (previous instanceof BootstrapManifest) {
+            try {
+                snapshotSeq =
+                    deserialize(previous.payloadBytes, SnapshotManifestPayload)
+                        .snapshotSeq + 1n;
+            } catch {
+                snapshotSeq = 1n;
+            }
+        }
+        const payload = new SnapshotManifestPayload({
+            storeId: this.id,
+            snapshotSeq,
+            createdAtWallMs: BigInt(Math.floor(this.clock())),
+            counts: new SnapshotCounts({
+                nodes: BigInt(nodes.size),
+                docs: docCount,
+                bytes: totalBytes,
+            }),
+            segments,
+        });
+        const payloadBytes = serialize(payload);
+        if (payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES) {
+            // Loud failure by design: silent skips would leave stale
+            // snapshots serving joiners indefinitely.
+            throw new SharedFsError(
+                "EIO",
+                `snapshot manifest exceeds ${MANIFEST_PAYLOAD_CAP_BYTES} bytes`
+            );
+        }
+        const signature = await this.node.identity.sign(payloadBytes);
+        const manifest = new BootstrapManifest({
+            id: manifestId,
+            payloadBytes,
+            signatureBytes: serialize(signature),
+        });
+        // CUT the superseded manifest chain before publishing the new one
+        // so manifest history never accumulates in the replicated log
+        // (Guard D never matches manifests, so the delete is final).
+        if (previous) {
+            await this.entries.del(manifestId).catch(() => {});
+        }
+        await this.putPreferLinked(manifest);
+        this.docsSinceSnapshot = 0;
+        return {
+            snapshotSeq,
+            createdAtWallMs: payload.createdAtWallMs,
+            nodes: BigInt(nodes.size),
+            docs: docCount,
+            bytes: totalBytes,
+            segments: segments.length,
+            manifestId,
+        };
+    }
+
+    /**
+     * Automatic snapshot publication on long-running trusted full
+     * replicas; skipped while too little changed. Failures are loud.
+     */
+    private startSnapshotPublisher() {
+        if (this.snapshotConfig.disabled || !this.isFullReplica()) {
+            return;
+        }
+        const tick = async () => {
+            // Publish only from a whole view: a plain replica ("off") or
+            // a VERIFIED converged bootstrap — never from "unverified" or
+            // quiescence-armed states, whose fresh timestamps would
+            // outrank complete snapshots for every future joiner.
+            if (
+                !(
+                    this.bootstrapPhase === "off" ||
+                    (this.bootstrapPhase === "converged" &&
+                        this.bootstrapVerified)
+                )
+            ) {
+                return;
+            }
+            let due =
+                this.docsSinceSnapshot >= this.snapshotConfig.minChangesBetween;
+            if (!due) {
+                // Quiet stores must not lose their bootstrap: joiners
+                // reject manifests older than the staleness cap, so
+                // refresh an aging (or missing) manifest even with no
+                // changes — unchanged shards dedup to identical blocks.
+                const previous = await this.getDocument<SharedFsEntry>(
+                    `bootstrap:${this.authorKey()}`
+                );
+                if (previous instanceof BootstrapManifest) {
+                    try {
+                        const payload = deserialize(
+                            previous.payloadBytes,
+                            SnapshotManifestPayload
+                        );
+                        due =
+                            this.clock() - Number(payload.createdAtWallMs) >
+                            BOOTSTRAP_DEFAULTS.maxSnapshotAgeMs / 2;
+                    } catch {
+                        due = true;
+                    }
+                } else {
+                    due = true;
+                }
+            }
+            if (!due) {
+                return;
+            }
+            // Never publish an empty view (an unreachable network or a
+            // brand-new store): require at least one naming row.
+            const probe = this.entries.index.iterate(
+                {
+                    query: [new StringMatch({ key: "kind", value: "naming" })],
+                },
+                { local: true, remote: false, resolve: false }
+            );
+            let populated: boolean;
+            try {
+                populated = (await probe.next(1)).length > 0;
+            } finally {
+                await (probe as any).close?.();
+            }
+            if (!populated) {
+                return;
+            }
+            await this.snapshotWrite().catch((error: any) => {
+                console.error(
+                    "shared-fs: scheduled snapshot publication failed:",
+                    error?.message ?? error
+                );
+            });
+        };
+        this.snapshotTimer = setInterval(() => {
+            void tick().catch(() => {});
+        }, this.snapshotConfig.publishIntervalMs);
+        (this.snapshotTimer as any)?.unref?.();
+        // First check soon after open so a populated replica with no (or
+        // an aging) manifest does not wait a full interval.
+        const early = setTimeout(() => {
+            void tick().catch(() => {});
+        }, 60_000);
+        (early as any)?.unref?.();
+        this.bootstrapTimers.push(early);
+    }
+
+    // ------------------------------------------------------------------
     // Garbage collection
     // ------------------------------------------------------------------
 
@@ -2984,6 +4597,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async guardAgainstLiveRemovals(removed: unknown[]) {
+        if (!this.guardArmed) {
+            return;
+        }
         for (const value of removed) {
             try {
                 if (value instanceof FileChunk) {
@@ -3045,6 +4661,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async flushGuardQueues() {
+        // Work enqueued while armed must not run after a disarm (a
+        // bootstrap decided mid-window): resurrection judged against a
+        // partial view — possibly through the overlay — is exactly what
+        // the disarm exists to prevent. Queued buckets are dropped.
+        if (!this.guardArmed) {
+            this.pendingGuardVersions.clear();
+            this.pendingGuardNaming.clear();
+            return;
+        }
         const removedVersions = new Map<string, FileVersion[]>();
         for (const [nodeId, bucket] of this.pendingGuardVersions) {
             removedVersions.set(nodeId, [...bucket.values()]);
@@ -3233,6 +4858,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private gcRunning = false;
 
     async collectGarbage(options: GcOptions = {}): Promise<GcReport> {
+        // A fresh open may still be deciding whether to bootstrap (a few
+        // seconds of manifest discovery); wait that decision out instead
+        // of failing spuriously.
+        await this.bootstrapDecision.catch(() => {});
+        if (
+            this.bootstrapPhase !== "off" &&
+            this.bootstrapPhase !== "converged"
+        ) {
+            // Belt and braces over the arrival-age and empty-ledger
+            // shields: a partial (bootstrapping or unverified) replica
+            // must not plan retirements at all.
+            throw new SharedFsError(
+                "EINVAL",
+                "collectGarbage is unavailable until the cold-start bootstrap converges"
+            );
+        }
         if (this.gcRunning) {
             throw new SharedFsError(
                 "EINVAL",
@@ -4000,16 +5641,16 @@ export class SharedFsHandle {
         return this.program.versions(path);
     }
 
-    conflicts(path?: string) {
-        return this.program.conflicts(path);
+    conflicts(path?: string, options?: { allowPartial?: boolean }) {
+        return this.program.conflicts(path, options);
     }
 
     resolveConflict(path: string, versionId: string) {
         return this.program.resolveConflict(path, versionId);
     }
 
-    namingConflicts(path?: string) {
-        return this.program.namingConflicts(path);
+    namingConflicts(path?: string, options?: { allowPartial?: boolean }) {
+        return this.program.namingConflicts(path, options);
     }
 
     resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
@@ -4024,8 +5665,25 @@ export class SharedFsHandle {
         return this.program.writeBatch(entries, options);
     }
 
-    versionsByChangeset(changesetId: string) {
-        return this.program.versionsByChangeset(changesetId);
+    versionsByChangeset(
+        changesetId: string,
+        options?: { allowPartial?: boolean }
+    ) {
+        return this.program.versionsByChangeset(changesetId, options);
+    }
+
+    /** Materialize and publish a cold-start snapshot from this replica. */
+    snapshotWrite() {
+        return this.program.snapshotWrite();
+    }
+
+    bootstrapStatus() {
+        return this.program.bootstrapStatus();
+    }
+
+    /** Resolves when the bootstrap overlay retires (either path). */
+    awaitBootstrapConverged() {
+        return this.program.awaitBootstrapConverged();
     }
 
     authorizeWriter(publicKey: PublicSignKey) {
@@ -4048,6 +5706,13 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
         remoteChunkFetch: options.remoteChunkFetch,
         clock: options.clock,
         dedupSkipHorizonMs: options.dedupSkipHorizonMs,
+        // Creating a brand-new filesystem keeps today's open path exactly
+        // — there is nothing to bootstrap from and the creator must
+        // announce immediately.
+        bootstrap: options.address
+            ? options.bootstrap
+            : (options.bootstrap ?? false),
+        snapshot: options.snapshot,
     };
     const program = options.address
         ? await SharedFileSystem.open(

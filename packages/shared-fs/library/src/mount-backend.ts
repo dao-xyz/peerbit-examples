@@ -33,7 +33,10 @@ export type SharedFsMountBackendTarget = {
     rename(from: string, to: string): Promise<unknown>;
     list(path?: string): Promise<SharedFsEntryInfo[]>;
     versions(path: string): Promise<SharedFsVersionInfo[]>;
-    conflicts(path?: string): Promise<SharedFsConflict[]>;
+    conflicts(
+        path?: string,
+        options?: { allowPartial?: boolean }
+    ): Promise<SharedFsConflict[]>;
     /**
      * Optional single-path lookup. When present the backend uses it for
      * getattr/open instead of listing the parent directory.
@@ -586,7 +589,13 @@ export const createSharedFsMountBackend = (
                         );
                     }
                     if (parsed.kind === "root") {
-                        return (await target.conflicts()).map((conflict) => ({
+                        // A mount listing tolerates partial results while
+                        // a cold-start bootstrap overlay is active.
+                        return (
+                            await target.conflicts(undefined, {
+                                allowPartial: true,
+                            })
+                        ).map((conflict) => ({
                             name: encodeConflictPathName(conflict.path),
                             kind: "directory" as const,
                         }));
