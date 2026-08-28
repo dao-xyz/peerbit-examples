@@ -1,5 +1,82 @@
 # @peerbit/shared-fs-cli
 
+## 0.6.0
+
+### Minor Changes
+
+- 1a35ea3: Cold-start bootstrap: a new party opening an existing filesystem reaches a
+  readable, winner-correct tree in about a second, independent of log size,
+  then converges to a normal full replica in the background.
+    - Trusted full replicas periodically materialize their retained HEAD
+      state (all naming heads including deletes, all version heads, no
+      history, no chunks) into content-addressed segments plus a signed
+      manifest (`snapshotWrite()`, automatic publication on long-running
+      replicas, `peerbit-fs snapshot` for one-shot use).
+    - A cold joiner discovers the newest manifest, verifies the inner
+      signature against its OWN trust graph, re-hashes every fetched segment
+      against the signed manifest, structurally validates every document,
+      and serves reads from an in-memory read-through overlay — nothing
+      bootstrap-vouched ever enters the log, index, or block store. Segment
+      count adapts to snapshot size and fetches route to currently connected
+      peers only, so joins stay fast even when the replicator set carries
+      dead ex-members; content streams lazily through the existing
+      hash-verified remote chunk fetch.
+    - The overlay retires per document (arrival, removal, or supersession
+      proven by a causal descendant); on verified retirement the caches are
+      cleared and the resurrection guard arms. Until then the guard stays
+      disarmed and garbage collection is gated, and a persisted marker keeps
+      both across a crashed bootstrap. Every failure falls back silently to
+      a plain join (`bootstrap: { mode: "require" }` throws instead).
+    - Whole-store conflict/changeset scans throw a typed
+      `BootstrapPendingError` while the overlay is active (pass
+      `{ allowPartial: true }` for partial-index results). New surface:
+      `bootstrapStatus()`, `awaitBootstrapConverged()`, `bootstrap:ready` /
+      `bootstrap:converged` events, `bootstrap` and `snapshot` open options.
+    - Fixed in passing: remote chunk fetch was silently disabled on every
+      peer that opened an existing address with default options (a field
+      initializer bypassed by deserialization), and empty remote answers are
+      now retried within the configured fetch budget instead of failing the
+      read while the serving peer is saturated.
+
+    Measured (2000 files / 4201 head documents): tree readable 1.2s after
+    open with the entire log still pending, first lazy content read 1.7s,
+    background convergence 6.3s — versus 3.1s to readability on a plain join,
+    a gap that grows linearly with retained history.
+
+    Schema note: new bootstrap-manifest document kind; store salt bumped to
+    /shared-fs/v7. Recreate filesystems and upgrade all peers together.
+
+### Patch Changes
+
+- 8b65660: Fix a cache fill/event race: the per-node row caches computed a fill epoch
+  but never checked it, so a cache-miss fill whose row query raced a
+  concurrently arriving document could install a stale bucket that silently
+  hid the superseding row (a newer version or rename) for as long as the
+  bucket stayed warm. Fills now install only when the node's epoch is
+  unchanged across the fill's awaits, matching the directory-sweep cache.
+- 32c6681: Cold-join accelerators: roughly halve the time and CPU a new party spends
+  replicating an existing filesystem.
+    - Raw exchange-heads sync is enabled on the entries store: senders ship
+      raw entry blocks and the receiver batch-computes content addresses and
+      batch-verifies signatures (using the wasm verifier when available),
+      marking entries preverified. Negotiated per connection with a
+      compatible fallback; per-document validation still runs unchanged.
+    - Trust verdicts are memoized: the trust-graph reachability check ran
+      once per replicated document for a handful of distinct signers. Positive
+      verdicts live until any trust-graph change flushes the cache (so
+      revocations apply immediately); negative verdicts expire after one
+      second so writers whose trust relation is still replicating are
+      retried.
+
+    Measured on the multi-party cold-join benchmark (2000 files, 6200
+    documents): full convergence 6.0-7.1s before, 3.1s after, with receiver
+    CPU halved.
+
+- Updated dependencies [8b65660]
+- Updated dependencies [32c6681]
+- Updated dependencies [1a35ea3]
+    - @peerbit/shared-fs@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes
