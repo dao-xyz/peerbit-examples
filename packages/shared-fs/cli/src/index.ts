@@ -775,6 +775,177 @@ export const runCli = async (args = hideBin(process.argv)) => {
             }
         )
         .command(
+            "gc <address>",
+            "reclaim storage: retire old versions, compact naming history, delete unreferenced chunks",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                        demandOption: true,
+                    })
+                    .option("keep-versions", {
+                        type: "number",
+                        description: "Newest versions always kept per file.",
+                    })
+                    .option("retention-days", {
+                        type: "number",
+                        description:
+                            "Versions younger than this are always kept.",
+                    })
+                    .option("grace-days", {
+                        type: "number",
+                        description:
+                            "Nothing is retired unless superseded for this long.",
+                    })
+                    .option("chunk-grace-hours", {
+                        type: "number",
+                        description:
+                            "Unreferenced chunks must be at least this old.",
+                    })
+                    .option("naming-grace-days", {
+                        type: "number",
+                        description:
+                            "Naming history compacts only when settled this long.",
+                    })
+                    .option("settle-seconds", {
+                        type: "number",
+                        description:
+                            "Settle wait before re-validating the plan.",
+                    })
+                    .option("min-orphan-span-minutes", {
+                        type: "number",
+                        description:
+                            "Span between recording and executing chunk/purge candidates.",
+                    })
+                    .option("scope", {
+                        type: "string",
+                        description:
+                            "Restrict version/naming retirement to this path prefix.",
+                    })
+                    .option("immediate-sweep", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "Collapse the two-run safety barrier. Only when this replica is known warm.",
+                    })
+                    .option("dry-run", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "Plan and report without deleting anything.",
+                    })
+                    .option("json", {
+                        type: "boolean",
+                        default: false,
+                        description: "Print machine-readable JSON.",
+                    }),
+            async (argv) => {
+                if (argv.replicate === false) {
+                    console.error(
+                        chalk.red(
+                            "gc requires a full replica; --no-replicate is not allowed."
+                        )
+                    );
+                    process.exitCode = 1;
+                    return;
+                }
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: true,
+                    });
+                    const fsHandle = await openCliFs(peerbit, {
+                        address: argv.address,
+                        machineLabel: argv.machine,
+                        replicate: true,
+                    });
+                    const report = await fsHandle.collectGarbage({
+                        keepVersions: argv.keepVersions,
+                        retentionMs: argv.retentionDays
+                            ? argv.retentionDays * 24 * 60 * 60 * 1000
+                            : undefined,
+                        graceMs: argv.graceDays
+                            ? argv.graceDays * 24 * 60 * 60 * 1000
+                            : undefined,
+                        chunkGraceMs: argv.chunkGraceHours
+                            ? argv.chunkGraceHours * 60 * 60 * 1000
+                            : undefined,
+                        namingGraceMs: argv.namingGraceDays
+                            ? argv.namingGraceDays * 24 * 60 * 60 * 1000
+                            : undefined,
+                        settleMs: argv.settleSeconds
+                            ? argv.settleSeconds * 1000
+                            : undefined,
+                        minOrphanSpanMs: argv.minOrphanSpanMinutes
+                            ? argv.minOrphanSpanMinutes * 60 * 1000
+                            : undefined,
+                        scope: argv.scope,
+                        chunkSweep: argv.immediateSweep
+                            ? "immediate"
+                            : "ledger",
+                        dryRun: argv.dryRun,
+                    });
+                    if (argv.json) {
+                        console.log(
+                            JSON.stringify(
+                                report,
+                                (key, value) =>
+                                    typeof value === "bigint"
+                                        ? value.toString()
+                                        : value,
+                                2
+                            )
+                        );
+                    } else {
+                        const mode = report.dryRun ? " (dry run)" : "";
+                        console.log(chalk.bold(`gc report${mode}`));
+                        console.log(
+                            `retired versions:        ${report.retiredVersions}`
+                        );
+                        console.log(
+                            `compacted naming events: ${report.compactedNamingEvents}`
+                        );
+                        console.log(
+                            `purged nodes:            ${report.purgedNodes}`
+                        );
+                        console.log(
+                            `deleted chunks:          ${report.deletedChunks} (${report.reclaimedChunkBytes} bytes)`
+                        );
+                        console.log(
+                            `healed chunks:           ${report.healedChunks}`
+                        );
+                        console.log(
+                            `conflicted nodes kept:   ${report.conflictedNodes}`
+                        );
+                        if (
+                            report.chunkCandidatesRecorded > 0 ||
+                            report.purgeCandidatesRecorded > 0
+                        ) {
+                            console.log(
+                                chalk.yellow(
+                                    `candidates recorded: ${report.chunkCandidatesRecorded} chunk(s), ${report.purgeCandidatesRecorded} purge(s) — run gc again after the span to reclaim them.`
+                                )
+                            );
+                        }
+                        for (const warning of report.warnings) {
+                            console.log(chalk.yellow(`warning: ${warning}`));
+                        }
+                    }
+                    if (report.damagedNodeIds.length > 0) {
+                        console.error(
+                            chalk.red(
+                                `damaged nodes (missing unrecoverable chunks): ${report.damagedNodeIds.join(", ")}`
+                            )
+                        );
+                        process.exitCode = 1;
+                    }
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
             "unmount <mountpoint>",
             "unmount a native shared filesystem mountpoint",
             (command) =>

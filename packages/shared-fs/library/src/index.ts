@@ -9,7 +9,15 @@ import {
     toBase64,
     toBase64URL,
 } from "@peerbit/crypto";
-import { Documents, Or, StringMatch, type Query } from "@peerbit/document";
+import {
+    Compare,
+    Documents,
+    IntegerCompare,
+    NotFoundError,
+    Or,
+    StringMatch,
+    type Query,
+} from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
@@ -68,6 +76,92 @@ const REMOTE_CHUNK_FETCH_TIMEOUT_MS = 10_000;
 /** Number of node ids per batched history query. */
 const HEAD_QUERY_BATCH = 64;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Garbage-collection defaults. Every window has a floor of hours by design;
+ * the dangerous clock-skew direction (a fast GC clock) is bounded by the
+ * smallest of these windows.
+ */
+const GC_DEFAULTS = {
+    keepVersions: 10,
+    retentionMs: 30 * DAY_MS,
+    graceMs: 3 * DAY_MS,
+    chunkGraceMs: 1 * DAY_MS,
+    namingGraceMs: 14 * DAY_MS,
+    settleMs: 5_000,
+    minOrphanSpanMs: 60 * 60 * 1000,
+} as const;
+
+/**
+ * Writers may skip re-putting a chunk only when a version referencing it is
+ * younger than this horizon: such a witness version cannot be retired by any
+ * peer for at least retentionMs − skipHorizonMs, so the chunk's refcount
+ * stays above zero everywhere while the new version propagates.
+ */
+const DEFAULT_SKIP_HORIZON_MS = GC_DEFAULTS.retentionMs / 2;
+
+/** TTL for in-process version pins taken by reads and versions(). */
+const GC_PIN_TTL_MS = 60_000;
+
+export type GcOptions = {
+    /** Newest versions always kept per node. Default 10. */
+    keepVersions?: number;
+    /** Versions younger than this are always kept. Default 30 days. */
+    retentionMs?: number;
+    /** Nothing is retired unless causally superseded for this long. Default 3 days. */
+    graceMs?: number;
+    /** Unreferenced chunks must be at least this old. Default 1 day. */
+    chunkGraceMs?: number;
+    /** Naming events compact only when every head is older. Default 14 days. */
+    namingGraceMs?: number;
+    /** Settle wait before re-validating the plan. Default 5 s. */
+    settleMs?: number;
+    /** Minimum span between recording and executing chunk/purge candidates. Default 1 h. */
+    minOrphanSpanMs?: number;
+    /** Dedup-skip witness horizon; must stay well below retentionMs. */
+    skipHorizonMs?: number;
+    /**
+     * "ledger" (default): chunks and purges are recorded on one run and
+     * executed on a later run after minOrphanSpanMs — the barrier that makes
+     * a freshly-bootstrapped or long-offline runner collect nothing until
+     * replication has settled. "immediate" collapses the barrier (tests /
+     * operators who know the replica is warm; Guard D still backstops it).
+     */
+    chunkSweep?: "ledger" | "immediate";
+    /** Restrict version/naming retirement to paths under this prefix. */
+    scope?: string;
+    /** Plan and report without mutating anything. */
+    dryRun?: boolean;
+    /** Injected clock for tests. */
+    nowMs?: number;
+};
+
+export type GcReport = {
+    dryRun: boolean;
+    healedChunks: number;
+    damagedNodeIds: string[];
+    retiredVersions: number;
+    compactedNamingEvents: number;
+    purgedNodes: number;
+    deletedChunks: number;
+    reclaimedChunkBytes: bigint;
+    chunkCandidatesRecorded: number;
+    purgeCandidatesRecorded: number;
+    conflictedNodes: number;
+    cutRecoveries: number;
+    warnings: string[];
+};
+
+type GcLedger = {
+    chunkCandidates: Record<string, { firstSeenMs: number }>;
+    purgeCandidates: Record<
+        string,
+        { firstSeenMs: number; winnerEventId: string }
+    >;
+    lastRunMs: number;
+};
+
 type OpenReplicateOptions =
     | false
     | {
@@ -93,6 +187,8 @@ export type SharedFsOpenArgs = {
      * available locally. Enabled by default.
      */
     remoteChunkFetch?: boolean | { timeoutMs?: number };
+    /** Injected clock (ms). Tests use this to control GC windows. */
+    clock?: () => number;
 };
 
 export type OpenSharedFsOptions = SharedFsOpenArgs & {
@@ -175,6 +271,12 @@ export type WriteFileOptions = {
      */
     baseVersionIds?: string[];
     chunkSize?: number;
+    /**
+     * "verify" (default): dedup-skip a chunk only when a fresh witness
+     * version references it, and re-verify presence after the version lands.
+     * "off": always re-put every chunk (partition-proof mode).
+     */
+    dedup?: "verify" | "off";
 };
 
 export type SharedFsErrorCode =
@@ -270,6 +372,18 @@ const chunkBytes = (bytes: Uint8Array, chunkSize = DEFAULT_FILE_CHUNK_SIZE) => {
  */
 const compareIds = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
+const compareBigint = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
+
+const maxDepth = (parents: { causalDepth: bigint }[]): bigint => {
+    let max = 0n;
+    for (const parent of parents) {
+        if (parent.causalDepth > max) {
+            max = parent.causalDepth;
+        }
+    }
+    return 1n + max;
+};
+
 /**
  * Heads and depths of a causal DAG restricted to the locally present
  * document set. References to absent ids are ignored, and reference cycles
@@ -343,8 +457,11 @@ const computeNamingState = (
         events,
         (event) => event.parentNamingIds
     );
+    // Winner order reads the STORED causalDepth (author-asserted, validated
+    // ≥1 at ingest), not the locally computed depth: deleting (compacting)
+    // ancestors must never change winners on any peer.
     const sorted = [...heads].sort((a, b) => {
-        const depthDiff = (depths.get(b.id) ?? 0) - (depths.get(a.id) ?? 0);
+        const depthDiff = compareBigint(b.causalDepth, a.causalDepth);
         if (depthDiff !== 0) {
             return depthDiff;
         }
@@ -414,6 +531,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     remoteChunkFetch: { timeoutMs: number } | false = {
         timeoutMs: REMOTE_CHUNK_FETCH_TIMEOUT_MS,
     };
+    clock: () => number = Date.now;
+    /** In-process version pins (reads in flight); pinned ids survive GC. */
+    private versionPins = new Map<string, number>();
+    /** Ids this process is currently deleting on purpose; Guard D skips them. */
+    private gcSuppressed = new Set<string>();
+    /** In-memory GC ledger fallback for directory-less (in-memory) peers. */
+    private memoryLedger: GcLedger | undefined;
 
     constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
         super();
@@ -424,11 +548,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   rootTrust: properties.rootKey,
               })
             : undefined;
-        // v3: causal-naming schema — the salt bump guarantees 0.2.x and
-        // 0.3.x peers can never attach to the same log and fail confusingly
-        // mid-replication.
+        // v4: gc schema (stored causal depth + chunk reference index) — the
+        // salt bump guarantees older peers can never attach to the same log
+        // and fail confusingly mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v3")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v4")])),
         });
     }
 
@@ -454,6 +578,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await this.trustGraph?.open({
             replicate: { factor: 1 } as any,
         });
+        this.clock = args?.clock ?? Date.now;
+        // Borsh deserialization bypasses the constructor, so per-instance
+        // state must be (re)initialized here, not in field initializers.
+        this.versionPins = new Map();
+        this.gcSuppressed = new Set();
+        this.memoryLedger = undefined;
         await this.entries.open({
             type: SharedFsEntry,
             replicate: this.replicate as any,
@@ -466,6 +596,49 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 type: IndexableSharedFsEntry,
             },
         });
+        if (this.isFullReplica()) {
+            // Guard D: veto-by-resurrection. Registering a change consumer
+            // also makes Documents materialize removed VALUES on delete —
+            // required, because by the time the handler runs the log entry
+            // is physically gone.
+            this.entries.events.addEventListener("change", (event: any) => {
+                void this.guardAgainstLiveRemovals(
+                    event?.detail?.removed ?? []
+                ).catch(() => {});
+            });
+            // Warm the chunkRefs child-table index so the first writeFile's
+            // dedup freshness probe is a planned indexed join, not a scan.
+            void this.entries.index
+                .iterate(
+                    {
+                        query: [
+                            new StringMatch({
+                                key: "chunkRefs",
+                                value: "chunk:warmup",
+                            }),
+                        ],
+                    },
+                    { local: true, remote: false, resolve: false }
+                )
+                .all()
+                .catch(() => {});
+            if (this.trustGraph) {
+                void this.isTrustedWriter(this.node.identity.publicKey).then(
+                    (trusted) => {
+                        if (!trusted) {
+                            console.warn(
+                                "shared-fs: this peer's key is not a trusted writer; garbage collection and the resurrection guard are inert here."
+                            );
+                        }
+                    },
+                    () => {}
+                );
+            }
+        }
+    }
+
+    private isFullReplica() {
+        return this.replicate !== false && this.replicate?.factor === 1;
     }
 
     private authorKey() {
@@ -512,12 +685,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     ) ||
                     !VALID_NAME(value.name) ||
                     !decodesToStringArray(value.parentNamingIdsJson) ||
-                    !decodesToStringArray(value.observedContentHeadsJson)
+                    !decodesToStringArray(value.observedContentHeadsJson) ||
+                    value.causalDepth < 1n
                 ) {
                     return false;
                 }
             } else if (value instanceof FileVersion) {
-                if (!value.nodeId.startsWith("file:")) {
+                if (
+                    !value.nodeId.startsWith("file:") ||
+                    value.causalDepth < 1n
+                ) {
                     return false;
                 }
             }
@@ -710,9 +887,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return undefined;
         }
         claimants.sort((a, b) => {
-            const depthDiff =
-                (b.depths.get(b.winner.id) ?? 0) -
-                (a.depths.get(a.winner.id) ?? 0);
+            const depthDiff = compareBigint(
+                b.winner.causalDepth,
+                a.winner.causalDepth
+            );
             if (depthDiff !== 0) {
                 return depthDiff;
             }
@@ -848,7 +1026,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         parentId: string;
         name: string;
         deleted?: boolean;
-        parentNamingIds: string[];
+        /** Current head events this event causally supersedes. */
+        parentHeads: NamingEvent[];
         observedContentHeads?: string[];
     }) {
         const metadata = this.signedMetadata();
@@ -858,7 +1037,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentId: properties.parentId,
             name: properties.name,
             deleted: properties.deleted ?? false,
-            parentNamingIds: properties.parentNamingIds,
+            causalDepth: maxDepth(properties.parentHeads),
+            parentNamingIds: properties.parentHeads.map((head) => head.id),
             observedContentHeads: properties.observedContentHeads ?? [],
             createdAt: metadata.timestamp,
             authorKey: metadata.authorKey,
@@ -872,6 +1052,71 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     // Content layer
     // ------------------------------------------------------------------
 
+    /**
+     * W1 dedup rule. A chunk put may be skipped only when BOTH hold: this is
+     * a full replica, and a version younger than the skip horizon references
+     * the chunk — such a witness cannot be retired by any collector for at
+     * least retentionMs − skipHorizonMs, so the chunk stays referenced
+     * everywhere while the new version propagates. Otherwise the chunk is
+     * re-put NON-unique: the put links the existing head, which refreshes
+     * its modified time (the age shield every collector honors) and gives
+     * the old entry a non-CUT child that stops an in-flight delete's
+     * recursive prune. Partial replicas always re-put so keep:"self"
+     * protects the writer's own content.
+     */
+    private async touchChunks(
+        chunks: FileChunk[],
+        dedup: "verify" | "off" | undefined
+    ) {
+        const fullReplica = this.isFullReplica();
+        const horizonFloor = BigInt(
+            Math.max(0, Math.floor(this.clock() - DEFAULT_SKIP_HORIZON_MS))
+        );
+        await mapWithConcurrency(
+            chunks,
+            CHUNK_IO_CONCURRENCY,
+            async (chunk) => {
+                if (dedup === "off" || !fullReplica) {
+                    await this.entries.put(chunk);
+                    return;
+                }
+                if (!(await this.hasDocument(chunk.id))) {
+                    // Absence just verified; a fresh chain with no
+                    // existing-key lookup. Duplicate-id races are idempotent
+                    // by construction under content addressing.
+                    await this.entries.put(chunk, { unique: true });
+                    return;
+                }
+                const witness = await this.entries.index
+                    .iterate(
+                        {
+                            query: [
+                                new StringMatch({
+                                    key: "kind",
+                                    value: "file-version",
+                                }),
+                                new StringMatch({
+                                    key: "chunkRefs",
+                                    value: chunk.id,
+                                }),
+                                new IntegerCompare({
+                                    key: "createdAt",
+                                    compare: Compare.GreaterOrEqual,
+                                    value: horizonFloor,
+                                }),
+                            ],
+                        },
+                        { local: true, remote: false, resolve: false }
+                    )
+                    .next(1);
+                if (witness.length > 0) {
+                    return;
+                }
+                await this.entries.put(chunk);
+            }
+        );
+    }
+
     /** All version documents for a node. */
     private async versionDocumentsForNode(
         nodeId: string
@@ -884,12 +1129,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private contentHeads(documents: FileVersion[]): FileVersion[] {
-        const { heads, depths } = computeDag(
-            documents,
-            (doc) => doc.parentVersionIds
-        );
+        const { heads } = computeDag(documents, (doc) => doc.parentVersionIds);
+        // Stored depth, same rationale as naming winners: retiring ancestors
+        // must never change the visible head.
         return [...heads].sort((a, b) => {
-            const depthDiff = (depths.get(b.id) ?? 0) - (depths.get(a.id) ?? 0);
+            const depthDiff = compareBigint(b.causalDepth, a.causalDepth);
             return depthDiff !== 0 ? depthDiff : compareIds(a.id, b.id);
         });
     }
@@ -1055,7 +1299,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             nodeId: createId("dir"),
             parentId,
             name: basename(normalized),
-            parentNamingIds: [],
+            parentHeads: [],
         });
     }
 
@@ -1093,14 +1337,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return this.versionInfo(currentHeads[0], normalized, currentHeads);
         }
-        const parentVersionIds =
-            options.baseVersionIds ?? currentHeads.map((head) => head.id);
+        let parentVersionIds: string[];
+        let parentVersions: FileVersion[];
+        if (options.baseVersionIds !== undefined) {
+            parentVersionIds = options.baseVersionIds;
+            parentVersions = [];
+            for (const parentId of parentVersionIds) {
+                const parent = await this.getDocument<SharedFsEntry>(parentId);
+                if (parent instanceof FileVersion) {
+                    parentVersions.push(parent);
+                }
+            }
+        } else {
+            parentVersionIds = currentHeads.map((head) => head.id);
+            parentVersions = currentHeads;
+        }
         const versionId = createId("version");
         // Content-addressed chunks: identical bytes — across versions of
         // this file or across entirely different files — share one chunk
-        // document. Chunks are append-only and immortal by design; a future
-        // garbage collector must revisit this check-then-skip dedup and the
-        // delete/put ordering before it may remove anything.
+        // document. Only chunks the store has not seen (or cannot prove
+        // fresh) are re-put; see touchChunks for the dedup safety rules.
         const orderedChunks = chunkBytes(bytes, options.chunkSize).map(
             (chunk) => new FileChunk({ bytes: chunk })
         );
@@ -1109,38 +1365,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 orderedChunks.map((chunk) => [chunk.id, chunk])
             ).values(),
         ];
-        // Skipping the put is only safe on a full replica: on a partial
-        // replicator the existing copy may be remote-authored, and skipping
-        // would leave this writer's content unprotected by keep:"self".
-        // Re-putting identical bytes is LWW-safe.
-        const fullReplica =
-            this.replicate !== false && this.replicate?.factor === 1;
-        await mapWithConcurrency(
-            uniqueChunks,
-            CHUNK_IO_CONCURRENCY,
-            async (chunk) => {
-                if (fullReplica) {
-                    if (await this.hasDocument(chunk.id)) {
-                        return;
-                    }
-                    // Absence just verified; skip the internal existing-key
-                    // lookup. Duplicate-id races are idempotent by
-                    // construction under content addressing.
-                    await this.entries.put(chunk, { unique: true });
-                    return;
-                }
-                // Partial replicator: put unconditionally (identical bytes
-                // are LWW-safe) and let the internal existing-key lookup
-                // link same-id heads.
-                await this.entries.put(chunk);
-            }
-        );
+        await this.touchChunks(uniqueChunks, options.dedup);
         const metadata = this.signedMetadata();
         const nodeId = existingNodeId ?? createId("file");
         const version = new FileVersion({
             id: versionId,
             nodeId,
             parentVersionIds,
+            causalDepth: maxDepth(parentVersions),
             contentHash,
             size: BigInt(bytes.byteLength),
             chunkIds: orderedChunks.map((chunk) => chunk.id),
@@ -1149,6 +1381,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             machineLabel: metadata.machineLabel,
         });
         await this.entries.put(version, { unique: true });
+        // W2: the version now references the chunks; re-verify every chunk
+        // is still present and re-put from memory any that a concurrently
+        // executing collector removed inside the probe window.
+        if (options.dedup !== "off") {
+            await mapWithConcurrency(
+                uniqueChunks,
+                CHUNK_IO_CONCURRENCY,
+                async (chunk) => {
+                    if (!(await this.hasDocument(chunk.id))) {
+                        await this.entries.put(chunk, { unique: true });
+                    }
+                }
+            );
+        }
         if (!existingNodeId) {
             // Brand-new path: content first, then the naming event that
             // makes it visible. Writes to existing files never touch naming
@@ -1158,7 +1404,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 nodeId,
                 parentId,
                 name: basename(normalized),
-                parentNamingIds: [],
+                parentHeads: [],
             });
         }
         const referenced = new Set(parentVersionIds);
@@ -1259,6 +1505,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let firstError: unknown;
         const candidates: FileVersion[] = [visible];
         const seen = new Set<string>([visible.id]);
+        this.pinVersions(heads.map((head) => head.id));
         for (let i = 0; i < candidates.length; i++) {
             const candidate = candidates[i];
             try {
@@ -1294,6 +1541,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return undefined;
         }
+        this.pinVersions([version.id]);
         return this.readFileVersion(version, normalized);
     }
 
@@ -1381,6 +1629,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const documents = await this.versionDocumentsForNode(resolved.nodeId);
         const heads = this.contentHeads(documents);
+        this.pinVersions(documents.map((document) => document.id));
         return documents
             .sort(
                 (a, b) =>
@@ -1485,6 +1734,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             id: createId("version"),
             nodeId: selected.nodeId,
             parentVersionIds: heads.map((head) => head.id),
+            causalDepth: maxDepth(heads),
             contentHash: selected.contentHash,
             size: selected.size,
             chunkIds: selected.chunkIds,
@@ -1522,7 +1772,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parentId: resolved.winner.parentId,
                 name: resolved.winner.name,
                 deleted: true,
-                parentNamingIds: resolved.state.heads.map((head) => head.id),
+                parentHeads: resolved.state.heads,
             });
             return;
         }
@@ -1535,7 +1785,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentId: resolved.winner.parentId,
             name: resolved.winner.name,
             deleted: true,
-            parentNamingIds: resolved.state.heads.map((head) => head.id),
+            parentHeads: resolved.state.heads,
             observedContentHeads: contentHeads.map((head) => head.id),
         });
     }
@@ -1592,7 +1842,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             nodeId: resolved.nodeId,
             parentId,
             name: basename(toPath),
-            parentNamingIds: resolved.state.heads.map((head) => head.id),
+            parentHeads: resolved.state.heads,
         });
     }
 
@@ -1767,6 +2017,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 break;
             }
             case "restore": {
+                if (
+                    nodeKindOf(nodeId) === "file" &&
+                    (await this.headsForNode(nodeId)).length === 0
+                ) {
+                    // Never produce a contentless ghost: if every version of
+                    // this node has been reclaimed, say so loudly.
+                    throw new SharedFsError(
+                        "ENOENT",
+                        "no recoverable content survives for this node"
+                    );
+                }
                 payload = {
                     parentId: state.winner.parentId,
                     name: state.winner.name,
@@ -1821,9 +2082,866 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentId: payload.parentId,
             name: payload.name,
             deleted: payload.deleted,
-            parentNamingIds: state.heads.map((head) => head.id),
+            parentHeads: state.heads,
             observedContentHeads: payload.observedContentHeads,
         });
+        if (action.type === "restore" && nodeKindOf(nodeId) === "file") {
+            // A restore must carry content: append a resolution version
+            // re-referencing the visible head and re-put/touch its chunks,
+            // so the restored file is race-proof against a concurrent chunk
+            // sweep exactly like a fresh edit is.
+            const heads = await this.headsForNode(nodeId);
+            const visible = heads[0];
+            if (visible) {
+                const chunkDocs: FileChunk[] = [];
+                for (const chunkId of new Set(visible.chunkIds)) {
+                    const chunk = await this.getDocument<FileChunk>(chunkId);
+                    if (chunk instanceof FileChunk) {
+                        chunkDocs.push(chunk);
+                    }
+                }
+                await this.touchChunks(chunkDocs, "off");
+                const metadata = this.signedMetadata();
+                const resolution = new FileVersion({
+                    id: createId("version"),
+                    nodeId,
+                    parentVersionIds: heads.map((head) => head.id),
+                    causalDepth: maxDepth(heads),
+                    contentHash: visible.contentHash,
+                    size: visible.size,
+                    chunkIds: visible.chunkIds,
+                    createdAt: metadata.timestamp,
+                    authorKey: metadata.authorKey,
+                    machineLabel: metadata.machineLabel,
+                    conflictResolution: true,
+                });
+                await this.entries.put(resolution, { unique: true });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Garbage collection
+    // ------------------------------------------------------------------
+
+    private pinVersions(ids: string[]) {
+        const expires = this.clock() + GC_PIN_TTL_MS;
+        for (const id of ids) {
+            this.versionPins.set(id, expires);
+        }
+    }
+
+    private activePins(): Set<string> {
+        const now = this.clock();
+        const active = new Set<string>();
+        for (const [id, expiry] of this.versionPins) {
+            if (expiry >= now) {
+                active.add(id);
+            } else {
+                this.versionPins.delete(id);
+            }
+        }
+        return active;
+    }
+
+    /**
+     * Guard D: veto by resurrection. Whenever a document this replica still
+     * needs is removed (a collector elsewhere raced local state), re-put it
+     * from the removed value carried by the change event. Only adds data,
+     * idempotent, cannot loop (re-puts arrive as additions).
+     */
+    private async guardAgainstLiveRemovals(removed: unknown[]) {
+        for (const value of removed) {
+            try {
+                if (value instanceof FileChunk) {
+                    if (this.gcSuppressed.has(value.id)) {
+                        continue;
+                    }
+                    if (!this.verifyChunk(value, value.id)) {
+                        continue;
+                    }
+                    const referenced = await this.entries.index
+                        .iterate(
+                            {
+                                query: [
+                                    new StringMatch({
+                                        key: "kind",
+                                        value: "file-version",
+                                    }),
+                                    new StringMatch({
+                                        key: "chunkRefs",
+                                        value: value.id,
+                                    }),
+                                ],
+                            },
+                            { local: true, remote: false, resolve: false }
+                        )
+                        .next(1);
+                    if (referenced.length > 0) {
+                        await this.entries.put(value, { unique: true });
+                    }
+                } else if (value instanceof FileVersion) {
+                    if (this.gcSuppressed.has(value.id)) {
+                        continue;
+                    }
+                    const naming = await this.namingStateForNode(value.nodeId);
+                    if (!naming) {
+                        continue;
+                    }
+                    const remaining = (
+                        await this.versionDocumentsForNode(value.nodeId)
+                    ).filter((doc) => doc.id !== value.id);
+                    const heads = this.contentHeads([...remaining, value]);
+                    const isHead = heads.some((head) => head.id === value.id);
+                    const recoverable =
+                        naming.winner.deleted &&
+                        !new Set(naming.winner.observedContentHeads).has(
+                            value.id
+                        );
+                    if ((isHead && !naming.winner.deleted) || recoverable) {
+                        await this.entries.put(value, { unique: true });
+                    }
+                } else if (value instanceof NamingEvent) {
+                    if (this.gcSuppressed.has(value.id)) {
+                        continue;
+                    }
+                    const remaining = (
+                        (await this.namingStateForNode(value.nodeId))?.events ??
+                        []
+                    ).filter((event) => event.id !== value.id);
+                    const state = computeNamingState(value.nodeId, [
+                        ...remaining,
+                        value,
+                    ]);
+                    if (state?.heads.some((head) => head.id === value.id)) {
+                        await this.entries.put(value, { unique: true });
+                    }
+                }
+            } catch {
+                // The guard must never throw into the event loop.
+            }
+        }
+    }
+
+    private async gcLedgerPath(): Promise<string | undefined> {
+        const directory = (this.node as any)?.directory as string | undefined;
+        if (!directory) {
+            return undefined;
+        }
+        const { mkdir } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const dir = join(directory, "shared-fs-gc");
+        await mkdir(dir, { recursive: true });
+        return join(dir, `${this.address?.toString() ?? "unaddressed"}.json`);
+    }
+
+    private async loadGcLedger(): Promise<GcLedger> {
+        const empty: GcLedger = {
+            chunkCandidates: {},
+            purgeCandidates: {},
+            lastRunMs: 0,
+        };
+        const path = await this.gcLedgerPath();
+        if (!path) {
+            this.memoryLedger ??= empty;
+            return this.memoryLedger;
+        }
+        try {
+            const { readFile } = await import("node:fs/promises");
+            const parsed = JSON.parse(await readFile(path, "utf8"));
+            return {
+                chunkCandidates: parsed.chunkCandidates ?? {},
+                purgeCandidates: parsed.purgeCandidates ?? {},
+                lastRunMs: parsed.lastRunMs ?? 0,
+            };
+        } catch {
+            return empty;
+        }
+    }
+
+    private async saveGcLedger(ledger: GcLedger) {
+        const path = await this.gcLedgerPath();
+        if (!path) {
+            this.memoryLedger = ledger;
+            return;
+        }
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(path, JSON.stringify(ledger));
+    }
+
+    /**
+     * Context.modified in milliseconds regardless of the underlying clock
+     * scale (wall-clock nanoseconds vs milliseconds), detected by magnitude.
+     */
+    private contextModifiedMs(context: any): number {
+        const raw = Number(context?.modified ?? 0);
+        return raw > 1e15 ? raw / 1e6 : raw;
+    }
+
+    async collectGarbage(options: GcOptions = {}): Promise<GcReport> {
+        if (!this.isFullReplica()) {
+            throw new SharedFsError(
+                "EINVAL",
+                "collectGarbage requires a full replica (replicate: { factor: 1 })"
+            );
+        }
+        if (
+            this.trustGraph &&
+            !(await this.isTrustedWriter(this.node.identity.publicKey))
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "collectGarbage requires a trusted writer key"
+            );
+        }
+        const config = {
+            keepVersions: options.keepVersions ?? GC_DEFAULTS.keepVersions,
+            retentionMs: options.retentionMs ?? GC_DEFAULTS.retentionMs,
+            graceMs: options.graceMs ?? GC_DEFAULTS.graceMs,
+            chunkGraceMs: options.chunkGraceMs ?? GC_DEFAULTS.chunkGraceMs,
+            namingGraceMs: options.namingGraceMs ?? GC_DEFAULTS.namingGraceMs,
+            settleMs: options.settleMs ?? GC_DEFAULTS.settleMs,
+            minOrphanSpanMs:
+                options.minOrphanSpanMs ?? GC_DEFAULTS.minOrphanSpanMs,
+            skipHorizonMs: options.skipHorizonMs ?? DEFAULT_SKIP_HORIZON_MS,
+            chunkSweep: options.chunkSweep ?? ("ledger" as const),
+            scope: options.scope,
+            dryRun: options.dryRun ?? false,
+            nowMs: options.nowMs ?? this.clock(),
+        };
+        const report: GcReport = {
+            dryRun: config.dryRun,
+            healedChunks: 0,
+            damagedNodeIds: [],
+            retiredVersions: 0,
+            compactedNamingEvents: 0,
+            purgedNodes: 0,
+            deletedChunks: 0,
+            reclaimedChunkBytes: 0n,
+            chunkCandidatesRecorded: 0,
+            purgeCandidatesRecorded: 0,
+            conflictedNodes: 0,
+            cutRecoveries: 0,
+            warnings: [],
+        };
+        if (config.skipHorizonMs > config.retentionMs - config.graceMs) {
+            report.warnings.push(
+                "skipHorizonMs is too close to retentionMs; widening retention is safer than narrowing the horizon"
+            );
+        }
+        const ledger = await this.loadGcLedger();
+        const runStartedMs = config.nowMs;
+
+        const sleep = (ms: number) =>
+            new Promise((resolve) => setTimeout(resolve, ms));
+
+        // ---------------- PLAN (pure function of the local set) -----------
+        const buildPlan = async () => {
+            const pins = this.activePins();
+            const namingDocs = await this.queryDocuments<NamingEvent>([
+                new StringMatch({ key: "kind", value: "naming" }),
+            ]);
+            const namingByNode = new Map<string, NamingEvent[]>();
+            for (const event of namingDocs) {
+                const list = namingByNode.get(event.nodeId) ?? [];
+                list.push(event);
+                namingByNode.set(event.nodeId, list);
+            }
+            const namingStates = new Map<string, NodeNamingState>();
+            for (const [nodeId, events] of namingByNode) {
+                const state = computeNamingState(nodeId, events);
+                if (state) {
+                    namingStates.set(nodeId, state);
+                }
+            }
+            const versionDocs = await this.queryDocuments<SharedFsEntry>([
+                new StringMatch({ key: "kind", value: "file-version" }),
+            ]);
+            const versionsByNode = new Map<string, FileVersion[]>();
+            for (const doc of versionDocs) {
+                if (doc instanceof FileVersion) {
+                    const list = versionsByNode.get(doc.nodeId) ?? [];
+                    list.push(doc);
+                    versionsByNode.set(doc.nodeId, list);
+                }
+            }
+            // Arrival times (Context.modified) via one index-only pass.
+            const modifiedMs = new Map<string, number>();
+            const rows = await this.entries.index
+                .iterate(
+                    {
+                        query: [
+                            new Or([
+                                new StringMatch({
+                                    key: "kind",
+                                    value: "file-version",
+                                }),
+                                new StringMatch({
+                                    key: "kind",
+                                    value: "naming",
+                                }),
+                            ]),
+                        ],
+                    },
+                    { local: true, remote: false, resolve: false }
+                )
+                .all();
+            for (const row of rows as any[]) {
+                modifiedMs.set(row.id, this.contextModifiedMs(row.__context));
+            }
+            const ageOk = (
+                doc: { id: string; createdAt: bigint },
+                ms: number
+            ) =>
+                Number(doc.createdAt) <= runStartedMs - ms &&
+                (modifiedMs.get(doc.id) ?? runStartedMs) <= runStartedMs - ms;
+
+            const conflictedNodeIds = new Set<string>();
+            for (const conflict of await this.namingConflicts()) {
+                conflictedNodeIds.add(conflict.nodeId);
+                for (const shadowed of conflict.shadowedNodeIds ?? []) {
+                    conflictedNodeIds.add(shadowed);
+                }
+            }
+            report.conflictedNodes = conflictedNodeIds.size;
+
+            let scopeNodeIds: Set<string> | undefined;
+            if (config.scope) {
+                const prefix = normalizeFsPath(config.scope);
+                scopeNodeIds = new Set();
+                const cache = new Map<string, NodeNamingState>(namingStates);
+                for (const nodeId of namingStates.keys()) {
+                    const path = await this.pathForNode(nodeId, cache);
+                    if (
+                        prefix === "/" ||
+                        path === prefix ||
+                        path.startsWith(prefix + "/")
+                    ) {
+                        scopeNodeIds.add(nodeId);
+                    }
+                }
+            }
+            const inScope = (nodeId: string) =>
+                !scopeNodeIds || scopeNodeIds.has(nodeId);
+
+            type DagPlan = {
+                retire: Map<string, FileVersion | NamingEvent>;
+            };
+            const planDag = <T extends { id: string; createdAt: bigint }>(
+                docs: T[],
+                parentsOf: (doc: T) => string[],
+                heads: T[],
+                keep: Set<string>
+            ): Map<string, T> => {
+                const byId = new Map(docs.map((doc) => [doc.id, doc]));
+                const children = new Map<string, string[]>();
+                for (const doc of docs) {
+                    for (const parent of parentsOf(doc)) {
+                        if (byId.has(parent)) {
+                            const list = children.get(parent) ?? [];
+                            list.push(doc.id);
+                            children.set(parent, list);
+                        }
+                    }
+                }
+                const ancestorMemo = new Map<string, Set<string>>();
+                const ancestorsOf = (id: string): Set<string> => {
+                    const memo = ancestorMemo.get(id);
+                    if (memo) {
+                        return memo;
+                    }
+                    const out = new Set<string>();
+                    ancestorMemo.set(id, out); // cycle guard
+                    const doc = byId.get(id);
+                    if (doc) {
+                        for (const parent of parentsOf(doc)) {
+                            if (byId.has(parent)) {
+                                out.add(parent);
+                                for (const deep of ancestorsOf(parent)) {
+                                    out.add(deep);
+                                }
+                            }
+                        }
+                    }
+                    return out;
+                };
+                // Strict COMMON ancestors of every head: conflicted nodes
+                // compact shared history only; branch-exclusive documents
+                // stay until the conflict resolves.
+                let common: Set<string> | undefined;
+                for (const head of heads) {
+                    const ancestors = ancestorsOf(head.id);
+                    common = common
+                        ? new Set([...common].filter((id) => ancestors.has(id)))
+                        : new Set(ancestors);
+                }
+                const retire = new Map<string, T>();
+                for (const id of common ?? []) {
+                    if (!keep.has(id)) {
+                        const doc = byId.get(id);
+                        if (doc) {
+                            retire.set(id, doc);
+                        }
+                    }
+                }
+                // Grace-closure fixpoint: never leave a surviving doc whose
+                // every present child is being retired — deleting them would
+                // promote the survivor to a spurious head.
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const doc of docs) {
+                        if (retire.has(doc.id)) {
+                            continue;
+                        }
+                        const kids = children.get(doc.id) ?? [];
+                        if (
+                            kids.length > 0 &&
+                            kids.every((kid) => retire.has(kid))
+                        ) {
+                            for (const kid of kids) {
+                                retire.delete(kid);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                return retire;
+            };
+
+            // Version retirement per node.
+            const versionRetire = new Map<string, FileVersion>();
+            for (const [nodeId, docs] of versionsByNode) {
+                if (!inScope(nodeId)) {
+                    continue;
+                }
+                const naming = namingStates.get(nodeId);
+                const heads = this.contentHeads(docs);
+                const keep = new Set<string>();
+                for (const head of heads) {
+                    keep.add(head.id);
+                }
+                if (naming?.winner.deleted) {
+                    const observed = new Set(
+                        naming.winner.observedContentHeads
+                    );
+                    for (const doc of docs) {
+                        // Recoverables and everything the delete observed.
+                        if (!observed.has(doc.id)) {
+                            keep.add(doc.id);
+                        }
+                    }
+                    for (const id of observed) {
+                        keep.add(id);
+                    }
+                }
+                const newest = [...docs].sort(
+                    (a, b) =>
+                        Number(b.createdAt) - Number(a.createdAt) ||
+                        compareIds(b.id, a.id)
+                );
+                for (const doc of newest.slice(0, config.keepVersions)) {
+                    keep.add(doc.id);
+                }
+                for (const doc of docs) {
+                    if (!ageOk(doc, config.retentionMs)) {
+                        keep.add(doc.id);
+                    }
+                    if (!ageOk(doc, config.graceMs)) {
+                        keep.add(doc.id);
+                    }
+                    if (pins.has(doc.id)) {
+                        keep.add(doc.id);
+                    }
+                }
+                // Witness rule: a doc is only retirable when some strict
+                // present descendant is itself grace-old (supersession must
+                // be causal AND settled).
+                const byId = new Map(docs.map((doc) => [doc.id, doc]));
+                const descendants = new Map<string, Set<string>>();
+                for (const doc of docs) {
+                    for (const parent of doc.parentVersionIds) {
+                        if (byId.has(parent)) {
+                            const set = descendants.get(parent) ?? new Set();
+                            set.add(doc.id);
+                            descendants.set(parent, set);
+                        }
+                    }
+                }
+                const hasSettledDescendant = (id: string): boolean => {
+                    const seen = new Set<string>();
+                    const queue = [...(descendants.get(id) ?? [])];
+                    while (queue.length > 0) {
+                        const next = queue.pop()!;
+                        if (seen.has(next)) {
+                            continue;
+                        }
+                        seen.add(next);
+                        const doc = byId.get(next);
+                        if (doc && ageOk(doc, config.graceMs)) {
+                            return true;
+                        }
+                        for (const deep of descendants.get(next) ?? []) {
+                            queue.push(deep);
+                        }
+                    }
+                    return false;
+                };
+                for (const doc of docs) {
+                    if (!keep.has(doc.id) && !hasSettledDescendant(doc.id)) {
+                        keep.add(doc.id);
+                    }
+                }
+                const retire = planDag(
+                    docs,
+                    (doc) => doc.parentVersionIds,
+                    heads,
+                    keep
+                );
+                for (const [id, doc] of retire) {
+                    versionRetire.set(id, doc);
+                }
+            }
+
+            // Naming compaction per eligible node.
+            const namingRetire = new Map<string, NamingEvent>();
+            for (const [nodeId, state] of namingStates) {
+                if (!inScope(nodeId) || conflictedNodeIds.has(nodeId)) {
+                    continue;
+                }
+                if (
+                    !state.heads.every((head) =>
+                        ageOk(head, config.namingGraceMs)
+                    )
+                ) {
+                    continue;
+                }
+                const keep = new Set<string>();
+                for (const head of state.heads) {
+                    keep.add(head.id);
+                }
+                for (const event of state.events) {
+                    if (!ageOk(event, config.namingGraceMs)) {
+                        keep.add(event.id);
+                    }
+                }
+                const retire = planDag(
+                    state.events,
+                    (event) => event.parentNamingIds,
+                    state.heads,
+                    keep
+                );
+                for (const [id, event] of retire) {
+                    namingRetire.set(id, event);
+                }
+            }
+
+            // Purge candidates (the only place content heads die).
+            const purgeReady = new Map<string, string>(); // nodeId -> winner event id
+            for (const [nodeId, state] of namingStates) {
+                if (
+                    !inScope(nodeId) ||
+                    nodeKindOf(nodeId) !== "file" ||
+                    conflictedNodeIds.has(nodeId)
+                ) {
+                    continue;
+                }
+                if (!state.winner.deleted || state.heads.length !== 1) {
+                    continue;
+                }
+                const wall = Math.max(config.retentionMs, config.graceMs);
+                if (!state.heads.every((head) => ageOk(head, wall))) {
+                    continue;
+                }
+                const docs = versionsByNode.get(nodeId) ?? [];
+                const heads = this.contentHeads(docs);
+                const observed = new Set(state.winner.observedContentHeads);
+                if (!heads.every((head) => observed.has(head.id))) {
+                    continue;
+                }
+                purgeReady.set(nodeId, state.winner.id);
+            }
+
+            return {
+                versionRetire,
+                namingRetire,
+                purgeReady,
+                versionsByNode,
+                namingStates,
+            };
+        };
+
+        let plan = await buildPlan();
+
+        // ---------------- HEAL --------------------------------------------
+        const damaged = new Set<string>();
+        if (!config.dryRun) {
+            for (const [nodeId, docs] of plan.versionsByNode) {
+                for (const doc of docs) {
+                    if (plan.versionRetire.has(doc.id)) {
+                        continue;
+                    }
+                    for (const chunkId of new Set(doc.chunkIds)) {
+                        if (await this.hasDocument(chunkId)) {
+                            continue;
+                        }
+                        try {
+                            const healed = await this.fetchChunk(
+                                chunkId,
+                                nodeId
+                            );
+                            await this.entries.put(healed, { unique: true });
+                            report.healedChunks++;
+                        } catch {
+                            damaged.add(nodeId);
+                        }
+                    }
+                }
+            }
+            for (const nodeId of damaged) {
+                report.warnings.push(
+                    `node ${nodeId} has unrecoverable missing chunks; excluded from all deletion this run`
+                );
+            }
+        }
+        report.damagedNodeIds = [...damaged];
+
+        // ---------------- SETTLE + REVALIDATE -----------------------------
+        if (!config.dryRun && config.settleMs > 0) {
+            await sleep(config.settleMs);
+        }
+        const settled = await buildPlan();
+        const retireVersions = new Map(
+            [...plan.versionRetire].filter(
+                ([id, doc]) =>
+                    settled.versionRetire.has(id) && !damaged.has(doc.nodeId)
+            )
+        );
+        const retireNaming = new Map(
+            [...plan.namingRetire].filter(
+                ([id, event]) =>
+                    settled.namingRetire.has(id) && !damaged.has(event.nodeId)
+            )
+        );
+        const purgeReady = new Map(
+            [...plan.purgeReady].filter(
+                ([nodeId, winnerId]) =>
+                    settled.purgeReady.get(nodeId) === winnerId &&
+                    !damaged.has(nodeId)
+            )
+        );
+
+        // ---------------- EXECUTE (metadata, parents before children) -----
+        const executeDeletes = async (
+            docs: (FileVersion | NamingEvent)[]
+        ): Promise<number> => {
+            let deleted = 0;
+            const ordered = [...docs].sort(
+                (a, b) =>
+                    compareBigint(a.causalDepth, b.causalDepth) ||
+                    compareIds(a.id, b.id)
+            );
+            for (const doc of ordered) {
+                const row = (await this.entries.index.get(doc.id, {
+                    local: true,
+                    remote: false,
+                    resolve: false,
+                })) as any;
+                if (!row) {
+                    continue; // concurrent collector won
+                }
+                const expectedHead = row.__context?.head;
+                this.gcSuppressed.add(doc.id);
+                try {
+                    const result: any = await this.entries.del(doc.id);
+                    const cutTarget = result?.entry?.meta?.next?.[0];
+                    if (
+                        expectedHead &&
+                        cutTarget &&
+                        cutTarget !== expectedHead
+                    ) {
+                        // The CUT landed on a concurrent re-put, not on the
+                        // head we planned against: restore the immutable
+                        // value we hold and count the recovery.
+                        await this.entries.put(doc, { unique: true });
+                        report.cutRecoveries++;
+                        continue;
+                    }
+                    deleted++;
+                } catch (error) {
+                    if (!(error instanceof NotFoundError)) {
+                        throw error;
+                    }
+                }
+            }
+            return deleted;
+        };
+
+        if (!config.dryRun) {
+            report.retiredVersions = await executeDeletes([
+                ...retireVersions.values(),
+            ]);
+            report.compactedNamingEvents = await executeDeletes([
+                ...retireNaming.values(),
+            ]);
+        } else {
+            report.retiredVersions = retireVersions.size;
+            report.compactedNamingEvents = retireNaming.size;
+        }
+
+        // ---------------- PURGE + CHUNK SWEEP (two-run barrier) -----------
+        const spanReady = (firstSeenMs: number) =>
+            config.chunkSweep === "immediate" ||
+            (firstSeenMs <= runStartedMs - config.minOrphanSpanMs &&
+                firstSeenMs <= ledger.lastRunMs);
+
+        // Purge execution (recorded on a previous run, fully re-verified).
+        const purgeExecuted: string[] = [];
+        for (const [nodeId, record] of Object.entries(ledger.purgeCandidates)) {
+            if (!spanReady(record.firstSeenMs)) {
+                continue;
+            }
+            if (purgeReady.get(nodeId) !== record.winnerEventId) {
+                delete ledger.purgeCandidates[nodeId];
+                continue;
+            }
+            if (!config.dryRun) {
+                const docs = settled.versionsByNode.get(nodeId) ?? [];
+                await executeDeletes(docs);
+                purgeExecuted.push(nodeId);
+            }
+            delete ledger.purgeCandidates[nodeId];
+        }
+        report.purgedNodes = purgeExecuted.length;
+        for (const [nodeId, winnerId] of purgeReady) {
+            if (
+                !purgeExecuted.includes(nodeId) &&
+                !ledger.purgeCandidates[nodeId]
+            ) {
+                ledger.purgeCandidates[nodeId] = {
+                    firstSeenMs: runStartedMs,
+                    winnerEventId: winnerId,
+                };
+                report.purgeCandidatesRecorded++;
+            }
+        }
+
+        if (!config.dryRun && config.settleMs > 0) {
+            // Let version CUTs propagate before chunk CUTs so remotes see
+            // dereference-then-delete, not the reverse.
+            await sleep(config.settleMs);
+        }
+
+        // Chunk candidates: refcount 0 against the post-retirement index and
+        // old enough by arrival time.
+        const chunkRows = (await this.entries.index
+            .iterate(
+                {
+                    query: [
+                        new StringMatch({ key: "kind", value: "file-chunk" }),
+                    ],
+                },
+                { local: true, remote: false, resolve: false }
+            )
+            .all()) as any[];
+        const orphaned = new Map<string, any>();
+        for (const row of chunkRows) {
+            if (
+                this.contextModifiedMs(row.__context) >
+                runStartedMs - config.chunkGraceMs
+            ) {
+                continue;
+            }
+            const referenced = await this.entries.index
+                .iterate(
+                    {
+                        query: [
+                            new StringMatch({
+                                key: "kind",
+                                value: "file-version",
+                            }),
+                            new StringMatch({
+                                key: "chunkRefs",
+                                value: row.id,
+                            }),
+                        ],
+                    },
+                    { local: true, remote: false, resolve: false }
+                )
+                .next(1);
+            if (referenced.length === 0) {
+                orphaned.set(row.id, row);
+            }
+        }
+        for (const [chunkId, record] of Object.entries(
+            ledger.chunkCandidates
+        )) {
+            const row = orphaned.get(chunkId);
+            if (!row) {
+                delete ledger.chunkCandidates[chunkId];
+                continue;
+            }
+            if (!spanReady(record.firstSeenMs)) {
+                continue;
+            }
+            if (!config.dryRun) {
+                this.gcSuppressed.add(chunkId);
+                try {
+                    await this.entries.del(chunkId);
+                    report.deletedChunks++;
+                    report.reclaimedChunkBytes += BigInt(
+                        Number(row.__context?.size ?? 0)
+                    );
+                } catch (error) {
+                    if (!(error instanceof NotFoundError)) {
+                        throw error;
+                    }
+                }
+            }
+            delete ledger.chunkCandidates[chunkId];
+            orphaned.delete(chunkId);
+        }
+        if (config.chunkSweep === "immediate") {
+            for (const [chunkId, row] of orphaned) {
+                if (config.dryRun) {
+                    report.chunkCandidatesRecorded++;
+                    continue;
+                }
+                this.gcSuppressed.add(chunkId);
+                try {
+                    await this.entries.del(chunkId);
+                    report.deletedChunks++;
+                    report.reclaimedChunkBytes += BigInt(
+                        Number(row.__context?.size ?? 0)
+                    );
+                } catch (error) {
+                    if (!(error instanceof NotFoundError)) {
+                        throw error;
+                    }
+                }
+            }
+        } else {
+            for (const chunkId of orphaned.keys()) {
+                if (!ledger.chunkCandidates[chunkId]) {
+                    ledger.chunkCandidates[chunkId] = {
+                        firstSeenMs: runStartedMs,
+                    };
+                    report.chunkCandidatesRecorded++;
+                }
+            }
+        }
+
+        ledger.lastRunMs = runStartedMs;
+        if (!config.dryRun) {
+            await this.saveGcLedger(ledger);
+        }
+        this.gcSuppressed.clear();
+        if (report.chunkCandidatesRecorded > 0) {
+            report.warnings.push(
+                `${report.chunkCandidatesRecorded} chunk candidate(s) recorded; run collectGarbage again after ${Math.round(config.minOrphanSpanMs / 60000)} minutes to reclaim their bytes`
+            );
+        }
+        return report;
     }
 }
 
@@ -1900,6 +3018,10 @@ export class SharedFsHandle {
 
     resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
         return this.program.resolveNamingConflict(nodeId, action);
+    }
+
+    collectGarbage(options?: GcOptions) {
+        return this.program.collectGarbage(options);
     }
 
     authorizeWriter(publicKey: PublicSignKey) {
