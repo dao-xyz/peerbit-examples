@@ -285,6 +285,45 @@ export type WriteFileOptions = {
     dedup?: "verify" | "off";
 };
 
+export type WriteBatchEntry =
+    | {
+          path: string;
+          content: Uint8Array | string;
+          chunkSize?: number;
+      }
+    /**
+     * File-only: deleting a directory throws EISDIR (use rmdir/rm), and a
+     * path that does not resolve to a file is a no-op (idempotent deletes).
+     */
+    | { path: string; delete: true };
+
+export type WriteBatchOptions = {
+    /**
+     * Identity (1-256 chars) recorded on every version and naming event
+     * this batch applies; queryable afterwards via versionsByChangeset.
+     * Generated when omitted. Reusing an id — in later batches, or from
+     * another peer — appends to the same logical changeset: the identity is
+     * advisory attribution among trusted writers, not authenticated, so
+     * callers that need their own writes only must filter the returned
+     * versions by authorKey.
+     */
+    changesetId?: string;
+    dedup?: "verify" | "off";
+};
+
+export type WriteBatchResult = {
+    changesetId: string;
+    /**
+     * Per input entry, in order: the resulting version info for writes, or
+     * undefined for an applied delete, a delete whose path resolved to
+     * nothing, and a no-op write over unchanged content. Entries reflect
+     * the pre-commit snapshot: under concurrent writes to the same nodes,
+     * head:true is best-effort — conflicts surface via versions() and
+     * namingConflicts().
+     */
+    results: (SharedFsVersionInfo | undefined)[];
+};
+
 export type SharedFsErrorCode =
     | "ENOENT"
     | "EEXIST"
@@ -579,6 +618,12 @@ const decodesToStringArray = (value: string) => {
     }
 };
 
+// Enforced at ingest, not just in writeBatch: the cap bounds the indexed
+// scalar column against remote writers, and "" would be a queryable
+// non-value.
+const validChangesetId = (value: string | undefined) =>
+    value === undefined || (value.length > 0 && value.length <= 256);
+
 @variant("peerbit_shared_fs")
 export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     @field({ type: Uint8Array })
@@ -628,6 +673,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private slotSweepCache = new Map<string, Map<string, NamingLike>>();
     private changeListener: ((event: any) => void) | undefined;
+    /** Serializes writeBatch calls; see the writeBatch docstring. */
+    private writeBatchChain: Promise<unknown> = Promise.resolve();
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
 
@@ -640,12 +687,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   rootTrust: properties.rootKey,
               })
             : undefined;
-        // v5: index-served metadata plane (causal refs, sizes, hashes and
-        // attribution projected into the index) — the salt bump guarantees
+        // v6: write-set identities (changesetId) — the salt bump guarantees
         // older peers can never attach to the same log and fail confusingly
         // mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v5")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v6")])),
         });
     }
 
@@ -686,6 +732,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.cacheEpochs = new Map();
         this.cacheGlobalEpoch = 0;
         this.slotSweepCache = new Map();
+        this.writeBatchChain = Promise.resolve();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
         if (this.guardFlushTimer) {
@@ -797,14 +844,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     !VALID_NAME(value.name) ||
                     !decodesToStringArray(value.parentNamingIdsJson) ||
                     !decodesToStringArray(value.observedContentHeadsJson) ||
-                    value.causalDepth < 1n
+                    value.causalDepth < 1n ||
+                    !validChangesetId(value.changesetId)
                 ) {
                     return false;
                 }
             } else if (value instanceof FileVersion) {
                 if (
                     !value.nodeId.startsWith("file:") ||
-                    value.causalDepth < 1n
+                    value.causalDepth < 1n ||
+                    !validChangesetId(value.changesetId)
                 ) {
                     return false;
                 }
@@ -1699,6 +1748,371 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ...currentHeads.filter((head) => !referenced.has(head.id)),
         ];
         return this.versionInfo(version, normalized, heads);
+    }
+
+    /**
+     * Apply many file operations as one write-set. Far cheaper than
+     * sequential writeFile calls (parents resolved once against a shared
+     * overlay, chunk-dedup probes and chunk IO batched across the whole
+     * set), and every applied document carries one changesetId — a
+     * queryable, commit-like handle over the multi-file change.
+     *
+     * Missing parent directories are created. Atomicity contract: per file
+     * always (content chunks land before the version that references them,
+     * and a NEW file's naming event lands last, so a crashed or replicated
+     * prefix never shows a partially present new file). Across entries the
+     * batch is NOT transactional: an edit to an existing file becomes
+     * visible as soon as its version lands, a crash mid-batch can leave a
+     * prefix of edits applied, and remote peers apply the batch's documents
+     * incrementally. Delete events are appended after all creates so every
+     * intermediate state is data-preserving — a rename expressed as
+     * delete+create never transiently shows neither file.
+     *
+     * Batches are serialized per instance; concurrent batches from OTHER
+     * peers that create the same new directory converge to one visible
+     * winner, with the loser surfaced via namingConflicts().
+     */
+    async writeBatch(
+        entries: WriteBatchEntry[],
+        options: WriteBatchOptions = {}
+    ): Promise<WriteBatchResult> {
+        // Serialized per instance: two in-flight batches would otherwise
+        // each mint a fresh directory node for the same new path segment
+        // (the overlay is per call), manufacturing duplicate-name conflicts
+        // from a single process.
+        const run = this.writeBatchChain.then(() =>
+            this.writeBatchInner(entries, options)
+        );
+        this.writeBatchChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private async writeBatchInner(
+        entries: WriteBatchEntry[],
+        options: WriteBatchOptions = {}
+    ): Promise<WriteBatchResult> {
+        const changesetId = options.changesetId ?? createId("changeset");
+        if (changesetId.length === 0 || changesetId.length > 256) {
+            throw new SharedFsError(
+                "EINVAL",
+                "changesetId must be 1-256 characters"
+            );
+        }
+        if (entries.length === 0) {
+            return { changesetId, results: [] };
+        }
+        if (entries.length > 10_000) {
+            throw new SharedFsError(
+                "EINVAL",
+                "writeBatch is limited to 10000 entries"
+            );
+        }
+        const normalizedEntries = entries.map((entry) => ({
+            ...entry,
+            path: normalizeFsPath(entry.path),
+        }));
+        const seenPaths = new Set<string>();
+        for (const entry of normalizedEntries) {
+            if (entry.path === "/") {
+                throw new SharedFsError("EISDIR", "Cannot write to root");
+            }
+            if (seenPaths.has(entry.path)) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `Duplicate path in batch: ${entry.path}`
+                );
+            }
+            seenPaths.add(entry.path);
+        }
+        // No entry's path may lie under another entry's path: the shorter
+        // path claims a file (or delete) slot while the longer one needs it
+        // as a directory — sequential writes would throw ENOTDIR, and a
+        // batch that applied both would mint two nodes for one (parent,
+        // name) slot, silently shadowing one of its own writes.
+        for (const entry of normalizedEntries) {
+            for (
+                let ancestor = dirname(entry.path);
+                ancestor !== "/";
+                ancestor = dirname(ancestor)
+            ) {
+                if (seenPaths.has(ancestor)) {
+                    throw new SharedFsError(
+                        "ENOTDIR",
+                        `Conflicting paths in batch: ${entry.path} lies under ${ancestor}, which the batch also writes`
+                    );
+                }
+            }
+        }
+        const metadata = this.signedMetadata();
+        // Directories created by this batch, keyed by normalized path.
+        const createdDirs = new Map<
+            string,
+            { nodeId: string; event: NamingEvent }
+        >();
+        const resolveParentWithOverlay = async (
+            path: string
+        ): Promise<string> => {
+            const parentPath = dirname(path);
+            if (parentPath === "/") {
+                return ROOT_NODE_ID;
+            }
+            const segments = pathSegments(parentPath);
+            let parentId: string = ROOT_NODE_ID;
+            let currentPath = "/";
+            for (const name of segments) {
+                currentPath = joinFsPath(currentPath, name);
+                const made = createdDirs.get(currentPath);
+                if (made) {
+                    parentId = made.nodeId;
+                    continue;
+                }
+                const slot = await this.slotResolution(parentId, name);
+                if (slot) {
+                    if (nodeKindOf(slot.nodeId) === "file") {
+                        throw new SharedFsError(
+                            "ENOTDIR",
+                            `Parent path is a file: ${currentPath}`
+                        );
+                    }
+                    parentId = slot.nodeId;
+                    continue;
+                }
+                const nodeId = createId("dir");
+                const event = new NamingEvent({
+                    id: createId("naming"),
+                    nodeId,
+                    parentId,
+                    name,
+                    causalDepth: 1n,
+                    parentNamingIds: [],
+                    createdAt: metadata.timestamp,
+                    authorKey: metadata.authorKey,
+                    machineLabel: metadata.machineLabel,
+                    changesetId,
+                });
+                createdDirs.set(currentPath, { nodeId, event });
+                parentId = nodeId;
+            }
+            return parentId;
+        };
+
+        const results: (SharedFsVersionInfo | undefined)[] = new Array(
+            normalizedEntries.length
+        );
+        const versions: FileVersion[] = [];
+        const createNamingEvents: NamingEvent[] = [];
+        const deleteNamingEvents: NamingEvent[] = [];
+        const allChunks = new Map<string, FileChunk>();
+
+        for (let i = 0; i < normalizedEntries.length; i++) {
+            const entry = normalizedEntries[i];
+            const resolved = await this.resolvePath(entry.path);
+            if ("delete" in entry) {
+                if (
+                    resolved?.kind === "directory" ||
+                    resolved?.kind === "root"
+                ) {
+                    // rm() handles directories (with an empty check); a
+                    // silent skip here would be indistinguishable from an
+                    // applied delete.
+                    throw new SharedFsError(
+                        "EISDIR",
+                        `Batch deletes are file-only: ${entry.path} is a directory`
+                    );
+                }
+                if (!resolved) {
+                    results[i] = undefined; // delete of nothing is a no-op
+                    continue;
+                }
+                if (resolved.state.heads.length > 8000) {
+                    // Same indexer bound appendNamingEvent enforces; throw
+                    // before any document is put.
+                    throw new SharedFsError(
+                        "EINVAL",
+                        "too many concurrent naming heads to supersede in one event"
+                    );
+                }
+                const contentHeads = await this.headsForNode(resolved.nodeId);
+                deleteNamingEvents.push(
+                    new NamingEvent({
+                        id: createId("naming"),
+                        nodeId: resolved.nodeId,
+                        parentId: resolved.winner.parentId,
+                        name: resolved.winner.name,
+                        deleted: true,
+                        causalDepth: maxDepth(resolved.state.heads),
+                        parentNamingIds: resolved.state.heads.map(
+                            (head) => head.id
+                        ),
+                        observedContentHeads: contentHeads.map(
+                            (head) => head.id
+                        ),
+                        createdAt: metadata.timestamp,
+                        authorKey: metadata.authorKey,
+                        machineLabel: metadata.machineLabel,
+                        changesetId,
+                    })
+                );
+                results[i] = undefined;
+                continue;
+            }
+            if (resolved?.kind === "directory" || resolved?.kind === "root") {
+                throw new SharedFsError(
+                    "EISDIR",
+                    `Path is a directory: ${entry.path}`
+                );
+            }
+            const bytes = await toBytes(entry.content);
+            const contentHash = sha256Base64Sync(bytes);
+            const existingNodeId = resolved?.nodeId;
+            const currentHeads = existingNodeId
+                ? await this.headsForNode(existingNodeId)
+                : [];
+            if (
+                entry.chunkSize === undefined &&
+                currentHeads.length === 1 &&
+                currentHeads[0].contentHash === contentHash
+            ) {
+                results[i] = undefined; // unchanged content: no-op
+                continue;
+            }
+            const orderedChunks = chunkBytes(bytes, entry.chunkSize).map(
+                (chunk) => new FileChunk({ bytes: chunk })
+            );
+            const uniqueChunkIds = new Set(
+                orderedChunks.map((chunk) => chunk.id)
+            );
+            if (uniqueChunkIds.size > 8000) {
+                // The indexer bound is per version row's chunkRefs (see
+                // writeFile); the batch as a whole probes and puts chunks
+                // one document at a time, so its total is unbounded.
+                throw new SharedFsError(
+                    "EINVAL",
+                    `File has ${uniqueChunkIds.size} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version): ${entry.path}`
+                );
+            }
+            for (const chunk of orderedChunks) {
+                allChunks.set(chunk.id, chunk);
+            }
+            const nodeId = existingNodeId ?? createId("file");
+            const version = new FileVersion({
+                id: createId("version"),
+                nodeId,
+                parentVersionIds: currentHeads.map((head) => head.id),
+                causalDepth: maxDepth(currentHeads),
+                contentHash,
+                size: BigInt(bytes.byteLength),
+                chunkIds: orderedChunks.map((chunk) => chunk.id),
+                createdAt: metadata.timestamp,
+                authorKey: metadata.authorKey,
+                machineLabel: metadata.machineLabel,
+                changesetId,
+            });
+            versions.push(version);
+            if (!existingNodeId) {
+                const parentId = await resolveParentWithOverlay(entry.path);
+                createNamingEvents.push(
+                    new NamingEvent({
+                        id: createId("naming"),
+                        nodeId,
+                        parentId,
+                        name: basename(entry.path),
+                        causalDepth: 1n,
+                        parentNamingIds: [],
+                        createdAt: metadata.timestamp,
+                        authorKey: metadata.authorKey,
+                        machineLabel: metadata.machineLabel,
+                        changesetId,
+                    })
+                );
+            }
+            const referenced = new Set(version.parentVersionIds);
+            results[i] = this.versionInfo(versionRowOf(version), entry.path, [
+                versionRowOf(version),
+                ...currentHeads.filter((head) => !referenced.has(head.id)),
+            ]);
+        }
+
+        // Content first, then versions, then naming (directories, creates,
+        // deletes last): a crashed or replicated prefix never shows a
+        // partially present NEW file, and never loses data — old files stay
+        // visible until every create has landed. Edits to existing files
+        // become visible at the versions phase (see the docstring).
+        await this.touchChunks([...allChunks.values()], options.dedup);
+        if (versions.length > 0) {
+            await this.entries.putMany(versions, { unique: true });
+        }
+        if (options.dedup !== "off" && allChunks.size > 0) {
+            await mapWithConcurrency(
+                [...allChunks.values()],
+                CHUNK_IO_CONCURRENCY,
+                async (chunk) => {
+                    if (!(await this.hasDocument(chunk.id))) {
+                        await this.putPreferLinked(chunk);
+                    }
+                }
+            );
+        }
+        const namingEvents = [
+            ...[...createdDirs.values()].map((made) => made.event),
+            ...createNamingEvents,
+            ...deleteNamingEvents,
+        ];
+        if (namingEvents.length > 0) {
+            await this.entries.putMany(namingEvents, { unique: true });
+        }
+        for (const version of versions) {
+            this.cacheLocalWrite(version);
+        }
+        for (const event of namingEvents) {
+            this.cacheLocalWrite(event);
+        }
+        return { changesetId, results };
+    }
+
+    /**
+     * The versions (and naming event ids) currently stored under one
+     * changesetId, with best-effort current paths. The record is a view
+     * over retained history, not a durable commit object: GC retires
+     * superseded versions without regard to changesetId, so it shrinks as
+     * the batch's files are overwritten and retention windows pass. The id
+     * is advisory attribution among trusted writers — any peer may stamp
+     * it — so filter the returned versions by authorKey when only one
+     * writer's rows are wanted. The first call builds the (kind,
+     * changesetId) index lazily; subsequent calls are indexed lookups.
+     */
+    async versionsByChangeset(changesetId: string): Promise<{
+        versions: SharedFsVersionInfo[];
+        namingEventIds: string[];
+    }> {
+        const versionRows = (
+            await this.queryRows([
+                new StringMatch({ key: "kind", value: "file-version" }),
+                new StringMatch({ key: "changesetId", value: changesetId }),
+            ])
+        ).map(versionRowOf);
+        const namingRows = await this.queryRows([
+            new StringMatch({ key: "kind", value: "naming" }),
+            new StringMatch({ key: "changesetId", value: changesetId }),
+        ]);
+        const heads = await this.headsForNodes(
+            versionRows.map((row) => row.nodeId)
+        );
+        const stateCache = new Map<string, NodeNamingState>();
+        const versions: SharedFsVersionInfo[] = [];
+        for (const row of versionRows) {
+            const path = await this.pathForNode(row.nodeId, stateCache);
+            versions.push(
+                this.versionInfo(row, path, heads.get(row.nodeId) ?? [])
+            );
+        }
+        return {
+            versions,
+            namingEventIds: namingRows.map((row) => row.id as string),
+        };
     }
 
     /**
@@ -3539,6 +3953,14 @@ export class SharedFsHandle {
 
     collectGarbage(options?: GcOptions) {
         return this.program.collectGarbage(options);
+    }
+
+    writeBatch(entries: WriteBatchEntry[], options?: WriteBatchOptions) {
+        return this.program.writeBatch(entries, options);
+    }
+
+    versionsByChangeset(changesetId: string) {
+        return this.program.versionsByChangeset(changesetId);
     }
 
     authorizeWriter(publicKey: PublicSignKey) {

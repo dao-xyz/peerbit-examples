@@ -164,18 +164,30 @@ describe("shared fs multi-party workload", () => {
             const first = await burst(0);
             const second = await burst(1); // overwrites: version churn
             const third = await burst(2);
+            // The same 100-file change applied as one write-set.
+            const batchStart = performance.now();
+            await fs.writeBatch(
+                Array.from({ length: 100 }, (_, i) => ({
+                    path: `/project/${["a", "b", "c", "d"][i % 4]}/file-${i}.txt`,
+                    content: `round 3 content ${i}`,
+                }))
+            );
+            const batched = performance.now() - batchStart;
             report("burst-100-files", {
                 first,
                 second,
                 third,
                 median: median([first, second, third]),
+                batched,
             });
+            // The batched form must beat the sequential steady state.
+            expect(batched).toBeLessThan(median([first, second, third]));
+            expect(decode(await fs.readFile("/project/a/file-0.txt"))).toBe(
+                "round 3 content 0"
+            );
             // A 100-file burst must stay comfortably interactive, and
             // overwrite bursts must not degrade versus creation bursts.
             expect(third).toBeLessThan(first * 4 + 2_000);
-            expect(decode(await fs.readFile("/project/a/file-0.txt"))).toBe(
-                "round 2 content 0"
-            );
         }
     );
 

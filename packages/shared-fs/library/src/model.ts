@@ -88,6 +88,10 @@ export class IndexableSharedFsEntry {
     @field({ type: option("string") })
     machineLabel?: string;
 
+    /** Write-set identity for naming/version rows; queryable. */
+    @field({ type: option("string") })
+    changesetId?: string;
+
     constructor(value?: SharedFsEntry) {
         this.chunkRefs = [];
         this.createdAt = 0n;
@@ -113,6 +117,7 @@ export class IndexableSharedFsEntry {
             this.causalDepth = value.causalDepth;
             this.authorKey = value.authorKey;
             this.machineLabel = value.machineLabel;
+            this.changesetId = value.changesetId;
         } else if (value instanceof FileVersion) {
             this.kind = "file-version";
             this.nodeId = value.nodeId;
@@ -124,6 +129,7 @@ export class IndexableSharedFsEntry {
             this.contentHash = value.contentHash;
             this.authorKey = value.authorKey;
             this.machineLabel = value.machineLabel;
+            this.changesetId = value.changesetId;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
         } else {
@@ -189,6 +195,10 @@ export class NamingEvent extends SharedFsEntry {
     @field({ type: "string" })
     machineLabel: string;
 
+    /** Optional write-set identity (see FileVersion.changesetId). */
+    @field({ type: option("string") })
+    changesetId?: string;
+
     constructor(properties?: {
         id: string;
         nodeId: string;
@@ -201,6 +211,7 @@ export class NamingEvent extends SharedFsEntry {
         createdAt: bigint | number;
         authorKey: string;
         machineLabel: string;
+        changesetId?: string;
     }) {
         super();
         if (properties) {
@@ -215,6 +226,7 @@ export class NamingEvent extends SharedFsEntry {
             this.createdAt = BigInt(properties.createdAt);
             this.authorKey = properties.authorKey;
             this.machineLabel = properties.machineLabel;
+            this.changesetId = properties.changesetId;
         }
     }
 
@@ -316,6 +328,14 @@ export class FileVersion extends SharedFsEntry {
     @field({ type: "bool" })
     conflictResolution: boolean;
 
+    /**
+     * Optional write-set identity: every version applied by one writeBatch
+     * carries the same changesetId, giving callers a queryable commit-like
+     * handle over multi-file changes.
+     */
+    @field({ type: option("string") })
+    changesetId?: string;
+
     constructor(properties?: {
         id: string;
         nodeId: string;
@@ -328,6 +348,7 @@ export class FileVersion extends SharedFsEntry {
         authorKey: string;
         machineLabel: string;
         conflictResolution?: boolean;
+        changesetId?: string;
     }) {
         super();
         if (properties) {
@@ -342,6 +363,7 @@ export class FileVersion extends SharedFsEntry {
             this.authorKey = properties.authorKey;
             this.machineLabel = properties.machineLabel;
             this.conflictResolution = properties.conflictResolution ?? false;
+            this.changesetId = properties.changesetId;
         }
     }
 
