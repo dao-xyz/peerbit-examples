@@ -119,8 +119,6 @@ export type GcOptions = {
     settleMs?: number;
     /** Minimum span between recording and executing chunk/purge candidates. Default 1 h. */
     minOrphanSpanMs?: number;
-    /** Dedup-skip witness horizon; must stay well below retentionMs. */
-    skipHorizonMs?: number;
     /**
      * "ledger" (default): chunks and purges are recorded on one run and
      * executed on a later run after minOrphanSpanMs — the barrier that makes
@@ -653,13 +651,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         };
     }
 
-    private entryAuthorKey(entry: unknown) {
-        if (entry instanceof NamingEvent || entry instanceof FileVersion) {
-            return entry.authorKey;
-        }
-        return undefined;
-    }
-
     private async canPerformEntry(operation: any) {
         // Structural, state-independent validation — acceptance must never
         // depend on replication order or local history.
@@ -712,14 +703,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (trustedKeys.length === 0) {
             return false;
         }
-        if (operation.type === "put") {
-            const authorKey = this.entryAuthorKey(operation.value);
-            if (authorKey) {
-                return trustedKeys.some(
-                    (key) => encodePublicSignKey(key) === authorKey
-                );
-            }
-        }
+        // Any trusted signer may append. The stored authorKey is advisory
+        // attribution, not an authentication binding: documents are immutable
+        // and id-addressed, and resurrection/recovery flows legitimately
+        // re-append other authors' documents under the local key.
         return true;
     }
 
@@ -776,6 +763,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             remote: false,
         });
         return (result ?? undefined) as unknown as T | undefined;
+    }
+
+    /**
+     * Re-put that links the live head when the id currently exists (keeping
+     * one linear chain a future CUT can prune) and forks a fresh chain only
+     * when the row is genuinely absent.
+     */
+    private async putPreferLinked(value: SharedFsEntry) {
+        if (await this.hasDocument(value.id)) {
+            await this.entries.put(value);
+        } else {
+            await this.entries.put(value, { unique: true });
+        }
     }
 
     /** Index-only presence probe: never resolves document bytes. */
@@ -1087,29 +1087,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     await this.entries.put(chunk, { unique: true });
                     return;
                 }
-                const witness = await this.entries.index
-                    .iterate(
-                        {
-                            query: [
-                                new StringMatch({
-                                    key: "kind",
-                                    value: "file-version",
-                                }),
-                                new StringMatch({
-                                    key: "chunkRefs",
-                                    value: chunk.id,
-                                }),
-                                new IntegerCompare({
-                                    key: "createdAt",
-                                    compare: Compare.GreaterOrEqual,
-                                    value: horizonFloor,
-                                }),
-                            ],
-                        },
-                        { local: true, remote: false, resolve: false }
-                    )
-                    .next(1);
-                if (witness.length > 0) {
+                const iterator = this.entries.index.iterate(
+                    {
+                        query: [
+                            new StringMatch({
+                                key: "kind",
+                                value: "file-version",
+                            }),
+                            new StringMatch({
+                                key: "chunkRefs",
+                                value: chunk.id,
+                            }),
+                            new IntegerCompare({
+                                key: "createdAt",
+                                compare: Compare.GreaterOrEqual,
+                                value: horizonFloor,
+                            }),
+                        ],
+                    },
+                    { local: true, remote: false, resolve: false }
+                );
+                let witnessed: boolean;
+                try {
+                    witnessed = (await iterator.next(1)).length > 0;
+                } finally {
+                    await (iterator as any).close?.();
+                }
+                if (witnessed) {
                     return;
                 }
                 await this.entries.put(chunk);
@@ -1365,6 +1369,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 orderedChunks.map((chunk) => [chunk.id, chunk])
             ).values(),
         ];
+        if (uniqueChunks.length > 8000) {
+            // The indexer's batched child-table insert has a bound-variable
+            // ceiling (~8191 rows). Larger files need a larger chunk size.
+            throw new SharedFsError(
+                "EINVAL",
+                `File has ${uniqueChunks.length} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version)`
+            );
+        }
         await this.touchChunks(uniqueChunks, options.dedup);
         const metadata = this.signedMetadata();
         const nodeId = existingNodeId ?? createId("file");
@@ -1390,7 +1402,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 CHUNK_IO_CONCURRENCY,
                 async (chunk) => {
                     if (!(await this.hasDocument(chunk.id))) {
-                        await this.entries.put(chunk, { unique: true });
+                        await this.putPreferLinked(chunk);
                     }
                 }
             );
@@ -2150,6 +2162,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * from the removed value carried by the change event. Only adds data,
      * idempotent, cannot loop (re-puts arrive as additions).
      */
+    /**
+     * Metadata removals queued for coalesced guard evaluation. Deletions
+     * replicate as many independent CUT entries whose change events race the
+     * index; evaluating per event produces gap states where a superseded
+     * ancestor briefly looks like a head. Coalescing a quiet window turns an
+     * entire purge burst into ONE coherent evaluation per node — and caps
+     * the guard's cost per burst instead of per removed document.
+     */
+    private pendingGuardVersions = new Map<string, Map<string, FileVersion>>();
+    private pendingGuardNaming = new Map<string, Map<string, NamingEvent>>();
+    private guardFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+    private scheduleGuardFlush() {
+        if (this.guardFlushTimer) {
+            return;
+        }
+        this.guardFlushTimer = setTimeout(() => {
+            this.guardFlushTimer = undefined;
+            void this.flushGuardQueues().catch(() => {});
+        }, 300);
+        (this.guardFlushTimer as any)?.unref?.();
+    }
+
     private async guardAgainstLiveRemovals(removed: unknown[]) {
         for (const value of removed) {
             try {
@@ -2160,65 +2195,126 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     if (!this.verifyChunk(value, value.id)) {
                         continue;
                     }
-                    const referenced = await this.entries.index
-                        .iterate(
-                            {
-                                query: [
-                                    new StringMatch({
-                                        key: "kind",
-                                        value: "file-version",
-                                    }),
-                                    new StringMatch({
-                                        key: "chunkRefs",
-                                        value: value.id,
-                                    }),
-                                ],
-                            },
-                            { local: true, remote: false, resolve: false }
-                        )
-                        .next(1);
-                    if (referenced.length > 0) {
-                        await this.entries.put(value, { unique: true });
+                    const iterator = this.entries.index.iterate(
+                        {
+                            query: [
+                                new StringMatch({
+                                    key: "kind",
+                                    value: "file-version",
+                                }),
+                                new StringMatch({
+                                    key: "chunkRefs",
+                                    value: value.id,
+                                }),
+                            ],
+                        },
+                        { local: true, remote: false, resolve: false }
+                    );
+                    let referenced: boolean;
+                    try {
+                        referenced = (await iterator.next(1)).length > 0;
+                    } finally {
+                        await (iterator as any).close?.();
+                    }
+                    if (referenced) {
+                        await this.putPreferLinked(value);
                     }
                 } else if (value instanceof FileVersion) {
                     if (this.gcSuppressed.has(value.id)) {
                         continue;
                     }
-                    const naming = await this.namingStateForNode(value.nodeId);
-                    if (!naming) {
-                        continue;
-                    }
-                    const remaining = (
-                        await this.versionDocumentsForNode(value.nodeId)
-                    ).filter((doc) => doc.id !== value.id);
-                    const heads = this.contentHeads([...remaining, value]);
-                    const isHead = heads.some((head) => head.id === value.id);
-                    const recoverable =
-                        naming.winner.deleted &&
-                        !new Set(naming.winner.observedContentHeads).has(
-                            value.id
-                        );
-                    if ((isHead && !naming.winner.deleted) || recoverable) {
-                        await this.entries.put(value, { unique: true });
-                    }
+                    const bucket =
+                        this.pendingGuardVersions.get(value.nodeId) ??
+                        new Map<string, FileVersion>();
+                    bucket.set(value.id, value);
+                    this.pendingGuardVersions.set(value.nodeId, bucket);
+                    this.scheduleGuardFlush();
                 } else if (value instanceof NamingEvent) {
                     if (this.gcSuppressed.has(value.id)) {
                         continue;
                     }
-                    const remaining = (
-                        (await this.namingStateForNode(value.nodeId))?.events ??
-                        []
-                    ).filter((event) => event.id !== value.id);
-                    const state = computeNamingState(value.nodeId, [
-                        ...remaining,
-                        value,
-                    ]);
-                    if (state?.heads.some((head) => head.id === value.id)) {
-                        await this.entries.put(value, { unique: true });
-                    }
+                    const bucket =
+                        this.pendingGuardNaming.get(value.nodeId) ??
+                        new Map<string, NamingEvent>();
+                    bucket.set(value.id, value);
+                    this.pendingGuardNaming.set(value.nodeId, bucket);
+                    this.scheduleGuardFlush();
                 }
             } catch {
                 // The guard must never throw into the event loop.
+            }
+        }
+    }
+
+    private async flushGuardQueues() {
+        const removedVersions = new Map<string, FileVersion[]>();
+        for (const [nodeId, bucket] of this.pendingGuardVersions) {
+            removedVersions.set(nodeId, [...bucket.values()]);
+        }
+        this.pendingGuardVersions.clear();
+        const removedNaming = new Map<string, NamingEvent[]>();
+        for (const [nodeId, bucket] of this.pendingGuardNaming) {
+            removedNaming.set(nodeId, [...bucket.values()]);
+        }
+        this.pendingGuardNaming.clear();
+        for (const [nodeId, values] of removedVersions) {
+            try {
+                const naming = await this.namingStateForNode(nodeId);
+                if (!naming) {
+                    continue;
+                }
+                const removedIds = new Set(values.map((value) => value.id));
+                const remaining = (
+                    await this.versionDocumentsForNode(nodeId)
+                ).filter((doc) => !removedIds.has(doc.id));
+                const heads = this.contentHeads([...remaining, ...values]);
+                const observed = new Set(naming.winner.observedContentHeads);
+                // Purge discriminator: a genuine delete-vs-edit recoverable
+                // (an edit the delete never saw) always coexists with a
+                // still-present observed version, because purge only runs
+                // once EVERY head is observed — and then removes them all.
+                // When no observed version survives locally, unobserved
+                // "heads" are purge remnants arriving out of order, not
+                // recoverable edits.
+                const observedPresent = remaining.some((doc) =>
+                    observed.has(doc.id)
+                );
+                for (const value of values) {
+                    const isHead = heads.some((head) => head.id === value.id);
+                    if (!isHead) {
+                        continue;
+                    }
+                    const protectedHead = naming.winner.deleted
+                        ? !observed.has(value.id) && observedPresent
+                        : true;
+                    if (protectedHead) {
+                        await this.putPreferLinked(value);
+                    }
+                }
+            } catch {
+                // Never throw into the event loop.
+            }
+        }
+        for (const [nodeId, values] of removedNaming) {
+            try {
+                const removedIds = new Set(values.map((value) => value.id));
+                const remaining = (
+                    (await this.namingStateForNode(nodeId))?.events ?? []
+                ).filter((event) => !removedIds.has(event.id));
+                const state = computeNamingState(nodeId, [
+                    ...remaining,
+                    ...values,
+                ]);
+                if (!state) {
+                    continue;
+                }
+                for (const value of values) {
+                    if (state.heads.some((head) => head.id === value.id)) {
+                        await this.putPreferLinked(value);
+                    }
+                }
+            } catch {
+                // Never throw into the event loop.
             }
         }
     }
@@ -2278,7 +2374,66 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return raw > 1e15 ? raw / 1e6 : raw;
     }
 
+    /**
+     * H0-verified chunk delete: resolve the bytes first (the only recovery
+     * source once the CUT prunes the chain), delete, and when the CUT landed
+     * on a head other than the one eligibility was computed against (a
+     * concurrent re-put won the race) restore the chunk and count the
+     * recovery instead of the deletion. Chunk ids are intentionally NOT
+     * added to gcSuppressed: with refcount genuinely zero the resurrection
+     * guard cannot fire, and suppressing it would blind this replica's only
+     * local defense during the sweep window.
+     */
+    private async deleteChunkVerified(
+        chunkId: string,
+        expectedHead: string | undefined,
+        sizeHint: number,
+        report: GcReport
+    ) {
+        const value = await this.getDocument<FileChunk>(chunkId);
+        try {
+            const result: any = await this.entries.del(chunkId);
+            const cutTarget = result?.entry?.meta?.next?.[0];
+            if (expectedHead && cutTarget && cutTarget !== expectedHead) {
+                if (value instanceof FileChunk) {
+                    await this.entries.put(value);
+                }
+                report.cutRecoveries++;
+                return;
+            }
+            report.deletedChunks++;
+            report.reclaimedChunkBytes += BigInt(sizeHint);
+        } catch (error) {
+            if (!(error instanceof NotFoundError)) {
+                throw error;
+            }
+        }
+    }
+
+    private gcRunning = false;
+
     async collectGarbage(options: GcOptions = {}): Promise<GcReport> {
+        if (this.gcRunning) {
+            throw new SharedFsError(
+                "EINVAL",
+                "collectGarbage is already running on this instance"
+            );
+        }
+        this.gcRunning = true;
+        try {
+            return await this.collectGarbageInner(options);
+        } finally {
+            this.gcRunning = false;
+            // Suppression must never outlive the run — a leaked id would
+            // permanently blind Guard D for exactly the documents an aborted
+            // run was deleting.
+            this.gcSuppressed.clear();
+        }
+    }
+
+    private async collectGarbageInner(
+        options: GcOptions = {}
+    ): Promise<GcReport> {
         if (!this.isFullReplica()) {
             throw new SharedFsError(
                 "EINVAL",
@@ -2303,7 +2458,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             settleMs: options.settleMs ?? GC_DEFAULTS.settleMs,
             minOrphanSpanMs:
                 options.minOrphanSpanMs ?? GC_DEFAULTS.minOrphanSpanMs,
-            skipHorizonMs: options.skipHorizonMs ?? DEFAULT_SKIP_HORIZON_MS,
             chunkSweep: options.chunkSweep ?? ("ledger" as const),
             scope: options.scope,
             dryRun: options.dryRun ?? false,
@@ -2324,12 +2478,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             cutRecoveries: 0,
             warnings: [],
         };
-        if (config.skipHorizonMs > config.retentionMs - config.graceMs) {
+        // W1's dedup-skip safety depends on the invariant skipHorizon <=
+        // retention - max(grace, 48h): a witness version younger than the
+        // horizon must be unretirable everywhere while a new write
+        // propagates. The horizon is fixed at authoring time, so retention
+        // is clamped up rather than letting an aggressive option break W1.
+        const retentionFloor =
+            DEFAULT_SKIP_HORIZON_MS + Math.max(config.graceMs, 2 * DAY_MS);
+        if (config.retentionMs < retentionFloor) {
             report.warnings.push(
-                "skipHorizonMs is too close to retentionMs; widening retention is safer than narrowing the horizon"
+                `retentionMs raised to ${retentionFloor} to preserve the dedup-skip safety invariant`
             );
+            config.retentionMs = retentionFloor;
         }
-        const ledger = await this.loadGcLedger();
+        const loaded = await this.loadGcLedger();
+        const ledger: GcLedger = config.dryRun
+            ? JSON.parse(JSON.stringify(loaded))
+            : loaded;
         const runStartedMs = config.nowMs;
 
         const sleep = (ms: number) =>
@@ -2676,28 +2841,39 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // ---------------- HEAL --------------------------------------------
         const damaged = new Set<string>();
         if (!config.dryRun) {
+            // Dedup shared chunks across all surviving versions: one probe
+            // (and at most one heal attempt) per distinct chunk id.
+            const owners = new Map<string, Set<string>>();
             for (const [nodeId, docs] of plan.versionsByNode) {
                 for (const doc of docs) {
                     if (plan.versionRetire.has(doc.id)) {
                         continue;
                     }
                     for (const chunkId of new Set(doc.chunkIds)) {
-                        if (await this.hasDocument(chunkId)) {
-                            continue;
-                        }
-                        try {
-                            const healed = await this.fetchChunk(
-                                chunkId,
-                                nodeId
-                            );
-                            await this.entries.put(healed, { unique: true });
-                            report.healedChunks++;
-                        } catch {
+                        const set = owners.get(chunkId) ?? new Set<string>();
+                        set.add(nodeId);
+                        owners.set(chunkId, set);
+                    }
+                }
+            }
+            await mapWithConcurrency(
+                [...owners.entries()],
+                CHUNK_IO_CONCURRENCY,
+                async ([chunkId, nodeIds]) => {
+                    if (await this.hasDocument(chunkId)) {
+                        return;
+                    }
+                    try {
+                        const healed = await this.fetchChunk(chunkId, chunkId);
+                        await this.entries.put(healed, { unique: true });
+                        report.healedChunks++;
+                    } catch {
+                        for (const nodeId of nodeIds) {
                             damaged.add(nodeId);
                         }
                     }
                 }
-            }
+            );
             for (const nodeId of damaged) {
                 report.warnings.push(
                     `node ${nodeId} has unrecoverable missing chunks; excluded from all deletion this run`
@@ -2762,8 +2938,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     ) {
                         // The CUT landed on a concurrent re-put, not on the
                         // head we planned against: restore the immutable
-                        // value we hold and count the recovery.
-                        await this.entries.put(doc, { unique: true });
+                        // value we hold (linking whatever survives — a
+                        // concurrent chain demonstrably exists) and count
+                        // the recovery.
+                        await this.entries.put(doc);
                         report.cutRecoveries++;
                         continue;
                     }
@@ -2845,15 +3023,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             )
             .all()) as any[];
         const orphaned = new Map<string, any>();
-        for (const row of chunkRows) {
-            if (
-                this.contextModifiedMs(row.__context) >
+        const graceOldRows = chunkRows.filter(
+            (row) =>
+                this.contextModifiedMs(row.__context) <=
                 runStartedMs - config.chunkGraceMs
-            ) {
-                continue;
-            }
-            const referenced = await this.entries.index
-                .iterate(
+        );
+        await mapWithConcurrency(
+            graceOldRows,
+            CHUNK_IO_CONCURRENCY,
+            async (row) => {
+                const iterator = this.entries.index.iterate(
                     {
                         query: [
                             new StringMatch({
@@ -2867,12 +3046,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         ],
                     },
                     { local: true, remote: false, resolve: false }
-                )
-                .next(1);
-            if (referenced.length === 0) {
-                orphaned.set(row.id, row);
+                );
+                let referenced: boolean;
+                try {
+                    referenced = (await iterator.next(1)).length > 0;
+                } finally {
+                    await (iterator as any).close?.();
+                }
+                if (!referenced) {
+                    orphaned.set(row.id, row);
+                }
             }
-        }
+        );
         for (const [chunkId, record] of Object.entries(
             ledger.chunkCandidates
         )) {
@@ -2885,18 +3070,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 continue;
             }
             if (!config.dryRun) {
-                this.gcSuppressed.add(chunkId);
-                try {
-                    await this.entries.del(chunkId);
-                    report.deletedChunks++;
-                    report.reclaimedChunkBytes += BigInt(
-                        Number(row.__context?.size ?? 0)
-                    );
-                } catch (error) {
-                    if (!(error instanceof NotFoundError)) {
-                        throw error;
-                    }
-                }
+                await this.deleteChunkVerified(
+                    chunkId,
+                    row.__context?.head,
+                    Number(row.__context?.size ?? 0),
+                    report
+                );
             }
             delete ledger.chunkCandidates[chunkId];
             orphaned.delete(chunkId);
@@ -2907,18 +3086,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     report.chunkCandidatesRecorded++;
                     continue;
                 }
-                this.gcSuppressed.add(chunkId);
-                try {
-                    await this.entries.del(chunkId);
-                    report.deletedChunks++;
-                    report.reclaimedChunkBytes += BigInt(
-                        Number(row.__context?.size ?? 0)
-                    );
-                } catch (error) {
-                    if (!(error instanceof NotFoundError)) {
-                        throw error;
-                    }
-                }
+                await this.deleteChunkVerified(
+                    chunkId,
+                    row.__context?.head,
+                    Number(row.__context?.size ?? 0),
+                    report
+                );
             }
         } else {
             for (const chunkId of orphaned.keys()) {
@@ -2935,7 +3108,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!config.dryRun) {
             await this.saveGcLedger(ledger);
         }
-        this.gcSuppressed.clear();
         if (report.chunkCandidatesRecorded > 0) {
             report.warnings.push(
                 `${report.chunkCandidatesRecorded} chunk candidate(s) recorded; run collectGarbage again after ${Math.round(config.minOrphanSpanMs / 60000)} minutes to reclaim their bytes`
@@ -3042,6 +3214,7 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
         machineLabel: options.machineLabel,
         replicate: options.replicate,
         remoteChunkFetch: options.remoteChunkFetch,
+        clock: options.clock,
     };
     const program = options.address
         ? await SharedFileSystem.open(

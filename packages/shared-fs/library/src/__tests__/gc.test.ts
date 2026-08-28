@@ -340,6 +340,21 @@ describe("shared fs garbage collection", () => {
         expect(await countRows("file-version")).toBe(versionsBefore);
     });
 
+    it("honors a clock injected through openSharedFs when no nowMs is given", async () => {
+        for (let i = 0; i < 5; i++) {
+            await fs.writeFile("/clocked.txt", `v${i}`);
+        }
+        // No explicit nowMs: collectGarbage must read the injected clock.
+        fakeNow += 40 * DAY_MS;
+        const report = await fs.collectGarbage({
+            settleMs: 0,
+            chunkSweep: "immediate",
+            keepVersions: 1,
+        });
+        expect(report.retiredVersions).toBeGreaterThan(0);
+        expect(decode(await fs.readFile("/clocked.txt"))).toBe("v4");
+    });
+
     it("skips conflicted nodes' branch-exclusive history", async () => {
         await fs.writeFile("/branchy.txt", "base");
         const base = (await fs.versions("/branchy.txt"))
@@ -376,6 +391,87 @@ describe("shared fs garbage collection across peers", () => {
                 }
             })
         );
+    });
+
+    it("purge converges cluster-wide: remote replicas do not resurrect retired history", async () => {
+        let fakeNow = Date.now();
+        const clock = () => fakeNow;
+        const a = await Peerbit.create();
+        const b = await Peerbit.create();
+        peers.push(a, b);
+        await a.dial(b);
+        const fsA = await openSharedFs({
+            peerbit: a,
+            machineLabel: "collector",
+            clock,
+        });
+        const fsB = await openSharedFs({
+            peerbit: b,
+            address: fsA.address,
+            machineLabel: "holder",
+            clock,
+        });
+
+        for (let i = 0; i < 5; i++) {
+            await fsA.writeFile("/purged.bin", patternedBytes(2048, i));
+        }
+        await fsA.rm("/purged.bin");
+        // Both peers agree the file is gone before the purge windows open.
+        await waitUntil(async () => {
+            expect(await fsB.stat("/purged.bin")).toBeUndefined();
+            const rows = (await fsB.program.entries.index
+                .iterate(
+                    { query: { kind: "file-version" } },
+                    { local: true, remote: false, resolve: false }
+                )
+                .all()) as any[];
+            expect(rows.length).toBe(5);
+        });
+
+        fakeNow += 40 * DAY_MS;
+        await fsA.collectGarbage({
+            settleMs: 0,
+            minOrphanSpanMs: 60_000,
+            nowMs: fakeNow,
+        });
+        fakeNow += 120_000;
+        await fsA.collectGarbage({
+            settleMs: 0,
+            minOrphanSpanMs: 60_000,
+            nowMs: fakeNow,
+        });
+        fakeNow += 120_000;
+        await fsA.collectGarbage({
+            settleMs: 0,
+            minOrphanSpanMs: 60_000,
+            nowMs: fakeNow,
+        });
+
+        // The purge must stick on BOTH peers: if the remote resurrection
+        // guard over-fired (resurrecting non-head history of the deleted
+        // node), rows would bounce back and the cluster would never settle.
+        const countOn = async (
+            handle: typeof fsA,
+            kind: string
+        ): Promise<number> =>
+            (
+                (await handle.program.entries.index
+                    .iterate(
+                        { query: { kind } },
+                        { local: true, remote: false, resolve: false }
+                    )
+                    .all()) as any[]
+            ).length;
+        await waitUntil(async () => {
+            expect(await countOn(fsA, "file-version")).toBe(0);
+            expect(await countOn(fsB, "file-version")).toBe(0);
+        });
+        // Give any wrong-headed resurrection a moment, then re-assert.
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        expect(await countOn(fsA, "file-version")).toBe(0);
+        expect(await countOn(fsB, "file-version")).toBe(0);
+        expect(await fsB.stat("/purged.bin")).toBeUndefined();
+        expect(await fsA.namingConflicts()).toEqual([]);
     });
 
     it("a collector on one peer converges with a holder on another; data survives", async () => {

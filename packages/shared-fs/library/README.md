@@ -71,7 +71,10 @@ recomputed), a two-run ledger barrier keeps a freshly-synced replica from
 collecting anything, every replica resurrects removed documents it still
 needs, and writers re-verify chunk presence after every save. Version and
 naming GC reclaim index rows and per-operation CPU; chunk GC reclaims real
-bytes (metadata deletions each leave a small permanent log tombstone).
+bytes (metadata deletions each leave a small permanent log tombstone). Purges
+and chunk-byte reclamation always take effect on a later run — the first run
+records candidates; `--immediate-sweep` waives only the time span between
+runs, never the second run itself.
 
 ## CLI
 
