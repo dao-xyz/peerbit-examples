@@ -624,6 +624,9 @@ const decodesToStringArray = (value: string) => {
 const validChangesetId = (value: string | undefined) =>
     value === undefined || (value.length > 0 && value.length <= 256);
 
+/** How long a negative trust verdict may be served from cache. */
+const TRUST_NEGATIVE_TTL_MS = 1000;
+
 @variant("peerbit_shared_fs")
 export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     @field({ type: Uint8Array })
@@ -673,6 +676,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private slotSweepCache = new Map<string, Map<string, NamingLike>>();
     private changeListener: ((event: any) => void) | undefined;
+    /** Memoized isTrusted verdicts; see canPerformEntry. */
+    private trustVerdicts = new Map<string, { ok: boolean; at: number }>();
+    private trustChangeListener: (() => void) | undefined;
     /** Serializes writeBatch calls; see the writeBatch docstring. */
     private writeBatchChain: Promise<unknown> = Promise.resolve();
     /** Row queries issued; tests assert warm paths issue none. */
@@ -733,11 +739,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.cacheGlobalEpoch = 0;
         this.slotSweepCache = new Map();
         this.writeBatchChain = Promise.resolve();
+        this.trustVerdicts = new Map();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
+        }
+        // ANY trust-graph change flushes every memoized verdict, so
+        // revocations apply with zero added latency and newly trusted
+        // writers stop paying the negative-verdict TTL. Deduped like the
+        // entries change listener below.
+        if (this.trustGraph) {
+            if (this.trustChangeListener) {
+                this.trustGraph.trustGraph.events.removeEventListener(
+                    "change",
+                    this.trustChangeListener
+                );
+            }
+            this.trustChangeListener = () => this.trustVerdicts.clear();
+            this.trustGraph.trustGraph.events.addEventListener(
+                "change",
+                this.trustChangeListener
+            );
         }
         await this.entries.open({
             type: SharedFsEntry,
@@ -747,6 +771,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // not a replicator for them (e.g. replicate: false).
             keep: "self",
             canPerform: (operation) => this.canPerformEntry(operation),
+            // Raw exchange-heads: senders ship raw entry blocks and the
+            // receiver batch-computes CIDs and batch-verifies signatures
+            // (via the wasm verifier when available), marking entries
+            // preverified — canPerform still runs per entry. Negotiated
+            // per connection with a compatible fallback, this is the
+            // cheap half of fast cold joins.
+            sync: { rawExchangeHeads: true },
             index: {
                 type: IndexableSharedFsEntry,
             },
@@ -863,20 +894,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return true;
         }
         const keys = await operation.entry.getPublicKeys();
-        const trustedKeys: PublicSignKey[] = [];
+        const now = this.clock();
         for (const key of keys) {
-            if (await this.trustGraph.isTrusted(key)) {
-                trustedKeys.push(key);
+            // Memoized trust verdicts: the trust-graph BFS runs per entry
+            // on the replication ingest path, so a cold join pays it tens
+            // of thousands of times for a handful of signers. Positive
+            // verdicts live until ANY trust-graph change flushes the cache
+            // (revocations apply immediately); negatives expire quickly so
+            // a writer whose trust relation is still replicating gets
+            // retried by the sender's retry schedule.
+            const id = key.hashcode();
+            const cached = this.trustVerdicts.get(id);
+            if (
+                cached &&
+                (cached.ok || now - cached.at < TRUST_NEGATIVE_TTL_MS)
+            ) {
+                if (cached.ok) {
+                    return true;
+                }
+                continue;
+            }
+            const ok = await this.trustGraph.isTrusted(key);
+            if (this.trustVerdicts.size > 10_000) {
+                this.trustVerdicts.clear();
+            }
+            this.trustVerdicts.set(id, { ok, at: now });
+            if (ok) {
+                // Any trusted signer may append. The stored authorKey is
+                // advisory attribution, not an authentication binding:
+                // documents are immutable and id-addressed, and
+                // resurrection/recovery flows legitimately re-append other
+                // authors' documents under the local key.
+                return true;
             }
         }
-        if (trustedKeys.length === 0) {
-            return false;
-        }
-        // Any trusted signer may append. The stored authorKey is advisory
-        // attribution, not an authentication binding: documents are immutable
-        // and id-addressed, and resurrection/recovery flows legitimately
-        // re-append other authors' documents under the local key.
-        return true;
+        return false;
     }
 
     get accessControlled() {
