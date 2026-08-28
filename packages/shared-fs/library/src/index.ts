@@ -1083,11 +1083,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         }
         for (const nodeId of misses) {
+            // Install only if nothing changed for the node during the
+            // fill's awaits — otherwise the bucket stays cold and the next
+            // access re-queries (a stale install would drop a just-arrived
+            // superseding event for as long as the bucket stays warm).
+            if (this.epochOf(nodeId) !== fillEpochs.get(nodeId)) {
+                continue;
+            }
             this.namingRowCache.set(
                 nodeId,
                 new Map((byNode.get(nodeId) ?? []).map((row) => [row.id, row]))
             );
         }
+        this.boundCache(this.namingRowCache);
         const states = new Map<string, NodeNamingState>();
         for (const [nodeId, events] of byNode) {
             const state = computeNamingState(nodeId, events);
@@ -1485,11 +1493,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         }
         for (const nodeId of misses) {
+            // Epoch-gated install; see namingStatesForNodes.
+            if (this.epochOf(nodeId) !== fillEpochs.get(nodeId)) {
+                continue;
+            }
             this.versionRowCache.set(
                 nodeId,
                 new Map((byNode.get(nodeId) ?? []).map((row) => [row.id, row]))
             );
         }
+        this.boundCache(this.versionRowCache);
         const result = new Map<string, VersionLike[]>();
         for (const [nodeId, rows] of byNode) {
             result.set(nodeId, this.contentHeads(rows));
