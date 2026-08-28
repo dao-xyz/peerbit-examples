@@ -62,9 +62,38 @@ export class IndexableSharedFsEntry {
     @field({ type: "u64" })
     createdAt: bigint;
 
+    /**
+     * Causal parent ids (version parents for file-version rows, naming
+     * parents for naming rows). Together with causalDepth this makes head
+     * computation a pure function of index ROWS — the hot metadata paths
+     * (stat, list, path resolution, head selection) never resolve documents.
+     */
+    @field({ type: vec("string") })
+    causalRefs: string[];
+
+    @field({ type: "u64" })
+    causalDepth: bigint;
+
+    /** Content size for file-version rows; 0 otherwise. */
+    @field({ type: "u64" })
+    size: bigint;
+
+    /** Content hash for file-version rows. */
+    @field({ type: option("string") })
+    contentHash?: string;
+
+    @field({ type: option("string") })
+    authorKey?: string;
+
+    @field({ type: option("string") })
+    machineLabel?: string;
+
     constructor(value?: SharedFsEntry) {
         this.chunkRefs = [];
         this.createdAt = 0n;
+        this.causalRefs = [];
+        this.causalDepth = 0n;
+        this.size = 0n;
         if (!value) {
             this.id = "";
             this.kind = "";
@@ -80,11 +109,21 @@ export class IndexableSharedFsEntry {
             this.name = value.name;
             this.deleted = value.deleted;
             this.createdAt = value.createdAt;
+            this.causalRefs = value.parentNamingIds;
+            this.causalDepth = value.causalDepth;
+            this.authorKey = value.authorKey;
+            this.machineLabel = value.machineLabel;
         } else if (value instanceof FileVersion) {
             this.kind = "file-version";
             this.nodeId = value.nodeId;
             this.chunkRefs = [...new Set(value.chunkIds)];
             this.createdAt = value.createdAt;
+            this.causalRefs = value.parentVersionIds;
+            this.causalDepth = value.causalDepth;
+            this.size = value.size;
+            this.contentHash = value.contentHash;
+            this.authorKey = value.authorKey;
+            this.machineLabel = value.machineLabel;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
         } else {
