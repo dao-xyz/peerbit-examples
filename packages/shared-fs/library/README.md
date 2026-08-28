@@ -62,6 +62,20 @@ access-controlled by a trusted-writer graph rooted at that key. Entries must be
 signed by a trusted Peerbit identity, and the stored `authorKey` must match the
 entry signer. Use `authorizeWriter(publicKey)` to trust another writer.
 
+Storage is bounded by explicit garbage collection: `collectGarbage()` /
+`peerbit-fs gc` retires superseded versions (keeping the newest K, everything
+recent, all conflict heads, and anything a delete-vs-edit conflict may need),
+compacts settled naming histories, and deletes chunks no surviving version
+references. Safety over speed: winners never change (depths are stored, not
+recomputed), a two-run ledger barrier keeps a freshly-synced replica from
+collecting anything, every replica resurrects removed documents it still
+needs, and writers re-verify chunk presence after every save. Version and
+naming GC reclaim index rows and per-operation CPU; chunk GC reclaims real
+bytes (metadata deletions each leave a small permanent log tombstone). Purges
+and chunk-byte reclamation always take effect on a later run — the first run
+records candidates; `--immediate-sweep` waives only the time span between
+runs, never the second run itself.
+
 ## CLI
 
 The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs` for native

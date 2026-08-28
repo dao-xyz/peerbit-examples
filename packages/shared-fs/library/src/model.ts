@@ -1,4 +1,4 @@
-import { field, option, variant } from "@dao-xyz/borsh";
+import { field, option, variant, vec } from "@dao-xyz/borsh";
 import { sha256Base64Sync } from "@peerbit/crypto";
 
 const encodeStringList = (values?: string[]) => JSON.stringify(values ?? []);
@@ -50,7 +50,21 @@ export class IndexableSharedFsEntry {
     @field({ type: "bool" })
     deleted: boolean;
 
+    /**
+     * Distinct chunk ids referenced by a file-version row (empty for other
+     * kinds). Queryable reverse index: chunk refcounts and dedup freshness
+     * probes are indexed membership queries, never document resolutions.
+     */
+    @field({ type: vec("string") })
+    chunkRefs: string[];
+
+    /** Author createdAt for naming/version rows; 0 for chunks. */
+    @field({ type: "u64" })
+    createdAt: bigint;
+
     constructor(value?: SharedFsEntry) {
+        this.chunkRefs = [];
+        this.createdAt = 0n;
         if (!value) {
             this.id = "";
             this.kind = "";
@@ -65,9 +79,12 @@ export class IndexableSharedFsEntry {
             this.parentId = value.parentId;
             this.name = value.name;
             this.deleted = value.deleted;
+            this.createdAt = value.createdAt;
         } else if (value instanceof FileVersion) {
             this.kind = "file-version";
             this.nodeId = value.nodeId;
+            this.chunkRefs = [...new Set(value.chunkIds)];
+            this.createdAt = value.createdAt;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
         } else {
@@ -103,6 +120,14 @@ export class NamingEvent extends SharedFsEntry {
     @field({ type: "bool" })
     deleted: boolean;
 
+    /**
+     * Author-asserted causal depth: 1 + max(depth of locally-present
+     * parents). Winner selection reads this STORED depth so compacting
+     * (deleting) ancestors can never change winners on any peer.
+     */
+    @field({ type: "u64" })
+    causalDepth: bigint;
+
     @field({ type: "string" })
     parentNamingIdsJson: string;
 
@@ -131,6 +156,7 @@ export class NamingEvent extends SharedFsEntry {
         parentId: string;
         name: string;
         deleted?: boolean;
+        causalDepth: bigint | number;
         parentNamingIds?: string[];
         observedContentHeads?: string[];
         createdAt: bigint | number;
@@ -144,6 +170,7 @@ export class NamingEvent extends SharedFsEntry {
             this.parentId = properties.parentId;
             this.name = properties.name;
             this.deleted = properties.deleted ?? false;
+            this.causalDepth = BigInt(properties.causalDepth);
             this.parentNamingIds = properties.parentNamingIds ?? [];
             this.observedContentHeads = properties.observedContentHeads ?? [];
             this.createdAt = BigInt(properties.createdAt);
@@ -220,6 +247,14 @@ export class FileVersion extends SharedFsEntry {
     @field({ type: "string" })
     parentVersionIdsJson: string;
 
+    /**
+     * Author-asserted causal depth: 1 + max(depth of locally-present
+     * parents). Winner selection reads this STORED depth so retiring
+     * ancestors can never change the visible head on any peer.
+     */
+    @field({ type: "u64" })
+    causalDepth: bigint;
+
     @field({ type: "string" })
     contentHash: string;
 
@@ -246,6 +281,7 @@ export class FileVersion extends SharedFsEntry {
         id: string;
         nodeId: string;
         parentVersionIds?: string[];
+        causalDepth: bigint | number;
         contentHash: string;
         size: bigint | number;
         chunkIds: string[];
@@ -259,6 +295,7 @@ export class FileVersion extends SharedFsEntry {
             this.id = properties.id;
             this.nodeId = properties.nodeId;
             this.parentVersionIds = properties.parentVersionIds ?? [];
+            this.causalDepth = BigInt(properties.causalDepth);
             this.contentHash = properties.contentHash;
             this.size = BigInt(properties.size);
             this.chunkIds = properties.chunkIds;
