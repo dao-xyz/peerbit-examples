@@ -485,12 +485,23 @@ export class SnapshotManifestPayload {
     @field({ type: vec(SegmentRef) })
     segments: SegmentRef[];
 
+    /**
+     * The publisher's effective artifact-ignore pattern list at
+     * publication time — ADVISORY: a joiner installs it into its local
+     * matcher for the bootstrap window (before /.artifactignore is
+     * readable) and it only ever influences local write/view behavior,
+     * never document acceptance, GC, or resurrection.
+     */
+    @field({ type: option(vec("string")) })
+    advisoryIgnorePatterns?: string[];
+
     constructor(properties?: {
         storeId: Uint8Array;
         snapshotSeq: bigint | number;
         createdAtWallMs: bigint | number;
         counts: SnapshotCounts;
         segments: SegmentRef[];
+        advisoryIgnorePatterns?: string[];
     }) {
         if (properties) {
             this.formatVersion = SNAPSHOT_FORMAT_VERSION;
@@ -499,6 +510,7 @@ export class SnapshotManifestPayload {
             this.createdAtWallMs = BigInt(properties.createdAtWallMs);
             this.counts = properties.counts;
             this.segments = properties.segments;
+            this.advisoryIgnorePatterns = properties.advisoryIgnorePatterns;
         }
     }
 }

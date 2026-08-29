@@ -99,9 +99,7 @@ export const runSharedFsBenchmark = async (
     target: SharedFsBenchmarkTarget,
     options: SharedFsBenchmarkOptions = {}
 ): Promise<SharedFsBenchmarkResult> => {
-    const root = normalizeFsPath(
-        options.root ?? `/.peerbit-benchmark-${Date.now()}`
-    );
+    const root = normalizeFsPath(options.root ?? `/fs-benchmark-${Date.now()}`);
     const largeFileSize = options.largeFileSize ?? 16 * 1024 * 1024;
     const smallFileCount = options.smallFileCount ?? 200;
     const smallFileSize = options.smallFileSize ?? 1024;

@@ -1,4 +1,11 @@
-import { deserialize, field, option, serialize, variant } from "@dao-xyz/borsh";
+import {
+    deserialize,
+    field,
+    option,
+    serialize,
+    variant,
+    vec,
+} from "@dao-xyz/borsh";
 import {
     type PublicSignKey,
     PublicSignKey as PublicSignKeyType,
@@ -46,8 +53,16 @@ import {
     normalizeFsPath,
     pathSegments,
 } from "./path.js";
+import { compileIgnoreRules } from "./ignore/patterns.js";
+import { IgnorePolicyEngine, type IgnorePolicy } from "./ignore/policy.js";
 
 export * from "./model.js";
+export * from "./ignore/patterns.js";
+export * from "./ignore/policy.js";
+// Value imported dynamically in openSharedFs: the wrapper extends
+// SharedFsHandle, so an eager re-export would evaluate it before this
+// module finishes defining the base class.
+export type { IgnoreAwareFs } from "./ignore/ignore-fs.js";
 export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
@@ -296,6 +311,18 @@ export type OpenSharedFsOptions = SharedFsOpenArgs & {
     id?: Uint8Array;
     directory?: string;
     rootKey?: PublicSignKey;
+    /**
+     * Sealed ingest-tier artifact-ignore directory names for NEWLY
+     * CREATED filesystems (immutable once created; ignored when opening
+     * an existing address). Defaults to DEFAULT_SEALED_IGNORED_NAMES.
+     */
+    sealedIgnoredNames?: string[];
+    /**
+     * Tier 1 artifact-ignore policy for this open handle. When set, the
+     * returned handle enforces writes (reject mode) and filters views;
+     * the shared store itself never consults these rules.
+     */
+    ignore?: IgnorePolicy;
 };
 
 export type SharedFsEntryInfo = {
@@ -319,6 +346,12 @@ export type SharedFsEntryInfo = {
      * (multiple naming heads) or the path slot has shadowed claimants.
      */
     namingConflict?: boolean;
+    /**
+     * Set by the artifact-ignore layer: this entry exists in the SHARED
+     * store although the effective local policy ignores its path (written
+     * by a peer without the rule, or before the rule existed).
+     */
+    ignoredLeak?: boolean;
 };
 
 export type SharedFsVersionInfo = {
@@ -402,10 +435,23 @@ export type WriteBatchOptions = {
      */
     changesetId?: string;
     dedup?: "verify" | "off";
+    /**
+     * Artifact-ignore behavior for batch entries (consumed by the ignore
+     * layer): "reject" (default) fails the whole batch on the first
+     * ignored entry; "skip" drops ignored entries and reports them in
+     * WriteBatchResult.skipped.
+     */
+    onIgnored?: "reject" | "skip";
 };
 
 export type WriteBatchResult = {
     changesetId: string;
+    /**
+     * Entries dropped by the artifact-ignore layer under
+     * `onIgnored: "skip"` — explicit, never conflated with the undefined
+     * no-op slots in `results`.
+     */
+    skipped?: { index: number; path: string; rule?: string }[];
     /**
      * Per input entry, in order: the resulting version info for writes, or
      * undefined for an applied delete, a delete whose path resolved to
@@ -424,7 +470,11 @@ export type SharedFsErrorCode =
     | "ENOTDIR"
     | "ENOTEMPTY"
     | "EINVAL"
-    | "EIO";
+    | "EIO"
+    /** The path is artifact-ignored by the effective policy. */
+    | "EIGNORED"
+    /** The operation crosses an artifact-ignore boundary. */
+    | "EXDEV";
 
 /**
  * Typed filesystem error so adapters can map failures to POSIX errno values
@@ -720,6 +770,17 @@ const validChangesetId = (value: string | undefined) =>
 /** How long a negative trust verdict may be served from cache. */
 const TRUST_NEGATIVE_TTL_MS = 1000;
 
+/**
+ * Default sealed artifact-ignore directory names. Deliberately minimal:
+ * sealing is irreversible per store, and names like "build" or "dist"
+ * are common legitimate directories — those belong in the mutable
+ * Tier 1 starter patterns instead.
+ */
+export const DEFAULT_SEALED_IGNORED_NAMES: readonly string[] = ["node_modules"];
+
+/** Names under this prefix are reserved for control surfaces (mount). */
+const RESERVED_NAME_PREFIX = ".peerbit-";
+
 // ---------------------------------------------------------------------
 // Cold-start bootstrap constants
 // ---------------------------------------------------------------------
@@ -770,6 +831,9 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
             (value.parentId === ROOT_NODE_ID ||
                 value.parentId.startsWith("dir:")) &&
             VALID_NAME(value.name) &&
+            // Reserved control-surface names never enter the shared tree
+            // (the mount virtualizes them; a store entry would shadow).
+            !value.name.startsWith(RESERVED_NAME_PREFIX) &&
             decodesToStringArray(value.parentNamingIdsJson) &&
             decodesToStringArray(value.observedContentHeadsJson) &&
             value.causalDepth >= 1n &&
@@ -797,6 +861,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     @field({ type: option(TrustedNetwork) })
     trustGraph?: TrustedNetwork;
+
+    /**
+     * Sealed artifact-ignore tier: DIRECTORY basenames rejected at ingest
+     * on every peer. Part of the serialized program — and therefore of
+     * the store address — so the list is immutable and identical
+     * everywhere forever: acceptance stays independent of replication
+     * order and local history. Changing it means a new filesystem.
+     * File nodes with these names stay legal (only directories are
+     * banned); everything mutable lives in the Tier 1 policy layer.
+     */
+    @field({ type: vec("string") })
+    sealedIgnoredNames: string[];
 
     machineLabel = "unknown-machine";
     replicate: OpenReplicateOptions | undefined;
@@ -894,8 +970,32 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private sweepRunning = false;
     /** Last arrival authored by ANOTHER peer (local writes excluded). */
     private lastRemoteArrivalMs = 0;
+    /**
+     * Advisory ignore patterns the automatic snapshot publisher embeds in
+     * manifests (set by the policy layer; explicit snapshotWrite options
+     * win).
+     */
+    advisoryIgnorePublish: string[] | undefined;
+    /**
+     * Advisory ignore patterns carried by the ACCEPTED bootstrap
+     * manifest, valid-compiled; the policy layer reads these to cover the
+     * bootstrap window until /.artifactignore is readable.
+     */
+    bootstrapAdvisoryIgnorePatterns: string[] | undefined;
 
-    constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
+    constructor(
+        properties: {
+            id?: Uint8Array;
+            rootKey?: PublicSignKey;
+            /**
+             * Sealed ingest-tier artifact-ignore directory names —
+             * IMMUTABLE once the filesystem exists (they are part of the
+             * address). Defaults to DEFAULT_SEALED_IGNORED_NAMES; pass []
+             * to opt out entirely.
+             */
+            sealedIgnoredNames?: string[];
+        } = {}
+    ) {
         super();
         this.id = properties.id ?? randomBytes(32);
         this.trustGraph = properties.rootKey
@@ -904,11 +1004,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   rootTrust: properties.rootKey,
               })
             : undefined;
-        // v7: bootstrap manifests (cold-start snapshots) — the salt bump
-        // guarantees older peers can never attach to the same log and fail
-        // confusingly mid-replication.
+        this.sealedIgnoredNames = [
+            ...new Set(
+                properties.sealedIgnoredNames ?? DEFAULT_SEALED_IGNORED_NAMES
+            ),
+        ].sort();
+        // v8: artifact ignores (sealed names on the program, manifest
+        // advisory patterns) — the salt bump guarantees older peers can
+        // never attach to the same log and fail confusingly
+        // mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v7")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v8")])),
         });
     }
 
@@ -977,6 +1083,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.stateWriteChain = Promise.resolve();
         this.snapshotRunning = false;
         this.sweepRunning = false;
+        this.advisoryIgnorePublish = undefined;
+        this.bootstrapAdvisoryIgnorePatterns = undefined;
         const bootstrapArg = args?.bootstrap;
         this.bootstrapConfig = {
             ...BOOTSTRAP_DEFAULTS,
@@ -1171,6 +1279,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return encodePublicSignKey(this.node.identity.publicKey);
     }
 
+    /**
+     * Friendly SDK-side mirror of the ingest-tier name rules: reserved
+     * control names are invalid everywhere; sealed artifact names are
+     * rejected for directories (ingest would bounce them fleet-wide
+     * anyway — this just makes the error local and typed).
+     */
+    private assertWritableName(name: string, kind: "file" | "directory") {
+        if (name.startsWith(RESERVED_NAME_PREFIX)) {
+            throw new SharedFsError("EINVAL", `Name is reserved: ${name}`);
+        }
+        if (kind === "directory" && this.sealedIgnoredNames.includes(name)) {
+            throw new SharedFsError(
+                "EIGNORED",
+                `Directory name is a sealed artifact-ignore on this filesystem: ${name}`
+            );
+        }
+    }
+
     private signedMetadata() {
         return {
             authorKey: this.authorKey(),
@@ -1185,6 +1311,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (operation?.type === "put") {
             const value = operation.value;
             if (!structurallyValidEntry(value)) {
+                return false;
+            }
+            // Sealed artifact-ignore tier: DIRECTORY basenames on the
+            // sealed list bounce at ingest on every peer identically.
+            // Legal despite reading instance state because the sealed
+            // list is serialized into the program — part of the store
+            // address, immutable, identical everywhere — so the verdict
+            // stays independent of replication order and local history.
+            if (
+                value instanceof NamingEvent &&
+                value.nodeId.startsWith("dir:") &&
+                this.sealedIgnoredNames.includes(value.name)
+            ) {
                 return false;
             }
             if (value instanceof BootstrapManifest) {
@@ -2050,6 +2189,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (normalized === "/") {
             return;
         }
+        this.assertWritableName(basename(normalized), "directory");
         if (await this.resolvePath(normalized)) {
             throw new SharedFsError(
                 "EEXIST",
@@ -2074,6 +2214,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (normalized === "/") {
             throw new SharedFsError("EISDIR", "Cannot write to root");
         }
+        this.assertWritableName(basename(normalized), "file");
         const bytes = await toBytes(source);
         const resolved = await this.resolvePath(normalized);
         if (resolved?.kind === "directory" || resolved?.kind === "root") {
@@ -2263,6 +2404,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (entry.path === "/") {
                 throw new SharedFsError("EISDIR", "Cannot write to root");
             }
+            if (!("delete" in entry)) {
+                this.assertWritableName(basename(entry.path), "file");
+            }
             if (seenPaths.has(entry.path)) {
                 throw new SharedFsError(
                     "EINVAL",
@@ -2313,6 +2457,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     parentId = made.nodeId;
                     continue;
                 }
+                // Auto-created ancestors are directories: sealed and
+                // reserved names must bounce here too.
+                this.assertWritableName(name, "directory");
                 const slot = await this.slotResolution(parentId, name);
                 if (slot) {
                     if (nodeKindOf(slot.nodeId) === "file") {
@@ -3022,6 +3169,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `Path does not exist: ${fromPath}`
             );
         }
+        this.assertWritableName(
+            basename(toPath),
+            resolved.kind === "directory" ? "directory" : "file"
+        );
         const destination = await this.resolvePath(toPath);
         if (destination) {
             if (destination.kind === "root") {
@@ -3690,6 +3841,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         trusted.sort((a, b) => compareBigint(rankOf(b), rankOf(a)));
         const chosen = trusted[0];
         this.bootstrapFailure = undefined;
+        // Manifest-carried ADVISORY ignore patterns: installed into the
+        // local slot at accept time — before any segment or chunk fetch —
+        // so the bootstrap window is covered until /.artifactignore is
+        // readable. Advisory only (write/view behavior of THIS peer);
+        // invalid pattern lists are dropped, never partially applied.
+        if (chosen.payload.advisoryIgnorePatterns) {
+            try {
+                compileIgnoreRules(chosen.payload.advisoryIgnorePatterns);
+                this.bootstrapAdvisoryIgnorePatterns = [
+                    ...chosen.payload.advisoryIgnorePatterns,
+                ];
+                this.events.dispatchEvent(
+                    new CustomEvent("ignore:advisory-available", {
+                        detail: {
+                            patterns: this.bootstrapAdvisoryIgnorePatterns,
+                        },
+                    })
+                );
+            } catch (error: any) {
+                console.warn(
+                    "shared-fs: dropping invalid advisory ignore patterns from snapshot manifest:",
+                    error?.message ?? error
+                );
+            }
+        }
         // Restrict block fetches to CURRENTLY CONNECTED peers: the
         // replicator-derived provider set can contain dead ex-members
         // (machines join and leave constantly in this workload), and a
@@ -3756,6 +3932,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     throw new SharedFsError(
                         "EIO",
                         "bootstrap segment contains a structurally invalid document"
+                    );
+                }
+                if (
+                    doc instanceof NamingEvent &&
+                    doc.nodeId.startsWith("dir:") &&
+                    this.sealedIgnoredNames.includes(doc.name)
+                ) {
+                    // A converged donor cannot hold sealed-name dirs
+                    // (its own ingest bounces them); a snapshot carrying
+                    // one is invalid.
+                    throw new SharedFsError(
+                        "EIO",
+                        "bootstrap segment contains a sealed artifact-ignore directory"
                     );
                 }
                 this.installOverlayDoc(doc);
@@ -4242,7 +4431,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * plus a signed manifest other parties bootstrap from. One
      * O(retained-heads) scan, same order as a GC planning pass.
      */
-    async snapshotWrite(): Promise<SnapshotWriteResult> {
+    async snapshotWrite(
+        options: { advisoryIgnorePatterns?: string[] } = {}
+    ): Promise<SnapshotWriteResult> {
         if (!this.isFullReplica()) {
             throw new SharedFsError(
                 "EINVAL",
@@ -4278,13 +4469,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.snapshotRunning = true;
         try {
-            return await this.snapshotWriteInner();
+            return await this.snapshotWriteInner(options);
         } finally {
             this.snapshotRunning = false;
         }
     }
 
-    private async snapshotWriteInner(): Promise<SnapshotWriteResult> {
+    private async snapshotWriteInner(
+        options: { advisoryIgnorePatterns?: string[] } = {}
+    ): Promise<SnapshotWriteResult> {
         const namingRows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "naming" }),
@@ -4420,6 +4613,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 bytes: totalBytes,
             }),
             segments,
+            advisoryIgnorePatterns:
+                options.advisoryIgnorePatterns ??
+                this.advisoryIgnorePublish ??
+                (await this.readAdvisoryFromRulesFile()),
         });
         const payloadBytes = serialize(payload);
         if (payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES) {
@@ -4459,6 +4656,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * Automatic snapshot publication on long-running trusted full
      * replicas; skipped while too little changed. Failures are loud.
      */
+    /**
+     * Publisher fallback: a snapshot replica opened WITHOUT an ignore
+     * policy still advertises the fleet's durable rules — the replicated
+     * rules file is read and validated at publish time (signed manifest
+     * data either way; invalid content embeds nothing).
+     */
+    private async readAdvisoryFromRulesFile(): Promise<string[] | undefined> {
+        try {
+            const content = await this.readFile("/.artifactignore");
+            if (!content) {
+                return undefined;
+            }
+            const lines = new TextDecoder()
+                .decode(content)
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0 && !line.startsWith("#"));
+            if (lines.length === 0) {
+                return undefined;
+            }
+            compileIgnoreRules(lines);
+            return lines;
+        } catch {
+            return undefined;
+        }
+    }
+
     private startSnapshotPublisher() {
         if (this.snapshotConfig.disabled || !this.isFullReplica()) {
             return;
@@ -5700,6 +5924,29 @@ export class SharedFsHandle {
 }
 
 export const openSharedFs = async (options: OpenSharedFsOptions) => {
+    if (options.ignore?.onIgnoredWrite === "divert") {
+        // Refused BEFORE anything opens: the machine-local overlay is a
+        // staged follow-up.
+        throw new SharedFsError(
+            "EINVAL",
+            'ignore.onIgnoredWrite "divert" (the machine-local overlay) is not available yet; use "reject"'
+        );
+    }
+    if (options.ignore?.patterns) {
+        // Validate BEFORE anything opens: the program may be shared via
+        // existing:"reuse", so a post-open failure must never tear it
+        // down under another live handle.
+        try {
+            compileIgnoreRules(options.ignore.patterns, {
+                casefold: options.ignore.casefold,
+            });
+        } catch (error: any) {
+            throw new SharedFsError(
+                "EINVAL",
+                `invalid ignore policy: ${error?.message ?? error}`
+            );
+        }
+    }
     const args: SharedFsOpenArgs = {
         machineLabel: options.machineLabel,
         replicate: options.replicate,
@@ -5726,11 +5973,46 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
               new SharedFileSystem({
                   id: options.id,
                   rootKey: options.rootKey,
+                  sealedIgnoredNames: options.sealedIgnoredNames,
               }),
               {
                   existing: "reuse",
                   args,
               }
           );
+    if (
+        options.address &&
+        options.sealedIgnoredNames &&
+        JSON.stringify([...new Set(options.sealedIgnoredNames)].sort()) !==
+            JSON.stringify(program.sealedIgnoredNames)
+    ) {
+        // The sealed list is address-immutable; a caller-supplied list on
+        // an address open cannot apply and deserves a signal.
+        console.warn(
+            `shared-fs: sealedIgnoredNames option ignored — this filesystem is sealed with [${program.sealedIgnoredNames.join(", ")}]`
+        );
+    }
+    if (options.ignore) {
+        // Dynamic import: the wrapper extends SharedFsHandle, which this
+        // module must finish defining first.
+        const { IgnoreAwareFs } = await import("./ignore/ignore-fs.js");
+        let engine: IgnorePolicyEngine | undefined;
+        try {
+            engine = new IgnorePolicyEngine(program, options.ignore);
+            await engine.start();
+            return new IgnoreAwareFs(program, engine, options.ignore);
+        } catch (error: any) {
+            // The program may be shared (existing:"reuse"): detach the
+            // failed engine, never close under another live handle.
+            engine?.stop();
+            if (error instanceof SharedFsError) {
+                throw error;
+            }
+            throw new SharedFsError(
+                "EINVAL",
+                `invalid ignore policy: ${error?.message ?? error}`
+            );
+        }
+    }
     return new SharedFsHandle(program);
 };
