@@ -171,3 +171,41 @@ a deterministic display choice. Conflicting versions are listed through
 ```text
 /.peerbit-conflicts/<encoded-path>/<version-id>
 ```
+
+## Watching for changes
+
+`watch()` subscribes to filesystem-shaped change events for a path or
+subtree — no polling, no document plumbing:
+
+```ts
+const watcher = fs.watch("/project", { settleMs: 20 });
+watcher.on("change", (batch) => {
+    for (const event of batch) {
+        // { type: "created"|"modified"|"deleted"|"renamed", path, oldPath?,
+        //   nodeId, parentId, kind, versionId?, changesetId?, author?,
+        //   origin: "local"|"remote", cause }
+    }
+});
+await watcher.ready;           // initial view committed
+// or: for await (const batch of watcher) { ... }
+watcher.close();
+```
+
+Events describe transitions of the view the read API serves — winner
+elections, renames, deletes, and remote arrivals included — and every event
+carries write-set attribution (`changesetId`, `author`). Batches are the
+delivery unit: everything inside one settle window (`settleMs`, default 20 ms;
+`0` = microtask latency) coalesces, a whole `writeBatch` typically arrives as
+one batch, and applying a batch in order to a path-keyed mirror reproduces
+`list()` exactly (a directory `deleted`/`renamed` moves its whole subtree —
+descendants get no individual events). Garbage collection, history
+retirement, and resurrection-guard churn emit nothing.
+
+Options: `recursive` (default true), `initial: "snapshot"` to receive the
+existing tree as a first batch, `maxNodes` (view budget, default 100k —
+exceeding it errors the watcher with `EWATCHLIMIT`), `guardHoldMs` (quiet
+hold on removal-caused losses while the resurrection guard settles), and
+`signal`. On an ignore-aware handle the stream is filtered by that handle's
+policy (rule changes reconcile with `cause: "policy"` events);
+`includeIgnored: true` bypasses. Watchers are in-memory; a reopened process
+re-subscribes (use `initial: "snapshot"` as the recovery idiom).

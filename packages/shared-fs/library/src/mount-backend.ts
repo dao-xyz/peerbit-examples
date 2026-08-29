@@ -292,11 +292,14 @@ const toBackendError = (error: unknown): SharedFsBackendError => {
     if (error instanceof SharedFsError) {
         // Artifact-ignore rejections surface as permission errors until
         // the mount tier gains its local overlay; EXDEV has no slot in
-        // the adapter protocol yet either.
+        // the adapter protocol yet either. Watch-layer errors never reach
+        // the mount path but the type union must stay total.
         const code: SharedFsBackendErrorCode =
             error.code === "EIGNORED" || error.code === "EXDEV"
                 ? "EACCES"
-                : error.code;
+                : error.code === "EWATCHLIMIT"
+                  ? "EIO"
+                  : error.code;
         return new SharedFsBackendError(code, error.message);
     }
     return new SharedFsBackendError(
