@@ -38,6 +38,13 @@ export type SharedFsMountBackendTarget = {
         options?: { allowPartial?: boolean }
     ): Promise<SharedFsConflict[]>;
     /**
+     * Optional artifact-ignore probe (provided by ignore-aware handles).
+     * When present, write-intent opens on ignored paths fail EARLY at
+     * open() instead of surfacing a late error at flush/release that
+     * applications routinely discard.
+     */
+    ignoreCheck?(path: string): { ignored: boolean };
+    /**
      * Optional single-path lookup. When present the backend uses it for
      * getattr/open instead of listing the parent directory.
      */
@@ -283,7 +290,14 @@ const toBackendError = (error: unknown): SharedFsBackendError => {
         return error;
     }
     if (error instanceof SharedFsError) {
-        return new SharedFsBackendError(error.code, error.message);
+        // Artifact-ignore rejections surface as permission errors until
+        // the mount tier gains its local overlay; EXDEV has no slot in
+        // the adapter protocol yet either.
+        const code: SharedFsBackendErrorCode =
+            error.code === "EIGNORED" || error.code === "EXDEV"
+                ? "EACCES"
+                : error.code;
+        return new SharedFsBackendError(code, error.message);
     }
     return new SharedFsBackendError(
         "EIO",
@@ -502,6 +516,15 @@ export const createSharedFsMountBackend = (
                 readOnly: true,
             });
             return handle;
+        }
+        if (parsedFlags.write && target.ignoreCheck?.(normalized).ignored) {
+            // Reject-mode ignore policies must fail at open(), where
+            // tools handle errors — a buffered write failing only at
+            // flush/release reads as silent data loss.
+            throw new SharedFsBackendError(
+                "EACCES",
+                `Path is artifact-ignored: ${normalized}`
+            );
         }
         const entry = await findEntry(target, normalized);
         if (entry?.kind === "directory") {
