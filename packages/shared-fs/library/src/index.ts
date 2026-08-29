@@ -638,6 +638,7 @@ type NamingLike = {
     parentNamingIds: string[];
     authorKey?: string;
     machineLabel?: string;
+    changesetId?: string;
 };
 
 type VersionLike = {
@@ -650,6 +651,7 @@ type VersionLike = {
     parentVersionIds: string[];
     authorKey?: string;
     machineLabel?: string;
+    changesetId?: string;
 };
 
 const namingRowOf = (raw: any): NamingLike => ({
@@ -664,6 +666,7 @@ const namingRowOf = (raw: any): NamingLike => ({
     parentNamingIds: raw.causalRefs ?? raw.parentNamingIds ?? [],
     authorKey: raw.authorKey,
     machineLabel: raw.machineLabel,
+    changesetId: raw.changesetId,
 });
 
 const versionRowOf = (raw: any): VersionLike => ({
@@ -677,6 +680,7 @@ const versionRowOf = (raw: any): VersionLike => ({
     parentVersionIds: raw.causalRefs ?? raw.parentVersionIds ?? [],
     authorKey: raw.authorKey,
     machineLabel: raw.machineLabel,
+    changesetId: raw.changesetId,
 });
 
 type NodeNamingState = {
@@ -687,6 +691,23 @@ type NodeNamingState = {
     depths: Map<string, number>;
     /** Multiple heads with genuinely different payloads. */
     conflicted: boolean;
+};
+
+/** One served child of a directory: the slot winner plus, for files, its
+ *  content heads — the shared output of the list()/watch winner pipeline. */
+type SlotChildRecord = {
+    name: string;
+    nodeId: string;
+    kind: "directory" | "file";
+    state: NodeNamingState;
+    contested: boolean;
+    heads?: VersionLike[];
+};
+
+/** A resolved path plus the slot chain that produced it. */
+type ResolvedPathDetailed = {
+    resolved: ResolvedPath;
+    spine: { parentId: string; name: string; nodeId: string }[];
 };
 
 const samePayload = (a: NamingLike, b: NamingLike) =>
@@ -1746,11 +1767,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async resolvePath(path: string): Promise<ResolvedPath | undefined> {
+        return (await this.resolvePathDetailed(path))?.resolved;
+    }
+
+    /** resolvePath plus the slot chain walked to get there — the spine the
+     *  watch layer uses to detect ancestor placement changes. */
+    private async resolvePathDetailed(
+        path: string
+    ): Promise<ResolvedPathDetailed | undefined> {
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
-            return { kind: "root", nodeId: ROOT_NODE_ID, path: "/" };
+            return {
+                resolved: { kind: "root", nodeId: ROOT_NODE_ID, path: "/" },
+                spine: [],
+            };
         }
         const segments = pathSegments(normalized);
+        const spine: ResolvedPathDetailed["spine"] = [];
         let parentId: string = ROOT_NODE_ID;
         let currentPath = "/";
         for (let i = 0; i < segments.length; i++) {
@@ -1761,16 +1794,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (!slot) {
                 return undefined;
             }
+            spine.push({ parentId, name, nodeId: slot.nodeId });
             const kind = nodeKindOf(slot.nodeId);
             if (kind === "directory") {
                 if (isLast) {
                     return {
-                        kind,
-                        nodeId: slot.nodeId,
-                        winner: slot.state.winner,
-                        state: slot.state,
-                        contested: slot.shadowed.length > 0,
-                        path: currentPath,
+                        resolved: {
+                            kind,
+                            nodeId: slot.nodeId,
+                            winner: slot.state.winner,
+                            state: slot.state,
+                            contested: slot.shadowed.length > 0,
+                            path: currentPath,
+                        },
+                        spine,
                     };
                 }
                 parentId = slot.nodeId;
@@ -1778,12 +1815,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             if (isLast) {
                 return {
-                    kind,
-                    nodeId: slot.nodeId,
-                    winner: slot.state.winner,
-                    state: slot.state,
-                    contested: slot.shadowed.length > 0,
-                    path: currentPath,
+                    resolved: {
+                        kind,
+                        nodeId: slot.nodeId,
+                        winner: slot.state.winner,
+                        state: slot.state,
+                        contested: slot.shadowed.length > 0,
+                        path: currentPath,
+                    },
+                    spine,
                 };
             }
             // A file in the middle of the path.
@@ -2920,6 +2960,32 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const parentId =
             resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
+        const children = await this.listByParentId(parentId);
+        const infos: SharedFsEntryInfo[] = [];
+        for (const child of children) {
+            const info = this.entryInfoFor(
+                child.state.winner,
+                joinFsPath(normalized, child.name),
+                {
+                    heads: child.heads,
+                    namingConflict: child.state.conflicted || child.contested,
+                }
+            );
+            if (info) {
+                infos.push(info);
+            }
+        }
+        return infos.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    /**
+     * The slot winners a directory currently serves, with content heads for
+     * file winners. This is the single winner pipeline behind list() and the
+     * watch layer's view diffs — both must always agree with it.
+     */
+    private async listByParentId(
+        parentId: string
+    ): Promise<SlotChildRecord[]> {
         // Every event that ever asserted a placement under this directory is
         // a candidate; slot resolution filters to current live winners.
         const slotRows = await this.sweepRows(parentId);
@@ -2931,12 +2997,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const allNodeIds = [...new Set(slotRows.map((row) => row.nodeId))];
         const states = await this.namingStatesForNodes(allNodeIds);
-        const winners: {
-            name: string;
-            nodeId: string;
-            state: NodeNamingState;
-            contested: boolean;
-        }[] = [];
+        const winners: SlotChildRecord[] = [];
         for (const [name, nodeIds] of nodesByName) {
             const scoped = new Map<string, NodeNamingState>();
             for (const nodeId of nodeIds) {
@@ -2950,33 +3011,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 winners.push({
                     name,
                     nodeId: slot.nodeId,
+                    kind: nodeKindOf(slot.nodeId),
                     state: slot.state,
                     contested: slot.shadowed.length > 0,
                 });
             }
         }
         const fileNodeIds = winners
-            .filter((winner) => nodeKindOf(winner.nodeId) === "file")
+            .filter((winner) => winner.kind === "file")
             .map((winner) => winner.nodeId);
         const heads = await this.headsForNodes(fileNodeIds);
-        const infos: SharedFsEntryInfo[] = [];
         for (const winner of winners) {
-            const info = this.entryInfoFor(
-                winner.state.winner,
-                joinFsPath(normalized, winner.name),
-                {
-                    heads:
-                        nodeKindOf(winner.nodeId) === "file"
-                            ? heads.get(winner.nodeId)
-                            : undefined,
-                    namingConflict: winner.state.conflicted || winner.contested,
-                }
-            );
-            if (info) {
-                infos.push(info);
+            if (winner.kind === "file") {
+                winner.heads = heads.get(winner.nodeId);
             }
         }
-        return infos.sort((a, b) => a.name.localeCompare(b.name));
+        return winners;
     }
 
     async versions(path: string): Promise<SharedFsVersionInfo[]> {
