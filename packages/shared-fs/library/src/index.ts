@@ -2983,9 +2983,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * file winners. This is the single winner pipeline behind list() and the
      * watch layer's view diffs — both must always agree with it.
      */
-    private async listByParentId(
-        parentId: string
-    ): Promise<SlotChildRecord[]> {
+    private async listByParentId(parentId: string): Promise<SlotChildRecord[]> {
         // Every event that ever asserted a placement under this directory is
         // a candidate; slot resolution filters to current live winners.
         const slotRows = await this.sweepRows(parentId);
