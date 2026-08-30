@@ -186,7 +186,7 @@ watcher.on("change", (batch) => {
         //   origin: "local"|"remote", cause }
     }
 });
-await watcher.ready;           // initial view committed
+await watcher.ready; // initial view committed
 // or: for await (const batch of watcher) { ... }
 watcher.close();
 ```
