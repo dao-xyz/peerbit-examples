@@ -255,6 +255,7 @@ class WatchSubscription implements FsWatcher {
     private signal?: AbortSignal;
     private readyResolve!: () => void;
     private readyReject!: (err: Error) => void;
+    private readySettled = false;
 
     /** nodeId -> served entry. The watch root itself is NOT an entry. */
     private view = new Map<string, ViewEntry>();
@@ -322,8 +323,7 @@ class WatchSubscription implements FsWatcher {
 
     start(): void {
         if (this.signal?.aborted) {
-            this.close();
-            this.readyReject(this.host.makeError("EINVAL", "watch aborted"));
+            this.close(); // close settles ready with a rejection
             return;
         }
         this.signal?.addEventListener("abort", () => this.close(), {
@@ -335,6 +335,12 @@ class WatchSubscription implements FsWatcher {
     close(): void {
         if (this.closed) return;
         this.closed = true;
+        if (!this.readySettled) {
+            this.readySettled = true;
+            this.readyReject(
+                this.host.makeError("EINVAL", "watcher closed before ready")
+            );
+        }
         this.hub.detach(this);
         if (this.settleTimer) clearTimeout(this.settleTimer);
         if (this.maxSettleTimer) clearTimeout(this.maxSettleTimer);
@@ -491,8 +497,16 @@ class WatchSubscription implements FsWatcher {
     guardSettled(nodeIds: Iterable<string>): void {
         for (const nodeId of nodeIds) {
             const q = this.quarantine.get(nodeId);
-            if (q) void this.recheckQuarantine(q);
+            if (q) this.queueRecheck(q);
         }
+    }
+
+    /** Quarantine resolution runs inside the flush chain: it must never
+     *  race a concurrent diff over the same view. */
+    private queueRecheck(entry: QuarantineEntry): void {
+        this.flushChain = this.flushChain.then(() =>
+            this.resolveQuarantine(entry).catch(() => {})
+        );
     }
 
     /* ---------------- settle scheduling ---------------- */
@@ -560,6 +574,7 @@ class WatchSubscription implements FsWatcher {
             const buffered = this.attachBuffer;
             this.attachBuffer = null;
             for (const mark of buffered ?? []) this.applyMark(mark);
+            this.readySettled = true;
             this.readyResolve();
             if (this.opts.initial === "snapshot") {
                 const snapshot = [...this.view.values()]
@@ -573,8 +588,13 @@ class WatchSubscription implements FsWatcher {
             }
             this.scheduleFlush();
         } catch (error: any) {
+            // The build failing (including EWATCHLIMIT overflow, which
+            // closes first) must always settle ready.
+            if (!this.readySettled) {
+                this.readySettled = true;
+                this.readyReject(error);
+            }
             if (this.closed) return;
-            this.readyReject(error);
             this.emitError(error);
             this.close();
         }
@@ -703,6 +723,13 @@ class WatchSubscription implements FsWatcher {
                 this.rootCause = rootCause;
             }
             this.windowHadAdds = true;
+            if ((error as any)?.code === "EWATCHLIMIT") {
+                // A truncated view would emit lies: fail loud and close,
+                // never retry (§1.7).
+                this.emitError(error);
+                this.close();
+                return;
+            }
             if (this.flushRetries < FLUSH_RETRY_MAX) {
                 const delay = FLUSH_RETRY_BASE_MS * 2 ** this.flushRetries;
                 this.flushRetries += 1;
@@ -740,9 +767,37 @@ class WatchSubscription implements FsWatcher {
         else {
             this.rootNodeId = null;
         }
-        const events = this.diffViews(fresh.view, cause, removalTouched);
+        // Tombstoned losses take the fast delete path instead of quarantine.
+        const explained = await this.explainedLosses(fresh.view);
+        const events = this.diffViews(
+            fresh.view,
+            cause,
+            removalTouched,
+            fresh.latent,
+            explained
+        );
         fresh.closed = true;
         return events;
+    }
+
+    /**
+     * Losses whose fresh naming winner is an added tombstone are ordinary
+     * user deletes: they must never wait out the removal quarantine.
+     */
+    private async explainedLosses(
+        target: Map<string, ViewEntry>
+    ): Promise<Set<string>> {
+        const candidates = [...this.view.keys()].filter(
+            (nodeId) => !target.has(nodeId)
+        );
+        if (candidates.length === 0) return new Set();
+        const states = await this.host.namingStatesForNodes(candidates);
+        const explained = new Set<string>();
+        for (const nodeId of candidates) {
+            const state = states.get(nodeId);
+            if (state?.winner.deleted) explained.add(nodeId);
+        }
+        return explained;
     }
 
     /** Partial diff: re-list dirty dirs + re-head dirty files. */
@@ -827,6 +882,14 @@ class WatchSubscription implements FsWatcher {
                     }
                 }
             }
+            // Latent entries under this dir vanish with their naming winner
+            // — a late version arrival must not resurrect a deleted file.
+            const freshNodeIds = new Set(children.map((c) => c.nodeId));
+            for (const [nodeId, l] of this.latent) {
+                if (l.parentId === dir && !freshNodeIds.has(nodeId)) {
+                    targetLatent.delete(nodeId);
+                }
+            }
         }
         // Dirty files not covered by a re-listed dir: refresh heads only.
         const headOnly = [...dirtyFiles].filter((nodeId) => {
@@ -838,6 +901,14 @@ class WatchSubscription implements FsWatcher {
         });
         if (headOnly.length > 0) {
             const heads = await this.host.headsForNodes(headOnly);
+            // A latent file only materializes if its naming winner is live.
+            const latentIds = headOnly.filter(
+                (nodeId) => !target.has(nodeId) && this.latent.has(nodeId)
+            );
+            const latentStates =
+                latentIds.length > 0
+                    ? await this.host.namingStatesForNodes(latentIds)
+                    : new Map<string, WatchHostNamingState>();
             for (const nodeId of headOnly) {
                 const nodeHeads = heads.get(nodeId);
                 const head = nodeHeads?.[0];
@@ -862,6 +933,13 @@ class WatchSubscription implements FsWatcher {
                 } else {
                     const latent = this.latent.get(nodeId);
                     if (latent && head) {
+                        const state = latentStates.get(nodeId);
+                        if (!state || state.winner.deleted) {
+                            // Naming winner gone or tombstoned: never
+                            // resurrect a deleted file from a late version.
+                            targetLatent.delete(nodeId);
+                            continue;
+                        }
                         // Latent file gained a head: appears at its slot.
                         const parentPath =
                             latent.parentId === this.rootNodeId
@@ -898,11 +976,38 @@ class WatchSubscription implements FsWatcher {
                 }
             }
         }
+        // Tombstoned losses take the fast delete path instead of quarantine.
+        const explained = await this.explainedLosses(target);
+        // A node vanishing from every fresh list while new marks raced this
+        // flush is likely a torn cross-directory rename read: defer the
+        // unexplained loss (under-report, never phantom) and re-derive it
+        // in the next flush.
+        const racing =
+            this.dirtyDirs.size > 0 ||
+            this.dirtyFiles.size > 0 ||
+            this.dirtyRoot;
+        if (racing) {
+            let deferred = false;
+            for (const [nodeId, before] of this.view) {
+                if (target.has(nodeId)) continue;
+                if (!freshLists.has(before.parentId)) continue;
+                if (explained.has(nodeId)) continue;
+                const removalCaused =
+                    removalTouched.has(nodeId) ||
+                    removalTouched.has(`slot:${before.parentId}`);
+                if (removalCaused) continue; // the quarantine handles it
+                target.set(nodeId, before);
+                this.dirtyDirs.add(before.parentId);
+                deferred = true;
+            }
+            if (deferred) this.scheduleFlush();
+        }
         const events = this.diffViews(
             target,
             "data",
             removalTouched,
-            targetLatent
+            targetLatent,
+            explained
         );
         return events;
     }
@@ -944,7 +1049,15 @@ class WatchSubscription implements FsWatcher {
                     child.kind === "file" ? head?.authorKey : winner.authorKey,
             };
             target.set(entry.nodeId, entry);
-            if (target.size > this.opts.maxNodes) this.checkMaxNodes();
+            if (target.size > this.opts.maxNodes) {
+                // The scratch after-state must respect the budget too — a
+                // remote rename can reveal an arbitrarily large subtree.
+                throw this.host.makeError(
+                    "EWATCHLIMIT",
+                    `watch view exceeded maxNodes (${this.opts.maxNodes})`
+                );
+            }
+            if (this.closed) return;
             if (entry.kind === "directory") {
                 await this.expandInto(target, targetLatent, entry);
             }
@@ -973,7 +1086,8 @@ class WatchSubscription implements FsWatcher {
         target: Map<string, ViewEntry>,
         cause: FsWatchCause,
         removalTouched: Set<string>,
-        targetLatent?: Map<string, { parentId: string; name: string }>
+        targetLatent?: Map<string, { parentId: string; name: string }>,
+        explained?: Set<string>
     ): FsWatchEvent[] {
         const events: FsWatchEvent[] = [];
         const losses: ViewEntry[] = [];
@@ -998,11 +1112,10 @@ class WatchSubscription implements FsWatcher {
                 events.push(this.eventFor("created", after, cause));
                 continue;
             }
-            if (
+            const placementChanged =
                 before.parentId !== after.parentId ||
-                before.name !== after.name ||
-                before.path !== after.path
-            ) {
+                before.name !== after.name;
+            if (placementChanged) {
                 events.push({
                     ...this.eventFor("renamed", after, cause),
                     oldPath: before.path,
@@ -1015,6 +1128,9 @@ class WatchSubscription implements FsWatcher {
                 }
                 continue;
             }
+            // A pure path delta inherited from an ancestor's rename updates
+            // the view silently — the ancestor's single renamed event
+            // carries the whole subtree by contract.
             if (after.kind === "file" && before.versionId !== after.versionId) {
                 events.push(this.eventFor("modified", after, cause));
             }
@@ -1030,19 +1146,32 @@ class WatchSubscription implements FsWatcher {
             if (parentGone) continue;
             losses.push(before);
         }
-        // Quarantine gate on removal-provenance losses.
+        // Quarantine gate on removal-provenance losses. A loss explained
+        // by an added tombstone winner is an ordinary user delete and is
+        // never withheld.
         const emittedLosses: ViewEntry[] = [];
         for (const loss of losses) {
             const removalCaused =
                 removalTouched.has(loss.nodeId) ||
                 removalTouched.has(`slot:${loss.parentId}`);
-            if (removalCaused && cause === "data") {
+            if (
+                removalCaused &&
+                cause === "data" &&
+                !explained?.has(loss.nodeId)
+            ) {
                 this.enqueueQuarantine(loss, target);
                 continue;
             }
             emittedLosses.push(loss);
         }
         for (const loss of emittedLosses) {
+            // An honestly emitted loss supersedes any standing quarantine
+            // for the node — never a second deleted from the recheck.
+            const q = this.quarantine.get(loss.nodeId);
+            if (q) {
+                if (q.timer) clearTimeout(q.timer);
+                this.quarantine.delete(loss.nodeId);
+            }
             events.push({
                 type: "deleted",
                 path: loss.path,
@@ -1083,30 +1212,32 @@ class WatchSubscription implements FsWatcher {
         this.quarantine.set(loss.nodeId, entry);
         target.set(loss.nodeId, loss);
         entry.timer = setTimeout(
-            () => void this.recheckQuarantine(entry),
+            () => this.queueRecheck(entry),
             this.opts.guardHoldMs
         );
     }
 
-    private async recheckQuarantine(entry: QuarantineEntry): Promise<void> {
+    private async resolveQuarantine(entry: QuarantineEntry): Promise<void> {
         if (this.closed) return;
         if (!this.quarantine.has(entry.nodeId)) return;
         if (this.host.guardPendingFor(entry.nodeId)) {
             // The guard still holds this node; wait for guardSettled or
-            // re-arm a short backstop check.
+            // re-arm a backstop check.
             if (entry.timer) clearTimeout(entry.timer);
             entry.timer = setTimeout(
-                () => void this.recheckQuarantine(entry),
+                () => this.queueRecheck(entry),
                 this.opts.guardHoldMs
             );
             return;
         }
         try {
             const states = await this.host.namingStatesForNodes([entry.nodeId]);
+            if (this.closed || !this.quarantine.has(entry.nodeId)) return;
             const state = states.get(entry.nodeId);
             const restored = state !== undefined && !state.winner.deleted;
             this.quarantine.delete(entry.nodeId);
             if (entry.timer) clearTimeout(entry.timer);
+            const live = this.view.get(entry.nodeId);
             if (restored) {
                 // The guard re-put it (or it never truly left) — mark its
                 // parent so the next flush trues the entry up silently.
@@ -1114,15 +1245,25 @@ class WatchSubscription implements FsWatcher {
                 this.scheduleFlush();
                 return;
             }
-            // Confirmed loss: drop the carved-out entry and emit honestly.
-            if (this.view.get(entry.nodeId) === entry.preImage) {
+            if (live !== undefined && live !== entry.preImage) {
+                // A later flush re-served the node with a fresh entry; its
+                // own transitions own the story now.
+                return;
+            }
+            // Confirmed loss: drop the carved-out entry and emit honestly,
+            // with the path re-derived through the CURRENT view so an
+            // ancestor rename during the hold cannot leak a stale path.
+            const emitPath =
+                this.pathThroughView(entry.preImage) ?? entry.preImage.path;
+            if (live === entry.preImage) {
                 this.view.delete(entry.nodeId);
+                this.byPath.delete(emitPath);
                 this.byPath.delete(entry.preImage.path);
             }
             this.deliver([
                 {
                     type: "deleted",
-                    path: entry.preImage.path,
+                    path: emitPath,
                     nodeId: entry.nodeId,
                     parentId: entry.preImage.parentId,
                     kind: entry.preImage.kind,
@@ -1136,10 +1277,37 @@ class WatchSubscription implements FsWatcher {
             // Read failure: retry after another hold.
             if (entry.timer) clearTimeout(entry.timer);
             entry.timer = setTimeout(
-                () => void this.recheckQuarantine(entry),
+                () => this.queueRecheck(entry),
                 this.opts.guardHoldMs
             );
         }
+    }
+
+    /** Path of an entry derived through the CURRENT view's parent chain. */
+    private pathThroughView(entry: ViewEntry): string | undefined {
+        if (entry.parentId === this.rootNodeId) {
+            return joinPath(this.path, entry.name);
+        }
+        const parent = this.view.get(entry.parentId);
+        if (!parent) return undefined;
+        return joinPath(parent.path, entry.name);
+    }
+
+    /**
+     * A cheap snapshot of the committed served view — the wrapper layers
+     * (ignore filtering) seed and reconcile from this instead of re-walking
+     * the read API.
+     */
+    viewSnapshot(): {
+        path: string;
+        nodeId: string;
+        kind: "file" | "directory";
+    }[] {
+        return [...this.view.values()].map((entry) => ({
+            path: entry.path,
+            nodeId: entry.nodeId,
+            kind: entry.kind,
+        }));
     }
 
     /* ---------------- delivery ---------------- */
@@ -1178,16 +1346,9 @@ class WatchSubscription implements FsWatcher {
                 // A subscriber throwing must not break delivery to others.
             }
         }
-        if (this.iteratorActive || this.pending) {
-            this.pending = this.pending
-                ? composeBatches(this.pending, batch)
-                : batch;
-            this.iteratorWake?.();
-        } else {
-            this.pending = this.pending
-                ? composeBatches(this.pending, batch)
-                : batch;
-        }
+        this.pending = this.pending
+            ? composeBatches(this.pending, batch)
+            : batch;
         this.iteratorWake?.();
     }
 
@@ -1236,9 +1397,12 @@ const detachedHub = (host: WatchHost): WatchHub => new WatchHub(host);
  * dependency ordering (a rename whose destination is freed by another
  * pending rename waits for it; cycles degrade one rename), then modifieds.
  */
-const scheduleEvents = (events: FsWatchEvent[]): FsWatchEvent[] => {
+export const scheduleEvents = (events: FsWatchEvent[]): FsWatchEvent[] => {
     if (events.length <= 1) return events;
-    const deletes = events
+    // Deletes participate in the dependency pass too: a directory delete
+    // waits for any rename escaping FROM under it (its subtree prune must
+    // not swallow the escapee), per the mirror contract.
+    let pendingDeletes = events
         .filter((e) => e.type === "deleted")
         .sort(
             (a, b) =>
@@ -1255,134 +1419,204 @@ const scheduleEvents = (events: FsWatchEvent[]): FsWatchEvent[] => {
                 depthOf(a.path) - depthOf(b.path) ||
                 a.path.localeCompare(b.path)
         );
-    const ordered: FsWatchEvent[] = [...deletes];
-    const freed = new Set(deletes.map((e) => e.path));
+    const ordered: FsWatchEvent[] = [];
+    const freed = new Set<string>();
     const occupiedOld = new Map<string, FsWatchEvent>();
     for (const e of movers) {
         if (e.type === "renamed" && e.oldPath) occupiedOld.set(e.oldPath, e);
     }
-    // Greedy dependency pass over creates/renames.
-    let guard = movers.length * 2 + 4;
-    while (movers.length > 0 && guard-- > 0) {
+    const deleteBlocked = (del: FsWatchEvent): boolean => {
+        if (del.kind !== "directory") return false;
+        const prefix = `${del.path}/`;
+        return movers.some(
+            (e) =>
+                e.type === "renamed" &&
+                e.oldPath !== undefined &&
+                (e.oldPath === del.path || e.oldPath.startsWith(prefix))
+        );
+    };
+    let guard = (pendingDeletes.length + movers.length) * 2 + 4;
+    while ((pendingDeletes.length > 0 || movers.length > 0) && guard-- > 0) {
+        let progressed = false;
+        const readyDeletes = pendingDeletes.filter((e) => !deleteBlocked(e));
+        if (readyDeletes.length > 0) {
+            const emitted = new Set(readyDeletes);
+            pendingDeletes = pendingDeletes.filter((e) => !emitted.has(e));
+            for (const e of readyDeletes) {
+                ordered.push(e);
+                freed.add(e.path);
+            }
+            progressed = true;
+        }
         const emittable = movers.filter((e) => {
             const blocker = occupiedOld.get(e.path);
             return !blocker || blocker === e || freed.has(e.path);
         });
-        if (emittable.length === 0) {
-            // Cycle (A<->B swap): degrade the first rename into delete+create.
-            const victim = movers.find((e) => e.type === "renamed");
-            if (!victim) break;
-            movers = movers.filter((e) => e !== victim);
-            occupiedOld.delete(victim.oldPath!);
-            ordered.push({
-                type: "deleted",
-                path: victim.oldPath!,
-                nodeId: victim.nodeId,
-                parentId: victim.parentId,
-                kind: victim.kind,
-                origin: victim.origin,
-                cause: victim.cause,
-            });
-            freed.add(victim.oldPath!);
-            ordered.push({ ...victim, type: "created", oldPath: undefined });
-            freed.add(victim.path);
-            continue;
-        }
-        for (const e of emittable) {
-            ordered.push(e);
-            if (e.type === "renamed" && e.oldPath) {
-                freed.add(e.oldPath);
-                occupiedOld.delete(e.oldPath);
+        if (emittable.length > 0) {
+            for (const e of emittable) {
+                ordered.push(e);
+                if (e.type === "renamed" && e.oldPath) {
+                    freed.add(e.oldPath);
+                    occupiedOld.delete(e.oldPath);
+                }
             }
+            const emitted = new Set(emittable);
+            movers = movers.filter((e) => !emitted.has(e));
+            progressed = true;
         }
-        const emitted = new Set(emittable);
-        movers = movers.filter((e) => !emitted.has(e));
+        if (progressed) continue;
+        // Cycle (A<->B swap): degrade one rename — emit the vacating
+        // delete now, but the created must WAIT for whatever occupies its
+        // destination to move first (it re-enters the dependency pass).
+        const victim = movers.find((e) => e.type === "renamed");
+        if (!victim) break;
+        occupiedOld.delete(victim.oldPath!);
+        ordered.push({
+            type: "deleted",
+            path: victim.oldPath!,
+            nodeId: victim.nodeId,
+            parentId: victim.parentId,
+            kind: victim.kind,
+            origin: victim.origin,
+            cause: victim.cause,
+        });
+        freed.add(victim.oldPath!);
+        movers = movers.map((e) =>
+            e === victim
+                ? { ...victim, type: "created" as const, oldPath: undefined }
+                : e
+        );
     }
-    ordered.push(...movers); // guard exhaustion: emit rest as-is
+    ordered.push(...pendingDeletes, ...movers); // guard exhaustion fallback
     ordered.push(...modifieds);
     return ordered;
 };
 
 /**
  * Compose an undelivered batch with a newer one: per-node net view deltas.
- * Intermediate transitions drop; the net state never does.
+ * Intermediate transitions drop; the net state never does. Each node's
+ * standing events are first normalized to ONE canonical event (a swap
+ * degradation's deleted+created pair reads as a rename), so composition
+ * never applies its algebra to a stale sibling.
  */
-const composeBatches = (
+export const composeBatches = (
     older: FsWatchEvent[],
     newer: FsWatchEvent[]
 ): FsWatchEvent[] => {
-    const byNode = new Map<string, FsWatchEvent[]>();
+    const byNode = new Map<string, FsWatchEvent>();
+    const grouped = new Map<string, FsWatchEvent[]>();
     for (const e of older) {
-        byNode.set(e.nodeId, [...(byNode.get(e.nodeId) ?? []), e]);
+        grouped.set(e.nodeId, [...(grouped.get(e.nodeId) ?? []), e]);
+    }
+    for (const [nodeId, events] of grouped) {
+        const normalized = normalizeNodeEvents(events);
+        if (normalized) byNode.set(nodeId, normalized);
     }
     for (const e of newer) {
-        const prior = byNode.get(e.nodeId) ?? [];
-        const first = prior[0];
+        const first = byNode.get(e.nodeId);
         if (!first) {
-            byNode.set(e.nodeId, [e]);
+            byNode.set(e.nodeId, e);
             continue;
         }
         switch (e.type) {
             case "modified":
                 if (first.type === "created" || first.type === "renamed") {
-                    byNode.set(e.nodeId, [
-                        {
-                            ...first,
-                            versionId: e.versionId,
-                            contentHash: e.contentHash,
-                            changesetId: e.changesetId,
-                            author: e.author,
-                            origin: e.origin,
-                        },
-                    ]);
+                    byNode.set(e.nodeId, {
+                        ...first,
+                        versionId: e.versionId,
+                        contentHash: e.contentHash,
+                        changesetId: e.changesetId,
+                        author: e.author,
+                        origin: e.origin,
+                    });
                 } else {
-                    byNode.set(e.nodeId, [e]);
+                    byNode.set(e.nodeId, e);
                 }
                 break;
             case "deleted":
                 if (first.type === "created") {
                     byNode.delete(e.nodeId); // create+delete nets to nothing
                 } else if (first.type === "renamed") {
-                    byNode.set(e.nodeId, [
-                        { ...e, path: first.oldPath ?? e.path },
-                    ]);
+                    byNode.set(e.nodeId, {
+                        ...e,
+                        path: first.oldPath ?? e.path,
+                    });
                 } else {
-                    byNode.set(e.nodeId, [e]);
+                    byNode.set(e.nodeId, e);
                 }
                 break;
             case "renamed":
                 if (first.type === "renamed") {
-                    byNode.set(e.nodeId, [{ ...e, oldPath: first.oldPath }]);
+                    byNode.set(e.nodeId, { ...e, oldPath: first.oldPath });
                 } else if (first.type === "created") {
-                    byNode.set(e.nodeId, [
-                        { ...e, type: "created", oldPath: undefined },
-                    ]);
-                } else if (first.type === "deleted") {
-                    byNode.set(e.nodeId, [e]);
+                    byNode.set(e.nodeId, {
+                        ...e,
+                        type: "created",
+                        oldPath: undefined,
+                    });
                 } else {
-                    byNode.set(e.nodeId, [e]);
+                    byNode.set(e.nodeId, e);
                 }
                 break;
             case "created":
                 if (first.type === "deleted") {
                     if (first.path === e.path) {
                         // delete + recreate at the same path: net modified.
-                        byNode.set(e.nodeId, [
+                        byNode.set(
+                            e.nodeId,
                             e.versionId === undefined &&
-                            first.versionId === undefined
+                                first.versionId === undefined
                                 ? e
-                                : { ...e, type: "modified" },
-                        ]);
+                                : { ...e, type: "modified" }
+                        );
                     } else {
-                        byNode.set(e.nodeId, [
-                            { ...e, type: "renamed", oldPath: first.path },
-                        ]);
+                        byNode.set(e.nodeId, {
+                            ...e,
+                            type: "renamed",
+                            oldPath: first.path,
+                        });
                     }
                 } else {
-                    byNode.set(e.nodeId, [e]);
+                    byNode.set(e.nodeId, e);
                 }
                 break;
         }
     }
-    return scheduleEvents([...byNode.values()].flat());
+    return scheduleEvents([...byNode.values()]);
+};
+
+/** Reduce one node's events within a delivered batch to its net effect. */
+const normalizeNodeEvents = (
+    events: FsWatchEvent[]
+): FsWatchEvent | undefined => {
+    if (events.length === 1) return events[0];
+    const del = events.find((e) => e.type === "deleted");
+    const cre = events.find((e) => e.type === "created");
+    const ren = events.find((e) => e.type === "renamed");
+    const mod = [...events].reverse().find((e) => e.type === "modified");
+    if (del && cre) {
+        // A degradation pair: semantically one rename (or an in-place swap).
+        return del.path === cre.path
+            ? { ...cre, type: "modified" }
+            : { ...cre, type: "renamed", oldPath: del.path };
+    }
+    if (ren && mod) {
+        return {
+            ...ren,
+            versionId: mod.versionId,
+            contentHash: mod.contentHash,
+            changesetId: mod.changesetId,
+            author: mod.author,
+        };
+    }
+    if (cre && mod) {
+        return {
+            ...cre,
+            versionId: mod.versionId,
+            contentHash: mod.contentHash,
+            changesetId: mod.changesetId,
+            author: mod.author,
+        };
+    }
+    return events[events.length - 1];
 };

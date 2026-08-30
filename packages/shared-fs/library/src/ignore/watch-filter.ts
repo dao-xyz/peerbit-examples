@@ -7,6 +7,7 @@
  * reconciles the emitted stream against the handle's own filtered reads —
  * the same source of truth as its list()/stat().
  */
+import { composeBatches } from "../watch.js";
 import type { FsWatchEvent, FsWatcher, FsWatchCause } from "../watch.js";
 import type { CompiledIgnoreRules } from "./patterns.js";
 
@@ -14,10 +15,13 @@ export type IgnoreWatchHost = {
     /** The current effective verdict machinery (defaults-file exempt). */
     currentRules(): CompiledIgnoreRules;
     isIgnored(rules: CompiledIgnoreRules, path: string): boolean;
-    /** Recursive filtered listing straight off the handle's read API. */
-    walkVisible(
-        root: string
-    ): Promise<{ path: string; nodeId: string; kind: "file" | "directory" }[]>;
+    /** Snapshot of the inner subscription's committed served view — the
+     *  wrapper seeds and reconciles from this, never from live re-walks. */
+    viewSnapshot(): {
+        path: string;
+        nodeId: string;
+        kind: "file" | "directory";
+    }[];
     onRulesChanged(cb: () => void): () => void;
 };
 
@@ -59,7 +63,10 @@ export class IgnoreFilteredWatcher implements FsWatcher {
                 try {
                     await inner.ready;
                     if (this.closed) return;
-                    for (const entry of await host.walkVisible(this.path)) {
+                    // Synchronous snapshot of the inner committed view —
+                    // batches queued behind this in the chain diff against
+                    // a consistent baseline (no read-race window).
+                    for (const entry of host.viewSnapshot()) {
                         if (host.isIgnored(this.pinnedRules, entry.path)) {
                             continue;
                         }
@@ -234,11 +241,11 @@ export class IgnoreFilteredWatcher implements FsWatcher {
                             // Descendants appear too; reconcile from the
                             // handle's own filtered reads.
                             out.push(
-                                ...(await this.appearedDescendants(
+                                ...this.appearedDescendants(
                                     event.path,
                                     rules,
                                     event.cause
-                                ))
+                                )
                             );
                         }
                     }
@@ -295,32 +302,32 @@ export class IgnoreFilteredWatcher implements FsWatcher {
         }
     }
 
-    private async appearedDescendants(
+    private appearedDescendants(
         root: string,
         rules: CompiledIgnoreRules,
         cause: FsWatchCause
-    ): Promise<FsWatchEvent[]> {
+    ): FsWatchEvent[] {
         const events: FsWatchEvent[] = [];
-        try {
-            for (const entry of await this.host.walkVisible(root)) {
-                if (this.host.isIgnored(rules, entry.path)) continue;
-                if (this.emittedVisible.has(entry.nodeId)) continue;
-                this.emittedVisible.set(entry.nodeId, {
-                    path: entry.path,
-                    kind: entry.kind,
-                });
-                events.push({
-                    type: "created",
-                    path: entry.path,
-                    nodeId: entry.nodeId,
-                    parentId: "",
-                    kind: entry.kind,
-                    origin: "remote",
-                    cause,
-                });
+        const prefix = root === "/" ? "/" : `${root}/`;
+        for (const entry of this.host.viewSnapshot()) {
+            if (entry.path !== root && !entry.path.startsWith(prefix)) {
+                continue;
             }
-        } catch {
-            // The next data batch trues the stream up.
+            if (this.host.isIgnored(rules, entry.path)) continue;
+            if (this.emittedVisible.has(entry.nodeId)) continue;
+            this.emittedVisible.set(entry.nodeId, {
+                path: entry.path,
+                kind: entry.kind,
+            });
+            events.push({
+                type: "created",
+                path: entry.path,
+                nodeId: entry.nodeId,
+                parentId: "",
+                kind: entry.kind,
+                origin: "remote",
+                cause,
+            });
         }
         return events.sort((a, b) => a.path.length - b.path.length);
     }
@@ -351,7 +358,7 @@ export class IgnoreFilteredWatcher implements FsWatcher {
             out.sort((a, b) => b.path.length - a.path.length);
             // Newly visible: served entries the old rules hid.
             try {
-                const served = await this.host.walkVisible(this.path);
+                const served = this.host.viewSnapshot();
                 const creations: FsWatchEvent[] = [];
                 for (const entry of served) {
                     if (this.host.isIgnored(next, entry.path)) continue;
@@ -395,7 +402,13 @@ export class IgnoreFilteredWatcher implements FsWatcher {
                 /* subscriber errors are theirs */
             }
         }
-        this.pending = this.pending ? [...this.pending, ...batch] : batch;
+        if (this.iteratorActive) {
+            // Bounded: composition nets per-node deltas; without an active
+            // iterator nothing accumulates (callbacks got the batch).
+            this.pending = this.pending
+                ? composeBatches(this.pending, batch)
+                : batch;
+        }
         this.iteratorWake?.();
     }
 }

@@ -3596,6 +3596,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     async close(from?: any): Promise<boolean> {
         this.watchHub?.closeAll();
+        // A reopened instance gets a fresh hub: bootstrap resync latches
+        // must not persist across open generations.
+        this.watchHub = undefined;
         this.clearBootstrapTimers();
         this.resolveBootstrapWaiters({ verified: false });
         return super.close(from);

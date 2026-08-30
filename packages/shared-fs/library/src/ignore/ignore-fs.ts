@@ -99,35 +99,7 @@ export class IgnoreAwareFs extends SharedFsHandle {
                 currentRules: () => this.ignorePolicy.current(),
                 isIgnored: (rules, path) =>
                     this.effectiveVerdict(rules, normalizeFsPath(path)).ignored,
-                walkVisible: async (root) => {
-                    // SERVED entries, policy-unfiltered — the wrapper
-                    // applies its own pinned rule set on top.
-                    const out: {
-                        path: string;
-                        nodeId: string;
-                        kind: "file" | "directory";
-                    }[] = [];
-                    const walk = async (dir: string) => {
-                        let entries;
-                        try {
-                            entries = await this.program.list(dir);
-                        } catch {
-                            return;
-                        }
-                        for (const entry of entries) {
-                            out.push({
-                                path: entry.path,
-                                nodeId: entry.nodeId,
-                                kind: entry.kind,
-                            });
-                            if (entry.kind === "directory") {
-                                await walk(entry.path);
-                            }
-                        }
-                    };
-                    await walk(root === "/" ? "/" : root);
-                    return out;
-                },
+                viewSnapshot: () => (inner as any).viewSnapshot?.() ?? [],
                 onRulesChanged: (cb) => {
                     const handler = () => cb();
                     (this.program.events as any).addEventListener(
