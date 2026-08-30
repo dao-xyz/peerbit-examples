@@ -8,8 +8,10 @@ import {
     type WriteFileOptions,
 } from "../index.js";
 import { normalizeFsPath } from "../path.js";
+import type { FsWatcher, FsWatchOptions } from "../watch.js";
 import type { CompiledIgnoreRules, IgnoreVerdict } from "./patterns.js";
 import type { IgnorePolicy, IgnorePolicyEngine } from "./policy.js";
+import { IgnoreFilteredWatcher } from "./watch-filter.js";
 
 /**
  * Artifact-ignore enforcement, between the caller and the program. The
@@ -70,12 +72,52 @@ export class IgnoreAwareFs extends SharedFsHandle {
     }
 
     /**
-     * Detach the policy engine's listeners and timers. Call when done
-     * with a handle whose program outlives it; closing the peer or the
-     * program tears the listeners down anyway.
+     * Close this handle's watchers, then detach the policy engine's
+     * listeners and timers. Call when done with a handle whose program
+     * outlives it; closing the peer or the program tears the listeners
+     * down anyway.
      */
     close() {
+        super.close();
         this.ignorePolicy.stop();
+    }
+
+    /**
+     * Watch through THIS handle's ignore policy: events on ignored paths
+     * are suppressed, boundary crossings translate to created/deleted, and
+     * a rules change reconciles the stream with cause:"policy" events.
+     * `includeIgnored` bypasses the filter entirely.
+     */
+    watch(path = "/", options?: FsWatchOptions): FsWatcher {
+        const inner = super.watch(path, options);
+        if (options?.includeIgnored) {
+            return inner;
+        }
+        return new IgnoreFilteredWatcher(
+            inner,
+            {
+                currentRules: () => this.ignorePolicy.current(),
+                isIgnored: (rules, path) =>
+                    this.effectiveVerdict(rules, normalizeFsPath(path)).ignored,
+                viewSnapshot: () => (inner as any).viewSnapshot?.() ?? [],
+                onRulesChanged: (cb) => {
+                    const handler = () => cb();
+                    (this.program.events as any).addEventListener(
+                        "ignore:rules-changed",
+                        handler
+                    );
+                    return () =>
+                        (this.program.events as any).removeEventListener(
+                            "ignore:rules-changed",
+                            handler
+                        );
+                },
+            },
+            (code, message) => new SharedFsError(code as any, message),
+            // An initial snapshot flows through the filter and seeds the
+            // baseline itself; seeding first would double-count it.
+            { seedBaseline: options?.initial !== "snapshot" }
+        );
     }
 
     private guardWrite(

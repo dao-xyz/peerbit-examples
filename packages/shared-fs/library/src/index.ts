@@ -55,8 +55,21 @@ import {
 } from "./path.js";
 import { compileIgnoreRules } from "./ignore/patterns.js";
 import { IgnorePolicyEngine, type IgnorePolicy } from "./ignore/policy.js";
+import {
+    WatchHub,
+    type FsWatcher,
+    type FsWatchOptions,
+    type WatchHost,
+} from "./watch.js";
 
 export * from "./model.js";
+export {
+    type FsWatcher,
+    type FsWatchOptions,
+    type FsWatchEvent,
+    type FsWatchEventType,
+    type FsWatchCause,
+} from "./watch.js";
 export * from "./ignore/patterns.js";
 export * from "./ignore/policy.js";
 // Value imported dynamically in openSharedFs: the wrapper extends
@@ -474,7 +487,9 @@ export type SharedFsErrorCode =
     /** The path is artifact-ignored by the effective policy. */
     | "EIGNORED"
     /** The operation crosses an artifact-ignore boundary. */
-    | "EXDEV";
+    | "EXDEV"
+    /** A watch subscription's materialized view exceeded its node budget. */
+    | "EWATCHLIMIT";
 
 /**
  * Typed filesystem error so adapters can map failures to POSIX errno values
@@ -1213,6 +1228,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
             this.applyCacheChanges(added, removed);
+            this.watchHub?.ingest(added, removed);
             if (this.overlayPending.size > 0) {
                 for (const value of [...added, ...removed]) {
                     const id = (value as any)?.id;
@@ -3579,9 +3595,42 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async close(from?: any): Promise<boolean> {
+        this.watchHub?.closeAll();
+        // A reopened instance gets a fresh hub: bootstrap resync latches
+        // must not persist across open generations.
+        this.watchHub = undefined;
         this.clearBootstrapTimers();
         this.resolveBootstrapWaiters({ verified: false });
         return super.close(from);
+    }
+
+    /**
+     * Subscribe to filesystem-shaped change events for a path or subtree.
+     * Events describe transitions of the view this program's read API
+     * serves; see the README's watch section for the delivery contract.
+     */
+    watch(path = "/", options?: FsWatchOptions): FsWatcher {
+        this.watchHub ??= new WatchHub(this.watchHost());
+        return this.watchHub.watch(path, options);
+    }
+
+    private watchHost(): WatchHost {
+        return {
+            resolvePathDetailed: (path) => this.resolvePathDetailed(path),
+            listByParentId: (parentId) => this.listByParentId(parentId),
+            headsForNodes: (nodeIds) => this.headsForNodes(nodeIds),
+            namingStatesForNodes: (nodeIds) =>
+                this.namingStatesForNodes(nodeIds),
+            localAuthorKey: () => this.authorKey(),
+            clock: () => this.clock(),
+            guardPendingFor: (nodeId) =>
+                this.guardFlushBusy ||
+                this.pendingGuardVersions.has(nodeId) ||
+                this.pendingGuardNaming.has(nodeId),
+            makeError: (code, message) =>
+                new SharedFsError(code as SharedFsErrorCode, message),
+            nodeKindOf: (nodeId) => nodeKindOf(nodeId),
+        };
     }
 
     /** Fire the deferred replication announcement (idempotent). */
@@ -3734,6 +3783,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 detail: this.bootstrapStatus(),
             })
         );
+        // The overlay union switches on with zero feed traffic; watchers
+        // attached earlier must re-snapshot or they serve a near-empty view
+        // for the whole overlay window.
+        this.watchHub?.resyncAll("snapshot", "bootstrap:ready");
         this.startRetirementTracking();
     }
 
@@ -4357,6 +4410,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 })
             );
             this.resolveBootstrapWaiters({ verified: true });
+            // Verified retirement is view-neutral by the coverage rules;
+            // the resync is insurance against the outright cache clear.
+            this.watchHub?.resyncAll("data", "bootstrap:end");
         } else {
             // Timeout: the local store is a valid lagging-replica view —
             // no worse than a plain join mid-sync — but Guard D stays
@@ -4372,6 +4428,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 })
             );
             this.resolveBootstrapWaiters({ verified: false });
+            // Honest view shrink: unproven overlay docs left the served
+            // tree. Latched — the quiescence path dispatches this too.
+            this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
         }
     }
 
@@ -4406,6 +4465,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     })
                 );
                 this.resolveBootstrapWaiters({ verified: false });
+                this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
             }
         }, QUIESCENCE_CHECK_INTERVAL_MS);
         (this.quiescenceTimer as any)?.unref?.();
@@ -4853,6 +4913,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * entire purge burst into ONE coherent evaluation per node — and caps
      * the guard's cost per burst instead of per removed document.
      */
+    private watchHub?: WatchHub;
+    private guardFlushBusy = false;
     private pendingGuardVersions = new Map<string, Map<string, FileVersion>>();
     private pendingGuardNaming = new Map<string, Map<string, NamingEvent>>();
     private guardFlushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -4942,6 +5004,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.pendingGuardNaming.clear();
             return;
         }
+        this.guardFlushBusy = true;
+        let settledNodes: string[] = [];
+        try {
+            settledNodes = await this.flushGuardQueuesInner();
+        } finally {
+            this.guardFlushBusy = false;
+        }
+        // Quarantined watch losses re-check as soon as the guard's async
+        // work for their nodes is done, instead of racing a constant.
+        this.watchHub?.guardSettled(settledNodes);
+    }
+
+    private async flushGuardQueuesInner(): Promise<string[]> {
         const removedVersions = new Map<string, FileVersion[]>();
         for (const [nodeId, bucket] of this.pendingGuardVersions) {
             removedVersions.set(nodeId, [...bucket.values()]);
@@ -5034,6 +5109,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // Never throw into the event loop.
             }
         }
+        return [...removedVersions.keys(), ...removedNaming.keys()];
     }
 
     private async gcLedgerPath(): Promise<string | undefined> {
@@ -5855,7 +5931,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 }
 
 export class SharedFsHandle {
+    private handleWatchers = new Set<FsWatcher>();
+
     constructor(readonly program: SharedFileSystem) {}
+
+    /**
+     * Subscribe to filesystem-shaped change events for a path or subtree.
+     * The watcher belongs to this handle: close() tears it down; the shared
+     * program (and other handles' watchers) stay untouched.
+     */
+    watch(path = "/", options?: FsWatchOptions): FsWatcher {
+        const watcher = this.program.watch(path, options);
+        this.handleWatchers.add(watcher);
+        watcher.on("close", () => this.handleWatchers.delete(watcher));
+        return watcher;
+    }
+
+    /** Close this handle's watchers. Idempotent; the program stays open. */
+    close(): void {
+        for (const watcher of [...this.handleWatchers]) {
+            watcher.close();
+        }
+        this.handleWatchers.clear();
+    }
 
     get address() {
         return this.program.address?.toString();
