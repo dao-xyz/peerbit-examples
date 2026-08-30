@@ -65,6 +65,13 @@ import {
     type FsWatchOptions,
     type WatchHost,
 } from "./watch.js";
+import {
+    ChangesetBarrierHub,
+    type AwaitChangesetOptions,
+    type ChangesetHost,
+    type ChangesetStatus,
+    type ChangesetWatcher,
+} from "./changeset.js";
 
 export * from "./model.js";
 export {
@@ -74,6 +81,14 @@ export {
     type FsWatchEventType,
     type FsWatchCause,
 } from "./watch.js";
+export {
+    type AwaitChangesetOptions,
+    type ChangesetEvent,
+    type ChangesetManifestStatus,
+    type ChangesetStatus,
+    type ChangesetVerdict,
+    type ChangesetWatcher,
+} from "./changeset.js";
 export * from "./ignore/patterns.js";
 export * from "./ignore/policy.js";
 // Value imported dynamically in openSharedFs: the wrapper extends
@@ -1264,6 +1279,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             this.applyCacheChanges(added, removed);
             this.watchHub?.ingest(added, removed);
+            this.changesetHub?.ingest(added, removed);
             if (this.overlayPending.size > 0) {
                 for (const value of [...added, ...removed]) {
                     const id = (value as any)?.id;
@@ -3885,9 +3901,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     async close(from?: any): Promise<boolean> {
         this.watchHub?.closeAll();
-        // A reopened instance gets a fresh hub: bootstrap resync latches
+        this.changesetHub?.close();
+        // A reopened instance gets fresh hubs: bootstrap resync latches
         // must not persist across open generations.
         this.watchHub = undefined;
+        this.changesetHub = undefined;
         this.clearBootstrapTimers();
         this.resolveBootstrapWaiters({ verified: false });
         return super.close(from);
@@ -3919,6 +3937,94 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             makeError: (code, message) =>
                 new SharedFsError(code as SharedFsErrorCode, message),
             nodeKindOf: (nodeId) => nodeKindOf(nodeId),
+        };
+    }
+
+    /**
+     * Resolve when every member of changeset X (per its admitted
+     * manifests, scoped by manifestId/authors) has been observed admitted
+     * on this replica. See the README's write-set barrier section for the
+     * exact contract, including the unscoped-reuse exposure and the
+     * collected-or-incomplete verdict for historic turns.
+     */
+    awaitChangeset(
+        changesetId: string,
+        options?: AwaitChangesetOptions
+    ): Promise<ChangesetStatus> {
+        if (!validChangesetId(changesetId)) {
+            return Promise.reject(
+                new SharedFsError("EINVAL", "changesetId must be 1-256 chars")
+            );
+        }
+        this.changesetHub ??= new ChangesetBarrierHub(this.changesetHost());
+        return this.changesetHub.await(changesetId, options);
+    }
+
+    /** Instant per-replica snapshot of a changeset's arrival state. */
+    async changesetStatus(
+        changesetId: string,
+        options: { allowPartial?: boolean } = {}
+    ): Promise<ChangesetStatus> {
+        this.assertNotBootstrapPartial("changesetStatus", options.allowPartial);
+        this.changesetHub ??= new ChangesetBarrierHub(this.changesetHost());
+        await this.changesetHub.ensure(changesetId);
+        return this.changesetHub.status(changesetId);
+    }
+
+    /** Subscribe to manifest arrivals and turn completions. */
+    watchChangesets(options?: {
+        changesetId?: string;
+        signal?: AbortSignal;
+    }): ChangesetWatcher {
+        this.changesetHub ??= new ChangesetBarrierHub(this.changesetHost());
+        return this.changesetHub.watch(options);
+    }
+
+    private changesetHost(): ChangesetHost {
+        return {
+            manifestsFor: async (changesetId) => {
+                const rows = await this.queryRows([
+                    new StringMatch({
+                        key: "kind",
+                        value: "changeset-manifest",
+                    }),
+                    new StringMatch({ key: "changesetId", value: changesetId }),
+                ]);
+                const out: {
+                    manifest: ChangesetManifest;
+                    localArrivalMs?: number;
+                }[] = [];
+                for (const row of rows) {
+                    const doc = await this.getDocument<ChangesetManifest>(
+                        row.id
+                    );
+                    if (doc instanceof ChangesetManifest) {
+                        out.push({ manifest: doc });
+                    }
+                }
+                return out;
+            },
+            arrivedMemberIds: async (changesetId) => {
+                const ids = new Set<string>();
+                for (const kind of ["file-version", "naming"]) {
+                    const rows = await this.queryRows([
+                        new StringMatch({ key: "kind", value: kind }),
+                        new StringMatch({
+                            key: "changesetId",
+                            value: changesetId,
+                        }),
+                    ]);
+                    for (const row of rows) ids.add(row.id as string);
+                }
+                return ids;
+            },
+            hasDocumentId: (id) => this.hasDocument(id),
+            bootstrapPhase: () => this.bootstrapPhase,
+            overlayActive: () => this.bootstrapPhase === "overlay-active",
+            awaitBootstrapConverged: () => this.awaitBootstrapConverged(),
+            clock: () => this.clock(),
+            makeError: (code, message) =>
+                new SharedFsError(code as SharedFsErrorCode, message),
         };
     }
 
@@ -4702,6 +4808,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Verified retirement is view-neutral by the coverage rules;
             // the resync is insurance against the outright cache clear.
             this.watchHub?.resyncAll("data", "bootstrap:end");
+            this.changesetHub?.overlayRetired();
         } else {
             // Timeout: the local store is a valid lagging-replica view —
             // no worse than a plain join mid-sync — but Guard D stays
@@ -4720,6 +4827,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Honest view shrink: unproven overlay docs left the served
             // tree. Latched — the quiescence path dispatches this too.
             this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
+            this.changesetHub?.overlayRetired();
         }
     }
 
@@ -4755,6 +4863,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
                 this.resolveBootstrapWaiters({ verified: false });
                 this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
+                this.changesetHub?.overlayRetired();
             }
         }, QUIESCENCE_CHECK_INTERVAL_MS);
         (this.quiescenceTimer as any)?.unref?.();
@@ -5203,6 +5312,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * the guard's cost per burst instead of per removed document.
      */
     private watchHub?: WatchHub;
+    private changesetHub?: ChangesetBarrierHub;
     private guardFlushBusy = false;
     private pendingGuardVersions = new Map<string, Map<string, FileVersion>>();
     private pendingGuardNaming = new Map<string, Map<string, NamingEvent>>();
@@ -6329,6 +6439,18 @@ export class SharedFsHandle {
         options?: { allowPartial?: boolean }
     ) {
         return this.program.versionsByChangeset(changesetId, options);
+    }
+
+    awaitChangeset(changesetId: string, options?: AwaitChangesetOptions) {
+        return this.program.awaitChangeset(changesetId, options);
+    }
+
+    changesetStatus(changesetId: string, options?: { allowPartial?: boolean }) {
+        return this.program.changesetStatus(changesetId, options);
+    }
+
+    watchChangesets(options?: { changesetId?: string; signal?: AbortSignal }) {
+        return this.program.watchChangesets(options);
     }
 
     /** Materialize and publish a cold-start snapshot from this replica. */
