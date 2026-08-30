@@ -202,6 +202,8 @@ export type GcReport = {
     purgeCandidatesRecorded: number;
     conflictedNodes: number;
     cutRecoveries: number;
+    /** Changeset manifests retired by local arrival age. */
+    manifestsRetired: number;
     warnings: string[];
 };
 
@@ -5684,6 +5686,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             purgeCandidatesRecorded: 0,
             conflictedNodes: 0,
             cutRecoveries: 0,
+            manifestsRetired: 0,
             warnings: [],
         };
         // W1's dedup-skip safety depends on the invariant skipHorizon <=
@@ -6313,6 +6316,40 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     };
                     report.chunkCandidatesRecorded++;
                 }
+            }
+        }
+
+        // Changeset-manifest sweep: retire membership records whose LOCAL
+        // arrival age exceeds the retention window. Arrival age cannot be
+        // forged remotely (a future-dated createdAtWallMs stamp neither
+        // dodges this sweep nor survives the 1h ingest skew bound), and it
+        // protects late-replicating old manifests, which arrive young.
+        // Guard D never matches manifests, so the deletes are final; live
+        // trackers observe the removal and resolve their waiters honestly.
+        {
+            const manifestAgeMs = Math.max(config.retentionMs, config.graceMs);
+            const manifestRows = (await this.entries.index
+                .iterate(
+                    {
+                        query: [
+                            new StringMatch({
+                                key: "kind",
+                                value: "changeset-manifest",
+                            }),
+                        ],
+                    },
+                    { local: true, remote: false, resolve: false }
+                )
+                .all()) as any[];
+            for (const row of manifestRows) {
+                const arrivalMs = this.contextModifiedMs(row.__context);
+                if (arrivalMs > runStartedMs - manifestAgeMs) {
+                    continue;
+                }
+                if (!config.dryRun) {
+                    await this.entries.del(row.id);
+                }
+                report.manifestsRetired++;
             }
         }
 
