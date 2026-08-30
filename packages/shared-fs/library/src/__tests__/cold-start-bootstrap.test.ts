@@ -312,7 +312,11 @@ describe("shared fs cold-start bootstrap", () => {
         { retry: 1, timeout: 240_000 },
         async () => {
             const { chunkIdForBytes } = await import("../model.js");
-            const donor = await populatedDonor(1000);
+            // Large enough that background log sync cannot complete in the
+            // instants between overlay activation and the donor stop below —
+            // the 5.3.33 ingest speedup outran the old 1,000-file window on
+            // slow CI runners, dissolving the stall this test exercises.
+            const donor = await populatedDonor(3000);
             const joinerPeer = await createPeer();
             await joinerPeer.dial(donor.peer);
             const joiner = await openSharedFs({
