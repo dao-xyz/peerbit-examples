@@ -318,7 +318,7 @@ describe("shared fs cold-start bootstrap", () => {
             // history entries to stream — so stranding it mid-sync is
             // structural, not a timing race a fast runner can dissolve
             // (both fixed-size 1,000- and 3,000-file trees raced on CI).
-            const donor = await (async () => {
+            const buildDonor = async () => {
                 const peer = await createPeer();
                 const fs = await openSharedFs({
                     peerbit: peer,
@@ -338,36 +338,58 @@ describe("shared fs cold-start bootstrap", () => {
                         }))
                     );
                 }
+                // One shallow, never-edited file: a stable probe for the
+                // gating-asymmetry check (deep-history files can show
+                // TRANSIENT multi-head conflicts mid-sync, legitimately).
+                await fs.writeFile("/tree/shallow-probe.txt", "single version");
                 await fs.writeFile("/tree/dir-0/file-0.txt", "edited content");
                 await fs.rm("/tree/dir-1/file-1.txt");
                 const snapshot = await fs.snapshotWrite();
                 return { peer, fs, snapshot };
-            })();
-            const joinerPeer = await createPeer();
-            await joinerPeer.dial(donor.peer);
-            const joiner = await openSharedFs({
-                peerbit: joinerPeer,
-                address: donor.fs.address,
-                machineLabel: "joiner",
-                bootstrap: { retirementTimeoutMs: 3_000 },
-            });
-            await waitUntil(
-                () => {
-                    expect(joiner.bootstrapStatus().phase).toBe(
-                        "overlay-active"
-                    );
-                },
-                { intervalMs: 5 }
-            );
-            // Strand the joiner mid-sync: the overlay must keep serving,
-            // and retirement must take the unverified path.
-            await donor.peer.stop();
-            expect(joiner.bootstrapStatus().pendingDocs).toBeGreaterThan(0);
+            };
+            // Stranding a joiner mid-sync is inherently a race against the
+            // replication engine; the deep-history donor makes the stall
+            // window wide, and a bounded retry makes the setup reliable on
+            // any runner speed. Assertions run on the first stranded join.
+            let donor!: Awaited<ReturnType<typeof buildDonor>>;
+            let joiner!: Awaited<ReturnType<typeof openSharedFs>>;
+            let stranded = false;
+            for (let attempt = 0; attempt < 4 && !stranded; attempt++) {
+                donor = await buildDonor();
+                const joinerPeer = await createPeer();
+                await joinerPeer.dial(donor.peer);
+                joiner = await openSharedFs({
+                    peerbit: joinerPeer,
+                    address: donor.fs.address,
+                    machineLabel: "joiner",
+                    bootstrap: { retirementTimeoutMs: 3_000 },
+                });
+                await waitUntil(
+                    () => {
+                        expect(joiner.bootstrapStatus().phase).toBe(
+                            "overlay-active"
+                        );
+                    },
+                    { intervalMs: 2 }
+                );
+                // Strand the joiner mid-sync: the overlay must keep
+                // serving, and retirement must take the unverified path.
+                await donor.peer.stop();
+                if (joiner.bootstrapStatus().pendingDocs > 0) {
+                    stranded = true;
+                } else {
+                    // The engine outran the stop; rebuild and try again.
+                    await joinerPeer.stop().catch(() => {});
+                }
+            }
+            expect(stranded).toBe(true);
 
             // Gating asymmetry: the per-file branch is overlay-consistent
-            // and stays available; whole-store scans are gated.
+            // and stays available; whole-store scans are gated. The probe
+            // file has exactly one version, so no transient multi-head
+            // state can surface as a conflict here.
             await expect(
-                joiner.conflicts("/tree/dir-2/file-2.txt")
+                joiner.conflicts("/tree/shallow-probe.txt")
             ).resolves.toEqual([]);
             await expect(joiner.conflicts()).rejects.toThrow(/bootstrap/);
 
