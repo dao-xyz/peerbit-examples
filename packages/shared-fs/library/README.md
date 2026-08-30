@@ -209,3 +209,42 @@ hold on removal-caused losses while the resurrection guard settles), and
 policy (rule changes reconcile with `cause: "policy"` events);
 `includeIgnored: true` bypasses. Watchers are in-memory; a reopened process
 re-subscribes (use `initial: "snapshot"` as the recovery idiom).
+
+## Write-set barriers
+
+A batch written with `manifest: true` publishes a **changeset manifest** —
+an inner-signed record of the batch's exact membership, committed after
+every member so a crashed prefix never certifies. Any replica can then
+gate on the turn:
+
+```ts
+const { changesetId, manifest } = await fs.writeBatch(entries, {
+    changesetId: "turn-42",
+    manifest: true,
+});
+// announce (changesetId, manifest.manifestId) to consumers, then:
+const status = await other.awaitChangeset("turn-42", {
+    manifestId: manifest.manifestId, // exact, unforgeable barrier
+});
+// status.complete === true: every member document of the turn was
+// admitted here and the metadata is readable NOW (list/stat/versions see
+// the whole turn; readFile may still fetch bytes remotely).
+```
+
+`complete` means every member was **admitted on this replica** — not that
+members are the visible winners (concurrent writes may supersede), and
+not global completeness. Retrying a crashed batch under the same
+`changesetId` is safe: no-op entries adopt the young documents that
+already satisfy them, so the retry's manifest certifies the real turn.
+Manifest-scoped barriers cannot be satisfied or extended by any other
+writer (member ids are unguessable and inner-signed); the unscoped form
+spans all known manifests for the id (set-union semantics) and is
+documented best-effort under id reuse. Barriers default to a 30 s timeout
+(`timeoutMs: Infinity` opts out) and reject with the full status
+attached; historic turns whose members were garbage-collected resolve
+`"collected-or-incomplete"` rather than hanging — barriers cover
+propagation windows, not archaeology. `changesetStatus()` snapshots the
+same view; `watchChangesets()` streams `manifest` and once-per-transition
+`complete` events (queued during a bootstrap overlay so a triggered read
+always sees the whole turn). Manifests are retired by `collectGarbage`
+once their local arrival age exceeds the retention window.

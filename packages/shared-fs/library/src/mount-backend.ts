@@ -297,7 +297,9 @@ const toBackendError = (error: unknown): SharedFsBackendError => {
         const code: SharedFsBackendErrorCode =
             error.code === "EIGNORED" || error.code === "EXDEV"
                 ? "EACCES"
-                : error.code === "EWATCHLIMIT"
+                : error.code === "EWATCHLIMIT" ||
+                    error.code === "ETIMEDOUT" ||
+                    error.code === "ECLOSED"
                   ? "EIO"
                   : error.code;
         return new SharedFsBackendError(code, error.message);
