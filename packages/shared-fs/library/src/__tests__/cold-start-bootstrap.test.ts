@@ -312,11 +312,37 @@ describe("shared fs cold-start bootstrap", () => {
         { retry: 1, timeout: 240_000 },
         async () => {
             const { chunkIdForBytes } = await import("../model.js");
-            // Large enough that background log sync cannot complete in the
-            // instants between overlay activation and the donor stop below —
-            // the 5.3.33 ingest speedup outran the old 1,000-file window on
-            // slow CI runners, dissolving the stall this test exercises.
-            const donor = await populatedDonor(3000);
+            // Deep-history donor: a SMALL snapshot (heads only) over a LARGE
+            // log (superseded versions). The joiner's overlay activates after
+            // a few segment fetches while the log still has thousands of
+            // history entries to stream — so stranding it mid-sync is
+            // structural, not a timing race a fast runner can dissolve
+            // (both fixed-size 1,000- and 3,000-file trees raced on CI).
+            const donor = await (async () => {
+                const peer = await createPeer();
+                const fs = await openSharedFs({
+                    peerbit: peer,
+                    machineLabel: "donor",
+                });
+                await fs.writeBatch(
+                    Array.from({ length: 400 }, (_, i) => ({
+                        path: `/tree/dir-${i % 10}/file-${i}.txt`,
+                        content: `content ${i}`,
+                    }))
+                );
+                for (let round = 1; round <= 8; round++) {
+                    await fs.writeBatch(
+                        Array.from({ length: 400 }, (_, i) => ({
+                            path: `/tree/dir-${i % 10}/file-${i}.txt`,
+                            content: `round ${round} content ${i}`,
+                        }))
+                    );
+                }
+                await fs.writeFile("/tree/dir-0/file-0.txt", "edited content");
+                await fs.rm("/tree/dir-1/file-1.txt");
+                const snapshot = await fs.snapshotWrite();
+                return { peer, fs, snapshot };
+            })();
             const joinerPeer = await createPeer();
             await joinerPeer.dial(donor.peer);
             const joiner = await openSharedFs({
@@ -352,13 +378,20 @@ describe("shared fs cold-start bootstrap", () => {
             const program: any = joiner.program;
             let sharedContent: string | undefined;
             let sharedChunkId: string | undefined;
-            for (let i = 999; i >= 0; i--) {
-                const candidate = `content ${i}`;
-                const id = chunkIdForBytes(new TextEncoder().encode(candidate));
-                if (!(await program.hasDocument(id))) {
-                    sharedContent = candidate;
-                    sharedChunkId = id;
-                    break;
+            // Overlay heads carry the final round's content; scan back
+            // through history rounds so a partially streamed chunk set can
+            // always yield an absent-but-referenced candidate.
+            outer: for (let round = 8; round >= 1; round--) {
+                for (let i = 399; i >= 0; i--) {
+                    const candidate = `round ${round} content ${i}`;
+                    const id = chunkIdForBytes(
+                        new TextEncoder().encode(candidate)
+                    );
+                    if (!(await program.hasDocument(id))) {
+                        sharedContent = candidate;
+                        sharedChunkId = id;
+                        break outer;
+                    }
                 }
             }
             expect(sharedContent).toBeDefined();
