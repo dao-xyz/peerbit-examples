@@ -129,6 +129,11 @@ const TRACKER_LRU_CAP = 4096;
 const EMITTED_LATCH_CAP = 65_536;
 const HISTORIC_CHECK_INTERVAL_MS = 30_000;
 const MISSING_DIAGNOSTIC_CAP = 100;
+/** Manifests tracked per changeset id; a trusted-but-rogue writer minting
+ *  endless distinct manifests must not grow tracker state without bound. */
+const MAX_MANIFESTS_PER_TRACKER = 64;
+const PROBED_IDS_CAP = 4096;
+const TRACKER_BUFFER_CAP = 50_000;
 
 type ManifestTrack = {
     manifestId: string;
@@ -160,7 +165,11 @@ type Tracker = {
     observed: Set<string>;
     waiters: Waiter[];
     initialized: Promise<void>;
-    buffer: { added: string[]; manifests: ChangesetManifest[] } | null;
+    buffer: {
+        added: string[];
+        manifests: ChangesetManifest[];
+        overflow: boolean;
+    } | null;
     lastTouched: number;
     pinned: number;
 };
@@ -184,6 +193,8 @@ export class ChangesetBarrierHub {
     private streams = new Set<ChangesetStreamImpl>();
     private emittedOnce = new Set<string>();
     private probedIds = new Set<string>();
+    /** Trackers whose init buffer is live — the only ones the tap scans. */
+    private bufferingTrackers = new Set<Tracker>();
     private historicTimer?: ReturnType<typeof setInterval>;
     /** Complete-emissions queued while the bootstrap overlay serves reads. */
     private overlayQueue: ChangesetEvent[] = [];
@@ -214,6 +225,10 @@ export class ChangesetBarrierHub {
                 // interest, while a global stream exists, probes ONCE for
                 // its manifest (covers the manifest-before-restart /
                 // members-after straddle for push consumers).
+                if (this.probedIds.size >= PROBED_IDS_CAP) {
+                    const oldest = this.probedIds.values().next().value;
+                    if (oldest !== undefined) this.probedIds.delete(oldest);
+                }
                 this.probedIds.add(changesetId);
                 queueMicrotask(() => {
                     void this.ensureTracker(changesetId, false).catch(() => {});
@@ -283,9 +298,9 @@ export class ChangesetBarrierHub {
     ): Promise<Tracker> {
         let tracker = this.trackers.get(changesetId);
         if (tracker) {
-            if (pin) tracker.pinned += 1;
             this.touch(tracker);
             await tracker.initialized;
+            if (pin) tracker.pinned += 1; // only after a successful init
             return tracker;
         }
         // Register with a buffer BEFORE any query: the tap routes matching
@@ -296,11 +311,12 @@ export class ChangesetBarrierHub {
             observed: new Set(),
             waiters: [],
             initialized: undefined as any,
-            buffer: { added: [], manifests: [] },
+            buffer: { added: [], manifests: [], overflow: false },
             lastTouched: this.host.clock(),
-            pinned: pin ? 1 : 0,
+            pinned: 0,
         };
         this.trackers.set(changesetId, fresh);
+        this.bufferingTrackers.add(fresh);
         fresh.initialized = (async () => {
             const manifests = await this.host.manifestsFor(changesetId);
             const arrived = await this.host.arrivedMemberIds(changesetId);
@@ -311,15 +327,31 @@ export class ChangesetBarrierHub {
             // Drain the buffer through the normal paths.
             const buffered = fresh.buffer;
             fresh.buffer = null;
+            this.bufferingTrackers.delete(fresh);
             for (const manifest of buffered?.manifests ?? []) {
                 await this.installManifest(fresh, manifest, undefined);
             }
             for (const id of buffered?.added ?? []) {
                 this.observeOnTracker(fresh, id);
             }
+            if (buffered?.overflow) {
+                // The buffer saturated during init: re-probe the indexed
+                // fast path once so nothing recorded there is missed.
+                const again = await this.host.arrivedMemberIds(changesetId);
+                for (const id of again) this.observeOnTracker(fresh, id);
+            }
             this.evaluateCompletion(fresh);
         })();
-        await fresh.initialized;
+        try {
+            await fresh.initialized;
+        } catch (error) {
+            // A failed probe must not poison the id for the session: the
+            // next call re-registers and re-probes from scratch.
+            this.bufferingTrackers.delete(fresh);
+            this.dropTracker(fresh);
+            throw error;
+        }
+        if (pin) fresh.pinned += 1;
         this.evictIfNeeded();
         return fresh;
     }
@@ -331,6 +363,10 @@ export class ChangesetBarrierHub {
         localArrivalMs: number | undefined
     ): Promise<void> {
         if (tracker.manifests.has(manifest.id)) return;
+        if (tracker.manifests.size >= MAX_MANIFESTS_PER_TRACKER) {
+            // Bounded against manifest-minting writers; documented cap.
+            return;
+        }
         const memberIds = memberIdsOf(manifest);
         const track: ManifestTrack = {
             manifestId: manifest.id,
@@ -341,20 +377,10 @@ export class ChangesetBarrierHub {
             expected: memberIds.length,
             pending: new Set(memberIds),
         };
+        // Register BEFORE any await: arrivals during the residue probes
+        // route through pendingIndex/observeOnTracker (idempotent deletes),
+        // so no admission in the probe window can be lost.
         tracker.manifests.set(manifest.id, track);
-        // Fast-path observations (changesetId-stamped rows) first...
-        for (const id of [...track.pending!]) {
-            if (tracker.observed.has(id)) track.pending!.delete(id);
-        }
-        // ...then the residue id-probe: adopted members carry foreign or
-        // absent changesetId stamps; arrival means "a document with this
-        // id was admitted", period.
-        for (const id of [...track.pending!]) {
-            if (await this.host.hasDocumentId(id)) {
-                tracker.observed.add(id);
-                track.pending!.delete(id);
-            }
-        }
         for (const id of track.pending!) {
             let set = this.pendingIndex.get(id);
             if (!set) {
@@ -363,7 +389,28 @@ export class ChangesetBarrierHub {
             }
             set.add(tracker);
         }
-        if (track.pending!.size === 0) track.pending = null;
+        if (track.pending!.size > 0) {
+            // A new incomplete manifest reopens the transition: the next
+            // completion must fire a fresh complete event (latch is per
+            // transition, not per changeset id forever).
+            this.emittedOnce.delete(`${tracker.changesetId}#complete`);
+        }
+        // Fast-path observations (changesetId-stamped rows) first...
+        for (const id of [...track.pending!]) {
+            if (tracker.observed.has(id)) {
+                this.observeOnTracker(tracker, id);
+            }
+        }
+        // ...then the residue id-probe: adopted members carry foreign or
+        // absent changesetId stamps; arrival means "a document with this
+        // id was admitted", period.
+        for (const id of [...(track.pending ?? [])]) {
+            if (track.pending === null) break;
+            if (await this.host.hasDocumentId(id)) {
+                this.observeOnTracker(tracker, id);
+            }
+        }
+        if (track.pending && track.pending.size === 0) track.pending = null;
         this.emitEvent({
             type: "manifest",
             changesetId: tracker.changesetId,
@@ -403,6 +450,17 @@ export class ChangesetBarrierHub {
         track.removed = true;
         if (track.pending && track.pending.size > 0) {
             for (const id of track.pending) {
+                // Keep routing alive for ids a sibling manifest still gates
+                // on — a sweep of one manifest must not sever the others.
+                let stillNeeded = false;
+                for (const other of tracker.manifests.values()) {
+                    if (other === track || other.removed) continue;
+                    if (other.pending?.has(id)) {
+                        stillNeeded = true;
+                        break;
+                    }
+                }
+                if (stillNeeded) continue;
                 const set = this.pendingIndex.get(id);
                 set?.delete(tracker);
                 if (set && set.size === 0) this.pendingIndex.delete(id);
@@ -418,25 +476,35 @@ export class ChangesetBarrierHub {
                 this.observeOnTracker(tracker, id);
             }
         }
-        // Buffered trackers record raw ids for the drain.
-        for (const tracker of this.trackers.values()) {
-            tracker.buffer?.added.push(id);
+        // Only trackers with a live init buffer record raw ids.
+        for (const tracker of this.bufferingTrackers) {
+            const buffer = tracker.buffer;
+            if (!buffer) continue;
+            if (buffer.added.length >= TRACKER_BUFFER_CAP) {
+                buffer.overflow = true;
+                continue;
+            }
+            buffer.added.push(id);
         }
     }
 
     private observeOnTracker(tracker: Tracker, id: string): void {
         tracker.observed.add(id);
-        let progressed = false;
+        let transitioned = false;
         for (const track of tracker.manifests.values()) {
             if (track.pending?.delete(id)) {
-                progressed = true;
-                if (track.pending.size === 0) track.pending = null;
+                if (track.pending.size === 0) {
+                    track.pending = null;
+                    transitioned = true;
+                }
             }
         }
         const set = this.pendingIndex.get(id);
         set?.delete(tracker);
         if (set && set.size === 0) this.pendingIndex.delete(id);
-        if (progressed) {
+        // Full evaluation is O(members): run it only when a manifest just
+        // completed (per-arrival work stays O(1) map/set ops).
+        if (transitioned) {
             queueMicrotask(() => this.evaluateCompletion(tracker));
         }
     }
@@ -507,11 +575,14 @@ export class ChangesetBarrierHub {
         const gatingIncomplete = inScope.filter(
             (m) => !m.complete && !m.removed
         );
+        // A manifest observed complete stays complete even after GC
+        // sweeps the manifest document: completeness is an observation the
+        // sweep never falsifies.
         const complete =
             known &&
             inScope.length > 0 &&
             gatingIncomplete.length === 0 &&
-            inScope.some((m) => !m.removed);
+            inScope.some((m) => m.complete);
         let verdict: ChangesetVerdict;
         if (!known) {
             verdict = "unknown";
@@ -562,7 +633,13 @@ export class ChangesetBarrierHub {
             const latch = `${tracker.changesetId}#complete`;
             if (!this.emittedOnce.has(latch)) {
                 if (this.emittedOnce.size >= EMITTED_LATCH_CAP) {
-                    this.emittedOnce.clear();
+                    // Evict the oldest half (insertion order), never all —
+                    // a full clear would re-fire completes for live ids.
+                    let toDrop = EMITTED_LATCH_CAP >> 1;
+                    for (const key of this.emittedOnce) {
+                        if (toDrop-- <= 0) break;
+                        this.emittedOnce.delete(key);
+                    }
                 }
                 this.emittedOnce.add(latch);
                 this.emitEvent({
@@ -636,6 +713,9 @@ export class ChangesetBarrierHub {
 
     /** Install (or refresh) a tracker without pinning or waiting. */
     async ensure(changesetId: string): Promise<void> {
+        if (this.closed) {
+            throw this.host.makeError("ECLOSED", "store closed");
+        }
         await this.ensureTracker(changesetId, false);
     }
 
@@ -646,15 +726,77 @@ export class ChangesetBarrierHub {
         if (this.closed) {
             throw this.host.makeError("ECLOSED", "store closed");
         }
+        // One deadline spans the WHOLE call — including the bootstrap
+        // convergence wait and tracker init — so a 30s timeout during a
+        // 15-minute overlay window rejects at 30s with bootstrapPhase
+        // attached instead of silently blocking.
+        const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        const startedAt = this.host.clock();
+        const timedOutError = () => {
+            const error: any = this.host.makeError(
+                "ETIMEDOUT",
+                `awaitChangeset(${changesetId}) timed out after ${timeoutMs}ms`
+            );
+            error.status = this.status(
+                changesetId,
+                options.manifestId,
+                options.authors,
+                options.historicThresholdMs ?? DEFAULT_HISTORIC_THRESHOLD_MS
+            );
+            return error;
+        };
+        const race = async <T>(work: Promise<T>): Promise<T> => {
+            if (!Number.isFinite(timeoutMs) && !options.signal) return work;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let onAbort: (() => void) | undefined;
+            try {
+                return await new Promise<T>((resolve, reject) => {
+                    if (Number.isFinite(timeoutMs)) {
+                        const remaining = Math.max(
+                            0,
+                            timeoutMs - (this.host.clock() - startedAt)
+                        );
+                        timer = setTimeout(
+                            () => reject(timedOutError()),
+                            remaining
+                        );
+                    }
+                    if (options.signal) {
+                        onAbort = () =>
+                            reject(
+                                this.host.makeError(
+                                    "EINVAL",
+                                    "awaitChangeset aborted"
+                                )
+                            );
+                        if (options.signal.aborted) {
+                            onAbort();
+                            return;
+                        }
+                        options.signal.addEventListener("abort", onAbort, {
+                            once: true,
+                        });
+                    }
+                    work.then(resolve, reject);
+                });
+            } finally {
+                if (timer) clearTimeout(timer);
+                if (onAbort) {
+                    options.signal?.removeEventListener("abort", onAbort);
+                }
+            }
+        };
         if (this.host.overlayActive() && !options.allowPartial) {
             // Compose bootstrap convergence: overlay-served docs never
             // enter the feed/index, so counting now would under-count for
             // the whole overlay window. awaitBootstrapConverged settles on
             // every terminal transition — this cannot wedge.
-            await this.host.awaitBootstrapConverged();
+            await race(this.host.awaitBootstrapConverged());
         }
-        const tracker = await this.ensureTracker(changesetId, true);
-        const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        const tracker = await race(this.ensureTracker(changesetId, false));
+        if (this.closed) {
+            throw this.host.makeError("ECLOSED", "store closed");
+        }
         return new Promise<ChangesetStatus>((resolve, reject) => {
             const waiter: Waiter = {
                 scopeManifestId: options.manifestId,
@@ -666,6 +808,7 @@ export class ChangesetBarrierHub {
                 reject,
                 settled: false,
             };
+            tracker.pinned += 1; // finishWaiter releases it
             const finishRejected = (error: Error) => {
                 if (waiter.settled) return;
                 this.finishWaiter(waiter, tracker);
@@ -673,19 +816,14 @@ export class ChangesetBarrierHub {
                 reject(error);
             };
             if (Number.isFinite(timeoutMs)) {
-                waiter.timer = setTimeout(() => {
-                    const error: any = this.host.makeError(
-                        "ETIMEDOUT",
-                        `awaitChangeset(${changesetId}) timed out after ${timeoutMs}ms`
-                    );
-                    error.status = this.status(
-                        changesetId,
-                        options.manifestId,
-                        options.authors,
-                        waiter.historicThresholdMs
-                    );
-                    finishRejected(error);
-                }, timeoutMs);
+                const remaining = Math.max(
+                    0,
+                    timeoutMs - (this.host.clock() - startedAt)
+                );
+                waiter.timer = setTimeout(
+                    () => finishRejected(timedOutError()),
+                    remaining
+                );
             }
             if (options.signal) {
                 const onAbort = () =>
@@ -725,9 +863,12 @@ export class ChangesetBarrierHub {
             once: true,
         });
         if (options?.changesetId) {
-            // Scoped streams pin their tracker while subscribed.
-            void this.ensureTracker(options.changesetId, true)
+            // Scoped streams pin their tracker while subscribed; a stream
+            // that closed before the tracker resolved releases immediately.
+            void this.ensureTracker(options.changesetId, false)
                 .then((tracker) => {
+                    if (stream.closed) return;
+                    tracker.pinned += 1;
                     stream.onClose(() => {
                         tracker.pinned = Math.max(0, tracker.pinned - 1);
                     });

@@ -108,8 +108,10 @@ describe("shared fs changeset barrier", () => {
             ],
             { changesetId: "del-turn", manifest: true }
         );
-        // 1 version + 1 tombstone = 2 members.
-        expect(result.manifest!.memberCount).toBe(2);
+        // 1 version + 1 tombstone + the edited file's adopted naming
+        // winner (adoption closure: an edit's visibility needs its naming
+        // event, so a reordered replica cannot certify an invisible file).
+        expect(result.manifest!.memberCount).toBe(3);
         const status = await fsB.awaitChangeset("del-turn", {
             manifestId: result.manifest!.manifestId,
         });

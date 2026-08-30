@@ -2762,6 +2762,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     })
                 );
                 results[i] = undefined;
+                if (options.manifest) {
+                    await adoptAncestorWinners(entry.path);
+                }
                 continue;
             }
             if (resolved?.kind === "directory" || resolved?.kind === "root") {
@@ -2826,6 +2829,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 changesetId,
             });
             versions.push(version);
+            if (existingNodeId && options.manifest && resolved) {
+                // Applied EDIT: a reader needs the node's naming winner and
+                // its ancestors to SEE the new version — adopt the young
+                // ones so a reordered replica cannot certify an invisible
+                // file (adoption closure rule c).
+                if (youngEnough(resolved.winner.createdAt)) {
+                    adoptNamingIds.add(resolved.winner.id);
+                }
+                await adoptAncestorWinners(entry.path);
+            }
             if (!existingNodeId) {
                 await adoptAncestorWinners(entry.path);
                 const parentId = await resolveParentWithOverlay(entry.path);
@@ -4001,7 +4014,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         row.id
                     );
                     if (doc instanceof ChangesetManifest) {
-                        out.push({ manifest: doc });
+                        out.push({
+                            manifest: doc,
+                            localArrivalMs: this.contextModifiedMs(
+                                row.__context
+                            ),
+                        });
                     }
                 }
                 return out;
