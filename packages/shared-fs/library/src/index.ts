@@ -15,6 +15,7 @@ import {
     sha256Base64Sync,
     sha256Sync,
     toBase64,
+    fromBase64URL,
     toBase64URL,
     verify,
 } from "@peerbit/crypto";
@@ -33,6 +34,9 @@ import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
 import {
     BootstrapManifest,
+    CHANGESET_MANIFEST_FORMAT_VERSION,
+    ChangesetManifest,
+    ChangesetManifestPayload,
     FileChunk,
     FileVersion,
     IndexableSharedFsEntry,
@@ -455,10 +459,23 @@ export type WriteBatchOptions = {
      * WriteBatchResult.skipped.
      */
     onIgnored?: "reject" | "skip";
+    /**
+     * Publish a changeset manifest recording this batch's exact membership
+     * (committed AFTER every member document), enabling awaitChangeset /
+     * changesetStatus / watchChangesets on every replica. Default false.
+     */
+    manifest?: boolean;
 };
 
 export type WriteBatchResult = {
     changesetId: string;
+    /**
+     * Present iff options.manifest: the admitted manifest and its member
+     * count. memberCount === 0 means the batch required no propagation
+     * (the barrier completes immediately everywhere); it certifies only
+     * that, never prior batches' propagation.
+     */
+    manifest?: { manifestId: string; memberCount: number };
     /**
      * Entries dropped by the artifact-ignore layer under
      * `onIgnored: "skip"` — explicit, never conflated with the undefined
@@ -489,7 +506,11 @@ export type SharedFsErrorCode =
     /** The operation crosses an artifact-ignore boundary. */
     | "EXDEV"
     /** A watch subscription's materialized view exceeded its node budget. */
-    | "EWATCHLIMIT";
+    | "EWATCHLIMIT"
+    /** An awaited operation exceeded its timeout. */
+    | "ETIMEDOUT"
+    /** The store closed while an awaited operation was pending. */
+    | "ECLOSED";
 
 /**
  * Typed filesystem error so adapters can map failures to POSIX errno values
@@ -825,6 +846,20 @@ const SNAPSHOT_MAX_SEGMENT_COUNT = 256;
 const SNAPSHOT_TARGET_SEGMENT_BYTES = 384_000;
 const SNAPSHOT_EST_DOC_BYTES = 384;
 const MANIFEST_PAYLOAD_CAP_BYTES = 100_000;
+/** Members per changeset manifest, versions+naming combined. 12k x 36B is
+ *  ~432KB payload — under the 512KiB chunk envelope, the largest document
+ *  the store demonstrably ships. A manifest:true batch above this throws
+ *  EINVAL before anything is put. */
+const CHANGESET_MANIFEST_MAX_MEMBERS = 12_000;
+const CHANGESET_MANIFEST_PAYLOAD_CAP_BYTES = 460_800; // 450 KiB
+/** Future-dated createdAtWallMs bound at ingest: a forged future stamp can
+ *  neither dodge the GC sweep indefinitely nor stall the historic verdict
+ *  beyond this skew. */
+const CHANGESET_MANIFEST_MAX_CLOCK_SKEW_MS = 3_600_000; // 1h
+/** Adoption horizon: no-op satisfiers younger than this are adopted into
+ *  membership (48h = the GC grace floor, so adopted ids are unretirable on
+ *  every conforming replica); older satisfiers are settled pre-history. */
+const CHANGESET_ADOPTION_HORIZON_MS = 172_800_000; // 48h
 const BOOTSTRAP_DEFAULTS = {
     maxSnapshotAgeMs: 2 * 60 * 60 * 1000,
     discoveryTimeoutMs: 5_000,
@@ -1050,7 +1085,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // never attach to the same log and fail confusingly
         // mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v8")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v9")])),
         });
     }
 
@@ -1393,6 +1428,62 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     value.id !==
                         `bootstrap:${encodePublicSignKey(signature.publicKey)}` ||
                     !equalBytes(payload.storeId, this.id) ||
+                    !(await verify(signature, value.payloadBytes))
+                ) {
+                    return false;
+                }
+                if (
+                    this.trustGraph &&
+                    !(await this.trustGraph.isTrusted(signature.publicKey))
+                ) {
+                    return false;
+                }
+            }
+            if (value instanceof ChangesetManifest) {
+                // A write-set membership record: self-certifying id (hash
+                // of the payload), inner-signed, bounded, bound to THIS
+                // store, with index mirrors enforced equal to the payload —
+                // the mirrors are what the index and the turn barrier
+                // trust, so authorKey on this kind is authenticated.
+                if (
+                    value.payloadBytes.byteLength >
+                    CHANGESET_MANIFEST_PAYLOAD_CAP_BYTES
+                ) {
+                    return false;
+                }
+                let signature: SignatureWithKey;
+                let payload: ChangesetManifestPayload;
+                try {
+                    signature = deserialize(
+                        value.signatureBytes,
+                        SignatureWithKey
+                    );
+                    payload = deserialize(
+                        value.payloadBytes,
+                        ChangesetManifestPayload
+                    );
+                } catch {
+                    return false;
+                }
+                if (
+                    value.id !==
+                        `changeset-manifest:${sha256Base64Sync(value.payloadBytes)}` ||
+                    payload.formatVersion !==
+                        CHANGESET_MANIFEST_FORMAT_VERSION ||
+                    !equalBytes(payload.storeId, this.id) ||
+                    !validChangesetId(payload.changesetId) ||
+                    value.changesetId !== payload.changesetId ||
+                    value.createdAtWallMs !== payload.createdAtWallMs ||
+                    value.authorKey !==
+                        encodePublicSignKey(signature.publicKey) ||
+                    payload.createdAtWallMs >
+                        BigInt(
+                            Math.floor(this.clock()) +
+                                CHANGESET_MANIFEST_MAX_CLOCK_SKEW_MS
+                        ) ||
+                    payload.versionMembers.length +
+                        payload.namingMembers.length >
+                        CHANGESET_MANIFEST_MAX_MEMBERS ||
                     !(await verify(signature, value.payloadBytes))
                 ) {
                     return false;
@@ -2443,6 +2534,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         if (entries.length === 0) {
+            if (options.manifest) {
+                const manifest = await this.publishChangesetManifest(
+                    changesetId,
+                    [],
+                    []
+                );
+                return { changesetId, manifest, results: [] };
+            }
             return { changesetId, results: [] };
         }
         if (entries.length > 10_000) {
@@ -2549,6 +2648,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const results: (SharedFsVersionInfo | undefined)[] = new Array(
             normalizedEntries.length
         );
+        // Adoption closure (manifest batches only): no-op entries adopt the
+        // young documents that already satisfy them — the matching head
+        // version, the node's winning naming event, and young ancestor
+        // directory winners — so a same-changesetId retry after a crash
+        // certifies exactly the real turn's documents instead of a
+        // zero-member manifest that completes remote barriers early.
+        const adoptVersionIds = new Set<string>();
+        const adoptNamingIds = new Set<string>();
+        const adoptionNow = BigInt(Math.floor(this.clock()));
+        const youngEnough = (createdAt: bigint) =>
+            adoptionNow - createdAt <= BigInt(CHANGESET_ADOPTION_HORIZON_MS);
+        const adoptAncestorWinners = async (path: string) => {
+            if (!options.manifest) return;
+            const parentPath = dirname(path);
+            if (parentPath === "/") return;
+            let parentId: string = ROOT_NODE_ID;
+            let currentPath = "/";
+            for (const name of pathSegments(parentPath)) {
+                currentPath = joinFsPath(currentPath, name);
+                if (createdDirs.has(currentPath)) return; // fresh members
+                const slot = await this.slotResolution(parentId, name);
+                if (!slot || nodeKindOf(slot.nodeId) === "file") return;
+                if (youngEnough(slot.state.winner.createdAt)) {
+                    adoptNamingIds.add(slot.state.winner.id);
+                }
+                parentId = slot.nodeId;
+            }
+        };
         const versions: FileVersion[] = [];
         const createNamingEvents: NamingEvent[] = [];
         const deleteNamingEvents: NamingEvent[] = [];
@@ -2572,6 +2699,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 if (!resolved) {
                     results[i] = undefined; // delete of nothing is a no-op
+                    if (options.manifest) {
+                        // A young winning tombstone for a node formerly at
+                        // this path satisfies the delete: adopt it so a
+                        // retry certifies the real removal.
+                        const tombstone = await this.youngTombstoneAt(
+                            entry.path,
+                            youngEnough
+                        );
+                        if (tombstone) {
+                            adoptNamingIds.add(tombstone);
+                            await adoptAncestorWinners(entry.path);
+                        }
+                    }
                     continue;
                 }
                 if (resolved.state.heads.length > 8000) {
@@ -2624,6 +2764,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 currentHeads[0].contentHash === contentHash
             ) {
                 results[i] = undefined; // unchanged content: no-op
+                if (options.manifest && resolved) {
+                    if (youngEnough(currentHeads[0].createdAt)) {
+                        adoptVersionIds.add(currentHeads[0].id);
+                    }
+                    if (youngEnough(resolved.winner.createdAt)) {
+                        adoptNamingIds.add(resolved.winner.id);
+                    }
+                    await adoptAncestorWinners(entry.path);
+                }
                 continue;
             }
             const orderedChunks = chunkBytes(bytes, entry.chunkSize).map(
@@ -2660,6 +2809,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             });
             versions.push(version);
             if (!existingNodeId) {
+                await adoptAncestorWinners(entry.path);
                 const parentId = await resolveParentWithOverlay(entry.path);
                 createNamingEvents.push(
                     new NamingEvent({
@@ -2683,11 +2833,51 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ]);
         }
 
+        const namingEvents = [
+            ...[...createdDirs.values()].map((made) => made.event),
+            ...createNamingEvents,
+            ...deleteNamingEvents,
+        ];
+        // Manifest membership + caps settle BEFORE anything is put: an
+        // over-cap batch fails with nothing committed.
+        let manifestMembers:
+            | { versionIds: string[]; namingIds: string[] }
+            | undefined;
+        if (options.manifest) {
+            const freshVersionIds = versions.map((version) => version.id);
+            const freshNamingIds = namingEvents.map((event) => event.id);
+            const freshVersionSet = new Set(freshVersionIds);
+            const freshNamingSet = new Set(freshNamingIds);
+            manifestMembers = {
+                versionIds: [
+                    ...freshVersionIds,
+                    ...[...adoptVersionIds].filter(
+                        (id) => !freshVersionSet.has(id)
+                    ),
+                ],
+                namingIds: [
+                    ...freshNamingIds,
+                    ...[...adoptNamingIds].filter(
+                        (id) => !freshNamingSet.has(id)
+                    ),
+                ],
+            };
+            const memberCount =
+                manifestMembers.versionIds.length +
+                manifestMembers.namingIds.length;
+            if (memberCount > CHANGESET_MANIFEST_MAX_MEMBERS) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `manifest member cap (${CHANGESET_MANIFEST_MAX_MEMBERS}) exceeded (${memberCount}); split the turn into smaller batches`
+                );
+            }
+        }
         // Content first, then versions, then naming (directories, creates,
-        // deletes last): a crashed or replicated prefix never shows a
-        // partially present NEW file, and never loses data — old files stay
-        // visible until every create has landed. Edits to existing files
-        // become visible at the versions phase (see the docstring).
+        // deletes last), then the manifest LAST: a crashed or replicated
+        // prefix never shows a partially present NEW file, never loses
+        // data — and never certifies: local manifest durability implies
+        // every member was durably committed first. Edits to existing
+        // files become visible at the versions phase (see the docstring).
         await this.touchChunks([...allChunks.values()], options.dedup);
         if (versions.length > 0) {
             await this.entries.putMany(versions, { unique: true });
@@ -2703,13 +2893,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             );
         }
-        const namingEvents = [
-            ...[...createdDirs.values()].map((made) => made.event),
-            ...createNamingEvents,
-            ...deleteNamingEvents,
-        ];
         if (namingEvents.length > 0) {
             await this.entries.putMany(namingEvents, { unique: true });
+        }
+        let manifestResult: WriteBatchResult["manifest"];
+        if (manifestMembers) {
+            manifestResult = await this.publishChangesetManifest(
+                changesetId,
+                manifestMembers.versionIds,
+                manifestMembers.namingIds
+            );
         }
         for (const version of versions) {
             this.cacheLocalWrite(version);
@@ -2717,7 +2910,103 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         for (const event of namingEvents) {
             this.cacheLocalWrite(event);
         }
-        return { changesetId, results };
+        return { changesetId, manifest: manifestResult, results };
+    }
+
+    /** A young winning delete tombstone for whatever node last held a path
+     *  (adoption closure for no-op deletes). */
+    private async youngTombstoneAt(
+        path: string,
+        youngEnough: (createdAt: bigint) => boolean
+    ): Promise<string | undefined> {
+        const parentPath = dirname(path);
+        const name = basename(path);
+        const parent = await this.resolvePath(parentPath);
+        if (!parent || parent.kind === "file") return undefined;
+        const parentId = parent.kind === "root" ? ROOT_NODE_ID : parent.nodeId;
+        const slotRows = await this.sweepRows(parentId);
+        const nodeIds = [
+            ...new Set(
+                slotRows
+                    .filter((row) => row.name === name)
+                    .map((row) => row.nodeId)
+            ),
+        ];
+        if (nodeIds.length === 0) return undefined;
+        const states = await this.namingStatesForNodes(nodeIds);
+        for (const nodeId of nodeIds) {
+            const state = states.get(nodeId);
+            if (
+                state?.winner.deleted &&
+                state.winner.parentId === parentId &&
+                state.winner.name === name &&
+                youngEnough(state.winner.createdAt)
+            ) {
+                return state.winner.id;
+            }
+        }
+        return undefined;
+    }
+
+    /** Build, sign, and commit a changeset manifest AFTER its members. */
+    private async publishChangesetManifest(
+        changesetId: string,
+        versionIds: string[],
+        namingIds: string[]
+    ): Promise<{ manifestId: string; memberCount: number }> {
+        const decodeSuffix = (id: string, prefix: string): Uint8Array => {
+            const raw = fromBase64URL(id.slice(prefix.length));
+            if (raw.byteLength !== 32) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `member id is not a 32-byte identity: ${id}`
+                );
+            }
+            return raw;
+        };
+        const versionMembers = versionIds.map((id) =>
+            decodeSuffix(id, "version:")
+        );
+        const namingMembers = namingIds.map((id) =>
+            decodeSuffix(id, "naming:")
+        );
+        const membershipDigest = sha256Sync(
+            concat([
+                Uint8Array.of(1),
+                ...versionMembers,
+                Uint8Array.of(2),
+                ...namingMembers,
+            ])
+        );
+        const payload = new ChangesetManifestPayload({
+            storeId: this.id,
+            changesetId,
+            createdAtWallMs: BigInt(Math.floor(this.clock())),
+            versionMembers,
+            namingMembers,
+            membershipDigest,
+        });
+        const payloadBytes = serialize(payload);
+        if (payloadBytes.byteLength > CHANGESET_MANIFEST_PAYLOAD_CAP_BYTES) {
+            throw new SharedFsError(
+                "EINVAL",
+                `manifest payload exceeds ${CHANGESET_MANIFEST_PAYLOAD_CAP_BYTES} bytes; split the turn`
+            );
+        }
+        const signature = await this.node.identity.sign(payloadBytes);
+        const manifest = new ChangesetManifest({
+            id: `changeset-manifest:${sha256Base64Sync(payloadBytes)}`,
+            changesetId,
+            authorKey: encodePublicSignKey(signature.publicKey),
+            createdAtWallMs: payload.createdAtWallMs,
+            payloadBytes,
+            signatureBytes: serialize(signature),
+        });
+        await this.putPreferLinked(manifest);
+        return {
+            manifestId: manifest.id,
+            memberCount: versionMembers.length + namingMembers.length,
+        };
     }
 
     /**

@@ -21,7 +21,8 @@ export type SharedFsEntryKind =
     | "naming"
     | "file-version"
     | "file-chunk"
-    | "bootstrap-manifest";
+    | "bootstrap-manifest"
+    | "changeset-manifest";
 
 export abstract class SharedFsEntry {
     abstract id: string;
@@ -136,6 +137,14 @@ export class IndexableSharedFsEntry {
             this.changesetId = value.changesetId;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
+        } else if (value instanceof ChangesetManifest) {
+            this.kind = "changeset-manifest";
+            // NOTE: authorKey is ADVISORY attribution on naming/version rows
+            // but AUTHENTICATED here — canPerform enforces equality with the
+            // manifest's inner signature before the row exists.
+            this.changesetId = value.changesetId;
+            this.authorKey = value.authorKey;
+            this.createdAt = value.createdAtWallMs;
         } else {
             this.kind = value.kind;
         }
@@ -567,6 +576,129 @@ export class BootstrapManifest extends SharedFsEntry {
         super();
         if (properties) {
             this.id = properties.id;
+            this.payloadBytes = properties.payloadBytes;
+            this.signatureBytes = properties.signatureBytes;
+        }
+    }
+}
+
+export const CHANGESET_MANIFEST_FORMAT_VERSION = 1;
+
+/**
+ * The exact membership of one write-set (turn): the ids of every member
+ * document a reader must observe admitted before the turn is complete on
+ * its replica. Member ids are 32 unguessable random bytes bound under the
+ * inner signature — no other writer can satisfy or extend a manifest-scoped
+ * barrier.
+ */
+export class ChangesetManifestPayload {
+    @field({ type: "u32" })
+    formatVersion: number;
+
+    /** Program id: binds the manifest to one filesystem (no replay). */
+    @field({ type: fixedArray("u8", 32) })
+    storeId: Uint8Array;
+
+    /** The write-set identity; 1..256 chars. */
+    @field({ type: "string" })
+    changesetId: string;
+
+    /** Writer wall clock at commit; ingest-bounded to <= now + 1h skew. */
+    @field({ type: "u64" })
+    createdAtWallMs: bigint;
+
+    /**
+     * Raw 32-byte suffixes of member FileVersion ids ("version:<b64url>"),
+     * in commit order; adopted satisfier ids appended.
+     */
+    @field({ type: vec(fixedArray("u8", 32)) })
+    versionMembers: Uint8Array[];
+
+    /**
+     * Raw 32-byte suffixes of member NamingEvent ids ("naming:<b64url>"),
+     * order: created dirs, creates, deletes last; adopted ids appended.
+     */
+    @field({ type: vec(fixedArray("u8", 32)) })
+    namingMembers: Uint8Array[];
+
+    /**
+     * sha256 over (0x01 || versionMembers || 0x02 || namingMembers) in
+     * payload order — comparison anchor; the signature binds the lists.
+     */
+    @field({ type: fixedArray("u8", 32) })
+    membershipDigest: Uint8Array;
+
+    constructor(properties?: {
+        storeId: Uint8Array;
+        changesetId: string;
+        createdAtWallMs: bigint;
+        versionMembers: Uint8Array[];
+        namingMembers: Uint8Array[];
+        membershipDigest: Uint8Array;
+    }) {
+        this.formatVersion = CHANGESET_MANIFEST_FORMAT_VERSION;
+        if (properties) {
+            this.storeId = properties.storeId;
+            this.changesetId = properties.changesetId;
+            this.createdAtWallMs = properties.createdAtWallMs;
+            this.versionMembers = properties.versionMembers;
+            this.namingMembers = properties.namingMembers;
+            this.membershipDigest = properties.membershipDigest;
+        } else {
+            this.versionMembers = [];
+            this.namingMembers = [];
+        }
+    }
+}
+
+/**
+ * One write-set's membership record, published as an ordinary document —
+ * content-addressed (id = hash of the payload) and inner-signed, so
+ * authorKey on THIS kind is authenticated, unlike the advisory authorKey
+ * on naming/version documents.
+ */
+@variant("shared_fs_changeset_manifest")
+export class ChangesetManifest extends SharedFsEntry {
+    kind: SharedFsEntryKind = "changeset-manifest";
+
+    /** "changeset-manifest:" + sha256Base64(payloadBytes) — self-certifying. */
+    @field({ type: "string" })
+    id: string;
+
+    /** Index mirror of payload.changesetId (canPerform enforces equality). */
+    @field({ type: "string" })
+    changesetId: string;
+
+    /** Index mirror of the inner signer (canPerform enforces equality). */
+    @field({ type: "string" })
+    authorKey: string;
+
+    /** Index mirror of payload.createdAtWallMs (canPerform enforces equality). */
+    @field({ type: "u64" })
+    createdAtWallMs: bigint;
+
+    /** Serialized ChangesetManifestPayload. */
+    @field({ type: Uint8Array })
+    payloadBytes: Uint8Array;
+
+    /** Serialized SignatureWithKey over payloadBytes. */
+    @field({ type: Uint8Array })
+    signatureBytes: Uint8Array;
+
+    constructor(properties?: {
+        id: string;
+        changesetId: string;
+        authorKey: string;
+        createdAtWallMs: bigint;
+        payloadBytes: Uint8Array;
+        signatureBytes: Uint8Array;
+    }) {
+        super();
+        if (properties) {
+            this.id = properties.id;
+            this.changesetId = properties.changesetId;
+            this.authorKey = properties.authorKey;
+            this.createdAtWallMs = properties.createdAtWallMs;
             this.payloadBytes = properties.payloadBytes;
             this.signatureBytes = properties.signatureBytes;
         }
