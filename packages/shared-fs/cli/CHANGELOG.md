@@ -1,5 +1,72 @@
 # @peerbit/shared-fs-cli
 
+## 0.8.0
+
+### Minor Changes
+
+- b09682c: Change notification: `fs.watch(path?, options?)` subscribes to
+  filesystem-shaped events for a path or subtree, replacing polling as the way
+  embedders observe a live multi-party filesystem.
+    - Events are transitions of the view the read API serves: `created`,
+      `modified`, `deleted`, `renamed` with `path`/`oldPath`, `nodeId`,
+      `parentId`, `kind`, the visible `versionId`/`contentHash`, write-set
+      attribution (`changesetId`, `author`, `origin: "local"|"remote"`), and a
+      `cause` tag (`data`, `policy`, `overlay-timeout`, `snapshot`).
+    - Delivery is batch-shaped: one settle window (`settleMs`, default 20 ms;
+      `0` = microtask latency with `maxSettleMs` as the liveness cap) coalesces
+      churn, so a whole `writeBatch` typically arrives as one batch with per-node
+      net transitions. Applying a batch in order to a path-keyed mirror
+      reproduces recursive `list()`; a directory `deleted`/`renamed` carries its
+      subtree (descendants get no individual events).
+    - The watcher maintains a per-subscription materialized view diffed through
+      the same winner pipeline as `list()`/`stat()` (extracted as
+      `listByParentId`/`resolvePathDetailed`), so late-arriving causal history
+      that flips a winner surfaces as the correct rename/modify/delete — and
+      garbage collection, history retirement, and resurrection-guard re-puts
+      emit nothing. Removal-caused losses are quarantined until the guard
+      settles (`guardHoldMs`) before an honest `deleted` is emitted.
+    - Cold-start aware: a watcher attached before or during a snapshot-overlay
+      bootstrap re-snapshots at overlay activation (`cause: "snapshot"`) and
+      reports an unverified-timeout view shrink as `cause: "overlay-timeout"`.
+    - Ignore-aware handles filter the stream through their own policy; a rules
+      change reconciles the emitted stream with `cause: "policy"` events;
+      `includeIgnored: true` bypasses. `initial: "snapshot"` delivers the
+      existing tree as a first batch; `maxNodes` bounds the view (typed
+      `EWATCHLIMIT` error); `AbortSignal` and async iteration are supported,
+      and slow consumers get composed batches (bounded memory, never a stale
+      mirror). `SharedFsHandle.close()` closes that handle's watchers only.
+
+    No store schema change and no salt bump: peers with and without the watch
+    layer interoperate freely; the hot-path cost with no watchers is one null
+    check per change burst.
+
+### Patch Changes
+
+- 69915dd: Upgrade the Peerbit cohort to peerbit 5.3.33 / @peerbit/document 15.0.13
+  (shared-log 16.0.13 with batch signature verification under application
+  authorization, indexer-sqlite3 3.0.18 with ordered write sessions, program
+  6.0.54, trusted-network 6.0.99) and rebaseline the multi-party workload.
+
+    Measured on the 2,000-file / ~6,200-document cold join (three instrumented
+    runs per cohort, identical instrumentation): complete convergence median
+    12.7s → 9.6s (~25% faster) with ~24% less joiner CPU and 1.9x faster SQLite
+    insert statement time; receive-batch shape (13 batches, p50 ~84 docs) and
+    message counts unchanged, so the gain is genuinely per-entry ingest cost —
+    consistent with upstream's 21.5% elapsed improvement claim. The 500-file
+    live-join case (ten counterbalanced runs per cohort) is unchanged within
+    noise and revealed a pre-existing bimodal structure on BOTH cohorts (~0.8s
+    fast path vs 3-4.5s slow path) now reported upstream.
+
+    No shared-fs code change; full suite green. The install recipe matters:
+    pin the whole cohort (including program/trusted-network) before installing,
+    never run `pnpm dedupe` (it evicts the subtree peerbit copy and splits the
+    class registries — replication silently drops every document).
+
+- Updated dependencies [69915dd]
+- Updated dependencies [b09682c]
+- Updated dependencies [1d7fdbc]
+    - @peerbit/shared-fs@0.8.0
+
 ## 0.7.1
 
 ### Patch Changes
