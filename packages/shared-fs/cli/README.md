@@ -111,19 +111,30 @@ Stop mounted writes, wait for persisted delivery, and only then dispose of the
 machine or delete its local Peerbit state:
 
 ```bash
-peerbit-fs unmount "$MOUNTPOINT"
+# In the original mount terminal, send Ctrl-C/SIGTERM and wait for
+# `peerbit-fs mount` to finish its clean shutdown.
 peerbit-fs prepare-disposal "$ADDRESS" --min-acks 1
 # Only after both commands exit successfully, dispose of the machine or its state.
 ```
 
+`peerbit-fs unmount "$MOUNTPOINT"` only detaches the OS mountpoint; it does not
+stop a separately running `peerbit-fs mount` process. If manual unmounting is
+needed, still terminate that original process and wait for it to exit before
+opening the same Peerbit state directory for the barrier.
+
 `--min-acks <number>` defaults to `1`, `--timeout-ms <number>` bounds the
-overall wait, and `--json` emits a machine-readable result. A timeout, abort,
-error, or nonzero exit never indicates safe disposal. Keep the source machine
-and its state available, correct connectivity or storage capacity, and retry
-the barrier. Run it against the existing full local replica;
-`--no-replicate` is rejected. A pending bootstrap decision is awaited; a
-bootstrapping or unverified view is rejected. Any filesystem-content arrival
-during the fence also fails the attempt, so let replication settle and retry.
+barrier after the filesystem has opened, and `--json` emits a machine-readable
+result. Network connection, filesystem open, and shutdown are outside that
+flag's deadline. A timeout, abort, error, or nonzero exit never indicates safe
+disposal. Keep the source machine and its state available, correct connectivity
+or storage capacity, and retry the barrier. Run it against the existing full
+local replica; `--no-replicate` is rejected. A pending bootstrap decision is
+awaited; a bootstrapping or unverified view is rejected. Any filesystem-content
+arrival during the fence also fails the attempt. A deferred resurrection-guard
+decision for removed live metadata fails closed until it settles, so let
+replication and guard recovery settle before retrying. Avoid tight retry loops
+after a timeout: already-started local index/log reads cannot be cancelled and
+finish in the background.
 
 The captured recoverable head closure contains every current naming head
 (including tombstones and conflicts), every current file-version head, and

@@ -271,21 +271,32 @@ For a mounted filesystem, stop new writes first and use the CLI barrier before
 disposing of the machine or deleting its state:
 
 ```bash
-peerbit-fs unmount "$MOUNTPOINT"
+# In the original mount terminal, send Ctrl-C/SIGTERM and wait for
+# `peerbit-fs mount` to finish its clean shutdown.
 peerbit-fs prepare-disposal "$ADDRESS" --min-acks 1
 # Only after both commands exit successfully, dispose of the machine or its state.
 ```
 
-`--min-acks` defaults to `1`; `--timeout-ms <number>` sets an overall deadline,
-and `--json` emits a machine-readable result. Any timeout, abort, error, or
-nonzero exit means **not safe to dispose**: keep the source machine and its
-state, fix connectivity or capacity, and retry the barrier. Retrying is safe
-because the barrier appends no logical filesystem mutation. The command must
-run against the existing full local replica; `--no-replicate` is rejected. It
-waits for any pending bootstrap decision and rejects a bootstrapping or
-unverified view. Any filesystem-content arrival during the fence also fails the
-attempt, so let replication settle and retry rather than disposing a moving
-source.
+`peerbit-fs unmount "$MOUNTPOINT"` only detaches the OS mountpoint; it does not
+stop a separately running `peerbit-fs mount` process. If manual unmounting is
+needed, still terminate that original process and wait for it to exit before
+running the barrier against the same Peerbit state directory.
+
+`--min-acks` defaults to `1`; `--timeout-ms <number>` sets an overall deadline
+for the barrier after the filesystem has opened, and `--json` emits a
+machine-readable result. Network connection, filesystem open, and shutdown are
+outside that flag's deadline. Any timeout, abort, error, or nonzero exit means
+**not safe to dispose**: keep the source machine and its state, fix connectivity
+or capacity, and retry the barrier. Retrying is safe because the barrier appends
+no logical filesystem mutation. The command must run against the existing full
+local replica; `--no-replicate` is rejected. It waits for any pending bootstrap
+decision and rejects a bootstrapping or unverified view. Any filesystem-content
+arrival during the fence also fails the attempt. A deferred resurrection-guard
+decision for removed live metadata also fails closed until it settles. Let
+replication and guard recovery settle, then retry rather than disposing a moving
+or temporarily incomplete source. Avoid tight retry loops after a timeout or
+abort: already-started local index/log reads cannot be cancelled and finish in
+the background.
 
 The guarantee is deliberately narrow:
 

@@ -1224,7 +1224,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
         )
         .command(
             "unmount <mountpoint>",
-            "unmount a native shared filesystem mountpoint",
+            "detach a native mountpoint (does not stop a separate mount process)",
             (command) =>
                 command.positional("mountpoint", {
                     type: "string",
@@ -1235,6 +1235,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     normalizeNativeMountpoint(String(argv.mountpoint))
                 );
                 console.log(chalk.green(`Unmounted ${argv.mountpoint}`));
+                console.log(
+                    chalk.yellow(
+                        "If peerbit-fs mount is still running, terminate that process separately and wait for it to exit."
+                    )
+                );
             }
         )
         .demandCommand(1)

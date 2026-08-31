@@ -2,12 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Peerbit } from "peerbit";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     openSharedFs,
     PrepareForDisposalError,
     type SharedFsHandle,
 } from "../index.js";
+import { FileChunk, type NamingEvent } from "../model.js";
 
 const WAIT_TIMEOUT_MS = process.env.CI ? 90_000 : 30_000;
 // The capability is intentionally session-scoped. It is not currently
@@ -339,6 +340,173 @@ describe("shared fs durable machine disposal", () => {
         }
     );
 
+    it(
+        "preserves admitted naming-conflict heads and a tombstone after an access-controlled source is disposed",
+        { retry: 1, timeout: process.env.CI ? 180_000 : 90_000 },
+        async () => {
+            const receiverDirectory = await mkdtemp(
+                join(tmpdir(), "peerbit-shared-fs-auth-disposal-")
+            );
+            temporaryDirectories.add(receiverDirectory);
+
+            const sourcePeer = await trackPeer();
+            const writerPeer = await trackPeer();
+            const receiverPeer = await trackPeer({
+                directory: receiverDirectory,
+            });
+            const writerKey = writerPeer.identity.publicKey;
+            await Promise.all([
+                sourcePeer.dial(writerPeer),
+                sourcePeer.dial(receiverPeer),
+            ]);
+            const source = await openSharedFs({
+                peerbit: sourcePeer,
+                machineLabel: "access-controlled-source",
+                rootKey: sourcePeer.identity.publicKey,
+                replicate: { factor: 1 },
+                bootstrap: false,
+                gc: false,
+            });
+            const writer = await openSharedFs({
+                peerbit: writerPeer,
+                address: source.address,
+                machineLabel: "admitted-writer",
+                replicate: { factor: 1 },
+                bootstrap: false,
+                gc: false,
+            });
+            const receiver = await openSharedFs({
+                peerbit: receiverPeer,
+                address: source.address,
+                machineLabel: "durable-access-controlled-receiver",
+                replicate: { factor: 1 },
+                bootstrap: false,
+                remoteChunkFetch: false,
+                gc: false,
+            });
+            await waitForRemoteReceiptCapability(source, receiverPeer);
+
+            await source.authorizeWriter(writerKey);
+            await waitUntil(async () => {
+                expect(await writer.isTrustedWriter(writerKey)).toBe(true);
+                expect(await receiver.isTrustedWriter(writerKey)).toBe(true);
+            });
+            await source.writeFile("/subject.txt", "shared subject");
+            await writer.writeFile("/admitted.txt", "trusted writer data");
+            await source.writeFile("/deleted.txt", "retained tombstone data");
+            await source.rm("/deleted.txt");
+            const expectedTombstone = (
+                (await source.program.entries.index
+                    .iterate(
+                        { query: { kind: "naming" } },
+                        { local: true, remote: false, resolve: true }
+                    )
+                    .all()) as NamingEvent[]
+            ).find((event) => event.name === "deleted.txt" && event.deleted);
+            expect(expectedTombstone).toBeDefined();
+            await waitUntil(async () => {
+                expect(decode(await writer.readFile("/subject.txt"))).toBe(
+                    "shared subject"
+                );
+                expect(decode(await source.readFile("/admitted.txt"))).toBe(
+                    "trusted writer data"
+                );
+            });
+
+            // Partition the two admitted writers so both renames observe the
+            // same naming head, deterministically creating a real multi-head
+            // naming conflict rather than relying on scheduler timing.
+            await sourcePeer.hangUp(writerPeer.identity.publicKey);
+            await source.rename("/subject.txt", "/from-owner.txt");
+            await writer.rename("/subject.txt", "/from-writer.txt");
+            await sourcePeer.dial(writerPeer);
+
+            let expectedConflict:
+                | Awaited<ReturnType<SharedFsHandle["namingConflicts"]>>[number]
+                | undefined;
+            await waitUntil(async () => {
+                expectedConflict = (await source.namingConflicts()).find(
+                    (conflict) => conflict.type === "multi-head"
+                );
+                expect(expectedConflict).toBeDefined();
+                expect(expectedConflict!.eventIds).toHaveLength(2);
+            });
+            const expectedEventIds = [...expectedConflict!.eventIds].sort();
+            const expectedWinnerPath = expectedConflict!.path;
+            expect(["/from-owner.txt", "/from-writer.txt"]).toContain(
+                expectedWinnerPath
+            );
+            expect(decode(await source.readFile(expectedWinnerPath))).toBe(
+                "shared subject"
+            );
+
+            // Take the in-memory writer offline after its admitted conflict
+            // converges so it cannot own a replica range during the barrier.
+            // The disk-backed receiver has been an eligible full replica for
+            // every entry from the start.
+            await stopPeer(writerPeer);
+
+            const disposal = await source.prepareForDisposal({
+                minAcks: 1,
+                timeout: WAIT_TIMEOUT_MS,
+            });
+            expect(disposal).toMatchObject({
+                safeToDispose: true,
+                minAcksPerEntry: 1,
+                empty: false,
+            });
+
+            const address = source.address;
+            await stopPeer(sourcePeer);
+            await stopPeer(receiverPeer);
+
+            const reopenedPeer = await trackPeer({
+                directory: receiverDirectory,
+            });
+            const reopened = await openSharedFs({
+                peerbit: reopenedPeer,
+                address,
+                machineLabel: "offline-access-controlled-reopen",
+                replicate: false,
+                bootstrap: false,
+                remoteChunkFetch: false,
+                gc: false,
+            });
+
+            expect(reopened.accessControlled).toBe(true);
+            expect(await reopened.isTrustedWriter(writerKey)).toBe(true);
+            expect(decode(await reopened.readFile("/admitted.txt"))).toBe(
+                "trusted writer data"
+            );
+            expect(await reopened.stat("/deleted.txt")).toBeUndefined();
+            const reopenedTombstone = (
+                (await reopened.program.entries.index
+                    .iterate(
+                        { query: { kind: "naming" } },
+                        { local: true, remote: false, resolve: true }
+                    )
+                    .all()) as NamingEvent[]
+            ).find((event) => event.id === expectedTombstone!.id);
+            expect(reopenedTombstone).toMatchObject({
+                id: expectedTombstone!.id,
+                deleted: true,
+            });
+            const reopenedConflict = (await reopened.namingConflicts()).find(
+                (conflict) =>
+                    conflict.type === "multi-head" &&
+                    conflict.nodeId === expectedConflict!.nodeId
+            );
+            expect(reopenedConflict).toBeDefined();
+            expect([...reopenedConflict!.eventIds].sort()).toEqual(
+                expectedEventIds
+            );
+            expect(reopenedConflict!.path).toBe(expectedWinnerPath);
+            expect(
+                decode(await reopened.readFile(reopenedConflict!.path))
+            ).toBe("shared subject");
+        }
+    );
+
     it("fails closed when the only remote leader cannot issue persisted receipts", async () => {
         const sourcePeer = await trackPeer();
         const memoryReceiver = await trackPeer();
@@ -464,6 +632,126 @@ describe("shared fs durable machine disposal", () => {
         expect(decode(await source.readFile("/during.txt"))).toBe(
             "moving target"
         );
+    });
+
+    it("fails closed while the resurrection guard owns a removed live head", async () => {
+        const peer = await trackPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "guard-pending-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        await fs.mkdir("/important");
+        const namingRows = (await fs.program.entries.index
+            .iterate(
+                { query: { kind: "naming" } },
+                { local: true, remote: false, resolve: true }
+            )
+            .all()) as Array<{ id: string }>;
+        expect(namingRows).toHaveLength(1);
+
+        // Simulate a remote collector removing the only live naming head.
+        // Guard D still owns the removed value during its coalescing window,
+        // so an empty index is not yet the replica's recoverable closure.
+        await fs.program.entries.del(namingRows[0].id);
+
+        await expect(
+            fs.prepareForDisposal({ minAcks: 1 })
+        ).rejects.toMatchObject({
+            name: "PrepareForDisposalError",
+            safeToDispose: false,
+            retrySafe: true,
+            cause: {
+                name: "SharedFsError",
+                code: "EIO",
+                message: expect.stringContaining(
+                    "resurrection guard is still settling"
+                ),
+            },
+        });
+        await waitUntil(async () => {
+            expect(await fs.stat("/important")).toBeDefined();
+        });
+    });
+
+    it("fails closed while the resurrection guard is ingesting a mixed removal batch", async () => {
+        const peer = await trackPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "guard-ingest-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        await fs.mkdir("/important");
+        const naming = (
+            (await fs.program.entries.index
+                .iterate(
+                    { query: { kind: "naming" } },
+                    { local: true, remote: false, resolve: true }
+                )
+                .all()) as NamingEvent[]
+        )[0];
+        expect(naming).toBeDefined();
+
+        const guardHost = fs.program as unknown as {
+            gcSuppressed: Set<string>;
+            guardAgainstLiveRemovals(values: unknown[]): Promise<void>;
+            guardIngestBusy: number;
+            pendingGuardNaming: Map<string, unknown>;
+            pendingGuardVersions: Map<string, unknown>;
+        };
+        guardHost.gcSuppressed.add(naming.id);
+        await fs.program.entries.del(naming.id);
+        guardHost.gcSuppressed.delete(naming.id);
+        expect(await fs.stat("/important")).toBeUndefined();
+
+        let releaseChunkQuery!: (rows: unknown[]) => void;
+        const stalledChunkQuery = new Promise<unknown[]>((resolve) => {
+            releaseChunkQuery = resolve;
+        });
+        const iterateSpy = vi
+            .spyOn(fs.program.entries.index, "iterate")
+            .mockImplementationOnce(
+                () =>
+                    ({
+                        next: () => stalledChunkQuery,
+                        close: async () => {},
+                    }) as any
+            );
+        const guardWork = guardHost.guardAgainstLiveRemovals([
+            new FileChunk({ bytes: new Uint8Array([1, 2, 3]) }),
+            naming,
+        ]);
+        iterateSpy.mockRestore();
+
+        expect(guardHost.guardIngestBusy).toBe(1);
+        expect(guardHost.pendingGuardNaming.size).toBe(0);
+        expect(guardHost.pendingGuardVersions.size).toBe(0);
+        try {
+            await expect(
+                fs.prepareForDisposal({ minAcks: 1 })
+            ).rejects.toMatchObject({
+                name: "PrepareForDisposalError",
+                safeToDispose: false,
+                retrySafe: true,
+                cause: {
+                    name: "SharedFsError",
+                    code: "EIO",
+                    message: expect.stringContaining(
+                        "resurrection guard is still settling"
+                    ),
+                },
+            });
+        } finally {
+            releaseChunkQuery([]);
+            await guardWork;
+        }
+        await waitUntil(async () => {
+            expect(await fs.stat("/important")).toBeDefined();
+        });
     });
 
     it("returns a vacuous success for an empty full replica without remotes", async () => {

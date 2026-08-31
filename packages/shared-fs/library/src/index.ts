@@ -1560,6 +1560,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.trustVerdicts = new Map();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
+        // A fire-and-forget guard call can span close -> reopen on the same
+        // program instance. Preserve its count so its eventual `finally`
+        // cannot underflow a freshly reset counter or hide newer guard work.
+        this.guardIngestBusy ??= 0;
         this.bootstrapPhase = "off";
         this.guardArmed = true;
         this.overlayNaming = new Map();
@@ -1691,11 +1695,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             const added = event?.detail?.added ?? [];
             const removed = event?.detail?.removed ?? [];
             if (
-                [...added, ...removed].some(
-                    (value) =>
-                        value instanceof NamingEvent ||
-                        value instanceof FileVersion ||
-                        value instanceof FileChunk
+                this.disposalPreparationRunning &&
+                [added, removed].some((values) =>
+                    values.some(
+                        (value: unknown) =>
+                            value instanceof NamingEvent ||
+                            value instanceof FileVersion ||
+                            value instanceof FileChunk
+                    )
                 )
             ) {
                 this.disposalContentGeneration++;
@@ -5477,6 +5484,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         );
     }
 
+    /**
+     * Removed live metadata remains recoverable while Guard D owns its
+     * materialized value. Never certify the index gap before that deferred
+     * resurrection decision has settled; callers can safely retry afterward.
+     */
+    private throwIfDisposalGuardUnsettled() {
+        if (
+            !this.guardArmed ||
+            this.guardIngestBusy > 0 ||
+            this.guardFlushBusy ||
+            this.pendingGuardVersions.size > 0 ||
+            this.pendingGuardNaming.size > 0
+        ) {
+            throw new SharedFsError(
+                "EIO",
+                "filesystem resurrection guard is still settling removed live metadata; keep the source machine and retry"
+            );
+        }
+    }
+
     /** Bound local reads/queues as well as Peerbit's receipt settlement. */
     private awaitDisposalStep<T>(
         promise: Promise<T>,
@@ -5774,11 +5801,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 deadline
             );
             this.throwIfDisposalInterrupted(options, deadline);
+            this.throwIfDisposalGuardUnsettled();
             const generation = this.disposalContentGeneration;
             const closure = await this.captureDisposalClosure(
                 options,
                 deadline
             );
+            this.throwIfDisposalGuardUnsettled();
             if (this.disposalContentGeneration !== generation) {
                 throw new SharedFsError(
                     "EIO",
@@ -5797,6 +5826,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     deadline,
                     progress
                 );
+                this.throwIfDisposalGuardUnsettled();
                 if (this.disposalContentGeneration !== generation) {
                     throw new SharedFsError(
                         "EIO",
@@ -5816,6 +5846,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         deadline,
                         progress
                     );
+                    this.throwIfDisposalGuardUnsettled();
                     if (this.disposalContentGeneration !== generation) {
                         throw new SharedFsError(
                             "EIO",
@@ -6555,6 +6586,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private watchHub?: WatchHub;
     private changesetHub?: ChangesetBarrierHub;
+    private guardIngestBusy = 0;
     private guardFlushBusy = false;
     private pendingGuardVersions = new Map<string, Map<string, FileVersion>>();
     private pendingGuardNaming = new Map<string, Map<string, NamingEvent>>();
@@ -6575,63 +6607,68 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!this.guardArmed) {
             return;
         }
-        for (const value of removed) {
-            try {
-                if (value instanceof FileChunk) {
-                    if (this.gcSuppressed.has(value.id)) {
-                        continue;
+        this.guardIngestBusy++;
+        try {
+            for (const value of removed) {
+                try {
+                    if (value instanceof FileChunk) {
+                        if (this.gcSuppressed.has(value.id)) {
+                            continue;
+                        }
+                        if (!this.verifyChunk(value, value.id)) {
+                            continue;
+                        }
+                        const iterator = this.entries.index.iterate(
+                            {
+                                query: [
+                                    new StringMatch({
+                                        key: "kind",
+                                        value: "file-version",
+                                    }),
+                                    new StringMatch({
+                                        key: "chunkRefs",
+                                        value: value.id,
+                                    }),
+                                ],
+                            },
+                            { local: true, remote: false, resolve: false }
+                        );
+                        let referenced: boolean;
+                        try {
+                            referenced = (await iterator.next(1)).length > 0;
+                        } finally {
+                            await (iterator as any).close?.();
+                        }
+                        if (referenced) {
+                            await this.putPreferLinked(value);
+                        }
+                    } else if (value instanceof FileVersion) {
+                        if (this.gcSuppressed.has(value.id)) {
+                            continue;
+                        }
+                        const bucket =
+                            this.pendingGuardVersions.get(value.nodeId) ??
+                            new Map<string, FileVersion>();
+                        bucket.set(value.id, value);
+                        this.pendingGuardVersions.set(value.nodeId, bucket);
+                        this.scheduleGuardFlush();
+                    } else if (value instanceof NamingEvent) {
+                        if (this.gcSuppressed.has(value.id)) {
+                            continue;
+                        }
+                        const bucket =
+                            this.pendingGuardNaming.get(value.nodeId) ??
+                            new Map<string, NamingEvent>();
+                        bucket.set(value.id, value);
+                        this.pendingGuardNaming.set(value.nodeId, bucket);
+                        this.scheduleGuardFlush();
                     }
-                    if (!this.verifyChunk(value, value.id)) {
-                        continue;
-                    }
-                    const iterator = this.entries.index.iterate(
-                        {
-                            query: [
-                                new StringMatch({
-                                    key: "kind",
-                                    value: "file-version",
-                                }),
-                                new StringMatch({
-                                    key: "chunkRefs",
-                                    value: value.id,
-                                }),
-                            ],
-                        },
-                        { local: true, remote: false, resolve: false }
-                    );
-                    let referenced: boolean;
-                    try {
-                        referenced = (await iterator.next(1)).length > 0;
-                    } finally {
-                        await (iterator as any).close?.();
-                    }
-                    if (referenced) {
-                        await this.putPreferLinked(value);
-                    }
-                } else if (value instanceof FileVersion) {
-                    if (this.gcSuppressed.has(value.id)) {
-                        continue;
-                    }
-                    const bucket =
-                        this.pendingGuardVersions.get(value.nodeId) ??
-                        new Map<string, FileVersion>();
-                    bucket.set(value.id, value);
-                    this.pendingGuardVersions.set(value.nodeId, bucket);
-                    this.scheduleGuardFlush();
-                } else if (value instanceof NamingEvent) {
-                    if (this.gcSuppressed.has(value.id)) {
-                        continue;
-                    }
-                    const bucket =
-                        this.pendingGuardNaming.get(value.nodeId) ??
-                        new Map<string, NamingEvent>();
-                    bucket.set(value.id, value);
-                    this.pendingGuardNaming.set(value.nodeId, bucket);
-                    this.scheduleGuardFlush();
+                } catch {
+                    // The guard must never throw into the event loop.
                 }
-            } catch {
-                // The guard must never throw into the event loop.
             }
+        } finally {
+            this.guardIngestBusy--;
         }
     }
 
