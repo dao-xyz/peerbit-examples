@@ -1347,16 +1347,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private gcFollowUpGateRetries = 0;
     private gcSnapshotDeferrals = 0;
     private gcPeerEvidenceWarned = false;
+    private gcPermanentSkipWarned = false;
     private gcLastRun?: GcStatus["lastRun"];
     // Ticks capture the generation at arm time; a tick whose generation no
     // longer matches (the program was reopened) dies silently.
     private gcSchedulerGeneration = 0;
     private gcRng: () => number = Math.random;
     private segmentLedgerChain: Promise<unknown> = Promise.resolve();
-    private memorySegmentLedger: SegmentLedger | undefined;
     private segmentLedgerReconciled = false;
     private segmentReapFailureCycles = 0;
     private segmentGraceWarned = false;
+    // Publish-side manifest cap; ingest keeps the constant. Test-only
+    // override (like gcRng) so the pre-CUT cap-throw window is testable.
+    private manifestPayloadCapBytes = MANIFEST_PAYLOAD_CAP_BYTES;
     private bootstrapManifestMeta: BootstrapStatus["manifest"];
     private lastArrivalMs = 0;
     private docsSinceSnapshot = 0;
@@ -1496,6 +1499,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.gcFollowUpGateRetries = 0;
         this.gcSnapshotDeferrals = 0;
         this.gcPeerEvidenceWarned = false;
+        this.gcPermanentSkipWarned = false;
         this.gcLastRun = undefined;
         // Borsh bypasses field initializers on address-opened programs, so
         // the previous value may be undefined here — never trust it.
@@ -1503,10 +1507,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Injectable rng for the schedule's jitter draws (test-only).
         this.gcRng = (args as any)?.gcRng ?? Math.random;
         this.segmentLedgerChain = Promise.resolve();
-        this.memorySegmentLedger = undefined;
         this.segmentLedgerReconciled = false;
         this.segmentReapFailureCycles = 0;
         this.segmentGraceWarned = false;
+        this.manifestPayloadCapBytes =
+            (args as any)?.manifestPayloadCapBytes ??
+            MANIFEST_PAYLOAD_CAP_BYTES;
         this.advisoryIgnorePublish = undefined;
         this.bootstrapAdvisoryIgnorePatterns = undefined;
         const bootstrapArg = args?.bootstrap;
@@ -4513,8 +4519,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.startQuiescenceChecker();
             return;
         }
+        // Content kinds only: replicated bootstrap/changeset manifests are
+        // control-plane rows (indexable since the manifest-kind fix) and
+        // must not make a cold store look warm — a store holding nothing
+        // but another author's manifest still needs the bootstrap.
         const iterator = this.entries.index.iterate(
-            { query: [] },
+            {
+                query: [
+                    new Or([
+                        new StringMatch({ key: "kind", value: "naming" }),
+                        new StringMatch({ key: "kind", value: "file-version" }),
+                        new StringMatch({ key: "kind", value: "file-chunk" }),
+                    ]),
+                ],
+            },
             { local: true, remote: false, resolve: false }
         );
         let empty: boolean;
@@ -5545,12 +5563,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 (await this.readAdvisoryFromRulesFile()),
         });
         const payloadBytes = serialize(payload);
-        if (payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES) {
+        if (payloadBytes.byteLength > this.manifestPayloadCapBytes) {
             // Loud failure by design: silent skips would leave stale
-            // snapshots serving joiners indefinitely.
+            // snapshots serving joiners indefinitely. This throw is BEFORE
+            // the CUT, so the previous manifest stays live and reap-time
+            // liveness keeps its segments protected.
             throw new SharedFsError(
                 "EIO",
-                `snapshot manifest exceeds ${MANIFEST_PAYLOAD_CAP_BYTES} bytes`
+                `snapshot manifest exceeds ${this.manifestPayloadCapBytes} bytes`
             );
         }
         const signature = await this.node.identity.sign(payloadBytes);
@@ -5567,7 +5587,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
-        void this.reapSnapshotSegments().catch(() => {});
+        void this.reapSnapshotSegments(undefined, {
+            duringPublish: true,
+        }).catch(() => {});
         return {
             snapshotSeq,
             createdAtWallMs: payload.createdAtWallMs,
@@ -5873,6 +5895,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (error?.code === "ERR_GC_PHASE") {
                 // The phase regressed between the gate and the run (a
                 // bootstrap restarted): a plain skip, not a failure.
+                return gateSkip();
+            }
+            if (error?.gcPermanent) {
+                // An unmet precondition (untrusted writer key, not a full
+                // replica): not transient, so no error events and no
+                // backoff spiral — warn once and keep quietly retrying
+                // each interval, which recovers by itself when trust is
+                // granted later.
+                if (!this.gcPermanentSkipWarned) {
+                    this.gcPermanentSkipWarned = true;
+                    console.warn(
+                        `shared-fs: scheduled gc skipped: ${error?.message ?? error}`
+                    );
+                }
                 return gateSkip();
             }
             this.gcConsecutiveFailures++;
@@ -6306,6 +6342,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return { enabled: true, graceMs: Math.max(requested, floor) };
     }
 
+    /**
+     * Directory-less peers keep the ledger on the NODE, not the program
+     * instance: the in-memory block store also lives on the node and
+     * survives program close/reopen within a process, so the ledger must
+     * too — an instance-scoped fallback would silently exempt every
+     * generation retired before a reopen.
+     */
+    private nodeMemorySegmentLedgers(): Map<string, SegmentLedger> {
+        const node: any = this.node;
+        node.__sharedFsSegmentLedgers ??= new Map();
+        return node.__sharedFsSegmentLedgers;
+    }
+
+    private segmentLedgerKey(): string {
+        return this.address?.toString() ?? "unaddressed";
+    }
+
     private async segmentLedgerPath(): Promise<string | undefined> {
         const directory = (this.node as any)?.directory as string | undefined;
         if (!directory) {
@@ -6328,10 +6381,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const path = await this.segmentLedgerPath();
         let ledger: SegmentLedger;
         if (!path) {
-            // Memory fallback resets per process — consistent with an
-            // in-memory block store, whose blocks reset with it.
-            this.memorySegmentLedger ??= empty;
-            ledger = this.memorySegmentLedger;
+            const store = this.nodeMemorySegmentLedgers();
+            const stored = store.get(this.segmentLedgerKey());
+            if (!stored) {
+                store.set(this.segmentLedgerKey(), empty);
+            }
+            ledger = stored ?? empty;
         } else {
             try {
                 const { readFile } = await import("node:fs/promises");
@@ -6385,12 +6440,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private async saveSegmentLedgerCas(
         loadedGeneration: number,
-        next: SegmentLedger
+        next: SegmentLedger,
+        reapedCids?: Set<string>
     ): Promise<boolean> {
         const path = await this.segmentLedgerPath();
         if (!path) {
             next.generation = loadedGeneration + 1;
-            this.memorySegmentLedger = next;
+            this.nodeMemorySegmentLedgers().set(this.segmentLedgerKey(), next);
             return true;
         }
         const { readFile, writeFile } = await import("node:fs/promises");
@@ -6414,6 +6470,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 payload,
                 this.clock()
             );
+            if (reapedCids && reapedCids.size > 0) {
+                // Successful rm is the invariant's sanctioned exit: a
+                // concurrent writer's disk copy must not resurrect cids
+                // this reap just deleted, or the next reap double-counts
+                // them in segmentBlocksDeleted/reclaimedSegmentBytes.
+                payload.retired = payload.retired
+                    .map((gen) => ({
+                        ...gen,
+                        cids: gen.cids.filter(
+                            (entry) => !reapedCids.has(entry.cid)
+                        ),
+                    }))
+                    .filter((gen) => gen.cids.length > 0);
+            }
             expected = diskGeneration;
         }
         return false;
@@ -6484,10 +6554,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private reapSnapshotSegments(
-        nowMsArg?: number
+        nowMsArg?: number,
+        options?: { duringPublish?: boolean }
     ): Promise<{ deleted: number; bytes: bigint }> {
         const run = this.segmentLedgerChain.then(() =>
-            this.reapSnapshotSegmentsInner(nowMsArg)
+            this.reapSnapshotSegmentsInner(nowMsArg, options)
         );
         this.segmentLedgerChain = run.then(
             () => undefined,
@@ -6497,11 +6568,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async reapSnapshotSegmentsInner(
-        nowMsArg?: number
+        nowMsArg?: number,
+        options?: { duringPublish?: boolean }
     ): Promise<{ deleted: number; bytes: bigint }> {
         const zero = { deleted: 0, bytes: 0n };
         const settings = this.segmentReclaimSettings();
         if (!settings.enabled || !this.isFullReplica()) {
+            return zero;
+        }
+        if (this.snapshotRunning && !options?.duringPublish) {
+            // A publish's shard puts land BEFORE its intent reaches the
+            // ledger chain; a reap ordered between them could rm a block
+            // the new manifest is about to reference. The publish-tail
+            // trigger passes duringPublish (its own puts and intent are
+            // complete by then). Cross-process overlap keeps the same
+            // tiny residual window as the metadata GC — accepted.
             return zero;
         }
         const now = nowMsArg ?? this.clock();
@@ -6655,7 +6736,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             current: ledger.current,
             retired: nextRetired,
         };
-        await this.saveSegmentLedgerCas(loadedGeneration, nextLedger);
+        await this.saveSegmentLedgerCas(
+            loadedGeneration,
+            nextLedger,
+            deletedSet
+        );
         return { deleted: deletedSet.size, bytes };
     }
 
@@ -6745,19 +6830,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         options: GcOptions = {}
     ): Promise<GcReport> {
         if (!this.isFullReplica()) {
-            throw new SharedFsError(
+            const error = new SharedFsError(
                 "EINVAL",
                 "collectGarbage requires a full replica (replicate: { factor: 1 })"
             );
+            // Scheduler hint: a precondition, not a transient failure.
+            (error as any).gcPermanent = true;
+            throw error;
         }
         if (
             this.trustGraph &&
             !(await this.isTrustedWriter(this.node.identity.publicKey))
         ) {
-            throw new SharedFsError(
+            const error = new SharedFsError(
                 "EINVAL",
                 "collectGarbage requires a trusted writer key"
             );
+            (error as any).gcPermanent = true;
+            throw error;
         }
         const config = {
             keepVersions: options.keepVersions ?? GC_DEFAULTS.keepVersions,

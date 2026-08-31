@@ -119,59 +119,75 @@ describe("snapshot segment reclamation", () => {
         expect((await loadLedger()).retired).toHaveLength(0);
     });
 
-    it("records intent before any throw and protects the live old generation", async () => {
+    it("records intent before the cap throw and reap protects the live old generation", async () => {
         await seedFiles(6);
         await fs.snapshotWrite();
         const gen1 = new Set(await manifestCids());
-
-        // Two consecutive failing publishes (thrown after intent, like the
-        // payload-cap check): every attempt's delta must still be
-        // ledgered, and the LIVE manifest's cids must survive any reap.
         const program: any = fs.program;
-        const original = program.putPreferLinked.bind(program);
-        let failures = 0;
-        program.putPreferLinked = async (value: any) => {
-            if (
-                failures < 2 &&
-                typeof value?.id === "string" &&
-                value.id.startsWith("bootstrap:")
-            ) {
-                failures++;
-                throw new Error("injected publish failure");
-            }
-            return original(value);
-        };
-        await fs.writeFile("/f-0.txt", "attempt one");
-        fakeNow += 1_000;
-        await expect(fs.snapshotWrite()).rejects.toThrow(/injected/);
-        await fs.writeFile("/f-1.txt", "attempt two");
-        fakeNow += 1_000;
-        await expect(fs.snapshotWrite()).rejects.toThrow(/injected/);
+        const manifestId = `bootstrap:${program.authorKey()}`;
 
-        // No unrecorded strays: everything the failed attempts put is in
-        // the ledger (current or retired).
+        // Two consecutive publishes failing AT THE PAYLOAD-CAP CHECK —
+        // before the CUT, so the gen-1 manifest stays LIVE while
+        // ledger.current holds a stranded unpublished generation. This is
+        // the one window where reap's own-manifest liveness protection is
+        // load-bearing (current-set membership alone would not protect
+        // the live delta).
+        program.manifestPayloadCapBytes = 1;
+        const blocksAny: any = program.node.services.blocks;
+        const originalPut = blocksAny.put.bind(blocksAny);
+        const attemptPutCids: string[] = [];
+        blocksAny.put = async (bytes: any, ...rest: any[]) => {
+            const cid = await originalPut(bytes, ...rest);
+            attemptPutCids.push(cid);
+            return cid;
+        };
+        try {
+            await fs.writeFile("/f-0.txt", "attempt one");
+            fakeNow += 1_000;
+            await expect(fs.snapshotWrite()).rejects.toThrow(/exceeds/);
+            await fs.writeFile("/f-1.txt", "attempt two");
+            fakeNow += 1_000;
+            await expect(fs.snapshotWrite()).rejects.toThrow(/exceeds/);
+        } finally {
+            blocksAny.put = originalPut;
+        }
+        // The old manifest doc must still be live (the throw preceded the
+        // CUT) and `current` must be the stranded attempt, not gen-1.
+        expect(await program.getDocument(manifestId)).toBeDefined();
         const ledger = await loadLedger();
+        const currentSet = new Set(
+            (ledger.current?.cids ?? []).map((c: any) => c.cid)
+        );
+        expect([...currentSet].sort()).not.toEqual([...gen1].sort());
+        // No unrecorded strays: every block the failed attempts put is
+        // positively recorded (current or retired).
         const recorded = new Set([
-            ...(ledger.current?.cids ?? []).map((c: any) => c.cid),
+            ...currentSet,
             ...ledger.retired.flatMap((g: any) =>
                 g.cids.map((c: any) => c.cid)
             ),
         ]);
-        expect(recorded.size).toBeGreaterThan(0);
+        for (const cid of attemptPutCids) {
+            expect(recorded.has(cid)).toBe(true);
+        }
 
-        // A reap far past grace must keep every cid of the still-live
-        // (old) manifest doc, no matter how mangled `current` became.
-        await reap(fakeNow + 24 * HOUR_MS);
+        // Far past grace, the retired gen-1 delta is expired and NOT in
+        // `current` — only the live-manifest protection can keep it.
+        // Nothing may be deleted, and the delta stays ledgered for retry.
+        const guarded = await reap(fakeNow + 24 * HOUR_MS);
+        expect(guarded.deleted).toBe(0);
         for (const cid of gen1) {
             expect(await blocks().has(cid)).toBe(true);
         }
+        expect((await loadLedger()).retired.length).toBeGreaterThan(0);
 
-        // The next successful publish supersedes; the stranded deltas flow
-        // into retired and a later reap clears them.
+        // Cap restored: the next publish supersedes for real, stranded
+        // deltas flow through retired, and a later reap clears them.
+        program.manifestPayloadCapBytes = 100_000;
         fakeNow += 1_000;
         await fs.snapshotWrite();
         const gen3 = new Set(await manifestCids());
-        await reap(fakeNow + 24 * HOUR_MS);
+        await reap(fakeNow + 48 * HOUR_MS);
         for (const cid of gen3) {
             expect(await blocks().has(cid)).toBe(true);
         }
@@ -182,6 +198,53 @@ describe("snapshot segment reclamation", () => {
                 expect(await blocks().has(cid)).toBe(false);
             }
         }
+    });
+
+    it("skips reaping while a publish is in flight (except its own tail)", async () => {
+        await seedFiles(4);
+        await fs.snapshotWrite();
+        await fs.writeFile("/f-0.txt", "mutated");
+        fakeNow += 1_000;
+        await fs.snapshotWrite();
+        const program: any = fs.program;
+        // A concurrent publish has put its shard blocks but its intent may
+        // not have reached the ledger chain yet — reap must stand down.
+        program.snapshotRunning = true;
+        const skipped = await reap(fakeNow + 24 * HOUR_MS);
+        expect(skipped.deleted).toBe(0);
+        program.snapshotRunning = false;
+        const real = await reap(fakeNow + 24 * HOUR_MS);
+        expect(real.deleted).toBeGreaterThan(0);
+    });
+
+    it("memory ledger survives a program reopen on the same node", async () => {
+        await seedFiles(4);
+        await fs.snapshotWrite();
+        await fs.writeFile("/f-0.txt", "mutated");
+        fakeNow += 1_000;
+        await fs.snapshotWrite();
+        const retiredBefore = (await loadLedger()).retired;
+        expect(retiredBefore.length).toBeGreaterThan(0);
+        const address = fs.program.address!.toString();
+        await fs.program.close();
+
+        // The in-memory block store lives on the NODE and survives the
+        // program reopen — the ledger's memory fallback must too, or every
+        // generation retired before the reopen would be silently exempt.
+        fs = await openSharedFs({
+            peerbit: peer,
+            address,
+            machineLabel: "segment-gc-reopen",
+            clock: () => fakeNow,
+        });
+        const retiredAfter = (await loadLedger()).retired;
+        expect(
+            retiredAfter.flatMap((g: any) => g.cids.map((c: any) => c.cid))
+        ).toEqual(
+            retiredBefore.flatMap((g: any) => g.cids.map((c: any) => c.cid))
+        );
+        const reaped = await reap(fakeNow + 24 * HOUR_MS);
+        expect(reaped.deleted).toBeGreaterThan(0);
     });
 
     it("clamps a sub-floor grace with a warning", async () => {

@@ -401,6 +401,61 @@ describe("scheduled garbage collection", () => {
         expect(runEvents.length).toBe(2);
     });
 
+    it("an untrusted full replica skips quietly and recovers once trusted", async () => {
+        const owner = await Peerbit.create();
+        try {
+            const ownerFs = await openSharedFs({
+                peerbit: owner,
+                machineLabel: "gc-schedule-owner",
+                rootKey: owner.identity.publicKey,
+            });
+            const address = ownerFs.program.address!.toString();
+            await peer.dial(owner.getMultiaddrs());
+            fs = await openSharedFs({
+                peerbit: peer,
+                address,
+                machineLabel: "gc-schedule-untrusted",
+                bootstrap: false,
+                gc: {
+                    intervalMs: 20_000,
+                    initialDelayMs: 20_000,
+                    run: { settleMs: 0 },
+                    testOverrides: { noFloors: true },
+                } as any,
+            });
+            listen();
+            const warnSpy = vi
+                .spyOn(console, "warn")
+                .mockImplementation(() => {});
+            // Untrusted writer key: a permanent precondition, not a
+            // transient failure — no gc:error spiral, one warning, quiet
+            // interval retries.
+            await tick();
+            await tick();
+            expect(errorEvents.length).toBe(0);
+            expect(runEvents.length).toBe(0);
+            expect(fs.gcStatus().consecutiveFailures).toBe(0);
+            const skips = warnSpy.mock.calls.filter((c) =>
+                String(c[0]).includes("scheduled gc skipped")
+            );
+            expect(skips.length).toBe(1);
+            // Trust granted later: the very next tick runs, no reopen.
+            await ownerFs.authorizeWriter(peer.identity.publicKey as any);
+            await waitUntil(async () => {
+                expect(
+                    await fs.program.isTrustedWriter(
+                        peer.identity.publicKey as any
+                    )
+                ).toBe(true);
+            });
+            await tick();
+            expect(runEvents.length).toBe(1);
+            expect(errorEvents.length).toBe(0);
+        } finally {
+            await owner.stop();
+        }
+    });
+
     it("strips unsafe run options with one warning and keeps safe ones", async () => {
         const warnSpy = vi
             .spyOn(console, "warn")
