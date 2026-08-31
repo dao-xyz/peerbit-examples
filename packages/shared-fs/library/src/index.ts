@@ -145,7 +145,75 @@ const GC_DEFAULTS = {
     namingGraceMs: 14 * DAY_MS,
     settleMs: 5_000,
     minOrphanSpanMs: 60 * 60 * 1000,
+    namingHeadStabilityMs: 60 * 60 * 1000,
+    namingCompactionBatchLimit: 500,
 } as const;
+
+/**
+ * Scheduled-GC defaults. Interval ticks jitter both ways so a fleet never
+ * herds onto the same GC minute; follow-up runs (the executing half of the
+ * two-run chunk/purge barrier) are anchored to the recording run's start
+ * with positive-only jitter, so they can never fire before candidates
+ * mature.
+ */
+const GC_SCHEDULE_DEFAULTS = {
+    intervalMs: 6 * 60 * 60 * 1000,
+    initialDelayMs: 5 * 60 * 1000,
+    jitterRatio: 0.2,
+    followUpSlackMs: 60_000,
+    backoffBaseMs: 60_000,
+    maxFollowUpGateRetries: 10,
+} as const;
+
+const GC_SCHEDULE_INTERVAL_FLOOR_MS = 15 * 60 * 1000;
+const GC_SCHEDULE_INITIAL_DELAY_FLOOR_MS = 30_000;
+
+/**
+ * GcOptions a schedule may forward to its runs. Deliberately absent:
+ * `dryRun` (the scheduler would spin forever deleting nothing), `nowMs` (a
+ * frozen clock never matures ledger candidates), and
+ * `chunkSweep: "immediate"` (bypasses the two-run barrier on autopilot).
+ * Manual `collectGarbage` calls keep all three.
+ */
+const GC_SCHEDULED_RUN_OPTION_ALLOWLIST = [
+    "retentionMs",
+    "graceMs",
+    "chunkGraceMs",
+    "namingGraceMs",
+    "keepVersions",
+    "settleMs",
+    "minOrphanSpanMs",
+    "scope",
+    "namingHeadStabilityMs",
+    "namingCompactionBatchLimit",
+] as const;
+
+/**
+ * First scheduled run: uniform over [initialDelayMs, initialDelayMs +
+ * intervalMs / 4] so a fleet restarting together spreads its first runs
+ * (and, one interval later, its follow-ups) instead of herding.
+ */
+export const computeGcFirstDelay = (
+    initialDelayMs: number,
+    intervalMs: number,
+    rng: () => number
+): number => initialDelayMs + rng() * (intervalMs / 4);
+
+/**
+ * Follow-up delay for the executing half of the two-run barrier. The ledger
+ * accepts a candidate only after minOrphanSpanMs of wall time from the
+ * recording run's start, so the delay is anchored there with positive-only
+ * slack jitter: a follow-up can land late, never before maturity.
+ */
+export const computeGcFollowUpDelay = (
+    recordingRunStartedMs: number,
+    minOrphanSpanMs: number,
+    nowMs: number,
+    followUpSlackMs: number,
+    rng: () => number
+): number =>
+    Math.max(0, recordingRunStartedMs + minOrphanSpanMs - nowMs) +
+    followUpSlackMs * (1 + rng());
 
 /**
  * Writers may skip re-putting a chunk only when a version referencing it is
@@ -174,6 +242,16 @@ export type GcOptions = {
     /** Minimum span between recording and executing chunk/purge candidates. Default 1 h. */
     minOrphanSpanMs?: number;
     /**
+     * Naming compaction proceeds once every head has been visible on this
+     * replica for this long (local arrival, not author stamp). Default 1 h.
+     */
+    namingHeadStabilityMs?: number;
+    /**
+     * Upper bound on naming events retired per node per run; backlogs
+     * drain over successive runs. Default 500.
+     */
+    namingCompactionBatchLimit?: number;
+    /**
      * "ledger" (default): chunks and purges are recorded on one run and
      * executed on a later run after minOrphanSpanMs — the barrier that makes
      * a freshly-bootstrapped or long-offline runner collect nothing until
@@ -187,6 +265,40 @@ export type GcOptions = {
     dryRun?: boolean;
     /** Injected clock for tests. */
     nowMs?: number;
+};
+
+export type GcScheduleOptions = {
+    /** Default true; `gc: false` on open also disables the schedule. */
+    schedule?: boolean;
+    /** Cadence of scheduled runs. Default 6 h, floor 15 min. */
+    intervalMs?: number;
+    /**
+     * Lower bound of the first-run delay after open. Default 5 min, floor
+     * 30 s; the actual first delay spreads up to intervalMs/4 beyond it.
+     */
+    initialDelayMs?: number;
+    /** Interval jitter, clamped to [0, 0.5]. Default 0.2. */
+    jitterRatio?: number;
+    /**
+     * Options forwarded to every scheduled run. Restricted to retention
+     * and pacing knobs; `dryRun`, `nowMs`, and `chunkSweep: "immediate"`
+     * are stripped with a warning. Note that a `scope` here means
+     * everything outside the scope never GCs on this schedule.
+     */
+    run?: GcOptions;
+};
+
+export type GcStatus = {
+    /** True when this open has an armed schedule (full replica, not disabled). */
+    scheduled: boolean;
+    /** Earliest pending timer's target wall time, if any timer is armed. */
+    nextRunAtMs?: number;
+    consecutiveFailures: number;
+    lastRun?: {
+        atMs: number;
+        trigger: "interval" | "follow-up";
+        report: GcReport;
+    };
 };
 
 export type GcReport = {
@@ -204,6 +316,9 @@ export type GcReport = {
     cutRecoveries: number;
     /** Changeset manifests retired by local arrival age. */
     manifestsRetired: number;
+    /** Own superseded snapshot segment blocks reclaimed this run. */
+    segmentBlocksDeleted: number;
+    reclaimedSegmentBytes: bigint;
     warnings: string[];
 };
 
@@ -243,6 +358,14 @@ export type SharedFsOpenArgs = {
     remoteChunkFetch?: boolean | { timeoutMs?: number };
     /** Injected clock (ms). Tests use this to control GC windows. */
     clock?: () => number;
+    /**
+     * Scheduled garbage collection. Default on for full replicas: runs
+     * `collectGarbage` every 6 h (jittered) and chains the executing half
+     * of the two-run chunk/purge barrier automatically once candidates
+     * mature. `false` (or `{ schedule: false }`) disables; observers never
+     * schedule. Manual `collectGarbage` calls are unaffected either way.
+     */
+    gc?: false | GcScheduleOptions;
     /**
      * Dedup-skip witness horizon: a chunk put may be skipped only when a
      * version younger than this references it. Smaller horizons enable
@@ -285,6 +408,15 @@ export type SnapshotPublishOptions = {
     minChangesBetween?: number;
     /** Disable automatic publication (snapshotWrite() stays available). */
     disabled?: boolean;
+    /**
+     * Reclaim this author's own superseded snapshot segment blocks after a
+     * grace period (default 3 h; floor bootstrap maxSnapshotAgeMs, since a
+     * joiner may still be fetching a manifest up to that old — the cap must
+     * be fleet-consistent or a joiner with a larger one can select a
+     * manifest whose segments were already reaped and fall back to log
+     * replication). `false` disables reclamation entirely.
+     */
+    segmentReclaim?: false | { graceMs?: number };
 };
 
 export type BootstrapPhase =
@@ -511,6 +643,7 @@ export type WriteBatchResult = {
 };
 
 export type SharedFsErrorCode =
+    | "ERR_GC_PHASE"
     | "ENOENT"
     | "EEXIST"
     | "EISDIR"
@@ -887,6 +1020,166 @@ const SNAPSHOT_DEFAULTS = {
     publishIntervalMs: 30 * 60 * 1000,
     minChangesBetween: 50,
 };
+
+/**
+ * Segment-block reclamation. The block store is shared with log entry
+ * blocks and other authors' fetched segments, so "unreferenced by my
+ * manifests" is NOT a delete predicate: only cids this instance positively
+ * recorded as its own published segments are ever rm'd, every rm is
+ * re-verified against live manifest docs at deletion time, and there is no
+ * blocks-iterator sweep, ever. Content-addressing dedups unchanged shards
+ * to identical cids across generations — the delete set is always a set
+ * difference, never "the previous generation".
+ */
+const SEGMENT_RECLAIM_DEFAULT_GRACE_MS = 3 * 60 * 60 * 1000;
+/** Retired generations kept before the oldest coalesce into one. */
+const SEGMENT_LEDGER_MAX_RETIRED = 32;
+/** Consecutive reap cycles with rm failures before a loud warning. */
+const SEGMENT_REAP_FAILURE_WARN_CYCLES = 5;
+
+type SegmentLedgerCid = { cid: string; bytes: number };
+type SegmentLedgerGen = {
+    cids: SegmentLedgerCid[];
+    retiredAtMs: number;
+    snapshotSeq: string;
+};
+/**
+ * Side-state file #3 (shared-fs-snapshots/<address>.json), CAS-versioned.
+ * Ledger invariant: a positively-recorded cid leaves the ledger only via
+ * successful rm or by membership in `current`. Every merge/cap rule below
+ * preserves it.
+ */
+type SegmentLedger = {
+    v: 1;
+    generation: number;
+    current: {
+        cids: SegmentLedgerCid[];
+        publishedAtMs: number;
+        snapshotSeq: string;
+    } | null;
+    retired: SegmentLedgerGen[];
+};
+
+const normalizeSegmentLedger = (raw: any): SegmentLedger => ({
+    v: 1,
+    generation: Number(raw?.generation ?? 0),
+    current: raw?.current ?? null,
+    retired: Array.isArray(raw?.retired) ? raw.retired : [],
+});
+
+/**
+ * Optimistic-concurrency merge for the CLI-vs-daemon lost-update case:
+ * `retired` unions by snapshotSeq (newest stamp wins — delays deletion,
+ * never accelerates it), `current` is the newer publish, and any cids of
+ * the losing current covered nowhere else become a synthetic retired gen —
+ * nothing positively recorded is ever silently dropped.
+ */
+const mergeSegmentLedgers = (
+    a: SegmentLedger,
+    b: SegmentLedger,
+    nowMs: number
+): SegmentLedger => {
+    const retired = new Map<
+        string,
+        { cids: Map<string, number>; retiredAtMs: number }
+    >();
+    const addGen = (gen: SegmentLedgerGen) => {
+        const bucket = retired.get(gen.snapshotSeq) ?? {
+            cids: new Map<string, number>(),
+            retiredAtMs: gen.retiredAtMs,
+        };
+        bucket.retiredAtMs = Math.max(bucket.retiredAtMs, gen.retiredAtMs);
+        for (const entry of gen.cids) {
+            bucket.cids.set(entry.cid, entry.bytes);
+        }
+        retired.set(gen.snapshotSeq, bucket);
+    };
+    for (const gen of [...a.retired, ...b.retired]) {
+        addGen(gen);
+    }
+    const newer = (
+        x: SegmentLedger["current"],
+        y: SegmentLedger["current"]
+    ) => {
+        if (!x) return y;
+        if (!y) return x;
+        if (x.publishedAtMs !== y.publishedAtMs) {
+            return x.publishedAtMs > y.publishedAtMs ? x : y;
+        }
+        try {
+            return BigInt(x.snapshotSeq) >= BigInt(y.snapshotSeq) ? x : y;
+        } catch {
+            return x;
+        }
+    };
+    const current = newer(a.current, b.current);
+    const loser = current === a.current ? b.current : a.current;
+    if (loser && loser !== current) {
+        const covered = new Set((current?.cids ?? []).map((c) => c.cid));
+        for (const bucket of retired.values()) {
+            for (const cid of bucket.cids.keys()) {
+                covered.add(cid);
+            }
+        }
+        const stray = loser.cids.filter((c) => !covered.has(c.cid));
+        if (stray.length > 0) {
+            addGen({
+                cids: stray,
+                retiredAtMs: nowMs,
+                snapshotSeq: loser.snapshotSeq,
+            });
+        }
+    }
+    return {
+        v: 1,
+        generation: 0, // stamped by the CAS writer
+        current,
+        retired: [...retired.entries()]
+            .map(([snapshotSeq, bucket]) => ({
+                snapshotSeq,
+                retiredAtMs: bucket.retiredAtMs,
+                cids: [...bucket.cids.entries()].map(([cid, bytes]) => ({
+                    cid,
+                    bytes,
+                })),
+            }))
+            .sort((x, y) => x.retiredAtMs - y.retiredAtMs),
+    };
+};
+
+/**
+ * Coalesce the oldest overflow gens into one whose retiredAtMs is the
+ * NEWEST among them — conservative: delays deletion, never accelerates it.
+ */
+const capSegmentRetired = (ledger: SegmentLedger) => {
+    if (ledger.retired.length <= SEGMENT_LEDGER_MAX_RETIRED) {
+        return;
+    }
+    const sorted = [...ledger.retired].sort(
+        (x, y) => x.retiredAtMs - y.retiredAtMs
+    );
+    const overflow = sorted.slice(
+        0,
+        sorted.length - (SEGMENT_LEDGER_MAX_RETIRED - 1)
+    );
+    const kept = sorted.slice(sorted.length - (SEGMENT_LEDGER_MAX_RETIRED - 1));
+    const cids = new Map<string, number>();
+    let retiredAtMs = 0;
+    for (const gen of overflow) {
+        retiredAtMs = Math.max(retiredAtMs, gen.retiredAtMs);
+        for (const entry of gen.cids) {
+            cids.set(entry.cid, entry.bytes);
+        }
+    }
+    ledger.retired = [
+        {
+            snapshotSeq: overflow[overflow.length - 1].snapshotSeq,
+            retiredAtMs,
+            cids: [...cids.entries()].map(([cid, bytes]) => ({ cid, bytes })),
+        },
+        ...kept,
+    ];
+};
 /** Overlay supersession sweep cadence while bootstrap is active. */
 const SUPERSESSION_SWEEP_MS = 5_000;
 /** Double-check delay before verified retirement (one guard-coalescing window). */
@@ -1036,6 +1329,37 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ...BOOTSTRAP_DEFAULTS,
     };
     private snapshotConfig = { ...SNAPSHOT_DEFAULTS, disabled: false };
+    private gcScheduleConfig: {
+        disabled: boolean;
+        intervalMs: number;
+        initialDelayMs: number;
+        jitterRatio: number;
+        followUpSlackMs: number;
+        backoffBaseMs: number;
+        maxFollowUpGateRetries: number;
+        run: GcOptions;
+    } = { ...GC_SCHEDULE_DEFAULTS, disabled: false, run: {} };
+    private gcTimer?: ReturnType<typeof setTimeout>;
+    private gcFollowUpTimer?: ReturnType<typeof setTimeout>;
+    private gcIntervalNextAtMs = 0;
+    private gcFollowUpNextAtMs = 0;
+    private gcConsecutiveFailures = 0;
+    private gcFollowUpGateRetries = 0;
+    private gcSnapshotDeferrals = 0;
+    private gcPeerEvidenceWarned = false;
+    private gcPermanentSkipWarned = false;
+    private gcLastRun?: GcStatus["lastRun"];
+    // Ticks capture the generation at arm time; a tick whose generation no
+    // longer matches (the program was reopened) dies silently.
+    private gcSchedulerGeneration = 0;
+    private gcRng: () => number = Math.random;
+    private segmentLedgerChain: Promise<unknown> = Promise.resolve();
+    private segmentLedgerReconciled = false;
+    private segmentReapFailureCycles = 0;
+    private segmentGraceWarned = false;
+    // Publish-side manifest cap; ingest keeps the constant. Test-only
+    // override (like gcRng) so the pre-CUT cap-throw window is testable.
+    private manifestPayloadCapBytes = MANIFEST_PAYLOAD_CAP_BYTES;
     private bootstrapManifestMeta: BootstrapStatus["manifest"];
     private lastArrivalMs = 0;
     private docsSinceSnapshot = 0;
@@ -1171,6 +1495,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.stateWriteChain = Promise.resolve();
         this.snapshotRunning = false;
         this.sweepRunning = false;
+        this.gcConsecutiveFailures = 0;
+        this.gcFollowUpGateRetries = 0;
+        this.gcSnapshotDeferrals = 0;
+        this.gcPeerEvidenceWarned = false;
+        this.gcPermanentSkipWarned = false;
+        this.gcLastRun = undefined;
+        // Borsh bypasses field initializers on address-opened programs, so
+        // the previous value may be undefined here — never trust it.
+        this.gcSchedulerGeneration = (this.gcSchedulerGeneration || 0) + 1;
+        // Injectable rng for the schedule's jitter draws (test-only).
+        this.gcRng = (args as any)?.gcRng ?? Math.random;
+        this.segmentLedgerChain = Promise.resolve();
+        this.segmentLedgerReconciled = false;
+        this.segmentReapFailureCycles = 0;
+        this.segmentGraceWarned = false;
+        this.manifestPayloadCapBytes =
+            (args as any)?.manifestPayloadCapBytes ??
+            MANIFEST_PAYLOAD_CAP_BYTES;
         this.advisoryIgnorePublish = undefined;
         this.bootstrapAdvisoryIgnorePatterns = undefined;
         const bootstrapArg = args?.bootstrap;
@@ -1189,6 +1531,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             disabled: false,
             ...(args?.snapshot ?? {}),
         };
+        this.gcScheduleConfig = this.parseGcScheduleConfig(args?.gc);
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
@@ -1329,6 +1672,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Stamp the warm-reopen marker (never clears the bootstrap key).
         void this.writeBootstrapState({ openedBefore: true }).catch(() => {});
         this.startSnapshotPublisher();
+        this.startGcScheduler();
         if (this.isFullReplica()) {
             // Warm the chunkRefs child-table index so the first writeFile's
             // dedup freshness probe is a planned indexed join, not a scan.
@@ -3930,6 +4274,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearInterval(this.snapshotTimer);
             this.snapshotTimer = undefined;
         }
+        if (this.gcTimer) {
+            clearTimeout(this.gcTimer);
+            this.gcTimer = undefined;
+        }
+        if (this.gcFollowUpTimer) {
+            clearTimeout(this.gcFollowUpTimer);
+            this.gcFollowUpTimer = undefined;
+        }
     }
 
     async close(from?: any): Promise<boolean> {
@@ -4167,8 +4519,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.startQuiescenceChecker();
             return;
         }
+        // Content kinds only: replicated bootstrap/changeset manifests are
+        // control-plane rows (indexable since the manifest-kind fix) and
+        // must not make a cold store look warm — a store holding nothing
+        // but another author's manifest still needs the bootstrap.
         const iterator = this.entries.index.iterate(
-            { query: [] },
+            {
+                query: [
+                    new Or([
+                        new StringMatch({ key: "kind", value: "naming" }),
+                        new StringMatch({ key: "kind", value: "file-version" }),
+                        new StringMatch({ key: "kind", value: "file-chunk" }),
+                    ]),
+                ],
+            },
             { local: true, remote: false, resolve: false }
         );
         let empty: boolean;
@@ -5151,6 +5515,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 snapshotSeq = 1n;
             }
         }
+        let prevDocCids: SegmentLedgerCid[] = [];
+        let prevSeq = "0";
+        if (previous instanceof BootstrapManifest) {
+            try {
+                const prevPayload = deserialize(
+                    previous.payloadBytes,
+                    SnapshotManifestPayload
+                );
+                prevDocCids = prevPayload.segments.map((segment) => ({
+                    cid: segment.cid,
+                    bytes: Number(segment.byteLength),
+                }));
+                prevSeq = prevPayload.snapshotSeq.toString();
+            } catch {
+                // Existing fallback: an unparseable previous manifest
+                // contributes nothing (its cids were ledgered when it
+                // published, or are pre-upgrade and exempt).
+            }
+        }
+        // Record intent BEFORE the payload-cap check below can throw: a
+        // cap-throwing publish loop must ledger each attempt's delta, not
+        // strand freshly-put blocks (reap-time liveness keeps the live old
+        // generation protected regardless of what `current` becomes).
+        await this.recordSegmentIntent(
+            segments.map((segment) => ({
+                cid: segment.cid,
+                bytes: Number(segment.byteLength),
+            })),
+            prevDocCids,
+            prevSeq,
+            snapshotSeq.toString()
+        );
         const payload = new SnapshotManifestPayload({
             storeId: this.id,
             snapshotSeq,
@@ -5167,12 +5563,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 (await this.readAdvisoryFromRulesFile()),
         });
         const payloadBytes = serialize(payload);
-        if (payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES) {
+        if (payloadBytes.byteLength > this.manifestPayloadCapBytes) {
             // Loud failure by design: silent skips would leave stale
-            // snapshots serving joiners indefinitely.
+            // snapshots serving joiners indefinitely. This throw is BEFORE
+            // the CUT, so the previous manifest stays live and reap-time
+            // liveness keeps its segments protected.
             throw new SharedFsError(
                 "EIO",
-                `snapshot manifest exceeds ${MANIFEST_PAYLOAD_CAP_BYTES} bytes`
+                `snapshot manifest exceeds ${this.manifestPayloadCapBytes} bytes`
             );
         }
         const signature = await this.node.identity.sign(payloadBytes);
@@ -5189,6 +5587,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
+        void this.reapSnapshotSegments(undefined, {
+            duringPublish: true,
+        }).catch(() => {});
         return {
             snapshotSeq,
             createdAtWallMs: payload.createdAtWallMs,
@@ -5313,6 +5714,290 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }, 60_000);
         (early as any)?.unref?.();
         this.bootstrapTimers.push(early);
+    }
+
+    // ------------------------------------------------------------------
+    // Scheduled garbage collection
+    // ------------------------------------------------------------------
+
+    private parseGcScheduleConfig(arg: SharedFsOpenArgs["gc"]) {
+        const opts = typeof arg === "object" && arg !== null ? arg : {};
+        const disabled = arg === false || opts.schedule === false;
+        // Test-only floor/slack overrides (undocumented, like gcRng): the
+        // production floors would put every schedule beyond test patience.
+        const testOverrides: {
+            noFloors?: boolean;
+            followUpSlackMs?: number;
+            backoffBaseMs?: number;
+        } = (opts as any)?.testOverrides ?? {};
+        const run: GcOptions = {};
+        const stripped: string[] = [];
+        for (const [key, value] of Object.entries(opts.run ?? {})) {
+            if (
+                (
+                    GC_SCHEDULED_RUN_OPTION_ALLOWLIST as readonly string[]
+                ).includes(key)
+            ) {
+                (run as any)[key] = value;
+            } else {
+                stripped.push(key);
+            }
+        }
+        if (stripped.length > 0 && !disabled) {
+            console.warn(
+                `shared-fs: scheduled-gc run option(s) ignored (unsafe on a schedule; manual collectGarbage keeps them): ${stripped.join(", ")}`
+            );
+        }
+        return {
+            disabled,
+            intervalMs: Math.max(
+                testOverrides.noFloors ? 1 : GC_SCHEDULE_INTERVAL_FLOOR_MS,
+                opts.intervalMs ?? GC_SCHEDULE_DEFAULTS.intervalMs
+            ),
+            initialDelayMs: Math.max(
+                testOverrides.noFloors ? 0 : GC_SCHEDULE_INITIAL_DELAY_FLOOR_MS,
+                opts.initialDelayMs ?? GC_SCHEDULE_DEFAULTS.initialDelayMs
+            ),
+            jitterRatio: Math.min(
+                0.5,
+                Math.max(
+                    0,
+                    opts.jitterRatio ?? GC_SCHEDULE_DEFAULTS.jitterRatio
+                )
+            ),
+            followUpSlackMs:
+                testOverrides.followUpSlackMs ??
+                GC_SCHEDULE_DEFAULTS.followUpSlackMs,
+            backoffBaseMs:
+                testOverrides.backoffBaseMs ??
+                GC_SCHEDULE_DEFAULTS.backoffBaseMs,
+            maxFollowUpGateRetries: GC_SCHEDULE_DEFAULTS.maxFollowUpGateRetries,
+            run,
+        };
+    }
+
+    private startGcScheduler() {
+        if (this.gcScheduleConfig.disabled || !this.isFullReplica()) {
+            return;
+        }
+        this.armGcTimer(
+            computeGcFirstDelay(
+                this.gcScheduleConfig.initialDelayMs,
+                this.gcScheduleConfig.intervalMs,
+                this.gcRng
+            ),
+            "interval"
+        );
+    }
+
+    private gcJittered(ms: number): number {
+        const ratio = this.gcScheduleConfig.jitterRatio;
+        return ms * (1 + ratio * (2 * this.gcRng() - 1));
+    }
+
+    private armGcTimer(delayMs: number, trigger: "interval" | "follow-up") {
+        const generation = this.gcSchedulerGeneration;
+        const delay = Math.max(0, delayMs);
+        const prior =
+            trigger === "interval" ? this.gcTimer : this.gcFollowUpTimer;
+        if (prior) {
+            clearTimeout(prior);
+        }
+        const timer = setTimeout(() => {
+            if (trigger === "interval") {
+                this.gcTimer = undefined;
+            } else {
+                this.gcFollowUpTimer = undefined;
+            }
+            void this.gcSchedulerTick(trigger, generation).catch(() => {});
+        }, delay);
+        (timer as any)?.unref?.();
+        if (trigger === "interval") {
+            this.gcTimer = timer;
+            this.gcIntervalNextAtMs = this.clock() + delay;
+        } else {
+            this.gcFollowUpTimer = timer;
+            this.gcFollowUpNextAtMs = this.clock() + delay;
+        }
+    }
+
+    private async gcSchedulerTick(
+        trigger: "interval" | "follow-up",
+        generation: number
+    ): Promise<void> {
+        if (this.closed || generation !== this.gcSchedulerGeneration) {
+            return;
+        }
+        const config = this.gcScheduleConfig;
+        // Every gate below skips silently: an interval tick re-arms a full
+        // (jittered) interval out; a gated follow-up retries shortly, then
+        // folds into the next interval run — matured ledger candidates
+        // execute there anyway, so gating loses nothing but time.
+        const gateSkip = () => {
+            if (trigger === "interval") {
+                this.armGcTimer(this.gcJittered(config.intervalMs), "interval");
+            } else if (
+                this.gcFollowUpGateRetries++ <
+                GC_SCHEDULE_DEFAULTS.maxFollowUpGateRetries
+            ) {
+                this.armGcTimer(config.followUpSlackMs, "follow-up");
+            }
+        };
+        if (
+            this.bootstrapPhase !== "off" &&
+            this.bootstrapPhase !== "converged"
+        ) {
+            return gateSkip();
+        }
+        if (this.bootstrapPhase === "converged" && !this.bootstrapVerified) {
+            // Peer-evidence gate, scheduled ticks only: an isolated box
+            // quiesces to "converged" and would otherwise run BOTH halves
+            // of the two-run barrier against the same partitioned view —
+            // the ledger barrier verifies temporal span, not convergence.
+            // Manual runs (an operator who can see the box) stay allowed.
+            const connected = [
+                ...(((this.node.services.pubsub as any)?.peers?.keys?.() ??
+                    []) as Iterable<string>),
+            ].length;
+            const recentArrival =
+                this.clock() - this.lastArrivalMs <= config.intervalMs;
+            if (connected === 0 && !recentArrival) {
+                if (!this.gcPeerEvidenceWarned) {
+                    this.gcPeerEvidenceWarned = true;
+                    console.warn(
+                        "shared-fs: scheduled gc deferred: no peer evidence on an unverified replica"
+                    );
+                }
+                return gateSkip();
+            }
+        }
+        if (this.gcRunning) {
+            // A manual/CLI run is in flight; skip rather than queue (the
+            // collectGarbage mutex would throw).
+            return gateSkip();
+        }
+        if (this.snapshotRunning && this.gcSnapshotDeferrals < 5) {
+            // Courtesy, not correctness: GC against a mid-publish writer
+            // just causes pointless resurrection churn.
+            this.gcSnapshotDeferrals++;
+            this.armGcTimer(60_000, trigger);
+            return;
+        }
+        this.gcSnapshotDeferrals = 0;
+        const startedMs = this.clock();
+        let report: GcReport;
+        try {
+            report = await this.collectGarbage(config.run);
+        } catch (error: any) {
+            if (this.closed || generation !== this.gcSchedulerGeneration) {
+                return;
+            }
+            if (error?.code === "ERR_GC_PHASE") {
+                // The phase regressed between the gate and the run (a
+                // bootstrap restarted): a plain skip, not a failure.
+                return gateSkip();
+            }
+            if (error?.gcPermanent) {
+                // An unmet precondition (untrusted writer key, not a full
+                // replica): not transient, so no error events and no
+                // backoff spiral — warn once and keep quietly retrying
+                // each interval, which recovers by itself when trust is
+                // granted later.
+                if (!this.gcPermanentSkipWarned) {
+                    this.gcPermanentSkipWarned = true;
+                    console.warn(
+                        `shared-fs: scheduled gc skipped: ${error?.message ?? error}`
+                    );
+                }
+                return gateSkip();
+            }
+            this.gcConsecutiveFailures++;
+            console.error(
+                "shared-fs: scheduled gc run failed:",
+                error?.message ?? error
+            );
+            this.events.dispatchEvent(
+                new CustomEvent("gc:error", {
+                    detail: {
+                        trigger,
+                        error,
+                        consecutiveFailures: this.gcConsecutiveFailures,
+                    },
+                })
+            );
+            // Late GC is strictly safe (growth resumes; nothing corrupts):
+            // retry soon, backing off exponentially up to the interval.
+            this.armGcTimer(
+                this.gcJittered(
+                    Math.min(
+                        config.intervalMs,
+                        config.backoffBaseMs *
+                            2 ** (this.gcConsecutiveFailures - 1)
+                    )
+                ),
+                "interval"
+            );
+            return;
+        }
+        if (this.closed || generation !== this.gcSchedulerGeneration) {
+            return;
+        }
+        this.gcConsecutiveFailures = 0;
+        const finishedMs = this.clock();
+        this.gcLastRun = { atMs: finishedMs, trigger, report };
+        this.events.dispatchEvent(
+            new CustomEvent("gc:run", {
+                detail: {
+                    trigger,
+                    durationMs: finishedMs - startedMs,
+                    report,
+                },
+            })
+        );
+        const span = config.run.minOrphanSpanMs ?? GC_DEFAULTS.minOrphanSpanMs;
+        if (
+            report.chunkCandidatesRecorded + report.purgeCandidatesRecorded >
+                0 &&
+            !this.gcFollowUpTimer &&
+            config.intervalMs > span + 2 * config.followUpSlackMs
+        ) {
+            this.gcFollowUpGateRetries = 0;
+            this.armGcTimer(
+                computeGcFollowUpDelay(
+                    startedMs,
+                    span,
+                    finishedMs,
+                    config.followUpSlackMs,
+                    this.gcRng
+                ),
+                "follow-up"
+            );
+        }
+        this.armGcTimer(this.gcJittered(config.intervalMs), "interval");
+    }
+
+    /**
+     * Schedule state for the current open. A follow-up timer does not
+     * survive process restart; persisted ledger candidates simply mature
+     * and execute on the first post-restart interval run.
+     */
+    gcStatus(): GcStatus {
+        const nexts: number[] = [];
+        if (this.gcTimer) {
+            nexts.push(this.gcIntervalNextAtMs);
+        }
+        if (this.gcFollowUpTimer) {
+            nexts.push(this.gcFollowUpNextAtMs);
+        }
+        return {
+            scheduled:
+                !this.closed &&
+                !this.gcScheduleConfig.disabled &&
+                this.isFullReplica(),
+            nextRunAtMs: nexts.length > 0 ? Math.min(...nexts) : undefined,
+            consecutiveFailures: this.gcConsecutiveFailures,
+            lastRun: this.gcLastRun,
+        };
     }
 
     // ------------------------------------------------------------------
@@ -5541,10 +6226,45 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (!state) {
                     continue;
                 }
-                for (const value of values) {
-                    if (state.heads.some((head) => head.id === value.id)) {
-                        await this.putPreferLinked(value);
+                let deepestPresent = -1n;
+                for (const doc of remaining) {
+                    if (doc.causalDepth > deepestPresent) {
+                        deepestPresent = doc.causalDepth;
                     }
+                }
+                for (const value of values) {
+                    if (!state.heads.some((head) => head.id === value.id)) {
+                        continue;
+                    }
+                    // Split-flush damper: a compaction burst reaches peers
+                    // across several guard flushes, and causally independent
+                    // delete entries may reorder between them — a reordered
+                    // mid-chain delete makes an already-retired ancestor a
+                    // union head here, and re-putting it would plant a
+                    // permanent spurious head (node stuck conflicted). Skip
+                    // the re-put only when BOTH hold: the event is old by
+                    // its author stamp (every GC-retired event is, by
+                    // construction) AND some PRESENT event is strictly
+                    // deeper — so suppression can never change any winner,
+                    // and a genuinely lagging peer (nothing deeper present)
+                    // still resurrects its deepest known event. createdAt
+                    // rather than local arrival because the removed row's
+                    // index entry is already gone when this runs; backdating
+                    // it only suppresses the backdater's own events.
+                    // Deliberately keyed to the GC_DEFAULTS constant, not
+                    // per-run config: fleets lowering namingGraceMs get
+                    // guard churn instead of suppression (the safe
+                    // direction). Accepted narrowing: a stale conflict-
+                    // branch head that is already strictly dominated is no
+                    // longer resurrected after a rogue direct delete.
+                    if (
+                        this.clock() - Number(value.createdAt) >
+                            GC_DEFAULTS.namingGraceMs &&
+                        deepestPresent > value.causalDepth
+                    ) {
+                        continue;
+                    }
+                    await this.putPreferLinked(value);
                 }
             } catch {
                 // Never throw into the event loop.
@@ -5597,6 +6317,431 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const { writeFile } = await import("node:fs/promises");
         await writeFile(path, JSON.stringify(ledger));
+    }
+
+    // ------------------------------------------------------------------
+    // Snapshot segment reclamation (see the safety rule at the constants)
+    // ------------------------------------------------------------------
+
+    private segmentReclaimSettings(): { enabled: boolean; graceMs: number } {
+        const raw = (this.snapshotConfig as any).segmentReclaim as
+            | false
+            | { graceMs?: number }
+            | undefined;
+        if (raw === false) {
+            return { enabled: false, graceMs: 0 };
+        }
+        const requested = raw?.graceMs ?? SEGMENT_RECLAIM_DEFAULT_GRACE_MS;
+        const floor = this.bootstrapConfig.maxSnapshotAgeMs;
+        if (requested < floor && !this.segmentGraceWarned) {
+            this.segmentGraceWarned = true;
+            console.warn(
+                `shared-fs: segmentReclaim.graceMs raised to ${floor} (bootstrap maxSnapshotAgeMs): joiners may still be fetching a manifest that old`
+            );
+        }
+        return { enabled: true, graceMs: Math.max(requested, floor) };
+    }
+
+    /**
+     * Directory-less peers keep the ledger on the NODE, not the program
+     * instance: the in-memory block store also lives on the node and
+     * survives program close/reopen within a process, so the ledger must
+     * too — an instance-scoped fallback would silently exempt every
+     * generation retired before a reopen.
+     */
+    private nodeMemorySegmentLedgers(): Map<string, SegmentLedger> {
+        const node: any = this.node;
+        node.__sharedFsSegmentLedgers ??= new Map();
+        return node.__sharedFsSegmentLedgers;
+    }
+
+    private segmentLedgerKey(): string {
+        return this.address?.toString() ?? "unaddressed";
+    }
+
+    private async segmentLedgerPath(): Promise<string | undefined> {
+        const directory = (this.node as any)?.directory as string | undefined;
+        if (!directory) {
+            return undefined;
+        }
+        const { mkdir } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const dir = join(directory, "shared-fs-snapshots");
+        await mkdir(dir, { recursive: true });
+        return join(dir, `${this.address?.toString() ?? "unaddressed"}.json`);
+    }
+
+    private async loadSegmentLedger(): Promise<SegmentLedger> {
+        const empty: SegmentLedger = {
+            v: 1,
+            generation: 0,
+            current: null,
+            retired: [],
+        };
+        const path = await this.segmentLedgerPath();
+        let ledger: SegmentLedger;
+        if (!path) {
+            const store = this.nodeMemorySegmentLedgers();
+            const stored = store.get(this.segmentLedgerKey());
+            if (!stored) {
+                store.set(this.segmentLedgerKey(), empty);
+            }
+            ledger = stored ?? empty;
+        } else {
+            try {
+                const { readFile } = await import("node:fs/promises");
+                ledger = normalizeSegmentLedger(
+                    JSON.parse(await readFile(path, "utf8"))
+                );
+            } catch {
+                ledger = empty;
+            }
+        }
+        if (
+            !this.segmentLedgerReconciled &&
+            !ledger.current &&
+            ledger.retired.length === 0
+        ) {
+            // Startup reconciliation: an empty ledger beside a live own
+            // manifest means the ledger was lost — reseed the live
+            // generation. Pre-upgrade historic generations were never
+            // recorded and stay permanently exempt (safety rule): a
+            // one-time bloat that stops growing once reclamation ships.
+            const doc = await this.getDocument<SharedFsEntry>(
+                `bootstrap:${this.authorKey()}`
+            );
+            if (doc instanceof BootstrapManifest) {
+                try {
+                    const payload = deserialize(
+                        doc.payloadBytes,
+                        SnapshotManifestPayload
+                    );
+                    ledger.current = {
+                        cids: payload.segments.map((segment) => ({
+                            cid: segment.cid,
+                            bytes: Number(segment.byteLength),
+                        })),
+                        publishedAtMs: Number(payload.createdAtWallMs),
+                        snapshotSeq: payload.snapshotSeq.toString(),
+                    };
+                } catch {
+                    // Corrupt own manifest: nothing safe to seed.
+                }
+            }
+        }
+        this.segmentLedgerReconciled = true;
+        return ledger;
+    }
+
+    /**
+     * Generation-CAS write. One conflict merges against the disk state and
+     * retries; a second consecutive conflict skips (the next trigger
+     * retries the whole operation).
+     */
+    private async saveSegmentLedgerCas(
+        loadedGeneration: number,
+        next: SegmentLedger,
+        reapedCids?: Set<string>
+    ): Promise<boolean> {
+        const path = await this.segmentLedgerPath();
+        if (!path) {
+            next.generation = loadedGeneration + 1;
+            this.nodeMemorySegmentLedgers().set(this.segmentLedgerKey(), next);
+            return true;
+        }
+        const { readFile, writeFile } = await import("node:fs/promises");
+        let expected = loadedGeneration;
+        let payload = next;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            let disk: any;
+            try {
+                disk = JSON.parse(await readFile(path, "utf8"));
+            } catch {
+                disk = undefined;
+            }
+            const diskGeneration = Number(disk?.generation ?? 0);
+            if (disk == null || diskGeneration === expected) {
+                payload.generation = Math.max(diskGeneration, expected) + 1;
+                await writeFile(path, JSON.stringify(payload));
+                return true;
+            }
+            payload = mergeSegmentLedgers(
+                normalizeSegmentLedger(disk),
+                payload,
+                this.clock()
+            );
+            if (reapedCids && reapedCids.size > 0) {
+                // Successful rm is the invariant's sanctioned exit: a
+                // concurrent writer's disk copy must not resurrect cids
+                // this reap just deleted, or the next reap double-counts
+                // them in segmentBlocksDeleted/reclaimedSegmentBytes.
+                payload.retired = payload.retired
+                    .map((gen) => ({
+                        ...gen,
+                        cids: gen.cids.filter(
+                            (entry) => !reapedCids.has(entry.cid)
+                        ),
+                    }))
+                    .filter((gen) => gen.cids.length > 0);
+            }
+            expected = diskGeneration;
+        }
+        return false;
+    }
+
+    /**
+     * Publish-time intent record. Runs BEFORE any throw-capable publish
+     * step so a cap-throwing publish loop records each attempt's delta
+     * instead of stranding freshly-put blocks outside the ledger.
+     */
+    private recordSegmentIntent(
+        newCids: SegmentLedgerCid[],
+        prevDocCids: SegmentLedgerCid[],
+        prevSeq: string,
+        newSeq: string
+    ): Promise<void> {
+        const run = this.segmentLedgerChain.then(async () => {
+            try {
+                const ledger = await this.loadSegmentLedger();
+                const loadedGeneration = ledger.generation;
+                const now = this.clock();
+                const newSet = new Set(newCids.map((c) => c.cid));
+                const prev = new Map<string, number>();
+                for (const entry of [
+                    ...prevDocCids,
+                    ...(ledger.current?.cids ?? []),
+                ]) {
+                    prev.set(entry.cid, entry.bytes);
+                }
+                const retiredNow = [...prev.entries()]
+                    .filter(([cid]) => !newSet.has(cid))
+                    .map(([cid, bytes]) => ({ cid, bytes }));
+                const nextLedger: SegmentLedger = {
+                    v: 1,
+                    generation: loadedGeneration,
+                    current: {
+                        cids: newCids,
+                        publishedAtMs: now,
+                        snapshotSeq: newSeq,
+                    },
+                    retired: [
+                        ...ledger.retired,
+                        ...(retiredNow.length > 0
+                            ? [
+                                  {
+                                      cids: retiredNow,
+                                      retiredAtMs: now,
+                                      snapshotSeq: prevSeq,
+                                  },
+                              ]
+                            : []),
+                    ],
+                };
+                capSegmentRetired(nextLedger);
+                await this.saveSegmentLedgerCas(loadedGeneration, nextLedger);
+            } catch (error: any) {
+                console.warn(
+                    "shared-fs: segment-ledger intent record failed:",
+                    error?.message ?? error
+                );
+            }
+        });
+        this.segmentLedgerChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private reapSnapshotSegments(
+        nowMsArg?: number,
+        options?: { duringPublish?: boolean }
+    ): Promise<{ deleted: number; bytes: bigint }> {
+        const run = this.segmentLedgerChain.then(() =>
+            this.reapSnapshotSegmentsInner(nowMsArg, options)
+        );
+        this.segmentLedgerChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private async reapSnapshotSegmentsInner(
+        nowMsArg?: number,
+        options?: { duringPublish?: boolean }
+    ): Promise<{ deleted: number; bytes: bigint }> {
+        const zero = { deleted: 0, bytes: 0n };
+        const settings = this.segmentReclaimSettings();
+        if (!settings.enabled || !this.isFullReplica()) {
+            return zero;
+        }
+        if (this.snapshotRunning && !options?.duringPublish) {
+            // A publish's shard puts land BEFORE its intent reaches the
+            // ledger chain; a reap ordered between them could rm a block
+            // the new manifest is about to reference. The publish-tail
+            // trigger passes duringPublish (its own puts and intent are
+            // complete by then). Cross-process overlap keeps the same
+            // tiny residual window as the metadata GC — accepted.
+            return zero;
+        }
+        const now = nowMsArg ?? this.clock();
+        const ledger = await this.loadSegmentLedger();
+        const loadedGeneration = ledger.generation;
+        const expired = ledger.retired.filter(
+            (gen) => gen.retiredAtMs <= now - settings.graceMs
+        );
+        if (expired.length === 0) {
+            return zero;
+        }
+        // Liveness re-verification at deletion time. Own manifest absent
+        // (a crash between CUT and publish): SKIP entirely — fail-safe, the
+        // next successful publish restores it. Any parse failure: ABORT —
+        // never delete on a corrupt view.
+        const own = await this.getDocument<SharedFsEntry>(
+            `bootstrap:${this.authorKey()}`
+        );
+        if (!(own instanceof BootstrapManifest)) {
+            return zero;
+        }
+        const protectedCids = new Set<string>();
+        try {
+            for (const segment of deserialize(
+                own.payloadBytes,
+                SnapshotManifestPayload
+            ).segments) {
+                protectedCids.add(segment.cid);
+            }
+        } catch {
+            return zero;
+        }
+        for (const entry of ledger.current?.cids ?? []) {
+            protectedCids.add(entry.cid);
+        }
+        for (const gen of ledger.retired) {
+            if (gen.retiredAtMs > now - settings.graceMs) {
+                for (const entry of gen.cids) {
+                    protectedCids.add(entry.cid);
+                }
+            }
+        }
+        // Every OTHER locally-known live manifest too: identical shard
+        // content across authors dedups to identical cids, and reaping one
+        // out from under a joiner bootstrapping from an offline author
+        // would cost an avoidable availability dip. One indexed scan.
+        const manifestDocs = await this.entries.index
+            .iterate(
+                {
+                    query: [
+                        new StringMatch({
+                            key: "kind",
+                            value: "bootstrap-manifest",
+                        }),
+                    ],
+                },
+                { local: true, remote: false, resolve: true }
+            )
+            .all();
+        for (const doc of manifestDocs as any[]) {
+            if (!(doc instanceof BootstrapManifest) || doc.id === own.id) {
+                continue;
+            }
+            try {
+                for (const segment of deserialize(
+                    doc.payloadBytes,
+                    SnapshotManifestPayload
+                ).segments) {
+                    protectedCids.add(segment.cid);
+                }
+            } catch {
+                return zero; // corrupt view: abort, never delete
+            }
+        }
+        const currentSet = new Set(
+            (ledger.current?.cids ?? []).map((entry) => entry.cid)
+        );
+        const rmCandidates = new Map<string, number>();
+        for (const gen of expired) {
+            for (const entry of gen.cids) {
+                if (!protectedCids.has(entry.cid)) {
+                    rmCandidates.set(entry.cid, entry.bytes);
+                }
+            }
+        }
+        const blocks: any = this.node.services.blocks;
+        const deletedSet = new Set<string>();
+        const failedSet = new Set<string>();
+        let bytes = 0n;
+        const cids = [...rmCandidates.keys()];
+        let batchDone = false;
+        if (cids.length > 0 && typeof blocks.rmMany === "function") {
+            try {
+                await blocks.rmMany(cids);
+                batchDone = true;
+                for (const cid of cids) {
+                    deletedSet.add(cid);
+                    bytes += BigInt(rmCandidates.get(cid) ?? 0);
+                }
+            } catch {
+                batchDone = false;
+            }
+        }
+        if (!batchDone) {
+            for (const cid of cids) {
+                try {
+                    await blocks.rm(cid);
+                    deletedSet.add(cid);
+                    bytes += BigInt(rmCandidates.get(cid) ?? 0);
+                } catch {
+                    // An absent-cid rm must not abort the batch; failures
+                    // keep their cids ledgered for retry.
+                    failedSet.add(cid);
+                }
+            }
+        }
+        // Drop processed cids and gens. A cid may leave a gen only when it
+        // was rm'd or lives in `current` (the invariant); cids protected by
+        // OTHER manifests stay for retry once those retire.
+        const expiredSet = new Set(expired);
+        const nextRetired: SegmentLedgerGen[] = [];
+        for (const gen of ledger.retired) {
+            if (!expiredSet.has(gen)) {
+                nextRetired.push(gen);
+                continue;
+            }
+            const remaining = gen.cids.filter(
+                (entry) =>
+                    !deletedSet.has(entry.cid) && !currentSet.has(entry.cid)
+            );
+            if (remaining.length > 0) {
+                nextRetired.push({ ...gen, cids: remaining });
+            }
+        }
+        if (failedSet.size > 0) {
+            this.segmentReapFailureCycles++;
+            if (
+                this.segmentReapFailureCycles >=
+                SEGMENT_REAP_FAILURE_WARN_CYCLES
+            ) {
+                console.warn(
+                    `shared-fs: segment reclamation has failed to rm ${failedSet.size} block(s) for ${this.segmentReapFailureCycles} consecutive cycles (read-only block store?)`
+                );
+            }
+        } else {
+            this.segmentReapFailureCycles = 0;
+        }
+        const nextLedger: SegmentLedger = {
+            v: 1,
+            generation: loadedGeneration,
+            current: ledger.current,
+            retired: nextRetired,
+        };
+        await this.saveSegmentLedgerCas(
+            loadedGeneration,
+            nextLedger,
+            deletedSet
+        );
+        return { deleted: deletedSet.size, bytes };
     }
 
     /**
@@ -5659,7 +6804,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // shields: a partial (bootstrapping or unverified) replica
             // must not plan retirements at all.
             throw new SharedFsError(
-                "EINVAL",
+                "ERR_GC_PHASE",
                 "collectGarbage is unavailable until the cold-start bootstrap converges"
             );
         }
@@ -5685,19 +6830,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         options: GcOptions = {}
     ): Promise<GcReport> {
         if (!this.isFullReplica()) {
-            throw new SharedFsError(
+            const error = new SharedFsError(
                 "EINVAL",
                 "collectGarbage requires a full replica (replicate: { factor: 1 })"
             );
+            // Scheduler hint: a precondition, not a transient failure.
+            (error as any).gcPermanent = true;
+            throw error;
         }
         if (
             this.trustGraph &&
             !(await this.isTrustedWriter(this.node.identity.publicKey))
         ) {
-            throw new SharedFsError(
+            const error = new SharedFsError(
                 "EINVAL",
                 "collectGarbage requires a trusted writer key"
             );
+            (error as any).gcPermanent = true;
+            throw error;
         }
         const config = {
             keepVersions: options.keepVersions ?? GC_DEFAULTS.keepVersions,
@@ -5708,6 +6858,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             settleMs: options.settleMs ?? GC_DEFAULTS.settleMs,
             minOrphanSpanMs:
                 options.minOrphanSpanMs ?? GC_DEFAULTS.minOrphanSpanMs,
+            namingHeadStabilityMs:
+                options.namingHeadStabilityMs ??
+                GC_DEFAULTS.namingHeadStabilityMs,
+            namingCompactionBatchLimit:
+                options.namingCompactionBatchLimit ??
+                GC_DEFAULTS.namingCompactionBatchLimit,
             chunkSweep: options.chunkSweep ?? ("ledger" as const),
             scope: options.scope,
             dryRun: options.dryRun ?? false,
@@ -5727,6 +6883,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             conflictedNodes: 0,
             cutRecoveries: 0,
             manifestsRetired: 0,
+            segmentBlocksDeleted: 0,
+            reclaimedSegmentBytes: 0n,
             warnings: [],
         };
         // W1's dedup-skip safety depends on the invariant skipHorizon <=
@@ -5849,7 +7007,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 docs: T[],
                 parentsOf: (doc: T) => string[],
                 heads: T[],
-                keep: Set<string>
+                keep: Set<string>,
+                cap?: { limit: number; depthOf: (doc: T) => bigint }
             ): Map<string, T> => {
                 const byId = new Map(docs.map((doc) => [doc.id, doc]));
                 const children = new Map<string, string[]>();
@@ -5900,6 +7059,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         if (doc) {
                             retire.set(id, doc);
                         }
+                    }
+                }
+                if (cap && retire.size > cap.limit) {
+                    // Bound upgrade-day bursts (years of backlog on a busy
+                    // node): keep the shallowest N — ancestors retire before
+                    // descendants — and let the fixpoint below un-retire any
+                    // child-set whose deletion would promote a survivor.
+                    // Successive runs drain the backlog layer by layer.
+                    const shallowest = [...retire.values()].sort((a, b) => {
+                        const da = cap.depthOf(a);
+                        const db = cap.depthOf(b);
+                        if (da !== db) {
+                            return da < db ? -1 : 1;
+                        }
+                        return a.id < b.id ? -1 : 1;
+                    });
+                    retire.clear();
+                    for (const doc of shallowest.slice(0, cap.limit)) {
+                        retire.set(doc.id, doc);
                     }
                 }
                 // Grace-closure fixpoint: never leave a surviving doc whose
@@ -6027,9 +7205,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (!inScope(nodeId) || conflictedNodeIds.has(nodeId)) {
                     continue;
                 }
+                // Arrival stability, not author age, gates the node: the
+                // old every-head-fresh rule let ONE fresh head immortalize
+                // the node's whole DAG — active nodes never compacted. A
+                // head counts as stable once it has been visible HERE for
+                // namingHeadStabilityMs; arrival is backdate-proof, and a
+                // late-arriving old head is treated as fresh (the
+                // protective direction). A version-style younger-witness
+                // rule was rejected: on an active node every survivor is
+                // younger than grace, so it re-starves permanently.
+                // Retired events still stay >= namingGraceMs by BOTH author
+                // stamp and local arrival via the keep set below.
                 if (
-                    !state.heads.every((head) =>
-                        ageOk(head, config.namingGraceMs)
+                    !state.heads.every(
+                        (head) =>
+                            (modifiedMs.get(head.id) ?? runStartedMs) <=
+                            runStartedMs - config.namingHeadStabilityMs
                     )
                 ) {
                     continue;
@@ -6047,7 +7238,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     state.events as NamingEvent[],
                     (event) => event.parentNamingIds,
                     state.heads as NamingEvent[],
-                    keep
+                    keep,
+                    {
+                        limit: config.namingCompactionBatchLimit,
+                        depthOf: (event) => event.causalDepth,
+                    }
                 );
                 for (const [id, event] of retire) {
                     namingRetire.set(id, event);
@@ -6396,6 +7591,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ledger.lastRunMs = runStartedMs;
         if (!config.dryRun) {
             await this.saveGcLedger(ledger);
+            // Reclaim own superseded snapshot segments on the same cadence
+            // (manual CLI runs and scheduled runs alike). Best-effort: a
+            // reap failure must never fail the GC run.
+            try {
+                const reaped = await this.reapSnapshotSegments(config.nowMs);
+                report.segmentBlocksDeleted = reaped.deleted;
+                report.reclaimedSegmentBytes = reaped.bytes;
+            } catch {
+                // reported via its own failure-cycle warning
+            }
         }
         if (report.chunkCandidatesRecorded > 0) {
             report.warnings.push(
@@ -6507,6 +7712,10 @@ export class SharedFsHandle {
         return this.program.collectGarbage(options);
     }
 
+    gcStatus() {
+        return this.program.gcStatus();
+    }
+
     writeBatch(entries: WriteBatchEntry[], options?: WriteBatchOptions) {
         return this.program.writeBatch(entries, options);
     }
@@ -6599,7 +7808,10 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
             ? options.bootstrap
             : (options.bootstrap ?? false),
         snapshot: options.snapshot,
+        gc: options.gc,
     };
+    // Test-only jitter rng rides along undocumented.
+    (args as any).gcRng = (options as any).gcRng;
     const program = options.address
         ? await SharedFileSystem.open(
               options.address as string,
