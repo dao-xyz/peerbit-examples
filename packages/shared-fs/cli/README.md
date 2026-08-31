@@ -14,6 +14,7 @@ peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
+peerbit-fs prepare-disposal <address>
 ```
 
 `benchmark` writes and reads one large file plus a configurable many-small-files
@@ -103,6 +104,44 @@ peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can
 be opened.
+
+## Safely dispose of a machine
+
+Stop mounted writes, wait for persisted delivery, and only then dispose of the
+machine or delete its local Peerbit state:
+
+```bash
+peerbit-fs unmount "$MOUNTPOINT"
+peerbit-fs prepare-disposal "$ADDRESS" --min-acks 1
+# Only after both commands exit successfully, dispose of the machine or its state.
+```
+
+`--min-acks <number>` defaults to `1`, `--timeout-ms <number>` bounds the
+overall wait, and `--json` emits a machine-readable result. A timeout, abort,
+error, or nonzero exit never indicates safe disposal. Keep the source machine
+and its state available, correct connectivity or storage capacity, and retry
+the barrier. Run it against the existing full local replica;
+`--no-replicate` is rejected. A pending bootstrap decision is awaited; a
+bootstrapping or unverified view is rejected. Any filesystem-content arrival
+during the fence also fails the attempt, so let replication settle and retry.
+
+The captured recoverable head closure contains every current naming head
+(including tombstones and conflicts), every current file-version head, and
+every distinct chunk those versions reference. It does not preserve already
+superseded history, control manifests, or the trusted-writer graph.
+
+The reported guarantee is persisted **per entry**: every exact entry in that
+closure independently reached the requested number of capable remote leaders
+backed by supported durable storage. It does not prove that one common
+custodian, or the same group of custodians, holds all entries. The command does
+not raise the replication degree, and older, incapable, in-memory, and local
+peers do not count.
+
+Receipts describe the instant they were issued and assume cooperative remotes;
+they are not permanent-custody guarantees or Byzantine proofs. A successful
+empty result is vacuous: it acknowledges no data and provides no evidence that
+a remote peer was present. The command also does not revoke the local writer
+key or claim that a separate writer revocation was durably delivered.
 
 ## macOS from this repo
 

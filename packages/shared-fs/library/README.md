@@ -109,6 +109,7 @@ peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
+peerbit-fs prepare-disposal <address>
 ```
 
 Mounted writes are buffered by the native adapter and committed as one signed
@@ -248,6 +249,65 @@ same view; `watchChangesets()` streams `manifest` and once-per-transition
 `complete` events (queued during a bootstrap overlay so a triggered read
 always sees the whole turn). Manifests are retired by `collectGarbage`
 once their local arrival age exceeds the retention window.
+
+## Preparing a machine for disposal
+
+Before permanently deleting a machine's Peerbit state, fence the filesystem's
+captured recoverable head closure with persisted delivery receipts. The closure
+contains every current naming head (including tombstones and conflicts), every
+current file-version head, and every distinct chunk those versions reference.
+It does not preserve already superseded history, control manifests, or the
+trusted-writer graph:
+
+```ts
+const result = await fs.prepareForDisposal({
+    minAcks: 1,
+    timeout: 120_000,
+});
+// result.safeToDispose === true
+```
+
+For a mounted filesystem, stop new writes first and use the CLI barrier before
+disposing of the machine or deleting its state:
+
+```bash
+peerbit-fs unmount "$MOUNTPOINT"
+peerbit-fs prepare-disposal "$ADDRESS" --min-acks 1
+# Only after both commands exit successfully, dispose of the machine or its state.
+```
+
+`--min-acks` defaults to `1`; `--timeout-ms <number>` sets an overall deadline,
+and `--json` emits a machine-readable result. Any timeout, abort, error, or
+nonzero exit means **not safe to dispose**: keep the source machine and its
+state, fix connectivity or capacity, and retry the barrier. Retrying is safe
+because the barrier appends no logical filesystem mutation. The command must
+run against the existing full local replica; `--no-replicate` is rejected. It
+waits for any pending bootstrap decision and rejects a bootstrapping or
+unverified view. Any filesystem-content arrival during the fence also fails the
+attempt, so let replication settle and retry rather than disposing a moving
+source.
+
+The guarantee is deliberately narrow:
+
+- The requested quorum applies independently to every exact chunk, version,
+  and naming entry. It does not guarantee that one common remote custodian (or
+  the same set of custodians) holds every entry.
+- `minAcks` does not increase the filesystem's replication degree. Only
+  capable remote leaders backed by supported durable storage count; older,
+  incapable, in-memory, or local peers cannot satisfy the requested
+  acknowledgements.
+- A receipt proves crash-safe persistence at the instant it is issued by a
+  cooperative remote. It is not permanent custody, a Byzantine proof, or a
+  promise that the remote will remain online or retain the data forever.
+- An empty captured state returns a vacuous success (`empty: true`); it
+  acknowledges no data and provides no evidence that a remote peer was present.
+- The barrier does not revoke this machine's writer key and makes no claim that
+  a writer revocation was durably delivered. Authorization and revocation are
+  separate operations.
+
+This is stronger than a changeset barrier: `awaitChangeset()` proves local
+admission and readability, while `prepareForDisposal()` requests persisted
+remote delivery for every entry in the captured disposal closure.
 
 ## Unattended lifecycle
 

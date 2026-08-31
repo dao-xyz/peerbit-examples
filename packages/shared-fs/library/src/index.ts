@@ -130,6 +130,15 @@ const REMOTE_CHUNK_FETCH_TIMEOUT_MS = 10_000;
 /** Number of node ids per batched history query. */
 const HEAD_QUERY_BATCH = 64;
 
+/**
+ * Disposal receipts are streamed in bounded groups so a multi-gigabyte
+ * filesystem never materializes every chunk entry in memory at once. The
+ * protocol still applies `minAcks` independently to every entry hash.
+ */
+const DISPOSAL_METADATA_BATCH_SIZE = 256;
+const DISPOSAL_CHUNK_BATCH_SIZE = 16;
+const MAX_DELIVERY_TIMEOUT_MS = 2_147_483_647;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -456,6 +465,76 @@ export type SnapshotWriteResult = {
     segments: number;
     manifestId: string;
 };
+
+export type PrepareForDisposalOptions = {
+    /**
+     * Distinct current capable remote leaders required for EVERY fenced
+     * entry. This does not increase the filesystem's replication degree.
+     */
+    minAcks: number;
+    /**
+     * Optional overall deadline for the whole barrier. When omitted, each
+     * bounded receipt group uses Peerbit's size-aware default deadline.
+     */
+    timeout?: number;
+    signal?: AbortSignal;
+};
+
+export type PrepareForDisposalResult = {
+    /** True only after every entry in the captured closure reached quorum. */
+    safeToDispose: true;
+    guarantee: "persisted-per-entry";
+    minAcksPerEntry: number;
+    /** Empty is a vacuous success and proves no remote peer was present. */
+    empty: boolean;
+    entries: {
+        chunks: number;
+        versions: number;
+        naming: number;
+    };
+    entryCount: number;
+    receiptBatches: number;
+};
+
+type DisposalEntryRef = {
+    id: string;
+    hash: string;
+};
+
+type DisposalClosure = {
+    chunks: DisposalEntryRef[];
+    versions: DisposalEntryRef[];
+    naming: DisposalEntryRef[];
+};
+
+/**
+ * The disposal barrier did not complete. Retrying the BARRIER after fixing
+ * connectivity/capacity is safe because it appends no logical filesystem
+ * mutation; the source machine must remain available until a later attempt
+ * returns `safeToDispose: true`.
+ */
+export class PrepareForDisposalError extends Error {
+    readonly safeToDispose = false;
+    readonly retrySafe = true;
+
+    constructor(
+        readonly cause: unknown,
+        /**
+         * Conservative lower bound: entries in receipt batches that fully
+         * settled before the failing batch began.
+         */
+        readonly confirmedEntries: number
+    ) {
+        super(
+            `Shared filesystem disposal barrier failed after confirming ${confirmedEntries} entr${
+                confirmedEntries === 1 ? "y" : "ies"
+            } in completed receipt batches; keep the source machine: ${
+                cause instanceof Error ? cause.message : String(cause)
+            }`
+        );
+        this.name = "PrepareForDisposalError";
+    }
+}
 
 /**
  * Thrown by whole-store conflict/changeset queries while a bootstrap
@@ -1298,6 +1377,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private trustChangeListener: (() => void) | undefined;
     /** Serializes writeBatch calls; see the writeBatch docstring. */
     private writeBatchChain: Promise<unknown> = Promise.resolve();
+    /** Content-store generation used to reject a moving disposal fence. */
+    private disposalContentGeneration = 0;
+    private disposalPreparationRunning = false;
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
     // --- Cold-start bootstrap state (all re-initialized in open()) ---
@@ -1473,6 +1555,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.cacheGlobalEpoch = 0;
         this.slotSweepCache = new Map();
         this.writeBatchChain = Promise.resolve();
+        this.disposalContentGeneration = 0;
+        this.disposalPreparationRunning = false;
         this.trustVerdicts = new Map();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
@@ -1606,6 +1690,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.changeListener = (event: any) => {
             const added = event?.detail?.added ?? [];
             const removed = event?.detail?.removed ?? [];
+            if (
+                [...added, ...removed].some(
+                    (value) =>
+                        value instanceof NamingEvent ||
+                        value instanceof FileVersion ||
+                        value instanceof FileChunk
+                )
+            ) {
+                this.disposalContentGeneration++;
+            }
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
             for (const value of added) {
@@ -5336,6 +5430,428 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
+    private validatePrepareForDisposalOptions(
+        options: PrepareForDisposalOptions
+    ) {
+        if (
+            !options ||
+            !Number.isSafeInteger(options.minAcks) ||
+            options.minAcks <= 0
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "prepareForDisposal requires a positive integer minAcks"
+            );
+        }
+        if (
+            options.timeout !== undefined &&
+            (!Number.isFinite(options.timeout) ||
+                options.timeout <= 0 ||
+                options.timeout > MAX_DELIVERY_TIMEOUT_MS)
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                `prepareForDisposal timeout must be a positive number no greater than ${MAX_DELIVERY_TIMEOUT_MS}`
+            );
+        }
+    }
+
+    private throwIfDisposalInterrupted(
+        options: PrepareForDisposalOptions,
+        deadline: number | undefined
+    ) {
+        if (options.signal?.aborted) {
+            throw (
+                options.signal.reason ?? new Error("Disposal barrier aborted")
+            );
+        }
+        if (deadline !== undefined && Date.now() >= deadline) {
+            throw this.disposalTimeoutError(options);
+        }
+    }
+
+    private disposalTimeoutError(options: PrepareForDisposalOptions) {
+        return new SharedFsError(
+            "ETIMEDOUT",
+            `Timed out preparing the filesystem for disposal with minAcks ${options.minAcks}`
+        );
+    }
+
+    /** Bound local reads/queues as well as Peerbit's receipt settlement. */
+    private awaitDisposalStep<T>(
+        promise: Promise<T>,
+        options: PrepareForDisposalOptions,
+        deadline: number | undefined
+    ): Promise<T> {
+        this.throwIfDisposalInterrupted(options, deadline);
+        if (deadline === undefined && !options.signal) {
+            return promise;
+        }
+        return new Promise<T>((resolve, reject) => {
+            let settled = false;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const cleanup = () => {
+                if (timer) {
+                    clearTimeout(timer);
+                }
+                options.signal?.removeEventListener("abort", onAbort);
+            };
+            const resolveOnce = (value: T) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(value);
+            };
+            const rejectOnce = (error: unknown) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(error);
+            };
+            const onAbort = () =>
+                rejectOnce(
+                    options.signal?.reason ??
+                        new Error("Disposal barrier aborted")
+                );
+
+            options.signal?.addEventListener("abort", onAbort, { once: true });
+            if (deadline !== undefined) {
+                timer = setTimeout(
+                    () => rejectOnce(this.disposalTimeoutError(options)),
+                    Math.max(0, deadline - Date.now())
+                );
+            }
+            promise.then(resolveOnce, rejectOnce);
+        });
+    }
+
+    private disposalEntryRef(raw: any, description: string): DisposalEntryRef {
+        if (typeof raw?.id !== "string" || raw.id.length === 0) {
+            throw new SharedFsError(
+                "EIO",
+                `Cannot fence ${description}: its local index row has no id`
+            );
+        }
+        const hash = raw.__context?.head;
+        if (typeof hash !== "string" || hash.length === 0) {
+            throw new SharedFsError(
+                "EIO",
+                `Cannot fence ${description} ${raw.id}: its exact local log head is unavailable`
+            );
+        }
+        return { id: raw.id, hash };
+    }
+
+    /**
+     * Capture the current recoverable state: every naming head (including
+     * tombstones and conflicts), every content head, and every distinct chunk
+     * referenced by those content heads. Index rows retain each document's
+     * exact backing log hash, so the barrier sends existing entries without a
+     * re-put or any other logical filesystem mutation.
+     */
+    private async captureDisposalClosure(
+        options: PrepareForDisposalOptions,
+        deadline: number | undefined
+    ): Promise<DisposalClosure> {
+        this.throwIfDisposalInterrupted(options, deadline);
+        const [rawNamingRows, rawVersionRows] = await this.awaitDisposalStep(
+            Promise.all([
+                this.queryRows([
+                    new StringMatch({ key: "kind", value: "naming" }),
+                ]),
+                this.queryRows([
+                    new StringMatch({ key: "kind", value: "file-version" }),
+                ]),
+            ]),
+            options,
+            deadline
+        );
+        this.throwIfDisposalInterrupted(options, deadline);
+
+        const namingByNode = new Map<string, NamingLike[]>();
+        const rawNamingById = new Map<string, any>();
+        for (const raw of rawNamingRows) {
+            const row = namingRowOf(raw);
+            const bucket = namingByNode.get(row.nodeId) ?? [];
+            bucket.push(row);
+            namingByNode.set(row.nodeId, bucket);
+            rawNamingById.set(row.id, raw);
+        }
+        const naming: DisposalEntryRef[] = [];
+        for (const [nodeId, rows] of namingByNode) {
+            for (const head of computeNamingState(nodeId, rows)?.heads ?? []) {
+                const raw = rawNamingById.get(head.id);
+                if (!raw) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `Cannot fence naming head ${head.id}: its local index row disappeared`
+                    );
+                }
+                naming.push(this.disposalEntryRef(raw, "naming head"));
+            }
+        }
+
+        const versionsByNode = new Map<string, VersionLike[]>();
+        const rawVersionById = new Map<string, any>();
+        for (const raw of rawVersionRows) {
+            const row = versionRowOf(raw);
+            const bucket = versionsByNode.get(row.nodeId) ?? [];
+            bucket.push(row);
+            versionsByNode.set(row.nodeId, bucket);
+            rawVersionById.set(row.id, raw);
+        }
+        const versions: DisposalEntryRef[] = [];
+        const chunkIds = new Set<string>();
+        for (const rows of versionsByNode.values()) {
+            for (const head of this.contentHeads(rows)) {
+                const raw = rawVersionById.get(head.id);
+                if (!raw) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `Cannot fence file-version head ${head.id}: its local index row disappeared`
+                    );
+                }
+                versions.push(this.disposalEntryRef(raw, "file-version head"));
+                if (!Array.isArray(raw.chunkRefs)) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `Cannot fence file-version head ${head.id}: its chunk references are unavailable`
+                    );
+                }
+                for (const chunkId of raw.chunkRefs) {
+                    if (typeof chunkId !== "string" || chunkId.length === 0) {
+                        throw new SharedFsError(
+                            "EIO",
+                            `Cannot fence file-version head ${head.id}: it contains an invalid chunk reference`
+                        );
+                    }
+                    chunkIds.add(chunkId);
+                }
+            }
+        }
+
+        const chunks: DisposalEntryRef[] = [];
+        const sortedChunkIds = [...chunkIds].sort(compareIds);
+        for (let i = 0; i < sortedChunkIds.length; i += HEAD_QUERY_BATCH) {
+            this.throwIfDisposalInterrupted(options, deadline);
+            const batch = sortedChunkIds.slice(i, i + HEAD_QUERY_BATCH);
+            const rows = await this.awaitDisposalStep(
+                this.queryRows([
+                    new StringMatch({ key: "kind", value: "file-chunk" }),
+                    batch.length === 1
+                        ? new StringMatch({ key: "id", value: batch[0] })
+                        : new Or(
+                              batch.map(
+                                  (id) =>
+                                      new StringMatch({ key: "id", value: id })
+                              )
+                          ),
+                ]),
+                options,
+                deadline
+            );
+            const byId = new Map(rows.map((row) => [row.id, row]));
+            for (const id of batch) {
+                const raw = byId.get(id);
+                if (!raw) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `Cannot fence current filesystem state: referenced chunk ${id} is missing locally`
+                    );
+                }
+                chunks.push(this.disposalEntryRef(raw, "file chunk"));
+            }
+        }
+        this.throwIfDisposalInterrupted(options, deadline);
+
+        naming.sort((a, b) => compareIds(a.id, b.id));
+        versions.sort((a, b) => compareIds(a.id, b.id));
+        return { chunks, versions, naming };
+    }
+
+    private async deliverDisposalBatch(
+        refs: DisposalEntryRef[],
+        options: PrepareForDisposalOptions,
+        deadline: number | undefined,
+        progress: { confirmedEntries: number; receiptBatches: number }
+    ) {
+        if (refs.length === 0) {
+            return;
+        }
+        this.throwIfDisposalInterrupted(options, deadline);
+        const entries = await this.awaitDisposalStep(
+            mapWithConcurrency(refs, CHUNK_IO_CONCURRENCY, async (ref) => {
+                const entry = await this.entries.log.log.get(ref.hash);
+                if (!entry || entry.hash !== ref.hash) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `Cannot fence ${ref.id}: exact local log entry ${ref.hash} is unavailable`
+                    );
+                }
+                return entry;
+            }),
+            options,
+            deadline
+        );
+        this.throwIfDisposalInterrupted(options, deadline);
+        const remainingTimeout =
+            deadline === undefined
+                ? undefined
+                : Math.max(1, deadline - Date.now());
+        await this.awaitDisposalStep(
+            this.entries.log.deliverPersistedEntries(entries, {
+                target: "replicators",
+                delivery: {
+                    reliability: "persisted",
+                    minAcks: options.minAcks,
+                    timeout: remainingTimeout,
+                    signal: options.signal,
+                },
+            }),
+            options,
+            deadline
+        );
+        progress.confirmedEntries += refs.length;
+        progress.receiptBatches++;
+    }
+
+    /**
+     * Fence this full replica's current recoverable filesystem closure on
+     * `minAcks` distinct capable remote leaders per exact entry. The caller
+     * must stop new writes before calling and keep them stopped until the
+     * returned success has been acted on. A content arrival during the fence
+     * rejects the attempt instead of certifying a moving view.
+     *
+     * Receipts are per entry: different entries may be held by different
+     * remote leader sets. This does not raise the replication degree, revoke
+     * this machine's writer key, or promise permanent remote custody.
+     */
+    async prepareForDisposal(
+        options: PrepareForDisposalOptions
+    ): Promise<PrepareForDisposalResult> {
+        this.validatePrepareForDisposalOptions(options);
+        if (!this.isFullReplica()) {
+            throw new SharedFsError(
+                "EINVAL",
+                "prepareForDisposal requires a full replica (replicate: { factor: 1 })"
+            );
+        }
+        if (this.disposalPreparationRunning) {
+            throw new SharedFsError(
+                "EINVAL",
+                "prepareForDisposal is already running on this instance"
+            );
+        }
+
+        const deadline =
+            options.timeout === undefined
+                ? undefined
+                : Date.now() + options.timeout;
+        const progress = { confirmedEntries: 0, receiptBatches: 0 };
+        this.disposalPreparationRunning = true;
+        try {
+            // `open()` starts auto-bootstrap beside normal replication. Its
+            // first local-index probe intentionally leaves phase="off", so
+            // phase is meaningful only after this decision has settled.
+            await this.awaitDisposalStep(
+                this.bootstrapDecision,
+                options,
+                deadline
+            );
+            if (
+                this.bootstrapPhase !== "off" &&
+                !(this.bootstrapPhase === "converged" && this.bootstrapVerified)
+            ) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "prepareForDisposal requires a fully verified local view; await verified bootstrap convergence before retrying"
+                );
+            }
+            // Drain an already-started writeBatch before choosing the closure.
+            // Other write APIs are guarded by the generation check below.
+            await this.awaitDisposalStep(
+                this.writeBatchChain,
+                options,
+                deadline
+            );
+            this.throwIfDisposalInterrupted(options, deadline);
+            const generation = this.disposalContentGeneration;
+            const closure = await this.captureDisposalClosure(
+                options,
+                deadline
+            );
+            if (this.disposalContentGeneration !== generation) {
+                throw new SharedFsError(
+                    "EIO",
+                    "filesystem content changed while capturing the disposal closure; quiesce writes and replication, then retry"
+                );
+            }
+
+            for (
+                let i = 0;
+                i < closure.chunks.length;
+                i += DISPOSAL_CHUNK_BATCH_SIZE
+            ) {
+                await this.deliverDisposalBatch(
+                    closure.chunks.slice(i, i + DISPOSAL_CHUNK_BATCH_SIZE),
+                    options,
+                    deadline,
+                    progress
+                );
+                if (this.disposalContentGeneration !== generation) {
+                    throw new SharedFsError(
+                        "EIO",
+                        "filesystem content changed during the disposal barrier; quiesce writes and replication, then retry"
+                    );
+                }
+            }
+            for (const refs of [closure.versions, closure.naming]) {
+                for (
+                    let i = 0;
+                    i < refs.length;
+                    i += DISPOSAL_METADATA_BATCH_SIZE
+                ) {
+                    await this.deliverDisposalBatch(
+                        refs.slice(i, i + DISPOSAL_METADATA_BATCH_SIZE),
+                        options,
+                        deadline,
+                        progress
+                    );
+                    if (this.disposalContentGeneration !== generation) {
+                        throw new SharedFsError(
+                            "EIO",
+                            "filesystem content changed during the disposal barrier; quiesce writes and replication, then retry"
+                        );
+                    }
+                }
+            }
+
+            const entries = {
+                chunks: closure.chunks.length,
+                versions: closure.versions.length,
+                naming: closure.naming.length,
+            };
+            const entryCount =
+                entries.chunks + entries.versions + entries.naming;
+            return {
+                safeToDispose: true,
+                guarantee: "persisted-per-entry",
+                minAcksPerEntry: options.minAcks,
+                empty: entryCount === 0,
+                entries,
+                entryCount,
+                receiptBatches: progress.receiptBatches,
+            };
+        } catch (error) {
+            if (error instanceof PrepareForDisposalError) {
+                throw error;
+            }
+            throw new PrepareForDisposalError(error, progress.confirmedEntries);
+        } finally {
+            this.disposalPreparationRunning = false;
+        }
+    }
+
     /**
      * Materialize this replica's GC-retained head state — every naming
      * head (deletes included) and every version head per node, as full
@@ -7742,6 +8258,11 @@ export class SharedFsHandle {
     /** Materialize and publish a cold-start snapshot from this replica. */
     snapshotWrite() {
         return this.program.snapshotWrite();
+    }
+
+    /** Fence the current recoverable filesystem closure before disposal. */
+    prepareForDisposal(options: PrepareForDisposalOptions) {
+        return this.program.prepareForDisposal(options);
     }
 
     bootstrapStatus() {
