@@ -1,5 +1,13 @@
 # @peerbit/shared-fs
 
+## 0.12.0
+
+### Minor Changes
+
+- c6b102d: Add persisted per-entry machine-disposal barriers and the
+  `peerbit-fs prepare-disposal` workflow, with explicit safe-disposal reporting
+  and receipt-scope caveats.
+
 ## 0.11.0
 
 ### Minor Changes
