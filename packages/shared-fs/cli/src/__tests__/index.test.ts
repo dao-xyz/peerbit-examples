@@ -77,6 +77,86 @@ describe("peerbit-fs cli", () => {
         }
     });
 
+    it("rejects disposal preparation when replication is disabled", async () => {
+        await expect(
+            runCli([
+                "prepare-disposal",
+                "zb2rh-not-opened",
+                "--no-replicate",
+                "--directory",
+                "",
+            ])
+        ).rejects.toThrow(
+            "prepare-disposal requires a full replica; --no-replicate is not allowed"
+        );
+    });
+
+    it("does not print disposal success when peer shutdown fails", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-disposal-")
+        );
+        const createPeerbit = Peerbit.create.bind(Peerbit);
+        let seedPeer: Peerbit | undefined;
+        let cliPeer: Peerbit | undefined;
+        let restoreCliStop: (() => void) | undefined;
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        let createSpy: ReturnType<typeof vi.spyOn> | undefined;
+
+        try {
+            seedPeer = await createPeerbit({ directory });
+            const seeded = await openSharedFs({
+                peerbit: seedPeer,
+                machineLabel: "cli-disposal-seed",
+                replicate: { factor: 1 },
+                bootstrap: false,
+                gc: false,
+            });
+            const address = seeded.address;
+            await stopPeer(seedPeer);
+            seedPeer = undefined;
+
+            const shutdownFailure = new Error("simulated shutdown failure");
+            createSpy = vi
+                .spyOn(Peerbit, "create")
+                .mockImplementation(async (options) => {
+                    const peer = await createPeerbit(options);
+                    cliPeer = peer;
+                    vi.spyOn(peer, "bootstrap").mockResolvedValue({
+                        connectedPeerIds: [],
+                        failures: [],
+                    });
+                    const stop = vi
+                        .spyOn(peer, "stop")
+                        .mockRejectedValueOnce(shutdownFailure);
+                    restoreCliStop = () => stop.mockRestore();
+                    return peer;
+                });
+
+            await expect(
+                runCli([
+                    "prepare-disposal",
+                    address,
+                    "--directory",
+                    directory,
+                    "--json",
+                ])
+            ).rejects.toBe(shutdownFailure);
+            expect(cliPeer?.stop).toHaveBeenCalledTimes(1);
+            expect(log).not.toHaveBeenCalled();
+        } finally {
+            createSpy?.mockRestore();
+            restoreCliStop?.();
+            log.mockRestore();
+            if (cliPeer) {
+                await stopPeer(cliPeer);
+            }
+            if (seedPeer) {
+                await stopPeer(seedPeer);
+            }
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it("opens shared-fs addresses with the CLI dependency graph", async () => {
         const writerPeer = await Peerbit.create();
         const readerPeer = await Peerbit.create();

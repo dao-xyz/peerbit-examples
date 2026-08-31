@@ -1,6 +1,7 @@
 import {
     NativeMountUnavailableError,
     Peerbit,
+    type PrepareForDisposalResult,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
     decodePublicSignKey,
@@ -345,12 +346,32 @@ const printBenchmarkResult = (
     );
 };
 
+const printPrepareForDisposalResult = (result: PrepareForDisposalResult) => {
+    console.log(`guarantee: ${result.guarantee}`);
+    console.log(
+        `minimum acknowledgements per entry: ${result.minAcksPerEntry}`
+    );
+    console.log(
+        `entries fenced: ${result.entryCount} (${result.entries.chunks} chunks, ${result.entries.versions} version heads, ${result.entries.naming} naming heads)`
+    );
+    console.log(`receipt batches: ${result.receiptBatches}`);
+    if (result.empty) {
+        console.log(
+            chalk.yellow(
+                "empty filesystem: this is a vacuous success and does not prove that a remote replica exists"
+            )
+        );
+    }
+    console.log(chalk.bold.green("safe-to-dispose: true"));
+};
+
 const openCliFs = async (
     peerbit: Peerbit,
     options: {
         address?: string;
         machineLabel?: string;
         replicate?: boolean;
+        gc?: false;
         rootKey?: Peerbit["identity"]["publicKey"];
     }
 ) => {
@@ -364,6 +385,7 @@ const openCliFs = async (
             address: options.address,
             machineLabel: options.machineLabel || os.hostname(),
             rootKey: options.rootKey,
+            gc: options.gc,
             ...programArgs,
         });
     if (!options.address) {
@@ -865,6 +887,68 @@ export const runCli = async (args = hideBin(process.argv)) => {
             }
         )
         .command(
+            "prepare-disposal <address>",
+            "persist the current recoverable head closure on remote replicas before disposing this machine",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                        demandOption: true,
+                    })
+                    .option("min-acks", {
+                        type: "number",
+                        default: 1,
+                        description:
+                            "Distinct capable remote leaders required for every fenced entry.",
+                    })
+                    .option("timeout-ms", {
+                        type: "number",
+                        description:
+                            "Overall disposal-barrier deadline in milliseconds.",
+                    })
+                    .option("json", {
+                        type: "boolean",
+                        default: false,
+                        description: "Print machine-readable JSON.",
+                    }),
+            async (argv) => {
+                if (argv.replicate === false) {
+                    throw new Error(
+                        "prepare-disposal requires a full replica; --no-replicate is not allowed."
+                    );
+                }
+                const result = await (async () => {
+                    const directory = resolveDirectory(argv.directory);
+                    const peerbit = await Peerbit.create({ directory });
+                    try {
+                        await connectToNetwork(peerbit, argv.peer, {
+                            bootstrap: true,
+                        });
+                        const fsHandle = await openCliFs(peerbit, {
+                            address: argv.address,
+                            machineLabel: argv.machine,
+                            replicate: true,
+                            gc: false,
+                        });
+                        return await fsHandle.prepareForDisposal({
+                            minAcks: argv.minAcks,
+                            timeout: argv.timeoutMs,
+                        });
+                    } finally {
+                        // Unlike ordinary read/write commands, disposal must
+                        // fail closed: even a shutdown error prevents the
+                        // success report from being emitted.
+                        await peerbit.stop();
+                    }
+                })();
+                if (argv.json) {
+                    console.log(JSON.stringify(result, null, 2));
+                } else {
+                    printPrepareForDisposalResult(result);
+                }
+            }
+        )
+        .command(
             "gc <address>",
             "reclaim storage: retire old versions, compact naming history, delete unreferenced chunks",
             (command) =>
@@ -1140,7 +1224,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
         )
         .command(
             "unmount <mountpoint>",
-            "unmount a native shared filesystem mountpoint",
+            "detach a native mountpoint (does not stop a separate mount process)",
             (command) =>
                 command.positional("mountpoint", {
                     type: "string",
@@ -1151,6 +1235,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     normalizeNativeMountpoint(String(argv.mountpoint))
                 );
                 console.log(chalk.green(`Unmounted ${argv.mountpoint}`));
+                console.log(
+                    chalk.yellow(
+                        "If peerbit-fs mount is still running, terminate that process separately and wait for it to exit."
+                    )
+                );
             }
         )
         .demandCommand(1)
