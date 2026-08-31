@@ -496,6 +496,48 @@ export const runCli = async (args = hideBin(process.argv)) => {
             }
         )
         .command(
+            "revoke <address> <public-key>",
+            "revoke this identity's trust edge to a writer key",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                        demandOption: true,
+                    })
+                    .positional("public-key", {
+                        type: "string",
+                        demandOption: true,
+                        description:
+                            "Base64 public key printed by peerbit-fs whoami.",
+                    }),
+            async (argv) => {
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: argv.replicate !== false,
+                    });
+                    const fsHandle = await openCliFs(peerbit, {
+                        address: argv.address,
+                        machineLabel: argv.machine,
+                        replicate: argv.replicate,
+                    });
+                    const key = decodePublicSignKey(String(argv.publicKey));
+                    await fsHandle.revokeWriter(key);
+                    const stillTrusted = await fsHandle.isTrustedWriter(key);
+                    console.log(
+                        stillTrusted
+                            ? chalk.yellow(
+                                  "Edge revoked, but the key is STILL trusted through another path — revoke the remaining grants (only each truster can revoke its own edge)"
+                              )
+                            : chalk.green("Writer revoked")
+                    );
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
             "install-adapter",
             "download and install the prebuilt native mount adapter",
             (command) =>
