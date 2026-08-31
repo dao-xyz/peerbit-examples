@@ -148,6 +148,70 @@ const GC_DEFAULTS = {
 } as const;
 
 /**
+ * Scheduled-GC defaults. Interval ticks jitter both ways so a fleet never
+ * herds onto the same GC minute; follow-up runs (the executing half of the
+ * two-run chunk/purge barrier) are anchored to the recording run's start
+ * with positive-only jitter, so they can never fire before candidates
+ * mature.
+ */
+const GC_SCHEDULE_DEFAULTS = {
+    intervalMs: 6 * 60 * 60 * 1000,
+    initialDelayMs: 5 * 60 * 1000,
+    jitterRatio: 0.2,
+    followUpSlackMs: 60_000,
+    backoffBaseMs: 60_000,
+    maxFollowUpGateRetries: 10,
+} as const;
+
+const GC_SCHEDULE_INTERVAL_FLOOR_MS = 15 * 60 * 1000;
+const GC_SCHEDULE_INITIAL_DELAY_FLOOR_MS = 30_000;
+
+/**
+ * GcOptions a schedule may forward to its runs. Deliberately absent:
+ * `dryRun` (the scheduler would spin forever deleting nothing), `nowMs` (a
+ * frozen clock never matures ledger candidates), and
+ * `chunkSweep: "immediate"` (bypasses the two-run barrier on autopilot).
+ * Manual `collectGarbage` calls keep all three.
+ */
+const GC_SCHEDULED_RUN_OPTION_ALLOWLIST = [
+    "retentionMs",
+    "graceMs",
+    "chunkGraceMs",
+    "namingGraceMs",
+    "keepVersions",
+    "settleMs",
+    "minOrphanSpanMs",
+    "scope",
+] as const;
+
+/**
+ * First scheduled run: uniform over [initialDelayMs, initialDelayMs +
+ * intervalMs / 4] so a fleet restarting together spreads its first runs
+ * (and, one interval later, its follow-ups) instead of herding.
+ */
+export const computeGcFirstDelay = (
+    initialDelayMs: number,
+    intervalMs: number,
+    rng: () => number
+): number => initialDelayMs + rng() * (intervalMs / 4);
+
+/**
+ * Follow-up delay for the executing half of the two-run barrier. The ledger
+ * accepts a candidate only after minOrphanSpanMs of wall time from the
+ * recording run's start, so the delay is anchored there with positive-only
+ * slack jitter: a follow-up can land late, never before maturity.
+ */
+export const computeGcFollowUpDelay = (
+    recordingRunStartedMs: number,
+    minOrphanSpanMs: number,
+    nowMs: number,
+    followUpSlackMs: number,
+    rng: () => number
+): number =>
+    Math.max(0, recordingRunStartedMs + minOrphanSpanMs - nowMs) +
+    followUpSlackMs * (1 + rng());
+
+/**
  * Writers may skip re-putting a chunk only when a version referencing it is
  * younger than this horizon: such a witness version cannot be retired by any
  * peer for at least retentionMs − skipHorizonMs, so the chunk's refcount
@@ -187,6 +251,40 @@ export type GcOptions = {
     dryRun?: boolean;
     /** Injected clock for tests. */
     nowMs?: number;
+};
+
+export type GcScheduleOptions = {
+    /** Default true; `gc: false` on open also disables the schedule. */
+    schedule?: boolean;
+    /** Cadence of scheduled runs. Default 6 h, floor 15 min. */
+    intervalMs?: number;
+    /**
+     * Lower bound of the first-run delay after open. Default 5 min, floor
+     * 30 s; the actual first delay spreads up to intervalMs/4 beyond it.
+     */
+    initialDelayMs?: number;
+    /** Interval jitter, clamped to [0, 0.5]. Default 0.2. */
+    jitterRatio?: number;
+    /**
+     * Options forwarded to every scheduled run. Restricted to retention
+     * and pacing knobs; `dryRun`, `nowMs`, and `chunkSweep: "immediate"`
+     * are stripped with a warning. Note that a `scope` here means
+     * everything outside the scope never GCs on this schedule.
+     */
+    run?: GcOptions;
+};
+
+export type GcStatus = {
+    /** True when this open has an armed schedule (full replica, not disabled). */
+    scheduled: boolean;
+    /** Earliest pending timer's target wall time, if any timer is armed. */
+    nextRunAtMs?: number;
+    consecutiveFailures: number;
+    lastRun?: {
+        atMs: number;
+        trigger: "interval" | "follow-up";
+        report: GcReport;
+    };
 };
 
 export type GcReport = {
@@ -243,6 +341,14 @@ export type SharedFsOpenArgs = {
     remoteChunkFetch?: boolean | { timeoutMs?: number };
     /** Injected clock (ms). Tests use this to control GC windows. */
     clock?: () => number;
+    /**
+     * Scheduled garbage collection. Default on for full replicas: runs
+     * `collectGarbage` every 6 h (jittered) and chains the executing half
+     * of the two-run chunk/purge barrier automatically once candidates
+     * mature. `false` (or `{ schedule: false }`) disables; observers never
+     * schedule. Manual `collectGarbage` calls are unaffected either way.
+     */
+    gc?: false | GcScheduleOptions;
     /**
      * Dedup-skip witness horizon: a chunk put may be skipped only when a
      * version younger than this references it. Smaller horizons enable
@@ -511,6 +617,7 @@ export type WriteBatchResult = {
 };
 
 export type SharedFsErrorCode =
+    | "ERR_GC_PHASE"
     | "ENOENT"
     | "EEXIST"
     | "EISDIR"
@@ -1036,6 +1143,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ...BOOTSTRAP_DEFAULTS,
     };
     private snapshotConfig = { ...SNAPSHOT_DEFAULTS, disabled: false };
+    private gcScheduleConfig: {
+        disabled: boolean;
+        intervalMs: number;
+        initialDelayMs: number;
+        jitterRatio: number;
+        followUpSlackMs: number;
+        backoffBaseMs: number;
+        maxFollowUpGateRetries: number;
+        run: GcOptions;
+    } = { ...GC_SCHEDULE_DEFAULTS, disabled: false, run: {} };
+    private gcTimer?: ReturnType<typeof setTimeout>;
+    private gcFollowUpTimer?: ReturnType<typeof setTimeout>;
+    private gcIntervalNextAtMs = 0;
+    private gcFollowUpNextAtMs = 0;
+    private gcConsecutiveFailures = 0;
+    private gcFollowUpGateRetries = 0;
+    private gcSnapshotDeferrals = 0;
+    private gcPeerEvidenceWarned = false;
+    private gcLastRun?: GcStatus["lastRun"];
+    // Ticks capture the generation at arm time; a tick whose generation no
+    // longer matches (the program was reopened) dies silently.
+    private gcSchedulerGeneration = 0;
+    private gcRng: () => number = Math.random;
     private bootstrapManifestMeta: BootstrapStatus["manifest"];
     private lastArrivalMs = 0;
     private docsSinceSnapshot = 0;
@@ -1171,6 +1301,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.stateWriteChain = Promise.resolve();
         this.snapshotRunning = false;
         this.sweepRunning = false;
+        this.gcConsecutiveFailures = 0;
+        this.gcFollowUpGateRetries = 0;
+        this.gcSnapshotDeferrals = 0;
+        this.gcPeerEvidenceWarned = false;
+        this.gcLastRun = undefined;
+        // Borsh bypasses field initializers on address-opened programs, so
+        // the previous value may be undefined here — never trust it.
+        this.gcSchedulerGeneration = (this.gcSchedulerGeneration || 0) + 1;
+        // Injectable rng for the schedule's jitter draws (test-only).
+        this.gcRng = (args as any)?.gcRng ?? Math.random;
         this.advisoryIgnorePublish = undefined;
         this.bootstrapAdvisoryIgnorePatterns = undefined;
         const bootstrapArg = args?.bootstrap;
@@ -1189,6 +1329,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             disabled: false,
             ...(args?.snapshot ?? {}),
         };
+        this.gcScheduleConfig = this.parseGcScheduleConfig(args?.gc);
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
@@ -1329,6 +1470,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Stamp the warm-reopen marker (never clears the bootstrap key).
         void this.writeBootstrapState({ openedBefore: true }).catch(() => {});
         this.startSnapshotPublisher();
+        this.startGcScheduler();
         if (this.isFullReplica()) {
             // Warm the chunkRefs child-table index so the first writeFile's
             // dedup freshness probe is a planned indexed join, not a scan.
@@ -3930,6 +4072,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearInterval(this.snapshotTimer);
             this.snapshotTimer = undefined;
         }
+        if (this.gcTimer) {
+            clearTimeout(this.gcTimer);
+            this.gcTimer = undefined;
+        }
+        if (this.gcFollowUpTimer) {
+            clearTimeout(this.gcFollowUpTimer);
+            this.gcFollowUpTimer = undefined;
+        }
     }
 
     async close(from?: any): Promise<boolean> {
@@ -5316,6 +5466,276 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     // ------------------------------------------------------------------
+    // Scheduled garbage collection
+    // ------------------------------------------------------------------
+
+    private parseGcScheduleConfig(arg: SharedFsOpenArgs["gc"]) {
+        const opts = typeof arg === "object" && arg !== null ? arg : {};
+        const disabled = arg === false || opts.schedule === false;
+        // Test-only floor/slack overrides (undocumented, like gcRng): the
+        // production floors would put every schedule beyond test patience.
+        const testOverrides: {
+            noFloors?: boolean;
+            followUpSlackMs?: number;
+            backoffBaseMs?: number;
+        } = (opts as any)?.testOverrides ?? {};
+        const run: GcOptions = {};
+        const stripped: string[] = [];
+        for (const [key, value] of Object.entries(opts.run ?? {})) {
+            if (
+                (
+                    GC_SCHEDULED_RUN_OPTION_ALLOWLIST as readonly string[]
+                ).includes(key)
+            ) {
+                (run as any)[key] = value;
+            } else {
+                stripped.push(key);
+            }
+        }
+        if (stripped.length > 0 && !disabled) {
+            console.warn(
+                `shared-fs: scheduled-gc run option(s) ignored (unsafe on a schedule; manual collectGarbage keeps them): ${stripped.join(", ")}`
+            );
+        }
+        return {
+            disabled,
+            intervalMs: Math.max(
+                testOverrides.noFloors ? 1 : GC_SCHEDULE_INTERVAL_FLOOR_MS,
+                opts.intervalMs ?? GC_SCHEDULE_DEFAULTS.intervalMs
+            ),
+            initialDelayMs: Math.max(
+                testOverrides.noFloors ? 0 : GC_SCHEDULE_INITIAL_DELAY_FLOOR_MS,
+                opts.initialDelayMs ?? GC_SCHEDULE_DEFAULTS.initialDelayMs
+            ),
+            jitterRatio: Math.min(
+                0.5,
+                Math.max(
+                    0,
+                    opts.jitterRatio ?? GC_SCHEDULE_DEFAULTS.jitterRatio
+                )
+            ),
+            followUpSlackMs:
+                testOverrides.followUpSlackMs ??
+                GC_SCHEDULE_DEFAULTS.followUpSlackMs,
+            backoffBaseMs:
+                testOverrides.backoffBaseMs ??
+                GC_SCHEDULE_DEFAULTS.backoffBaseMs,
+            maxFollowUpGateRetries: GC_SCHEDULE_DEFAULTS.maxFollowUpGateRetries,
+            run,
+        };
+    }
+
+    private startGcScheduler() {
+        if (this.gcScheduleConfig.disabled || !this.isFullReplica()) {
+            return;
+        }
+        this.armGcTimer(
+            computeGcFirstDelay(
+                this.gcScheduleConfig.initialDelayMs,
+                this.gcScheduleConfig.intervalMs,
+                this.gcRng
+            ),
+            "interval"
+        );
+    }
+
+    private gcJittered(ms: number): number {
+        const ratio = this.gcScheduleConfig.jitterRatio;
+        return ms * (1 + ratio * (2 * this.gcRng() - 1));
+    }
+
+    private armGcTimer(delayMs: number, trigger: "interval" | "follow-up") {
+        const generation = this.gcSchedulerGeneration;
+        const delay = Math.max(0, delayMs);
+        const prior =
+            trigger === "interval" ? this.gcTimer : this.gcFollowUpTimer;
+        if (prior) {
+            clearTimeout(prior);
+        }
+        const timer = setTimeout(() => {
+            if (trigger === "interval") {
+                this.gcTimer = undefined;
+            } else {
+                this.gcFollowUpTimer = undefined;
+            }
+            void this.gcSchedulerTick(trigger, generation).catch(() => {});
+        }, delay);
+        (timer as any)?.unref?.();
+        if (trigger === "interval") {
+            this.gcTimer = timer;
+            this.gcIntervalNextAtMs = this.clock() + delay;
+        } else {
+            this.gcFollowUpTimer = timer;
+            this.gcFollowUpNextAtMs = this.clock() + delay;
+        }
+    }
+
+    private async gcSchedulerTick(
+        trigger: "interval" | "follow-up",
+        generation: number
+    ): Promise<void> {
+        if (this.closed || generation !== this.gcSchedulerGeneration) {
+            return;
+        }
+        const config = this.gcScheduleConfig;
+        // Every gate below skips silently: an interval tick re-arms a full
+        // (jittered) interval out; a gated follow-up retries shortly, then
+        // folds into the next interval run — matured ledger candidates
+        // execute there anyway, so gating loses nothing but time.
+        const gateSkip = () => {
+            if (trigger === "interval") {
+                this.armGcTimer(this.gcJittered(config.intervalMs), "interval");
+            } else if (
+                this.gcFollowUpGateRetries++ <
+                GC_SCHEDULE_DEFAULTS.maxFollowUpGateRetries
+            ) {
+                this.armGcTimer(config.followUpSlackMs, "follow-up");
+            }
+        };
+        if (
+            this.bootstrapPhase !== "off" &&
+            this.bootstrapPhase !== "converged"
+        ) {
+            return gateSkip();
+        }
+        if (this.bootstrapPhase === "converged" && !this.bootstrapVerified) {
+            // Peer-evidence gate, scheduled ticks only: an isolated box
+            // quiesces to "converged" and would otherwise run BOTH halves
+            // of the two-run barrier against the same partitioned view —
+            // the ledger barrier verifies temporal span, not convergence.
+            // Manual runs (an operator who can see the box) stay allowed.
+            const connected = [
+                ...(((this.node.services.pubsub as any)?.peers?.keys?.() ??
+                    []) as Iterable<string>),
+            ].length;
+            const recentArrival =
+                this.clock() - this.lastArrivalMs <= config.intervalMs;
+            if (connected === 0 && !recentArrival) {
+                if (!this.gcPeerEvidenceWarned) {
+                    this.gcPeerEvidenceWarned = true;
+                    console.warn(
+                        "shared-fs: scheduled gc deferred: no peer evidence on an unverified replica"
+                    );
+                }
+                return gateSkip();
+            }
+        }
+        if (this.gcRunning) {
+            // A manual/CLI run is in flight; skip rather than queue (the
+            // collectGarbage mutex would throw).
+            return gateSkip();
+        }
+        if (this.snapshotRunning && this.gcSnapshotDeferrals < 5) {
+            // Courtesy, not correctness: GC against a mid-publish writer
+            // just causes pointless resurrection churn.
+            this.gcSnapshotDeferrals++;
+            this.armGcTimer(60_000, trigger);
+            return;
+        }
+        this.gcSnapshotDeferrals = 0;
+        const startedMs = this.clock();
+        let report: GcReport;
+        try {
+            report = await this.collectGarbage(config.run);
+        } catch (error: any) {
+            if (this.closed || generation !== this.gcSchedulerGeneration) {
+                return;
+            }
+            if (error?.code === "ERR_GC_PHASE") {
+                // The phase regressed between the gate and the run (a
+                // bootstrap restarted): a plain skip, not a failure.
+                return gateSkip();
+            }
+            this.gcConsecutiveFailures++;
+            console.error(
+                "shared-fs: scheduled gc run failed:",
+                error?.message ?? error
+            );
+            this.events.dispatchEvent(
+                new CustomEvent("gc:error", {
+                    detail: {
+                        trigger,
+                        error,
+                        consecutiveFailures: this.gcConsecutiveFailures,
+                    },
+                })
+            );
+            // Late GC is strictly safe (growth resumes; nothing corrupts):
+            // retry soon, backing off exponentially up to the interval.
+            this.armGcTimer(
+                this.gcJittered(
+                    Math.min(
+                        config.intervalMs,
+                        config.backoffBaseMs *
+                            2 ** (this.gcConsecutiveFailures - 1)
+                    )
+                ),
+                "interval"
+            );
+            return;
+        }
+        if (this.closed || generation !== this.gcSchedulerGeneration) {
+            return;
+        }
+        this.gcConsecutiveFailures = 0;
+        const finishedMs = this.clock();
+        this.gcLastRun = { atMs: finishedMs, trigger, report };
+        this.events.dispatchEvent(
+            new CustomEvent("gc:run", {
+                detail: {
+                    trigger,
+                    durationMs: finishedMs - startedMs,
+                    report,
+                },
+            })
+        );
+        const span = config.run.minOrphanSpanMs ?? GC_DEFAULTS.minOrphanSpanMs;
+        if (
+            report.chunkCandidatesRecorded + report.purgeCandidatesRecorded >
+                0 &&
+            !this.gcFollowUpTimer &&
+            config.intervalMs > span + 2 * config.followUpSlackMs
+        ) {
+            this.gcFollowUpGateRetries = 0;
+            this.armGcTimer(
+                computeGcFollowUpDelay(
+                    startedMs,
+                    span,
+                    finishedMs,
+                    config.followUpSlackMs,
+                    this.gcRng
+                ),
+                "follow-up"
+            );
+        }
+        this.armGcTimer(this.gcJittered(config.intervalMs), "interval");
+    }
+
+    /**
+     * Schedule state for the current open. A follow-up timer does not
+     * survive process restart; persisted ledger candidates simply mature
+     * and execute on the first post-restart interval run.
+     */
+    gcStatus(): GcStatus {
+        const nexts: number[] = [];
+        if (this.gcTimer) {
+            nexts.push(this.gcIntervalNextAtMs);
+        }
+        if (this.gcFollowUpTimer) {
+            nexts.push(this.gcFollowUpNextAtMs);
+        }
+        return {
+            scheduled:
+                !this.closed &&
+                !this.gcScheduleConfig.disabled &&
+                this.isFullReplica(),
+            nextRunAtMs: nexts.length > 0 ? Math.min(...nexts) : undefined,
+            consecutiveFailures: this.gcConsecutiveFailures,
+            lastRun: this.gcLastRun,
+        };
+    }
+
+    // ------------------------------------------------------------------
     // Garbage collection
     // ------------------------------------------------------------------
 
@@ -5659,7 +6079,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // shields: a partial (bootstrapping or unverified) replica
             // must not plan retirements at all.
             throw new SharedFsError(
-                "EINVAL",
+                "ERR_GC_PHASE",
                 "collectGarbage is unavailable until the cold-start bootstrap converges"
             );
         }
@@ -6507,6 +6927,10 @@ export class SharedFsHandle {
         return this.program.collectGarbage(options);
     }
 
+    gcStatus() {
+        return this.program.gcStatus();
+    }
+
     writeBatch(entries: WriteBatchEntry[], options?: WriteBatchOptions) {
         return this.program.writeBatch(entries, options);
     }
@@ -6599,7 +7023,10 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
             ? options.bootstrap
             : (options.bootstrap ?? false),
         snapshot: options.snapshot,
+        gc: options.gc,
     };
+    // Test-only jitter rng rides along undocumented.
+    (args as any).gcRng = (options as any).gcRng;
     const program = options.address
         ? await SharedFileSystem.open(
               options.address as string,

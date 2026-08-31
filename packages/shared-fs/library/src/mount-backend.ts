@@ -299,7 +299,8 @@ const toBackendError = (error: unknown): SharedFsBackendError => {
                 ? "EACCES"
                 : error.code === "EWATCHLIMIT" ||
                     error.code === "ETIMEDOUT" ||
-                    error.code === "ECLOSED"
+                    error.code === "ECLOSED" ||
+                    error.code === "ERR_GC_PHASE"
                   ? "EIO"
                   : error.code;
         return new SharedFsBackendError(code, error.message);
