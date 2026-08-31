@@ -39,10 +39,10 @@ describe("snapshot segment reclamation", () => {
 
     const blocks = () => (fs.program as any).node.services.blocks;
     const manifestCids = async (program: any = fs.program): Promise<string[]> =>
-        ((await (program as any).loadSegmentLedgerForTest?.()) ??
-            (await loadLedger(program))).current?.cids.map(
-            (c: any) => c.cid
-        ) ?? [];
+        (
+            (await (program as any).loadSegmentLedgerForTest?.()) ??
+            (await loadLedger(program))
+        ).current?.cids.map((c: any) => c.cid) ?? [];
     const loadLedger = (program: any = fs.program) =>
         (program as any).loadSegmentLedger() as Promise<any>;
     const reap = (nowMs: number) =>

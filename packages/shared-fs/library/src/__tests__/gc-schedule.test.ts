@@ -37,8 +37,7 @@ const waitUntil = async (
     throw lastError;
 };
 
-const sleep = (ms: number) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("gc schedule delay helpers", () => {
     it("spreads the first run over [initialDelay, initialDelay + interval/4]", () => {
@@ -228,8 +227,7 @@ describe("scheduled garbage collection", () => {
             expect(
                 runEvents.some(
                     (e) =>
-                        e.trigger === "follow-up" &&
-                        e.report.deletedChunks > 0
+                        e.trigger === "follow-up" && e.report.deletedChunks > 0
                 )
             ).toBe(true);
         });
@@ -377,9 +375,7 @@ describe("scheduled garbage collection", () => {
         });
         listen();
         const program: any = fs.program;
-        const warnSpy = vi
-            .spyOn(console, "warn")
-            .mockImplementation(() => {});
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
         program.bootstrapPhase = "converged";
         program.bootstrapVerified = false;
         program.lastArrivalMs = 0; // far beyond intervalMs ago
@@ -457,9 +453,7 @@ describe("scheduled garbage collection", () => {
     });
 
     it("strips unsafe run options with one warning and keeps safe ones", async () => {
-        const warnSpy = vi
-            .spyOn(console, "warn")
-            .mockImplementation(() => {});
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
         await openScheduled({
             intervalMs: 20_000,
             initialDelayMs: 20_000,
