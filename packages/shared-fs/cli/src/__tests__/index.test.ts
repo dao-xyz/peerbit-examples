@@ -29,12 +29,28 @@ describe("peerbit-fs cli", () => {
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-")
         );
         const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        let reopenedPeer: Peerbit | undefined;
 
         try {
             await runCli(["create", "--directory", directory]);
             expect(log).toHaveBeenCalledTimes(1);
             expect(log.mock.calls[0]?.[0]).toMatch(/^zb2/);
+            const address = String(log.mock.calls[0]?.[0]);
+
+            reopenedPeer = await Peerbit.create({ directory });
+            const reopened = await openSharedFs({
+                peerbit: reopenedPeer,
+                address,
+                machineLabel: "cli-create-reopen",
+            });
+            expect(reopened.bootstrapStatus().writeReady).toBe(true);
+            await expect(
+                reopened.awaitWriteReady({ timeout: 100 })
+            ).resolves.toBeUndefined();
         } finally {
+            if (reopenedPeer) {
+                await stopPeer(reopenedPeer);
+            }
             log.mockRestore();
             await fs.rm(directory, { recursive: true, force: true });
         }
@@ -89,6 +105,85 @@ describe("peerbit-fs cli", () => {
         ).rejects.toThrow(
             "prepare-disposal requires a full replica; --no-replicate is not allowed"
         );
+    });
+
+    it("rejects create when replication is disabled", async () => {
+        await expect(
+            runCli(["create", "--no-replicate", "--directory", ""])
+        ).rejects.toThrow(
+            "create requires a full replica; --no-replicate is not allowed"
+        );
+    });
+
+    it("rejects a writable mount when replication is disabled", async () => {
+        await expect(
+            runCli([
+                "mount",
+                "zb2rh-not-opened",
+                "/tmp/peerbit-shared-fs-not-mounted",
+                "--no-replicate",
+                "--directory",
+                "",
+            ])
+        ).rejects.toThrow(
+            "mount requires a full replica; --no-replicate is not allowed for a writable mount"
+        );
+    });
+
+    it("persists an explicit legacy-replica trust assertion", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-legacy-")
+        );
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        let reopenedPeer: Peerbit | undefined;
+        try {
+            await runCli(["create", "--directory", directory]);
+            const address = String(log.mock.calls[0]?.[0]);
+            const stateDirectory = path.join(directory, "shared-fs-bootstrap");
+            const [stateName] = await fs.readdir(stateDirectory);
+            const statePath = path.join(stateDirectory, stateName);
+            const legacy = JSON.parse(await fs.readFile(statePath, "utf8"));
+            delete legacy.writeReady;
+            delete legacy.writeReadySource;
+            delete legacy.legacyUnproven;
+            await fs.writeFile(statePath, JSON.stringify(legacy));
+
+            log.mockClear();
+            const command = [
+                "trust-legacy-replica",
+                address,
+                "--assume-local-replica-complete",
+                "--timeout-ms",
+                "15000",
+                "--directory",
+                directory,
+            ];
+            await runCli(command);
+            expect(log.mock.calls.at(-1)?.[0]).toContain(
+                "explicit operator assertion"
+            );
+            // Repeating the command is harmless once the marker is durable.
+            await expect(runCli(command)).resolves.toBeUndefined();
+
+            reopenedPeer = await Peerbit.create({ directory });
+            const reopened = await openSharedFs({
+                peerbit: reopenedPeer,
+                address,
+                machineLabel: "cli-legacy-reopen",
+                bootstrap: false,
+            });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "legacy-operator-assertion",
+                legacyPromotionEligible: false,
+            });
+        } finally {
+            if (reopenedPeer) {
+                await stopPeer(reopenedPeer);
+            }
+            log.mockRestore();
+            await fs.rm(directory, { recursive: true, force: true });
+        }
     });
 
     it("does not print disposal success when peer shutdown fails", async () => {

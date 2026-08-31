@@ -194,6 +194,12 @@ const expectNativeMountAvailable = (error: unknown) => {
                     ).toBe("hello from mount a");
                 });
 
+                // Readability intentionally precedes write readiness for a
+                // cold join. The mounted write below opens with O_CREAT, so
+                // wait for peer B's settled-view proof instead of treating
+                // the safety gate's transient EAGAIN as a native-mount bug.
+                await fsB.awaitWriteReady({ timeout: 20_000 });
+
                 await writeFile(
                     path.join(mountB, "shared", "from-b.txt"),
                     "hello from mount b"
@@ -321,6 +327,10 @@ const expectNativeMountAvailable = (error: unknown) => {
                         )
                     ).toBe("rename me");
                 });
+
+                // Seeing the remote rename proves readability, not that this
+                // cold join has completed its settled-view write barrier.
+                await fsB.awaitWriteReady({ timeout: 20_000 });
 
                 await rm(path.join(mountB, "docs", "final.txt"));
 

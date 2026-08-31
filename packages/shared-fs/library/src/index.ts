@@ -98,6 +98,11 @@ export type { IgnoreAwareFs } from "./ignore/ignore-fs.js";
 export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
+
+const directorySyncUnsupported = (error: unknown) =>
+    ["EINVAL", "ENOTSUP", "ENOSYS", "EPERM", "EISDIR", "EBADF"].includes(
+        (error as { code?: string })?.code ?? ""
+    );
 export * from "./native-mount.js";
 export * from "./path.js";
 
@@ -392,8 +397,23 @@ export type SharedFsOpenArgs = {
      * falling back. "off" (or false) keeps today's plain join.
      */
     bootstrap?: false | "auto" | BootstrapOptions;
+    /**
+     * Explicitly permit mutations before a fresh address-open has established
+     * a settled full-replica view. This can manufacture duplicate paths or
+     * overwrite from stale state; intended only for recovery/legacy observer
+     * workflows. It never persists a write-readiness proof.
+     */
+    allowPartialWrites?: boolean;
     /** Snapshot publication policy for trusted full replicas. */
     snapshot?: SnapshotPublishOptions;
+};
+
+/** Options passed only by openSharedFs; never part of the public wire format. */
+type SharedFsInternalOpenArgs = SharedFsOpenArgs & {
+    /** Distinguishes a new program from opening an existing address. */
+    addressOpen?: boolean;
+    /** Test-only override for the post-sync quiet window. */
+    writeReadinessSettleMs?: number;
 };
 
 export type BootstrapOptions = {
@@ -437,6 +457,21 @@ export type BootstrapPhase =
 
 export type BootstrapStatus = {
     phase: BootstrapPhase;
+    /**
+     * False on a fresh address-open until initial replication has produced a
+     * settled, full-replica view. Mutations fail with
+     * SharedFsWritePendingError while this is false.
+     */
+    writeReady?: boolean;
+    /** True when writeReady comes from the explicit unsafe override. */
+    partialWriteOverride?: boolean;
+    /** Durable provenance for a ready full replica, when recorded. */
+    writeReadinessSource?:
+        | "creator"
+        | "remote-settled"
+        | "legacy-operator-assertion";
+    /** Whether this local directory may use the explicit legacy trust API. */
+    legacyPromotionEligible?: boolean;
     manifest?: {
         authorKey: string;
         snapshotSeq: bigint;
@@ -454,6 +489,21 @@ export type BootstrapStatus = {
      * yet); a settle signal for callers that need a quiet store.
      */
     msSinceLastArrival: number;
+};
+
+export type AwaitWriteReadyOptions = {
+    /** Reject with ETIMEDOUT if readiness is not reached in this many ms. */
+    timeout?: number;
+    /** Abort only this wait; it does not change filesystem state. */
+    signal?: AbortSignal;
+};
+
+export type TrustLegacyLocalReplicaOptions = {
+    /** Required operator assertion; this method does not verify completeness. */
+    assumeComplete: true;
+    /** Bound the best-effort synchronizer-idle wait (default 30s). */
+    timeout?: number;
+    signal?: AbortSignal;
 };
 
 export type SnapshotWriteResult = {
@@ -485,12 +535,14 @@ export type PrepareForDisposalResult = {
     safeToDispose: true;
     guarantee: "persisted-per-entry";
     minAcksPerEntry: number;
-    /** Empty is a vacuous success and proves no remote peer was present. */
+    /** Empty is a vacuous success and does not prove any remote peer was present. */
     empty: boolean;
     entries: {
         chunks: number;
         versions: number;
         naming: number;
+        /** Live grants and revocation tombstones from the trust log. */
+        trust: number;
     };
     entryCount: number;
     receiptBatches: number;
@@ -505,6 +557,7 @@ type DisposalClosure = {
     chunks: DisposalEntryRef[];
     versions: DisposalEntryRef[];
     naming: DisposalEntryRef[];
+    trust: DisposalEntryRef[];
 };
 
 /**
@@ -647,6 +700,14 @@ export type WriteFileOptions = {
      * used as parents.
      */
     baseVersionIds?: string[];
+    /**
+     * Compare-and-set guard for path-bound writers such as native mounts.
+     * A string requires the path to still resolve to that exact file node;
+     * null requires it to remain absent. A mismatch fails with EAGAIN before
+     * the replacement node can be edited. Ordinary API writes should leave
+     * this undefined to retain local-first conflict behavior.
+     */
+    expectedNodeId?: string | null;
     chunkSize?: number;
     /**
      * "verify" (default): dedup-skip a chunk only when a fresh witness
@@ -723,6 +784,7 @@ export type WriteBatchResult = {
 
 export type SharedFsErrorCode =
     | "ERR_GC_PHASE"
+    | "EAGAIN"
     | "ENOENT"
     | "EEXIST"
     | "EISDIR"
@@ -752,6 +814,24 @@ export class SharedFsError extends Error {
     ) {
         super(message);
         this.name = "SharedFsError";
+    }
+}
+
+/**
+ * An address-open has not established a trustworthy initial namespace yet.
+ * The attempted mutation made no change and is safe to retry after
+ * awaitWriteReady() resolves.
+ */
+export class SharedFsWritePendingError extends SharedFsError {
+    readonly retryable = true;
+    readonly retrySafe = true;
+
+    constructor(operation: string, phase: BootstrapPhase) {
+        super(
+            "EAGAIN",
+            `${operation} is unavailable until this address-open has a settled initial view (bootstrap phase: ${phase}); await write readiness and retry`
+        );
+        this.name = "SharedFsWritePendingError";
     }
 }
 
@@ -1019,11 +1099,8 @@ const mapWithConcurrency = async <T, R>(
     const workers = Array.from(
         { length: Math.min(limit, items.length) },
         async () => {
-            while (true) {
+            while (next < items.length) {
                 const index = next++;
-                if (index >= items.length) {
-                    return;
-                }
                 results[index] = await fn(items[index], index);
             }
         }
@@ -1263,6 +1340,15 @@ const capSegmentRetired = (ledger: SegmentLedger) => {
 const SUPERSESSION_SWEEP_MS = 5_000;
 /** Double-check delay before verified retirement (one guard-coalescing window). */
 const RETIRE_DOUBLE_CHECK_MS = 300;
+/**
+ * A fresh address-open remains read-only until remote metadata has arrived,
+ * bootstrap has retired, the synchronizer is idle, and arrivals have stayed
+ * quiet for this window. This is deliberately a settled-view signal, not a
+ * protocol frontier proof; a future upstream frontier can replace it without
+ * weakening the fail-closed API.
+ */
+const WRITE_READINESS_SETTLE_MS = 5_000;
+const WRITE_READINESS_MIN_CHECK_MS = 100;
 /** Post-timeout arming: no arrivals for this long counts as quiescent... */
 const QUIESCENCE_WINDOW_MS = 60_000;
 /** ...on two consecutive checks this far apart. */
@@ -1377,13 +1463,42 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private trustChangeListener: (() => void) | undefined;
     /** Serializes writeBatch calls; see the writeBatch docstring. */
     private writeBatchChain: Promise<unknown> = Promise.resolve();
-    /** Content-store generation used to reject a moving disposal fence. */
+    /** Filesystem/trust-state generation used to reject a moving disposal fence. */
     private disposalContentGeneration = 0;
     private disposalPreparationRunning = false;
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
     // --- Cold-start bootstrap state (all re-initialized in open()) ---
     private bootstrapPhase: BootstrapPhase = "off";
+    /**
+     * Mutations are synchronously closed at the start of every existing-
+     * address open. A new creator and a persisted, previously-proven warm
+     * reopen are the only immediate-ready cases.
+     */
+    private writesReady = true;
+    private partialWriteOverride = false;
+    private writeReadinessRequired = false;
+    private writeReadinessRemoteEvidence = false;
+    private writeReadinessDecisionSettled = true;
+    private writeReadinessStartedAtMs = 0;
+    private writeReadinessSettleMs = WRITE_READINESS_SETTLE_MS;
+    private writeReadinessQuietChecks = 0;
+    private writeReadinessTimer: ReturnType<typeof setInterval> | undefined;
+    private writeReadinessCheckRunning = false;
+    private openedExistingAddress = false;
+    private legacyPromotionEligible = false;
+    private legacyPromotionCrashMarker = false;
+    private writeReadinessSource:
+        | "creator"
+        | "remote-settled"
+        | "legacy-operator-assertion"
+        | undefined;
+    private writeReadinessWaiters: Array<{
+        resolve: () => void;
+        reject: (error: unknown) => void;
+    }> = [];
+    /** Invalidates stale timer callbacks across close/reopen generations. */
+    private openGeneration = 0;
     /**
      * Guard D arming: false from the moment a bootstrap is decided until
      * verified retirement (or post-timeout quiescence), so a partial
@@ -1454,12 +1569,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         [];
     /** Settles once the bootstrap decision (run, fall back, resume) is made. */
     private bootstrapDecision: Promise<void> = Promise.resolve();
+    /** Cancels and joins the per-open bootstrap task during close/reopen. */
+    private bootstrapAbortController?: AbortController;
     /** True only after a VERIFIED retirement (never for quiescence arming). */
     private bootstrapVerified = false;
     /** Human-readable summary of the last bootstrap fallback, for status. */
     private bootstrapFailure: string | undefined;
     /** Serializes bootstrap state-file writes. */
     private stateWriteChain: Promise<unknown> = Promise.resolve();
+    /**
+     * Serializes the durable marker plus its matching in-memory readiness
+     * transition. Lifecycle entry points block new transitions and drain this
+     * chain before changing generations, so a transition either commits and
+     * reports success or makes no durable change.
+     */
+    private writeReadinessTransitionChain: Promise<unknown> = Promise.resolve();
+    private writeReadinessLifecycleBlocked = false;
     private snapshotRunning = false;
     private sweepRunning = false;
     /** Last arrival authored by ANOTHER peer (local writes excluded). */
@@ -1513,6 +1638,78 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async open(args?: SharedFsOpenArgs) {
+        const internalArgs = args as SharedFsInternalOpenArgs | undefined;
+        const addressOpen = internalArgs?.addressOpen === true;
+        this.openedExistingAddress = addressOpen;
+        const partialWriteOverride =
+            addressOpen && args?.allowPartialWrites === true;
+        // Block new readiness transitions synchronously, then let a transition
+        // that already owns the serialization slot finish before changing the
+        // generation. This gives concurrent open/close a deterministic order:
+        // an active promotion succeeds durably, while a queued one observes the
+        // lifecycle block and performs no write.
+        this.writeReadinessLifecycleBlocked = true;
+        // A same-program close -> reopen leaves the Documents EventTarget
+        // object intact. Detach the previous generation synchronously, before
+        // any await or state reset, so local replay during entries.open() can
+        // never be interpreted by the old listener as current remote evidence.
+        if (this.changeListener) {
+            this.entries.events.removeEventListener(
+                "change",
+                this.changeListener
+            );
+            this.changeListener = undefined;
+        }
+        // A previous generation may still be inside remote snapshot discovery.
+        // Cancel and join it before resetting any state: otherwise its late
+        // fallback can recreate the sidecar directory after close/reopen.
+        this.bootstrapAbortController?.abort(
+            new SharedFsError(
+                "ECLOSED",
+                "filesystem reopened while bootstrap was running"
+            )
+        );
+        this.bootstrapAbortController = undefined;
+        this.bootstrapDecision ??= Promise.resolve();
+        await this.bootstrapDecision.catch(() => {});
+        this.writeReadinessTransitionChain ??= Promise.resolve();
+        this.stateWriteChain ??= Promise.resolve();
+        this.clearBootstrapTimers();
+        for (const waiter of this.writeReadinessWaiters ?? []) {
+            waiter.reject(
+                new SharedFsError(
+                    "ECLOSED",
+                    "filesystem reopened while awaiting write readiness"
+                )
+            );
+        }
+        await this.writeReadinessTransitionChain;
+        let pendingStateWrites: Promise<unknown>;
+        do {
+            pendingStateWrites = this.stateWriteChain;
+            await pendingStateWrites;
+        } while (pendingStateWrites !== this.stateWriteChain);
+        // FIRST, before trust-graph/bootstrap/storage awaits: a handle for an
+        // existing address must never inherit a stale ready bit from a prior
+        // open generation. No caller can race a mutation through this gate.
+        const openGeneration = (this.openGeneration || 0) + 1;
+        this.openGeneration = openGeneration;
+        this.writesReady = !addressOpen || partialWriteOverride;
+        this.partialWriteOverride = partialWriteOverride;
+        this.writeReadinessRequired = addressOpen && !partialWriteOverride;
+        this.writeReadinessDecisionSettled =
+            !addressOpen || partialWriteOverride;
+        this.writeReadinessRemoteEvidence = false;
+        this.writeReadinessQuietChecks = 0;
+        this.writeReadinessCheckRunning = false;
+        this.legacyPromotionEligible = false;
+        this.legacyPromotionCrashMarker = false;
+        this.writeReadinessSource = undefined;
+        this.writeReadinessStartedAtMs = Date.now();
+        this.writeReadinessSettleMs = Math.max(
+            WRITE_READINESS_MIN_CHECK_MS,
+            internalArgs?.writeReadinessSettleMs ?? WRITE_READINESS_SETTLE_MS
+        );
         this.machineLabel = args?.machineLabel || "unknown-machine";
         // Default to a full replica: every mount serves the whole namespace
         // from its local index, and a writer must never see its own files
@@ -1544,6 +1741,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             5 * 60 * 1000,
             args?.dedupSkipHorizonMs ?? DEFAULT_SKIP_HORIZON_MS
         );
+        this.writeReadinessStartedAtMs = this.clock();
         // Borsh deserialization bypasses the constructor, so per-instance
         // state must be (re)initialized here, not in field initializers.
         this.versionPins = new Map();
@@ -1578,9 +1776,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.quiescentChecks = 0;
         this.clearBootstrapTimers();
         this.bootstrapWaiters = [];
+        this.writeReadinessWaiters = [];
         this.bootstrapVerified = false;
         this.bootstrapFailure = undefined;
-        this.stateWriteChain = Promise.resolve();
+        this.stateWriteChain ??= Promise.resolve();
+        this.writeReadinessTransitionChain ??= Promise.resolve();
         this.snapshotRunning = false;
         this.sweepRunning = false;
         this.gcConsecutiveFailures = 0;
@@ -1635,7 +1835,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.trustChangeListener
                 );
             }
-            this.trustChangeListener = () => this.trustVerdicts.clear();
+            this.trustChangeListener = () => {
+                this.trustVerdicts.clear();
+                if (this.disposalPreparationRunning) {
+                    this.disposalContentGeneration++;
+                }
+            };
             this.trustGraph.trustGraph.events.addEventListener(
                 "change",
                 this.trustChangeListener
@@ -1648,11 +1853,77 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // removals.
         const persisted = await this.readBootstrapState();
         const marker = persisted.bootstrap;
-        if (marker !== undefined) {
+        this.legacyPromotionEligible =
+            addressOpen &&
+            this.isFullReplica() &&
+            persisted.legacyUnproven &&
+            marker === undefined &&
+            !partialWriteOverride;
+        this.writeReadinessSource = persisted.writeReadySource;
+        const trustedWarmWriteReady =
+            addressOpen &&
+            this.isFullReplica() &&
+            persisted.openedBefore &&
+            persisted.writeReady &&
+            persisted.writeReadySource !== undefined &&
+            marker === undefined;
+        if (trustedWarmWriteReady) {
+            // The marker is written only after a previous full-replica open
+            // passed the readiness fence. Missing/unreadable state and any
+            // interrupted-bootstrap marker remain fail-closed.
+            this.writesReady = true;
+            this.writeReadinessRequired = false;
+            this.writeReadinessDecisionSettled = true;
+        }
+        if (addressOpen && !trustedWarmWriteReady) {
+            // Clear any proof from an earlier full-replica generation before
+            // replication/bootstrap can fail or the caller can return. This
+            // is especially important when the same directory is reopened as
+            // an observer: a later full reopen must not trust observer state.
+            await this.writeBootstrapState(
+                {
+                    openedBefore: true,
+                    writeReady: false,
+                    legacyUnproven: this.legacyPromotionEligible,
+                    writeReadySource: null,
+                },
+                openGeneration,
+                true
+            );
+            this.writeReadinessSource = undefined;
+        }
+        if (addressOpen && !trustedWarmWriteReady) {
+            // An unproven address-open must not mutate shared history through
+            // the internal resurrection guard either. Public writes and GC
+            // are already gated; Guard D is armed together with write
+            // readiness below.
             this.guardArmed = false;
         }
         const bootstrapCandidate =
             this.bootstrapConfig.mode !== "off" && this.isFullReplica();
+        const preOpenCrashMarker =
+            addressOpen &&
+            !trustedWarmWriteReady &&
+            this.isFullReplica() &&
+            marker === undefined &&
+            (bootstrapCandidate || this.legacyPromotionEligible);
+        if (preOpenCrashMarker) {
+            // entries.open() may ingest a prefix before it resolves. Persist a
+            // crash marker first so that prefix can never reopen as a clean
+            // legacy candidate. The current legacy session may still make its
+            // explicit assertion; both successful readiness transitions clear
+            // this marker through the serialized, crash-safe state update.
+            await this.writeBootstrapState(
+                { bootstrap: "active" },
+                openGeneration,
+                true
+            );
+            this.legacyPromotionCrashMarker = this.legacyPromotionEligible;
+        }
+        const bootstrapMarker =
+            preOpenCrashMarker && !this.legacyPromotionEligible
+                ? "active"
+                : marker;
         // Replication is ALWAYS announced at open. An earlier design
         // deferred the announcement until the snapshot overlay installed
         // (to keep ingest off the install's critical path), but an
@@ -1661,36 +1932,102 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // stayed a silent observer. The overlay install runs beside the
         // ingest instead; it is chunked with yields and still lands in
         // low single-digit seconds.
-        await this.entries.open({
-            type: SharedFsEntry,
-            replicate: this.replicate as any,
-            replicas: { min: 3 },
-            // Never prune locally authored entries, even when this peer is
-            // not a replicator for them (e.g. replicate: false).
-            keep: "self",
-            canPerform: (operation) => this.canPerformEntry(operation),
-            // Raw exchange-heads: senders ship raw entry blocks and the
-            // receiver batch-computes CIDs and batch-verifies signatures
-            // (via the wasm verifier when available), marking entries
-            // preverified — canPerform still runs per entry. Negotiated
-            // per connection with a compatible fallback, this is the
-            // cheap half of fast cold joins.
-            sync: { rawExchangeHeads: true },
-            index: {
-                type: IndexableSharedFsEntry,
-            },
-        });
+        // Correlate a Documents change with the lower log's successful NETWORK
+        // commit diagnostic. DiagnosticEvent.name is a documented stable phase
+        // name. Local replay can produce an identical document event, but it
+        // never produces one of these sync-profile commit events; rejected
+        // network entries do not produce one either. The profile event is
+        // emitted synchronously immediately after the awaited document onChange
+        // callback, with no intervening await, so the last-event classification
+        // belongs to that exact committed batch. Every change overwrites the
+        // classification (a chunk-only batch resets it false), and every commit
+        // diagnostic consumes/resets it. This preserves replicated-open/native
+        // receive acceleration without depending on private storage layout.
+        const captureFreshOpenEvidence =
+            addressOpen && this.writeReadinessRequired && this.isFullReplica();
+        let duringOpenChangeHadMetadata = false;
+        const freshOpenListener = captureFreshOpenEvidence
+            ? (event: any) => {
+                  const added = event?.detail?.added ?? [];
+                  duringOpenChangeHadMetadata = added.some(
+                      (value: unknown) =>
+                          value instanceof NamingEvent ||
+                          value instanceof FileVersion
+                  );
+              }
+            : undefined;
+        const freshOpenSyncProfile = captureFreshOpenEvidence
+            ? (event: { name: string }) => {
+                  if (
+                      event.name !== "log.joinPreparedFacts.change" &&
+                      event.name !== "log.joinIndependent.change"
+                  ) {
+                      return;
+                  }
+                  if (duringOpenChangeHadMetadata) {
+                      this.writeReadinessRemoteEvidence = true;
+                      this.writeReadinessQuietChecks = 0;
+                      this.lastArrivalMs = this.clock();
+                      this.lastRemoteArrivalMs = this.lastArrivalMs;
+                  }
+                  duringOpenChangeHadMetadata = false;
+              }
+            : undefined;
+        // SharedLog retains this exact public SyncOptions object. Delete the
+        // temporary sink as soon as open resolves so steady-state replication
+        // pays no diagnostic timing/callback overhead.
+        const entrySyncOptions: {
+            rawExchangeHeads: true;
+            profile?: (event: { name: string }) => void;
+        } = { rawExchangeHeads: true, profile: freshOpenSyncProfile };
+        if (freshOpenListener) {
+            this.entries.events.addEventListener("change", freshOpenListener);
+        }
+        try {
+            await this.entries.open({
+                type: SharedFsEntry,
+                replicate: this.replicate as any,
+                replicas: { min: 3 },
+                // Never prune locally authored entries, even when this peer is
+                // not a replicator for them (e.g. replicate: false).
+                keep: "self",
+                canPerform: (operation) => this.canPerformEntry(operation),
+                // Raw exchange-heads: senders ship raw entry blocks and the
+                // receiver batch-computes CIDs and batch-verifies signatures
+                // (via the wasm verifier when available), marking entries
+                // preverified — canPerform still runs per entry. Negotiated
+                // per connection with a compatible fallback, this is the
+                // cheap half of fast cold joins.
+                sync: entrySyncOptions,
+                index: {
+                    type: IndexableSharedFsEntry,
+                },
+            });
+        } finally {
+            delete entrySyncOptions.profile;
+            // Native defaults clone SyncOptions before SharedLog retains it.
+            // Clear that clone too, but only when it still contains OUR sink;
+            // never erase a future/user-owned replacement.
+            const retainedSync = (this.entries.log as any)?._logProperties
+                ?.sync as
+                | { profile?: (event: { name: string }) => void }
+                | undefined;
+            if (retainedSync && retainedSync.profile === freshOpenSyncProfile) {
+                delete retainedSync.profile;
+            }
+            duringOpenChangeHadMetadata = false;
+            if (freshOpenListener) {
+                this.entries.events.removeEventListener(
+                    "change",
+                    freshOpenListener
+                );
+            }
+        }
         // Cache maintenance runs on every peer; the resurrection guard only
         // on full replicas (and only while armed — see guardArmed).
         // Registering a change consumer also makes Documents materialize
         // removed VALUES on delete. Deduped so a close→reopen of the same
         // instance never stacks listeners.
-        if (this.changeListener) {
-            this.entries.events.removeEventListener(
-                "change",
-                this.changeListener
-            );
-        }
         this.changeListener = (event: any) => {
             const added = event?.detail?.added ?? [];
             const removed = event?.detail?.removed ?? [];
@@ -1710,6 +2047,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
             for (const value of added) {
+                const remoteMetadata =
+                    value instanceof NamingEvent ||
+                    value instanceof FileVersion;
+                if (this.writeReadinessRequired && remoteMetadata) {
+                    // Positive evidence is mandatory before a fresh join can
+                    // leave the write gate. Public mutations are closed while
+                    // gated, so any such arrival came from replication even
+                    // when two machines intentionally share one writer key.
+                    // Every later metadata arrival restarts the quiet window,
+                    // including the post-snapshot gap overlay coverage cannot
+                    // prove.
+                    this.writeReadinessRemoteEvidence = true;
+                    this.writeReadinessQuietChecks = 0;
+                    this.lastRemoteArrivalMs = this.clock();
+                }
                 if (
                     value instanceof NamingEvent ||
                     value instanceof FileVersion
@@ -1741,12 +2093,35 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.entries.events.addEventListener("change", this.changeListener);
         this.bootstrapDecision = Promise.resolve();
         if (bootstrapCandidate) {
+            const bootstrapAbortController = new AbortController();
+            this.bootstrapAbortController = bootstrapAbortController;
+            this.writeReadinessDecisionSettled = false;
             if (this.bootstrapConfig.mode === "require") {
                 // "require" surfaces the failing stage to the opener
                 // instead of falling back silently.
-                await this.startBootstrap(marker);
+                try {
+                    await this.startBootstrap(
+                        bootstrapMarker,
+                        openGeneration,
+                        bootstrapAbortController.signal
+                    );
+                } finally {
+                    if (this.openGeneration === openGeneration) {
+                        this.writeReadinessDecisionSettled = true;
+                    }
+                }
             } else {
-                const run = this.startBootstrap(marker).catch(() => {
+                const run = this.startBootstrap(
+                    bootstrapMarker,
+                    openGeneration,
+                    bootstrapAbortController.signal
+                ).catch(() => {
+                    if (
+                        bootstrapAbortController.signal.aborted ||
+                        this.openGeneration !== openGeneration
+                    ) {
+                        return;
+                    }
                     // startBootstrap chooses its posture on expected
                     // failures; an unexpected throw keeps the safe side:
                     // a resumed (marker-bearing) store must stay gated.
@@ -1754,24 +2129,63 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         this.bootstrapPhase === "fetching" ||
                         this.bootstrapPhase === "off"
                     ) {
-                        if (marker !== undefined) {
-                            this.enterUnverified();
+                        if (bootstrapMarker !== undefined) {
+                            this.enterUnverified(openGeneration);
                         } else {
-                            this.abandonBootstrap();
+                            this.abandonBootstrap(openGeneration);
                         }
                     }
                 });
                 this.bootstrapDecision = run;
+                void run.then(
+                    () => {
+                        if (this.openGeneration === openGeneration) {
+                            this.writeReadinessDecisionSettled = true;
+                        }
+                    },
+                    () => {
+                        if (this.openGeneration === openGeneration) {
+                            this.writeReadinessDecisionSettled = true;
+                        }
+                    }
+                );
             }
-        } else if (marker !== undefined) {
+        } else if (bootstrapMarker !== undefined) {
             // An unfinished bootstrap on disk, but this open is not a
             // candidate (mode off, or a partial replica): hold the
             // unverified posture until the store settles.
             this.bootstrapPhase = "unverified";
             this.startQuiescenceChecker();
         }
-        // Stamp the warm-reopen marker (never clears the bootstrap key).
-        void this.writeBootstrapState({ openedBefore: true }).catch(() => {});
+        if (!bootstrapCandidate) {
+            this.writeReadinessDecisionSettled = true;
+        }
+        // Stamp directory continuity, but never infer write safety from it.
+        // A separate true marker is persisted only by markWriteReady().
+        if (!addressOpen) {
+            const openStateWrite = this.writeBootstrapState(
+                {
+                    openedBefore: true,
+                    writeReady: this.isFullReplica(),
+                    legacyUnproven: false,
+                    writeReadySource: this.isFullReplica() ? "creator" : null,
+                },
+                openGeneration,
+                this.isFullReplica()
+            );
+            if (this.isFullReplica()) {
+                // A creator returned as ready must leave an explicit
+                // warm-reopen proof before the caller can immediately close.
+                await openStateWrite;
+                this.writeReadinessSource = "creator";
+            } else {
+                void openStateWrite.catch(() => {});
+            }
+        }
+        this.writeReadinessLifecycleBlocked = false;
+        if (this.writeReadinessRequired && this.isFullReplica()) {
+            this.startWriteReadinessTracking(openGeneration);
+        }
         this.startSnapshotPublisher();
         this.startGcScheduler();
         if (this.isFullReplica()) {
@@ -2015,6 +2429,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async authorizeWriter(publicKey: PublicSignKey) {
+        this.assertSafeMaintenanceReady("authorizeWriter");
         if (!this.trustGraph) {
             throw new Error("Shared filesystem is not access controlled");
         }
@@ -2033,6 +2448,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * re-validated (upstream revocation-epoch work tracks that gap).
      */
     async revokeWriter(publicKey: PublicSignKey) {
+        this.assertSafeMaintenanceReady("revokeWriter");
         if (!this.trustGraph) {
             throw new Error("Shared filesystem is not access controlled");
         }
@@ -2813,6 +3229,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async mkdir(path: string) {
+        this.assertWriteReady("mkdir");
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             return;
@@ -2838,6 +3255,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options: WriteFileOptions = {}
     ) {
+        this.assertWriteReady("writeFile");
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EISDIR", "Cannot write to root");
@@ -2845,6 +3263,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.assertWritableName(basename(normalized), "file");
         const bytes = await toBytes(source);
         const resolved = await this.resolvePath(normalized);
+        const expectedNodeId = options.expectedNodeId;
+        const resolvedNodeId = resolved?.nodeId ?? null;
+        const assertExpectedNode = async () => {
+            if (expectedNodeId === undefined) {
+                return;
+            }
+            const current = await this.resolvePath(normalized);
+            const currentNodeId = current?.nodeId ?? null;
+            if (currentNodeId !== expectedNodeId) {
+                throw new SharedFsError(
+                    "EAGAIN",
+                    `Path changed while writing ${normalized}; expected ${expectedNodeId ?? "an absent path"}, found ${currentNodeId ?? "an absent path"}`
+                );
+            }
+        };
+        if (expectedNodeId !== undefined && resolvedNodeId !== expectedNodeId) {
+            throw new SharedFsError(
+                "EAGAIN",
+                `Path changed before writing ${normalized}; expected ${expectedNodeId ?? "an absent path"}, found ${resolvedNodeId ?? "an absent path"}`
+            );
+        }
         if (resolved?.kind === "directory" || resolved?.kind === "root") {
             throw new SharedFsError(
                 "EISDIR",
@@ -2866,6 +3305,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             currentHeads.length === 1 &&
             currentHeads[0].contentHash === contentHash
         ) {
+            if (expectedNodeId !== undefined) {
+                await assertExpectedNode();
+            }
             return this.versionInfo(currentHeads[0], normalized, currentHeads);
         }
         if ((options.baseVersionIds?.length ?? 0) > 8000) {
@@ -2884,7 +3326,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             for (const parentId of parentVersionIds) {
                 const parent = await this.getDocument<SharedFsEntry>(parentId);
                 if (parent instanceof FileVersion) {
+                    if (
+                        expectedNodeId !== undefined &&
+                        parent.nodeId !== expectedNodeId
+                    ) {
+                        throw new SharedFsError(
+                            "EAGAIN",
+                            `Base version ${parentId} no longer belongs to the expected node at ${normalized}`
+                        );
+                    }
                     parentVersions.push(parent);
+                } else if (expectedNodeId !== undefined) {
+                    throw new SharedFsError(
+                        "EAGAIN",
+                        `Base version ${parentId} is unavailable for the expected node at ${normalized}`
+                    );
                 }
             }
         } else {
@@ -2913,6 +3369,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         await this.touchChunks(uniqueChunks, options.dedup);
+        // Path lookup, base loading, hashing and chunk IO all await. Recheck
+        // immediately before publishing the node-scoped version so a local
+        // replacement that landed during that work cannot receive these
+        // bytes. The version always remains bound to the node captured above.
+        if (expectedNodeId !== undefined) {
+            await assertExpectedNode();
+        }
         const metadata = this.signedMetadata();
         const nodeId = existingNodeId ?? createId("file");
         const version = new FileVersion({
@@ -2947,6 +3410,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Brand-new path: content first, then the naming event that
             // makes it visible. Writes to existing files never touch naming
             // — a concurrent rename can no longer be reverted by a save.
+            if (expectedNodeId !== undefined) {
+                await assertExpectedNode();
+            }
             const parentId = await this.resolveParent(normalized);
             await this.appendNamingEvent({
                 nodeId,
@@ -2954,6 +3420,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 name: basename(normalized),
                 parentHeads: [],
             });
+        } else {
+            // A replacement that won while the node-scoped version was being
+            // persisted remains untouched and is reported as retryable. The
+            // just-written version stays attached to the old node and cannot
+            // alter the replacement's visible content.
+            if (expectedNodeId !== undefined) {
+                await assertExpectedNode();
+            }
         }
         const referenced = new Set(parentVersionIds);
         const heads = [
@@ -2989,6 +3463,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         entries: WriteBatchEntry[],
         options: WriteBatchOptions = {}
     ): Promise<WriteBatchResult> {
+        this.assertWriteReady("writeBatch");
         // Serialized per instance: two in-flight batches would otherwise
         // each mint a fresh directory node for the same new path segment
         // (the overlay is per call), manufacturing duplicate-name conflicts
@@ -3922,6 +4397,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async resolveConflict(path: string, versionId: string) {
+        this.assertWriteReady("resolveConflict");
         const normalized = normalizeFsPath(path);
         const resolved = await this.resolvePath(normalized);
         if (!resolved || resolved.kind !== "file") {
@@ -3961,6 +4437,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async rm(path: string) {
+        this.assertWriteReady("rm");
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EINVAL", "Cannot remove root");
@@ -4004,6 +4481,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async rename(from: string, to: string) {
+        this.assertWriteReady("rename");
         const fromPath = normalizeFsPath(from);
         const toPath = normalizeFsPath(to);
         if (fromPath === toPath) {
@@ -4220,6 +4698,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * resolutions converge without ping-pong).
      */
     async resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
+        this.assertWriteReady("resolveNamingConflict");
         const state = await this.namingStateForNode(nodeId);
         if (!state) {
             throw new SharedFsError("ENOENT", `Unknown node: ${nodeId}`);
@@ -4356,6 +4835,235 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     // Cold-start bootstrap
     // ------------------------------------------------------------------
 
+    private assertWriteReady(operation: string) {
+        if (!this.writesReady || this.writeReadinessLifecycleBlocked) {
+            throw new SharedFsWritePendingError(operation, this.bootstrapPhase);
+        }
+    }
+
+    private assertSafeMaintenanceReady(operation: string) {
+        this.assertWriteReady(operation);
+        if (this.partialWriteOverride) {
+            throw new SharedFsError(
+                "EAGAIN",
+                `${operation} requires proven full-replica write readiness; allowPartialWrites permits namespace recovery writes only`
+            );
+        }
+    }
+
+    private synchronizerIdle() {
+        const synchronizer = (this.entries?.log as any)?.syncronizer;
+        if (!synchronizer) {
+            return false;
+        }
+        if (Number(synchronizer.pending ?? 0) > 0) {
+            return false;
+        }
+        const inFlight = synchronizer.syncInFlight as
+            | Map<unknown, Map<unknown, unknown>>
+            | undefined;
+        if (
+            inFlight &&
+            [...inFlight.values()].some((pending) => pending.size > 0)
+        ) {
+            return false;
+        }
+        // Rateless sync owns these maps in addition to the simple
+        // synchronizer's queue. They are intentionally checked when
+        // available; older/simple synchronizers omit them.
+        if ((synchronizer.ingoingSyncProcesses?.size ?? 0) > 0) {
+            return false;
+        }
+        if ((synchronizer.outgoingSyncProcesses?.size ?? 0) > 0) {
+            return false;
+        }
+        return true;
+    }
+
+    private async hasConnectedRemoteReplicator() {
+        const pubsub = (this.node?.services?.pubsub as any) ?? undefined;
+        const peers = pubsub?.peers as Map<string, unknown> | undefined;
+        const routes = pubsub?.routes as
+            | {
+                  isReachable?: (from: string, target: string) => boolean;
+                  getBestRouteHint?: (
+                      from: string,
+                      target: string
+                  ) => { nextHop: string; expiresAt?: number } | undefined;
+              }
+            | undefined;
+        if (!peers?.has && !routes?.isReachable) {
+            return false;
+        }
+        try {
+            const self = this.node.identity.publicKey.hashcode();
+            const replicators = await this.entries.log.getReplicators();
+            return [...replicators].some((hash) => {
+                if (hash === self) {
+                    return false;
+                }
+                if (routes?.isReachable) {
+                    if (!routes.isReachable(self, hash)) {
+                        return false;
+                    }
+                    const hint = routes.getBestRouteHint?.(self, hash);
+                    if (routes.getBestRouteHint) {
+                        // DirectStream retains invalidated routes briefly for
+                        // failover, marking them with expiresAt. They are useful
+                        // for delivery retries but are not current donor-liveness
+                        // evidence. The selected next hop must also still be a
+                        // live direct stream when that map is available.
+                        if (hint == null || hint.expiresAt != null) {
+                            return false;
+                        }
+                        if (peers?.has && !peers.has(hint.nextHop)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                // Compatibility fallback for older transports without the
+                // route/session API. Current transports take the branch above
+                // for both direct and relayed donors.
+                return peers?.has(hash) === true;
+            });
+        } catch {
+            // A cold replication index is not proof. The periodic readiness
+            // check retries once the relevant membership rows arrive.
+            return false;
+        }
+    }
+
+    private serializeWriteReadinessTransition<T>(
+        transition: () => Promise<T>
+    ): Promise<T> {
+        this.writeReadinessTransitionChain ??= Promise.resolve();
+        const run = this.writeReadinessTransitionChain.then(transition);
+        this.writeReadinessTransitionChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private markWriteReady(generation: number): Promise<void> {
+        return this.serializeWriteReadinessTransition(async () => {
+            if (
+                this.writeReadinessLifecycleBlocked ||
+                generation !== this.openGeneration ||
+                !this.writeReadinessRequired ||
+                this.writesReady
+            ) {
+                return;
+            }
+            await this.writeBootstrapState(
+                {
+                    openedBefore: true,
+                    writeReady: true,
+                    legacyUnproven: false,
+                    writeReadySource: "remote-settled",
+                    bootstrap: null,
+                },
+                generation,
+                true
+            );
+            // open()/close() block and drain this entire transition before
+            // changing generations. Keeping the memory update in the same
+            // serialization slot also prevents legacy and remote provenance
+            // from crossing on disk versus in status().
+            this.writesReady = true;
+            this.writeReadinessRequired = false;
+            this.writeReadinessQuietChecks = 0;
+            this.guardArmed = true;
+            this.legacyPromotionEligible = false;
+            this.writeReadinessSource = "remote-settled";
+            if (this.writeReadinessTimer) {
+                clearInterval(this.writeReadinessTimer);
+                this.writeReadinessTimer = undefined;
+            }
+            this.events.dispatchEvent(
+                new CustomEvent("write:ready", {
+                    detail: this.bootstrapStatus(),
+                })
+            );
+            const waiters = this.writeReadinessWaiters.splice(0);
+            for (const waiter of waiters) {
+                waiter.resolve();
+            }
+        });
+    }
+
+    /**
+     * Fail-closed readiness for a fresh address-open. Positive remote
+     * metadata proves synchronization actually started; bootstrap retirement,
+     * synchronizer idleness, and two post-arrival quiet checks provide a
+     * settled initial view. This deliberately does not call the result a
+     * verified log frontier: Peerbit does not expose one yet.
+     */
+    private startWriteReadinessTracking(generation: number) {
+        if (
+            generation !== this.openGeneration ||
+            !this.writeReadinessRequired ||
+            this.writeReadinessTimer
+        ) {
+            return;
+        }
+        const intervalMs = Math.max(
+            WRITE_READINESS_MIN_CHECK_MS,
+            Math.min(1_000, Math.floor(this.writeReadinessSettleMs / 2))
+        );
+        const check = async () => {
+            if (
+                this.writeReadinessCheckRunning ||
+                generation !== this.openGeneration ||
+                !this.writeReadinessRequired
+            ) {
+                return;
+            }
+            this.writeReadinessCheckRunning = true;
+            try {
+                const settledPhase =
+                    this.bootstrapPhase === "off" ||
+                    this.bootstrapPhase === "converged";
+                if (
+                    !this.isFullReplica() ||
+                    !this.writeReadinessDecisionSettled ||
+                    !settledPhase ||
+                    !this.writeReadinessRemoteEvidence ||
+                    !(await this.hasConnectedRemoteReplicator()) ||
+                    !this.synchronizerIdle()
+                ) {
+                    this.writeReadinessQuietChecks = 0;
+                    return;
+                }
+                const quietSince = Math.max(
+                    this.writeReadinessStartedAtMs,
+                    this.lastRemoteArrivalMs
+                );
+                if (this.clock() - quietSince < this.writeReadinessSettleMs) {
+                    this.writeReadinessQuietChecks = 0;
+                    return;
+                }
+                this.writeReadinessQuietChecks++;
+                if (this.writeReadinessQuietChecks >= 2) {
+                    await this.markWriteReady(generation);
+                }
+            } catch {
+                // A durable marker failure must leave the gate and Guard D
+                // closed. Keep the timer alive and retry from a fresh pair of
+                // quiet checks instead of leaking an unhandled rejection.
+                this.writeReadinessQuietChecks = 0;
+            } finally {
+                this.writeReadinessCheckRunning = false;
+            }
+        };
+        this.writeReadinessTimer = setInterval(() => {
+            void check();
+        }, intervalMs);
+        (this.writeReadinessTimer as any)?.unref?.();
+        void check();
+    }
+
     private clearBootstrapTimers() {
         // Borsh bypasses field initializers on address-opened programs;
         // this also runs from open() before per-instance re-init.
@@ -4370,6 +5078,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (this.quiescenceTimer) {
             clearInterval(this.quiescenceTimer);
             this.quiescenceTimer = undefined;
+        }
+        if (this.writeReadinessTimer) {
+            clearInterval(this.writeReadinessTimer);
+            this.writeReadinessTimer = undefined;
         }
         if (this.snapshotTimer) {
             clearInterval(this.snapshotTimer);
@@ -4386,15 +5098,75 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async close(from?: any): Promise<boolean> {
+        // Stop queued promotions, but let a transition that already owns the
+        // slot finish its durable marker + memory update before close returns.
+        // A caller therefore never receives ECLOSED after its trust marker was
+        // actually committed.
+        this.writeReadinessLifecycleBlocked = true;
+        const lifecycleError = new SharedFsError(
+            "ECLOSED",
+            "filesystem closed while background work was running"
+        );
+        this.bootstrapAbortController?.abort(lifecycleError);
+        this.bootstrapAbortController = undefined;
+        if (this.changeListener) {
+            this.entries.events.removeEventListener(
+                "change",
+                this.changeListener
+            );
+            this.changeListener = undefined;
+        }
+        this.clearBootstrapTimers();
+        const readinessError = new SharedFsError(
+            "ECLOSED",
+            "filesystem closed while awaiting write readiness"
+        );
+        const writeWaiters = this.writeReadinessWaiters.splice(0);
+        for (const waiter of writeWaiters) {
+            waiter.reject(readinessError);
+        }
+        // Abort makes remote query/block waits return promptly; joining the
+        // task is what guarantees no late fallback can recreate state or arm
+        // timers after close has returned.
+        this.bootstrapDecision ??= Promise.resolve();
+        await this.bootstrapDecision.catch(() => {});
+        this.clearBootstrapTimers();
+        this.writeReadinessTransitionChain ??= Promise.resolve();
+        this.stateWriteChain ??= Promise.resolve();
+        await this.writeReadinessTransitionChain;
+        let pendingStateWrites: Promise<unknown>;
+        do {
+            pendingStateWrites = this.stateWriteChain;
+            await pendingStateWrites;
+        } while (pendingStateWrites !== this.stateWriteChain);
+        // A later reopen creates a fresh generation only after all old state
+        // writes have drained, so it cannot race a stale marker onto disk.
+        this.openGeneration = (this.openGeneration || 0) + 1;
+        this.writesReady = false;
+        this.writeReadinessRequired = false;
         this.watchHub?.closeAll();
         this.changesetHub?.close();
         // A reopened instance gets fresh hubs: bootstrap resync latches
         // must not persist across open generations.
         this.watchHub = undefined;
         this.changesetHub = undefined;
-        this.clearBootstrapTimers();
         this.resolveBootstrapWaiters({ verified: false });
-        return super.close(from);
+        const restoreCleanLegacyEligibility =
+            this.legacyPromotionCrashMarker && this.legacyPromotionEligible;
+        const closed = await super.close(from);
+        if (closed && restoreCleanLegacyEligibility) {
+            await this.writeBootstrapState(
+                {
+                    bootstrap: null,
+                    writeReady: false,
+                    legacyUnproven: true,
+                    writeReadySource: null,
+                },
+                undefined,
+                true
+            );
+        }
+        return closed;
     }
 
     /**
@@ -4525,10 +5297,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!directory) {
             return undefined;
         }
-        const { mkdir } = await import("node:fs/promises");
+        const fs = await import("node:fs/promises");
         const { join } = await import("node:path");
         const dir = join(directory, "shared-fs-bootstrap");
-        await mkdir(dir, { recursive: true });
+        const created = await fs.mkdir(dir, { recursive: true });
+        // Persist creation of the side-state directory itself before a marker
+        // inside it is allowed to protect an address-open. Without the parent
+        // sync, a power loss after the first marker could drop the whole child
+        // directory and make ENOENT look like a fresh store.
+        if (created !== undefined) {
+            for (const durableDirectory of [dir, directory]) {
+                try {
+                    const handle = await fs.open(durableDirectory, "r");
+                    try {
+                        await handle.sync();
+                    } finally {
+                        await handle.close();
+                    }
+                } catch (error) {
+                    // Directory fsync is unavailable on some supported
+                    // platforms. The readiness-critical existing-file path
+                    // does not depend on this sync; malformed JSON still
+                    // fails closed on read.
+                    if (!directorySyncUnsupported(error)) {
+                        throw error;
+                    }
+                }
+            }
+        }
         return join(dir, `${this.address?.toString() ?? "unaddressed"}.json`);
     }
 
@@ -4543,36 +5339,172 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async readBootstrapState(): Promise<{
         openedBefore: boolean;
         bootstrap?: "active" | "unverified";
+        writeReady: boolean;
+        legacyUnproven: boolean;
+        writeReadySource?:
+            | "creator"
+            | "remote-settled"
+            | "legacy-operator-assertion";
     }> {
         const path = await this.bootstrapStatePath();
         if (!path) {
-            return { openedBefore: false };
+            return {
+                openedBefore: false,
+                writeReady: false,
+                legacyUnproven: false,
+            };
         }
         try {
             const { readFile } = await import("node:fs/promises");
             const parsed = JSON.parse(await readFile(path, "utf8"));
+            const record =
+                parsed !== null &&
+                typeof parsed === "object" &&
+                !Array.isArray(parsed);
+            const openedBefore = parsed?.openedBefore === true;
+            const hasOpenedBefore = Object.prototype.hasOwnProperty.call(
+                parsed ?? {},
+                "openedBefore"
+            );
+            const hasWriteReady = Object.prototype.hasOwnProperty.call(
+                parsed ?? {},
+                "writeReady"
+            );
+            const hasLegacyUnproven = Object.prototype.hasOwnProperty.call(
+                parsed ?? {},
+                "legacyUnproven"
+            );
+            const hasBootstrap = Object.prototype.hasOwnProperty.call(
+                parsed ?? {},
+                "bootstrap"
+            );
+            const hasWriteReadySource = Object.prototype.hasOwnProperty.call(
+                parsed ?? {},
+                "writeReadySource"
+            );
+            const bootstrap =
+                parsed?.bootstrap === "active" ||
+                parsed?.bootstrap === "unverified"
+                    ? parsed.bootstrap
+                    : undefined;
+            const writeReadySource = [
+                "creator",
+                "remote-settled",
+                "legacy-operator-assertion",
+            ].includes(parsed?.writeReadySource)
+                ? parsed.writeReadySource
+                : undefined;
+            const malformed =
+                !record ||
+                (hasOpenedBefore && typeof parsed.openedBefore !== "boolean") ||
+                (hasWriteReady && typeof parsed.writeReady !== "boolean") ||
+                (hasLegacyUnproven &&
+                    typeof parsed.legacyUnproven !== "boolean") ||
+                (hasBootstrap && bootstrap === undefined) ||
+                (hasWriteReadySource && writeReadySource === undefined) ||
+                (parsed?.writeReady === true &&
+                    (!openedBefore ||
+                        writeReadySource === undefined ||
+                        parsed?.legacyUnproven === true)) ||
+                (parsed?.writeReady !== true && writeReadySource !== undefined);
+            if (malformed) {
+                return {
+                    openedBefore: true,
+                    bootstrap: "active",
+                    writeReady: false,
+                    legacyUnproven: false,
+                };
+            }
             return {
-                openedBefore: parsed?.openedBefore === true,
-                bootstrap:
-                    parsed?.bootstrap === "active" ||
-                    parsed?.bootstrap === "unverified"
-                        ? parsed.bootstrap
-                        : undefined,
+                openedBefore,
+                writeReady: parsed?.writeReady === true,
+                bootstrap,
+                // Upgrade eligibility survives an initial gated open. Only a
+                // valid old state that explicitly records prior use while
+                // lacking the new field can enter this posture; missing or
+                // corrupt files and explicit false markers are ineligible.
+                legacyUnproven:
+                    openedBefore &&
+                    parsed?.writeReady !== true &&
+                    writeReadySource === undefined &&
+                    parsed?.writeReadySource === undefined &&
+                    bootstrap === undefined &&
+                    (parsed?.legacyUnproven === true ||
+                        (!hasWriteReady && !hasLegacyUnproven)),
+                writeReadySource,
             };
         } catch (error: any) {
             if (error?.code === "ENOENT") {
-                return { openedBefore: false };
+                return {
+                    openedBefore: false,
+                    writeReady: false,
+                    legacyUnproven: false,
+                };
             }
-            return { openedBefore: true, bootstrap: "active" };
+            return {
+                openedBefore: true,
+                bootstrap: "active",
+                writeReady: false,
+                legacyUnproven: false,
+            };
+        }
+    }
+
+    /**
+     * Durably overwrite an existing sidecar on the same inode before allowing
+     * ingest. This avoids depending on directory-rename durability for the
+     * critical old-ready -> gated transition. A crash before sync cannot pass
+     * the caller's await; the old proof is still valid because ingest has not
+     * started, while any torn JSON parses fail closed. A missing first sidecar
+     * may be lost with its directory entry, but missing state is itself gated
+     * and is never accepted as early replay evidence.
+     */
+    private async replaceBootstrapState(path: string, contents: string) {
+        const fs = await import("node:fs/promises");
+        let file: Awaited<ReturnType<typeof fs.open>> | undefined;
+        try {
+            try {
+                file = await fs.open(path, "r+");
+                await file.truncate(0);
+            } catch (error) {
+                if ((error as { code?: string })?.code !== "ENOENT") {
+                    throw error;
+                }
+                file = await fs.open(path, "wx", 0o600);
+            }
+            await file.writeFile(contents, "utf8");
+            await file.sync();
+            await file.close();
+            file = undefined;
+        } catch (error) {
+            await file?.close().catch(() => {});
+            throw error;
         }
     }
 
     /** Serialized read-merge-write so concurrent patches never clobber. */
-    private writeBootstrapState(patch: {
-        openedBefore?: boolean;
-        bootstrap?: "active" | "unverified" | null;
-    }): Promise<void> {
+    private writeBootstrapState(
+        patch: {
+            openedBefore?: boolean;
+            bootstrap?: "active" | "unverified" | null;
+            writeReady?: boolean;
+            legacyUnproven?: boolean;
+            writeReadySource?:
+                | "creator"
+                | "remote-settled"
+                | "legacy-operator-assertion"
+                | null;
+        },
+        generation?: number,
+        failOnError = false
+    ): Promise<void> {
         const run = this.stateWriteChain.then(async () => {
+            if (
+                generation !== undefined &&
+                generation !== this.openGeneration
+            ) {
+                return;
+            }
             const path = await this.bootstrapStatePath();
             if (!path) {
                 return;
@@ -4582,14 +5514,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 const next: any = {
                     openedBefore:
                         patch.openedBefore ?? current.openedBefore ?? false,
+                    writeReady: patch.writeReady ?? current.writeReady ?? false,
+                    legacyUnproven:
+                        patch.legacyUnproven ?? current.legacyUnproven ?? false,
+                    writeReadySource:
+                        patch.writeReadySource === null
+                            ? undefined
+                            : (patch.writeReadySource ??
+                              current.writeReadySource),
                     bootstrap:
                         patch.bootstrap === null
                             ? undefined
                             : (patch.bootstrap ?? current.bootstrap),
                 };
-                const { writeFile } = await import("node:fs/promises");
-                await writeFile(path, JSON.stringify(next));
-            } catch {
+                if (
+                    generation !== undefined &&
+                    generation !== this.openGeneration
+                ) {
+                    return;
+                }
+                await this.replaceBootstrapState(path, JSON.stringify(next));
+            } catch (error) {
+                if (failOnError) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `failed to persist fail-closed bootstrap state: ${error instanceof Error ? error.message : String(error)}`
+                    );
+                }
                 // In-memory or read-only peers proceed without crash
                 // safety; an interrupted bootstrap there restarts from an
                 // empty store.
@@ -4611,7 +5562,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * join; a failure over a resumed partial store takes the unverified
      * posture instead — guard down and GC gated until the store settles.
      */
-    private async startBootstrap(marker: "active" | "unverified" | undefined) {
+    private async startBootstrap(
+        marker: "active" | "unverified" | undefined,
+        generation: number,
+        signal: AbortSignal
+    ) {
+        const active = () =>
+            generation === this.openGeneration && !signal.aborted;
+        if (!active()) {
+            return;
+        }
         if (marker === "unverified") {
             // A previous bootstrap retired on timeout: no overlay, but
             // Guard D stays disarmed and GC gated until quiescence.
@@ -4642,6 +5602,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         } finally {
             await (iterator as any).close?.();
         }
+        if (!active()) {
+            return;
+        }
         if (!empty && !marker) {
             return;
         }
@@ -4650,19 +5613,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const resumed = marker !== undefined && !empty;
         this.bootstrapPhase = "fetching";
         this.guardArmed = false;
-        await this.writeBootstrapState({ bootstrap: "active" });
+        await this.writeBootstrapState(
+            { bootstrap: "active" },
+            generation,
+            true
+        );
+        if (!active()) {
+            return;
+        }
         let installed = false;
         let failure: unknown;
         try {
-            installed = await this.fetchAndInstallOverlay();
+            installed = await this.fetchAndInstallOverlay(signal);
         } catch (error) {
             failure = error;
         }
+        if (!active()) {
+            return;
+        }
         if (!installed) {
             if (resumed) {
-                this.enterUnverified();
+                this.enterUnverified(generation);
             } else {
-                this.abandonBootstrap();
+                this.abandonBootstrap(generation);
             }
             if (this.bootstrapConfig.mode === "require") {
                 throw (
@@ -4693,7 +5666,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * overlay state and re-arms the guard. Never valid for a resumed
      * partial store — that path takes enterUnverified().
      */
-    private abandonBootstrap() {
+    private abandonBootstrap(generation: number = this.openGeneration) {
+        if (generation !== this.openGeneration) {
+            return;
+        }
         this.overlayNaming = new Map();
         this.overlayVersions = new Map();
         this.overlaySweep = new Map();
@@ -4701,8 +5677,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.overlayPending = new Map();
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "off";
-        this.guardArmed = true;
-        void this.writeBootstrapState({ bootstrap: null }).catch(() => {});
+        this.guardArmed = !this.writeReadinessRequired;
+        void this.writeBootstrapState({ bootstrap: null }, generation).catch(
+            () => {}
+        );
         this.resolveBootstrapWaiters({ verified: false });
     }
 
@@ -4711,7 +5689,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * disarmed, GC gated, marker persisted, arming deferred to the
      * quiescence checker.
      */
-    private enterUnverified() {
+    private enterUnverified(generation: number = this.openGeneration) {
+        if (generation !== this.openGeneration) {
+            return;
+        }
         this.overlayNaming = new Map();
         this.overlayVersions = new Map();
         this.overlaySweep = new Map();
@@ -4720,9 +5701,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "unverified";
         this.guardArmed = false;
-        void this.writeBootstrapState({ bootstrap: "unverified" }).catch(
-            () => {}
-        );
+        void this.writeBootstrapState(
+            { bootstrap: "unverified" },
+            generation
+        ).catch(() => {});
         this.startQuiescenceChecker();
         this.resolveBootstrapWaiters({ verified: false });
     }
@@ -4731,7 +5713,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * Discover, verify, fetch and install the newest trusted snapshot.
      * Returns false when no usable manifest exists (caller falls back).
      */
-    private async fetchAndInstallOverlay(): Promise<boolean> {
+    private async fetchAndInstallOverlay(
+        signal: AbortSignal
+    ): Promise<boolean> {
+        const throwIfAborted = () => {
+            if (signal.aborted) {
+                throw (
+                    signal.reason ??
+                    new SharedFsError("ECLOSED", "bootstrap was aborted")
+                );
+            }
+        };
+        throwIfAborted();
         const config = this.bootstrapConfig;
         const results = await this.entries.index
             .iterate(
@@ -4747,9 +5740,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     local: true,
                     remote: { timeout: config.discoveryTimeoutMs } as any,
                     resolve: true,
+                    signal,
                 }
             )
             .all();
+        throwIfAborted();
         const deadline = this.clock() + config.discoveryTimeoutMs;
         type Candidate = {
             payload: SnapshotManifestPayload;
@@ -4812,6 +5807,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // so an untrusted verdict is final only at the deadline.
         const trusted: Candidate[] = [];
         while (trusted.length === 0) {
+            throwIfAborted();
             for (const candidate of candidates) {
                 if (
                     !this.trustGraph ||
@@ -4823,7 +5819,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (trusted.length > 0 || this.clock() >= deadline) {
                 break;
             }
-            await new Promise((resolve) => setTimeout(resolve, 250));
+            await new Promise<void>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    signal.removeEventListener("abort", onAbort);
+                    resolve();
+                }, 250);
+                const onAbort = () => {
+                    clearTimeout(timer);
+                    reject(
+                        signal.reason ??
+                            new SharedFsError(
+                                "ECLOSED",
+                                "bootstrap was aborted"
+                            )
+                    );
+                };
+                signal.addEventListener("abort", onAbort, { once: true });
+                if (signal.aborted) {
+                    onAbort();
+                }
+            });
         }
         if (trusted.length === 0) {
             this.bootstrapFailure = `${candidates.length} snapshot candidate(s) found, none from a trusted signer by the discovery deadline`;
@@ -4886,6 +5901,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     {
                         remote: {
                             timeout: config.discoveryTimeoutMs * 4,
+                            signal,
                             ...(connectedPeers.length > 0
                                 ? { from: connectedPeers }
                                 : {}),
@@ -4921,6 +5937,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // running log ingest.
         let sinceYield = 0;
         for (const segment of segments) {
+            throwIfAborted();
             for (const doc of segment.entries) {
                 if (
                     !(doc instanceof NamingEvent) &&
@@ -4955,8 +5972,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (++sinceYield >= 16) {
                 sinceYield = 0;
                 await new Promise((resolve) => setImmediate(resolve));
+                throwIfAborted();
             }
         }
+        throwIfAborted();
         this.bootstrapManifestMeta = {
             authorKey: chosen.authorKey,
             snapshotSeq: chosen.payload.snapshotSeq,
@@ -4964,6 +5983,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ageMs: this.clock() - Number(chosen.payload.createdAtWallMs),
             docs: chosen.payload.counts.docs,
         };
+        if (this.writeReadinessRequired) {
+            // The signature, store id, trust, age, segment hashes and every
+            // metadata document have all been validated at this point. This
+            // is positive remote evidence; it is not a post-snapshot log
+            // frontier, so later namespace arrivals still restart settling.
+            this.writeReadinessRemoteEvidence = true;
+            this.writeReadinessQuietChecks = 0;
+            this.lastRemoteArrivalMs = this.clock();
+        }
         return true;
     }
 
@@ -5304,7 +6332,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (verified) {
             this.bootstrapPhase = "converged";
             this.bootstrapVerified = true;
-            this.guardArmed = true;
+            this.guardArmed = !this.writeReadinessRequired;
             void this.writeBootstrapState({ bootstrap: null }).catch(() => {});
             this.events.dispatchEvent(
                 new CustomEvent("bootstrap:converged", {
@@ -5359,7 +6387,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 clearInterval(this.quiescenceTimer!);
                 this.quiescenceTimer = undefined;
                 this.bootstrapPhase = "converged";
-                this.guardArmed = true;
+                this.guardArmed = !this.writeReadinessRequired;
                 void this.writeBootstrapState({ bootstrap: null }).catch(
                     () => {}
                 );
@@ -5401,6 +6429,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     bootstrapStatus(): BootstrapStatus {
         return {
             phase: this.bootstrapPhase,
+            writeReady:
+                this.writesReady && !this.writeReadinessLifecycleBlocked,
+            partialWriteOverride: this.partialWriteOverride,
+            writeReadinessSource: this.writeReadinessSource,
+            legacyPromotionEligible: this.legacyPromotionEligible,
             manifest: this.bootstrapManifestMeta
                 ? {
                       ...this.bootstrapManifestMeta,
@@ -5417,6 +6450,262 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     ? Number.POSITIVE_INFINITY
                     : this.clock() - this.lastArrivalMs,
         };
+    }
+
+    /**
+     * Persist a one-time operator assertion for an eligible pre-marker local
+     * replica. This does not prove completeness: callers must independently
+     * verify that this exact directory was a clean, complete full replica.
+     */
+    async trustLegacyLocalReplica(
+        options: TrustLegacyLocalReplicaOptions
+    ): Promise<void> {
+        if (options?.assumeComplete !== true) {
+            throw new SharedFsError(
+                "EINVAL",
+                "trustLegacyLocalReplica requires { assumeComplete: true }"
+            );
+        }
+        const timeout = options.timeout ?? 30_000;
+        if (!Number.isFinite(timeout) || timeout <= 0) {
+            throw new SharedFsError(
+                "EINVAL",
+                "legacy trust timeout must be a positive finite number"
+            );
+        }
+        if (this.writeReadinessLifecycleBlocked) {
+            throw new SharedFsError(
+                "ECLOSED",
+                "filesystem lifecycle changed while trusting a legacy replica"
+            );
+        }
+        if (this.writesReady && !this.partialWriteOverride) {
+            if (this.writeReadinessSource === "legacy-operator-assertion") {
+                return;
+            }
+            throw new SharedFsError(
+                "EINVAL",
+                "this replica is already write-ready and does not require legacy promotion"
+            );
+        }
+        if (
+            !this.openedExistingAddress ||
+            !this.isFullReplica() ||
+            this.partialWriteOverride ||
+            !this.legacyPromotionEligible
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "this open handle is not an eligible pre-marker full replica"
+            );
+        }
+
+        const generation = this.openGeneration;
+        const deadline = Date.now() + timeout;
+        let quietChecks = 0;
+        while (quietChecks < 2) {
+            if (options.signal?.aborted) {
+                throw (
+                    options.signal.reason ??
+                    new SharedFsError(
+                        "ECLOSED",
+                        "legacy replica trust was aborted"
+                    )
+                );
+            }
+            if (
+                this.writeReadinessLifecycleBlocked ||
+                generation !== this.openGeneration
+            ) {
+                throw new SharedFsError(
+                    "ECLOSED",
+                    "filesystem reopened while trusting a legacy replica"
+                );
+            }
+            if (!this.legacyPromotionEligible) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "legacy promotion eligibility changed before persistence"
+                );
+            }
+            const settledPhase =
+                this.bootstrapPhase === "off" ||
+                this.bootstrapPhase === "converged";
+            const quietFor =
+                this.lastArrivalMs === 0
+                    ? this.writeReadinessSettleMs
+                    : this.clock() - this.lastArrivalMs;
+            quietChecks =
+                this.writeReadinessDecisionSettled &&
+                settledPhase &&
+                this.synchronizerIdle() &&
+                quietFor >= this.writeReadinessSettleMs
+                    ? quietChecks + 1
+                    : 0;
+            if (quietChecks >= 2) {
+                break;
+            }
+            if (Date.now() >= deadline) {
+                throw new SharedFsError(
+                    "ETIMEDOUT",
+                    "timed out waiting for the legacy replica to become locally idle"
+                );
+            }
+            await new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, WRITE_READINESS_MIN_CHECK_MS);
+                (timer as any)?.unref?.();
+            });
+        }
+
+        await this.serializeWriteReadinessTransition(async () => {
+            if (options.signal?.aborted) {
+                throw (
+                    options.signal.reason ??
+                    new SharedFsError(
+                        "ECLOSED",
+                        "legacy replica trust was aborted"
+                    )
+                );
+            }
+            if (
+                this.writeReadinessLifecycleBlocked ||
+                generation !== this.openGeneration
+            ) {
+                throw new SharedFsError(
+                    "ECLOSED",
+                    "filesystem reopened while persisting legacy replica trust"
+                );
+            }
+            if (this.writesReady && !this.partialWriteOverride) {
+                if (this.writeReadinessSource === "legacy-operator-assertion") {
+                    return;
+                }
+                throw new SharedFsError(
+                    "EINVAL",
+                    "remote readiness completed before legacy promotion"
+                );
+            }
+            if (!this.legacyPromotionEligible) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "legacy promotion eligibility changed before persistence"
+                );
+            }
+            await this.writeBootstrapState(
+                {
+                    openedBefore: true,
+                    writeReady: true,
+                    legacyUnproven: false,
+                    writeReadySource: "legacy-operator-assertion",
+                    bootstrap: null,
+                },
+                generation,
+                true
+            );
+            this.writesReady = true;
+            this.writeReadinessRequired = false;
+            this.legacyPromotionEligible = false;
+            this.writeReadinessSource = "legacy-operator-assertion";
+            this.guardArmed = true;
+            if (this.writeReadinessTimer) {
+                clearInterval(this.writeReadinessTimer);
+                this.writeReadinessTimer = undefined;
+            }
+            this.events.dispatchEvent(
+                new CustomEvent("write:ready", {
+                    detail: this.bootstrapStatus(),
+                })
+            );
+            for (const waiter of this.writeReadinessWaiters.splice(0)) {
+                waiter.resolve();
+            }
+        });
+    }
+
+    /**
+     * Resolve when this handle may accept mutations. Fresh full replicas
+     * resolve after the settled-view readiness fence; new creators, proven
+     * warm reopens, and explicit allowPartialWrites overrides resolve
+     * immediately. Closing/reopening rejects outstanding waiters.
+     */
+    awaitWriteReady(options: AwaitWriteReadyOptions = {}): Promise<void> {
+        if (
+            options.timeout !== undefined &&
+            (!Number.isFinite(options.timeout) || options.timeout <= 0)
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "awaitWriteReady timeout must be a positive finite number"
+            );
+        }
+        if (this.writeReadinessLifecycleBlocked) {
+            return Promise.reject(
+                new SharedFsError(
+                    "ECLOSED",
+                    "filesystem lifecycle changed while awaiting write readiness"
+                )
+            );
+        }
+        if (this.writesReady) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve, reject) => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let settled = false;
+            const waiters = this.writeReadinessWaiters;
+            function cleanup() {
+                if (timer) {
+                    clearTimeout(timer);
+                    timer = undefined;
+                }
+                options.signal?.removeEventListener("abort", onAbort);
+                const index = waiters.indexOf(waiter);
+                if (index >= 0) {
+                    waiters.splice(index, 1);
+                }
+            }
+            function settleResolve() {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve();
+            }
+            function settleReject(error: unknown) {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(error);
+            }
+            const onAbort = () =>
+                settleReject(
+                    options.signal?.reason ??
+                        new SharedFsError(
+                            "ECLOSED",
+                            "awaitWriteReady was aborted"
+                        )
+                );
+            const waiter = { resolve: settleResolve, reject: settleReject };
+            waiters.push(waiter);
+            if (options.timeout !== undefined) {
+                timer = setTimeout(
+                    () =>
+                        settleReject(
+                            new SharedFsError(
+                                "ETIMEDOUT",
+                                "timed out awaiting shared filesystem write readiness"
+                            )
+                        ),
+                    options.timeout
+                );
+                (timer as any)?.unref?.();
+            }
+            options.signal?.addEventListener("abort", onAbort, {
+                once: true,
+            });
+            if (options.signal?.aborted) {
+                onAbort();
+            }
+        });
     }
 
     awaitBootstrapConverged(): Promise<{ verified: boolean }> {
@@ -5571,10 +6860,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * Capture the current recoverable state: every naming head (including
-     * tombstones and conflicts), every content head, and every distinct chunk
-     * referenced by those content heads. Index rows retain each document's
-     * exact backing log hash, so the barrier sends existing entries without a
-     * re-put or any other logical filesystem mutation.
+     * tombstones and conflicts), every content head, every distinct chunk
+     * referenced by those content heads, and every surviving trust-log entry.
+     * The latter includes live relation puts and CUT revocation tombstones.
+     * Index rows retain each filesystem document's exact backing log hash; the
+     * trust log already exposes its exact resident entries. The barrier sends
+     * existing entries without a re-put or any other logical mutation.
      */
     private async captureDisposalClosure(
         options: PrepareForDisposalOptions,
@@ -5691,16 +6982,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.throwIfDisposalInterrupted(options, deadline);
 
+        const trustEntries = this.trustGraph
+            ? await this.awaitDisposalStep(
+                  this.trustGraph.trustGraph.log.log.toArray(),
+                  options,
+                  deadline
+              )
+            : [];
+        const trust = trustEntries.map((entry) => {
+            if (typeof entry?.hash !== "string" || entry.hash.length === 0) {
+                throw new SharedFsError(
+                    "EIO",
+                    "Cannot fence trusted-writer state: a local trust-log entry has no hash"
+                );
+            }
+            return {
+                id: `trusted-writer log entry ${entry.hash}`,
+                hash: entry.hash,
+            };
+        });
+        this.throwIfDisposalInterrupted(options, deadline);
+
         naming.sort((a, b) => compareIds(a.id, b.id));
         versions.sort((a, b) => compareIds(a.id, b.id));
-        return { chunks, versions, naming };
+        return { chunks, versions, naming, trust };
     }
 
     private async deliverDisposalBatch(
         refs: DisposalEntryRef[],
         options: PrepareForDisposalOptions,
         deadline: number | undefined,
-        progress: { confirmedEntries: number; receiptBatches: number }
+        progress: { confirmedEntries: number; receiptBatches: number },
+        documents: Documents<any, any> = this.entries
     ) {
         if (refs.length === 0) {
             return;
@@ -5708,7 +7021,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.throwIfDisposalInterrupted(options, deadline);
         const entries = await this.awaitDisposalStep(
             mapWithConcurrency(refs, CHUNK_IO_CONCURRENCY, async (ref) => {
-                const entry = await this.entries.log.log.get(ref.hash);
+                const entry = await documents.log.log.get(ref.hash);
                 if (!entry || entry.hash !== ref.hash) {
                     throw new SharedFsError(
                         "EIO",
@@ -5728,7 +7041,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Peerbit owns the receipt-phase deadline/abort so it can preserve
         // PersistedDeliveryError evidence instead of racing our generic local
         // step timer at the same deadline.
-        await this.entries.log.deliverPersistedEntries(entries, {
+        await documents.log.deliverPersistedEntries(entries, {
             target: "replicators",
             delivery: {
                 reliability: "persisted",
@@ -5742,11 +7055,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Fence this full replica's current recoverable filesystem closure on
-     * `minAcks` distinct capable remote leaders per exact entry. The caller
-     * must stop new writes before calling and keep them stopped until the
-     * returned success has been acted on. A content arrival during the fence
-     * rejects the attempt instead of certifying a moving view.
+     * Fence this full replica's current recoverable filesystem and trusted-
+     * writer closure on `minAcks` distinct capable remote leaders per exact
+     * entry. The caller must stop new writes and authorization changes before
+     * calling and keep them stopped until the returned success has been acted
+     * on. A filesystem or trust-state arrival during the fence rejects the
+     * attempt instead of certifying a moving view.
      *
      * Receipts are per entry: different entries may be held by different
      * remote leader sets. This does not raise the replication degree, revoke
@@ -5755,6 +7069,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     async prepareForDisposal(
         options: PrepareForDisposalOptions
     ): Promise<PrepareForDisposalResult> {
+        this.assertSafeMaintenanceReady("prepareForDisposal");
         this.validatePrepareForDisposalOptions(options);
         if (!this.isFullReplica()) {
             throw new SharedFsError(
@@ -5811,7 +7126,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (this.disposalContentGeneration !== generation) {
                 throw new SharedFsError(
                     "EIO",
-                    "filesystem content changed while capturing the disposal closure; quiesce writes and replication, then retry"
+                    "filesystem content changed while capturing the disposal closure, or authorization state changed while capturing the disposal closure; quiesce writes, authorization changes, and replication, then retry"
                 );
             }
 
@@ -5830,7 +7145,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (this.disposalContentGeneration !== generation) {
                     throw new SharedFsError(
                         "EIO",
-                        "filesystem content changed during the disposal barrier; quiesce writes and replication, then retry"
+                        "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
                     );
                 }
             }
@@ -5850,7 +7165,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     if (this.disposalContentGeneration !== generation) {
                         throw new SharedFsError(
                             "EIO",
-                            "filesystem content changed during the disposal barrier; quiesce writes and replication, then retry"
+                            "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
+                        );
+                    }
+                }
+            }
+            if (closure.trust.length > 0) {
+                const trustDocuments = this.trustGraph?.trustGraph as Documents<
+                    any,
+                    any
+                >;
+                if (!trustDocuments) {
+                    throw new SharedFsError(
+                        "EIO",
+                        "trusted-writer state disappeared during the disposal barrier"
+                    );
+                }
+                for (
+                    let i = 0;
+                    i < closure.trust.length;
+                    i += DISPOSAL_METADATA_BATCH_SIZE
+                ) {
+                    await this.deliverDisposalBatch(
+                        closure.trust.slice(
+                            i,
+                            i + DISPOSAL_METADATA_BATCH_SIZE
+                        ),
+                        options,
+                        deadline,
+                        progress,
+                        trustDocuments
+                    );
+                    if (this.disposalContentGeneration !== generation) {
+                        throw new SharedFsError(
+                            "EIO",
+                            "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
                         );
                     }
                 }
@@ -5860,9 +7209,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 chunks: closure.chunks.length,
                 versions: closure.versions.length,
                 naming: closure.naming.length,
+                trust: closure.trust.length,
             };
             const entryCount =
-                entries.chunks + entries.versions + entries.naming;
+                entries.chunks +
+                entries.versions +
+                entries.naming +
+                entries.trust;
             return {
                 safeToDispose: true,
                 guarantee: "persisted-per-entry",
@@ -5892,6 +7245,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     async snapshotWrite(
         options: { advisoryIgnorePatterns?: string[] } = {}
     ): Promise<SnapshotWriteResult> {
+        this.assertSafeMaintenanceReady("snapshotWrite");
         if (!this.isFullReplica()) {
             throw new SharedFsError(
                 "EINVAL",
@@ -7344,6 +8698,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private gcRunning = false;
 
     async collectGarbage(options: GcOptions = {}): Promise<GcReport> {
+        this.assertSafeMaintenanceReady("collectGarbage");
         // A fresh open may still be deciding whether to bootstrap (a few
         // seconds of manifest discovery); wait that decision out instead
         // of failing spuriously.
@@ -7838,7 +9193,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             };
         };
 
-        let plan = await buildPlan();
+        const plan = await buildPlan();
 
         // ---------------- HEAL --------------------------------------------
         const damaged = new Set<string>();
@@ -8305,6 +9660,16 @@ export class SharedFsHandle {
         return this.program.bootstrapStatus();
     }
 
+    /** Resolves when mutations are safe to retry on this open handle. */
+    awaitWriteReady(options?: AwaitWriteReadyOptions) {
+        return this.program.awaitWriteReady(options);
+    }
+
+    /** Persist an explicit one-time trust assertion for an eligible legacy store. */
+    trustLegacyLocalReplica(options: TrustLegacyLocalReplicaOptions) {
+        return this.program.trustLegacyLocalReplica(options);
+    }
+
     /** Resolves when the bootstrap overlay retires (either path). */
     awaitBootstrapConverged() {
         return this.program.awaitBootstrapConverged();
@@ -8364,9 +9729,18 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
         bootstrap: options.address
             ? options.bootstrap
             : (options.bootstrap ?? false),
+        allowPartialWrites: options.allowPartialWrites,
         snapshot: options.snapshot,
         gc: options.gc,
     };
+    // Internal provenance: SharedFileSystem.open cannot otherwise
+    // distinguish deserializing an existing address from creating a new
+    // program (borsh bypasses constructor/field initializers).
+    (args as SharedFsInternalOpenArgs).addressOpen =
+        options.address !== undefined;
+    (args as SharedFsInternalOpenArgs).writeReadinessSettleMs = (
+        options as any
+    ).writeReadinessSettleMs;
     // Test-only jitter rng rides along undocumented.
     (args as any).gcRng = (options as any).gcRng;
     const program = options.address

@@ -55,7 +55,10 @@ const openByAddressWithRetry = async (
     peerbit: Peerbit,
     address: string,
     machineLabel: string,
-    extra: { remoteChunkFetch?: { timeoutMs: number } } = {}
+    extra: {
+        remoteChunkFetch?: { timeoutMs: number };
+        allowPartialWrites?: boolean;
+    } = {}
 ) => {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -153,16 +156,19 @@ describe("shared fs multi-peer", () => {
             remoteChunkFetch: options.remoteChunkFetch,
         });
         const rest = await Promise.all(
-            network
-                .slice(1)
-                .map((peer, index) =>
-                    openByAddressWithRetry(
-                        peer,
-                        first.address!,
-                        `machine-${index + 1}`,
-                        { remoteChunkFetch: options.remoteChunkFetch }
-                    )
+            network.slice(1).map((peer, index) =>
+                openByAddressWithRetry(
+                    peer,
+                    first.address!,
+                    `machine-${index + 1}`,
+                    {
+                        remoteChunkFetch: options.remoteChunkFetch,
+                        // Several cases deliberately race the first
+                        // namespace write from otherwise-empty peers.
+                        allowPartialWrites: true,
+                    }
                 )
+            )
         );
         return [first, ...rest];
     };

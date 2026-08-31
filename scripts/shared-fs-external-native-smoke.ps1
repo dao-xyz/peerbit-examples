@@ -49,7 +49,7 @@ try {
   Pop-Location
 }
 
-$Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State --no-replicate).Trim()
+$Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State).Trim()
 $Args = @(
   "packages/shared-fs/cli/lib/esm/bin.js",
   "mount",
@@ -57,7 +57,6 @@ $Args = @(
   $Mountpoint,
   "--directory",
   $State,
-  "--no-replicate",
   "--native-adapter",
   $Adapter
 )

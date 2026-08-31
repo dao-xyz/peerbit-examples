@@ -352,7 +352,7 @@ const printPrepareForDisposalResult = (result: PrepareForDisposalResult) => {
         `minimum acknowledgements per entry: ${result.minAcksPerEntry}`
     );
     console.log(
-        `entries fenced: ${result.entryCount} (${result.entries.chunks} chunks, ${result.entries.versions} version heads, ${result.entries.naming} naming heads)`
+        `entries fenced: ${result.entryCount} (${result.entries.chunks} chunks, ${result.entries.versions} version heads, ${result.entries.naming} naming heads, ${result.entries.trust} trusted-writer entries)`
     );
     console.log(`receipt batches: ${result.receiptBatches}`);
     if (result.empty) {
@@ -371,6 +371,7 @@ const openCliFs = async (
         address?: string;
         machineLabel?: string;
         replicate?: boolean;
+        allowPartialWrites?: boolean;
         gc?: false;
         rootKey?: Peerbit["identity"]["publicKey"];
     }
@@ -385,6 +386,7 @@ const openCliFs = async (
             address: options.address,
             machineLabel: options.machineLabel || os.hostname(),
             rootKey: options.rootKey,
+            allowPartialWrites: options.allowPartialWrites,
             gc: options.gc,
             ...programArgs,
         });
@@ -396,7 +398,7 @@ const openCliFs = async (
     // Transient resolution failures are retried within a bounded window;
     // auth/config errors stay fail-fast.
     const deadline = Date.now() + 20_000;
-    while (true) {
+    for (;;) {
         try {
             return await open();
         } catch (error: any) {
@@ -449,16 +451,33 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         "Create with trusted-writer access control rooted at this peer identity. Disable with --no-auth.",
                 }),
             async (argv) => {
+                if (argv.replicate === false) {
+                    throw new Error(
+                        "create requires a full replica; --no-replicate is not allowed"
+                    );
+                }
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await Peerbit.create({ directory });
                 try {
                     const fsHandle = await openCliFs(peerbit, {
                         machineLabel: argv.machine,
-                        replicate: false,
+                        // A creator is the authoritative empty/full initial
+                        // replica. Persist that continuity proof so the normal
+                        // create -> mount flow in this same state directory is
+                        // immediately writable even before any namespace row
+                        // exists.
+                        replicate: true,
                         rootKey: argv.auth
                             ? peerbit.identity.publicKey
                             : undefined,
                     });
+                    // Publish an authenticated zero-document frontier. The
+                    // normal empty create -> local mount path uses persisted
+                    // creator continuity; once that mount is online, remote
+                    // peers can use this manifest as positive empty-state
+                    // bootstrap evidence instead of waiting forever for a
+                    // namespace event that does not exist.
+                    await fsHandle.snapshotWrite();
                     console.log(fsHandle.address);
                 } finally {
                     await stopPeerbitForCli(peerbit);
@@ -623,8 +642,66 @@ export const runCli = async (args = hideBin(process.argv)) => {
             }
         )
         .command(
+            "trust-legacy-replica <address>",
+            "persist a one-time operator trust assertion for an eligible pre-marker local replica",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                        demandOption: true,
+                    })
+                    .option("assume-local-replica-complete", {
+                        type: "boolean",
+                        demandOption: true,
+                        description:
+                            "Required assertion that this exact local directory was cleanly shut down as a complete full replica.",
+                    })
+                    .option("timeout-ms", {
+                        type: "number",
+                        default: 30_000,
+                        description:
+                            "Maximum time to wait for local synchronization activity to become idle.",
+                    }),
+            async (argv) => {
+                if (argv.replicate === false) {
+                    throw new Error(
+                        "trust-legacy-replica requires a full replica; --no-replicate is not allowed"
+                    );
+                }
+                if (argv.assumeLocalReplicaComplete !== true) {
+                    throw new Error(
+                        "trust-legacy-replica requires --assume-local-replica-complete"
+                    );
+                }
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: false,
+                    });
+                    const fsHandle = await openCliFs(peerbit, {
+                        address: argv.address,
+                        machineLabel: argv.machine,
+                        replicate: true,
+                        gc: false,
+                    });
+                    await fsHandle.trustLegacyLocalReplica({
+                        assumeComplete: true,
+                        timeout: argv.timeoutMs,
+                    });
+                    console.log(
+                        chalk.green(
+                            "Legacy local replica trusted by explicit operator assertion; durable write readiness is now enabled for this directory and address."
+                        )
+                    );
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
             "mount <address> <mountpoint>",
-            "mount a shared filesystem using the native adapter",
+            "mount a writable shared filesystem using a full replica",
             (command) =>
                 command
                     .positional("address", {
@@ -639,8 +716,25 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "string",
                         description:
                             "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER.",
+                    })
+                    .option("write-ready-timeout-ms", {
+                        type: "number",
+                        default: 120_000,
+                        description:
+                            "Fail the mount if a safe initial write view is not established within this time.",
+                    })
+                    .option("allow-partial-writes", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "UNSAFE session-only recovery override: expose namespace writes without a proven settled full-replica view.",
                     }),
             async (argv) => {
+                if (argv.replicate === false) {
+                    throw new Error(
+                        "mount requires a full replica; --no-replicate is not allowed for a writable mount"
+                    );
+                }
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await Peerbit.create({ directory });
                 let ipc:
@@ -651,14 +745,30 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: argv.replicate !== false,
-                    });
+                    await connectToNetwork(peerbit, argv.peer);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
-                        replicate: argv.replicate,
+                        replicate: true,
+                        allowPartialWrites: argv.allowPartialWrites,
                     });
+                    // A fresh address-open can serve bootstrap-overlay reads
+                    // before its namespace is safe to mutate. Do not expose a
+                    // writable OS mount until the full-replica readiness fence
+                    // has settled (warm reopens resolve immediately).
+                    try {
+                        await fsHandle.awaitWriteReady({
+                            timeout: argv.writeReadyTimeoutMs,
+                        });
+                    } catch (error: any) {
+                        if (error?.code === "ETIMEDOUT") {
+                            throw new Error(
+                                `mount did not establish a safe initial write view within ${argv.writeReadyTimeoutMs} ms; keep a complete replicator connected and retry. If status reports legacy promotion eligibility, independently verify this exact local replica and run: peerbit-fs trust-legacy-replica ${argv.address} --assume-local-replica-complete. --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`,
+                                { cause: error }
+                            );
+                        }
+                        throw error;
+                    }
                     const backend = createSharedFsMountBackend(fsHandle);
                     const externalAdapter = await resolveExternalNativeAdapter(
                         argv.nativeAdapter
@@ -753,6 +863,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             `bootstrap: ${bootstrap.phase} (${bootstrap.pendingDocs} documents pending)`
                         );
                     }
+                    console.log(
+                        `write readiness: ${bootstrap.writeReady ? "ready" : "pending"}${bootstrap.writeReadinessSource ? ` (${bootstrap.writeReadinessSource})` : ""}`
+                    );
+                    console.log(
+                        `legacy promotion eligible: ${bootstrap.legacyPromotionEligible ? "yes" : "no"}`
+                    );
                     console.log(`local public key: ${fsHandle.localPublicKey}`);
                     console.log(
                         `access controlled: ${

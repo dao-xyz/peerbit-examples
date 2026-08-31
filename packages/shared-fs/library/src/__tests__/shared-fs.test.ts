@@ -480,6 +480,7 @@ describe("shared fs replication", () => {
         await waitUntil(async () => {
             expect(decode(await fsB.readFile("/shared.txt"))).toBe("base");
         });
+        await fsB.awaitWriteReady();
 
         const base = (await fsA.versions("/shared.txt"))
             .filter((version) => version.head)
@@ -525,6 +526,9 @@ describe("shared fs replication", () => {
             peerbit: writerPeer,
             address: ownerFs.address,
             machineLabel: "writer-machine",
+            // This fixture isolates signature authorization before any
+            // namespace exists; readiness behavior is covered separately.
+            allowPartialWrites: true,
         });
 
         expect(ownerFs.accessControlled).toBe(true);

@@ -1,4 +1,7 @@
 import { Peerbit } from "peerbit";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     computeGcFirstDelay,
@@ -296,42 +299,57 @@ describe("scheduled garbage collection", () => {
     });
 
     it("close() between arm and fire leaves no stray events; reopen re-arms", async () => {
-        await openScheduled({
-            intervalMs: 5_000,
-            initialDelayMs: 60,
-            jitterRatio: 0,
-            run: { settleMs: 0 },
-            testOverrides: { noFloors: true },
-        });
-        listen();
-        const address = fs.program.address!.toString();
-        await fs.program.close();
-        await sleep(250);
-        expect(runEvents.length).toBe(0);
-        expect(errorEvents.length).toBe(0);
-
-        const reopened = await openSharedFs({
-            peerbit: peer,
-            address,
-            clock,
-            gc: {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-gc-reopen-"));
+        await peer.stop();
+        peer = await Peerbit.create({ directory: join(root, "peer") });
+        try {
+            await openScheduled({
                 intervalMs: 5_000,
-                initialDelayMs: 60,
+                initialDelayMs: 20_000,
                 jitterRatio: 0,
                 run: { settleMs: 0 },
                 testOverrides: { noFloors: true },
-            } as any,
-        });
-        fs = reopened;
-        // Address opens deserialize the program through borsh, which
-        // bypasses field initializers: the generation must still be a
-        // finite number (NaN would silently kill every tick).
-        expect((fs.program as any).gcSchedulerGeneration).toBe(1);
-        expect(fs.gcStatus().scheduled).toBe(true);
-        listen();
-        await waitUntil(() => {
-            expect(runEvents.length).toBeGreaterThan(0);
-        });
+            });
+            listen();
+            const address = fs.program.address!.toString();
+
+            await fs.program.close();
+            await sleep(250);
+            expect(runEvents.length).toBe(0);
+            expect(errorEvents.length).toBe(0);
+
+            const reopened = await openSharedFs({
+                peerbit: peer,
+                address,
+                clock,
+                writeReadinessSettleMs: 100,
+                gc: {
+                    intervalMs: 5_000,
+                    initialDelayMs: 60,
+                    jitterRatio: 0,
+                    run: { settleMs: 0 },
+                    testOverrides: { noFloors: true },
+                } as any,
+            } as any);
+            fs = reopened;
+            // The persistent creator marker proves this exact directory was a
+            // complete full replica before close, so the warm reopen is ready
+            // without an unrelated network-readiness dependency.
+            expect(fs.bootstrapStatus().writeReady).toBe(true);
+
+            // Address opens deserialize the program through borsh, which
+            // bypasses field initializers: the generation must still be a
+            // finite number (NaN would silently kill every tick).
+            expect((fs.program as any).gcSchedulerGeneration).toBe(1);
+            expect(fs.gcStatus().scheduled).toBe(true);
+            listen();
+            await waitUntil(() => {
+                expect(runEvents.length).toBeGreaterThan(0);
+            });
+        } finally {
+            await peer.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
     });
 
     it("skips ticks while a manual run holds the mutex; overlap still throws", async () => {
@@ -412,13 +430,21 @@ describe("scheduled garbage collection", () => {
                 address,
                 machineLabel: "gc-schedule-untrusted",
                 bootstrap: false,
+                writeReadinessSettleMs: 100,
                 gc: {
                     intervalMs: 20_000,
                     initialDelayMs: 20_000,
                     run: { settleMs: 0 },
                     testOverrides: { noFloors: true },
                 } as any,
+            } as any);
+            // Prove a settled full-replica view independently of local writer
+            // trust; the test below remains solely about the trust gate.
+            await ownerFs.writeFile("/gc-readiness.txt", "seed");
+            await waitUntil(async () => {
+                expect(await fs.readFile("/gc-readiness.txt")).toBeDefined();
             });
+            await fs.awaitWriteReady({ timeout: 20_000 });
             listen();
             const warnSpy = vi
                 .spyOn(console, "warn")

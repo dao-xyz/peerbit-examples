@@ -69,16 +69,17 @@ describe("shared fs durable machine disposal", () => {
 
     const waitForRemoteReceiptCapability = async (
         source: SharedFsHandle,
-        remote: Peerbit
+        remote: Peerbit,
+        log: any = source.program.entries.log
     ) => {
-        await source.program.entries.log.waitForReplicator(
-            remote.identity.publicKey,
-            { roleAge: 0, timeout: WAIT_TIMEOUT_MS }
-        );
+        await log.waitForReplicator(remote.identity.publicKey, {
+            roleAge: 0,
+            timeout: WAIT_TIMEOUT_MS,
+        });
         const remoteHash = remote.identity.publicKey.hashcode();
         await waitUntil(() => {
             const capabilities = (
-                source.program.entries.log as unknown as {
+                log as {
                     _peerSyncCapabilities: Map<string, number>;
                 }
             )._peerSyncCapabilities.get(remoteHash);
@@ -177,7 +178,8 @@ describe("shared fs durable machine disposal", () => {
         expect(disposal.entryCount).toBe(
             disposal.entries.chunks +
                 disposal.entries.versions +
-                disposal.entries.naming
+                disposal.entries.naming +
+                disposal.entries.trust
         );
         expect(disposal.receiptBatches).toBeGreaterThanOrEqual(1);
 
@@ -374,6 +376,9 @@ describe("shared fs durable machine disposal", () => {
                 replicate: { factor: 1 },
                 bootstrap: false,
                 gc: false,
+                // The test intentionally lets a second writer act before an
+                // initially empty namespace can yield readiness evidence.
+                allowPartialWrites: true,
             });
             const receiver = await openSharedFs({
                 peerbit: receiverPeer,
@@ -385,6 +390,11 @@ describe("shared fs durable machine disposal", () => {
                 gc: false,
             });
             await waitForRemoteReceiptCapability(source, receiverPeer);
+            await waitForRemoteReceiptCapability(
+                source,
+                receiverPeer,
+                source.program.trustGraph!.trustGraph.log
+            );
 
             await source.authorizeWriter(writerKey);
             await waitUntil(async () => {
@@ -455,6 +465,7 @@ describe("shared fs durable machine disposal", () => {
                 minAcksPerEntry: 1,
                 empty: false,
             });
+            expect(disposal.entries.trust).toBeGreaterThanOrEqual(1);
 
             const address = source.address;
             await stopPeer(sourcePeer);
@@ -506,6 +517,141 @@ describe("shared fs durable machine disposal", () => {
             ).toBe("shared subject");
         }
     );
+
+    it("persists a revocation tombstone before the source is disposed", async () => {
+        const receiverDirectory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-revocation-disposal-")
+        );
+        temporaryDirectories.add(receiverDirectory);
+        const sourcePeer = await trackPeer();
+        const writerPeer = await trackPeer();
+        const receiverPeer = await trackPeer({ directory: receiverDirectory });
+        await sourcePeer.dial(receiverPeer);
+
+        const source = await openSharedFs({
+            peerbit: sourcePeer,
+            machineLabel: "revocation-source",
+            rootKey: sourcePeer.identity.publicKey,
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        const address = source.address;
+        expect(address).toBeDefined();
+        const receiver = await openSharedFs({
+            peerbit: receiverPeer,
+            address,
+            machineLabel: "revocation-receiver",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            remoteChunkFetch: false,
+            gc: false,
+        });
+        const trustLog = source.program.trustGraph!.trustGraph.log;
+        await waitForRemoteReceiptCapability(source, receiverPeer, trustLog);
+
+        const writerKey = writerPeer.identity.publicKey;
+        await source.authorizeWriter(writerKey);
+        await waitUntil(async () => {
+            expect(await receiver.isTrustedWriter(writerKey)).toBe(true);
+        });
+        await source.revokeWriter(writerKey);
+        await waitUntil(async () => {
+            expect(await receiver.isTrustedWriter(writerKey)).toBe(false);
+        });
+
+        const disposal = await source.prepareForDisposal({
+            minAcks: 1,
+            timeout: WAIT_TIMEOUT_MS,
+        });
+        expect(disposal).toMatchObject({
+            safeToDispose: true,
+            empty: false,
+            entries: { chunks: 0, versions: 0, naming: 0 },
+        });
+        expect(disposal.entries.trust).toBeGreaterThanOrEqual(1);
+        expect(disposal.entryCount).toBe(disposal.entries.trust);
+
+        await stopPeer(sourcePeer);
+        await stopPeer(receiverPeer);
+        const reopenedPeer = await trackPeer({ directory: receiverDirectory });
+        const reopened = await openSharedFs({
+            peerbit: reopenedPeer,
+            address,
+            machineLabel: "offline-revocation-reopen",
+            replicate: false,
+            bootstrap: false,
+            remoteChunkFetch: false,
+            gc: false,
+        });
+        expect(await reopened.isTrustedWriter(writerKey)).toBe(false);
+    });
+
+    it("fails a moving disposal fence when trusted-writer state changes", async () => {
+        const receiverDirectory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-moving-trust-disposal-")
+        );
+        temporaryDirectories.add(receiverDirectory);
+        const sourcePeer = await trackPeer();
+        const firstWriter = await trackPeer();
+        const secondWriter = await trackPeer();
+        const receiverPeer = await trackPeer({ directory: receiverDirectory });
+        await sourcePeer.dial(receiverPeer);
+
+        const source = await openSharedFs({
+            peerbit: sourcePeer,
+            machineLabel: "moving-trust-source",
+            rootKey: sourcePeer.identity.publicKey,
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        await openSharedFs({
+            peerbit: receiverPeer,
+            address: source.address,
+            machineLabel: "moving-trust-receiver",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        const trustLog = source.program.trustGraph!.trustGraph.log as any;
+        await waitForRemoteReceiptCapability(source, receiverPeer, trustLog);
+        await source.authorizeWriter(firstWriter.identity.publicKey);
+
+        const deliver = trustLog.deliverPersistedEntries.bind(trustLog);
+        let injected = false;
+        trustLog.deliverPersistedEntries = async (...args: any[]) => {
+            await deliver(...args);
+            if (!injected) {
+                injected = true;
+                await source.authorizeWriter(secondWriter.identity.publicKey);
+            }
+        };
+        try {
+            await expect(
+                source.prepareForDisposal({
+                    minAcks: 1,
+                    timeout: WAIT_TIMEOUT_MS,
+                })
+            ).rejects.toMatchObject({
+                name: "PrepareForDisposalError",
+                safeToDispose: false,
+                cause: {
+                    name: "SharedFsError",
+                    code: "EIO",
+                    message: expect.stringContaining(
+                        "authorization state changed during the disposal barrier"
+                    ),
+                },
+            });
+        } finally {
+            trustLog.deliverPersistedEntries = deliver;
+        }
+        expect(injected).toBe(true);
+        expect(
+            await source.isTrustedWriter(secondWriter.identity.publicKey)
+        ).toBe(true);
+    });
 
     it("fails closed when the only remote leader cannot issue persisted receipts", async () => {
         const sourcePeer = await trackPeer();
@@ -754,7 +900,32 @@ describe("shared fs durable machine disposal", () => {
         });
     });
 
-    it("returns a vacuous success for an empty full replica without remotes", async () => {
+    it("does not treat an authorization-only filesystem as vacuously safe", async () => {
+        const owner = await trackPeer();
+        const writer = await trackPeer();
+        const fs = await openSharedFs({
+            peerbit: owner,
+            machineLabel: "authorization-only-source",
+            rootKey: owner.identity.publicKey,
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        await fs.authorizeWriter(writer.identity.publicKey);
+        expect(
+            await fs.program.trustGraph!.trustGraph.log.log.toArray()
+        ).toHaveLength(1);
+
+        await expect(
+            fs.prepareForDisposal({ minAcks: 1, timeout: 1_000 })
+        ).rejects.toMatchObject({
+            name: "PrepareForDisposalError",
+            safeToDispose: false,
+            retrySafe: true,
+        });
+    });
+
+    it("returns a vacuous success for a truly empty full replica without remotes", async () => {
         const peer = await trackPeer();
         const fs = await openSharedFs({
             peerbit: peer,
@@ -769,7 +940,7 @@ describe("shared fs durable machine disposal", () => {
             guarantee: "persisted-per-entry",
             minAcksPerEntry: 1,
             empty: true,
-            entries: { chunks: 0, versions: 0, naming: 0 },
+            entries: { chunks: 0, versions: 0, naming: 0, trust: 0 },
             entryCount: 0,
             receiptBatches: 0,
         });
@@ -839,41 +1010,48 @@ describe("shared fs durable machine disposal", () => {
         const program = fs.program as unknown as {
             bootstrapDecision: Promise<void>;
         };
+        const originalBootstrapDecision = program.bootstrapDecision;
         program.bootstrapDecision = new Promise(() => {});
+        try {
+            const timeoutFailure = await fs
+                .prepareForDisposal({ minAcks: 1, timeout: 25 })
+                .then(
+                    () => undefined,
+                    (error: unknown) => error
+                );
+            expect(timeoutFailure).toMatchObject({
+                name: "PrepareForDisposalError",
+                safeToDispose: false,
+                cause: {
+                    name: "SharedFsError",
+                    code: "ETIMEDOUT",
+                },
+            });
 
-        const timeoutFailure = await fs
-            .prepareForDisposal({ minAcks: 1, timeout: 25 })
-            .then(
+            const controller = new AbortController();
+            const abortReason = new Error("operator cancelled disposal");
+            const aborted = fs.prepareForDisposal({
+                minAcks: 1,
+                signal: controller.signal,
+            });
+            controller.abort(abortReason);
+            const abortFailure = await aborted.then(
                 () => undefined,
                 (error: unknown) => error
             );
-        expect(timeoutFailure).toMatchObject({
-            name: "PrepareForDisposalError",
-            safeToDispose: false,
-            cause: {
-                name: "SharedFsError",
-                code: "ETIMEDOUT",
-            },
-        });
-
-        const controller = new AbortController();
-        const abortReason = new Error("operator cancelled disposal");
-        const aborted = fs.prepareForDisposal({
-            minAcks: 1,
-            signal: controller.signal,
-        });
-        controller.abort(abortReason);
-        const abortFailure = await aborted.then(
-            () => undefined,
-            (error: unknown) => error
-        );
-        expect(abortFailure).toMatchObject({
-            name: "PrepareForDisposalError",
-            safeToDispose: false,
-        });
-        expect((abortFailure as PrepareForDisposalError).cause).toBe(
-            abortReason
-        );
+            expect(abortFailure).toMatchObject({
+                name: "PrepareForDisposalError",
+                safeToDispose: false,
+            });
+            expect((abortFailure as PrepareForDisposalError).cause).toBe(
+                abortReason
+            );
+        } finally {
+            // close() now correctly joins the real per-open bootstrap task;
+            // do not leave this intentionally-never-settling test double
+            // installed for teardown.
+            program.bootstrapDecision = originalBootstrapDecision;
+        }
     });
 
     it("rejects invalid acknowledgement and deadline options", async () => {

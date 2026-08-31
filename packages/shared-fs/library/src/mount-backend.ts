@@ -27,7 +27,10 @@ export type SharedFsMountBackendTarget = {
         path: string,
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options?: WriteFileOptions
-    ): Promise<unknown>;
+    ): Promise<Pick<
+        SharedFsVersionInfo,
+        "id" | "nodeId" | "contentHash"
+    > | void>;
     mkdir(path: string): Promise<unknown>;
     rm(path: string): Promise<unknown>;
     rename(from: string, to: string): Promise<unknown>;
@@ -49,6 +52,15 @@ export type SharedFsMountBackendTarget = {
      * getattr/open instead of listing the parent directory.
      */
     stat?(path: string): Promise<SharedFsEntryInfo | undefined>;
+    /**
+     * Optional cold-join readiness probe. A writable open is rejected before
+     * any path/content lookup while this reports `writeReady: false`; reads
+     * remain available from the bootstrap overlay.
+     */
+    bootstrapStatus?(): {
+        phase?: string;
+        writeReady?: boolean;
+    };
 };
 
 export type SharedFsOpenFlags =
@@ -98,6 +110,7 @@ export type SharedFsMountBackend = {
 
 export type SharedFsBackendErrorCode =
     | "ENOENT"
+    | "EAGAIN"
     | "EIO"
     | "EEXIST"
     | "EISDIR"
@@ -127,12 +140,25 @@ type OpenHandle = {
     write: boolean;
     dirty: boolean;
     readOnly: boolean;
-    /** Head version ids observed when the handle was opened / last committed. */
+    /**
+     * Node observed by a writable open. `null` means the path was absent.
+     * Read-only handles leave this undefined because they never commit.
+     */
+    openedNodeId?: string | null;
+    /** Exact version whose bytes seeded the writable buffer / last commit. */
     baseVersionIds?: string[];
+    /** All content heads observed in the coherent writable-open snapshot. */
+    openedHeadVersionIds?: string[];
     /** Content hash of the version the buffer was loaded from. */
     baseContentHash?: string;
     /** Serializes concurrent flush/fsync/release commits for one handle. */
     committing?: Promise<void>;
+    /**
+     * Advances whenever the buffered contents are mutated. A commit may await
+     * metadata while writes continue on the same handle; this generation keeps
+     * an older no-op check from clearing the newer write's dirty bit.
+     */
+    mutationGeneration: number;
 };
 
 const S_IFDIR = 0o040000;
@@ -342,6 +368,24 @@ const growTo = (handle: OpenHandle, capacity: number) => {
 const contentOf = (handle: OpenHandle) =>
     handle.buffer.subarray(0, handle.length);
 
+const sameHeads = (left?: string[], right?: string[]) => {
+    if (left === undefined || right === undefined) {
+        return left === right;
+    }
+    if (left.length !== right.length) {
+        return false;
+    }
+    const rightIds = new Set(right);
+    return left.every((id) => rightIds.has(id));
+};
+
+const sameFileSnapshot = (left: SharedFsEntryInfo, right: SharedFsEntryInfo) =>
+    left.kind === "file" &&
+    right.kind === "file" &&
+    left.nodeId === right.nodeId &&
+    left.versionId === right.versionId &&
+    sameHeads(left.headVersionIds, right.headVersionIds);
+
 const resizeHandle = (handle: OpenHandle, size: number) => {
     if (size < 0 || !Number.isFinite(size)) {
         throw new SharedFsBackendError("EINVAL", `Invalid size: ${size}`);
@@ -355,6 +399,7 @@ const resizeHandle = (handle: OpenHandle, size: number) => {
     }
     handle.length = size;
     handle.dirty = true;
+    handle.mutationGeneration++;
 };
 
 export const createSharedFsMountBackend = (
@@ -362,6 +407,16 @@ export const createSharedFsMountBackend = (
 ): SharedFsMountBackend => {
     const handles = new Map<number, OpenHandle>();
     let nextHandle = 1;
+
+    const assertWriteReady = (operation: string) => {
+        const readiness = target.bootstrapStatus?.();
+        if (readiness?.writeReady === false) {
+            throw new SharedFsBackendError(
+                "EAGAIN",
+                `${operation} is unavailable until the initial filesystem view settles${readiness.phase ? ` (bootstrap phase: ${readiness.phase})` : ""}; await write readiness and retry`
+            );
+        }
+    };
 
     const wrap = async <T>(fn: () => Promise<T>): Promise<T> => {
         try {
@@ -440,35 +495,122 @@ export const createSharedFsMountBackend = (
         if (!handle.dirty) {
             return;
         }
+        assertWriteReady(`Commit for ${handle.path}`);
         if (handle.readOnly) {
             throw new SharedFsBackendError(
                 "EROFS",
                 `Path is read-only: ${handle.path}`
             );
         }
-        const bytes = contentOf(handle);
+        // Freeze this commit's bytes. The backing buffer remains writable
+        // while writeFile awaits chunk/document IO; a subarray view here
+        // would let a concurrent write mutate the in-flight version.
+        const bytes = contentOf(handle).slice();
         const contentHash = sha256Base64Sync(bytes);
+        const mutationGeneration = handle.mutationGeneration;
         if (
             handle.baseContentHash !== undefined &&
             handle.baseContentHash === contentHash &&
-            (handle.baseVersionIds?.length ?? 0) <= 1
+            (handle.baseVersionIds?.length ?? 0) <= 1 &&
+            handle.openedHeadVersionIds !== undefined
         ) {
-            // No-op save (editors flush/fsync liberally): do not mint a
-            // new version for identical content.
-            handle.dirty = false;
-            return;
-        }
-        // Clear before awaiting so writes landing during the commit mark the
-        // handle dirty again instead of being lost.
-        handle.dirty = false;
-        try {
-            const result = (await target.writeFile(handle.path, bytes, {
-                baseVersionIds: handle.baseVersionIds,
-            })) as { id?: string; contentHash?: string } | undefined;
-            if (result && typeof result.id === "string") {
-                handle.baseVersionIds = [result.id];
+            // An equal byte buffer is a no-op only while the exact content
+            // head snapshot opened by this handle is still current. A
+            // same-node concurrent version must not make an explicit rewrite
+            // disappear: fall through and publish it as a concurrent head.
+            const current = await findEntry(target, handle.path);
+            const sameNode =
+                typeof handle.openedNodeId === "string" &&
+                current?.kind === "file" &&
+                current.nodeId === handle.openedNodeId;
+            if (!sameNode) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `Path changed after it was opened: ${handle.path}`
+                );
             }
-            handle.baseContentHash = result?.contentHash ?? contentHash;
+            if (
+                current.headVersionIds !== undefined &&
+                sameHeads(handle.openedHeadVersionIds, current.headVersionIds)
+            ) {
+                // Editors flush/fsync liberally: do not mint a new version
+                // when neither the bytes nor the exact causal snapshot moved.
+                // A write may have changed the backing buffer while the stat
+                // above was in flight. In that case this frozen snapshot is
+                // still a no-op, but the newer buffer must remain dirty.
+                if (handle.mutationGeneration === mutationGeneration) {
+                    handle.dirty = false;
+                }
+                return;
+            }
+        }
+        // Clear before awaiting only when this frozen buffer is still current.
+        // The same-head validation above may itself have awaited while a newer
+        // write mutated the handle; that newer generation must remain dirty.
+        if (handle.mutationGeneration === mutationGeneration) {
+            handle.dirty = false;
+        }
+        try {
+            const writeOptions: WriteFileOptions & {
+                expectedNodeId?: string | null;
+            } = {
+                baseVersionIds: handle.baseVersionIds,
+                // Atomic path/node compare-and-set in the library closes the
+                // gap between open and writeFile's path resolution. `null`
+                // means this handle created a path that must still be absent.
+                expectedNodeId: handle.openedNodeId,
+            };
+            const result = await target.writeFile(
+                handle.path,
+                bytes,
+                writeOptions
+            );
+            let committed =
+                result &&
+                typeof result.id === "string" &&
+                typeof result.nodeId === "string" &&
+                typeof result.contentHash === "string"
+                    ? result
+                    : undefined;
+            if (!committed) {
+                // Keep custom/legacy adapters that return void correct: reload
+                // the committed visible version instead of retaining a null
+                // node id or stale causal base on the handle.
+                const observed = await findEntry(target, handle.path);
+                if (
+                    observed?.kind !== "file" ||
+                    typeof observed.versionId !== "string" ||
+                    typeof observed.contentHash !== "string"
+                ) {
+                    throw new SharedFsBackendError(
+                        "EIO",
+                        `Committed version metadata is unavailable: ${handle.path}`
+                    );
+                }
+                committed = {
+                    id: observed.versionId,
+                    nodeId: observed.nodeId,
+                    contentHash: observed.contentHash,
+                };
+            }
+            if (
+                (typeof handle.openedNodeId === "string" &&
+                    handle.openedNodeId !== committed.nodeId) ||
+                committed.contentHash !== contentHash
+            ) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `Path changed while it was being committed: ${handle.path}`
+                );
+            }
+            handle.baseVersionIds = [committed.id];
+            // The common single-head case remains eligible for a later no-op.
+            // If another head raced this commit, the conservative singleton
+            // will not match and the next dirty rewrite will publish instead
+            // of being incorrectly discarded.
+            handle.openedHeadVersionIds = [committed.id];
+            handle.openedNodeId = committed.nodeId;
+            handle.baseContentHash = committed.contentHash;
         } catch (error) {
             handle.dirty = true;
             throw error;
@@ -504,6 +646,9 @@ export const createSharedFsMountBackend = (
         normalized: string,
         parsedFlags: ReturnType<typeof parseFlags>
     ): Promise<number> => {
+        if (parsedFlags.write) {
+            assertWriteReady(`Writable open for ${normalized}`);
+        }
         if (isConflictPath(normalized)) {
             if (parsedFlags.write) {
                 throw new SharedFsBackendError(
@@ -520,6 +665,7 @@ export const createSharedFsMountBackend = (
                 write: false,
                 dirty: false,
                 readOnly: true,
+                mutationGeneration: 0,
             });
             return handle;
         }
@@ -532,7 +678,7 @@ export const createSharedFsMountBackend = (
                 `Path is artifact-ignored: ${normalized}`
             );
         }
-        const entry = await findEntry(target, normalized);
+        let entry = await findEntry(target, normalized);
         if (entry?.kind === "directory") {
             throw new SharedFsBackendError(
                 "EISDIR",
@@ -542,11 +688,102 @@ export const createSharedFsMountBackend = (
         if (!entry && !parsedFlags.create && !parsedFlags.write) {
             throw notFound(normalized);
         }
-        let existing: Uint8Array;
-        if (parsedFlags.truncate || !entry) {
-            existing = new Uint8Array(0);
+        let existing: Uint8Array = new Uint8Array(0);
+        if (!parsedFlags.write) {
+            // Read-only opens deliberately retain readFile's newest-complete-
+            // ancestor fallback while a visible version's chunks replicate.
+            existing = entry
+                ? ((await target.readFile(normalized)) ?? new Uint8Array(0))
+                : new Uint8Array(0);
         } else {
-            existing = (await target.readFile(normalized)) ?? new Uint8Array(0);
+            // A writable handle must never seed its buffer from readFile's
+            // ancestor fallback and then claim the visible head as its base.
+            // Take a coherent {node, visible version, all heads} snapshot,
+            // fetch exactly that visible version, and re-check the snapshot.
+            // Same-node content races retry; replacement/removal fails closed.
+            const maxSnapshotAttempts = 3;
+            let opened = false;
+            for (let attempt = 0; attempt < maxSnapshotAttempts; attempt++) {
+                if (!entry) {
+                    const confirmed = await findEntry(target, normalized);
+                    if (!confirmed) {
+                        existing = new Uint8Array(0);
+                        opened = true;
+                        break;
+                    }
+                    if (confirmed.kind === "directory") {
+                        throw new SharedFsBackendError(
+                            "EISDIR",
+                            `Path is a directory: ${normalized}`
+                        );
+                    }
+                    entry = confirmed;
+                    continue;
+                }
+
+                const candidate = entry;
+                const versionId = candidate.versionId;
+                if (!versionId) {
+                    throw new SharedFsBackendError(
+                        "EIO",
+                        `File has no visible version: ${normalized}`
+                    );
+                }
+
+                let exact: Uint8Array | undefined;
+                let readError: unknown;
+                if (!parsedFlags.truncate) {
+                    try {
+                        exact = await target.readVersion(normalized, versionId);
+                    } catch (error) {
+                        readError = error;
+                    }
+                }
+
+                const confirmed = await findEntry(target, normalized);
+                if (
+                    !confirmed ||
+                    confirmed.kind !== "file" ||
+                    confirmed.nodeId !== candidate.nodeId
+                ) {
+                    throw new SharedFsBackendError(
+                        "EAGAIN",
+                        `Path changed while it was being opened: ${normalized}`
+                    );
+                }
+                if (!sameFileSnapshot(candidate, confirmed)) {
+                    entry = confirmed;
+                    continue;
+                }
+                if (readError !== undefined) {
+                    throw readError;
+                }
+                if (!parsedFlags.truncate && exact === undefined) {
+                    throw new SharedFsBackendError(
+                        "EIO",
+                        `Visible version is unavailable: ${normalized}`
+                    );
+                }
+                existing = parsedFlags.truncate ? new Uint8Array(0) : exact!;
+                // Bind no-op detection to the bytes actually opened, rather
+                // than separately observed metadata.
+                if (!parsedFlags.truncate) {
+                    entry = {
+                        ...confirmed,
+                        contentHash: sha256Base64Sync(existing),
+                    };
+                } else {
+                    entry = confirmed;
+                }
+                opened = true;
+                break;
+            }
+            if (!opened) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `File changed repeatedly while it was being opened: ${normalized}`
+                );
+            }
         }
         const handle = nextHandle++;
         const dirty =
@@ -562,12 +799,26 @@ export const createSharedFsMountBackend = (
             write: parsedFlags.write,
             dirty,
             readOnly: false,
-            baseVersionIds: entry?.headVersionIds,
+            openedNodeId: parsedFlags.write
+                ? (entry?.nodeId ?? null)
+                : undefined,
+            // Editing the deterministic visible version is not an implicit
+            // conflict-resolution operation. Base only on the exact version
+            // whose bytes seeded the buffer, leaving other heads preserved.
+            baseVersionIds:
+                parsedFlags.write && entry?.versionId
+                    ? [entry.versionId]
+                    : entry?.headVersionIds,
+            openedHeadVersionIds:
+                parsedFlags.write && entry?.headVersionIds !== undefined
+                    ? [...entry.headVersionIds]
+                    : undefined,
             // The no-op-save check compares the FINAL buffer hash against
             // the opened head, so it applies to truncate opens too: shell
             // `> file` / editor rewrite-in-place of identical content must
             // not mint a new version.
             baseContentHash: entry?.contentHash,
+            mutationGeneration: 0,
         });
         return handle;
     };
@@ -686,6 +937,7 @@ export const createSharedFsMountBackend = (
         },
 
         async write(handle: number, data: Uint8Array, offset: number) {
+            assertWriteReady(`Write on handle ${handle}`);
             const openHandle = requireHandle(handle);
             if (!openHandle.write) {
                 throw new SharedFsBackendError(
@@ -708,11 +960,15 @@ export const createSharedFsMountBackend = (
             openHandle.buffer.set(data, offset);
             openHandle.length = Math.max(openHandle.length, end);
             openHandle.dirty = true;
+            openHandle.mutationGeneration++;
             return data.byteLength;
         },
 
         async truncate(targetRef: number | string, size: number) {
             return wrap(async () => {
+                assertWriteReady(
+                    `Truncate ${typeof targetRef === "number" ? `on handle ${targetRef}` : normalizeFsPath(targetRef)}`
+                );
                 if (typeof targetRef === "number") {
                     const openHandle = requireHandle(targetRef);
                     if (!openHandle.write) {
@@ -776,6 +1032,7 @@ export const createSharedFsMountBackend = (
         async mkdir(path: string) {
             return wrap(async () => {
                 const normalized = normalizeFsPath(path);
+                assertWriteReady(`mkdir ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
                         "EROFS",
@@ -795,6 +1052,7 @@ export const createSharedFsMountBackend = (
         async rmdir(path: string) {
             return wrap(async () => {
                 const normalized = normalizeFsPath(path);
+                assertWriteReady(`rmdir ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
                         "EROFS",
@@ -819,6 +1077,7 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const fromPath = normalizeFsPath(from);
                 const toPath = normalizeFsPath(to);
+                assertWriteReady(`rename ${fromPath} to ${toPath}`);
                 if (isConflictPath(fromPath) || isConflictPath(toPath)) {
                     throw new SharedFsBackendError(
                         "EROFS",
@@ -840,6 +1099,7 @@ export const createSharedFsMountBackend = (
         async unlink(path: string) {
             return wrap(async () => {
                 const normalized = normalizeFsPath(path);
+                assertWriteReady(`unlink ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
                         "EROFS",

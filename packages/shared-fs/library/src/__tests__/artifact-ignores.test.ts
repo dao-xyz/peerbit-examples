@@ -171,6 +171,9 @@ describe("shared fs artifact ignores", () => {
             peerbit: b,
             address: fsA.address,
             machineLabel: "b",
+            // The fixture joins a deliberately empty address, which has no
+            // namespace arrival from which to establish readiness.
+            allowPartialWrites: true,
         });
         // B (no policy) writes what A ignores; A accepts and replicates
         // it — policy governs writes and views, never acceptance.
@@ -289,6 +292,7 @@ describe("shared fs artifact ignores", () => {
         // Sticky after convergence: advisory rules hold until a REAL
         // rules file replaces them.
         await joiner.awaitBootstrapConverged();
+        await joiner.awaitWriteReady();
         // Trigger refresh via an unrelated same-named file in a subdir —
         // which must NOT collapse the advisory policy (slot-scoped
         // watcher + sticky last-good).

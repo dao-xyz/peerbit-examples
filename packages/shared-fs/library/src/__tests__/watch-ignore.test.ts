@@ -63,6 +63,7 @@ describe("shared fs watch: ignore policy filtering", () => {
             address: fs.address,
             machineLabel: "r",
         });
+        await fsRemote.awaitWriteReady();
         await fsRemote.mkdir("/dist");
         await fsRemote.writeFile("/dist/out.js", "bundle");
 

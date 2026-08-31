@@ -8,6 +8,7 @@ peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
 peerbit-fs install-adapter
+peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
@@ -23,7 +24,8 @@ optimized for code workspaces.
 
 `status` prints the current native mount adapter, whether its prerequisites are
 available on the host, and any missing pieces before optionally opening an
-address.
+address. Address status also reports write readiness, its durable source, and
+whether the local directory is eligible for one-time legacy promotion.
 
 `create` creates an access-controlled filesystem rooted at the local Peerbit
 identity. Use `create --no-auth` only for explicitly unauthenticated test/demo
@@ -101,6 +103,56 @@ mkdir -p "$HOME/PeerbitShared"
 peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 ```
 
+`mount` opens a full replica and waits until the initial namespace has settled
+before exposing a writable filesystem. During that window library mutations and
+writable backend opens return retryable `EAGAIN`; reads remain available.
+`mount --no-replicate` is rejected because an observer cannot establish the
+complete namespace required for safe mounted writes. For now readiness is a
+settled-view heuristic rather than a protocol log-frontier proof, so deployments
+requiring a strict frontier should keep writers stopped until Peerbit exposes
+that upstream barrier.
+
+For access-controlled filesystems, write readiness is not a global revocation
+proof. The trusted-writer graph converges separately and entries do not carry
+an authorization epoch, so quiesce and isolate a revoked machine/key, wait for
+every serving replica to report it untrusted, and keep an already-converged
+durable replica online. A signed trust frontier and entry-bound authorization
+epoch are still needed upstream for protocol-grade revocation.
+
+`create` requires a full replica and publishes a signed empty snapshot, so a
+newly created empty filesystem can be mounted locally and later prove its empty
+starting view to a connected joiner. `create --no-replicate` is rejected.
+`mount` waits up to 120 seconds by default; tune this with
+`--write-ready-timeout-ms`. A timeout is not permission to write: keep a
+complete replicator for this filesystem connected and retry. An unrelated
+connected Peerbit peer does not count. A fresh no-snapshot join can count
+namespace rows materialized during the initial store open only when they are
+paired with the lower log's successful network-commit phase. Local replay has
+no such phase, so a populated store with a missing sidecar cannot certify
+itself; when it is already identical to its donor, one later donor mutation or
+a verified snapshot is still required.
+
+Pre-marker stores have no persisted readiness proof. Connection alone is
+insufficient when local and remote states are already identical, because no new
+metadata event may arrive. The normal path is to open the legacy handle, keep a
+complete replicator connected, and make one normal namespace mutation on that
+replicator. If `peerbit-fs status "$ADDRESS"` reports
+`legacy promotion eligible: yes`, and only after independently verifying that
+this exact directory was a cleanly shut down, complete full replica that was
+never copied mid-bootstrap, run:
+
+```bash
+peerbit-fs trust-legacy-replica "$ADDRESS" \
+  --assume-local-replica-complete
+```
+
+This is an operator assertion, not a network proof. It persists a marker for
+this directory/address before enabling writes and is safe to repeat after
+success; never copy the marker to another machine. The `--allow-partial-writes`
+mount escape hatch is instead a session-only recovery bypass. It can manufacture
+duplicate paths or overwrite from stale state, does not persist proof, and keeps
+snapshot, GC, ACL, and disposal operations blocked.
+
 Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can
 be opened.
@@ -130,16 +182,17 @@ disposal. Keep the source machine and its state available, correct connectivity
 or storage capacity, and retry the barrier. Run it against the existing full
 local replica; `--no-replicate` is rejected. A pending bootstrap decision is
 awaited; a bootstrapping or unverified view is rejected. Any filesystem-content
-arrival during the fence also fails the attempt. A deferred resurrection-guard
-decision for removed live metadata fails closed until it settles, so let
-replication and guard recovery settle before retrying. Avoid tight retry loops
-after a timeout: already-started local index/log reads cannot be cancelled and
-finish in the background.
+or trusted-writer-graph arrival during the fence also fails the attempt. A
+deferred resurrection-guard decision for removed live metadata fails closed
+until it settles, so let replication and guard recovery settle before retrying.
+Avoid tight retry loops after a timeout: already-started local index/log reads
+cannot be cancelled and finish in the background.
 
 The captured recoverable head closure contains every current naming head
 (including tombstones and conflicts), every current file-version head, and
-every distinct chunk those versions reference. It does not preserve already
-superseded history, control manifests, or the trusted-writer graph.
+every distinct chunk those versions reference, plus every surviving
+trusted-writer-log entry (live grants and revocation tombstones). It does not
+preserve already superseded filesystem history or control manifests.
 
 The reported guarantee is persisted **per entry**: every exact entry in that
 closure independently reached the requested number of capable remote leaders
@@ -151,8 +204,10 @@ peers do not count.
 Receipts describe the instant they were issued and assume cooperative remotes;
 they are not permanent-custody guarantees or Byzantine proofs. A successful
 empty result is vacuous: it acknowledges no data and provides no evidence that
-a remote peer was present. The command also does not revoke the local writer
-key or claim that a separate writer revocation was durably delivered.
+a remote peer was present. The command does not revoke the local writer key;
+perform any intended revocation first. If a cold receipt target cannot validate
+a revocation tombstone because it never admitted the original grant, the
+barrier fails closed instead of claiming disposal safety.
 
 ## macOS from this repo
 
