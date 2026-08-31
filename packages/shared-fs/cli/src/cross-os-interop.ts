@@ -109,6 +109,7 @@ const main = async () => {
             console.log(`seed address: ${fs.address}`);
         } else {
             console.log(`joining address: ${address}`);
+            await fs.awaitWriteReady({ timeout: options.timeoutMs });
         }
 
         await fs.writeFile(
