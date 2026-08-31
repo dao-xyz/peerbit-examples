@@ -357,6 +357,8 @@ func errno(err error) int {
 		switch ipc.Code {
 		case "ENOENT":
 			return -fuse.ENOENT
+		case "EAGAIN":
+			return -fuse.EAGAIN
 		case "EEXIST":
 			return -fuse.EEXIST
 		case "EISDIR":

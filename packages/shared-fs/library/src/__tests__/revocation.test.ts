@@ -60,6 +60,9 @@ describe("shared fs writer revocation", () => {
             peerbit: machine,
             address: ownerFs.address,
             machineLabel: "ephemeral",
+            // This ACL fixture opens an empty namespace; readiness has no
+            // namespace evidence until the machine itself writes.
+            allowPartialWrites: true,
         });
 
         await ownerFs.authorizeWriter(machine.identity.publicKey);

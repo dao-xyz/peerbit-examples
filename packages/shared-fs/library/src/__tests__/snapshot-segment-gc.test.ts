@@ -358,7 +358,9 @@ describe("snapshot segment reclamation", () => {
     });
 
     it("another author's live manifest protects identical cids", async () => {
-        await seedFiles(6);
+        // Leave one file to publish after B has opened so its readiness
+        // proof is a real post-listener remote metadata arrival.
+        await seedFiles(5);
         const address = fs.program.address!.toString();
         const peerB = await Peerbit.create();
         try {
@@ -369,10 +371,16 @@ describe("snapshot segment reclamation", () => {
                 machineLabel: "segment-gc-b",
                 clock: () => fakeNow,
                 bootstrap: false,
-            });
+                writeReadinessSettleMs: 100,
+            } as any);
+            await fs.writeFile("/f-5.txt", "content 5");
             await waitUntil(async () => {
                 expect((await fsB.list("/")).length).toBe(6);
             });
+            // The injected clock is intentionally manual in this suite;
+            // advance it past the quiet window after B has seen the write.
+            fakeNow += 1_000;
+            await fsB.awaitWriteReady({ timeout: DEFAULT_WAIT_MS });
 
             // Same document set on both sides: B's snapshot dedups to the
             // very cids A published.

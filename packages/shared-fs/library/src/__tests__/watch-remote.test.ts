@@ -64,6 +64,7 @@ describe("shared fs watch: multi-party", () => {
         expect(modified.origin).toBe("remote");
 
         // A local write on the watching peer reports local origin.
+        await fsB.awaitWriteReady();
         await fsB.writeFile("/shared/mine.txt", "local");
         const local = await waitForEvent(
             events,
@@ -160,6 +161,7 @@ describe("shared fs watch: multi-party", () => {
             (c: any) => c.type === "delete-vs-edit"
         );
         if (recoverable) {
+            await fsB.awaitWriteReady();
             await fsB.resolveNamingConflict(recoverable.nodeId, {
                 type: "restore",
             });

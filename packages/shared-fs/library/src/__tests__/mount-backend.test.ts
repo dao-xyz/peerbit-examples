@@ -1,5 +1,5 @@
 import { Peerbit } from "peerbit";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     CONFLICTS_DIR,
     createSharedFsIpcClient,
@@ -8,12 +8,33 @@ import {
     encodeConflictPathName,
     openSharedFs,
     parseFlags,
+    sharedFsBackendErrno,
     type SharedFsHandle,
+    type SharedFsMountBackendTarget,
+    type WriteFileOptions,
 } from "../index.js";
 
 const encode = (value: string) => new TextEncoder().encode(value);
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
+
+const mountTarget = (
+    fs: SharedFsHandle,
+    overrides: Partial<SharedFsMountBackendTarget> = {}
+): SharedFsMountBackendTarget => ({
+    readFile: (path) => fs.readFile(path),
+    readVersion: (path, versionId) => fs.readVersion(path, versionId),
+    writeFile: (path, source, options) => fs.writeFile(path, source, options),
+    mkdir: (path) => fs.mkdir(path),
+    rm: (path) => fs.rm(path),
+    rename: (from, to) => fs.rename(from, to),
+    list: (path) => fs.list(path),
+    versions: (path) => fs.versions(path),
+    conflicts: (path, options) => fs.conflicts(path, options),
+    stat: (path) => fs.stat(path),
+    bootstrapStatus: () => fs.bootstrapStatus(),
+    ...overrides,
+});
 
 describe("shared fs mount backend", () => {
     let peer: Peerbit;
@@ -29,6 +50,12 @@ describe("shared fs mount backend", () => {
 
     afterEach(async () => {
         await peer.stop();
+    });
+
+    it("maps retryable mount errors to the host-specific errno", () => {
+        expect(sharedFsBackendErrno("EAGAIN", "linux")).toBe(-11);
+        expect(sharedFsBackendErrno("EAGAIN", "win32")).toBe(-11);
+        expect(sharedFsBackendErrno("EAGAIN", "darwin")).toBe(-35);
     });
 
     it("commits buffered writes on release", async () => {
@@ -51,6 +78,311 @@ describe("shared fs mount backend", () => {
 
         await backend.release(handle);
         expect(decode(await fs.readFile("/docs/file.txt"))).toBe("hello");
+    });
+
+    it("keeps reads available but rejects writable opens before write readiness", async () => {
+        await fs.writeFile("/settling.txt", "visible read");
+        await fs.mkdir("/existing-dir");
+        const readVersion = vi.fn((path: string, versionId: string) =>
+            fs.readVersion(path, versionId)
+        );
+        const target = mountTarget(fs, {
+            bootstrapStatus: () => ({
+                phase: "overlay-active",
+                writeReady: false,
+            }),
+            readVersion,
+        });
+        const backend = createSharedFsMountBackend(target);
+
+        const readOnly = await backend.open("/settling.txt", { read: true });
+        expect(decode(await backend.read(readOnly, 1024, 0))).toBe(
+            "visible read"
+        );
+        await backend.release(readOnly);
+
+        await expect(
+            backend.open("/settling.txt", { read: true, write: true })
+        ).rejects.toMatchObject({
+            code: "EAGAIN",
+            message: expect.stringContaining("await write readiness"),
+        });
+        // The readiness fence fires before an exact-version read can seed a
+        // writable buffer from a partial namespace.
+        expect(readVersion).not.toHaveBeenCalled();
+
+        // Every namespace mutation fails at the readiness boundary before a
+        // partial tree can leak misleading path errors such as ENOENT/EEXIST.
+        const mutations = [
+            () => backend.mkdir("/existing-dir"),
+            () => backend.rmdir("/missing-dir"),
+            () => backend.unlink("/missing-file"),
+            () => backend.rename("/missing-from", "/missing-to"),
+            () => backend.truncate("/missing-file", 0),
+        ];
+        for (const mutate of mutations) {
+            await expect(mutate()).rejects.toMatchObject({ code: "EAGAIN" });
+        }
+
+        const server = await createSharedFsIpcServer(
+            backend,
+            "tcp://127.0.0.1:0"
+        );
+        try {
+            const client = createSharedFsIpcClient(server.endpoint);
+            await expect(
+                client.open("/settling.txt", { read: true, write: true })
+            ).rejects.toMatchObject({ code: "EAGAIN" });
+        } finally {
+            await server.close();
+        }
+    });
+
+    it("refuses a writable ancestor fallback when the visible version is unavailable", async () => {
+        const ancestor = await fs.writeFile("/stale.txt", "ancestor");
+        const visible = await fs.writeFile("/stale.txt", "newest");
+        const readFile = vi.fn(async () => encode("ancestor"));
+        const readVersion = vi.fn(async (path: string, versionId: string) => {
+            if (versionId === visible.id) {
+                throw new Error("missing newest chunk");
+            }
+            return fs.readVersion(path, versionId);
+        });
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { readFile, readVersion, writeFile })
+        );
+
+        // Read-only access retains the library's availability fallback.
+        const readOnly = await backend.open("/stale.txt", { read: true });
+        expect(decode(await backend.read(readOnly, 1024, 0))).toBe("ancestor");
+        await backend.release(readOnly);
+
+        // A writable buffer may not contain ancestor bytes while claiming
+        // the visible version as its causal base.
+        await expect(
+            backend.open("/stale.txt", { read: true, write: true })
+        ).rejects.toMatchObject({
+            code: "EIO",
+            message: "missing newest chunk",
+        });
+        expect(readVersion).toHaveBeenCalledWith("/stale.txt", visible.id);
+        expect(readVersion).not.toHaveBeenCalledWith("/stale.txt", ancestor.id);
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(decode(await fs.readFile("/stale.txt"))).toBe("newest");
+    });
+
+    it("fails a writable open when the path changes nodes during its exact read", async () => {
+        await fs.writeFile("/race.txt", "original");
+        await fs.writeFile("/replacement.txt", "replacement");
+        const original = await fs.stat("/race.txt");
+        const replacement = await fs.stat("/replacement.txt");
+        expect(original?.kind).toBe("file");
+        expect(replacement?.kind).toBe("file");
+
+        let statCalls = 0;
+        const stat = vi.fn(async () => {
+            statCalls++;
+            return statCalls === 1 ? original : replacement;
+        });
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                stat,
+                readVersion: async () => encode("original"),
+                writeFile,
+            })
+        );
+
+        await expect(
+            backend.open("/race.txt", { read: true, write: true })
+        ).rejects.toMatchObject({
+            code: "EAGAIN",
+            message: "Path changed while it was being opened: /race.txt",
+        });
+        expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("rejects a commit if an existing path is replaced after writable open", async () => {
+        await fs.writeFile("/race.txt", "original");
+        await fs.writeFile("/replacement.txt", "replacement");
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                // This runs after the mount captured its open snapshot and
+                // before SharedFileSystem.writeFile resolves the path itself.
+                await fs.rm(path);
+                await fs.rename("/replacement.txt", path);
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/race.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("edited"), 0);
+
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/race.txt"))).toBe("replacement");
+    });
+
+    it("rejects a create commit if another writer wins the absent-path race", async () => {
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                // The handle opened an absent path and therefore carries an
+                // expectedNodeId of null. Materialize a competing node before
+                // the library-level compare-and-set, which must reject.
+                await fs.writeFile(path, "racer");
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/new.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("ours"), 0);
+
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/new.txt"))).toBe("racer");
+    });
+
+    it("rejects a create commit if the absent path becomes a directory", async () => {
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                await fs.mkdir(path);
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/new-directory", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("ours"), 0);
+
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect((await fs.stat("/new-directory"))?.kind).toBe("directory");
+    });
+
+    it("freezes in-flight commit bytes while later writes remain dirty", async () => {
+        let writeStarted!: () => void;
+        let allowWrite!: () => void;
+        const started = new Promise<void>((resolve) => {
+            writeStarted = resolve;
+        });
+        const allowed = new Promise<void>((resolve) => {
+            allowWrite = resolve;
+        });
+        let writes = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                writes++;
+                if (writes === 1) {
+                    writeStarted();
+                    await allowed;
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/during-flush.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("old"), 0);
+
+        const flushing = backend.flush(handle);
+        await started;
+        await backend.write(handle, encode("new"), 0);
+        allowWrite();
+        await flushing;
+
+        expect(decode(await fs.readFile("/during-flush.txt"))).toBe("old");
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/during-flush.txt"))).toBe("new");
+        expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("reloads committed metadata when a compatible target returns void", async () => {
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                await fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/void-target.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("first"), 0);
+        await backend.flush(handle);
+
+        await backend.truncate(handle, 0);
+        await backend.write(handle, encode("second"), 0);
+        await backend.release(handle);
+
+        expect(writeFile).toHaveBeenCalledTimes(2);
+        expect(decode(await fs.readFile("/void-target.txt"))).toBe("second");
+        expect(
+            (await fs.versions("/void-target.txt")).filter(
+                (version) => version.head
+            )
+        ).toHaveLength(1);
     });
 
     it("exposes conflicts through the metadata namespace", async () => {
@@ -86,6 +418,41 @@ describe("shared fs mount backend", () => {
         );
         expect(decode(await backend.read(handle, 1024, 0))).toBe("right");
         await backend.release(handle);
+    });
+
+    it("edits only the exact visible conflict version without resolving other heads", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        await fs.writeFile("/contested.txt", "base");
+        const base = (await fs.versions("/contested.txt"))
+            .filter((version) => version.head)
+            .map((version) => version.id);
+        const left = await fs.writeFile("/contested.txt", "left", {
+            baseVersionIds: base,
+        });
+        const right = await fs.writeFile("/contested.txt", "right", {
+            baseVersionIds: base,
+        });
+        const visibleId = (await fs.stat("/contested.txt"))!.versionId!;
+        const preservedId = [left.id, right.id].find((id) => id !== visibleId)!;
+
+        const handle = await backend.open("/contested.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.truncate(handle, 0);
+        await backend.write(handle, encode("mounted edit"), 0);
+        await backend.release(handle);
+
+        const heads = (await fs.versions("/contested.txt")).filter(
+            (version) => version.head
+        );
+        expect(heads).toHaveLength(2);
+        expect(heads.map((version) => version.id)).toContain(preservedId);
+        const edited = heads.find((version) => version.id !== preservedId)!;
+        expect(edited.parentVersionIds).toEqual([visibleId]);
+        expect(decode(await fs.readVersion("/contested.txt", edited.id))).toBe(
+            "mounted edit"
+        );
     });
 
     it("round-trips backend calls through local IPC", async () => {
@@ -212,6 +579,149 @@ describe("shared fs mount backend", () => {
         expect((await fs.versions("/stable.txt")).length).toBe(
             versionsBefore + 1
         );
+    });
+
+    it("does not discard a dirty rewrite when the same node gains a new head", async () => {
+        const original = await fs.writeFile("/same-node-race.txt", "original");
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/same-node-race.txt", {
+            read: true,
+            write: true,
+        });
+
+        const concurrent = await fs.writeFile(
+            "/same-node-race.txt",
+            "concurrent"
+        );
+        expect(concurrent.nodeId).toBe(original.nodeId);
+        // Restore the exact opened bytes on a dirty handle. Content equality
+        // alone is not a no-op because the opened head snapshot has advanced.
+        await backend.write(handle, encode("original"), 0);
+        await backend.release(handle);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        const heads = (await fs.versions("/same-node-race.txt")).filter(
+            (version) => version.head
+        );
+        expect(heads).toHaveLength(2);
+        expect(heads.map((version) => version.id)).toContain(concurrent.id);
+        const mounted = heads.find((version) => version.id !== concurrent.id)!;
+        expect(mounted.parentVersionIds).toEqual([original.id]);
+        expect(
+            decode(await fs.readVersion("/same-node-race.txt", mounted.id))
+        ).toBe("original");
+    });
+
+    it("keeps a concurrent buffer mutation dirty while checking a no-op save", async () => {
+        await fs.writeFile("/no-op-buffer-race.txt", "base");
+        let statStarted!: () => void;
+        let allowStat!: () => void;
+        const started = new Promise<void>((resolve) => {
+            statStarted = resolve;
+        });
+        const allowed = new Promise<void>((resolve) => {
+            allowStat = resolve;
+        });
+        let deferNextStat = false;
+        const stat = vi.fn(async (path: string) => {
+            if (deferNextStat) {
+                deferNextStat = false;
+                statStarted();
+                await allowed;
+            }
+            return fs.stat(path);
+        });
+        const backend = createSharedFsMountBackend(mountTarget(fs, { stat }));
+        const handle = await backend.open("/no-op-buffer-race.txt", {
+            read: true,
+            write: true,
+        });
+
+        // The first buffer snapshot equals the opened version and takes the
+        // asynchronous no-op path. Mutate the handle while that stat is in
+        // flight; the later bytes must remain dirty for release to commit.
+        await backend.write(handle, encode("base"), 0);
+        deferNextStat = true;
+        const flushing = backend.flush(handle);
+        await started;
+        await backend.write(handle, encode("next"), 0);
+        allowStat();
+        await flushing;
+        await backend.release(handle);
+
+        expect(decode(await fs.readFile("/no-op-buffer-race.txt"))).toBe(
+            "next"
+        );
+        expect(await fs.versions("/no-op-buffer-race.txt")).toHaveLength(2);
+    });
+
+    it("keeps a concurrent buffer mutation dirty when heads advance during the no-op check", async () => {
+        const original = await fs.writeFile(
+            "/advanced-head-buffer-race.txt",
+            "base"
+        );
+        let statStarted!: () => void;
+        let allowStat!: () => void;
+        const started = new Promise<void>((resolve) => {
+            statStarted = resolve;
+        });
+        const allowed = new Promise<void>((resolve) => {
+            allowStat = resolve;
+        });
+        let deferNextStat = false;
+        const stat = vi.fn(async (path: string) => {
+            if (deferNextStat) {
+                deferNextStat = false;
+                statStarted();
+                await allowed;
+            }
+            return fs.stat(path);
+        });
+        const backend = createSharedFsMountBackend(mountTarget(fs, { stat }));
+        const handle = await backend.open("/advanced-head-buffer-race.txt", {
+            read: true,
+            write: true,
+        });
+
+        await backend.write(handle, encode("base"), 0);
+        deferNextStat = true;
+        const flushing = backend.flush(handle);
+        await started;
+        const concurrent = await fs.writeFile(
+            "/advanced-head-buffer-race.txt",
+            "peer",
+            { baseVersionIds: [original.id] }
+        );
+        await backend.write(handle, encode("next"), 0);
+        allowStat();
+        await flushing;
+        await backend.release(handle);
+
+        const heads = (
+            await fs.versions("/advanced-head-buffer-race.txt")
+        ).filter((version) => version.head);
+        expect(heads.map((version) => version.id)).toContain(concurrent.id);
+        const mounted = await Promise.all(
+            heads.map(async (version) => ({
+                version,
+                contents: decode(
+                    await fs.readVersion(
+                        "/advanced-head-buffer-race.txt",
+                        version.id
+                    )
+                ),
+            }))
+        );
+        expect(mounted.some(({ contents }) => contents === "next")).toBe(true);
     });
 
     it("parses numeric open flags with per-platform constants", () => {

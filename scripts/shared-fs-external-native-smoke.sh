@@ -46,10 +46,9 @@ fi
   go build -tags "$tags" -o "$adapter" .
 )
 
-address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state" --no-replicate)"
+address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state")"
 node packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint" \
   --directory "$state" \
-  --no-replicate \
   --native-adapter "$adapter" \
   >"$log" 2>&1 &
 mount_pid="$!"

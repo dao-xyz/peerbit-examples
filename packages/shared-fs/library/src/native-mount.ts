@@ -1,4 +1,5 @@
 import type {
+    SharedFsBackendErrorCode,
     SharedFsMountBackend,
     SharedFsMountBackendTarget,
 } from "./mount-backend.js";
@@ -33,10 +34,14 @@ export class NativeMountUnavailableError extends Error {
     }
 }
 
-const errno = {
+const errnoForPlatform = (
+    platform: NodeJS.Platform
+): Record<SharedFsBackendErrorCode, number> & { EPERM: number } => ({
     EPERM: -1,
     ENOENT: -2,
     EIO: -5,
+    // Darwin follows BSD here; Linux and WinFsp use 11.
+    EAGAIN: platform === "darwin" ? -35 : -11,
     EBADF: -9,
     EACCES: -13,
     EEXIST: -17,
@@ -45,8 +50,16 @@ const errno = {
     EINVAL: -22,
     EROFS: -30,
     // ENOTEMPTY differs per platform (Linux 39, Darwin/BSD 66).
-    ENOTEMPTY: process.platform === "darwin" ? -66 : -39,
-};
+    ENOTEMPTY: platform === "darwin" ? -66 : -39,
+});
+
+/** Platform-correct errno mapping shared by adapters and portable tests. */
+export const sharedFsBackendErrno = (
+    code: SharedFsBackendErrorCode,
+    platform: NodeJS.Platform = process.platform
+) => errnoForPlatform(platform)[code];
+
+const errno = errnoForPlatform(process.platform);
 
 const importOptional = async (specifier: string) => {
     return import(specifier);
@@ -181,7 +194,7 @@ const isBackend = (
 
 const toErrno = (error: unknown) => {
     if (error instanceof SharedFsBackendError) {
-        return errno[error.code] ?? errno.EIO;
+        return sharedFsBackendErrno(error.code);
     }
     return errno.EIO;
 };

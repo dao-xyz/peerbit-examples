@@ -47,6 +47,89 @@ reads. Every syncing peer keeps a full replica by default
 not store content — reads then fall back to bounded remote chunk fetches
 (`remoteChunkFetch`), and locally authored entries are always kept.
 
+## Write readiness on joins
+
+Opening an existing address is readable immediately but starts write-gated
+until a full replica has received unambiguous remotely committed namespace data
+(or a verified snapshot), bootstrap has retired, a replicator for this specific
+log is still reachable, synchronization is idle, and arrivals have stayed
+quiet. Every mutating API fails early with retryable `EAGAIN` while gated. Wait
+before starting a writer or service:
+
+```ts
+const fs = await openSharedFs({
+    peerbit,
+    address,
+    machineLabel: "workstation-b",
+});
+await fs.awaitWriteReady({ timeout: 120_000, signal });
+await fs.writeFile("/docs/hello.txt", "hello from workstation-b");
+```
+
+Newly created filesystems and previously proven warm full-replica reopens are
+ready immediately. `replicate: false` handles cannot establish a complete
+namespace and remain write-gated. `allowPartialWrites: true` is an explicit
+unsafe, session-only recovery escape hatch: it can create duplicate paths or
+base a write on stale state, and it never persists a readiness proof. The
+override is limited to namespace recovery mutations; snapshot publication,
+garbage collection, ACL changes, and disposal certification still require
+genuine readiness. Closing and reopening without the override returns to the
+write gate.
+
+The current readiness fence is deliberately a settled-view heuristic, not a
+cryptographic or protocol-level remote log frontier: Peerbit does not expose
+such a frontier yet. Late arrivals restart the quiet window, but a sufficiently
+long synchronization pause can still arrive after readiness. If the actual
+donor disconnects, an unrelated connected Peerbit peer cannot satisfy the
+fence. A fast no-snapshot join may receive its namespace while `entries.open()`
+is running; that data counts only when the document change is paired with the
+lower log's successful network-commit phase. Local replay has no such phase, so
+a populated store whose sidecar was lost cannot certify itself merely by
+reopening. If that store and its donor are already identical, it remains gated
+until a later normal donor mutation or verified snapshot supplies new evidence.
+A truly empty remote filesystem likewise has no namespace evidence, so a fresh
+join remains closed unless it receives a verified empty snapshot or the caller
+consciously uses the unsafe override. Protocol-grade empty-log and
+no-late-arrival proofs require an upstream shared-log frontier/barrier API.
+
+Access-controlled filesystems have an additional upstream limitation: write
+readiness fences the namespace log, not an authoritative trusted-writer
+frontier. Trust changes converge eventually, and filesystem entries carry no
+authorization epoch, so a cold replica after revocation cannot distinguish the
+writer's legitimate pre-revocation history from post-revocation writes. Do not
+use `awaitWriteReady()` as proof that a revocation is globally enforced.
+Quiesce and isolate the revoked machine/key, wait until every serving replica
+reports `isTrustedWriter(key) === false`, and retain at least one already
+converged durable replica before disposal. A signed trust frontier plus
+entry-bound authorization epochs is required upstream to close this gap.
+
+`peerbit-fs create` publishes a signed zero-document snapshot so the normal
+empty create/mount/share flow has that evidence. Stores created before the
+readiness marker was introduced are intentionally not trusted silently. Merely
+connecting an already-identical donor may produce no new arrival event. The
+non-assertion path is to keep a complete replicator connected and make one
+normal remote namespace mutation after the legacy handle opens. Otherwise,
+after independently verifying the exact local directory, make a one-time
+operator assertion:
+
+```ts
+const status = fs.bootstrapStatus();
+if (status.legacyPromotionEligible) {
+    await fs.trustLegacyLocalReplica({
+        assumeComplete: true,
+        timeout: 30_000,
+    });
+}
+```
+
+Only use that assertion when this same directory was previously a complete full
+replica, was cleanly shut down, was never copied mid-bootstrap, and its data has
+been inspected. It strictly persists a per-directory/per-address marker before
+enabling writes; do not copy that marker to another machine. `bootstrapStatus()`
+reports `writeReadinessSource` and `legacyPromotionEligible` for audit and
+diagnosis. `allowPartialWrites` is for exporting or repairing data during one
+session, not for migration.
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
@@ -102,6 +185,7 @@ peerbit-fs create
 peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
+peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs install-adapter
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
@@ -113,7 +197,8 @@ peerbit-fs prepare-disposal <address>
 ```
 
 Mounted writes are buffered by the native adapter and committed as one signed
-Peerbit file version on `flush`, `fsync`, or `release`/close.
+Peerbit file version on `flush`, `fsync`, or `release`/close. The CLI waits for
+write readiness before exposing the mount and rejects `mount --no-replicate`.
 
 `peerbit-fs create` is access-controlled by default. Use `peerbit-fs create
 --no-auth` only for explicitly unauthenticated test/demo filesystems. Another
@@ -142,7 +227,11 @@ JSON-lines IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
 `truncate`, `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`, and
 `unlink`. Numeric open flags are parsed with the host platform's `O_*`
 constants, truncate shrinks and zero-fill grows both open handles and paths,
-and flushing unchanged content does not mint a new version.
+and flushing unchanged content does not mint a new version. Writable opens load
+the exact visible version rather than a temporarily available ancestor, retain
+that version as their sole causal base, and compare-and-set the path's node id
+at commit. A remove/recreate race returns `EAGAIN` without editing the
+replacement; other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
@@ -255,9 +344,10 @@ once their local arrival age exceeds the retention window.
 Before permanently deleting a machine's Peerbit state, fence the filesystem's
 captured recoverable head closure with persisted delivery receipts. The closure
 contains every current naming head (including tombstones and conflicts), every
-current file-version head, and every distinct chunk those versions reference.
-It does not preserve already superseded history, control manifests, or the
-trusted-writer graph:
+current file-version head, every distinct chunk those versions reference, and
+every current trusted-writer log entry (live grants and revocation tombstones).
+It does not preserve already superseded filesystem history or control
+manifests:
 
 ```ts
 const result = await fs.prepareForDisposal({
@@ -291,18 +381,18 @@ or capacity, and retry the barrier. Retrying is safe because the barrier appends
 no logical filesystem mutation. The command must run against the existing full
 local replica; `--no-replicate` is rejected. It waits for any pending bootstrap
 decision and rejects a bootstrapping or unverified view. Any filesystem-content
-arrival during the fence also fails the attempt. A deferred resurrection-guard
-decision for removed live metadata also fails closed until it settles. Let
-replication and guard recovery settle, then retry rather than disposing a moving
-or temporarily incomplete source. Avoid tight retry loops after a timeout or
-abort: already-started local index/log reads cannot be cancelled and finish in
-the background.
+or trusted-writer-graph arrival during the fence also fails the attempt. A
+deferred resurrection-guard decision for removed live metadata also fails
+closed until it settles. Let replication and guard recovery settle, then retry
+rather than disposing a moving or temporarily incomplete source. Avoid tight
+retry loops after a timeout or abort: already-started local index/log reads
+cannot be cancelled and finish in the background.
 
 The guarantee is deliberately narrow:
 
 - The requested quorum applies independently to every exact chunk, version,
-  and naming entry. It does not guarantee that one common remote custodian (or
-  the same set of custodians) holds every entry.
+  naming, and trusted-writer entry. It does not guarantee that one common
+  remote custodian (or the same set of custodians) holds every entry.
 - `minAcks` does not increase the filesystem's replication degree. Only
   capable remote leaders backed by supported durable storage count; older,
   incapable, in-memory, or local peers cannot satisfy the requested
@@ -312,9 +402,11 @@ The guarantee is deliberately narrow:
   promise that the remote will remain online or retain the data forever.
 - An empty captured state returns a vacuous success (`empty: true`); it
   acknowledges no data and provides no evidence that a remote peer was present.
-- The barrier does not revoke this machine's writer key and makes no claim that
-  a writer revocation was durably delivered. Authorization and revocation are
-  separate operations.
+- The barrier does not revoke this machine's writer key. It durably fences the
+  authorization and revocation state that already exists when its stable
+  closure is captured; callers must perform any intended revocation first. A
+  cold receipt target that never admitted the original grant may be unable to
+  validate its revocation tombstone, in which case the barrier fails closed.
 
 This is stronger than a changeset barrier: `awaitChangeset()` proves local
 admission and readability, while `prepareForDisposal()` requests persisted
