@@ -137,6 +137,13 @@ export class IndexableSharedFsEntry {
             this.changesetId = value.changesetId;
         } else if (value instanceof FileChunk) {
             this.kind = "file-chunk";
+        } else if (value instanceof BootstrapManifest) {
+            // Explicit, NOT the value.kind fallback: `kind` on the class is
+            // a plain initializer, which borsh bypasses on deserialization
+            // — a replicated manifest would index as kind undefined (the
+            // row insert throws), leaving other authors' manifests
+            // invisible to every kind query on non-author replicas.
+            this.kind = "bootstrap-manifest";
         } else if (value instanceof ChangesetManifest) {
             this.kind = "changeset-manifest";
             // NOTE: authorKey is ADVISORY attribution on naming/version rows

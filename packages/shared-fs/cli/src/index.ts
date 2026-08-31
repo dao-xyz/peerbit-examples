@@ -990,6 +990,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             `deleted chunks:          ${report.deletedChunks} (${report.reclaimedChunkBytes} bytes)`
                         );
                         console.log(
+                            `reclaimed segments:      ${report.segmentBlocksDeleted} (${report.reclaimedSegmentBytes} bytes)`
+                        );
+                        console.log(
                             `healed chunks:           ${report.healedChunks}`
                         );
                         console.log(

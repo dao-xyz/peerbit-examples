@@ -316,6 +316,9 @@ export type GcReport = {
     cutRecoveries: number;
     /** Changeset manifests retired by local arrival age. */
     manifestsRetired: number;
+    /** Own superseded snapshot segment blocks reclaimed this run. */
+    segmentBlocksDeleted: number;
+    reclaimedSegmentBytes: bigint;
     warnings: string[];
 };
 
@@ -405,6 +408,15 @@ export type SnapshotPublishOptions = {
     minChangesBetween?: number;
     /** Disable automatic publication (snapshotWrite() stays available). */
     disabled?: boolean;
+    /**
+     * Reclaim this author's own superseded snapshot segment blocks after a
+     * grace period (default 3 h; floor bootstrap maxSnapshotAgeMs, since a
+     * joiner may still be fetching a manifest up to that old — the cap must
+     * be fleet-consistent or a joiner with a larger one can select a
+     * manifest whose segments were already reaped and fall back to log
+     * replication). `false` disables reclamation entirely.
+     */
+    segmentReclaim?: false | { graceMs?: number };
 };
 
 export type BootstrapPhase =
@@ -1008,6 +1020,166 @@ const SNAPSHOT_DEFAULTS = {
     publishIntervalMs: 30 * 60 * 1000,
     minChangesBetween: 50,
 };
+
+/**
+ * Segment-block reclamation. The block store is shared with log entry
+ * blocks and other authors' fetched segments, so "unreferenced by my
+ * manifests" is NOT a delete predicate: only cids this instance positively
+ * recorded as its own published segments are ever rm'd, every rm is
+ * re-verified against live manifest docs at deletion time, and there is no
+ * blocks-iterator sweep, ever. Content-addressing dedups unchanged shards
+ * to identical cids across generations — the delete set is always a set
+ * difference, never "the previous generation".
+ */
+const SEGMENT_RECLAIM_DEFAULT_GRACE_MS = 3 * 60 * 60 * 1000;
+/** Retired generations kept before the oldest coalesce into one. */
+const SEGMENT_LEDGER_MAX_RETIRED = 32;
+/** Consecutive reap cycles with rm failures before a loud warning. */
+const SEGMENT_REAP_FAILURE_WARN_CYCLES = 5;
+
+type SegmentLedgerCid = { cid: string; bytes: number };
+type SegmentLedgerGen = {
+    cids: SegmentLedgerCid[];
+    retiredAtMs: number;
+    snapshotSeq: string;
+};
+/**
+ * Side-state file #3 (shared-fs-snapshots/<address>.json), CAS-versioned.
+ * Ledger invariant: a positively-recorded cid leaves the ledger only via
+ * successful rm or by membership in `current`. Every merge/cap rule below
+ * preserves it.
+ */
+type SegmentLedger = {
+    v: 1;
+    generation: number;
+    current: {
+        cids: SegmentLedgerCid[];
+        publishedAtMs: number;
+        snapshotSeq: string;
+    } | null;
+    retired: SegmentLedgerGen[];
+};
+
+const normalizeSegmentLedger = (raw: any): SegmentLedger => ({
+    v: 1,
+    generation: Number(raw?.generation ?? 0),
+    current: raw?.current ?? null,
+    retired: Array.isArray(raw?.retired) ? raw.retired : [],
+});
+
+/**
+ * Optimistic-concurrency merge for the CLI-vs-daemon lost-update case:
+ * `retired` unions by snapshotSeq (newest stamp wins — delays deletion,
+ * never accelerates it), `current` is the newer publish, and any cids of
+ * the losing current covered nowhere else become a synthetic retired gen —
+ * nothing positively recorded is ever silently dropped.
+ */
+const mergeSegmentLedgers = (
+    a: SegmentLedger,
+    b: SegmentLedger,
+    nowMs: number
+): SegmentLedger => {
+    const retired = new Map<
+        string,
+        { cids: Map<string, number>; retiredAtMs: number }
+    >();
+    const addGen = (gen: SegmentLedgerGen) => {
+        const bucket = retired.get(gen.snapshotSeq) ?? {
+            cids: new Map<string, number>(),
+            retiredAtMs: gen.retiredAtMs,
+        };
+        bucket.retiredAtMs = Math.max(bucket.retiredAtMs, gen.retiredAtMs);
+        for (const entry of gen.cids) {
+            bucket.cids.set(entry.cid, entry.bytes);
+        }
+        retired.set(gen.snapshotSeq, bucket);
+    };
+    for (const gen of [...a.retired, ...b.retired]) {
+        addGen(gen);
+    }
+    const newer = (
+        x: SegmentLedger["current"],
+        y: SegmentLedger["current"]
+    ) => {
+        if (!x) return y;
+        if (!y) return x;
+        if (x.publishedAtMs !== y.publishedAtMs) {
+            return x.publishedAtMs > y.publishedAtMs ? x : y;
+        }
+        try {
+            return BigInt(x.snapshotSeq) >= BigInt(y.snapshotSeq) ? x : y;
+        } catch {
+            return x;
+        }
+    };
+    const current = newer(a.current, b.current);
+    const loser = current === a.current ? b.current : a.current;
+    if (loser && loser !== current) {
+        const covered = new Set((current?.cids ?? []).map((c) => c.cid));
+        for (const bucket of retired.values()) {
+            for (const cid of bucket.cids.keys()) {
+                covered.add(cid);
+            }
+        }
+        const stray = loser.cids.filter((c) => !covered.has(c.cid));
+        if (stray.length > 0) {
+            addGen({
+                cids: stray,
+                retiredAtMs: nowMs,
+                snapshotSeq: loser.snapshotSeq,
+            });
+        }
+    }
+    return {
+        v: 1,
+        generation: 0, // stamped by the CAS writer
+        current,
+        retired: [...retired.entries()]
+            .map(([snapshotSeq, bucket]) => ({
+                snapshotSeq,
+                retiredAtMs: bucket.retiredAtMs,
+                cids: [...bucket.cids.entries()].map(([cid, bytes]) => ({
+                    cid,
+                    bytes,
+                })),
+            }))
+            .sort((x, y) => x.retiredAtMs - y.retiredAtMs),
+    };
+};
+
+/**
+ * Coalesce the oldest overflow gens into one whose retiredAtMs is the
+ * NEWEST among them — conservative: delays deletion, never accelerates it.
+ */
+const capSegmentRetired = (ledger: SegmentLedger) => {
+    if (ledger.retired.length <= SEGMENT_LEDGER_MAX_RETIRED) {
+        return;
+    }
+    const sorted = [...ledger.retired].sort(
+        (x, y) => x.retiredAtMs - y.retiredAtMs
+    );
+    const overflow = sorted.slice(
+        0,
+        sorted.length - (SEGMENT_LEDGER_MAX_RETIRED - 1)
+    );
+    const kept = sorted.slice(sorted.length - (SEGMENT_LEDGER_MAX_RETIRED - 1));
+    const cids = new Map<string, number>();
+    let retiredAtMs = 0;
+    for (const gen of overflow) {
+        retiredAtMs = Math.max(retiredAtMs, gen.retiredAtMs);
+        for (const entry of gen.cids) {
+            cids.set(entry.cid, entry.bytes);
+        }
+    }
+    ledger.retired = [
+        {
+            snapshotSeq: overflow[overflow.length - 1].snapshotSeq,
+            retiredAtMs,
+            cids: [...cids.entries()].map(([cid, bytes]) => ({ cid, bytes })),
+        },
+        ...kept,
+    ];
+};
 /** Overlay supersession sweep cadence while bootstrap is active. */
 const SUPERSESSION_SWEEP_MS = 5_000;
 /** Double-check delay before verified retirement (one guard-coalescing window). */
@@ -1180,6 +1352,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     // longer matches (the program was reopened) dies silently.
     private gcSchedulerGeneration = 0;
     private gcRng: () => number = Math.random;
+    private segmentLedgerChain: Promise<unknown> = Promise.resolve();
+    private memorySegmentLedger: SegmentLedger | undefined;
+    private segmentLedgerReconciled = false;
+    private segmentReapFailureCycles = 0;
+    private segmentGraceWarned = false;
     private bootstrapManifestMeta: BootstrapStatus["manifest"];
     private lastArrivalMs = 0;
     private docsSinceSnapshot = 0;
@@ -1325,6 +1502,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.gcSchedulerGeneration = (this.gcSchedulerGeneration || 0) + 1;
         // Injectable rng for the schedule's jitter draws (test-only).
         this.gcRng = (args as any)?.gcRng ?? Math.random;
+        this.segmentLedgerChain = Promise.resolve();
+        this.memorySegmentLedger = undefined;
+        this.segmentLedgerReconciled = false;
+        this.segmentReapFailureCycles = 0;
+        this.segmentGraceWarned = false;
         this.advisoryIgnorePublish = undefined;
         this.bootstrapAdvisoryIgnorePatterns = undefined;
         const bootstrapArg = args?.bootstrap;
@@ -5315,6 +5497,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 snapshotSeq = 1n;
             }
         }
+        let prevDocCids: SegmentLedgerCid[] = [];
+        let prevSeq = "0";
+        if (previous instanceof BootstrapManifest) {
+            try {
+                const prevPayload = deserialize(
+                    previous.payloadBytes,
+                    SnapshotManifestPayload
+                );
+                prevDocCids = prevPayload.segments.map((segment) => ({
+                    cid: segment.cid,
+                    bytes: Number(segment.byteLength),
+                }));
+                prevSeq = prevPayload.snapshotSeq.toString();
+            } catch {
+                // Existing fallback: an unparseable previous manifest
+                // contributes nothing (its cids were ledgered when it
+                // published, or are pre-upgrade and exempt).
+            }
+        }
+        // Record intent BEFORE the payload-cap check below can throw: a
+        // cap-throwing publish loop must ledger each attempt's delta, not
+        // strand freshly-put blocks (reap-time liveness keeps the live old
+        // generation protected regardless of what `current` becomes).
+        await this.recordSegmentIntent(
+            segments.map((segment) => ({
+                cid: segment.cid,
+                bytes: Number(segment.byteLength),
+            })),
+            prevDocCids,
+            prevSeq,
+            snapshotSeq.toString()
+        );
         const payload = new SnapshotManifestPayload({
             storeId: this.id,
             snapshotSeq,
@@ -5353,6 +5567,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
+        void this.reapSnapshotSegments().catch(() => {});
         return {
             snapshotSeq,
             createdAtWallMs: payload.createdAtWallMs,
@@ -6068,6 +6283,382 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await writeFile(path, JSON.stringify(ledger));
     }
 
+    // ------------------------------------------------------------------
+    // Snapshot segment reclamation (see the safety rule at the constants)
+    // ------------------------------------------------------------------
+
+    private segmentReclaimSettings(): { enabled: boolean; graceMs: number } {
+        const raw = (this.snapshotConfig as any).segmentReclaim as
+            | false
+            | { graceMs?: number }
+            | undefined;
+        if (raw === false) {
+            return { enabled: false, graceMs: 0 };
+        }
+        const requested = raw?.graceMs ?? SEGMENT_RECLAIM_DEFAULT_GRACE_MS;
+        const floor = this.bootstrapConfig.maxSnapshotAgeMs;
+        if (requested < floor && !this.segmentGraceWarned) {
+            this.segmentGraceWarned = true;
+            console.warn(
+                `shared-fs: segmentReclaim.graceMs raised to ${floor} (bootstrap maxSnapshotAgeMs): joiners may still be fetching a manifest that old`
+            );
+        }
+        return { enabled: true, graceMs: Math.max(requested, floor) };
+    }
+
+    private async segmentLedgerPath(): Promise<string | undefined> {
+        const directory = (this.node as any)?.directory as string | undefined;
+        if (!directory) {
+            return undefined;
+        }
+        const { mkdir } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const dir = join(directory, "shared-fs-snapshots");
+        await mkdir(dir, { recursive: true });
+        return join(dir, `${this.address?.toString() ?? "unaddressed"}.json`);
+    }
+
+    private async loadSegmentLedger(): Promise<SegmentLedger> {
+        const empty: SegmentLedger = {
+            v: 1,
+            generation: 0,
+            current: null,
+            retired: [],
+        };
+        const path = await this.segmentLedgerPath();
+        let ledger: SegmentLedger;
+        if (!path) {
+            // Memory fallback resets per process — consistent with an
+            // in-memory block store, whose blocks reset with it.
+            this.memorySegmentLedger ??= empty;
+            ledger = this.memorySegmentLedger;
+        } else {
+            try {
+                const { readFile } = await import("node:fs/promises");
+                ledger = normalizeSegmentLedger(
+                    JSON.parse(await readFile(path, "utf8"))
+                );
+            } catch {
+                ledger = empty;
+            }
+        }
+        if (
+            !this.segmentLedgerReconciled &&
+            !ledger.current &&
+            ledger.retired.length === 0
+        ) {
+            // Startup reconciliation: an empty ledger beside a live own
+            // manifest means the ledger was lost — reseed the live
+            // generation. Pre-upgrade historic generations were never
+            // recorded and stay permanently exempt (safety rule): a
+            // one-time bloat that stops growing once reclamation ships.
+            const doc = await this.getDocument<SharedFsEntry>(
+                `bootstrap:${this.authorKey()}`
+            );
+            if (doc instanceof BootstrapManifest) {
+                try {
+                    const payload = deserialize(
+                        doc.payloadBytes,
+                        SnapshotManifestPayload
+                    );
+                    ledger.current = {
+                        cids: payload.segments.map((segment) => ({
+                            cid: segment.cid,
+                            bytes: Number(segment.byteLength),
+                        })),
+                        publishedAtMs: Number(payload.createdAtWallMs),
+                        snapshotSeq: payload.snapshotSeq.toString(),
+                    };
+                } catch {
+                    // Corrupt own manifest: nothing safe to seed.
+                }
+            }
+        }
+        this.segmentLedgerReconciled = true;
+        return ledger;
+    }
+
+    /**
+     * Generation-CAS write. One conflict merges against the disk state and
+     * retries; a second consecutive conflict skips (the next trigger
+     * retries the whole operation).
+     */
+    private async saveSegmentLedgerCas(
+        loadedGeneration: number,
+        next: SegmentLedger
+    ): Promise<boolean> {
+        const path = await this.segmentLedgerPath();
+        if (!path) {
+            next.generation = loadedGeneration + 1;
+            this.memorySegmentLedger = next;
+            return true;
+        }
+        const { readFile, writeFile } = await import("node:fs/promises");
+        let expected = loadedGeneration;
+        let payload = next;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            let disk: any;
+            try {
+                disk = JSON.parse(await readFile(path, "utf8"));
+            } catch {
+                disk = undefined;
+            }
+            const diskGeneration = Number(disk?.generation ?? 0);
+            if (disk == null || diskGeneration === expected) {
+                payload.generation = Math.max(diskGeneration, expected) + 1;
+                await writeFile(path, JSON.stringify(payload));
+                return true;
+            }
+            payload = mergeSegmentLedgers(
+                normalizeSegmentLedger(disk),
+                payload,
+                this.clock()
+            );
+            expected = diskGeneration;
+        }
+        return false;
+    }
+
+    /**
+     * Publish-time intent record. Runs BEFORE any throw-capable publish
+     * step so a cap-throwing publish loop records each attempt's delta
+     * instead of stranding freshly-put blocks outside the ledger.
+     */
+    private recordSegmentIntent(
+        newCids: SegmentLedgerCid[],
+        prevDocCids: SegmentLedgerCid[],
+        prevSeq: string,
+        newSeq: string
+    ): Promise<void> {
+        const run = this.segmentLedgerChain.then(async () => {
+            try {
+                const ledger = await this.loadSegmentLedger();
+                const loadedGeneration = ledger.generation;
+                const now = this.clock();
+                const newSet = new Set(newCids.map((c) => c.cid));
+                const prev = new Map<string, number>();
+                for (const entry of [
+                    ...prevDocCids,
+                    ...(ledger.current?.cids ?? []),
+                ]) {
+                    prev.set(entry.cid, entry.bytes);
+                }
+                const retiredNow = [...prev.entries()]
+                    .filter(([cid]) => !newSet.has(cid))
+                    .map(([cid, bytes]) => ({ cid, bytes }));
+                const nextLedger: SegmentLedger = {
+                    v: 1,
+                    generation: loadedGeneration,
+                    current: {
+                        cids: newCids,
+                        publishedAtMs: now,
+                        snapshotSeq: newSeq,
+                    },
+                    retired: [
+                        ...ledger.retired,
+                        ...(retiredNow.length > 0
+                            ? [
+                                  {
+                                      cids: retiredNow,
+                                      retiredAtMs: now,
+                                      snapshotSeq: prevSeq,
+                                  },
+                              ]
+                            : []),
+                    ],
+                };
+                capSegmentRetired(nextLedger);
+                await this.saveSegmentLedgerCas(loadedGeneration, nextLedger);
+            } catch (error: any) {
+                console.warn(
+                    "shared-fs: segment-ledger intent record failed:",
+                    error?.message ?? error
+                );
+            }
+        });
+        this.segmentLedgerChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private reapSnapshotSegments(
+        nowMsArg?: number
+    ): Promise<{ deleted: number; bytes: bigint }> {
+        const run = this.segmentLedgerChain.then(() =>
+            this.reapSnapshotSegmentsInner(nowMsArg)
+        );
+        this.segmentLedgerChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private async reapSnapshotSegmentsInner(
+        nowMsArg?: number
+    ): Promise<{ deleted: number; bytes: bigint }> {
+        const zero = { deleted: 0, bytes: 0n };
+        const settings = this.segmentReclaimSettings();
+        if (!settings.enabled || !this.isFullReplica()) {
+            return zero;
+        }
+        const now = nowMsArg ?? this.clock();
+        const ledger = await this.loadSegmentLedger();
+        const loadedGeneration = ledger.generation;
+        const expired = ledger.retired.filter(
+            (gen) => gen.retiredAtMs <= now - settings.graceMs
+        );
+        if (expired.length === 0) {
+            return zero;
+        }
+        // Liveness re-verification at deletion time. Own manifest absent
+        // (a crash between CUT and publish): SKIP entirely — fail-safe, the
+        // next successful publish restores it. Any parse failure: ABORT —
+        // never delete on a corrupt view.
+        const own = await this.getDocument<SharedFsEntry>(
+            `bootstrap:${this.authorKey()}`
+        );
+        if (!(own instanceof BootstrapManifest)) {
+            return zero;
+        }
+        const protectedCids = new Set<string>();
+        try {
+            for (const segment of deserialize(
+                own.payloadBytes,
+                SnapshotManifestPayload
+            ).segments) {
+                protectedCids.add(segment.cid);
+            }
+        } catch {
+            return zero;
+        }
+        for (const entry of ledger.current?.cids ?? []) {
+            protectedCids.add(entry.cid);
+        }
+        for (const gen of ledger.retired) {
+            if (gen.retiredAtMs > now - settings.graceMs) {
+                for (const entry of gen.cids) {
+                    protectedCids.add(entry.cid);
+                }
+            }
+        }
+        // Every OTHER locally-known live manifest too: identical shard
+        // content across authors dedups to identical cids, and reaping one
+        // out from under a joiner bootstrapping from an offline author
+        // would cost an avoidable availability dip. One indexed scan.
+        const manifestDocs = await this.entries.index
+            .iterate(
+                {
+                    query: [
+                        new StringMatch({
+                            key: "kind",
+                            value: "bootstrap-manifest",
+                        }),
+                    ],
+                },
+                { local: true, remote: false, resolve: true }
+            )
+            .all();
+        for (const doc of manifestDocs as any[]) {
+            if (!(doc instanceof BootstrapManifest) || doc.id === own.id) {
+                continue;
+            }
+            try {
+                for (const segment of deserialize(
+                    doc.payloadBytes,
+                    SnapshotManifestPayload
+                ).segments) {
+                    protectedCids.add(segment.cid);
+                }
+            } catch {
+                return zero; // corrupt view: abort, never delete
+            }
+        }
+        const currentSet = new Set(
+            (ledger.current?.cids ?? []).map((entry) => entry.cid)
+        );
+        const rmCandidates = new Map<string, number>();
+        for (const gen of expired) {
+            for (const entry of gen.cids) {
+                if (!protectedCids.has(entry.cid)) {
+                    rmCandidates.set(entry.cid, entry.bytes);
+                }
+            }
+        }
+        const blocks: any = this.node.services.blocks;
+        const deletedSet = new Set<string>();
+        const failedSet = new Set<string>();
+        let bytes = 0n;
+        const cids = [...rmCandidates.keys()];
+        let batchDone = false;
+        if (cids.length > 0 && typeof blocks.rmMany === "function") {
+            try {
+                await blocks.rmMany(cids);
+                batchDone = true;
+                for (const cid of cids) {
+                    deletedSet.add(cid);
+                    bytes += BigInt(rmCandidates.get(cid) ?? 0);
+                }
+            } catch {
+                batchDone = false;
+            }
+        }
+        if (!batchDone) {
+            for (const cid of cids) {
+                try {
+                    await blocks.rm(cid);
+                    deletedSet.add(cid);
+                    bytes += BigInt(rmCandidates.get(cid) ?? 0);
+                } catch {
+                    // An absent-cid rm must not abort the batch; failures
+                    // keep their cids ledgered for retry.
+                    failedSet.add(cid);
+                }
+            }
+        }
+        // Drop processed cids and gens. A cid may leave a gen only when it
+        // was rm'd or lives in `current` (the invariant); cids protected by
+        // OTHER manifests stay for retry once those retire.
+        const expiredSet = new Set(expired);
+        const nextRetired: SegmentLedgerGen[] = [];
+        for (const gen of ledger.retired) {
+            if (!expiredSet.has(gen)) {
+                nextRetired.push(gen);
+                continue;
+            }
+            const remaining = gen.cids.filter(
+                (entry) =>
+                    !deletedSet.has(entry.cid) && !currentSet.has(entry.cid)
+            );
+            if (remaining.length > 0) {
+                nextRetired.push({ ...gen, cids: remaining });
+            }
+        }
+        if (failedSet.size > 0) {
+            this.segmentReapFailureCycles++;
+            if (
+                this.segmentReapFailureCycles >=
+                SEGMENT_REAP_FAILURE_WARN_CYCLES
+            ) {
+                console.warn(
+                    `shared-fs: segment reclamation has failed to rm ${failedSet.size} block(s) for ${this.segmentReapFailureCycles} consecutive cycles (read-only block store?)`
+                );
+            }
+        } else {
+            this.segmentReapFailureCycles = 0;
+        }
+        const nextLedger: SegmentLedger = {
+            v: 1,
+            generation: loadedGeneration,
+            current: ledger.current,
+            retired: nextRetired,
+        };
+        await this.saveSegmentLedgerCas(loadedGeneration, nextLedger);
+        return { deleted: deletedSet.size, bytes };
+    }
+
     /**
      * Context.modified in milliseconds regardless of the underlying clock
      * scale (wall-clock nanoseconds vs milliseconds), detected by magnitude.
@@ -6202,6 +6793,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             conflictedNodes: 0,
             cutRecoveries: 0,
             manifestsRetired: 0,
+            segmentBlocksDeleted: 0,
+            reclaimedSegmentBytes: 0n,
             warnings: [],
         };
         // W1's dedup-skip safety depends on the invariant skipHorizon <=
@@ -6908,6 +7501,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ledger.lastRunMs = runStartedMs;
         if (!config.dryRun) {
             await this.saveGcLedger(ledger);
+            // Reclaim own superseded snapshot segments on the same cadence
+            // (manual CLI runs and scheduled runs alike). Best-effort: a
+            // reap failure must never fail the GC run.
+            try {
+                const reaped = await this.reapSnapshotSegments(config.nowMs);
+                report.segmentBlocksDeleted = reaped.deleted;
+                report.reclaimedSegmentBytes = reaped.bytes;
+            } catch {
+                // reported via its own failure-cycle warning
+            }
         }
         if (report.chunkCandidatesRecorded > 0) {
             report.warnings.push(
