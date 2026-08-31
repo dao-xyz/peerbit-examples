@@ -1576,6 +1576,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await this.trustGraph.add(publicKey);
     }
 
+    /**
+     * Remove THIS identity's trust edge to a writer (directional
+     * ownership: only the truster who granted an edge can revoke it, so a
+     * machine's de-provisioning is executed by whoever authorized it —
+     * typically the root identity). Idempotent; a writer trusted through
+     * ANOTHER live path (root -> A -> B) stays trusted until every path is
+     * revoked — check isTrustedWriter afterwards. Revocation applies to
+     * NEW writes as each replica's trust graph copy converges: documents a
+     * lagging replica admitted in the race window are not retroactively
+     * re-validated (upstream revocation-epoch work tracks that gap).
+     */
+    async revokeWriter(publicKey: PublicSignKey) {
+        if (!this.trustGraph) {
+            throw new Error("Shared filesystem is not access controlled");
+        }
+        await this.trustGraph.revoke(publicKey);
+    }
+
     async isTrustedWriter(publicKey: PublicSignKey) {
         return this.trustGraph ? this.trustGraph.isTrusted(publicKey) : true;
     }
@@ -4384,8 +4402,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         // Restrict block fetches to CURRENTLY CONNECTED peers: the
         // replicator-derived provider set can contain dead ex-members
-        // (machines join and leave constantly in this workload), and a
-        // request routed at one stalls for its full delivery timeout.
+        // (machines join and leave constantly in this workload). Upstream
+        // rotates past stale provider candidates since peerbit 5.3.34,
+        // which removes the total-unavailability failure — but measured
+        // 2026-08-31, 1 in 4 unrestricted joins after a peer crash still
+        // hit an ~80s delivery-timeout tail, while this restriction holds
+        // joins at a consistent ~2s. Tail beats median here; keep it.
         const connectedPeers = [
             ...(((this.node.services.pubsub as any)?.peers?.keys?.() ??
                 []) as Iterable<string>),
@@ -6524,6 +6546,11 @@ export class SharedFsHandle {
 
     authorizeWriter(publicKey: PublicSignKey) {
         return this.program.authorizeWriter(publicKey);
+    }
+
+    /** Revoke this identity's trust edge to a writer (see program docs). */
+    revokeWriter(publicKey: PublicSignKey) {
+        return this.program.revokeWriter(publicKey);
     }
 
     isTrustedWriter(publicKey: PublicSignKey) {
