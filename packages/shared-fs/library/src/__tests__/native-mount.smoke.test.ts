@@ -328,6 +328,10 @@ const expectNativeMountAvailable = (error: unknown) => {
                     ).toBe("rename me");
                 });
 
+                // Seeing the remote rename proves readability, not that this
+                // cold join has completed its settled-view write barrier.
+                await fsB.awaitWriteReady({ timeout: 20_000 });
+
                 await rm(path.join(mountB, "docs", "final.txt"));
 
                 await waitUntil(async () => {
