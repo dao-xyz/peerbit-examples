@@ -145,6 +145,8 @@ const GC_DEFAULTS = {
     namingGraceMs: 14 * DAY_MS,
     settleMs: 5_000,
     minOrphanSpanMs: 60 * 60 * 1000,
+    namingHeadStabilityMs: 60 * 60 * 1000,
+    namingCompactionBatchLimit: 500,
 } as const;
 
 /**
@@ -182,6 +184,8 @@ const GC_SCHEDULED_RUN_OPTION_ALLOWLIST = [
     "settleMs",
     "minOrphanSpanMs",
     "scope",
+    "namingHeadStabilityMs",
+    "namingCompactionBatchLimit",
 ] as const;
 
 /**
@@ -237,6 +241,16 @@ export type GcOptions = {
     settleMs?: number;
     /** Minimum span between recording and executing chunk/purge candidates. Default 1 h. */
     minOrphanSpanMs?: number;
+    /**
+     * Naming compaction proceeds once every head has been visible on this
+     * replica for this long (local arrival, not author stamp). Default 1 h.
+     */
+    namingHeadStabilityMs?: number;
+    /**
+     * Upper bound on naming events retired per node per run; backlogs
+     * drain over successive runs. Default 500.
+     */
+    namingCompactionBatchLimit?: number;
     /**
      * "ledger" (default): chunks and purges are recorded on one run and
      * executed on a later run after minOrphanSpanMs — the barrier that makes
@@ -5961,10 +5975,45 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (!state) {
                     continue;
                 }
-                for (const value of values) {
-                    if (state.heads.some((head) => head.id === value.id)) {
-                        await this.putPreferLinked(value);
+                let deepestPresent = -1n;
+                for (const doc of remaining) {
+                    if (doc.causalDepth > deepestPresent) {
+                        deepestPresent = doc.causalDepth;
                     }
+                }
+                for (const value of values) {
+                    if (!state.heads.some((head) => head.id === value.id)) {
+                        continue;
+                    }
+                    // Split-flush damper: a compaction burst reaches peers
+                    // across several guard flushes, and causally independent
+                    // delete entries may reorder between them — a reordered
+                    // mid-chain delete makes an already-retired ancestor a
+                    // union head here, and re-putting it would plant a
+                    // permanent spurious head (node stuck conflicted). Skip
+                    // the re-put only when BOTH hold: the event is old by
+                    // its author stamp (every GC-retired event is, by
+                    // construction) AND some PRESENT event is strictly
+                    // deeper — so suppression can never change any winner,
+                    // and a genuinely lagging peer (nothing deeper present)
+                    // still resurrects its deepest known event. createdAt
+                    // rather than local arrival because the removed row's
+                    // index entry is already gone when this runs; backdating
+                    // it only suppresses the backdater's own events.
+                    // Deliberately keyed to the GC_DEFAULTS constant, not
+                    // per-run config: fleets lowering namingGraceMs get
+                    // guard churn instead of suppression (the safe
+                    // direction). Accepted narrowing: a stale conflict-
+                    // branch head that is already strictly dominated is no
+                    // longer resurrected after a rogue direct delete.
+                    if (
+                        this.clock() - Number(value.createdAt) >
+                            GC_DEFAULTS.namingGraceMs &&
+                        deepestPresent > value.causalDepth
+                    ) {
+                        continue;
+                    }
+                    await this.putPreferLinked(value);
                 }
             } catch {
                 // Never throw into the event loop.
@@ -6128,6 +6177,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             settleMs: options.settleMs ?? GC_DEFAULTS.settleMs,
             minOrphanSpanMs:
                 options.minOrphanSpanMs ?? GC_DEFAULTS.minOrphanSpanMs,
+            namingHeadStabilityMs:
+                options.namingHeadStabilityMs ??
+                GC_DEFAULTS.namingHeadStabilityMs,
+            namingCompactionBatchLimit:
+                options.namingCompactionBatchLimit ??
+                GC_DEFAULTS.namingCompactionBatchLimit,
             chunkSweep: options.chunkSweep ?? ("ledger" as const),
             scope: options.scope,
             dryRun: options.dryRun ?? false,
@@ -6269,7 +6324,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 docs: T[],
                 parentsOf: (doc: T) => string[],
                 heads: T[],
-                keep: Set<string>
+                keep: Set<string>,
+                cap?: { limit: number; depthOf: (doc: T) => bigint }
             ): Map<string, T> => {
                 const byId = new Map(docs.map((doc) => [doc.id, doc]));
                 const children = new Map<string, string[]>();
@@ -6320,6 +6376,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         if (doc) {
                             retire.set(id, doc);
                         }
+                    }
+                }
+                if (cap && retire.size > cap.limit) {
+                    // Bound upgrade-day bursts (years of backlog on a busy
+                    // node): keep the shallowest N — ancestors retire before
+                    // descendants — and let the fixpoint below un-retire any
+                    // child-set whose deletion would promote a survivor.
+                    // Successive runs drain the backlog layer by layer.
+                    const shallowest = [...retire.values()].sort((a, b) => {
+                        const da = cap.depthOf(a);
+                        const db = cap.depthOf(b);
+                        if (da !== db) {
+                            return da < db ? -1 : 1;
+                        }
+                        return a.id < b.id ? -1 : 1;
+                    });
+                    retire.clear();
+                    for (const doc of shallowest.slice(0, cap.limit)) {
+                        retire.set(doc.id, doc);
                     }
                 }
                 // Grace-closure fixpoint: never leave a surviving doc whose
@@ -6447,9 +6522,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (!inScope(nodeId) || conflictedNodeIds.has(nodeId)) {
                     continue;
                 }
+                // Arrival stability, not author age, gates the node: the
+                // old every-head-fresh rule let ONE fresh head immortalize
+                // the node's whole DAG — active nodes never compacted. A
+                // head counts as stable once it has been visible HERE for
+                // namingHeadStabilityMs; arrival is backdate-proof, and a
+                // late-arriving old head is treated as fresh (the
+                // protective direction). A version-style younger-witness
+                // rule was rejected: on an active node every survivor is
+                // younger than grace, so it re-starves permanently.
+                // Retired events still stay >= namingGraceMs by BOTH author
+                // stamp and local arrival via the keep set below.
                 if (
-                    !state.heads.every((head) =>
-                        ageOk(head, config.namingGraceMs)
+                    !state.heads.every(
+                        (head) =>
+                            (modifiedMs.get(head.id) ?? runStartedMs) <=
+                            runStartedMs - config.namingHeadStabilityMs
                     )
                 ) {
                     continue;
@@ -6467,7 +6555,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     state.events as NamingEvent[],
                     (event) => event.parentNamingIds,
                     state.heads as NamingEvent[],
-                    keep
+                    keep,
+                    {
+                        limit: config.namingCompactionBatchLimit,
+                        depthOf: (event) => event.causalDepth,
+                    }
                 );
                 for (const [id, event] of retire) {
                     namingRetire.set(id, event);
