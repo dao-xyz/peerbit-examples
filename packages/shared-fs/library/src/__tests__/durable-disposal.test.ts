@@ -368,7 +368,7 @@ describe("shared fs durable machine disposal", () => {
 
         let failure: unknown;
         try {
-            await source.prepareForDisposal({ minAcks: 1, timeout: 2_000 });
+            await source.prepareForDisposal({ minAcks: 1, timeout: 5_000 });
         } catch (error) {
             failure = error;
         }

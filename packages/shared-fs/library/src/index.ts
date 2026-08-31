@@ -5698,19 +5698,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             deadline === undefined
                 ? undefined
                 : Math.max(1, deadline - Date.now());
-        await this.awaitDisposalStep(
-            this.entries.log.deliverPersistedEntries(entries, {
-                target: "replicators",
-                delivery: {
-                    reliability: "persisted",
-                    minAcks: options.minAcks,
-                    timeout: remainingTimeout,
-                    signal: options.signal,
-                },
-            }),
-            options,
-            deadline
-        );
+        // Peerbit owns the receipt-phase deadline/abort so it can preserve
+        // PersistedDeliveryError evidence instead of racing our generic local
+        // step timer at the same deadline.
+        await this.entries.log.deliverPersistedEntries(entries, {
+            target: "replicators",
+            delivery: {
+                reliability: "persisted",
+                minAcks: options.minAcks,
+                timeout: remainingTimeout,
+                signal: options.signal,
+            },
+        });
         progress.confirmedEntries += refs.length;
         progress.receiptBatches++;
     }
