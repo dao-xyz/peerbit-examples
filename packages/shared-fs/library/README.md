@@ -248,3 +248,67 @@ same view; `watchChangesets()` streams `manifest` and once-per-transition
 `complete` events (queued during a bootstrap overlay so a triggered read
 always sees the whole turn). Manifests are retired by `collectGarbage`
 once their local arrival age exceeds the retention window.
+
+## Unattended lifecycle
+
+Full replicas garbage-collect themselves: `collectGarbage` runs on a
+jittered schedule (default every 6 h, first run spread over minutes to
+~95 min so fleets never herd), and the executing half of the two-run
+chunk/purge barrier is chained automatically once candidates mature.
+Disable with `gc: false` (or `gc: { schedule: false }`); tune with
+`gc: { intervalMs, initialDelayMs, jitterRatio, run }`. Observe via
+`gcStatus()` and the `gc:run` / `gc:error` events on `program.events`.
+
+```ts
+const fs = await openSharedFs({
+    peerbit,
+    address,
+    gc: { intervalMs: 6 * 3600_000, run: { keepVersions: 5 } },
+});
+fs.program.events.addEventListener("gc:run", (e) =>
+    console.log(e.detail.trigger, e.detail.report.deletedChunks)
+);
+```
+
+Notes on scheduled runs:
+
+- `run` options are allowlisted: `dryRun`, `nowMs`, and
+  `chunkSweep: "immediate"` are stripped (each would be unsafe on
+  autopilot); manual `collectGarbage` calls keep them all. A `run.scope`
+  means everything **outside** the scope never GCs on this schedule.
+- Every run inherits the HEAL phase's full chunk probe (each chunk of
+  each surviving version), so the default cadence probes the store four
+  times a day — budget disk latency accordingly on very large stores.
+- An unverified replica with no peer evidence (no connections, no recent
+  arrivals) defers scheduled runs rather than collecting against a
+  partitioned view; manual runs stay available.
+- A follow-up timer does not survive restart: persisted candidates
+  simply mature and execute on the first post-restart run.
+
+Naming history compacts even under active heads: a head only needs to
+have been **visible locally** for `namingHeadStabilityMs` (default 1 h;
+arrival-based, so author-stamp backdating cannot force compaction), and
+at most `namingCompactionBatchLimit` events retire per node per run
+(default 500, shallowest-first) so upgrade-day backlogs drain in bounded
+bursts.
+
+Superseded snapshot **segment blocks** are reclaimed too, after a grace
+period (`snapshot: { segmentReclaim: { graceMs } }`, default 3 h,
+disable with `segmentReclaim: false`). Only positively recorded own
+segments are ever deleted, re-verified at deletion time against every
+locally known live manifest — identical content across authors dedups
+to identical cids, and another author's live manifest protects them.
+Fleet caveats:
+
+- The grace is floored at the bootstrap staleness cap
+  (`maxSnapshotAgeMs`, 2 h): keep that cap **fleet-consistent**, or a
+  joiner configured with a larger cap can select a manifest whose
+  segments were already reaped (it then falls back to log replication —
+  degraded, not lost).
+- The segment ledger lives beside the store
+  (`shared-fs-snapshots/<address>.json`); peers without a directory keep
+  it in memory, matching their in-memory block store.
+- Generations published before this feature were never recorded and are
+  permanently exempt (the positive-record safety rule): a one-time bloat
+  that stops growing. Wipe the block store and re-replicate to reclaim
+  it.

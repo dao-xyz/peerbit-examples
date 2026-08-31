@@ -670,6 +670,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     if (ipc) {
                         console.log(`IPC endpoint: ${ipc.endpoint}`);
                     }
+                    const gcSchedule = fsHandle.gcStatus();
+                    console.log(
+                        gcSchedule.scheduled
+                            ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
+                            : "gc schedule: off"
+                    );
                     await waitForTermination(async () => {
                         await mounted?.unmount();
                         await ipc?.close();
@@ -736,6 +742,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }
                     console.log(`root entries: ${rootEntries.length}`);
                     console.log(`conflicts: ${conflicts.length}`);
+                    const gc = fsHandle.gcStatus();
+                    const nextIn = gc.nextRunAtMs
+                        ? ` (next run in ${Math.max(0, Math.round((gc.nextRunAtMs - Date.now()) / 1000))}s)`
+                        : "";
+                    console.log(
+                        `gc schedule: ${gc.scheduled ? `on${nextIn}` : "off"}`
+                    );
                 } finally {
                     await stopPeerbitForCli(peerbit);
                 }
