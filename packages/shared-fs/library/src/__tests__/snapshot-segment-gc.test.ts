@@ -172,12 +172,23 @@ describe("snapshot segment reclamation", () => {
         }
 
         // Far past grace, the retired gen-1 delta is expired and NOT in
-        // `current` — only the live-manifest protection can keep it.
-        // Nothing may be deleted, and the delta stays ledgered for retry.
+        // `current` — only the live-manifest protection can keep it. A
+        // failed-attempt-only shard may also be retired here when both
+        // mutations happened to hash into the same random shard; that
+        // shard is dead and may be reclaimed.
+        const safelyDead = new Set(
+            ledger.retired
+                .flatMap((generation: any) => generation.cids)
+                .map((entry: any) => entry.cid)
+                .filter((cid: string) => !gen1.has(cid) && !currentSet.has(cid))
+        );
         const guarded = await reap(fakeNow + 24 * HOUR_MS);
-        expect(guarded.deleted).toBe(0);
+        expect(guarded.deleted).toBe(safelyDead.size);
         for (const cid of gen1) {
             expect(await blocks().has(cid)).toBe(true);
+        }
+        for (const cid of safelyDead) {
+            expect(await blocks().has(cid)).toBe(false);
         }
         expect((await loadLedger()).retired.length).toBeGreaterThan(0);
 
