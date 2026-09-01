@@ -21,6 +21,10 @@ const deferred = () => {
     return { promise, resolve };
 };
 
+const encode = (value: string) => new TextEncoder().encode(value);
+const decode = (value: Uint8Array | undefined) =>
+    value === undefined ? undefined : new TextDecoder().decode(value);
+
 const namingEvent = (properties: {
     id: string;
     nodeId: string;
@@ -1502,15 +1506,18 @@ describe("node-guarded mount namespace", () => {
         expect(nodeB.nodeId).not.toBe(nodeA.nodeId);
 
         await backend.rename("/tree", "/moved");
+        expect(decode(await backend.read(handleA, 32, 0))).toBe("valid-a");
+        expect(decode(await backend.read(handleB, 32, 0))).toBe("stale-b");
         await backend.flush(handleB);
         await backend.release(handleB);
         await backend.flush(handleA);
         await backend.release(handleA);
-        expect(writeFile).toHaveBeenCalledOnce();
-        expect(writeFile.mock.calls[0][0]).toBe("/moved/child.txt");
+        // Opening node B detached node A, and restoring A later must never
+        // reattach either quarantined state to a pathname.
+        expect(writeFile).not.toHaveBeenCalled();
         expect(
             new TextDecoder().decode(await fs.readFile("/moved/child.txt"))
-        ).toBe("valid-a");
+        ).toBe("aaaaaa");
     });
 
     it("preserves a dirty fd after a deterministic capable unlink rejection", async () => {
@@ -2027,6 +2034,813 @@ describe("node-guarded mount namespace", () => {
         await backend.fsync(handle);
         await backend.release(handle);
         expect(await fs.stat("/file.txt")).toBeUndefined();
+    });
+
+    it("detaches every shared sibling after a successful legacy unlink", async () => {
+        await fs.writeFile("/legacy-unlink.txt", "original");
+        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mountNamespaceSemantics: () => undefined,
+                mutateNamespaceForMount: undefined,
+                writeFile,
+            })
+        );
+        const first = await backend.open("/legacy-unlink.txt", {
+            read: true,
+            write: true,
+        });
+        const sibling = await backend.open("/legacy-unlink.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(first, encode("local!!!"), 0);
+        expect(decode(await backend.read(sibling, 32, 0))).toBe("local!!!");
+
+        await backend.unlink("/legacy-unlink.txt");
+        await expect(
+            backend.getattr("/legacy-unlink.txt")
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        expect(decode(await backend.read(first, 32, 0))).toBe("local!!!");
+        expect(decode(await backend.read(sibling, 32, 0))).toBe("local!!!");
+        await Promise.all([backend.flush(first), backend.flush(sibling)]);
+        await Promise.all([backend.release(first), backend.release(sibling)]);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(await fs.stat("/legacy-unlink.txt")).toBeUndefined();
+    });
+
+    it("detaches a shared legacy replacement destination before stale flush", async () => {
+        await fs.writeFile("/legacy-source.txt", "source-value");
+        await fs.writeFile("/legacy-destination.txt", "destination!");
+        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mountNamespaceSemantics: () => undefined,
+                mutateNamespaceForMount: undefined,
+                writeFile,
+            })
+        );
+        const source = await backend.open("/legacy-source.txt", {
+            read: true,
+            write: true,
+        });
+        const destination = await backend.open("/legacy-destination.txt", {
+            read: true,
+            write: true,
+        });
+        const destinationSibling = await backend.open(
+            "/legacy-destination.txt",
+            { read: true, write: true }
+        );
+        await backend.write(destination, encode("stale-state!"), 0);
+
+        await backend.rename("/legacy-source.txt", "/legacy-destination.txt");
+        expect(decode(await backend.read(destinationSibling, 32, 0))).toBe(
+            "stale-state!"
+        );
+        await backend.flush(destinationSibling);
+        await Promise.all([
+            backend.release(destination),
+            backend.release(destinationSibling),
+            backend.release(source),
+        ]);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(await fs.stat("/legacy-source.txt")).toBeUndefined();
+        expect(decode(await fs.readFile("/legacy-destination.txt"))).toBe(
+            "source-value"
+        );
+    });
+
+    it("does not rebase a remotely replaced legacy source state", async () => {
+        await fs.writeFile("/legacy-raced-source.txt", "node-a");
+        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mountNamespaceSemantics: () => undefined,
+                mutateNamespaceForMount: undefined,
+                writeFile,
+            })
+        );
+        const stale = await backend.open("/legacy-raced-source.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(stale, encode("stale!"), 0);
+        await fs.rm("/legacy-raced-source.txt");
+        await fs.writeFile("/legacy-raced-source.txt", "node-b");
+
+        await backend.rename(
+            "/legacy-raced-source.txt",
+            "/legacy-raced-destination.txt"
+        );
+        expect(decode(await backend.read(stale, 32, 0))).toBe("stale!");
+        await backend.flush(stale);
+        await backend.release(stale);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(decode(await fs.readFile("/legacy-raced-destination.txt"))).toBe(
+            "node-b"
+        );
+    });
+
+    it("post-validates a legacy source replaced inside the rename delegate", async () => {
+        await fs.writeFile("/legacy-delegate-source.txt", "node-a");
+        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mountNamespaceSemantics: () => undefined,
+                mutateNamespaceForMount: undefined,
+                writeFile,
+                rename: async (from, to) => {
+                    await fs.rm(from);
+                    await fs.writeFile(from, "node-b");
+                    await fs.rename(from, to);
+                },
+            })
+        );
+        const stale = await backend.open("/legacy-delegate-source.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(stale, encode("stale!"), 0);
+
+        await backend.rename(
+            "/legacy-delegate-source.txt",
+            "/legacy-delegate-destination.txt"
+        );
+        expect(decode(await backend.read(stale, 32, 0))).toBe("stale!");
+        await backend.flush(stale);
+        await backend.release(stale);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(
+            decode(await fs.readFile("/legacy-delegate-destination.txt"))
+        ).toBe("node-b");
+    });
+
+    it("fails closed when legacy unlink or rename mutates then rejects", async () => {
+        await fs.writeFile("/legacy-throw-unlink.txt", "unlink");
+        await fs.writeFile("/legacy-throw-source.txt", "source");
+        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mountNamespaceSemantics: () => undefined,
+                mutateNamespaceForMount: undefined,
+                writeFile,
+                rm: async (path) => {
+                    await fs.rm(path);
+                    throw new Error("post-remove failure");
+                },
+                rename: async (from, to) => {
+                    await fs.rename(from, to);
+                    throw new Error("post-rename failure");
+                },
+            })
+        );
+        const removed = await backend.open("/legacy-throw-unlink.txt", {
+            read: true,
+            write: true,
+        });
+        const moved = await backend.open("/legacy-throw-source.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(removed, encode("stale!"), 0);
+        await backend.write(moved, encode("stale!"), 0);
+
+        await expect(
+            backend.unlink("/legacy-throw-unlink.txt")
+        ).rejects.toMatchObject({ code: "EIO" });
+        await expect(
+            backend.rename(
+                "/legacy-throw-source.txt",
+                "/legacy-throw-destination.txt"
+            )
+        ).rejects.toMatchObject({ code: "EIO" });
+        await Promise.all([backend.flush(removed), backend.flush(moved)]);
+        await Promise.all([backend.release(removed), backend.release(moved)]);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(await fs.stat("/legacy-throw-unlink.txt")).toBeUndefined();
+        expect(await fs.stat("/legacy-throw-source.txt")).toBeUndefined();
+        expect(decode(await fs.readFile("/legacy-throw-destination.txt"))).toBe(
+            "source"
+        );
+    });
+
+    it("reconciles a dirty old state before opening a remote replacement", async () => {
+        await fs.writeFile("/remote-replacement.txt", "node-a");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const oldHandle = await backend.open("/remote-replacement.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(oldHandle, encode("stale!"), 0);
+        await fs.rm("/remote-replacement.txt");
+        await fs.writeFile("/remote-replacement.txt", "new");
+
+        const replacement = await backend.open("/remote-replacement.txt", {
+            read: true,
+        });
+        expect((await backend.getattr("/remote-replacement.txt")).size).toBe(3);
+        expect(decode(await backend.read(oldHandle, 32, 0))).toBe("stale!");
+        expect(decode(await backend.read(replacement, 32, 0))).toBe("new");
+        await backend.flush(oldHandle);
+        await Promise.all([
+            backend.release(oldHandle),
+            backend.release(replacement),
+        ]);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(decode(await fs.readFile("/remote-replacement.txt"))).toBe(
+            "new"
+        );
+    });
+
+    it("clears a dirty overlay when a fresh open observes remote removal", async () => {
+        await fs.writeFile("/remote-removal.txt", "node-a");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const oldHandle = await backend.open("/remote-removal.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(oldHandle, encode("stale!"), 0);
+        await fs.rm("/remote-removal.txt");
+
+        await expect(
+            backend.open("/remote-removal.txt", { read: true })
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(
+            backend.getattr("/remote-removal.txt")
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        expect(decode(await backend.read(oldHandle, 32, 0))).toBe("stale!");
+        await backend.flush(oldHandle);
+        await backend.release(oldHandle);
+
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(await fs.stat("/remote-removal.txt")).toBeUndefined();
+    });
+
+    it("detaches an old path state before opening the same remotely moved node", async () => {
+        await fs.writeFile("/remote-from.txt", "node-a");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const oldHandle = await backend.open("/remote-from.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(oldHandle, encode("local!"), 0);
+        await fs.rename("/remote-from.txt", "/remote-to.txt");
+
+        const moved = await backend.open("/remote-to.txt", {
+            read: true,
+            write: true,
+        });
+        await expect(backend.getattr("/remote-from.txt")).rejects.toMatchObject(
+            { code: "ENOENT" }
+        );
+        expect(decode(await backend.read(oldHandle, 32, 0))).toBe("local!");
+        expect(decode(await backend.read(moved, 32, 0))).toBe("node-a");
+        await backend.write(moved, encode("fresh!"), 0);
+        await backend.release(moved);
+        await backend.flush(oldHandle);
+        await backend.release(oldHandle);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(writeFile.mock.calls[0][0]).toBe("/remote-to.txt");
+        expect(decode(await fs.readFile("/remote-to.txt"))).toBe("fresh!");
+    });
+
+    it("does not detach a replaced state while its commit is in flight", async () => {
+        await fs.writeFile("/commit-reconcile.txt", "node-a");
+        const entered = deferred();
+        const allowed = deferred();
+        const writeFile = vi.fn(async (path, content, options) => {
+            entered.resolve();
+            await allowed.promise;
+            return fs.writeFile(path, content, options);
+        });
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const oldHandle = await backend.open("/commit-reconcile.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(oldHandle, encode("stale!"), 0);
+        const flushing = backend.flush(oldHandle);
+        await entered.promise;
+        await fs.rm("/commit-reconcile.txt");
+        await fs.writeFile("/commit-reconcile.txt", "node-b");
+
+        await expect(
+            backend.open("/commit-reconcile.txt", { read: true })
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        allowed.resolve();
+        await expect(flushing).rejects.toMatchObject({ code: "EAGAIN" });
+
+        const replacement = await backend.open("/commit-reconcile.txt", {
+            read: true,
+        });
+        expect(decode(await backend.read(replacement, 32, 0))).toBe("node-b");
+        await backend.release(replacement);
+        await backend.release(oldHandle);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/commit-reconcile.txt"))).toBe(
+            "node-b"
+        );
+    });
+
+    it("moves one shared source state and detaches one shared replacement state", async () => {
+        await fs.writeFile("/shared-source.txt", "source!");
+        await fs.writeFile("/shared-destination.txt", "destination");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const source = await backend.open("/shared-source.txt", {
+            read: true,
+            write: true,
+        });
+        const sourceSibling = await backend.open("/shared-source.txt", {
+            read: true,
+            write: true,
+        });
+        const destination = await backend.open("/shared-destination.txt", {
+            read: true,
+            write: true,
+        });
+        const destinationSibling = await backend.open(
+            "/shared-destination.txt",
+            { read: true, write: true }
+        );
+        await backend.write(source, encode("moved!!"), 0);
+        await backend.write(destination, encode("stale-state"), 0);
+
+        await backend.rename("/shared-source.txt", "/shared-destination.txt");
+        expect(decode(await backend.read(sourceSibling, 32, 0))).toBe(
+            "moved!!"
+        );
+        expect(decode(await backend.read(destinationSibling, 32, 0))).toBe(
+            "stale-state"
+        );
+        await backend.write(sourceSibling, encode("final!!"), 0);
+        await Promise.all([
+            backend.release(destination),
+            backend.release(destinationSibling),
+        ]);
+        await Promise.all([
+            backend.release(source),
+            backend.release(sourceSibling),
+        ]);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(writeFile.mock.calls[0][0]).toBe("/shared-destination.txt");
+        expect(decode(await fs.readFile("/shared-destination.txt"))).toBe(
+            "final!!"
+        );
+        expect(await fs.stat("/shared-source.txt")).toBeUndefined();
+    });
+
+    it("binds a shared descendant state once and follows a directory rename", async () => {
+        await fs.mkdir("/shared-tree");
+        await fs.writeFile("/shared-tree/child.txt", "child!");
+        const mutate = vi.fn((mutation) =>
+            fs.mutateNamespaceForMount(mutation)
+        );
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mutateNamespaceForMount: mutate,
+                writeFile,
+            })
+        );
+        const child = await backend.open("/shared-tree/child.txt", {
+            read: true,
+            write: true,
+        });
+        const sibling = await backend.open("/shared-tree/child.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(child, encode("moved!"), 0);
+
+        await backend.rename("/shared-tree", "/moved-tree");
+        const mutation = mutate.mock.calls[0][0];
+        expect(mutation).toMatchObject({ type: "rename" });
+        if (mutation.type !== "rename") throw new Error("wrong mutation");
+        expect(mutation.expectedOpenDescendants).toHaveLength(1);
+        expect(mutation.expectedOpenDescendants?.[0]?.path).toBe(
+            "/shared-tree/child.txt"
+        );
+        expect(decode(await backend.read(sibling, 32, 0))).toBe("moved!");
+        await Promise.all([backend.release(child), backend.release(sibling)]);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(writeFile.mock.calls[0][0]).toBe("/moved-tree/child.txt");
+        expect(decode(await fs.readFile("/moved-tree/child.txt"))).toBe(
+            "moved!"
+        );
+    });
+
+    it("detaches only the replaced shared descendant after a typed mismatch", async () => {
+        await fs.mkdir("/selective-tree");
+        await fs.writeFile("/selective-tree/a.txt", "aaaaaaa");
+        await fs.writeFile("/selective-tree/b.txt", "bbbbbbb");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const target = exactTarget(fs, {
+            writeFile,
+            mutateNamespaceForMount: async (mutation) => {
+                if (mutation.type !== "rename") throw new Error("unexpected");
+                const descendant = mutation.expectedOpenDescendants?.find(
+                    (binding) => binding.path === "/selective-tree/a.txt"
+                );
+                if (!descendant) throw new Error("missing descendant");
+                await fs.rm(descendant.path);
+                await fs.writeFile(descendant.path, "replace");
+                const replacement = (await fs.stat(descendant.path))!;
+                throw new SharedFsExpectedNamespaceMismatchError(
+                    "rename",
+                    "open-descendant",
+                    descendant.path,
+                    descendant.nodeId,
+                    replacement.nodeId,
+                    "before-append"
+                );
+            },
+        });
+        const backend = createSharedFsMountBackend(target);
+        const a = await backend.open("/selective-tree/a.txt", {
+            read: true,
+            write: true,
+        });
+        const aSibling = await backend.open("/selective-tree/a.txt", {
+            read: true,
+            write: true,
+        });
+        const b = await backend.open("/selective-tree/b.txt", {
+            read: true,
+            write: true,
+        });
+        const bSibling = await backend.open("/selective-tree/b.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(a, encode("dirty-a"), 0);
+        await backend.write(b, encode("dirty-b"), 0);
+
+        await expect(
+            backend.rename("/selective-tree", "/selective-moved")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        expect(decode(await backend.read(aSibling, 32, 0))).toBe("dirty-a");
+        expect(decode(await backend.read(bSibling, 32, 0))).toBe("dirty-b");
+        await Promise.all([backend.flush(a), backend.flush(b)]);
+        await Promise.all(
+            [a, aSibling, b, bSibling].map((handle) => backend.release(handle))
+        );
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(writeFile.mock.calls[0][0]).toBe("/selective-tree/b.txt");
+        expect(decode(await fs.readFile("/selective-tree/a.txt"))).toBe(
+            "replace"
+        );
+        expect(decode(await fs.readFile("/selective-tree/b.txt"))).toBe(
+            "dirty-b"
+        );
+    });
+
+    it("opens a fresh state after malformed capable output moved the old node", async () => {
+        await fs.writeFile("/malformed-source.txt", "source");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const target = exactTarget(fs, {
+            writeFile,
+            mutateNamespaceForMount: async (mutation) => {
+                await fs.mutateNamespaceForMount(mutation);
+                return {} as never;
+            },
+        });
+        const backend = createSharedFsMountBackend(target);
+        const old = await backend.open("/malformed-source.txt", {
+            read: true,
+            write: true,
+        });
+        const oldSibling = await backend.open("/malformed-source.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(old, encode("local!"), 0);
+
+        await expect(
+            backend.rename(
+                "/malformed-source.txt",
+                "/malformed-destination.txt"
+            )
+        ).rejects.toMatchObject({ code: "EIO" });
+        const fresh = await backend.open("/malformed-destination.txt", {
+            read: true,
+            write: true,
+        });
+        expect(decode(await backend.read(oldSibling, 32, 0))).toBe("local!");
+        expect(decode(await backend.read(fresh, 32, 0))).toBe("source");
+        await backend.write(fresh, encode("fresh!"), 0);
+        await backend.release(fresh);
+        await Promise.all([backend.release(old), backend.release(oldSibling)]);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(writeFile.mock.calls[0][0]).toBe("/malformed-destination.txt");
+        expect(decode(await fs.readFile("/malformed-destination.txt"))).toBe(
+            "fresh!"
+        );
+    });
+
+    it("keeps a legacy writable upgrade staged while rename admission fails", async () => {
+        await fs.writeFile("/staged-upgrade.txt", "visible");
+        const entered = deferred();
+        const allowed = deferred();
+        const readVersion = vi.fn(async (path: string, versionId: string) => {
+            entered.resolve();
+            await allowed.promise;
+            return fs.readVersion(path, versionId);
+        });
+        const mutate = vi.fn((mutation) =>
+            fs.mutateNamespaceForMount(mutation)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mountReadSemantics: () => undefined,
+                readFile: async () => encode("fallback"),
+                readVersion,
+                mutateNamespaceForMount: mutate,
+            })
+        );
+        const reader = await backend.open("/staged-upgrade.txt", {
+            read: true,
+        });
+        const openingWriter = backend.open("/staged-upgrade.txt", {
+            read: true,
+            write: true,
+        });
+        await entered.promise;
+
+        await expect(
+            backend.rename("/staged-upgrade.txt", "/staged-moved.txt")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        expect(mutate).not.toHaveBeenCalled();
+        expect(decode(await backend.read(reader, 32, 0))).toBe("fallback");
+        allowed.resolve();
+        const writer = await openingWriter;
+        expect(decode(await backend.read(reader, 32, 0))).toBe("visible");
+
+        await backend.rename("/staged-upgrade.txt", "/staged-moved.txt");
+        await backend.write(writer, encode("updated"), 0);
+        await Promise.all([backend.release(reader), backend.release(writer)]);
+        expect(decode(await fs.readFile("/staged-moved.txt"))).toBe("updated");
+    });
+
+    it("blocks rename while a sibling descriptor commits shared state", async () => {
+        await fs.writeFile("/shared-commit.txt", "before");
+        const entered = deferred();
+        const allowed = deferred();
+        const writeFile = vi.fn(async (path, content, options) => {
+            entered.resolve();
+            await allowed.promise;
+            return fs.writeFile(path, content, options);
+        });
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const writer = await backend.open("/shared-commit.txt", {
+            read: true,
+            write: true,
+        });
+        const fence = await backend.open("/shared-commit.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(writer, encode("after!"), 0);
+        const syncing = backend.fsync(fence);
+        await entered.promise;
+
+        await expect(
+            backend.rename("/shared-commit.txt", "/shared-committed.txt")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        allowed.resolve();
+        await syncing;
+        await backend.rename("/shared-commit.txt", "/shared-committed.txt");
+        await Promise.all([backend.release(writer), backend.release(fence)]);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/shared-committed.txt"))).toBe(
+            "after!"
+        );
+    });
+
+    it("keeps a borrowed snapshot stable when unlink detaches shared siblings", async () => {
+        await fs.writeFile("/borrowed-siblings.txt", "source");
+        let retained: Uint8Array | undefined;
+        const writeFile = vi.fn(async (path, content, options) => {
+            if (content instanceof Uint8Array) retained = content;
+            return fs.writeFile(path, content, options);
+        });
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const first = await backend.open("/borrowed-siblings.txt", {
+            read: true,
+            write: true,
+        });
+        const sibling = await backend.open("/borrowed-siblings.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(first, encode("first!"), 0);
+        await backend.fsync(first);
+        expect(decode(retained)).toBe("first!");
+
+        await backend.unlink("/borrowed-siblings.txt");
+        await backend.write(sibling, encode("second"), 0);
+        expect(decode(retained)).toBe("first!");
+        expect(decode(await backend.read(first, 32, 0))).toBe("second");
+        await Promise.all([backend.release(first), backend.release(sibling)]);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(await fs.stat("/borrowed-siblings.txt")).toBeUndefined();
+    });
+
+    it("keeps recreated path state separate from detached shared descriptors", async () => {
+        await fs.writeFile("/recreated.txt", "oldold");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const old = await backend.open("/recreated.txt", {
+            read: true,
+            write: true,
+        });
+        const oldSibling = await backend.open("/recreated.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(old, encode("local!"), 0);
+        await backend.unlink("/recreated.txt");
+
+        const creator = await backend.open("/recreated.txt", {
+            read: true,
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        const freshSibling = await backend.open("/recreated.txt", {
+            read: true,
+            write: true,
+            create: true,
+        });
+        await backend.write(creator, encode("newone"), 0);
+        expect(decode(await backend.read(freshSibling, 32, 0))).toBe("newone");
+        expect(decode(await backend.read(oldSibling, 32, 0))).toBe("local!");
+        await backend.release(creator);
+
+        await backend.rename("/recreated.txt", "/recreated-moved.txt");
+        await backend.write(freshSibling, encode("newtwo"), 0);
+        expect(decode(await backend.read(old, 32, 0))).toBe("local!");
+        await backend.release(freshSibling);
+        await Promise.all([backend.release(old), backend.release(oldSibling)]);
+
+        expect(writeFile).toHaveBeenCalledTimes(2);
+        expect(await fs.stat("/recreated.txt")).toBeUndefined();
+        expect(decode(await fs.readFile("/recreated-moved.txt"))).toBe(
+            "newtwo"
+        );
+    });
+
+    it("retains a provisional shared create intent until its commit settles", async () => {
+        const entered = deferred();
+        const allowed = deferred();
+        const writeFile = vi.fn(async (path, content, options) => {
+            entered.resolve();
+            await allowed.promise;
+            return fs.writeFile(path, content, options);
+        });
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const creator = await backend.open("/provisional-shared.txt", {
+            read: true,
+            write: true,
+            create: true,
+        });
+        const sibling = await backend.open("/provisional-shared.txt", {
+            read: true,
+            write: true,
+            create: true,
+        });
+        await backend.write(creator, encode("value!"), 0);
+        const releasing = backend.release(creator);
+        await entered.promise;
+
+        await expect(
+            backend.unlink("/provisional-shared.txt")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        await expect(
+            backend.rename("/provisional-shared.txt", "/provisional-moved.txt")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        await expect(
+            backend.mkdir("/provisional-shared.txt")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        allowed.resolve();
+        await releasing;
+
+        await backend.rename(
+            "/provisional-shared.txt",
+            "/provisional-moved.txt"
+        );
+        expect(decode(await backend.read(sibling, 32, 0))).toBe("value!");
+        await backend.release(sibling);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/provisional-moved.txt"))).toBe(
+            "value!"
+        );
+    });
+
+    it("quarantines a creator that reports another live state's node id", async () => {
+        await fs.writeFile("/collision-a.txt", "before");
+        const nodeA = (await fs.stat("/collision-a.txt"))!.nodeId;
+        const entered = deferred();
+        const allowed = deferred();
+        let aWrites = 0;
+        const writeFile = vi.fn(async (path, content, options) => {
+            if (path === "/collision-a.txt") {
+                aWrites++;
+                if (aWrites === 1) {
+                    entered.resolve();
+                    await allowed.promise;
+                }
+                return fs.writeFile(path, content, options);
+            }
+            const committed = await fs.writeFile(path, content, options);
+            return { ...committed, nodeId: nodeA };
+        });
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const a = await backend.open("/collision-a.txt", {
+            read: true,
+            write: true,
+        });
+        const aSibling = await backend.open("/collision-a.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(a, encode("first!"), 0);
+        const firstFence = backend.fsync(a);
+        await entered.promise;
+        await backend.write(aSibling, encode("later!"), 0);
+
+        const b = await backend.open("/collision-b.txt", {
+            read: true,
+            write: true,
+            create: true,
+        });
+        await backend.write(b, encode("value!"), 0);
+        await expect(backend.flush(b)).rejects.toMatchObject({ code: "EIO" });
+        await expect(
+            backend.write(b, encode("again!"), 0)
+        ).rejects.toMatchObject({ code: "EBADF" });
+
+        allowed.resolve();
+        await firstFence;
+        await Promise.all([backend.release(a), backend.release(aSibling)]);
+        await backend.release(b);
+
+        expect(aWrites).toBe(2);
+        expect(decode(await fs.readFile("/collision-a.txt"))).toBe("later!");
+        expect((await fs.stat("/collision-a.txt"))?.nodeId).toBe(nodeA);
     });
 
     it("wakes deferred naming work and joins an active guard during close", async () => {

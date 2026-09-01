@@ -11,6 +11,7 @@ import {
     parseFlags,
     sharedFsBackendErrno,
     SharedFsError,
+    SharedFsExpectedNodeMismatchError,
     SharedFsHandle,
     type SharedFsMountBackendTarget,
     type WriteFileOptions,
@@ -329,6 +330,99 @@ describe("shared fs mount backend", () => {
         ).rejects.toMatchObject({ code: "ENOENT" });
     });
 
+    it("allocates append offsets atomically across sibling descriptors and coalesces their commit", async () => {
+        await fs.writeFile("/sibling-append.txt", "base");
+        const versionsBefore = await fs.versions("/sibling-append.txt");
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const first = await backend.open("/sibling-append.txt", {
+            read: true,
+            write: true,
+            append: true,
+        });
+        const second = await backend.open("/sibling-append.txt", {
+            read: true,
+            write: true,
+            append: true,
+        });
+
+        await Promise.all([
+            backend.write(first, encode("A"), 0),
+            backend.write(second, encode("B"), -100),
+        ]);
+        expect(decode(await backend.read(first, 1024, 0))).toBe("baseAB");
+        expect(decode(await backend.read(second, 1024, 0))).toBe("baseAB");
+
+        await Promise.all([backend.release(first), backend.release(second)]);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/sibling-append.txt"))).toBe("baseAB");
+        expect(await fs.versions("/sibling-append.txt")).toHaveLength(
+            versionsBefore.length + 1
+        );
+        expect(await fs.conflicts("/sibling-append.txt")).toHaveLength(0);
+    });
+
+    it("shares O_TRUNC and later writes immediately with sibling readers", async () => {
+        await fs.writeFile("/sibling-truncate.txt", "long value");
+        const readVersion = vi.fn((path: string, versionId: string) =>
+            fs.readVersion(path, versionId)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { readVersion })
+        );
+        const reader = await backend.open("/sibling-truncate.txt", {
+            read: true,
+        });
+        const truncating = await backend.open("/sibling-truncate.txt", {
+            read: true,
+            write: true,
+            truncate: true,
+        });
+
+        expect(decode(await backend.read(reader, 1024, 0))).toBe("");
+        expect(readVersion).not.toHaveBeenCalled();
+        await backend.write(truncating, encode("new"), 0);
+        expect(decode(await backend.read(reader, 1024, 0))).toBe("new");
+
+        await backend.release(truncating);
+        await backend.release(reader);
+        expect(decode(await fs.readFile("/sibling-truncate.txt"))).toBe("new");
+    });
+
+    it("does not extend or dirty a file for a zero-byte sparse write", async () => {
+        await fs.writeFile("/zero-write.txt", "base");
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/zero-write.txt", {
+            read: true,
+            write: true,
+        });
+
+        expect(
+            await backend.write(handle, new Uint8Array(0), 1024 * 1024)
+        ).toBe(0);
+        expect((await backend.getattr("/zero-write.txt")).size).toBe(4);
+        await backend.release(handle);
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(decode(await fs.readFile("/zero-write.txt"))).toBe("base");
+    });
+
     it("keeps reads available but rejects writable opens before write readiness", async () => {
         await fs.writeFile("/settling.txt", "visible read");
         await fs.mkdir("/existing-dir");
@@ -425,10 +519,9 @@ describe("shared fs mount backend", () => {
         // Read-only access retains the library's availability fallback.
         const readOnly = await backend.open("/stale.txt", { read: true });
         expect(decode(await backend.read(readOnly, 1024, 0))).toBe("ancestor");
-        await backend.release(readOnly);
 
-        // A writable buffer may not contain ancestor bytes while claiming
-        // the visible version as its causal base.
+        // A writable attach may not reuse ancestor bytes while claiming the
+        // visible version as its causal base.
         await expect(
             backend.open("/stale.txt", { read: true, write: true })
         ).rejects.toMatchObject({
@@ -439,6 +532,151 @@ describe("shared fs mount backend", () => {
         expect(readVersion).not.toHaveBeenCalledWith("/stale.txt", ancestor.id);
         expect(writeFile).not.toHaveBeenCalled();
         expect(decode(await fs.readFile("/stale.txt"))).toBe("newest");
+        await backend.release(readOnly);
+    });
+
+    it("retains a legacy state while its last reader releases during writable upgrade", async () => {
+        await fs.writeFile("/upgrade-pin.txt", "visible");
+        const entered = deferred();
+        const allowed = deferred();
+        const readVersion = vi.fn(async (path: string, versionId: string) => {
+            entered.resolve();
+            await allowed.promise;
+            return fs.readVersion(path, versionId);
+        });
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { readVersion })
+        );
+        const reader = await backend.open("/upgrade-pin.txt", { read: true });
+
+        const openingWriter = backend.open("/upgrade-pin.txt", {
+            read: true,
+            write: true,
+        });
+        await entered.promise;
+        await backend.release(reader);
+        allowed.resolve();
+        const writer = await openingWriter;
+        const sibling = await backend.open("/upgrade-pin.txt", { read: true });
+
+        expect(readVersion).toHaveBeenCalledOnce();
+        await backend.write(writer, encode("updated"), 0);
+        expect(decode(await backend.read(sibling, 1024, 0))).toBe("updated");
+        await Promise.all([backend.release(writer), backend.release(sibling)]);
+    });
+
+    it("preserves legacy sibling bytes when an O_TRUNC upgrade loses its remote namespace binding", async () => {
+        const fromPath = "/upgrade-truncate-race.txt";
+        const toPath = "/moved-upgrade-truncate-race.txt";
+        await fs.writeFile(fromPath, "visible bytes");
+        const statEntered = deferred();
+        const statAllowed = deferred();
+        let countUpgradeStats = false;
+        let upgradeStatCalls = 0;
+        const stat = vi.fn(async (path: string) => {
+            if (path === fromPath && countUpgradeStats) {
+                upgradeStatCalls++;
+                if (upgradeStatCalls === 2) {
+                    statEntered.resolve();
+                    await statAllowed.promise;
+                }
+            }
+            return fs.stat(path);
+        });
+        const readFile = vi.fn(async () => encode("fallback bytes"));
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { stat, readFile, writeFile })
+        );
+        const reader = await backend.open(fromPath, { read: true });
+        expect(decode(await backend.read(reader, 1024, 0))).toBe(
+            "fallback bytes"
+        );
+
+        countUpgradeStats = true;
+        const openingWriter = backend.open(fromPath, {
+            read: true,
+            write: true,
+            truncate: true,
+        });
+        await statEntered.promise;
+        await fs.rename(fromPath, toPath);
+
+        statAllowed.resolve();
+        await expect(openingWriter).rejects.toMatchObject({ code: "EAGAIN" });
+        expect(decode(await backend.read(reader, 1024, 0))).toBe(
+            "fallback bytes"
+        );
+
+        expect(decode(await backend.read(reader, 1024, 0))).toBe(
+            "fallback bytes"
+        );
+        await backend.release(reader);
+        expect(decode(await fs.readFile(toPath))).toBe("visible bytes");
+        expect(readFile).toHaveBeenCalledOnce();
+        expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("does not install exact bytes or binding metadata when a legacy writable upgrade loses its remote namespace binding", async () => {
+        const fromPath = "/upgrade-binding-race.txt";
+        const toPath = "/moved-upgrade-binding-race.txt";
+        await fs.writeFile(fromPath, "exact bytes");
+        const readVersionEntered = deferred();
+        const readVersionAllowed = deferred();
+        let readVersionCalls = 0;
+        const readFile = vi.fn(async () => encode("fallback bytes"));
+        const readVersion = vi.fn(async (path: string, versionId: string) => {
+            readVersionCalls++;
+            if (readVersionCalls === 1) {
+                readVersionEntered.resolve();
+                await readVersionAllowed.promise;
+            }
+            return fs.readVersion(path, versionId);
+        });
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { readFile, readVersion, writeFile })
+        );
+        const reader = await backend.open(fromPath, { read: true });
+        expect(decode(await backend.read(reader, 1024, 0))).toBe(
+            "fallback bytes"
+        );
+
+        const openingWriter = backend.open(fromPath, {
+            read: true,
+            write: true,
+        });
+        await readVersionEntered.promise;
+        await fs.rename(fromPath, toPath);
+
+        readVersionAllowed.resolve();
+        await expect(openingWriter).rejects.toMatchObject({ code: "EAGAIN" });
+
+        expect(decode(await backend.read(reader, 1024, 0))).toBe(
+            "fallback bytes"
+        );
+        await backend.release(reader);
+        const retry = await backend.open(toPath, {
+            read: true,
+            write: true,
+        });
+        expect(readVersion).toHaveBeenCalledTimes(2);
+        expect(decode(await backend.read(retry, 1024, 0))).toBe("exact bytes");
+        await backend.release(retry);
+        expect(readFile).toHaveBeenCalledOnce();
+        expect(writeFile).not.toHaveBeenCalled();
     });
 
     it("uses a target-verified exact snapshot without calling the legacy reader", async () => {
@@ -469,6 +707,79 @@ describe("shared fs mount backend", () => {
             "/verified-open.txt",
             written.id
         );
+    });
+
+    it("shares one verified load, hash, and backing buffer across sibling opens", async () => {
+        const written = await fs.writeFile("/shared-open.txt", "before");
+        const verified = await fs.readVersionForMount(
+            "/shared-open.txt",
+            written.id
+        );
+        expect(verified).toBeDefined();
+        const verifiedBytes = new Uint8Array(verified!.bytes);
+        const verifiedSnapshot = { ...verified!, bytes: verifiedBytes };
+        const readVersionForMount = vi.fn(async () => verifiedSnapshot);
+        const inputs: Uint8Array[] = [];
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                inputs.push(source);
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            verifiedReadMountTarget(fs, {
+                readVersionForMount,
+                writeFile,
+            }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+
+        const [reader, writer] = await Promise.all([
+            backend.open("/shared-open.txt", { read: true }),
+            backend.open("/shared-open.txt", {
+                read: true,
+                write: true,
+            }),
+        ]);
+        expect(readVersionForMount).toHaveBeenCalledOnce();
+
+        await backend.write(writer, encode("after!"), 0);
+        expect(decode(await backend.read(reader, 1024, 0))).toBe("after!");
+        await backend.flush(writer);
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(inputs[0].buffer).toBe(verifiedBytes.buffer);
+        await Promise.all([backend.release(reader), backend.release(writer)]);
+    });
+
+    it("drops shared state after the last sibling release", async () => {
+        await fs.writeFile("/state-cleanup.txt", "content");
+        const readVersionForMount = vi.fn((path: string, versionId: string) =>
+            fs.readVersionForMount(path, versionId)
+        );
+        const backend = createSharedFsMountBackend(
+            verifiedReadMountTarget(fs, { readVersionForMount })
+        );
+
+        const first = await backend.open("/state-cleanup.txt", { read: true });
+        const sibling = await backend.open("/state-cleanup.txt", {
+            read: true,
+        });
+        expect(readVersionForMount).toHaveBeenCalledOnce();
+        await Promise.all([backend.release(first), backend.release(sibling)]);
+
+        const reopened = await backend.open("/state-cleanup.txt", {
+            read: true,
+        });
+        expect(readVersionForMount).toHaveBeenCalledTimes(2);
+        await backend.release(reopened);
     });
 
     it("fails closed when a verified-read capability returns malformed binding metadata", async () => {
@@ -774,6 +1085,57 @@ describe("shared fs mount backend", () => {
         });
         expect(writeFile).toHaveBeenCalledOnce();
         expect(decode(await fs.readFile("/race.txt"))).toBe("replacement");
+    });
+
+    it("quarantines an existing-node mismatch across later path repair", async () => {
+        await fs.writeFile("/quarantined.txt", "original");
+        const entered = deferred();
+        const allowed = deferred();
+        let actualNodeId: string | null = null;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                _source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                entered.resolve();
+                await allowed.promise;
+                throw new SharedFsExpectedNodeMismatchError(
+                    path,
+                    options?.expectedNodeId ?? null,
+                    actualNodeId,
+                    "before-naming"
+                );
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/quarantined.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("stale data"), 0);
+
+        const flushing = backend.flush(handle);
+        await entered.promise;
+        await fs.rm("/quarantined.txt");
+        await fs.writeFile("/quarantined.txt", "replacement");
+        actualNodeId = (await fs.stat("/quarantined.txt"))?.nodeId ?? null;
+        allowed.resolve();
+        await expect(flushing).rejects.toMatchObject({ code: "EAGAIN" });
+
+        await fs.rm("/quarantined.txt");
+        await fs.writeFile("/quarantined.txt", "repaired");
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EBADF",
+        });
+        await expect(
+            backend.write(handle, encode("still stale"), 0)
+        ).rejects.toMatchObject({ code: "EBADF" });
+        await backend.release(handle);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/quarantined.txt"))).toBe("repaired");
     });
 
     it("terminalizes an ordinary create that loses its absent-path race", async () => {
@@ -1104,12 +1466,15 @@ describe("shared fs mount backend", () => {
             write: true,
             create: true,
         });
-        await expect(
-            backend.open("/ordinary-pending.txt", {
-                write: true,
-                create: true,
-            })
-        ).rejects.toMatchObject({ code: "EAGAIN" });
+        const ordinarySibling = await backend.open("/ordinary-pending.txt", {
+            read: true,
+            write: true,
+            create: true,
+        });
+        await backend.write(ordinary, encode("shared"), 0);
+        expect(decode(await backend.read(ordinarySibling, 1024, 0))).toBe(
+            "shared"
+        );
         await expect(
             backend.open("/ordinary-pending.txt", {
                 write: true,
@@ -1118,18 +1483,17 @@ describe("shared fs mount backend", () => {
             })
         ).rejects.toMatchObject({ code: "EEXIST" });
         await backend.release(ordinary);
+        await backend.release(ordinarySibling);
 
         const exclusive = await backend.open("/exclusive-pending.txt", {
             write: true,
             create: true,
             exclusive: true,
         });
-        await expect(
-            backend.open("/exclusive-pending.txt", {
-                write: true,
-                create: true,
-            })
-        ).rejects.toMatchObject({ code: "EAGAIN" });
+        const exclusiveSibling = await backend.open("/exclusive-pending.txt", {
+            write: true,
+            create: true,
+        });
         await expect(
             backend.open("/exclusive-pending.txt", {
                 write: true,
@@ -1138,6 +1502,7 @@ describe("shared fs mount backend", () => {
             })
         ).rejects.toMatchObject({ code: "EEXIST" });
         await backend.release(exclusive);
+        await backend.release(exclusiveSibling);
     });
 
     it("rejects an ancestor rename while a descendant create intent is pending", async () => {
@@ -1524,7 +1889,7 @@ describe("shared fs mount backend", () => {
         await backend.release(moved);
     });
 
-    it("rejects a second ordinary creator while the first commit is in flight", async () => {
+    it("shares a provisional create while its first commit is in flight", async () => {
         const commitEntered = deferred();
         const commitAllowed = deferred();
         let calls = 0;
@@ -1550,30 +1915,30 @@ describe("shared fs mount backend", () => {
             create: true,
         });
         await backend.write(first, encode("left"), 0);
-        const releasing = backend.release(first);
+        const firstRelease = backend.release(first);
         await commitEntered.promise;
-        try {
-            await expect(
-                backend.open("/ordinary-race.txt", {
-                    write: true,
-                    create: true,
-                })
-            ).rejects.toMatchObject({ code: "EAGAIN" });
-            expect(writeFile).toHaveBeenCalledOnce();
-            expect(await fs.stat("/ordinary-race.txt")).toBeUndefined();
-        } finally {
-            commitAllowed.resolve();
-        }
-        await releasing;
-        expect(decode(await fs.readFile("/ordinary-race.txt"))).toBe("left");
 
-        const retry = await backend.open("/ordinary-race.txt", {
+        const sibling = await backend.open("/ordinary-race.txt", {
+            read: true,
             write: true,
             create: true,
-            truncate: true,
         });
-        await backend.write(retry, encode("right"), 0);
-        await backend.release(retry);
+        expect(decode(await backend.read(sibling, 1024, 0))).toBe("left");
+        await backend.write(sibling, encode("right"), 0);
+        await expect(
+            backend.open("/ordinary-race.txt", {
+                write: true,
+                create: true,
+                exclusive: true,
+            })
+        ).rejects.toMatchObject({ code: "EEXIST" });
+
+        const siblingRelease = backend.release(sibling);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(await fs.stat("/ordinary-race.txt")).toBeUndefined();
+        commitAllowed.resolve();
+        await Promise.all([firstRelease, siblingRelease]);
+
         expect(writeFile).toHaveBeenCalledTimes(2);
         expect(decode(await fs.readFile("/ordinary-race.txt"))).toBe("right");
     });
@@ -1825,7 +2190,7 @@ describe("shared fs mount backend", () => {
         expect(writeFile).toHaveBeenCalledTimes(2);
     });
 
-    it("keeps an in-flight append snapshot stable and drains it at fsync", async () => {
+    it("keeps an in-flight append snapshot stable at the fsync cutoff", async () => {
         await fs.writeFile("/append-fence.txt", "base");
         const started = deferred();
         const allowed = deferred();
@@ -1865,9 +2230,11 @@ describe("shared fs mount backend", () => {
         await syncing;
 
         expect(decode(inputs[0])).toBe("baseA");
+        expect(decode(await fs.readFile("/append-fence.txt"))).toBe("baseA");
+        expect(writeFile).toHaveBeenCalledOnce();
+        await backend.release(handle);
         expect(decode(await fs.readFile("/append-fence.txt"))).toBe("baseAB");
         expect(writeFile).toHaveBeenCalledTimes(2);
-        await backend.release(handle);
     });
 
     it("borrows a commit snapshot and detaches an overlapping write", async () => {
@@ -2162,37 +2529,18 @@ describe("shared fs mount backend", () => {
         expect(writeFile).toHaveBeenCalledOnce();
     });
 
-    it("drains concurrent buffer mutations before fsync resolves", async () => {
-        let firstWriteStarted!: () => void;
-        let secondWriteStarted!: () => void;
-        let allowFirstWrite!: () => void;
-        let allowSecondWrite!: () => void;
-        const firstStarted = new Promise<void>((resolve) => {
-            firstWriteStarted = resolve;
-        });
-        const secondStarted = new Promise<void>((resolve) => {
-            secondWriteStarted = resolve;
-        });
-        const firstAllowed = new Promise<void>((resolve) => {
-            allowFirstWrite = resolve;
-        });
-        const secondAllowed = new Promise<void>((resolve) => {
-            allowSecondWrite = resolve;
-        });
-        let writes = 0;
+    it("bounds fsync at its captured generation under sibling writes", async () => {
+        const firstStarted = deferred();
+        const firstAllowed = deferred();
         const writeFile = vi.fn(
             async (
                 path: string,
                 source: Uint8Array | string | AsyncIterable<Uint8Array>,
                 options?: WriteFileOptions
             ) => {
-                writes++;
-                if (writes === 1) {
-                    firstWriteStarted();
-                    await firstAllowed;
-                } else if (writes === 2) {
-                    secondWriteStarted();
-                    await secondAllowed;
+                if (writeFile.mock.calls.length === 1) {
+                    firstStarted.resolve();
+                    await firstAllowed.promise;
                 }
                 return fs.writeFile(path, source, options);
             }
@@ -2200,26 +2548,79 @@ describe("shared fs mount backend", () => {
         const backend = createSharedFsMountBackend(
             mountTarget(fs, { writeFile })
         );
-        const handle = await backend.open("/during-fsync.txt", {
+        const fence = await backend.open("/during-fsync.txt", {
             write: true,
             create: true,
             truncate: true,
         });
-        await backend.write(handle, encode("aaa"), 0);
+        const sibling = await backend.open("/during-fsync.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(fence, encode("aaa"), 0);
 
-        const syncing = backend.fsync(handle);
-        await firstStarted;
-        await backend.write(handle, encode("bbb"), 0);
-        allowFirstWrite();
-        await secondStarted;
-        await backend.write(handle, encode("ccc"), 0);
-        allowSecondWrite();
+        const syncing = backend.fsync(fence);
+        await firstStarted.promise;
+        await backend.write(sibling, encode("bbb"), 0);
+        await backend.write(sibling, encode("ccc"), 0);
+        firstAllowed.resolve();
         await syncing;
 
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/during-fsync.txt"))).toBe("aaa");
+        expect(decode(await backend.read(sibling, 1024, 0))).toBe("ccc");
+
+        await backend.release(fence);
+        expect(writeFile).toHaveBeenCalledTimes(2);
         expect(decode(await fs.readFile("/during-fsync.txt"))).toBe("ccc");
-        expect(writeFile).toHaveBeenCalledTimes(3);
-        await backend.release(handle);
-        expect(writeFile).toHaveBeenCalledTimes(3);
+        await backend.release(sibling);
+        expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("bounds release at its captured generation under sibling writes", async () => {
+        await fs.writeFile("/release-cutoff.txt", "base");
+        const firstStarted = deferred();
+        const firstAllowed = deferred();
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (writeFile.mock.calls.length === 1) {
+                    firstStarted.resolve();
+                    await firstAllowed.promise;
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const closing = await backend.open("/release-cutoff.txt", {
+            write: true,
+            append: true,
+        });
+        const sibling = await backend.open("/release-cutoff.txt", {
+            read: true,
+            write: true,
+            append: true,
+        });
+        await backend.write(closing, encode("A"), 0);
+
+        const releasing = backend.release(closing);
+        await firstStarted.promise;
+        await backend.write(sibling, encode("B"), 0);
+        firstAllowed.resolve();
+        await releasing;
+
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/release-cutoff.txt"))).toBe("baseA");
+        expect(decode(await backend.read(sibling, 1024, 0))).toBe("baseAB");
+
+        await backend.release(sibling);
+        expect(writeFile).toHaveBeenCalledTimes(2);
+        expect(decode(await fs.readFile("/release-cutoff.txt"))).toBe("baseAB");
     });
 
     it("drains accepted writes and rejects mutations after release begins", async () => {

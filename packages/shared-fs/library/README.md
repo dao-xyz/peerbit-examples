@@ -334,12 +334,17 @@ peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
 
-Mounted writes are buffered by the native adapter. Each successful `flush`
-publishes the one frozen buffer generation it captured as a signed Peerbit file
-version. `fsync` and `release` drain every mutation accepted before their fence
-and can publish a follow-up generation; writes that race a closing handle are
-rejected instead of being silently dropped. The CLI waits for write readiness
-before exposing the mount and rejects `mount --no-replicate`.
+Mounted writes are buffered by the native adapter. Each successful `flush` or
+`fsync` persists through the mutation generation captured when its fence
+starts. Backend-local descriptors for the same current file-node/path binding
+share one buffer, logical length, mutation generation, and commit ancestry;
+access mode, `O_APPEND`, and closing remain descriptor-local. A remote removal,
+replacement, or move detaches the old binding: its existing descriptors retain
+local-only bytes until close while a later open receives a fresh attached
+state. `release` closes writes through that descriptor before persisting its
+cutoff. Later writes through sibling descriptors stay dirty for the next fence
+instead of starving the current one. The CLI waits for write readiness before
+exposing the mount and rejects `mount --no-replicate`.
 
 This mount fence is not a remote durability quorum. In particular, `fsync`
 does not call `prepareForDisposal()` and does not wait for persisted receipts
@@ -367,6 +372,23 @@ workload: one large file upload/download plus a many-small-files write/list/read
 pass. This is meant to track regressions and guide future agent/code workspace
 work; v0 does not optimize the small-file workload yet.
 
+The manual shared-open benchmark runs with:
+
+```bash
+PEERBIT_SHARED_FS_SHARED_OPEN_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/mount-backend-shared-open.bench.test.ts --reporter=verbose
+```
+
+It uses isolated `--expose-gc` processes to compare one and eight simultaneous
+read-only descriptors for the same 64 MiB file. Both cases must perform exactly
+one target-side verified read and SHA-256 hash, perform no target write on
+release, and retain one file-sized `process.memoryUsage().arrayBuffers`
+allocation. The eight-descriptor retained delta is bounded to the
+one-descriptor delta plus 10% and a small fixed allocator allowance; after the
+last release both cases must return close to their baseline. Open time is
+reported for diagnosis only and has no pass/fail budget.
+
 ## Native Mounts
 
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
@@ -377,8 +399,12 @@ constants, truncate shrinks and zero-fill grows both open handles and paths,
 and flushing unchanged content does not mint a new version. Writable opens load
 the exact visible version rather than a temporarily available ancestor, retain
 that version as their sole causal base, and compare-and-set the path's node id
-at commit. A remove/recreate race returns `EAGAIN` without editing the
-replacement; other conflict heads remain preserved.
+at commit. A verified-read-capable target also lets a read-only first opener
+establish that exact shared snapshot once; legacy targets retain their
+`readFile` availability fallback and upgrade coherently on the first writable
+attach. A typed remove/recreate mismatch quarantines every descriptor for the
+old local state, so repairing the path cannot make a retry publish stale bytes;
+other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
@@ -387,15 +413,28 @@ handle truncates return `EBADF`; missing writable opens require `O_CREAT`; and
 the portable fail-closed result for `O_RDONLY|O_TRUNC` is `EINVAL`. A read-only
 `O_CREAT` handle materializes an empty file at its first successful
 `flush`/`fsync`/release commit fence. `O_APPEND` relocates each write to the
-then-current end of that one handle. It does not serialize separate handles or
-peers, whose concurrent snapshots remain conflict versions rather than a
-globally concatenated stream.
+then-current end of the shared backend-local file state. Sibling append
+descriptors therefore allocate non-overlapping ranges atomically within one
+backend process. This is not a distributed append lock: different backends or
+peers can still publish conflict versions rather than a globally concatenated
+stream. A zero-byte write never allocates a sparse gap, changes length, or
+creates a commit generation.
+
+One backend process keeps one attached, shareable state for each current
+file-node/path binding, even when several descriptors are open. A remote
+replacement or move can detach an older state: its still-open descriptors keep
+their local-only bytes until their last close, but the detached state is
+excluded from path overlays and commits while a fresh attached state loads for
+the observed binding. Attached state is removed after its last descriptor
+releases (or a typed node mismatch quarantines it), so a later open loads and
+verifies a fresh snapshot rather than retaining an unbounded inode cache.
 
 `O_CREAT|O_EXCL` excludes settled paths and backend-local pending creators with
-`EEXIST`. A second ordinary backend-local creator receives temporary `EAGAIN`
-until the first create fence settles, preventing two local expected-absent
-commits from both reporting success. This is not a distributed lock or
-globally linearizable open:
+`EEXIST`. Ordinary sibling opens attach to the same provisional file state,
+observe each other's writes immediately, and share its single serialized
+commit chain. This prevents separate local expected-absent commits from
+forming artificial conflict heads. It is not a distributed lock or globally
+linearizable open:
 disconnected or concurrently replicating peers can each observe an absent
 path, successfully create distinct nodes, and later expose the duplicate name
 through the normal conflict model. Creation remains
@@ -408,8 +447,9 @@ retain their original `EAGAIN` result.
 
 Custom mount targets that implement `expectedNodeId` compare-and-set should
 throw the exported `SharedFsExpectedNodeMismatchError` for an atomic mismatch.
-The mount uses that discriminator to terminalize an absent-path loser without a
-racy follow-up lookup; unrelated or untyped `EAGAIN` failures remain retryable.
+The mount uses that discriminator to terminalize both an absent-path loser and
+an existing file state whose node was replaced, without a racy follow-up
+lookup; unrelated or untyped `EAGAIN` failures remain retryable.
 An initially absent nested create also captures the exact parent directory node
 while holding its reservation. If that built-in parent disappears, becomes a
 file, or is replaced by another directory node before the naming fence, the
@@ -447,11 +487,13 @@ caller's requested access mode or `O_APPEND` during creation, and an ordinary
 `O_CREAT` race may therefore return `EEXIST`. Use the external adapter when
 its platform translation is required.
 
-The portable backend distinguishes `flush` from the stronger handle fence used
-by `fsync`/`release`: a flush publishes one frozen buffer generation, while an
-fsync/release drains mutations accepted during an in-flight publication before
-returning. This closes an editor-save race, but the current target interface
-still has no backend-independent hardware cache or power-loss barrier.
+The portable backend gives `flush` and `fsync` the same bounded file-state
+fence: each captures a synchronous mutation-generation cutoff and persists
+every generation accepted before that call. `release` first closes mutation
+admission through that descriptor, then persists the same kind of cutoff before
+detaching it. Mutations admitted later through sibling descriptors remain
+buffered for a later fence. The current target interface still has no
+backend-independent hardware cache or power-loss barrier.
 
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
