@@ -1,5 +1,15 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.2
+
+### Patch Changes
+
+- cd4bc22: Reuse one serialized IPC connection for each external native mount session, reconnect only after surfacing a transport failure, make mount startup and IPC-server shutdown terminate retained resources, and add portable transport benchmarks across metadata and 4 KiB through 1 MiB payloads.
+- 92cb810: Return isolated byte snapshots from mount reads and remove redundant buffer copies from native IPC encoding and decoding.
+- Updated dependencies [cd4bc22]
+- Updated dependencies [92cb810]
+    - @peerbit/shared-fs@0.13.2
+
 ## 0.13.1
 
 ### Patch Changes
