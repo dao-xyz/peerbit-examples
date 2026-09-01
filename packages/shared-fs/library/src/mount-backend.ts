@@ -153,6 +153,14 @@ type OpenHandle = {
     baseContentHash?: string;
     /** Serializes concurrent flush/fsync/release commits for one handle. */
     committing?: Promise<void>;
+    /** Shared completion for overlapping release calls. */
+    releasing?: Promise<void>;
+    /**
+     * Set synchronously when release begins. Mutations admitted before this
+     * transition are drained; later mutations fail instead of becoming dirty
+     * after the handle has been removed.
+     */
+    closing: boolean;
     /**
      * Advances whenever the buffered contents are mutated. A commit may await
      * metadata while writes continue on the same handle; this generation keeps
@@ -437,6 +445,7 @@ export const createSharedFsMountBackend = (
                 handle.path === path &&
                 handle.write &&
                 !handle.readOnly &&
+                !handle.closing &&
                 handle.dirty
             ) {
                 return handle;
@@ -634,6 +643,24 @@ export const createSharedFsMountBackend = (
         await run;
     };
 
+    const commitStable = async (handle: OpenHandle) => {
+        // A write is allowed to overlap one ordinary flush pass, but fsync and
+        // release are fences: if the buffer changed while a frozen snapshot was
+        // being committed, immediately commit the newer generation as well.
+        // The final comparison is synchronous, so a mutation admitted after it
+        // belongs to the next fence.
+        for (;;) {
+            const mutationGeneration = handle.mutationGeneration;
+            await commit(handle);
+            if (
+                !handle.dirty &&
+                handle.mutationGeneration === mutationGeneration
+            ) {
+                return;
+            }
+        }
+    };
+
     const requireHandle = (handle: number) => {
         const openHandle = handles.get(handle);
         if (!openHandle) {
@@ -665,6 +692,7 @@ export const createSharedFsMountBackend = (
                 write: false,
                 dirty: false,
                 readOnly: true,
+                closing: false,
                 mutationGeneration: 0,
             });
             return handle;
@@ -799,6 +827,7 @@ export const createSharedFsMountBackend = (
             write: parsedFlags.write,
             dirty,
             readOnly: false,
+            closing: false,
             openedNodeId: parsedFlags.write
                 ? (entry?.nodeId ?? null)
                 : undefined,
@@ -939,6 +968,9 @@ export const createSharedFsMountBackend = (
         async write(handle: number, data: Uint8Array, offset: number) {
             assertWriteReady(`Write on handle ${handle}`);
             const openHandle = requireHandle(handle);
+            if (openHandle.closing) {
+                throw badHandle(handle);
+            }
             if (!openHandle.write) {
                 throw new SharedFsBackendError(
                     "EACCES",
@@ -971,6 +1003,9 @@ export const createSharedFsMountBackend = (
                 );
                 if (typeof targetRef === "number") {
                     const openHandle = requireHandle(targetRef);
+                    if (openHandle.closing) {
+                        throw badHandle(targetRef);
+                    }
                     if (!openHandle.write) {
                         throw new SharedFsBackendError(
                             "EACCES",
@@ -1014,7 +1049,7 @@ export const createSharedFsMountBackend = (
         },
 
         async fsync(handle: number) {
-            return wrap(() => commit(requireHandle(handle)));
+            return wrap(() => commitStable(requireHandle(handle)));
         },
 
         async release(handle: number) {
@@ -1022,11 +1057,30 @@ export const createSharedFsMountBackend = (
             if (!openHandle) {
                 return;
             }
-            try {
-                await wrap(() => commit(openHandle));
-            } finally {
-                handles.delete(handle);
+            if (openHandle.releasing) {
+                return openHandle.releasing;
             }
+            // Close mutation admission before the first await. Every write or
+            // handle truncate accepted before this point has already advanced
+            // mutationGeneration; later attempts fail with EBADF.
+            openHandle.closing = true;
+            const releasing = wrap(() => commitStable(openHandle))
+                .then(() => {
+                    handles.delete(handle);
+                })
+                .finally(() => {
+                    if (
+                        handles.get(handle) === openHandle &&
+                        openHandle.releasing === releasing
+                    ) {
+                        // A failed commit leaves the closing, dirty handle
+                        // available for a release/fsync retry instead of
+                        // silently discarding buffered data.
+                        openHandle.releasing = undefined;
+                    }
+                });
+            openHandle.releasing = releasing;
+            return releasing;
         },
 
         async mkdir(path: string) {

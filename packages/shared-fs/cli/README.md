@@ -112,6 +112,13 @@ settled-view heuristic rather than a protocol log-frontier proof, so deployments
 requiring a strict frontier should keep writers stopped until Peerbit exposes
 that upstream barrier.
 
+Mounted `flush` publishes one frozen buffer generation. `fsync` and close drain
+every mutation accepted before their fence, while mutations racing a closing
+handle fail instead of disappearing. These calls do not wait for a remote
+persisted quorum; use the quiesced `prepare-disposal` workflow for machine
+retirement. CI verifies the default disk-backed store after forced process
+termination, not arbitrary custom targets or a host/controller power failure.
+
 For access-controlled filesystems, write readiness is not a global revocation
 proof. The trusted-writer graph converges separately and entries do not carry
 an authorization epoch, so quiesce and isolate a revoked machine/key, wait for
@@ -208,6 +215,12 @@ a remote peer was present. The command does not revoke the local writer key;
 perform any intended revocation first. If a cold receipt target cannot validate
 a revocation tombstone because it never admitted the original grant, the
 barrier fails closed instead of claiming disposal safety.
+
+The portable process-crash campaign kills all three authenticated replica
+instances without graceful shutdown after `minAcks: 2`, deletes the source, and
+reopens each custodian alone. That verifies the application-crash path on the
+tested disk backend. A literal power-cut claim still requires a VM or hardware
+fault campaign with explicit filesystem and controller-cache semantics.
 
 ## macOS from this repo
 
