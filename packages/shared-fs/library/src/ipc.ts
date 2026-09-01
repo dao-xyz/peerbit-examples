@@ -162,7 +162,10 @@ export const createSharedFsIpcServer = async (
     backend: SharedFsMountBackend,
     endpoint = defaultSharedFsIpcEndpoint()
 ): Promise<SharedFsIpcServer> => {
+    const sockets = new Set<Socket>();
     const server: Server = createServer((socket) => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
         let buffered = "";
         // A client abort (ECONNRESET/EPIPE) must never take the mount daemon
         // down; drop the connection and keep serving the others.
@@ -225,11 +228,15 @@ export const createSharedFsIpcServer = async (
     });
 
     const resolvedEndpoint = await listenServer(server, endpoint);
+    let closing: Promise<void> | undefined;
 
     return {
         endpoint: resolvedEndpoint,
         close() {
-            return new Promise<void>((resolve, reject) => {
+            closing ??= new Promise<void>((resolve, reject) => {
+                // Stop admission first, then terminate retained adapter
+                // sessions. Otherwise net.Server.close() waits indefinitely
+                // for a persistent client that survived mount teardown.
                 server.close((error) => {
                     if (error) {
                         reject(error);
@@ -237,7 +244,11 @@ export const createSharedFsIpcServer = async (
                         resolve();
                     }
                 });
+                for (const socket of sockets) {
+                    socket.destroy();
+                }
             });
+            return closing;
         },
     };
 };
