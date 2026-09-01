@@ -12,10 +12,14 @@ shift
 attempts="${SHARED_FS_NATIVE_INSTALL_ATTEMPTS:-30}"
 delay_seconds="${SHARED_FS_NATIVE_INSTALL_RETRY_SECONDS:-10}"
 error_file="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/peerbit-shared-fs-native-install.err"
+adapter_command=("$@" install-adapter --prefix "$install_dir" --print-path)
+if [ -n "${SHARED_FS_NATIVE_ADAPTER_VERSION:-}" ]; then
+  adapter_command+=(--adapter-version "$SHARED_FS_NATIVE_ADAPTER_VERSION")
+fi
 
 for ((attempt = 1; attempt <= attempts; attempt++)); do
   rm -f "$error_file"
-  if adapter_path="$("$@" install-adapter --prefix "$install_dir" --print-path 2>"$error_file")"; then
+  if adapter_path="$("${adapter_command[@]}" 2>"$error_file")"; then
     printf '%s\n' "$adapter_path"
     exit 0
   else
