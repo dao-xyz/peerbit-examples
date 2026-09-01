@@ -2,6 +2,14 @@
 
 Experimental native mount CLI for `@peerbit/shared-fs`.
 
+Mounted unlink and rename operations use the library's exact node-guarded
+namespace capability when available. This prevents an in-flight mount request
+from deleting a replacement node, preserves replaced/unlinked open descriptor
+buffers without recreating their names, and binds open descendants across a
+directory rename. It remains a visible-replica CRDT fence rather than a
+linearizable cross-peer transaction; concurrent unseen naming events can still
+surface as normal shared-filesystem conflicts.
+
 ```bash
 peerbit-fs create
 peerbit-fs create --no-auth
