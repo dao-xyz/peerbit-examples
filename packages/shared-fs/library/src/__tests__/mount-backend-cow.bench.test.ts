@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 const enabled = process.env.PEERBIT_SHARED_FS_MOUNT_COW_BENCH === "1";
 const manualDescribe = enabled ? describe : describe.skip;
 const SIZES_MIB = [4, 64, 256] as const;
+const MODES = ["fallback", "capable"] as const;
+type BenchmarkMode = (typeof MODES)[number];
 const CHILD_TIMEOUT_MS = 5 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 const workerPath = fileURLToPath(
@@ -20,6 +22,7 @@ type MemorySnapshot = {
 };
 
 type CowBenchmarkSample = {
+    mode: BenchmarkMode;
     sizeMiB: number;
     sizeBytes: number;
     commitEnterMs: number;
@@ -28,6 +31,9 @@ type CowBenchmarkSample = {
     commitEnterMiBPerSecond: number;
     retainedCowWriteMiBPerSecond: number;
     writeFileCalls: number;
+    targetHashCalls: number;
+    targetHashedBytes: number;
+    targetHashMs: number;
     snapshotPreserved: boolean;
     liveMutationPreserved: boolean;
     memory: {
@@ -61,9 +67,9 @@ afterEach(() => {
     runningChildren.clear();
 });
 
-const runWorker = (sizeMiB: number) =>
+const runWorker = (sizeMiB: number, mode: BenchmarkMode) =>
     new Promise<CowBenchmarkSample>((resolve, reject) => {
-        const child = fork(workerPath, [String(sizeMiB)], {
+        const child = fork(workerPath, [String(sizeMiB), mode], {
             execArgv: [
                 "--expose-gc",
                 "--enable-source-maps",
@@ -120,7 +126,7 @@ const runWorker = (sizeMiB: number) =>
         const onError = (error: Error) => {
             fail(
                 new Error(
-                    `COW benchmark worker for ${sizeMiB} MiB failed: ${error.message}${diagnostics()}`,
+                    `COW benchmark worker for ${mode} ${sizeMiB} MiB failed: ${error.message}${diagnostics()}`,
                     { cause: error }
                 )
             );
@@ -134,7 +140,7 @@ const runWorker = (sizeMiB: number) =>
                 fail(
                     new Error(
                         fatal ??
-                            `COW benchmark worker for ${sizeMiB} MiB exited without a result (code=${code}, signal=${signal})${diagnostics()}`
+                            `COW benchmark worker for ${mode} ${sizeMiB} MiB exited without a result (code=${code}, signal=${signal})${diagnostics()}`
                     )
                 );
                 return;
@@ -146,7 +152,7 @@ const runWorker = (sizeMiB: number) =>
         const timeout = setTimeout(() => {
             fail(
                 new Error(
-                    `COW benchmark worker for ${sizeMiB} MiB exceeded ${CHILD_TIMEOUT_MS} ms${diagnostics()}`
+                    `COW benchmark worker for ${mode} ${sizeMiB} MiB exceeded ${CHILD_TIMEOUT_MS} ms${diagnostics()}`
                 )
             );
         }, CHILD_TIMEOUT_MS);
@@ -162,11 +168,18 @@ const expectFiniteNumbers = (values: Record<string, number>) => {
     }
 };
 
-const validateSample = (sample: CowBenchmarkSample, sizeMiB: number) => {
+const validateSample = (
+    sample: CowBenchmarkSample,
+    sizeMiB: number,
+    mode: BenchmarkMode
+) => {
     expect(sample).toMatchObject({
+        mode,
         sizeMiB,
         sizeBytes: sizeMiB * 1024 * 1024,
         writeFileCalls: 1,
+        targetHashCalls: 1,
+        targetHashedBytes: sizeMiB * 1024 * 1024,
         snapshotPreserved: true,
         liveMutationPreserved: true,
     });
@@ -176,6 +189,7 @@ const validateSample = (sample: CowBenchmarkSample, sizeMiB: number) => {
         retainedCowWriteMs: sample.retainedCowWriteMs,
         commitEnterMiBPerSecond: sample.commitEnterMiBPerSecond,
         retainedCowWriteMiBPerSecond: sample.retainedCowWriteMiBPerSecond,
+        targetHashMs: sample.targetHashMs,
     });
     for (const snapshot of [
         sample.memory.baseline,
@@ -205,23 +219,59 @@ const roundedJson = (value: unknown) =>
 
 manualDescribe("mount backend copy-on-write benchmark (manual)", () => {
     it(
-        "reports isolated commit and retained-snapshot COW cost",
-        { timeout: SIZES_MIB.length * CHILD_TIMEOUT_MS + 60_000 },
+        "compares delegated and fallback commit hashing with retained-snapshot COW cost",
+        {
+            timeout:
+                SIZES_MIB.length * MODES.length * CHILD_TIMEOUT_MS + 60_000,
+        },
         async () => {
             const samples: CowBenchmarkSample[] = [];
             for (const sizeMiB of SIZES_MIB) {
-                const sample = await runWorker(sizeMiB);
-                validateSample(sample, sizeMiB);
-                samples.push(sample);
-                // Preserve each completed size if a larger child later fails.
-                console.log(
-                    "mount-backend-cow-bench-sample:",
-                    roundedJson(sample)
-                );
+                for (const mode of MODES) {
+                    const sample = await runWorker(sizeMiB, mode);
+                    validateSample(sample, sizeMiB, mode);
+                    samples.push(sample);
+                    // Preserve each completed child if a later one fails.
+                    console.log(
+                        "mount-backend-cow-bench-sample:",
+                        roundedJson(sample)
+                    );
+                }
+            }
+            const comparisons = SIZES_MIB.map((sizeMiB) => {
+                const fallback = samples.find(
+                    (sample) =>
+                        sample.sizeMiB === sizeMiB && sample.mode === "fallback"
+                )!;
+                const capable = samples.find(
+                    (sample) =>
+                        sample.sizeMiB === sizeMiB && sample.mode === "capable"
+                )!;
+                return {
+                    sizeMiB,
+                    fallbackCommitEnterMs: fallback.commitEnterMs,
+                    capableCommitEnterMs: capable.commitEnterMs,
+                    observedCommitDeltaMs:
+                        fallback.commitEnterMs - capable.commitEnterMs,
+                    fallbackOverCapable:
+                        capable.commitEnterMs > 0
+                            ? fallback.commitEnterMs / capable.commitEnterMs
+                            : 0,
+                    fallbackTargetHashMs: fallback.targetHashMs,
+                    capableTargetHashMs: capable.targetHashMs,
+                };
+            });
+            for (const comparison of comparisons) {
+                expectFiniteNumbers(comparison);
             }
             console.log(
                 "mount-backend-cow-bench:",
-                roundedJson({ sizesMiB: SIZES_MIB, samples })
+                roundedJson({
+                    sizesMiB: SIZES_MIB,
+                    modes: MODES,
+                    comparisons,
+                    samples,
+                })
             );
         }
     );

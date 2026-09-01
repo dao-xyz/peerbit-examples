@@ -8,6 +8,9 @@ import {
 
 const MEBIBYTE = 1024 * 1024;
 const ALLOWED_SIZES_MIB = new Set([4, 64, 256]);
+const MODES = new Set(["capable", "fallback"] as const);
+
+type BenchmarkMode = "capable" | "fallback";
 
 type MemorySnapshot = {
     rssBytes: number;
@@ -20,6 +23,7 @@ type MemorySnapshot = {
 type MemoryDelta = MemorySnapshot;
 
 type CowBenchmarkSample = {
+    mode: BenchmarkMode;
     sizeMiB: number;
     sizeBytes: number;
     commitEnterMs: number;
@@ -28,6 +32,9 @@ type CowBenchmarkSample = {
     commitEnterMiBPerSecond: number;
     retainedCowWriteMiBPerSecond: number;
     writeFileCalls: number;
+    targetHashCalls: number;
+    targetHashedBytes: number;
+    targetHashMs: number;
     snapshotPreserved: boolean;
     liveMutationPreserved: boolean;
     memory: {
@@ -95,35 +102,35 @@ const memoryDelta = (
     maxRssBytes: after.maxRssBytes - before.maxRssBytes,
 });
 
-const zeroContentHash = (sizeBytes: number) => {
-    const hash = createHash("sha256");
-    const chunk = Buffer.alloc(Math.min(MEBIBYTE, sizeBytes));
-    let remaining = sizeBytes;
-    while (remaining > 0) {
-        const length = Math.min(remaining, chunk.byteLength);
-        hash.update(chunk.subarray(0, length));
-        remaining -= length;
-    }
-    return hash.digest("base64");
-};
-
 const throughputMiBPerSecond = (sizeMiB: number, durationMs: number) =>
     durationMs > 0 ? (sizeMiB * 1000) / durationMs : 0;
 
-const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
+const run = async (
+    sizeMiB: number,
+    mode: BenchmarkMode
+): Promise<CowBenchmarkSample> => {
     assert.ok(
         ALLOWED_SIZES_MIB.has(sizeMiB),
         `COW benchmark size must be one of ${[...ALLOWED_SIZES_MIB].join(", ")} MiB`
     );
+    assert.ok(MODES.has(mode), `Unknown COW benchmark mode: ${mode}`);
     const sizeBytes = sizeMiB * MEBIBYTE;
-    const expectedContentHash = zeroContentHash(sizeBytes);
     const writeEntered = deferred();
     const writeAllowed = deferred();
     const retainedSnapshots: Uint8Array[] = [];
     let snapshotPreserved = false;
     let writeFileCalls = 0;
+    let targetHashCalls = 0;
+    let targetHashedBytes = 0;
+    let targetHashMs = 0;
 
     const target: SharedFsMountBackendTarget = {
+        ...(mode === "capable"
+            ? {
+                  mountWriteSemantics: () =>
+                      "self-hashed-exact-head-noop-v1" as const,
+              }
+            : {}),
         readFile: async () => undefined,
         readVersion: async () => undefined,
         stat: async () => undefined,
@@ -138,6 +145,13 @@ const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
                 source instanceof Uint8Array,
                 "mount commit must provide byte content"
             );
+            const targetHashStartedAt = performance.now();
+            const contentHash = createHash("sha256")
+                .update(source)
+                .digest("base64");
+            targetHashMs += performance.now() - targetHashStartedAt;
+            targetHashCalls++;
+            targetHashedBytes += source.byteLength;
             // Retain the exact source indefinitely, including after this
             // promise resolves, matching SharedFileSystem's chunk-view
             // retention contract.
@@ -147,7 +161,10 @@ const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
             return {
                 id: "benchmark-version",
                 nodeId: "benchmark-node",
-                contentHash: expectedContentHash,
+                contentHash,
+                ...(mode === "capable"
+                    ? { mountWriteOutcome: "created" as const }
+                    : {}),
             };
         },
         mkdir: async () => undefined,
@@ -212,6 +229,8 @@ const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
         const afterRetainedCowWrite = memorySnapshot();
 
         assert.equal(writeFileCalls, 1);
+        assert.equal(targetHashCalls, 1);
+        assert.equal(targetHashedBytes, sizeBytes);
         const retainedSnapshot = retainedSnapshots[0];
         snapshotPreserved =
             retainedSnapshots.length === 1 &&
@@ -224,6 +243,7 @@ const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
         assert.equal(liveMutationPreserved, true);
 
         return {
+            mode,
             sizeMiB,
             sizeBytes,
             commitEnterMs,
@@ -238,6 +258,9 @@ const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
                 retainedCowWriteMs
             ),
             writeFileCalls,
+            targetHashCalls,
+            targetHashedBytes,
+            targetHashMs,
             snapshotPreserved,
             liveMutationPreserved,
             memory: {
@@ -286,7 +309,8 @@ const send = (message: WorkerMessage) =>
 
 const main = async () => {
     const sizeMiB = Number(process.argv[2]);
-    const sample = await run(sizeMiB);
+    const mode = process.argv[3] as BenchmarkMode;
+    const sample = await run(sizeMiB, mode);
     await send({ type: "result", sample });
     process.disconnect();
 };

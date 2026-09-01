@@ -195,10 +195,18 @@ readiness and disables remote chunk fallback; it does not use the
 
 The mount backend's manual copy-on-write benchmark isolates 4, 64, and 256 MiB
 commit buffers behind a gated fake target that retains the immutable commit
-input after resolution. Each size runs in a fresh `--expose-gc` child and
-reports commit time, first post-commit mutation time, and
-RSS/external/ArrayBuffer memory snapshots and deltas. The numbers are
-descriptive only; there are no performance budgets:
+input after resolution. For every size it runs a legacy fallback (mount and
+target each SHA-256 the full input) and the versioned capable path (only the
+target hashes it) in fresh `--expose-gc` children. It reports paired commit
+entry times, the target's measured hash time, first post-commit mutation time,
+and RSS/external/ArrayBuffer memory snapshots and deltas. This deliberately
+uses a new/truncated file and a fake target: it isolates mount commit hashing
+and COW allocation, not writable-open hashing, SharedFileSystem chunk hashing,
+authorization, replication, or storage IO. The numbers are descriptive only;
+there are no performance budgets. Exact unchanged writes still perform one
+full-file hash in either mode (in the mount for fallback, in SharedFileSystem
+for the capable path); the duplicate-pass saving applies to version-creating
+commits:
 
 ```bash
 PEERBIT_SHARED_FS_MOUNT_COW_BENCH=1 \
