@@ -1,8 +1,12 @@
 import {
     SharedFsError,
+    SharedFileSystem,
     SharedFsHandle,
+    SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
     type ResolveNamingAction,
-    type SharedFileSystem,
+    type SharedFsMountNamespaceMutation,
+    type SharedFsMountNamespaceMutationResult,
+    type SharedFsMountNamespaceSemantics,
     type WriteBatchEntry,
     type WriteBatchOptions,
     type WriteFileOptions,
@@ -170,8 +174,11 @@ export class IgnoreAwareFs extends SharedFsHandle {
         return super.rm(path);
     }
 
-    async rename(from: string, to: string) {
-        const rules = this.ignorePolicy.current();
+    private async guardRenamePolicy(
+        rules: CompiledIgnoreRules,
+        from: string,
+        to: string
+    ) {
         const fromPath = normalizeFsPath(from);
         const toPath = normalizeFsPath(to);
         for (const [endpoint, label] of [
@@ -225,7 +232,62 @@ export class IgnoreAwareFs extends SharedFsHandle {
                 }
             }
         }
+        return { fromPath, toPath };
+    }
+
+    async rename(from: string, to: string) {
+        const rules = this.ignorePolicy.current();
+        await this.guardRenamePolicy(rules, from, to);
         return super.rename(from, to);
+    }
+
+    mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
+        // This wrapper's policy-aware guarded method is coherent only when
+        // both its exact methods retain their known implementation and its
+        // delegated program explicitly advertises the exact CAS. A subclass
+        // changing policy behavior must override and re-advertise coherently.
+        const usesExactIgnoreMethods =
+            this.rm === IgnoreAwareFs.prototype.rm &&
+            this.rename === IgnoreAwareFs.prototype.rename &&
+            this.mutateNamespaceForMount ===
+                IgnoreAwareFs.prototype.mutateNamespaceForMount;
+        const usesExactDelegatedMethods =
+            this.program.rm === SharedFileSystem.prototype.rm &&
+            this.program.rename === SharedFileSystem.prototype.rename &&
+            this.program.mutateNamespaceForMount ===
+                SharedFileSystem.prototype.mutateNamespaceForMount &&
+            this.program.mountNamespaceSemantics ===
+                SharedFileSystem.prototype.mountNamespaceSemantics;
+        return usesExactIgnoreMethods &&
+            usesExactDelegatedMethods &&
+            this.program.mountNamespaceSemantics() ===
+                SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
+            ? SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
+            : undefined;
+    }
+
+    async mutateNamespaceForMount(
+        mutation: SharedFsMountNamespaceMutation
+    ): Promise<SharedFsMountNamespaceMutationResult> {
+        // One policy snapshot governs the whole guarded operation, including
+        // the awaited directory-boundary inspection.
+        const rules = this.ignorePolicy.current();
+        if (mutation.type === "remove") {
+            const normalized = normalizeFsPath(mutation.path);
+            const verdict = this.effectiveVerdict(rules, normalized);
+            if (verdict.ignored) {
+                const leaked = await super.stat(normalized);
+                throw new SharedFsError(
+                    leaked ? "EIGNORED" : "ENOENT",
+                    leaked
+                        ? `rm rejected: ${normalized} is artifact-ignored but exists in the shared store (leaked by a peer without the rule) — use the hygiene flow to remediate`
+                        : `Path does not exist: ${normalized}`
+                );
+            }
+        } else {
+            await this.guardRenamePolicy(rules, mutation.from, mutation.to);
+        }
+        return super.mutateNamespaceForMount(mutation);
     }
 
     async writeBatch(entries: WriteBatchEntry[], options?: WriteBatchOptions) {

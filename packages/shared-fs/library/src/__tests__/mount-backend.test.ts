@@ -1272,8 +1272,6 @@ describe("shared fs mount backend", () => {
         await fs.mkdir("/source");
         const statEntered = deferred();
         const statAllowed = deferred();
-        const renameEntered = deferred();
-        const renameAllowed = deferred();
         let gatedStat = true;
         const stat = vi.fn(async (path: string) => {
             if (path === "/destination/racing.txt" && gatedStat) {
@@ -1283,11 +1281,7 @@ describe("shared fs mount backend", () => {
             }
             return fs.stat(path);
         });
-        const rename = vi.fn(async (from: string, to: string) => {
-            renameEntered.resolve();
-            await renameAllowed.promise;
-            return fs.rename(from, to);
-        });
+        const rename = vi.fn((from: string, to: string) => fs.rename(from, to));
         const backend = createSharedFsMountBackend(
             mountTarget(fs, { stat, rename })
         );
@@ -1298,16 +1292,13 @@ describe("shared fs mount backend", () => {
             exclusive: true,
         });
         await statEntered.promise;
-        const renaming = backend.rename("/source", "/destination");
-        await renameEntered.promise;
-
+        await expect(
+            backend.rename("/source", "/destination")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        expect(rename).not.toHaveBeenCalled();
         statAllowed.resolve();
-        try {
-            await expect(opening).rejects.toMatchObject({ code: "EAGAIN" });
-        } finally {
-            renameAllowed.resolve();
-        }
-        await renaming;
+        await expect(opening).rejects.toMatchObject({ code: "ENOENT" });
+        await backend.rename("/source", "/destination");
         expect((await fs.stat("/destination"))?.kind).toBe("directory");
         expect(await fs.stat("/source")).toBeUndefined();
     });
@@ -1368,25 +1359,14 @@ describe("shared fs mount backend", () => {
             exclusive: true,
         });
         await statEntered.promise;
-        const makingDirectory = backend.mkdir("/node");
-        await mkdirEntered.promise;
-
-        statAllowed.resolve();
-        try {
-            await expect(opening).rejects.toMatchObject({ code: "EAGAIN" });
-        } finally {
-            mkdirAllowed.resolve();
-        }
-        await makingDirectory;
-        expect((await fs.stat("/node"))?.kind).toBe("directory");
-
-        await backend.rmdir("/node");
-        const fresh = await backend.open("/node", {
-            write: true,
-            create: true,
-            exclusive: true,
+        await expect(backend.mkdir("/node")).rejects.toMatchObject({
+            code: "EAGAIN",
         });
+        expect(mkdir).not.toHaveBeenCalled();
+        statAllowed.resolve();
+        const fresh = await opening;
         await backend.release(fresh);
+        expect((await fs.stat("/node"))?.kind).toBe("file");
     });
 
     it("rejects rmdir while a descendant create intent is pending", async () => {
@@ -1417,7 +1397,6 @@ describe("shared fs mount backend", () => {
         await fs.writeFile("/removed.txt", "winner");
         const statEntered = deferred();
         const statAllowed = deferred();
-        const rmFinished = deferred();
         const rmAllowed = deferred();
         let gatedStat = true;
         const stat = vi.fn(async (path: string) => {
@@ -1430,7 +1409,6 @@ describe("shared fs mount backend", () => {
         });
         const rm = vi.fn(async (path: string) => {
             await fs.rm(path);
-            rmFinished.resolve();
             await rmAllowed.promise;
         });
         const backend = createSharedFsMountBackend(
@@ -1443,24 +1421,19 @@ describe("shared fs mount backend", () => {
             exclusive: true,
         });
         await statEntered.promise;
-        const unlinking = backend.unlink("/removed.txt");
-        await rmFinished.promise;
-
+        await expect(backend.unlink("/removed.txt")).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect(rm).not.toHaveBeenCalled();
         statAllowed.resolve();
-        try {
-            await expect(opening).rejects.toMatchObject({ code: "EAGAIN" });
-        } finally {
-            rmAllowed.resolve();
-        }
-        await unlinking;
-        expect(await fs.stat("/removed.txt")).toBeUndefined();
+        await expect(opening).rejects.toMatchObject({ code: "EEXIST" });
+        expect(await fs.stat("/removed.txt")).toBeDefined();
     });
 
     it("gates a descendant create lookup while rmdir removes its namespace", async () => {
         await fs.mkdir("/tree");
         const statEntered = deferred();
         const statAllowed = deferred();
-        const rmFinished = deferred();
         const rmAllowed = deferred();
         let gatedStat = true;
         const stat = vi.fn(async (path: string) => {
@@ -1473,7 +1446,6 @@ describe("shared fs mount backend", () => {
         });
         const rm = vi.fn(async (path: string) => {
             await fs.rm(path);
-            rmFinished.resolve();
             await rmAllowed.promise;
         });
         const backend = createSharedFsMountBackend(
@@ -1486,25 +1458,17 @@ describe("shared fs mount backend", () => {
             exclusive: true,
         });
         await statEntered.promise;
-        const removing = backend.rmdir("/tree");
-        await rmFinished.promise;
-
-        statAllowed.resolve();
-        try {
-            await expect(opening).rejects.toMatchObject({ code: "EAGAIN" });
-        } finally {
-            rmAllowed.resolve();
-        }
-        await removing;
-        expect(await fs.stat("/tree")).toBeUndefined();
-
-        await backend.mkdir("/tree");
-        const fresh = await backend.open("/tree/racing.txt", {
-            write: true,
-            create: true,
-            exclusive: true,
+        await expect(backend.rmdir("/tree")).rejects.toMatchObject({
+            code: "EAGAIN",
         });
+        expect(rm).not.toHaveBeenCalled();
+        statAllowed.resolve();
+        const fresh = await opening;
         await backend.release(fresh);
+        rmAllowed.resolve();
+        await backend.unlink("/tree/racing.txt");
+        await backend.rmdir("/tree");
+        expect(await fs.stat("/tree")).toBeUndefined();
     });
 
     it("gates a create lookup that races an in-flight ancestor rename", async () => {
@@ -1535,20 +1499,20 @@ describe("shared fs mount backend", () => {
             exclusive: true,
         });
         await statEntered.promise;
-        const renaming = backend.rename("/source", "/moved");
-        await renameEntered.promise;
-
+        await expect(backend.rename("/source", "/moved")).rejects.toMatchObject(
+            { code: "EAGAIN" }
+        );
+        expect(rename).not.toHaveBeenCalled();
         statAllowed.resolve();
-        try {
-            await expect(opening).rejects.toMatchObject({ code: "EAGAIN" });
-        } finally {
-            renameAllowed.resolve();
-        }
-        await renaming;
+        const raced = await opening;
+        await backend.release(raced);
+        renameAllowed.resolve();
+        await backend.rename("/source", "/moved");
 
         expect(rename).toHaveBeenCalledOnce();
         expect(await fs.stat("/source")).toBeUndefined();
         expect((await fs.stat("/moved"))?.kind).toBe("directory");
+        expect(await fs.stat("/moved/racing.txt")).toBeDefined();
 
         // Both the rename gate and the failed open's create intent must be
         // gone once the operations settle.
@@ -1558,13 +1522,6 @@ describe("shared fs mount backend", () => {
             exclusive: true,
         });
         await backend.release(moved);
-        await fs.mkdir("/source");
-        const oldPath = await backend.open("/source/racing.txt", {
-            write: true,
-            create: true,
-            exclusive: true,
-        });
-        await backend.release(oldPath);
     });
 
     it("rejects a second ordinary creator while the first commit is in flight", async () => {

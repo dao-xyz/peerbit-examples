@@ -1,14 +1,19 @@
 import { sha256Base64Sync } from "@peerbit/crypto";
 import {
     SHARED_FS_MOUNT_READ_SEMANTICS,
+    SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
     SHARED_FS_MOUNT_WRITE_SEMANTICS,
     SharedFsCreateParentMismatchError,
     SharedFsError,
+    SharedFsExpectedNamespaceMismatchError,
     SharedFsExpectedNodeMismatchError,
     type SharedFsConflict,
     type SharedFsEntryInfo,
     type SharedFsMountReadSemantics,
     type SharedFsMountReadSnapshot,
+    type SharedFsMountNamespaceMutation,
+    type SharedFsMountNamespaceMutationResult,
+    type SharedFsMountNamespaceSemantics,
     type SharedFsMountWriteOutcome,
     type SharedFsMountWriteSemantics,
     type SharedFsVersionInfo,
@@ -16,6 +21,7 @@ import {
 } from "./index.js";
 import {
     CONFLICTS_DIR,
+    ROOT_NODE_ID,
     basename,
     decodeConflictPathName,
     dirname,
@@ -26,6 +32,11 @@ import {
 } from "./path.js";
 
 export type SharedFsMountBackendTarget = {
+    /** Exact node-bound remove/rename capability used by native mounts. */
+    mountNamespaceSemantics?(): SharedFsMountNamespaceSemantics | undefined;
+    mutateNamespaceForMount?(
+        mutation: SharedFsMountNamespaceMutation
+    ): Promise<SharedFsMountNamespaceMutationResult>;
     /**
      * Explicit, versioned exact-read handshake. Implementations advertising
      * this value must return the exact requested version from
@@ -204,12 +215,14 @@ type OpenHandle = {
     createIntent?: symbol;
     /** Confirmed absent-path CAS loss; this handle can never publish again. */
     terminal?: SharedFsBackendError;
+    /** Namespace no longer names this opened node; buffered fd state is local-only. */
+    namespaceDetached?: boolean;
     /** Whether a failed release remains retryable or must close this handle. */
     releaseFailure: "retain" | "discard";
     /**
-     * Node observed by a commit-capable open. `null` means the path was
-     * absent. Pure reads leave this undefined; read-only O_CREAT handles use
-     * null because their empty-file creation commits at the close fence.
+     * Node observed by an ordinary open. `null` means a commit-capable open
+     * observed the path absent. Retaining this for pure reads lets directory
+     * rename bind every active descendant instead of silently omitting it.
      */
     openedNodeId?: string | null;
     /** Exact non-root parent directory observed for an absent nested create. */
@@ -457,6 +470,49 @@ const findEntry = async (
     return entries.find((entry) => entry.name === basename(normalized));
 };
 
+const mapWithBoundedConcurrency = async <T, R>(
+    values: T[],
+    limit: number,
+    visit: (value: T) => Promise<R>
+): Promise<R[]> => {
+    const results = new Array<R>(values.length);
+    let cursor = 0;
+    let failed = false;
+    let failure: unknown;
+    const workers = Array.from(
+        { length: Math.min(limit, values.length) },
+        async () => {
+            while (!failed) {
+                const index = cursor++;
+                if (index >= values.length) return;
+                try {
+                    results[index] = await visit(values[index]);
+                } catch (error) {
+                    if (!failed) {
+                        failed = true;
+                        failure = error;
+                    }
+                    return;
+                }
+            }
+        }
+    );
+    // A failed worker must not release the surrounding namespace transition
+    // while sibling lookups are still active. Drain them all; the shared
+    // failure flag prevents any worker from claiming another path afterward.
+    await Promise.allSettled(workers);
+    if (failed) {
+        throw (
+            failure ??
+            new SharedFsBackendError(
+                "EIO",
+                "Namespace binding revalidation failed without an error"
+            )
+        );
+    }
+    return results;
+};
+
 const ensureMutableCapacity = (handle: OpenHandle, capacity: number) => {
     const borrowedSnapshot = handle.borrowedCommitSnapshot;
     const borrowed = borrowedSnapshot?.buffer === handle.buffer;
@@ -559,11 +615,61 @@ export const createSharedFsMountBackend = (
     const handles = new Map<number, OpenHandle>();
     const createIntents = new Map<string, Map<symbol, boolean>>();
     const namespaceTransitions = new Map<symbol, readonly string[]>();
+    const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
+    const delegatesNamespaceMutation =
+        target.mountNamespaceSemantics?.() ===
+        SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
     const delegatesWriteHashing =
         target.mountWriteSemantics?.() === SHARED_FS_MOUNT_WRITE_SEMANTICS;
+
+    const requireRemoveMutationResult = (
+        value: unknown,
+        expectedNodeId: string
+    ) => {
+        const result = value as Partial<SharedFsMountNamespaceMutationResult>;
+        if (
+            !result ||
+            result.type !== "removed" ||
+            result.removedNodeId !== expectedNodeId ||
+            typeof result.removeEventId !== "string" ||
+            result.removeEventId.length === 0
+        ) {
+            throw new SharedFsBackendError(
+                "EIO",
+                "Guarded namespace target returned a malformed remove result"
+            );
+        }
+    };
+
+    const requireRenameMutationResult = (
+        value: unknown,
+        sourceNodeId: string,
+        destinationNodeId: string | null,
+        parentNodeId: string
+    ) => {
+        const result = value as Partial<SharedFsMountNamespaceMutationResult>;
+        if (
+            !result ||
+            result.type !== "renamed" ||
+            result.sourceNodeId !== sourceNodeId ||
+            result.replacedNodeId !== destinationNodeId ||
+            result.destinationParentNodeId !== parentNodeId ||
+            typeof result.moveEventId !== "string" ||
+            result.moveEventId.length === 0 ||
+            (destinationNodeId === null
+                ? result.replacementDeleteEventId !== null
+                : typeof result.replacementDeleteEventId !== "string" ||
+                  result.replacementDeleteEventId.length === 0)
+        ) {
+            throw new SharedFsBackendError(
+                "EIO",
+                "Guarded namespace target returned a malformed rename result"
+            );
+        }
+    };
 
     const assertWriteReady = (operation: string) => {
         const readiness = target.bootstrapStatus?.();
@@ -594,6 +700,7 @@ export const createSharedFsMountBackend = (
                 handle.path === path &&
                 !handle.readOnly &&
                 !handle.terminal &&
+                !handle.namespaceDetached &&
                 !handle.closing &&
                 handle.dirty
             ) {
@@ -603,9 +710,205 @@ export const createSharedFsMountBackend = (
         return undefined;
     };
 
+    const detachNamespaceHandle = (handle: OpenHandle) => {
+        handle.namespaceDetached = true;
+        clearHandleCreateIntent(handle);
+    };
+
+    const namespaceHandles = (path: string, descendants: boolean) =>
+        [...handles.values()].filter(
+            (handle) =>
+                !handle.terminal &&
+                !handle.namespaceDetached &&
+                (handle.path === path ||
+                    (descendants && handle.path.startsWith(path + "/")))
+        );
+
+    const reconcileObservedNamespaceScope = (
+        rootPath: string,
+        observed: SharedFsEntryInfo | undefined,
+        affected: OpenHandle[]
+    ): OpenHandle | undefined => {
+        let firstMismatch: OpenHandle | undefined;
+        for (const handle of affected) {
+            const expectedNodeId =
+                handle.path === rootPath
+                    ? observed?.nodeId
+                    : observed?.kind === "directory"
+                      ? handle.openedNodeId
+                      : undefined;
+            if (
+                typeof handle.openedNodeId !== "string" ||
+                handle.openedNodeId !== expectedNodeId
+            ) {
+                detachNamespaceHandle(handle);
+                if (handle.path === rootPath) {
+                    firstMismatch ??= handle;
+                }
+            }
+        }
+        return firstMismatch;
+    };
+
+    const requireHandleNodeBindings = (
+        affected: OpenHandle[],
+        expectedNodeAtPath: (handle: OpenHandle) => string | undefined
+    ): OpenHandle | undefined => {
+        let firstMismatch: OpenHandle | undefined;
+        for (const handle of affected) {
+            const expected = expectedNodeAtPath(handle);
+            if (
+                typeof handle.openedNodeId !== "string" ||
+                handle.openedNodeId !== expected
+            ) {
+                // This fd is already stale relative to the visible namespace.
+                // Quarantine it before failing so a later flush cannot repair
+                // the name with stale bytes.
+                detachNamespaceHandle(handle);
+                firstMismatch ??= handle;
+            }
+        }
+        return firstMismatch;
+    };
+
+    const throwHandleBindingMismatch = (
+        operation: string,
+        mismatch: OpenHandle | undefined
+    ) => {
+        if (!mismatch) return;
+        throw new SharedFsBackendError(
+            "EAGAIN",
+            `${operation} cannot bind active handle ${mismatch.path} to the visible node`
+        );
+    };
+
+    /**
+     * A typed CAS mismatch proves that the guarded append did not happen in
+     * the built-in implementation, but a custom capable delegate may have
+     * changed the namespace before surfacing that error. Re-read every
+     * affected path while the backend transition is still held and detach
+     * only descriptors whose opened node is no longer the visible binding.
+     * If the recheck itself is indeterminate, fail closed for all candidates.
+     * This helper only detaches; it can never reattach a quarantined handle.
+     */
+    const revalidateHandlesAfterNamespaceMismatch = async (
+        affected: OpenHandle[]
+    ) => {
+        const candidates = [...new Set(affected)].filter(
+            (handle) => !handle.namespaceDetached
+        );
+        if (candidates.length === 0) return;
+        const bindings = new Map<string, SharedFsEntryInfo | undefined>();
+        try {
+            const paths = [...new Set(candidates.map((handle) => handle.path))];
+            const resolved = await mapWithBoundedConcurrency(paths, 4, (path) =>
+                findEntry(target, path)
+            );
+            paths.forEach((path, index) => bindings.set(path, resolved[index]));
+        } catch {
+            for (const handle of candidates) detachNamespaceHandle(handle);
+            return;
+        }
+        for (const handle of candidates) {
+            if (
+                typeof handle.openedNodeId !== "string" ||
+                bindings.get(handle.path)?.nodeId !== handle.openedNodeId
+            ) {
+                detachNamespaceHandle(handle);
+            }
+        }
+    };
+
+    const revalidateOpenDescendantBindings = async (
+        rootPath: string,
+        affected: OpenHandle[]
+    ): Promise<Map<string, string>> => {
+        const byPath = new Map<string, OpenHandle[]>();
+        for (const handle of affected) {
+            if (handle.namespaceDetached || handle.path === rootPath) continue;
+            const bucket = byPath.get(handle.path) ?? [];
+            bucket.push(handle);
+            byPath.set(handle.path, bucket);
+        }
+        const paths = [...byPath.keys()];
+        let visible: (SharedFsEntryInfo | undefined)[];
+        try {
+            visible = await mapWithBoundedConcurrency(paths, 4, (path) =>
+                findEntry(target, path)
+            );
+        } catch {
+            for (const bucket of byPath.values()) {
+                for (const handle of bucket) detachNamespaceHandle(handle);
+            }
+            throw new SharedFsBackendError(
+                "EAGAIN",
+                "Cannot revalidate open descendants for directory rename"
+            );
+        }
+        const bindings = new Map<string, string>();
+        paths.forEach((path, index) => {
+            const nodeId = visible[index]?.nodeId;
+            for (const handle of byPath.get(path)!) {
+                if (
+                    typeof handle.openedNodeId !== "string" ||
+                    handle.openedNodeId !== nodeId
+                ) {
+                    detachNamespaceHandle(handle);
+                }
+            }
+            if (nodeId) bindings.set(path, nodeId);
+        });
+        return bindings;
+    };
+
+    const handleTypedRenameMismatch = async (
+        error: SharedFsExpectedNamespaceMismatchError,
+        sourceHandles: OpenHandle[],
+        destinationHandles: OpenHandle[]
+    ) => {
+        if (error.actualNodeId !== error.expectedNodeId) {
+            const immediatelyAffected =
+                error.role === "source"
+                    ? sourceHandles
+                    : error.role === "open-descendant"
+                      ? sourceHandles.filter(
+                            (handle) => handle.path === error.path
+                        )
+                      : destinationHandles;
+            for (const handle of immediatelyAffected) {
+                detachNamespaceHandle(handle);
+            }
+        }
+        await revalidateHandlesAfterNamespaceMismatch([
+            ...sourceHandles,
+            ...destinationHandles,
+        ]);
+    };
+
     const isAtOrBelow = (path: string, ancestor: string) =>
         path === ancestor ||
         path.startsWith(ancestor === "/" ? "/" : ancestor + "/");
+
+    const pathsOverlap = (left: string, right: string) =>
+        isAtOrBelow(left, right) || isAtOrBelow(right, left);
+
+    const reserveOpenAdmission = (path: string) => {
+        for (const transitionPaths of namespaceTransitions.values()) {
+            if (
+                transitionPaths.some((transitionPath) =>
+                    pathsOverlap(path, transitionPath)
+                )
+            ) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `Open overlaps an in-flight namespace transition; retry: ${path}`
+                );
+            }
+        }
+        const token = Symbol(path);
+        openAdmissions.set(token, path);
+        return token;
+    };
 
     const reserveCreateIntent = (path: string, exclusive: boolean) => {
         for (const transitionPaths of namespaceTransitions.values()) {
@@ -709,6 +1012,26 @@ export const createSharedFsMountBackend = (
                 }
             }
         }
+        for (const admittedPath of openAdmissions.values()) {
+            if (uniquePaths.some((path) => pathsOverlap(path, admittedPath))) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `${operation} overlaps an in-flight open; retry: ${admittedPath}`
+                );
+            }
+        }
+        for (const handle of handles.values()) {
+            if (
+                !handle.namespaceDetached &&
+                handle.committing &&
+                uniquePaths.some((path) => pathsOverlap(path, handle.path))
+            ) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `${operation} overlaps an in-flight file commit; retry: ${handle.path}`
+                );
+            }
+        }
         // No await may appear between the preflight above and this token. An
         // in-flight absent-path lookup must either reserve first (and make the
         // preflight fail) or observe this transition and retry.
@@ -768,6 +1091,22 @@ export const createSharedFsMountBackend = (
     };
 
     const commitNow = async (handle: OpenHandle) => {
+        if (handle.namespaceDetached) {
+            // POSIX-style unlinked/replaced descriptors retain their private
+            // buffer but no longer have a pathname to publish through.
+            handle.dirty = false;
+            return;
+        }
+        for (const transitionPaths of namespaceTransitions.values()) {
+            if (
+                transitionPaths.some((path) => pathsOverlap(path, handle.path))
+            ) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `Commit overlaps an in-flight namespace transition; retry: ${handle.path}`
+                );
+            }
+        }
         if (!handle.dirty) {
             return;
         }
@@ -1360,7 +1699,7 @@ export const createSharedFsMountBackend = (
                 createIntent,
                 releaseFailure: parsedFlags.releaseFailure ?? "retain",
                 closing: false,
-                openedNodeId: mayCommit ? (entry?.nodeId ?? null) : undefined,
+                openedNodeId: entry?.nodeId ?? (mayCommit ? null : undefined),
                 openedParentNodeId:
                     mayCommit && !entry ? openedParentNodeId : undefined,
                 // Editing the deterministic visible version is not an
@@ -1390,6 +1729,20 @@ export const createSharedFsMountBackend = (
                 releaseCreateIntent(normalized, createIntent);
             }
             throw error;
+        }
+    };
+
+    const openPathAdmitted = async (
+        normalized: string,
+        parsedFlags: ReturnType<typeof parseFlags>
+    ) => {
+        // Synchronous admission precedes openPath's first namespace await.
+        // Registration (or failure) releases it.
+        const admission = reserveOpenAdmission(normalized);
+        try {
+            return await openPath(normalized, parsedFlags);
+        } finally {
+            openAdmissions.delete(admission);
         }
     };
 
@@ -1474,6 +1827,7 @@ export const createSharedFsMountBackend = (
                     if (
                         !handle.readOnly &&
                         !handle.terminal &&
+                        !handle.namespaceDetached &&
                         handle.dirty &&
                         dirname(handle.path) === normalized
                     ) {
@@ -1493,7 +1847,7 @@ export const createSharedFsMountBackend = (
 
         async open(path: string, flags?: SharedFsOpenFlags) {
             return wrap(() =>
-                openPath(normalizeFsPath(path), parseFlags(flags))
+                openPathAdmitted(normalizeFsPath(path), parseFlags(flags))
             );
         },
 
@@ -1583,7 +1937,7 @@ export const createSharedFsMountBackend = (
                     resizeHandle(pending, size);
                     return;
                 }
-                const handle = await openPath(normalized, {
+                const handle = await openPathAdmitted(normalized, {
                     read: true,
                     write: true,
                     create: false,
@@ -1672,13 +2026,37 @@ export const createSharedFsMountBackend = (
                     `mkdir ${normalized}`,
                     [normalized],
                     async () => {
-                        if (await findEntry(target, normalized)) {
+                        const staleHandles = namespaceHandles(
+                            normalized,
+                            false
+                        );
+                        const existing = await findEntry(target, normalized);
+                        reconcileObservedNamespaceScope(
+                            normalized,
+                            existing,
+                            staleHandles
+                        );
+                        if (existing) {
                             throw new SharedFsBackendError(
                                 "EEXIST",
                                 `Path already exists: ${normalized}`
                             );
                         }
-                        await target.mkdir(normalized);
+                        try {
+                            await target.mkdir(normalized);
+                        } catch (error) {
+                            // mkdir has no structured commit result. Once the
+                            // delegate was invoked, a rejection is
+                            // indeterminate and old path-bound descriptors
+                            // must not shadow a possibly durable directory.
+                            for (const handle of staleHandles) {
+                                detachNamespaceHandle(handle);
+                            }
+                            throw error;
+                        }
+                        for (const handle of staleHandles) {
+                            detachNamespaceHandle(handle);
+                        }
                     }
                 );
             });
@@ -1698,7 +2076,13 @@ export const createSharedFsMountBackend = (
                     `rmdir ${normalized}`,
                     [normalized],
                     async () => {
+                        const affected = namespaceHandles(normalized, true);
                         const entry = await findEntry(target, normalized);
+                        reconcileObservedNamespaceScope(
+                            normalized,
+                            entry,
+                            affected
+                        );
                         if (!entry) {
                             throw notFound(normalized);
                         }
@@ -1708,7 +2092,43 @@ export const createSharedFsMountBackend = (
                                 `Path is not a directory: ${normalized}`
                             );
                         }
-                        await target.rm(normalized);
+                        try {
+                            if (delegatesNamespaceMutation) {
+                                if (!target.mutateNamespaceForMount) {
+                                    throw new SharedFsBackendError(
+                                        "EIO",
+                                        "Target advertises guarded namespace semantics without an implementation"
+                                    );
+                                }
+                                const result =
+                                    await target.mutateNamespaceForMount({
+                                        type: "remove",
+                                        path: normalized,
+                                        expectedNodeId: entry.nodeId,
+                                        expectedKind: "directory",
+                                    });
+                                requireRemoveMutationResult(
+                                    result,
+                                    entry.nodeId
+                                );
+                            } else {
+                                await target.rm(normalized);
+                            }
+                        } catch (error) {
+                            // Even an untyped error can be deterministic
+                            // (notably ENOTEMPTY). Re-read every descriptor's
+                            // exact binding: preserved bindings stay usable,
+                            // post-commit disappearance/replacement detaches,
+                            // and an indeterminate lookup fails closed inside
+                            // the helper.
+                            await revalidateHandlesAfterNamespaceMismatch(
+                                affected
+                            );
+                            throw error;
+                        }
+                        for (const handle of affected) {
+                            detachNamespaceHandle(handle);
+                        }
                     }
                 );
             });
@@ -1725,11 +2145,177 @@ export const createSharedFsMountBackend = (
                         "Conflict metadata is read-only"
                     );
                 }
+                if (fromPath === toPath) {
+                    return;
+                }
                 return withNamespaceTransition(
                     `rename ${fromPath} to ${toPath}`,
                     [fromPath, toPath],
                     async () => {
-                        await target.rename(fromPath, toPath);
+                        if (delegatesNamespaceMutation) {
+                            if (!target.mutateNamespaceForMount) {
+                                throw new SharedFsBackendError(
+                                    "EIO",
+                                    "Target advertises guarded namespace semantics without an implementation"
+                                );
+                            }
+                            const sourceScopeHandles = namespaceHandles(
+                                fromPath,
+                                true
+                            );
+                            const source = await findEntry(target, fromPath);
+                            const sourceObservedMismatch =
+                                reconcileObservedNamespaceScope(
+                                    fromPath,
+                                    source,
+                                    sourceScopeHandles
+                                );
+                            if (!source) throw notFound(fromPath);
+                            const destinationScopeHandles = namespaceHandles(
+                                toPath,
+                                true
+                            );
+                            const destination = await findEntry(target, toPath);
+                            const destinationObservedMismatch =
+                                reconcileObservedNamespaceScope(
+                                    toPath,
+                                    destination,
+                                    destinationScopeHandles
+                                );
+                            const sourceHandles = sourceScopeHandles.filter(
+                                (handle) =>
+                                    !handle.namespaceDetached &&
+                                    (handle.path === fromPath ||
+                                        source.kind === "directory")
+                            );
+                            const sourceRootHandles = sourceHandles.filter(
+                                (handle) => handle.path === fromPath
+                            );
+                            const sourceDescendantHandles =
+                                sourceHandles.filter(
+                                    (handle) => handle.path !== fromPath
+                                );
+                            const byPath =
+                                source.kind === "directory"
+                                    ? await revalidateOpenDescendantBindings(
+                                          fromPath,
+                                          sourceDescendantHandles
+                                      )
+                                    : new Map<string, string>();
+                            // Destination descendants never participate in
+                            // the guarded move binding, but stale descriptors
+                            // must still be reconciled before any early
+                            // preflight error (including a stale root EAGAIN).
+                            if (destination?.kind === "directory") {
+                                await revalidateOpenDescendantBindings(
+                                    toPath,
+                                    destinationScopeHandles
+                                );
+                            }
+                            const destinationHandles =
+                                destinationScopeHandles.filter(
+                                    (handle) => !handle.namespaceDetached
+                                );
+                            const destinationRootHandles =
+                                destinationHandles.filter(
+                                    (handle) => handle.path === toPath
+                                );
+                            const sourceBindingMismatch =
+                                sourceObservedMismatch ??
+                                requireHandleNodeBindings(
+                                    sourceRootHandles,
+                                    () => source.nodeId
+                                );
+                            const destinationBindingMismatch =
+                                destinationObservedMismatch ??
+                                requireHandleNodeBindings(
+                                    destinationRootHandles,
+                                    () => destination?.nodeId
+                                );
+                            throwHandleBindingMismatch(
+                                `rename ${fromPath} to ${toPath}`,
+                                sourceBindingMismatch ??
+                                    destinationBindingMismatch
+                            );
+                            // Validate every active source descendant before
+                            // consulting the destination parent. A replaced
+                            // source directory can otherwise leave stale
+                            // descendant descriptors attached when the rename
+                            // exits early for an invalid parent.
+                            const parentPath = dirname(toPath);
+                            const parent =
+                                parentPath === "/"
+                                    ? undefined
+                                    : await findEntry(target, parentPath);
+                            if (
+                                parentPath !== "/" &&
+                                (!parent || parent.kind !== "directory")
+                            ) {
+                                throw new SharedFsBackendError(
+                                    parent ? "ENOTDIR" : "ENOENT",
+                                    `Parent directory does not exist: ${parentPath}`
+                                );
+                            }
+                            const parentNodeId = parent?.nodeId ?? ROOT_NODE_ID;
+                            try {
+                                const result =
+                                    await target.mutateNamespaceForMount({
+                                        type: "rename",
+                                        from: fromPath,
+                                        to: toPath,
+                                        expectedSourceNodeId: source.nodeId,
+                                        expectedDestinationNodeId:
+                                            destination?.nodeId ?? null,
+                                        expectedDestinationParentNodeId:
+                                            parentNodeId,
+                                        expectedOpenDescendants: [
+                                            ...byPath,
+                                        ].map(([path, nodeId]) => ({
+                                            path,
+                                            nodeId,
+                                        })),
+                                    });
+                                requireRenameMutationResult(
+                                    result,
+                                    source.nodeId,
+                                    destination?.nodeId ?? null,
+                                    parentNodeId
+                                );
+                            } catch (error) {
+                                if (
+                                    error instanceof
+                                    SharedFsExpectedNamespaceMismatchError
+                                ) {
+                                    await handleTypedRenameMismatch(
+                                        error,
+                                        sourceHandles,
+                                        destinationHandles
+                                    );
+                                } else {
+                                    await revalidateHandlesAfterNamespaceMismatch(
+                                        [
+                                            ...sourceHandles,
+                                            ...destinationHandles,
+                                        ]
+                                    );
+                                }
+                                throw error;
+                            }
+                            for (const handle of destinationHandles) {
+                                detachNamespaceHandle(handle);
+                            }
+                            for (const handle of sourceHandles) {
+                                if (handle.namespaceDetached) continue;
+                                handle.path =
+                                    handle.path === fromPath
+                                        ? toPath
+                                        : toPath +
+                                          handle.path.slice(fromPath.length);
+                            }
+                            return;
+                        } else {
+                            await target.rename(fromPath, toPath);
+                        }
                         for (const handle of handles.values()) {
                             if (handle.path === fromPath) {
                                 handle.path = toPath;
@@ -1757,7 +2343,13 @@ export const createSharedFsMountBackend = (
                     `unlink ${normalized}`,
                     [normalized],
                     async () => {
+                        const affected = namespaceHandles(normalized, false);
                         const entry = await findEntry(target, normalized);
+                        reconcileObservedNamespaceScope(
+                            normalized,
+                            entry,
+                            affected
+                        );
                         if (!entry) {
                             throw notFound(normalized);
                         }
@@ -1767,7 +2359,57 @@ export const createSharedFsMountBackend = (
                                 `Path is a directory: ${normalized}`
                             );
                         }
-                        await target.rm(normalized);
+                        if (delegatesNamespaceMutation) {
+                            if (!target.mutateNamespaceForMount) {
+                                throw new SharedFsBackendError(
+                                    "EIO",
+                                    "Target advertises guarded namespace semantics without an implementation"
+                                );
+                            }
+                            throwHandleBindingMismatch(
+                                `unlink ${normalized}`,
+                                requireHandleNodeBindings(
+                                    affected,
+                                    () => entry.nodeId
+                                )
+                            );
+                            try {
+                                const result =
+                                    await target.mutateNamespaceForMount({
+                                        type: "remove",
+                                        path: normalized,
+                                        expectedNodeId: entry.nodeId,
+                                        expectedKind: "file",
+                                    });
+                                requireRemoveMutationResult(
+                                    result,
+                                    entry.nodeId
+                                );
+                            } catch (error) {
+                                if (
+                                    error instanceof
+                                    SharedFsExpectedNamespaceMismatchError
+                                ) {
+                                    if (
+                                        error.actualNodeId !==
+                                        error.expectedNodeId
+                                    ) {
+                                        for (const handle of affected) {
+                                            detachNamespaceHandle(handle);
+                                        }
+                                    }
+                                }
+                                await revalidateHandlesAfterNamespaceMismatch(
+                                    affected
+                                );
+                                throw error;
+                            }
+                            for (const handle of affected) {
+                                detachNamespaceHandle(handle);
+                            }
+                        } else {
+                            await target.rm(normalized);
+                        }
                     }
                 );
             });

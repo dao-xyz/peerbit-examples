@@ -39,6 +39,42 @@ races, duplicate-name creates, and unreachable nodes are surfaced through
 (`keep` / `restore` / `delete` / `move`) — a delete that raced a concurrent
 edit is recoverable, not lost.
 
+## Node-guarded mount namespace mutations
+
+Native mounts negotiate
+`SHARED_FS_MOUNT_NAMESPACE_SEMANTICS` (`"node-guarded-namespace-v1"`) before
+using `mutateNamespaceForMount()`. The additive API accepts either a `remove`
+bound to an exact path, node id, and kind, or a `rename` bound to the exact
+source node, destination node (or absence), destination-parent node, and every
+active open descendant supplied by the mount. It returns the exact removed
+node/event ids or the renamed source, replaced node, parent, move-event, and
+replacement-delete-event ids. A changed binding or naming-head set throws
+`SharedFsExpectedNamespaceMismatchError` (`EAGAIN`) with the operation, path
+role, expected/actual node ids, and `initial` or `before-append` checkpoint.
+
+This capability is a compare-and-set fence over this replica's visible CRDT
+state, not a linearizable distributed transaction or a global no-resurrection
+proof. A concurrent delete/rename not yet visible locally may still conflict
+after the guarded append; the existing naming conflict rules, including the
+non-delete preference, are deliberately unchanged. Rename-over-file emits the
+replacement tombstone and source move together with `putMany`, but remote
+replicas still ingest immutable events incrementally. Wrappers must explicitly
+preserve policy and re-advertise the exact capability; ordinary `rm()` and
+`rename()` retain their existing local-first behavior.
+
+Within one program instance, a guarded mutation fences local ordinary naming
+appends from validation through publication. Overlapping `mkdir`, `rm`,
+`rename`, file creation, naming-producing `writeBatch`, and conflict-resolution
+plans fail retryably with `EAGAIN`; an epoch check also rejects an ordinary plan
+that observed namespace state before the guarded fence and tries to publish
+after it. Already-admitted naming appends drain before the guarded mutation
+reads state, while background safety repair waits for the fence rather than
+dropping its work. Close cancels pending repair timers and joins or explicitly
+drains already accepted resurrection work before closing storage. This fence
+cannot stop a remote peer's event from arriving; such arrivals are revalidated
+when visible before append, while events not yet visible remain subject to the
+CRDT limitation above.
+
 Metadata operations (`stat`, `list`, `readFile`, path resolution) are served by
 indexed queries against the local document index — cost scales with the result,
 not with the total store size, and file content chunks are only loaded by

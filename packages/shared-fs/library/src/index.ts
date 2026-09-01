@@ -121,11 +121,46 @@ export const SHARED_FS_MOUNT_WRITE_SEMANTICS =
     "self-hashed-exact-head-noop-v1" as const;
 export const SHARED_FS_MOUNT_READ_SEMANTICS =
     "verified-exact-version-snapshot-v1" as const;
+export const SHARED_FS_MOUNT_NAMESPACE_SEMANTICS =
+    "node-guarded-namespace-v1" as const;
 
 export type SharedFsMountWriteSemantics =
     typeof SHARED_FS_MOUNT_WRITE_SEMANTICS;
 export type SharedFsMountWriteOutcome = "unchanged" | "created";
 export type SharedFsMountReadSemantics = typeof SHARED_FS_MOUNT_READ_SEMANTICS;
+export type SharedFsMountNamespaceSemantics =
+    typeof SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
+export type SharedFsMountOpenDescendant = { path: string; nodeId: string };
+export type SharedFsMountNamespaceMutation =
+    | {
+          type: "remove";
+          path: string;
+          expectedNodeId: string;
+          expectedKind: "file" | "directory";
+      }
+    | {
+          type: "rename";
+          from: string;
+          to: string;
+          expectedSourceNodeId: string;
+          expectedDestinationNodeId: string | null;
+          expectedDestinationParentNodeId: string;
+          expectedOpenDescendants?: SharedFsMountOpenDescendant[];
+      };
+export type SharedFsMountNamespaceMutationResult =
+    | {
+          type: "removed";
+          removedNodeId: string;
+          removeEventId: string;
+      }
+    | {
+          type: "renamed";
+          sourceNodeId: string;
+          replacedNodeId: string | null;
+          destinationParentNodeId: string;
+          moveEventId: string;
+          replacementDeleteEventId: string | null;
+      };
 export type SharedFsMountReadSnapshot = {
     /** Fresh, mutable bytes whose whole-file hash was verified by the target. */
     bytes: Uint8Array;
@@ -983,6 +1018,30 @@ export class SharedFsExpectedNodeMismatchError extends SharedFsError {
     }
 }
 
+export type SharedFsNamespaceMismatchOperation = "remove" | "rename";
+export type SharedFsNamespaceMismatchRole =
+    | "source"
+    | "destination"
+    | "destination-parent"
+    | "open-descendant";
+export type SharedFsNamespaceMismatchCheckpoint = "initial" | "before-append";
+
+/** A guarded mount namespace compare-and-set observed a different binding. */
+export class SharedFsExpectedNamespaceMismatchError extends SharedFsError {
+    constructor(
+        readonly operation: SharedFsNamespaceMismatchOperation,
+        readonly role: SharedFsNamespaceMismatchRole,
+        readonly path: string,
+        readonly expectedNodeId: string | null,
+        readonly actualNodeId: string | null,
+        readonly checkpoint: SharedFsNamespaceMismatchCheckpoint,
+        message = `${operation} namespace changed at ${path} (${role}); expected ${expectedNodeId ?? "an absent path"}, found ${actualNodeId ?? "an absent path"}`
+    ) {
+        super("EAGAIN", message);
+        this.name = "SharedFsExpectedNamespaceMismatchError";
+    }
+}
+
 /**
  * A create guarded by `expectedNodeId: null` reached its naming fence after
  * its parent disappeared, became a file, or was replaced by a different
@@ -1035,6 +1094,7 @@ type ResolvedPath =
           contested: boolean;
           path: string;
       };
+type ResolvedNodePath = Exclude<ResolvedPath, { kind: "root" }>;
 
 const now = () => BigInt(Date.now());
 
@@ -1281,20 +1341,42 @@ const computeNamingState = (
 const mapWithConcurrency = async <T, R>(
     items: T[],
     limit: number,
-    fn: (item: T, index: number) => Promise<R>
+    fn: (item: T, index: number) => Promise<R>,
+    stopOnFailure = false
 ): Promise<R[]> => {
     const results: R[] = new Array(items.length);
     let next = 0;
+    let failed = false;
+    let failure: unknown;
     const workers = Array.from(
         { length: Math.min(limit, items.length) },
         async () => {
-            while (next < items.length) {
+            while ((!failed || !stopOnFailure) && next < items.length) {
                 const index = next++;
-                results[index] = await fn(items[index], index);
+                try {
+                    results[index] = await fn(items[index], index);
+                } catch (error) {
+                    if (!failed) {
+                        failed = true;
+                        failure = error;
+                    }
+                }
             }
         }
     );
-    await Promise.all(workers);
+    // Keep the caller's fence held until every already-started worker has
+    // drained. Promise.all rejection would otherwise release it while sibling
+    // workers continue claiming namespace observations in the background.
+    await Promise.allSettled(workers);
+    if (failed) {
+        throw (
+            failure ??
+            new SharedFsError(
+                "EIO",
+                "bounded filesystem operation rejected without an error"
+            )
+        );
+    }
     return results;
 };
 
@@ -1652,6 +1734,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private trustChangeListener: (() => void) | undefined;
     /** Serializes writeBatch calls; see the writeBatch docstring. */
     private writeBatchChain: Promise<unknown> = Promise.resolve();
+    /** Serializes node-guarded mount namespace CAS operations locally. */
+    private mountNamespaceMutationChain: Promise<unknown> = Promise.resolve();
+    /**
+     * Program-local publication fence for naming appends. Guarded mount CAS
+     * owns it from its first lookup through put; ordinary naming appends fail
+     * retryably while it is held. Remote replication is intentionally outside
+     * this local fence and retains normal CRDT conflict semantics.
+     */
+    private mountNamespaceFenceActive = false;
+    private ordinaryNamingAppendsInFlight = 0;
+    private ordinaryNamingDrainWaiters: Array<() => void> = [];
+    private mountNamespaceFenceReleaseWaiters: Array<() => void> = [];
+    private localNamingFenceEpoch = 0;
     /** Filesystem/trust-state generation used to reject a moving disposal fence. */
     private disposalContentGeneration = 0;
     private disposalPreparationRunning = false;
@@ -1694,6 +1789,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * replica can never resurrect history network-wide.
      */
     private guardArmed = true;
+    /** Invalidates async Guard D decisions across every disarm/re-arm. */
+    private guardLifecycleGeneration = 0;
     /**
      * Read-through overlay over the snapshot's head documents. HARD
      * INVARIANT: visible ONLY to the five enumerated metadata read points
@@ -1872,6 +1969,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
+        if (this.guardFlushTimer) {
+            clearTimeout(this.guardFlushTimer);
+            this.guardFlushTimer = undefined;
+        }
         // A previous generation may still be inside remote snapshot discovery.
         // Cancel and join it before resetting any state: otherwise its late
         // fallback can recreate the sidecar directory after close/reopen.
@@ -2011,17 +2112,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.cacheGlobalEpoch = 0;
         this.slotSweepCache = new Map();
         this.writeBatchChain = Promise.resolve();
+        this.mountNamespaceMutationChain = Promise.resolve();
+        this.mountNamespaceFenceActive = false;
+        this.ordinaryNamingAppendsInFlight = 0;
+        this.ordinaryNamingDrainWaiters = [];
+        for (const resolve of this.mountNamespaceFenceReleaseWaiters ?? []) {
+            resolve();
+        }
+        this.mountNamespaceFenceReleaseWaiters = [];
+        // Never reset this counter on reopen. An ordinary operation may have
+        // captured the previous generation before close without reaching its
+        // final append admission yet; monotonic invalidation prevents that
+        // stale plan from aliasing a freshly opened generation.
+        this.localNamingFenceEpoch = (this.localNamingFenceEpoch ?? 0) + 1;
         this.disposalContentGeneration = 0;
         this.disposalPreparationRunning = false;
         this.trustVerdicts = new Map();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
+        this.guardIngestTasks = new Set();
+        this.guardFlushPromise = undefined;
         // A fire-and-forget guard call can span close -> reopen on the same
         // program instance. Preserve its count so its eventual `finally`
         // cannot underflow a freshly reset counter or hide newer guard work.
         this.guardIngestBusy ??= 0;
         this.bootstrapPhase = "off";
-        this.guardArmed = true;
+        // Even an armed-to-armed reopen is a new guard lifecycle: no async
+        // decision from an older open may publish into this generation.
+        this.guardLifecycleGeneration =
+            (this.guardLifecycleGeneration ?? 0) + 1;
+        this.setGuardArmed(true);
         this.overlayNaming = new Map();
         this.overlayVersions = new Map();
         this.overlaySweep = new Map();
@@ -2155,7 +2275,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // the internal resurrection guard either. Public writes and GC
             // are already gated; Guard D is armed together with write
             // readiness below.
-            this.guardArmed = false;
+            this.setGuardArmed(false);
         }
         const bootstrapCandidate =
             this.bootstrapConfig.mode !== "off" && this.isFullReplica();
@@ -2384,7 +2504,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
             if (this.guardArmed && this.isFullReplica()) {
-                void this.guardAgainstLiveRemovals(removed).catch(() => {});
+                const task = this.guardAgainstLiveRemovals(removed);
+                this.guardIngestTasks.add(task);
+                void task.then(
+                    () => this.guardIngestTasks.delete(task),
+                    () => this.guardIngestTasks.delete(task)
+                );
             }
         };
         this.entries.events.addEventListener("change", this.changeListener);
@@ -2997,8 +3122,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * one linear chain a future CUT can prune) and forks a fresh chain only
      * when the row is genuinely absent.
      */
-    private async putPreferLinked(value: SharedFsEntry) {
-        if (await this.hasDocument(value.id)) {
+    private async putPreferLinked(
+        value: SharedFsEntry,
+        stillValid?: () => boolean
+    ) {
+        const present = await this.hasDocument(value.id);
+        // Guard D passes a lifecycle predicate because hasDocument is an
+        // asynchronous gap between its decision and publication. Recheck it
+        // here, with no further await before invoking entries.put.
+        if (stillValid && !stillValid()) return;
+        if (present) {
             await this.entries.put(value);
         } else {
             await this.entries.put(value, { unique: true });
@@ -3444,6 +3577,118 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return false;
     }
 
+    private async withOrdinaryNamingAppend<T>(
+        operation: string,
+        append: () => Promise<T>,
+        expectedNamespaceEpoch?: number,
+        allowDuringClose = false
+    ): Promise<T> {
+        // No await between the fence check and admission counter: a guarded
+        // operation either sees this append in flight and drains it, or owns
+        // the fence first and makes this ordinary mutation retry.
+        if (
+            (this.writeReadinessLifecycleBlocked && !allowDuringClose) ||
+            this.mountNamespaceFenceActive ||
+            (expectedNamespaceEpoch !== undefined &&
+                expectedNamespaceEpoch !== this.localNamingFenceEpoch)
+        ) {
+            throw new SharedFsError(
+                this.writeReadinessLifecycleBlocked && !allowDuringClose
+                    ? "ECLOSED"
+                    : "EAGAIN",
+                `${operation} overlaps a node-guarded mount namespace mutation; retry`
+            );
+        }
+        this.ordinaryNamingAppendsInFlight++;
+        try {
+            return await append();
+        } finally {
+            this.ordinaryNamingAppendsInFlight--;
+            if (this.ordinaryNamingAppendsInFlight === 0) {
+                for (const resolve of this.ordinaryNamingDrainWaiters.splice(
+                    0
+                )) {
+                    resolve();
+                }
+            }
+        }
+    }
+
+    private captureOrdinaryNamespaceEpoch(operation: string): number {
+        if (
+            this.writeReadinessLifecycleBlocked ||
+            this.mountNamespaceFenceActive
+        ) {
+            throw new SharedFsError(
+                this.writeReadinessLifecycleBlocked ? "ECLOSED" : "EAGAIN",
+                `${operation} overlaps a node-guarded mount namespace mutation; retry`
+            );
+        }
+        return this.localNamingFenceEpoch;
+    }
+
+    /** Safety/background naming work waits instead of dropping required work. */
+    private async withDeferredOrdinaryNamingAppend<T>(
+        operation: string,
+        append: () => Promise<T>,
+        allowDuringClose = false
+    ): Promise<T> {
+        if (this.writeReadinessLifecycleBlocked && !allowDuringClose) {
+            throw new SharedFsError(
+                "ECLOSED",
+                `${operation}: filesystem closed`
+            );
+        }
+        while (this.mountNamespaceFenceActive) {
+            await new Promise<void>((resolve) =>
+                this.mountNamespaceFenceReleaseWaiters.push(resolve)
+            );
+            if (this.writeReadinessLifecycleBlocked && !allowDuringClose) {
+                throw new SharedFsError(
+                    "ECLOSED",
+                    `${operation}: filesystem closed`
+                );
+            }
+        }
+        return this.withOrdinaryNamingAppend(
+            operation,
+            append,
+            undefined,
+            allowDuringClose
+        );
+    }
+
+    private async withMountNamespaceFence<T>(
+        run: () => Promise<T>
+    ): Promise<T> {
+        if (this.mountNamespaceFenceActive) {
+            throw new SharedFsError(
+                "EAGAIN",
+                "A node-guarded mount namespace mutation is already active; retry"
+            );
+        }
+        // Fence synchronously before the first await. New ordinary naming
+        // appends now fail EAGAIN; any append admitted just before this point
+        // is drained before the guarded operation observes namespace state.
+        this.mountNamespaceFenceActive = true;
+        this.localNamingFenceEpoch++;
+        try {
+            if (this.ordinaryNamingAppendsInFlight > 0) {
+                await new Promise<void>((resolve) =>
+                    this.ordinaryNamingDrainWaiters.push(resolve)
+                );
+            }
+            return await run();
+        } finally {
+            this.mountNamespaceFenceActive = false;
+            for (const resolve of this.mountNamespaceFenceReleaseWaiters.splice(
+                0
+            )) {
+                resolve();
+            }
+        }
+    }
+
     private async appendNamingEvent(properties: {
         nodeId: string;
         parentId: string;
@@ -3452,6 +3697,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         /** Current head events this event causally supersedes. */
         parentHeads: NamingLike[];
         observedContentHeads?: string[];
+        expectedNamespaceEpoch?: number;
     }) {
         const metadata = this.signedMetadata();
         if (properties.parentHeads.length > 8000) {
@@ -3473,8 +3719,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             authorKey: metadata.authorKey,
             machineLabel: metadata.machineLabel,
         });
-        await this.entries.put(event, { unique: true });
-        this.cacheLocalWrite(event);
+        await this.withOrdinaryNamingAppend(
+            "naming append",
+            async () => {
+                await this.entries.put(event, { unique: true });
+                this.cacheLocalWrite(event);
+            },
+            properties.expectedNamespaceEpoch
+        );
         return event;
     }
 
@@ -3771,6 +4023,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (normalized === "/") {
             return;
         }
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("mkdir");
         this.assertWritableName(basename(normalized), "directory");
         if (await this.resolvePath(normalized)) {
             throw new SharedFsError(
@@ -3784,6 +4037,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentId,
             name: basename(normalized),
             parentHeads: [],
+            expectedNamespaceEpoch: namespaceEpoch,
         });
     }
 
@@ -3793,6 +4047,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         options: WriteFileOptions = {}
     ): Promise<SharedFsWriteFileResult> {
         this.assertWriteReady("writeFile");
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("writeFile");
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EISDIR", "Cannot write to root");
@@ -4058,6 +4313,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parentId,
                 name: basename(normalized),
                 parentHeads: [],
+                expectedNamespaceEpoch: namespaceEpoch,
             });
         } else {
             // A replacement that won while the node-scoped version was being
@@ -4106,12 +4362,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         options: WriteBatchOptions = {}
     ): Promise<WriteBatchResult> {
         this.assertWriteReady("writeBatch");
+        // Bind admission to the calling open generation before this batch is
+        // queued. A callback left behind an older chain must not capture a
+        // fresh epoch after close/reopen and publish a stale namespace plan.
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("writeBatch");
         // Serialized per instance: two in-flight batches would otherwise
         // each mint a fresh directory node for the same new path segment
         // (the overlay is per call), manufacturing duplicate-name conflicts
         // from a single process.
         const run = this.writeBatchChain.then(() =>
-            this.writeBatchInner(entries, options)
+            this.writeBatchInner(entries, options, namespaceEpoch)
         );
         this.writeBatchChain = run.then(
             () => undefined,
@@ -4122,7 +4382,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     private async writeBatchInner(
         entries: WriteBatchEntry[],
-        options: WriteBatchOptions = {}
+        options: WriteBatchOptions = {},
+        namespaceEpoch: number
     ): Promise<WriteBatchResult> {
         const changesetId = options.changesetId ?? createId("changeset");
         if (changesetId.length === 0 || changesetId.length > 256) {
@@ -4505,7 +4766,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         if (namingEvents.length > 0) {
-            await this.entries.putMany(namingEvents, { unique: true });
+            await this.withOrdinaryNamingAppend(
+                "writeBatch naming append",
+                async () => {
+                    await this.entries.putMany(namingEvents, { unique: true });
+                    for (const event of namingEvents) {
+                        this.cacheLocalWrite(event);
+                    }
+                },
+                namespaceEpoch
+            );
         }
         let manifestResult: WriteBatchResult["manifest"];
         if (manifestMembers) {
@@ -4517,9 +4787,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         for (const version of versions) {
             this.cacheLocalWrite(version);
-        }
-        for (const event of namingEvents) {
-            this.cacheLocalWrite(event);
         }
         return { changesetId, manifest: manifestResult, results };
     }
@@ -5099,8 +5366,573 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return this.versionInfo(resolution, normalized, [resolution]);
     }
 
+    /**
+     * Versioned capability for native mounts that must bind unlink/rename to
+     * the exact visible nodes opened by the kernel-facing adapter. This is a
+     * visible-state CAS fence, serialized only within this program instance;
+     * it is not a linearizable/global no-resurrection guarantee. An unseen
+     * concurrent delete or rename can still conflict after publication, and
+     * the naming CRDT's existing non-delete preference remains unchanged.
+     */
+    mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
+        // A subclass that changes legacy namespace behavior must explicitly
+        // override and re-advertise a coherent guarded implementation.
+        return this.rm === SharedFileSystem.prototype.rm &&
+            this.rename === SharedFileSystem.prototype.rename &&
+            this.mutateNamespaceForMount ===
+                SharedFileSystem.prototype.mutateNamespaceForMount
+            ? SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
+            : undefined;
+    }
+
+    mutateNamespaceForMount(
+        mutation: SharedFsMountNamespaceMutation
+    ): Promise<SharedFsMountNamespaceMutationResult> {
+        this.assertWriteReady(
+            `mount namespace ${mutation?.type ?? "mutation"}`
+        );
+        const run = this.mountNamespaceMutationChain.then(() =>
+            this.withMountNamespaceFence(() =>
+                this.mutateNamespaceForMountInner(mutation)
+            )
+        );
+        this.mountNamespaceMutationChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return run;
+    }
+
+    private async mutateNamespaceForMountInner(
+        mutation: SharedFsMountNamespaceMutation
+    ): Promise<SharedFsMountNamespaceMutationResult> {
+        const validNodeId = (value: unknown): value is string =>
+            typeof value === "string" && value.length > 0;
+        if (
+            !mutation ||
+            (mutation.type !== "remove" && mutation.type !== "rename")
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "Invalid guarded namespace mutation"
+            );
+        }
+        const mismatch = (
+            operation: SharedFsNamespaceMismatchOperation,
+            role: SharedFsNamespaceMismatchRole,
+            path: string,
+            expectedNodeId: string | null,
+            actualNodeId: string | null,
+            checkpoint: SharedFsNamespaceMismatchCheckpoint
+        ): never => {
+            throw new SharedFsExpectedNamespaceMismatchError(
+                operation,
+                role,
+                path,
+                expectedNodeId,
+                actualNodeId,
+                checkpoint
+            );
+        };
+        const sameHeadIds = (left: NamingLike[], right: NamingLike[]) => {
+            if (left.length !== right.length) return false;
+            const rightIds = new Set(right.map((head) => head.id));
+            // Heads are expected to be unique; fail closed on malformed
+            // duplicates instead of treating arrays as lossy sets.
+            if (
+                rightIds.size !== right.length ||
+                new Set(left.map((head) => head.id)).size !== left.length
+            ) {
+                return false;
+            }
+            return left.every((head) => rightIds.has(head.id));
+        };
+        const requireBinding = async (
+            operation: SharedFsNamespaceMismatchOperation,
+            role: SharedFsNamespaceMismatchRole,
+            path: string,
+            expectedNodeId: string | null,
+            checkpoint: SharedFsNamespaceMismatchCheckpoint
+        ) => {
+            const resolved = await this.resolvePath(path);
+            const actualNodeId = resolved?.nodeId ?? null;
+            if (actualNodeId !== expectedNodeId) {
+                mismatch(
+                    operation,
+                    role,
+                    path,
+                    expectedNodeId,
+                    actualNodeId,
+                    checkpoint
+                );
+            }
+            return resolved;
+        };
+
+        if (mutation.type === "remove") {
+            if (
+                !validNodeId(mutation.expectedNodeId) ||
+                (mutation.expectedKind !== "file" &&
+                    mutation.expectedKind !== "directory")
+            ) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "Invalid guarded remove binding"
+                );
+            }
+            const path = normalizeFsPath(mutation.path);
+            if (path === "/") {
+                throw new SharedFsError("EINVAL", "Cannot remove root");
+            }
+            const initial = await requireBinding(
+                "remove",
+                "source",
+                path,
+                mutation.expectedNodeId,
+                "initial"
+            );
+            if (!initial || initial.kind === "root") {
+                mismatch(
+                    "remove",
+                    "source",
+                    path,
+                    mutation.expectedNodeId,
+                    null,
+                    "initial"
+                );
+            }
+            const initialNode = initial as ResolvedNodePath;
+            if (initialNode.kind !== mutation.expectedKind) {
+                throw new SharedFsError(
+                    initialNode.kind === "directory" ? "EISDIR" : "ENOTDIR",
+                    `Path kind changed while removing ${path}`
+                );
+            }
+            const initialHeads = [...initialNode.state.heads];
+            let contentHeadIds: string[] = [];
+            if (initialNode.kind === "directory") {
+                if (
+                    (await this.listByParentId(initialNode.nodeId)).length > 0
+                ) {
+                    throw new SharedFsError(
+                        "ENOTEMPTY",
+                        `Directory is not empty: ${path}`
+                    );
+                }
+            } else {
+                contentHeadIds = (
+                    await this.headsForNode(initialNode.nodeId)
+                ).map((head) => head.id);
+            }
+            // Re-read the binding and exact head set after all preparatory
+            // work, then make the node-bound child sweep the final namespace
+            // validation await before initiating the tombstone append.
+            const fenced = await requireBinding(
+                "remove",
+                "source",
+                path,
+                mutation.expectedNodeId,
+                "before-append"
+            );
+            if (
+                !fenced ||
+                fenced.kind === "root" ||
+                fenced.kind !== mutation.expectedKind ||
+                !sameHeadIds(initialHeads, fenced.state.heads)
+            ) {
+                mismatch(
+                    "remove",
+                    "source",
+                    path,
+                    mutation.expectedNodeId,
+                    fenced?.nodeId ?? null,
+                    "before-append"
+                );
+            }
+            const fencedNode = fenced as ResolvedNodePath;
+            if (fencedNode.state.heads.length > 8000) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "too many concurrent naming heads to supersede in one event"
+                );
+            }
+            if (
+                fencedNode.kind === "directory" &&
+                (await this.listByParentId(fencedNode.nodeId)).length > 0
+            ) {
+                throw new SharedFsError(
+                    "ENOTEMPTY",
+                    `Directory is not empty: ${path}`
+                );
+            }
+            const metadata = this.signedMetadata();
+            const event = new NamingEvent({
+                id: createId("naming"),
+                nodeId: fencedNode.nodeId,
+                parentId: fencedNode.winner.parentId,
+                name: fencedNode.winner.name,
+                deleted: true,
+                causalDepth: maxDepth(fencedNode.state.heads),
+                parentNamingIds: fencedNode.state.heads.map((head) => head.id),
+                observedContentHeads: contentHeadIds,
+                createdAt: metadata.timestamp,
+                authorKey: metadata.authorKey,
+                machineLabel: metadata.machineLabel,
+            });
+            await this.entries.put(event, { unique: true });
+            this.cacheLocalWrite(event);
+            return {
+                type: "removed",
+                removedNodeId: fencedNode.nodeId,
+                removeEventId: event.id,
+            };
+        }
+
+        if (
+            !validNodeId(mutation.expectedSourceNodeId) ||
+            !(
+                mutation.expectedDestinationNodeId === null ||
+                validNodeId(mutation.expectedDestinationNodeId)
+            ) ||
+            !validNodeId(mutation.expectedDestinationParentNodeId) ||
+            (mutation.expectedOpenDescendants !== undefined &&
+                (!Array.isArray(mutation.expectedOpenDescendants) ||
+                    mutation.expectedOpenDescendants.length > 8000 ||
+                    mutation.expectedOpenDescendants.some(
+                        (item) =>
+                            !item ||
+                            typeof item.path !== "string" ||
+                            !validNodeId(item.nodeId)
+                    )))
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "Invalid guarded rename bindings"
+            );
+        }
+        const fromPath = normalizeFsPath(mutation.from);
+        const toPath = normalizeFsPath(mutation.to);
+        if (fromPath === "/" || toPath === "/" || fromPath === toPath) {
+            throw new SharedFsError("EINVAL", "Invalid guarded rename path");
+        }
+        const descendants = (mutation.expectedOpenDescendants ?? []).map(
+            (item) => ({
+                path: normalizeFsPath(item.path),
+                nodeId: item.nodeId,
+            })
+        );
+        if (
+            new Set(descendants.map((item) => item.path)).size !==
+                descendants.length ||
+            descendants.some(
+                (item) =>
+                    item.path === fromPath ||
+                    !item.path.startsWith(fromPath + "/")
+            )
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "Guarded rename descendants must be unique paths below the source"
+            );
+        }
+        const initialSource = await requireBinding(
+            "rename",
+            "source",
+            fromPath,
+            mutation.expectedSourceNodeId,
+            "initial"
+        );
+        if (!initialSource || initialSource.kind === "root") {
+            mismatch(
+                "rename",
+                "source",
+                fromPath,
+                mutation.expectedSourceNodeId,
+                null,
+                "initial"
+            );
+        }
+        const initialSourceNode = initialSource as ResolvedNodePath;
+        this.assertWritableName(
+            basename(toPath),
+            initialSourceNode.kind === "directory" ? "directory" : "file"
+        );
+        const initialDestination = await requireBinding(
+            "rename",
+            "destination",
+            toPath,
+            mutation.expectedDestinationNodeId,
+            "initial"
+        );
+        if (initialDestination?.kind === "root") {
+            throw new SharedFsError(
+                "EINVAL",
+                `Cannot replace root path: ${toPath}`
+            );
+        }
+        const initialDestinationNode = initialDestination as
+            | ResolvedNodePath
+            | undefined;
+        if (initialDestinationNode?.nodeId === initialSourceNode.nodeId) {
+            throw new SharedFsError(
+                "EINVAL",
+                "Source and destination resolve to the same node"
+            );
+        }
+        if (
+            initialDestinationNode &&
+            (initialSourceNode.kind === "directory" ||
+                initialDestinationNode.kind === "directory")
+        ) {
+            throw new SharedFsError(
+                initialDestinationNode.kind === "directory"
+                    ? "EISDIR"
+                    : "ENOTDIR",
+                `Cannot replace directory path: ${toPath}`
+            );
+        }
+        const parentPath = dirname(toPath);
+        const parent = await requireBinding(
+            "rename",
+            "destination-parent",
+            parentPath,
+            mutation.expectedDestinationParentNodeId,
+            "initial"
+        );
+        if (
+            !parent ||
+            (parent.kind !== "directory" && parent.kind !== "root")
+        ) {
+            throw new SharedFsError(
+                "ENOTDIR",
+                `Parent path is not a directory: ${parentPath}`
+            );
+        }
+        if (initialSourceNode.kind !== "directory" && descendants.length > 0) {
+            throw new SharedFsError(
+                "EINVAL",
+                "A file rename cannot bind descendants"
+            );
+        }
+        const descendantHeads = new Map<string, NamingLike[]>();
+        await mapWithConcurrency(
+            descendants,
+            CHUNK_IO_CONCURRENCY,
+            async (descendant) => {
+                const resolvedDescendant = await requireBinding(
+                    "rename",
+                    "open-descendant",
+                    descendant.path,
+                    descendant.nodeId,
+                    "initial"
+                );
+                if (!resolvedDescendant || resolvedDescendant.kind === "root") {
+                    mismatch(
+                        "rename",
+                        "open-descendant",
+                        descendant.path,
+                        descendant.nodeId,
+                        resolvedDescendant?.nodeId ?? null,
+                        "initial"
+                    );
+                }
+                descendantHeads.set(descendant.path, [
+                    ...(resolvedDescendant as ResolvedNodePath).state.heads,
+                ]);
+            },
+            true
+        );
+        if (
+            initialSourceNode.kind === "directory" &&
+            (parent.nodeId === initialSourceNode.nodeId ||
+                (await this.isWithinSubtree(
+                    parent.nodeId,
+                    initialSourceNode.nodeId
+                )))
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                `Cannot move a directory into its own subtree: ${fromPath} -> ${toPath}`
+            );
+        }
+        const sourceHeads = [...initialSourceNode.state.heads];
+        const destinationHeads = initialDestinationNode
+            ? [...initialDestinationNode.state.heads]
+            : [];
+        const parentHeads =
+            parent.kind === "root" ? [] : [...parent.state.heads];
+        const destinationContentHeadIds = initialDestinationNode
+            ? (await this.headsForNode(initialDestinationNode.nodeId)).map(
+                  (head) => head.id
+              )
+            : [];
+
+        // One final validation round after every content/empty/cycle await.
+        // The program-local naming fence prevents local appends throughout;
+        // remote arrivals visible during these lookups are compared below.
+        const currentDescendants = await mapWithConcurrency(
+            descendants,
+            CHUNK_IO_CONCURRENCY,
+            (descendant) =>
+                requireBinding(
+                    "rename",
+                    "open-descendant",
+                    descendant.path,
+                    descendant.nodeId,
+                    "before-append"
+                ),
+            true
+        );
+        const [currentSource, currentDestination, currentParent] =
+            await Promise.all([
+                requireBinding(
+                    "rename",
+                    "source",
+                    fromPath,
+                    mutation.expectedSourceNodeId,
+                    "before-append"
+                ),
+                requireBinding(
+                    "rename",
+                    "destination",
+                    toPath,
+                    mutation.expectedDestinationNodeId,
+                    "before-append"
+                ),
+                requireBinding(
+                    "rename",
+                    "destination-parent",
+                    parentPath,
+                    mutation.expectedDestinationParentNodeId,
+                    "before-append"
+                ),
+            ]);
+        if (
+            !currentSource ||
+            currentSource.kind === "root" ||
+            !sameHeadIds(sourceHeads, currentSource.state.heads)
+        ) {
+            mismatch(
+                "rename",
+                "source",
+                fromPath,
+                mutation.expectedSourceNodeId,
+                currentSource?.nodeId ?? null,
+                "before-append"
+            );
+        }
+        if (
+            !currentParent ||
+            (currentParent.kind === "root"
+                ? parent.kind !== "root"
+                : parent.kind === "root" ||
+                  !sameHeadIds(parentHeads, currentParent.state.heads))
+        ) {
+            mismatch(
+                "rename",
+                "destination-parent",
+                parentPath,
+                mutation.expectedDestinationParentNodeId,
+                currentParent?.nodeId ?? null,
+                "before-append"
+            );
+        }
+        for (let index = 0; index < descendants.length; index++) {
+            const descendant = descendants[index];
+            const currentDescendant = currentDescendants[index];
+            if (
+                !currentDescendant ||
+                currentDescendant.kind === "root" ||
+                !sameHeadIds(
+                    descendantHeads.get(descendant.path)!,
+                    currentDescendant.state.heads
+                )
+            ) {
+                mismatch(
+                    "rename",
+                    "open-descendant",
+                    descendant.path,
+                    descendant.nodeId,
+                    currentDescendant?.nodeId ?? null,
+                    "before-append"
+                );
+            }
+        }
+        if (
+            (currentDestination && currentDestination.kind === "root") ||
+            (currentDestination
+                ? !sameHeadIds(destinationHeads, currentDestination.state.heads)
+                : destinationHeads.length !== 0)
+        ) {
+            mismatch(
+                "rename",
+                "destination",
+                toPath,
+                mutation.expectedDestinationNodeId,
+                currentDestination?.nodeId ?? null,
+                "before-append"
+            );
+        }
+        const currentSourceNode = currentSource as ResolvedNodePath;
+        const currentDestinationNode = currentDestination as
+            | ResolvedNodePath
+            | undefined;
+        if (
+            currentSourceNode.state.heads.length > 8000 ||
+            (currentDestinationNode?.state.heads.length ?? 0) > 8000
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "too many concurrent naming heads to supersede in one event"
+            );
+        }
+        const metadata = this.signedMetadata();
+        const replacementDelete = currentDestinationNode
+            ? new NamingEvent({
+                  id: createId("naming"),
+                  nodeId: currentDestinationNode.nodeId,
+                  parentId: currentDestinationNode.winner.parentId,
+                  name: currentDestinationNode.winner.name,
+                  deleted: true,
+                  causalDepth: maxDepth(currentDestinationNode.state.heads),
+                  parentNamingIds: currentDestinationNode.state.heads.map(
+                      (head) => head.id
+                  ),
+                  observedContentHeads: destinationContentHeadIds,
+                  createdAt: metadata.timestamp,
+                  authorKey: metadata.authorKey,
+                  machineLabel: metadata.machineLabel,
+              })
+            : undefined;
+        const move = new NamingEvent({
+            id: createId("naming"),
+            nodeId: currentSourceNode.nodeId,
+            parentId: currentParent!.nodeId,
+            name: basename(toPath),
+            causalDepth: maxDepth(currentSourceNode.state.heads),
+            parentNamingIds: currentSourceNode.state.heads.map(
+                (head) => head.id
+            ),
+            createdAt: metadata.timestamp,
+            authorKey: metadata.authorKey,
+            machineLabel: metadata.machineLabel,
+        });
+        const events = replacementDelete ? [replacementDelete, move] : [move];
+        await this.entries.putMany(events, { unique: true });
+        for (const event of events) this.cacheLocalWrite(event);
+        return {
+            type: "renamed",
+            sourceNodeId: currentSourceNode.nodeId,
+            replacedNodeId: currentDestinationNode?.nodeId ?? null,
+            destinationParentNodeId: currentParent!.nodeId,
+            moveEventId: move.id,
+            replacementDeleteEventId: replacementDelete?.id ?? null,
+        };
+    }
+
     async rm(path: string) {
         this.assertWriteReady("rm");
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("rm");
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EINVAL", "Cannot remove root");
@@ -5126,6 +5958,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 name: resolved.winner.name,
                 deleted: true,
                 parentHeads: resolved.state.heads,
+                expectedNamespaceEpoch: namespaceEpoch,
             });
             return;
         }
@@ -5140,6 +5973,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             deleted: true,
             parentHeads: resolved.state.heads,
             observedContentHeads: contentHeads.map((head) => head.id),
+            expectedNamespaceEpoch: namespaceEpoch,
         });
     }
 
@@ -5150,6 +5984,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (fromPath === toPath) {
             return;
         }
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("rename");
         const resolved = await this.resolvePath(fromPath);
         if (!resolved || resolved.kind === "root") {
             throw new SharedFsError(
@@ -5193,15 +6028,59 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `Cannot move a directory into its own subtree: ${fromPath} -> ${toPath}`
             );
         }
-        if (destination) {
-            await this.rm(toPath);
+        if (
+            resolved.state.heads.length > 8000 ||
+            (destination?.state.heads.length ?? 0) > 8000
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "too many concurrent naming heads to supersede in one event"
+            );
         }
-        await this.appendNamingEvent({
+        const destinationContentHeads =
+            destination && destination.kind === "file"
+                ? await this.headsForNode(destination.nodeId)
+                : [];
+        const metadata = this.signedMetadata();
+        const replacementDelete = destination
+            ? new NamingEvent({
+                  id: createId("naming"),
+                  nodeId: destination.nodeId,
+                  parentId: destination.winner.parentId,
+                  name: destination.winner.name,
+                  deleted: true,
+                  causalDepth: maxDepth(destination.state.heads),
+                  parentNamingIds: destination.state.heads.map(
+                      (head) => head.id
+                  ),
+                  observedContentHeads: destinationContentHeads.map(
+                      (head) => head.id
+                  ),
+                  createdAt: metadata.timestamp,
+                  authorKey: metadata.authorKey,
+                  machineLabel: metadata.machineLabel,
+              })
+            : undefined;
+        const move = new NamingEvent({
+            id: createId("naming"),
             nodeId: resolved.nodeId,
             parentId,
             name: basename(toPath),
-            parentHeads: resolved.state.heads,
+            causalDepth: maxDepth(resolved.state.heads),
+            parentNamingIds: resolved.state.heads.map((head) => head.id),
+            createdAt: metadata.timestamp,
+            authorKey: metadata.authorKey,
+            machineLabel: metadata.machineLabel,
         });
+        const events = replacementDelete ? [replacementDelete, move] : [move];
+        await this.withOrdinaryNamingAppend(
+            "rename naming append",
+            async () => {
+                await this.entries.putMany(events, { unique: true });
+                for (const event of events) this.cacheLocalWrite(event);
+            },
+            namespaceEpoch
+        );
     }
 
     // ------------------------------------------------------------------
@@ -5250,7 +6129,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (state.winner.deleted) {
                 continue;
             }
-            const key = `${state.winner.parentId} ${state.winner.name}`;
+            const key = `${state.winner.parentId}\0${state.winner.name}`;
             const list = bySlot.get(key) ?? [];
             list.push(state);
             bySlot.set(key, list);
@@ -5362,6 +6241,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     async resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
         this.assertWriteReady("resolveNamingConflict");
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch(
+            "resolveNamingConflict"
+        );
         const state = await this.namingStateForNode(nodeId);
         if (!state) {
             throw new SharedFsError("ENOENT", `Unknown node: ${nodeId}`);
@@ -5449,6 +6331,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             deleted: payload.deleted,
             parentHeads: state.heads,
             observedContentHeads: payload.observedContentHeads,
+            expectedNamespaceEpoch: namespaceEpoch,
         });
         if (action.type === "restore" && nodeKindOf(nodeId) === "file") {
             // A restore must carry content: append a resolution version
@@ -5637,7 +6520,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.writesReady = true;
             this.writeReadinessRequired = false;
             this.writeReadinessQuietChecks = 0;
-            this.guardArmed = true;
+            this.setGuardArmed(true);
             this.legacyPromotionEligible = false;
             this.writeReadinessSource = "remote-settled";
             this.emitWriteReadyOnce("remote-settled");
@@ -5781,6 +6664,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // A caller therefore never receives ECLOSED after its trust marker was
         // actually committed.
         this.writeReadinessLifecycleBlocked = true;
+        this.localNamingFenceEpoch = (this.localNamingFenceEpoch ?? 0) + 1;
+        for (const resolve of this.mountNamespaceFenceReleaseWaiters.splice(
+            0
+        )) {
+            resolve();
+        }
         const lifecycleError = new SharedFsError(
             "ECLOSED",
             "filesystem closed while background work was running"
@@ -5845,6 +6734,54 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.watchHub = undefined;
         this.changesetHub = undefined;
         this.resolveBootstrapWaiters({ verified: false });
+        await (this.mountNamespaceMutationChain ?? Promise.resolve()).catch(
+            () => {}
+        );
+        // Batches admitted before lifecycle closure may contain only content
+        // versions and therefore never enter the naming-append fence. Join
+        // the whole old chain before closing/resetting stores and caches.
+        await (this.writeBatchChain ?? Promise.resolve()).catch(() => {});
+        // No new guard work can be accepted after the change listener was
+        // removed above. Join every already-accepted ingest/flush generation;
+        // an active naming flush woken with ECLOSED requeues its copied batch.
+        let guardLifecycleSettled = false;
+        while (!guardLifecycleSettled) {
+            const ingest = [...(this.guardIngestTasks ?? [])];
+            if (ingest.length > 0) {
+                await Promise.allSettled(ingest);
+            }
+            const flush = this.guardFlushPromise;
+            if (flush) await flush.catch(() => {});
+            guardLifecycleSettled =
+                (this.guardIngestTasks?.size ?? 0) === 0 &&
+                !this.guardFlushPromise;
+        }
+        if (this.guardFlushTimer) {
+            clearTimeout(this.guardFlushTimer);
+            this.guardFlushTimer = undefined;
+        }
+        if (this.ordinaryNamingAppendsInFlight > 0) {
+            await new Promise<void>((resolve) =>
+                this.ordinaryNamingDrainWaiters.push(resolve)
+            );
+        }
+        if (
+            this.pendingGuardVersions.size > 0 ||
+            this.pendingGuardNaming.size > 0
+        ) {
+            await this.startGuardFlush(true);
+        }
+        if (
+            this.pendingGuardVersions.size > 0 ||
+            this.pendingGuardNaming.size > 0
+        ) {
+            // Do not close/reset away safety work the replica still owns.
+            // Leaving the program intact lets a later close retry the drain.
+            throw new SharedFsError(
+                "EIO",
+                "filesystem resurrection guard could not finish required safety work before close"
+            );
+        }
         const restoreCleanLegacyEligibility =
             this.legacyPromotionCrashMarker && this.legacyPromotionEligible;
         const closed = await super.close(from);
@@ -6271,7 +7208,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // A previous bootstrap retired on timeout: no overlay, but
             // Guard D stays disarmed and GC gated until quiescence.
             this.bootstrapPhase = "unverified";
-            this.guardArmed = false;
+            this.setGuardArmed(false);
             this.emitBootstrapFallbackOnce(
                 "unverified",
                 "resuming a previously unverified bootstrap"
@@ -6312,7 +7249,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // PARTIAL doc set: its failure path must never arm the guard.
         const resumed = marker !== undefined && !empty;
         this.bootstrapPhase = "fetching";
-        this.guardArmed = false;
+        this.setGuardArmed(false);
         await this.writeBootstrapState(
             { bootstrap: "active" },
             generation,
@@ -6404,7 +7341,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.overlayPending = new Map();
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "off";
-        this.guardArmed = !this.writeReadinessRequired;
+        this.setGuardArmed(!this.writeReadinessRequired);
         this.emitBootstrapFallbackOnce("plain-join", reason);
         void this.writeBootstrapState({ bootstrap: null }, generation).catch(
             () => {}
@@ -6432,7 +7369,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.overlayPending = new Map();
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "unverified";
-        this.guardArmed = false;
+        this.setGuardArmed(false);
         this.emitBootstrapFallbackOnce("unverified", reason);
         void this.writeBootstrapState(
             { bootstrap: "unverified" },
@@ -7210,7 +8147,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (verified) {
             this.bootstrapPhase = "converged";
             this.bootstrapVerified = true;
-            this.guardArmed = !this.writeReadinessRequired;
+            this.setGuardArmed(!this.writeReadinessRequired);
             this.emitOverlayRetiredOnce(true);
             void this.writeBootstrapState(
                 { bootstrap: null },
@@ -7271,7 +8208,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 clearInterval(this.quiescenceTimer!);
                 this.quiescenceTimer = undefined;
                 this.bootstrapPhase = "converged";
-                this.guardArmed = !this.writeReadinessRequired;
+                this.setGuardArmed(!this.writeReadinessRequired);
                 void this.writeBootstrapState({ bootstrap: null }).catch(
                     () => {}
                 );
@@ -7490,7 +8427,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.writeReadinessRequired = false;
             this.legacyPromotionEligible = false;
             this.writeReadinessSource = "legacy-operator-assertion";
-            this.guardArmed = true;
+            this.setGuardArmed(true);
             this.emitWriteReadyOnce("legacy-operator-assertion");
             if (this.writeReadinessTimer) {
                 clearInterval(this.writeReadinessTimer);
@@ -8827,28 +9764,82 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private changesetHub?: ChangesetBarrierHub;
     private guardIngestBusy = 0;
     private guardFlushBusy = false;
+    private guardIngestTasks = new Set<Promise<void>>();
+    private guardFlushPromise: Promise<void> | undefined;
     private pendingGuardVersions = new Map<string, Map<string, FileVersion>>();
     private pendingGuardNaming = new Map<string, Map<string, NamingEvent>>();
     private guardFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
+    private setGuardArmed(armed: boolean) {
+        if (this.guardArmed === armed) return;
+        this.guardArmed = armed;
+        this.guardLifecycleGeneration =
+            (this.guardLifecycleGeneration ?? 0) + 1;
+        if (!armed) {
+            // A bootstrap disarm invalidates every queued decision
+            // synchronously. An already-running flush retains a private copy,
+            // but its generation checks below prevent any later publish.
+            this.pendingGuardVersions?.clear();
+            this.pendingGuardNaming?.clear();
+            if (this.guardFlushTimer) {
+                clearTimeout(this.guardFlushTimer);
+                this.guardFlushTimer = undefined;
+            }
+        }
+    }
+
+    private guardLifecycleActive(generation: number) {
+        return this.guardArmed && generation === this.guardLifecycleGeneration;
+    }
+
     private scheduleGuardFlush() {
-        if (this.guardFlushTimer) {
+        if (
+            this.writeReadinessLifecycleBlocked ||
+            this.guardFlushTimer ||
+            this.guardFlushPromise
+        ) {
             return;
         }
         this.guardFlushTimer = setTimeout(() => {
             this.guardFlushTimer = undefined;
-            void this.flushGuardQueues().catch(() => {});
+            void this.startGuardFlush().catch(() => {});
         }, 300);
         (this.guardFlushTimer as any)?.unref?.();
+    }
+
+    private startGuardFlush(allowDuringClose = false): Promise<void> {
+        if (this.guardFlushPromise) return this.guardFlushPromise;
+        const run = this.flushGuardQueues(allowDuringClose);
+        this.guardFlushPromise = run;
+        const settled = () => {
+            if (this.guardFlushPromise === run) {
+                this.guardFlushPromise = undefined;
+            }
+            // An ingest accepted while this flush was evaluating may have
+            // populated a fresh bucket after the flush copied its batch.
+            // Once the active promise no longer suppresses scheduling, make
+            // sure that later batch is not stranded.
+            if (
+                !this.writeReadinessLifecycleBlocked &&
+                (this.pendingGuardVersions.size > 0 ||
+                    this.pendingGuardNaming.size > 0)
+            ) {
+                this.scheduleGuardFlush();
+            }
+        };
+        void run.then(settled, settled);
+        return run;
     }
 
     private async guardAgainstLiveRemovals(removed: unknown[]) {
         if (!this.guardArmed) {
             return;
         }
+        const guardGeneration = this.guardLifecycleGeneration;
         this.guardIngestBusy++;
         try {
             for (const value of removed) {
+                if (!this.guardLifecycleActive(guardGeneration)) break;
                 try {
                     if (value instanceof FileChunk) {
                         if (this.gcSuppressed.has(value.id)) {
@@ -8878,13 +9869,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         } finally {
                             await (iterator as any).close?.();
                         }
-                        if (referenced) {
-                            await this.putPreferLinked(value);
+                        if (
+                            referenced &&
+                            this.guardLifecycleActive(guardGeneration)
+                        ) {
+                            await this.putPreferLinked(value, () =>
+                                this.guardLifecycleActive(guardGeneration)
+                            );
                         }
                     } else if (value instanceof FileVersion) {
                         if (this.gcSuppressed.has(value.id)) {
                             continue;
                         }
+                        if (!this.guardLifecycleActive(guardGeneration)) break;
                         const bucket =
                             this.pendingGuardVersions.get(value.nodeId) ??
                             new Map<string, FileVersion>();
@@ -8895,6 +9892,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         if (this.gcSuppressed.has(value.id)) {
                             continue;
                         }
+                        if (!this.guardLifecycleActive(guardGeneration)) break;
                         const bucket =
                             this.pendingGuardNaming.get(value.nodeId) ??
                             new Map<string, NamingEvent>();
@@ -8911,12 +9909,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
-    private async flushGuardQueues() {
+    private async flushGuardQueues(allowDuringClose = false) {
         // Work enqueued while armed must not run after a disarm (a
         // bootstrap decided mid-window): resurrection judged against a
         // partial view — possibly through the overlay — is exactly what
         // the disarm exists to prevent. Queued buckets are dropped.
-        if (!this.guardArmed) {
+        const guardGeneration = this.guardLifecycleGeneration;
+        if (!this.guardLifecycleActive(guardGeneration)) {
             this.pendingGuardVersions.clear();
             this.pendingGuardNaming.clear();
             return;
@@ -8924,7 +9923,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.guardFlushBusy = true;
         let settledNodes: string[] = [];
         try {
-            settledNodes = await this.flushGuardQueuesInner();
+            settledNodes = await this.flushGuardQueuesInner(
+                allowDuringClose,
+                guardGeneration
+            );
         } finally {
             this.guardFlushBusy = false;
         }
@@ -8933,7 +9935,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.watchHub?.guardSettled(settledNodes);
     }
 
-    private async flushGuardQueuesInner(): Promise<string[]> {
+    private async flushGuardQueuesInner(
+        allowDuringClose: boolean,
+        guardGeneration: number
+    ): Promise<string[]> {
+        const requeueVersions = (nodeId: string, values: FileVersion[]) => {
+            if (!this.guardLifecycleActive(guardGeneration)) return;
+            const bucket =
+                this.pendingGuardVersions.get(nodeId) ??
+                new Map<string, FileVersion>();
+            for (const value of values) bucket.set(value.id, value);
+            this.pendingGuardVersions.set(nodeId, bucket);
+            this.scheduleGuardFlush();
+        };
+        const requeueNaming = (nodeId: string, values: NamingEvent[]) => {
+            if (!this.guardLifecycleActive(guardGeneration)) return;
+            const bucket =
+                this.pendingGuardNaming.get(nodeId) ??
+                new Map<string, NamingEvent>();
+            for (const value of values) bucket.set(value.id, value);
+            this.pendingGuardNaming.set(nodeId, bucket);
+            this.scheduleGuardFlush();
+        };
         const removedVersions = new Map<string, FileVersion[]>();
         for (const [nodeId, bucket] of this.pendingGuardVersions) {
             removedVersions.set(nodeId, [...bucket.values()]);
@@ -8959,6 +9982,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         (doc): doc is NamingEvent => doc instanceof NamingEvent
                     )
                 );
+                if (!this.guardLifecycleActive(guardGeneration)) break;
                 if (!naming) {
                     continue;
                 }
@@ -8966,6 +9990,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 const remaining = (
                     await this.versionDocumentsForNode(nodeId)
                 ).filter((doc) => !removedIds.has(doc.id));
+                if (!this.guardLifecycleActive(guardGeneration)) break;
                 const heads = this.contentHeads([...remaining, ...values]);
                 const observed = new Set(
                     naming.winner.deleted
@@ -8991,74 +10016,87 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         ? !observed.has(value.id) && observedPresent
                         : true;
                     if (protectedHead) {
-                        await this.putPreferLinked(value);
+                        if (!this.guardLifecycleActive(guardGeneration)) break;
+                        await this.putPreferLinked(value, () =>
+                            this.guardLifecycleActive(guardGeneration)
+                        );
                     }
                 }
             } catch {
-                // Never throw into the event loop.
+                // Retain ownership of required safety work. In particular,
+                // close may wake a naming flush blocked behind the mount
+                // fence with ECLOSED; that copied batch must remain available
+                // for the explicit pre-close drain.
+                requeueVersions(nodeId, values);
             }
         }
         for (const [nodeId, values] of removedNaming) {
             try {
-                const removedIds = new Set(values.map((value) => value.id));
-                const namingDocs = await this.queryDocuments<NamingEvent>([
-                    new StringMatch({ key: "kind", value: "naming" }),
-                    new StringMatch({ key: "nodeId", value: nodeId }),
-                ]);
-                const remaining = namingDocs
-                    .filter(
-                        (doc): doc is NamingEvent => doc instanceof NamingEvent
-                    )
-                    .filter((event) => !removedIds.has(event.id));
-                const state = computeNamingState(nodeId, [
-                    ...remaining,
-                    ...values,
-                ]);
-                if (!state) {
-                    continue;
-                }
-                let deepestPresent = -1n;
-                for (const doc of remaining) {
-                    if (doc.causalDepth > deepestPresent) {
-                        deepestPresent = doc.causalDepth;
-                    }
-                }
-                for (const value of values) {
-                    if (!state.heads.some((head) => head.id === value.id)) {
-                        continue;
-                    }
-                    // Split-flush damper: a compaction burst reaches peers
-                    // across several guard flushes, and causally independent
-                    // delete entries may reorder between them — a reordered
-                    // mid-chain delete makes an already-retired ancestor a
-                    // union head here, and re-putting it would plant a
-                    // permanent spurious head (node stuck conflicted). Skip
-                    // the re-put only when BOTH hold: the event is old by
-                    // its author stamp (every GC-retired event is, by
-                    // construction) AND some PRESENT event is strictly
-                    // deeper — so suppression can never change any winner,
-                    // and a genuinely lagging peer (nothing deeper present)
-                    // still resurrects its deepest known event. createdAt
-                    // rather than local arrival because the removed row's
-                    // index entry is already gone when this runs; backdating
-                    // it only suppresses the backdater's own events.
-                    // Deliberately keyed to the GC_DEFAULTS constant, not
-                    // per-run config: fleets lowering namingGraceMs get
-                    // guard churn instead of suppression (the safe
-                    // direction). Accepted narrowing: a stale conflict-
-                    // branch head that is already strictly dominated is no
-                    // longer resurrected after a rogue direct delete.
-                    if (
-                        this.clock() - Number(value.createdAt) >
-                            GC_DEFAULTS.namingGraceMs &&
-                        deepestPresent > value.causalDepth
-                    ) {
-                        continue;
-                    }
-                    await this.putPreferLinked(value);
-                }
+                await this.withDeferredOrdinaryNamingAppend(
+                    "naming resurrection decision",
+                    async () => {
+                        if (!this.guardLifecycleActive(guardGeneration)) return;
+                        const removedIds = new Set(
+                            values.map((value) => value.id)
+                        );
+                        const namingDocs =
+                            await this.queryDocuments<NamingEvent>([
+                                new StringMatch({
+                                    key: "kind",
+                                    value: "naming",
+                                }),
+                                new StringMatch({
+                                    key: "nodeId",
+                                    value: nodeId,
+                                }),
+                            ]);
+                        const remaining = namingDocs
+                            .filter(
+                                (doc): doc is NamingEvent =>
+                                    doc instanceof NamingEvent
+                            )
+                            .filter((event) => !removedIds.has(event.id));
+                        if (!this.guardLifecycleActive(guardGeneration)) return;
+                        const state = computeNamingState(nodeId, [
+                            ...remaining,
+                            ...values,
+                        ]);
+                        if (!state) return;
+                        let deepestPresent = -1n;
+                        for (const doc of remaining) {
+                            if (doc.causalDepth > deepestPresent) {
+                                deepestPresent = doc.causalDepth;
+                            }
+                        }
+                        for (const value of values) {
+                            if (
+                                !state.heads.some(
+                                    (head) => head.id === value.id
+                                )
+                            ) {
+                                continue;
+                            }
+                            // Skip only an old, strictly dominated branch;
+                            // genuinely deepest removed heads are restored.
+                            if (
+                                this.clock() - Number(value.createdAt) >
+                                    GC_DEFAULTS.namingGraceMs &&
+                                deepestPresent > value.causalDepth
+                            ) {
+                                continue;
+                            }
+                            if (!this.guardLifecycleActive(guardGeneration)) {
+                                return;
+                            }
+                            await this.putPreferLinked(value, () =>
+                                this.guardLifecycleActive(guardGeneration)
+                            );
+                        }
+                    },
+                    allowDuringClose
+                );
             } catch {
-                // Never throw into the event loop.
+                requeueNaming(nodeId, values);
             }
         }
         return [...removedVersions.keys(), ...removedNaming.keys()];
@@ -10160,34 +11198,42 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     compareIds(a.id, b.id)
             );
             for (const doc of ordered) {
-                const row = (await this.entries.index.get(doc.id, {
-                    local: true,
-                    remote: false,
-                    resolve: false,
-                })) as any;
-                if (!row) {
-                    continue; // concurrent collector won
-                }
-                const expectedHead = row.__context?.head;
-                this.gcSuppressed.add(doc.id);
                 try {
-                    const result: any = await this.entries.del(doc.id);
-                    const cutTarget = result?.entry?.meta?.next?.[0];
-                    if (
-                        expectedHead &&
-                        cutTarget &&
-                        cutTarget !== expectedHead
-                    ) {
-                        // The CUT landed on a concurrent re-put, not on the
-                        // head we planned against: restore the immutable
-                        // value we hold (linking whatever survives — a
-                        // concurrent chain demonstrably exists) and count
-                        // the recovery.
-                        await this.entries.put(doc);
-                        report.cutRecoveries++;
-                        continue;
-                    }
-                    deleted++;
+                    const executeOne = async () => {
+                        const row = (await this.entries.index.get(doc.id, {
+                            local: true,
+                            remote: false,
+                            resolve: false,
+                        })) as any;
+                        if (!row) {
+                            return false; // concurrent collector won
+                        }
+                        const expectedHead = row.__context?.head;
+                        this.gcSuppressed.add(doc.id);
+                        const result: any = await this.entries.del(doc.id);
+                        const cutTarget = result?.entry?.meta?.next?.[0];
+                        if (
+                            expectedHead &&
+                            cutTarget &&
+                            cutTarget !== expectedHead
+                        ) {
+                            // The CUT landed on a concurrent re-put, not on
+                            // the head planned against: restore the immutable
+                            // value while still holding naming admission.
+                            await this.entries.put(doc);
+                            report.cutRecoveries++;
+                            return false;
+                        }
+                        return true;
+                    };
+                    const didDelete =
+                        doc instanceof NamingEvent
+                            ? await this.withDeferredOrdinaryNamingAppend(
+                                  "naming GC delete/recovery",
+                                  executeOne
+                              )
+                            : await executeOne();
+                    if (didDelete) deleted++;
                 } catch (error) {
                     if (!(error instanceof NotFoundError)) {
                         throw error;
@@ -10476,6 +11522,32 @@ export class SharedFsHandle {
         return usesDefaultHandleReaders && usesDefaultProgramReaders
             ? SHARED_FS_MOUNT_READ_SEMANTICS
             : undefined;
+    }
+
+    /** Advertise guarded namespace mutation only when delegation is exact. */
+    mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
+        const usesDefaultHandleMutations =
+            this.rm === SharedFsHandle.prototype.rm &&
+            this.rename === SharedFsHandle.prototype.rename &&
+            this.mutateNamespaceForMount ===
+                SharedFsHandle.prototype.mutateNamespaceForMount;
+        const usesDefaultProgramMutations =
+            this.program.rm === SharedFileSystem.prototype.rm &&
+            this.program.rename === SharedFileSystem.prototype.rename &&
+            this.program.mutateNamespaceForMount ===
+                SharedFileSystem.prototype.mutateNamespaceForMount &&
+            this.program.mountNamespaceSemantics ===
+                SharedFileSystem.prototype.mountNamespaceSemantics;
+        return usesDefaultHandleMutations &&
+            usesDefaultProgramMutations &&
+            this.program.mountNamespaceSemantics() ===
+                SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
+            ? SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
+            : undefined;
+    }
+
+    mutateNamespaceForMount(mutation: SharedFsMountNamespaceMutation) {
+        return this.program.mutateNamespaceForMount(mutation);
     }
 
     stat(path: string) {
