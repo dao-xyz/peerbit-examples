@@ -8,7 +8,7 @@ import {
     PrepareForDisposalError,
     type SharedFsHandle,
 } from "../index.js";
-import { FileChunk, type NamingEvent } from "../model.js";
+import { FileChunk, FileVersion, NamingEvent } from "../model.js";
 
 const WAIT_TIMEOUT_MS = process.env.CI ? 90_000 : 30_000;
 
@@ -1044,6 +1044,996 @@ describe("shared fs durable machine disposal", () => {
         });
     });
 
+    it("aborts and drains a disposal barrier across close without poisoning reopen", async () => {
+        const directory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-disposal-lifecycle-")
+        );
+        temporaryDirectories.add(directory);
+        const peer = await trackPeer({ directory });
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "disposal-lifecycle-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        await fs.writeFile("/preserved.txt", "close must not certify disposal");
+
+        const program = fs.program as any;
+        const log = program.entries.log;
+        const originalDeliver = log.deliverPersistedEntries;
+        let deliverySignal: AbortSignal | undefined;
+        let deliveryCalls = 0;
+        let deliveryTailFinished = false;
+        let barrierFinished = false;
+        const completionOrder: string[] = [];
+        let releaseDeliveryDrain!: () => void;
+        const deliveryDrain = new Promise<void>((resolve) => {
+            releaseDeliveryDrain = resolve;
+        });
+        let forceDeliveryExit!: () => void;
+        const forcedExit = new Promise<void>((resolve) => {
+            forceDeliveryExit = resolve;
+        });
+
+        log.deliverPersistedEntries = (async (...args) => {
+            deliveryCalls++;
+            const delivery = args[1] as {
+                delivery?: { signal?: AbortSignal };
+            };
+            deliverySignal = delivery.delivery?.signal;
+            if (!deliverySignal) {
+                throw new Error("disposal delivery did not receive a signal");
+            }
+            await Promise.race([
+                new Promise<void>((resolve) => {
+                    if (deliverySignal!.aborted) {
+                        resolve();
+                        return;
+                    }
+                    deliverySignal!.addEventListener("abort", () => resolve(), {
+                        once: true,
+                    });
+                }),
+                forcedExit,
+            ]);
+            await deliveryDrain;
+            deliveryTailFinished = true;
+            completionOrder.push("delivery-tail");
+            throw (
+                deliverySignal.reason ??
+                new Error("test released disposal delivery without an abort")
+            );
+        }) as typeof log.deliverPersistedEntries;
+
+        const caller = new AbortController();
+        let staleSafeResultReturned = false;
+        const barrierOutcome = fs
+            .prepareForDisposal({
+                minAcks: 1,
+                timeout: WAIT_TIMEOUT_MS,
+                signal: caller.signal,
+            })
+            .then(
+                (value) => {
+                    barrierFinished = true;
+                    completionOrder.push("barrier");
+                    staleSafeResultReturned = value.safeToDispose;
+                    return { status: "fulfilled" as const, value };
+                },
+                (error: unknown) => {
+                    barrierFinished = true;
+                    completionOrder.push("barrier");
+                    return { status: "rejected" as const, error };
+                }
+            );
+        let closing: Promise<unknown> | undefined;
+
+        try {
+            await waitUntil(
+                () => {
+                    expect(deliveryCalls).toBe(1);
+                    expect(deliverySignal).toBeDefined();
+                },
+                Math.min(WAIT_TIMEOUT_MS, 5_000)
+            );
+            expect(deliveryCalls).toBe(1);
+            expect(deliverySignal).toBeDefined();
+            expect(deliverySignal).not.toBe(caller.signal);
+            expect(deliverySignal!.aborted).toBe(false);
+            expect(caller.signal.aborted).toBe(false);
+
+            let closeSettled = false;
+            closing = program.close().then(() => {
+                expect(deliveryTailFinished).toBe(true);
+                expect(barrierFinished).toBe(true);
+                completionOrder.push("close");
+                closeSettled = true;
+            });
+            await waitUntil(
+                () => expect(deliverySignal!.aborted).toBe(true),
+                Math.min(WAIT_TIMEOUT_MS, 5_000)
+            );
+            expect(caller.signal.aborted).toBe(false);
+
+            // The delivery observed lifecycle cancellation but deliberately
+            // holds its cleanup tail. close() must join that tail rather than
+            // returning while an old disposal task can still mutate state.
+            expect(closeSettled).toBe(false);
+
+            releaseDeliveryDrain();
+            const outcome = await barrierOutcome;
+            expect(outcome.status).toBe("rejected");
+            if (outcome.status !== "rejected") {
+                throw new Error(
+                    "stale disposal barrier unexpectedly succeeded"
+                );
+            }
+            expect(outcome.error).toBeInstanceOf(PrepareForDisposalError);
+            expect(outcome.error).toMatchObject({
+                name: "PrepareForDisposalError",
+                safeToDispose: false,
+            });
+            expect(staleSafeResultReturned).toBe(false);
+            await closing;
+            expect(closeSettled).toBe(true);
+            expect(completionOrder).toEqual([
+                "delivery-tail",
+                "barrier",
+                "close",
+            ]);
+        } finally {
+            forceDeliveryExit();
+            releaseDeliveryDrain();
+            await Promise.allSettled(
+                [barrierOutcome, closing].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            log.deliverPersistedEntries = originalDeliver;
+        }
+
+        const reopened = await (peer as any).open(program, {
+            existing: "reuse",
+            args: {
+                machineLabel: "disposal-lifecycle-reopen",
+                addressOpen: true,
+                bootstrap: false,
+                gc: false,
+            },
+        });
+        expect(reopened).toBe(program);
+        expect(fs.bootstrapStatus().writeReady).toBe(true);
+
+        const reopenedLog = program.entries.log;
+        const reopenedOriginalDeliver = reopenedLog.deliverPersistedEntries;
+        const freshCaller = new AbortController();
+        let freshDeliveryCalls = 0;
+        reopenedLog.deliverPersistedEntries = (async (...args) => {
+            freshDeliveryCalls++;
+            const delivery = args[1] as {
+                delivery?: { signal?: AbortSignal };
+            };
+            expect(delivery.delivery?.signal).toBeDefined();
+            expect(delivery.delivery!.signal).not.toBe(deliverySignal);
+            expect(delivery.delivery!.signal).not.toBe(freshCaller.signal);
+            expect(delivery.delivery!.signal!.aborted).toBe(false);
+        }) as typeof reopenedLog.deliverPersistedEntries;
+        try {
+            const fresh = await fs.prepareForDisposal({
+                minAcks: 1,
+                timeout: WAIT_TIMEOUT_MS,
+                signal: freshCaller.signal,
+            });
+            expect(fresh).toMatchObject({
+                safeToDispose: true,
+                guarantee: "persisted-per-entry",
+                minAcksPerEntry: 1,
+                empty: false,
+            });
+            expect(fresh.entryCount).toBeGreaterThan(0);
+            expect(freshDeliveryCalls).toBeGreaterThan(0);
+            expect(fresh.receiptBatches).toBe(freshDeliveryCalls);
+            expect(freshCaller.signal.aborted).toBe(false);
+        } finally {
+            reopenedLog.deliverPersistedEntries = reopenedOriginalDeliver;
+        }
+    });
+
+    it("rejects a second open without disturbing an admitted namespace mutation", async () => {
+        const directory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-second-open-")
+        );
+        temporaryDirectories.add(directory);
+        const peer = await trackPeer({ directory });
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "second-open-namespace-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            snapshot: { disabled: true },
+            gc: false,
+        });
+        await fs.writeFile("/existing.txt", "before rejected open");
+
+        const program = fs.program as any;
+        const entries = program.entries as any;
+        const originalPut = entries.put;
+        let releaseNamingPut!: () => void;
+        const namingPutAllowed = new Promise<void>((resolve) => {
+            releaseNamingPut = resolve;
+        });
+        let namingPutEntered!: () => void;
+        const namingPutStarted = new Promise<void>((resolve) => {
+            namingPutEntered = resolve;
+        });
+        let gateNamingPut = true;
+        entries.put = async (value: unknown, ...args: unknown[]) => {
+            if (
+                gateNamingPut &&
+                value instanceof NamingEvent &&
+                value.name === "held"
+            ) {
+                gateNamingPut = false;
+                namingPutEntered();
+                await namingPutAllowed;
+            }
+            return originalPut.call(entries, value, ...args);
+        };
+
+        let admittedMutation: Promise<unknown> | undefined;
+        try {
+            admittedMutation = fs.mkdir("/held");
+            await namingPutStarted;
+            expect(program.ordinaryNamingAppendsInFlight).toBe(1);
+
+            await expect(
+                program.open({
+                    machineLabel: "invalid-second-open",
+                    addressOpen: true,
+                    bootstrap: false,
+                    snapshot: { disabled: true },
+                    gc: false,
+                })
+            ).rejects.toMatchObject({
+                name: "SharedFsError",
+                code: "EINVAL",
+                message: expect.stringContaining("already open"),
+            });
+
+            // Rejection happens before lifecycle invalidation: the admitted
+            // append still owns its old counter/fence and the active handle
+            // remains writable.
+            expect(program.ordinaryNamingAppendsInFlight).toBe(1);
+            expect(fs.bootstrapStatus().writeReady).toBe(true);
+            releaseNamingPut();
+            await admittedMutation;
+            expect(program.ordinaryNamingAppendsInFlight).toBe(0);
+            expect((await fs.stat("/held"))?.kind).toBe("directory");
+
+            await fs.writeFile("/existing.txt", "active lifecycle survived");
+            await fs.mkdir("/after-rejected-open");
+            expect(decode(await fs.readFile("/existing.txt"))).toBe(
+                "active lifecycle survived"
+            );
+        } finally {
+            releaseNamingPut();
+            await Promise.allSettled(
+                [admittedMutation].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            entries.put = originalPut;
+        }
+
+        await program.close();
+        const reopened = await (peer as any).open(program, {
+            existing: "reuse",
+            args: {
+                machineLabel: "second-open-namespace-reopen",
+                addressOpen: true,
+                bootstrap: false,
+                snapshot: { disabled: true },
+                gc: false,
+            },
+        });
+        expect(reopened).toBe(program);
+        await fs.mkdir("/fresh-lifecycle");
+        expect((await fs.stat("/fresh-lifecycle"))?.kind).toBe("directory");
+    });
+
+    it("rejects a queued open when close cannot drain required guard work", async () => {
+        const peer = await trackPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "failed-close-queued-open-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            snapshot: { disabled: true },
+            gc: false,
+        });
+        await fs.mkdir("/important");
+
+        const program = fs.program as any;
+        const important = (await fs.stat("/important"))!;
+        const naming = (
+            (await program.entries.index
+                .iterate(
+                    { query: { kind: "naming" } },
+                    { local: true, remote: false, resolve: true }
+                )
+                .all()) as NamingEvent[]
+        ).find((event) => event.nodeId === important.nodeId)!;
+        expect(naming).toBeInstanceOf(NamingEvent);
+        program.pendingGuardNaming.set(
+            important.nodeId,
+            new Map([[naming.id, naming]])
+        );
+
+        const originalStartGuardFlush = program.startGuardFlush;
+        let guardFlushCalls = 0;
+        program.startGuardFlush = async () => {
+            guardFlushCalls++;
+            // Preserve the required batch to force the pre-super.close
+            // fail-closed branch deterministically.
+        };
+        const openEvents: Event[] = [];
+        const onOpen = (event: Event) => {
+            if ((event as CustomEvent).detail === program) {
+                openEvents.push(event);
+            }
+        };
+        program.events.addEventListener("open", onOpen);
+        let queuedGcArmCalls = 0;
+        let closing:
+            | Promise<
+                  | { status: "fulfilled"; value: boolean }
+                  | { status: "rejected"; error: unknown }
+              >
+            | undefined;
+        let queuedOpen:
+            | Promise<
+                  | { status: "fulfilled"; value: unknown }
+                  | { status: "rejected"; error: unknown }
+              >
+            | undefined;
+        try {
+            closing = program.close().then(
+                (value: boolean) => ({ status: "fulfilled" as const, value }),
+                (error: unknown) => ({ status: "rejected" as const, error })
+            );
+            queuedOpen = program
+                .open({
+                    machineLabel: "must-not-open-after-failed-close",
+                    addressOpen: true,
+                    bootstrap: false,
+                    snapshot: { disabled: true },
+                    gc: {
+                        intervalMs: WAIT_TIMEOUT_MS * 10,
+                        initialDelayMs: WAIT_TIMEOUT_MS * 10,
+                        jitterRatio: 0,
+                        testOverrides: { noFloors: true },
+                    },
+                    gcRng: () => {
+                        queuedGcArmCalls++;
+                        return 0.5;
+                    },
+                })
+                .then(
+                    (value: unknown) => ({
+                        status: "fulfilled" as const,
+                        value,
+                    }),
+                    (error: unknown) => ({
+                        status: "rejected" as const,
+                        error,
+                    })
+                );
+
+            const closeOutcome = await closing;
+            expect(closeOutcome.status).toBe("rejected");
+            if (closeOutcome.status !== "rejected") {
+                throw new Error("close unexpectedly discarded guard work");
+            }
+            expect(closeOutcome.error).toMatchObject({
+                name: "SharedFsError",
+                code: "EIO",
+                message: expect.stringContaining("resurrection guard"),
+            });
+
+            const openOutcome = await queuedOpen;
+            expect(openOutcome.status).toBe("rejected");
+            if (openOutcome.status !== "rejected") {
+                throw new Error("queued open ran after a failed close");
+            }
+            expect(openOutcome.error).toBe(closeOutcome.error);
+            expect(guardFlushCalls).toBe(1);
+            expect(
+                program.pendingGuardNaming.get(important.nodeId)?.has(naming.id)
+            ).toBe(true);
+            expect(openEvents).toHaveLength(0);
+            expect(queuedGcArmCalls).toBe(0);
+            expect(program.gcStatus()).toMatchObject({
+                scheduled: false,
+                nextRunAtMs: undefined,
+            });
+        } finally {
+            program.startGuardFlush = originalStartGuardFlush;
+            program.events.removeEventListener("open", onOpen);
+            await Promise.allSettled(
+                [closing, queuedOpen].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            // The assertions above prove failed-close ownership. Clear the
+            // synthetic batch so teardown can perform the required retry.
+            program.pendingGuardNaming.clear();
+            await program.close().catch(() => {});
+        }
+    });
+
+    it("serializes a close requested inside an awaited same-instance reopen", async () => {
+        const directory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-open-close-transition-")
+        );
+        temporaryDirectories.add(directory);
+        const peer = await trackPeer({ directory });
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "open-close-transition-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            snapshot: { disabled: true },
+            gc: false,
+        });
+        await fs.writeFile("/preserved.txt", "fresh lifecycle owns this state");
+
+        const program = fs.program as any;
+        const classClose = Object.getPrototypeOf(program).close as (
+            this: typeof program
+        ) => Promise<boolean>;
+        await program.close();
+
+        const entries = program.entries as any;
+        const originalEntriesOpen = entries.open;
+        const originalProgramOpen = program.open;
+        let releaseOpenStage!: () => void;
+        const openStageGate = new Promise<void>((resolve) => {
+            releaseOpenStage = resolve;
+        });
+        let openStageEntered = false;
+        const completionOrder: string[] = [];
+        entries.open = async (...args: any[]) => {
+            openStageEntered = true;
+            completionOrder.push("open-stage-entered");
+            await openStageGate;
+            return originalEntriesOpen.apply(entries, args);
+        };
+
+        const lifecycleEvents: string[] = [];
+        const onOpen = (event: Event) => {
+            if ((event as CustomEvent).detail === program) {
+                lifecycleEvents.push("open");
+            }
+        };
+        const onClose = (event: Event) => {
+            if ((event as CustomEvent).detail === program) {
+                lifecycleEvents.push("close");
+            }
+        };
+        program.events.addEventListener("open", onOpen);
+        program.events.addEventListener("close", onClose);
+
+        let staleGcArmCalls = 0;
+        let localOpenTask:
+            | Promise<
+                  | { status: "fulfilled"; value: unknown }
+                  | { status: "rejected"; error: unknown }
+              >
+            | undefined;
+        program.open = (...args: any[]) => {
+            const task = originalProgramOpen.apply(
+                program,
+                args
+            ) as Promise<unknown>;
+            localOpenTask = task.then(
+                (value) => {
+                    completionOrder.push("stale-open-fulfilled");
+                    return { status: "fulfilled" as const, value };
+                },
+                (error: unknown) => {
+                    completionOrder.push("stale-open-rejected");
+                    return { status: "rejected" as const, error };
+                }
+            );
+            return task;
+        };
+        let staleOpenTask:
+            | Promise<
+                  | { status: "fulfilled"; value: unknown }
+                  | { status: "rejected"; error: unknown }
+              >
+            | undefined;
+        let closeTask: Promise<boolean> | undefined;
+        try {
+            staleOpenTask = (peer as any)
+                .open(program, {
+                    existing: "reuse",
+                    args: {
+                        machineLabel: "superseded-same-instance-open",
+                        addressOpen: true,
+                        bootstrap: false,
+                        snapshot: { disabled: true },
+                        gc: {
+                            intervalMs: WAIT_TIMEOUT_MS * 10,
+                            initialDelayMs: WAIT_TIMEOUT_MS * 10,
+                            jitterRatio: 0,
+                            testOverrides: { noFloors: true },
+                        },
+                        gcRng: () => {
+                            staleGcArmCalls++;
+                            return 0.5;
+                        },
+                    },
+                })
+                .then(
+                    (value: unknown) => {
+                        return { status: "fulfilled" as const, value };
+                    },
+                    (error: unknown) => {
+                        return { status: "rejected" as const, error };
+                    }
+                );
+            await waitUntil(
+                () => expect(openStageEntered).toBe(true),
+                Math.min(WAIT_TIMEOUT_MS, 5_000)
+            );
+
+            // The Peerbit handler correctly refuses an external terminal call
+            // while its managed open owns the address. Invoke this class's
+            // public implementation directly to exercise its independent
+            // same-instance transition queue and ownership token.
+            closeTask = classClose.call(program).then((closed: boolean) => {
+                completionOrder.push("close");
+                return closed;
+            });
+            completionOrder.push("close-requested");
+
+            // close() closes admission synchronously, even while the prior open
+            // still owns an awaited Documents.open stage.
+            await expect(
+                fs.writeFile("/must-stay-blocked.txt", "stale")
+            ).rejects.toMatchObject({
+                name: "SharedFsWritePendingError",
+                code: "EAGAIN",
+            });
+            expect(staleGcArmCalls).toBe(0);
+
+            completionOrder.push("open-stage-released");
+            releaseOpenStage();
+            if (!localOpenTask) {
+                throw new Error(
+                    "managed reopen never invoked the program open"
+                );
+            }
+            const staleLocalOpen = await localOpenTask;
+            expect(staleLocalOpen.status).toBe("rejected");
+            if (staleLocalOpen.status !== "rejected") {
+                throw new Error("superseded open unexpectedly completed");
+            }
+            expect(staleLocalOpen.error).toMatchObject({
+                name: "SharedFsError",
+                code: "ECLOSED",
+                message: expect.stringContaining("superseded"),
+            });
+
+            // The stale continuation must not reopen admission in the interval
+            // before its queued close transition finishes.
+            await expect(
+                fs.writeFile("/must-stay-blocked.txt", "still stale")
+            ).rejects.toMatchObject({
+                name: "SharedFsWritePendingError",
+                code: "EAGAIN",
+            });
+            expect(await closeTask).toBe(true);
+            expect(staleGcArmCalls).toBe(0);
+            expect(program.gcStatus()).toMatchObject({
+                scheduled: false,
+                nextRunAtMs: undefined,
+            });
+            expect(lifecycleEvents).toEqual(["close"]);
+            expect(completionOrder).toEqual([
+                "open-stage-entered",
+                "close-requested",
+                "open-stage-released",
+                "stale-open-rejected",
+                "close",
+            ]);
+            const staleManagedOpen = await staleOpenTask;
+            expect(staleManagedOpen.status).toBe("rejected");
+
+            entries.open = originalEntriesOpen;
+            program.open = originalProgramOpen;
+            let freshGcArmCalls = 0;
+            const reopened = await (peer as any).open(program, {
+                existing: "reuse",
+                args: {
+                    machineLabel: "fresh-same-instance-open",
+                    addressOpen: true,
+                    bootstrap: false,
+                    snapshot: { disabled: true },
+                    gc: {
+                        intervalMs: WAIT_TIMEOUT_MS * 10,
+                        initialDelayMs: WAIT_TIMEOUT_MS * 10,
+                        jitterRatio: 0,
+                        testOverrides: { noFloors: true },
+                    },
+                    gcRng: () => {
+                        freshGcArmCalls++;
+                        return 0.5;
+                    },
+                },
+            });
+            expect(reopened).toBe(program);
+            expect(freshGcArmCalls).toBe(1);
+            expect(program.gcStatus()).toMatchObject({ scheduled: true });
+            expect(program.gcStatus().nextRunAtMs).toBeDefined();
+            expect(lifecycleEvents).toEqual(["close", "open"]);
+            expect(decode(await fs.readFile("/preserved.txt"))).toBe(
+                "fresh lifecycle owns this state"
+            );
+            expect(await fs.stat("/must-stay-blocked.txt")).toBeUndefined();
+            await fs.writeFile("/fresh.txt", "fresh open is writable");
+            expect(decode(await fs.readFile("/fresh.txt"))).toBe(
+                "fresh open is writable"
+            );
+        } finally {
+            releaseOpenStage();
+            await Promise.allSettled(
+                [localOpenTask, staleOpenTask, closeTask].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            entries.open = originalEntriesOpen;
+            program.open = originalProgramOpen;
+            program.events.removeEventListener("open", onOpen);
+            program.events.removeEventListener("close", onClose);
+        }
+    });
+
+    it("drains admitted file-version writes and conflict resolution before close and reopen", async () => {
+        const directory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-foreground-drain-")
+        );
+        temporaryDirectories.add(directory);
+        const peer = await trackPeer({ directory });
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "foreground-mutation-drain-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            snapshot: { disabled: true },
+            gc: false,
+        });
+        await fs.writeFile("/file.txt", "base");
+        const program = fs.program as any;
+        const entries = program.entries as any;
+
+        const closeWhileVersionPutIsGated = async (
+            predicate: (value: FileVersion) => boolean,
+            mutate: () => Promise<unknown>
+        ) => {
+            const originalPut = entries.put;
+            let releasePut!: () => void;
+            const putAllowed = new Promise<void>((resolve) => {
+                releasePut = resolve;
+            });
+            let putEntered!: () => void;
+            const putStarted = new Promise<void>((resolve) => {
+                putEntered = resolve;
+            });
+            let gate = true;
+            let putFinished = false;
+            entries.put = async (value: unknown, ...args: unknown[]) => {
+                if (gate && value instanceof FileVersion && predicate(value)) {
+                    gate = false;
+                    putEntered();
+                    await putAllowed;
+                    const result = await originalPut.call(
+                        entries,
+                        value,
+                        ...args
+                    );
+                    putFinished = true;
+                    return result;
+                }
+                return originalPut.call(entries, value, ...args);
+            };
+
+            const completionOrder: string[] = [];
+            let mutationFinished = false;
+            let mutation: Promise<unknown> | undefined;
+            let closing: Promise<boolean> | undefined;
+            try {
+                mutation = mutate().then((value) => {
+                    expect(putFinished).toBe(true);
+                    mutationFinished = true;
+                    completionOrder.push("mutation");
+                    return value;
+                });
+                await putStarted;
+                closing = program.close().then((value: boolean) => {
+                    expect(mutationFinished).toBe(true);
+                    completionOrder.push("close");
+                    return value;
+                });
+
+                // Admission closes synchronously, while the already-admitted
+                // operation retains ownership through its post-put tail.
+                await expect(
+                    fs.writeFile("/must-not-cross-close.txt", "blocked")
+                ).rejects.toMatchObject({ code: "EAGAIN" });
+                releasePut();
+                await mutation;
+                await closing;
+                expect(completionOrder).toEqual(["mutation", "close"]);
+            } finally {
+                releasePut();
+                await Promise.allSettled(
+                    [mutation, closing].filter(
+                        (task): task is Promise<unknown> => task !== undefined
+                    )
+                );
+                entries.put = originalPut;
+            }
+        };
+
+        const reopen = async (machineLabel: string) => {
+            const reopened = await (peer as any).open(program, {
+                existing: "reuse",
+                args: {
+                    machineLabel,
+                    addressOpen: true,
+                    bootstrap: false,
+                    snapshot: { disabled: true },
+                    gc: false,
+                },
+            });
+            expect(reopened).toBe(program);
+        };
+
+        const nodeId = (await fs.stat("/file.txt"))!.nodeId;
+        await closeWhileVersionPutIsGated(
+            (value) =>
+                value.nodeId === nodeId && value.conflictResolution !== true,
+            () => fs.writeFile("/file.txt", "old generation completed")
+        );
+        await reopen("foreground-write-reopen");
+        expect(decode(await fs.readFile("/file.txt"))).toBe(
+            "old generation completed"
+        );
+        expect(await fs.stat("/must-not-cross-close.txt")).toBeUndefined();
+
+        const base = (await fs.versions("/file.txt"))[0];
+        await fs.writeFile("/file.txt", "branch a", {
+            baseVersionIds: [base.id],
+        });
+        await fs.writeFile("/file.txt", "branch b", {
+            baseVersionIds: [base.id],
+        });
+        const conflicts = await fs.conflicts("/file.txt");
+        expect(conflicts).toHaveLength(1);
+        expect(conflicts[0].versions).toHaveLength(2);
+        const selectedVersionId = conflicts[0].versions[0].id;
+        const selectedBytes = decode(
+            await fs.readVersion("/file.txt", selectedVersionId)
+        );
+
+        await closeWhileVersionPutIsGated(
+            (value) =>
+                value.nodeId === nodeId && value.conflictResolution === true,
+            () => fs.resolveConflict("/file.txt", selectedVersionId)
+        );
+        await reopen("foreground-conflict-reopen");
+        expect(await fs.conflicts("/file.txt")).toEqual([]);
+        expect(decode(await fs.readFile("/file.txt"))).toBe(selectedBytes);
+        await fs.writeFile("/fresh-after-conflict.txt", "fresh lifecycle");
+        expect(decode(await fs.readFile("/fresh-after-conflict.txt"))).toBe(
+            "fresh lifecycle"
+        );
+    });
+
+    it("ignores a queued quiescence callback from an older open generation", async () => {
+        const directory = await mkdtemp(
+            join(tmpdir(), "peerbit-shared-fs-quiescence-callback-")
+        );
+        temporaryDirectories.add(directory);
+        const peer = await trackPeer({ directory });
+        const fakeNow = Date.now() + 24 * 60 * 60 * 1000;
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "quiescence-callback-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            snapshot: { disabled: true },
+            gc: false,
+            clock: () => fakeNow,
+        });
+        const program = fs.program as any;
+        const originalSetInterval = globalThis.setInterval;
+        const timerHandles: Array<ReturnType<typeof setInterval>> = [];
+        const captureQuiescenceCallback = () => {
+            let callback: (() => void) | undefined;
+            const timer = originalSetInterval(
+                () => undefined,
+                WAIT_TIMEOUT_MS * 10
+            );
+            (timer as any).unref?.();
+            timerHandles.push(timer);
+            const intervalSpy = vi
+                .spyOn(globalThis, "setInterval")
+                .mockImplementationOnce(((
+                    handler: (...args: unknown[]) => void
+                ) => {
+                    callback = () => handler();
+                    return timer;
+                }) as typeof setInterval);
+            try {
+                program.startQuiescenceChecker();
+            } finally {
+                intervalSpy.mockRestore();
+            }
+            if (!callback) {
+                throw new Error("quiescence callback was not captured");
+            }
+            return { callback, timer };
+        };
+
+        let clearIntervalSpy: ReturnType<typeof vi.spyOn> | undefined;
+        try {
+            program.bootstrapPhase = "unverified";
+            program.lastArrivalMs = 0;
+            program.setGuardArmed(false);
+            const stale = captureQuiescenceCallback();
+
+            await program.close();
+            const reopened = await (peer as any).open(program, {
+                existing: "reuse",
+                args: {
+                    machineLabel: "quiescence-callback-reopen",
+                    addressOpen: true,
+                    bootstrap: false,
+                    snapshot: { disabled: true },
+                    gc: false,
+                    clock: () => fakeNow,
+                },
+            });
+            expect(reopened).toBe(program);
+
+            program.bootstrapPhase = "unverified";
+            program.lastArrivalMs = 0;
+            program.setGuardArmed(false);
+            const fresh = captureQuiescenceCallback();
+            clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+
+            stale.callback();
+            stale.callback();
+            expect(program.quiescentChecks).toBe(0);
+            expect(fs.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                guardArmed: false,
+            });
+            expect(clearIntervalSpy).not.toHaveBeenCalledWith(fresh.timer);
+
+            fresh.callback();
+            expect(program.quiescentChecks).toBe(1);
+            expect(fs.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                guardArmed: false,
+            });
+            fresh.callback();
+            expect(fs.bootstrapStatus()).toMatchObject({
+                phase: "converged",
+                guardArmed: true,
+            });
+            expect(clearIntervalSpy).toHaveBeenCalledWith(fresh.timer);
+            expect(program.quiescenceTimer).toBeUndefined();
+        } finally {
+            clearIntervalSpy?.mockRestore();
+            for (const timer of timerHandles) {
+                clearInterval(timer);
+            }
+        }
+    });
+
+    it("cancels a disposal waiter promptly while close drains its bootstrap tail", async () => {
+        const peer = await trackPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "disposal-bootstrap-close-source",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            snapshot: { disabled: true },
+            gc: false,
+        });
+        const program = fs.program as any;
+        const originalBootstrapDecision = program.bootstrapDecision;
+        let releaseBootstrapTail!: () => void;
+        const bootstrapTailGate = new Promise<void>((resolve) => {
+            releaseBootstrapTail = resolve;
+        });
+        const completionOrder: string[] = [];
+        program.bootstrapDecision = bootstrapTailGate.then(() => {
+            completionOrder.push("bootstrap-tail");
+        });
+
+        let barrier:
+            | Promise<
+                  | { status: "fulfilled"; value: unknown }
+                  | { status: "rejected"; error: unknown }
+              >
+            | undefined;
+        let closing: Promise<boolean> | undefined;
+        try {
+            barrier = fs.prepareForDisposal({ minAcks: 1 }).then(
+                (value) => ({ status: "fulfilled" as const, value }),
+                (error: unknown) => {
+                    completionOrder.push("barrier");
+                    return { status: "rejected" as const, error };
+                }
+            );
+            await waitUntil(
+                () => {
+                    expect(program.disposalPreparationRunning).toBe(true);
+                    expect(program.maintenanceTasks.size).toBeGreaterThan(0);
+                },
+                Math.min(WAIT_TIMEOUT_MS, 5_000)
+            );
+
+            let closeSettled = false;
+            closing = program.close().then((value: boolean) => {
+                closeSettled = true;
+                completionOrder.push("close");
+                return value;
+            });
+
+            const barrierOutcome = await barrier;
+            expect(barrierOutcome.status).toBe("rejected");
+            if (barrierOutcome.status !== "rejected") {
+                throw new Error("disposal barrier survived lifecycle close");
+            }
+            expect(barrierOutcome.error).toBeInstanceOf(
+                PrepareForDisposalError
+            );
+            expect(barrierOutcome.error).toMatchObject({
+                name: "PrepareForDisposalError",
+                safeToDispose: false,
+                cause: {
+                    name: "SharedFsError",
+                    code: "ECLOSED",
+                },
+            });
+            expect(closeSettled).toBe(false);
+            expect(completionOrder).toEqual(["barrier"]);
+
+            releaseBootstrapTail();
+            await closing;
+            expect(completionOrder).toEqual([
+                "barrier",
+                "bootstrap-tail",
+                "close",
+            ]);
+        } finally {
+            releaseBootstrapTail();
+            await Promise.allSettled(
+                [barrier, closing].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            program.bootstrapDecision = originalBootstrapDecision;
+        }
+    });
+
     it("bounds a pending local barrier step by timeout and abort signal", async () => {
         const peer = await trackPeer();
         const fs = await openSharedFs({
@@ -1057,7 +2047,11 @@ describe("shared fs durable machine disposal", () => {
             bootstrapDecision: Promise<void>;
         };
         const originalBootstrapDecision = program.bootstrapDecision;
-        program.bootstrapDecision = new Promise(() => {});
+        let resolveBootstrapDecision!: () => void;
+        const pendingBootstrapDecision = new Promise<void>((resolve) => {
+            resolveBootstrapDecision = resolve;
+        });
+        program.bootstrapDecision = pendingBootstrapDecision;
         try {
             const timeoutFailure = await fs
                 .prepareForDisposal({ minAcks: 1, timeout: 25 })
@@ -1094,8 +2088,10 @@ describe("shared fs durable machine disposal", () => {
             );
         } finally {
             // close() now correctly joins the real per-open bootstrap task;
-            // do not leave this intentionally-never-settling test double
-            // installed for teardown.
+            // settle every admitted reference to this test double before
+            // restoring it so teardown cannot wait forever.
+            resolveBootstrapDecision();
+            await pendingBootstrapDecision;
             program.bootstrapDecision = originalBootstrapDecision;
         }
     });

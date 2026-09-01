@@ -42,6 +42,14 @@ const waitUntil = async (
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((resolvePromise) => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
+};
+
 describe("gc schedule delay helpers", () => {
     it("spreads the first run over [initialDelay, initialDelay + interval/4]", () => {
         const initial = 5 * 60 * 1000;
@@ -298,6 +306,107 @@ describe("scheduled garbage collection", () => {
         expect(manual.dryRun).toBe(false);
     });
 
+    it("refuses a chunk CUT when its immutable recovery value is missing", async () => {
+        await openScheduled(false);
+        const program: any = fs.program;
+        const report = {
+            deletedChunks: 0,
+            reclaimedChunkBytes: 0n,
+            cutRecoveries: 0,
+        };
+        const getDocument = vi
+            .spyOn(program, "getDocument")
+            .mockResolvedValueOnce(undefined);
+        const deleteEntry = vi.spyOn(program.entries, "del");
+
+        await expect(
+            program.deleteChunkVerified(
+                "file-chunk:missing-recovery-value",
+                "planned-head",
+                4096,
+                report
+            )
+        ).rejects.toMatchObject({
+            name: "SharedFsError",
+            code: "EIO",
+            message: expect.stringContaining(
+                "could not be resolved before verified deletion"
+            ),
+        });
+        expect(getDocument).toHaveBeenCalledOnce();
+        expect(deleteEntry).not.toHaveBeenCalled();
+        expect(report).toEqual({
+            deletedChunks: 0,
+            reclaimedChunkBytes: 0n,
+            cutRecoveries: 0,
+        });
+    });
+
+    it("recovers a changeset manifest re-put after GC planning but before its CUT", async () => {
+        await openScheduled(false);
+        const batch = await fs.writeBatch(
+            [{ path: "/manifest-race.txt", content: "membership survives" }],
+            {
+                changesetId: "manifest-gc-race",
+                manifest: true,
+            }
+        );
+        expect(batch.manifest).toBeDefined();
+        const manifestId = batch.manifest!.manifestId;
+        const program: any = fs.program;
+        const manifest = await program.getDocument(manifestId);
+        expect(manifest).toBeDefined();
+        clockOffset += 40 * DAY_MS;
+
+        const entries = program.entries as any;
+        const originalDelete = entries.del;
+        let deleteEntered!: () => void;
+        const deleteStarted = new Promise<void>((resolve) => {
+            deleteEntered = resolve;
+        });
+        let releaseDelete!: () => void;
+        const deleteAllowed = new Promise<void>((resolve) => {
+            releaseDelete = resolve;
+        });
+        let gateDelete = true;
+        entries.del = async (id: string, ...args: unknown[]) => {
+            if (gateDelete && id === manifestId) {
+                gateDelete = false;
+                deleteEntered();
+                await deleteAllowed;
+            }
+            return originalDelete.call(entries, id, ...args);
+        };
+
+        let collecting: Promise<any> | undefined;
+        try {
+            collecting = fs.collectGarbage({
+                settleMs: 0,
+                nowMs: clock(),
+                chunkSweep: "immediate",
+            });
+            await deleteStarted;
+
+            // Refresh the same immutable id after the sweep planned against
+            // its old local head. The subsequent CUT must detect that head
+            // change and restore the manifest rather than retire history.
+            await entries.put(manifest);
+            releaseDelete();
+            const report = await collecting;
+            expect(report.manifestsRetired).toBe(0);
+            expect(report.cutRecoveries).toBe(1);
+            expect(await program.getDocument(manifestId)).toBeDefined();
+        } finally {
+            releaseDelete();
+            await Promise.allSettled(
+                [collecting].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            entries.del = originalDelete;
+        }
+    });
+
     it("close() between arm and fire leaves no stray events; reopen re-arms", async () => {
         const root = await mkdtemp(join(tmpdir(), "shared-fs-gc-reopen-"));
         await peer.stop();
@@ -349,6 +458,121 @@ describe("scheduled garbage collection", () => {
         } finally {
             await peer.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("close aborts and drains an in-flight scheduled tick without events or rearm", async () => {
+        await openScheduled({
+            intervalMs: 20_000,
+            initialDelayMs: 20_000,
+            jitterRatio: 0,
+            run: { settleMs: 0 },
+            testOverrides: { noFloors: true },
+        });
+        const program: any = fs.program;
+        const eventTarget = program.events as EventTarget;
+        const lifecycleRunEvents: any[] = [];
+        const lifecycleErrorEvents: any[] = [];
+        const onRun = (event: Event) =>
+            lifecycleRunEvents.push((event as CustomEvent).detail);
+        const onError = (event: Event) =>
+            lifecycleErrorEvents.push((event as CustomEvent).detail);
+        eventTarget.addEventListener("gc:run", onRun);
+        eventTarget.addEventListener("gc:error", onError);
+
+        const originalGc = program.collectGarbageInner.bind(program);
+        const originalQuery = program.queryDocuments.bind(program);
+        const planningEntered = deferred();
+        const planningAllowed = deferred();
+        const completionOrder: string[] = [];
+        let gatePlanning = true;
+        let planningReadCompleted = false;
+        let abortedError: any;
+        vi.spyOn(program, "collectGarbageInner").mockImplementation(
+            async (...args: any[]) => {
+                try {
+                    return await originalGc(...args);
+                } catch (error) {
+                    abortedError = error;
+                    throw error;
+                }
+            }
+        );
+        vi.spyOn(program, "queryDocuments").mockImplementation(
+            async (...args: any[]) => {
+                const result = await originalQuery(...args);
+                if (gatePlanning) {
+                    gatePlanning = false;
+                    planningReadCompleted = true;
+                    planningEntered.resolve();
+                    await planningAllowed.promise;
+                }
+                return result;
+            }
+        );
+
+        let scheduledSettled = false;
+        const scheduled = tick().then(() => {
+            scheduledSettled = true;
+            completionOrder.push("gc-cleanup");
+        });
+        let closing: Promise<boolean> | undefined;
+        let closeObservedGcCleanup = false;
+        try {
+            await planningEntered.promise;
+            closing = program.close().then((result: boolean) => {
+                closeObservedGcCleanup = scheduledSettled;
+                completionOrder.push("close");
+                return result;
+            });
+            planningAllowed.resolve();
+
+            await Promise.all([scheduled, closing]);
+            expect(planningReadCompleted).toBe(true);
+            expect(closeObservedGcCleanup).toBe(true);
+            expect(completionOrder).toEqual(["gc-cleanup", "close"]);
+            expect(abortedError).toMatchObject({ code: "ECLOSED" });
+            expect(lifecycleRunEvents).toHaveLength(0);
+            expect(lifecycleErrorEvents).toHaveLength(0);
+            expect(fs.gcStatus().nextRunAtMs).toBeUndefined();
+
+            const reopenedProgram = await (peer as any).open(program, {
+                existing: "reuse",
+                args: {
+                    machineLabel: "gc-in-flight-close-reopen",
+                    allowPartialWrites: true,
+                    addressOpen: true,
+                    bootstrap: false,
+                    clock,
+                    gc: {
+                        intervalMs: 20_000,
+                        initialDelayMs: 20_000,
+                        jitterRatio: 0,
+                        run: { settleMs: 0 },
+                        testOverrides: { noFloors: true },
+                    },
+                },
+            });
+            expect(reopenedProgram).toBe(program);
+            // Preserve the old-generation counters across reopen: any late
+            // event is a failure, not something cleared before the fresh run.
+            expect(lifecycleRunEvents).toHaveLength(0);
+            expect(lifecycleErrorEvents).toHaveLength(0);
+
+            await tick();
+            expect(lifecycleRunEvents).toHaveLength(1);
+            expect(lifecycleRunEvents[0].trigger).toBe("interval");
+            expect(lifecycleErrorEvents).toHaveLength(0);
+            expect(fs.gcStatus().lastRun?.report.dryRun).toBe(false);
+        } finally {
+            planningAllowed.resolve();
+            await Promise.allSettled(
+                [scheduled, closing].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            eventTarget.removeEventListener("gc:run", onRun);
+            eventTarget.removeEventListener("gc:error", onError);
         }
     });
 

@@ -99,10 +99,25 @@ export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
 
-const directorySyncUnsupported = (error: unknown) =>
-    ["EINVAL", "ENOTSUP", "ENOSYS", "EPERM", "EISDIR", "EBADF"].includes(
-        (error as { code?: string })?.code ?? ""
+const directorySyncUnsupported = (error: unknown) => {
+    const code = (error as { code?: string })?.code ?? "";
+    // Windows does not consistently permit opening/fsyncing directories.
+    // On POSIX, every failure (including a backend reporting that directory
+    // fsync is unsupported) means the requested durability barrier was not
+    // established and must fail closed.
+    return (
+        process.platform === "win32" &&
+        [
+            "EINVAL",
+            "ENOTSUP",
+            "ENOSYS",
+            "EPERM",
+            "EACCES",
+            "EISDIR",
+            "EBADF",
+        ].includes(code)
     );
+};
 export * from "./native-mount.js";
 export * from "./path.js";
 
@@ -706,6 +721,21 @@ type DisposalClosure = {
     versions: DisposalEntryRef[];
     naming: DisposalEntryRef[];
     trust: DisposalEntryRef[];
+};
+
+/** Ownership token for work admitted during one open lifecycle. */
+type MaintenanceContext = {
+    generation: number;
+    signal: AbortSignal;
+};
+
+/** Non-cancellable ownership for a public mutation admitted before close. */
+type ForegroundMutationContext = {
+    generation: number;
+    owner: Set<Promise<unknown>>;
+    criticalTail: Promise<void>;
+    settleCriticalTail: () => void;
+    criticalTailEntered: boolean;
 };
 
 /**
@@ -1463,6 +1493,11 @@ const SEGMENT_RECLAIM_DEFAULT_GRACE_MS = 3 * 60 * 60 * 1000;
 const SEGMENT_LEDGER_MAX_RETIRED = 32;
 /** Consecutive reap cycles with rm failures before a loud warning. */
 const SEGMENT_REAP_FAILURE_WARN_CYCLES = 5;
+/** Cross-process ledger writers wait briefly; a wedged lock fails closed. */
+const SEGMENT_LEDGER_LOCK_TIMEOUT_MS = 5_000;
+/** A dead owner's lock is recoverable only after this conservative age. */
+const SEGMENT_LEDGER_LOCK_STALE_MS = 30_000;
+const SEGMENT_LEDGER_LOCK_RETRY_MS = 20;
 
 type SegmentLedgerCid = { cid: string; bytes: number };
 type SegmentLedgerGen = {
@@ -1750,6 +1785,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     /** Filesystem/trust-state generation used to reject a moving disposal fence. */
     private disposalContentGeneration = 0;
     private disposalPreparationRunning = false;
+    private disposalPreparationRunningGeneration: number | undefined;
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
     // --- Cold-start bootstrap state (all re-initialized in open()) ---
@@ -1769,6 +1805,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessQuietChecks = 0;
     private writeReadinessTimer: ReturnType<typeof setInterval> | undefined;
     private writeReadinessCheckRunning = false;
+    /** Owns the async readiness probe so an older finally cannot unlock a reopen. */
+    private writeReadinessCheckRunningRequestGeneration: number | undefined;
     private openedExistingAddress = false;
     private legacyPromotionEligible = false;
     private legacyPromotionCrashMarker = false;
@@ -1783,6 +1821,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }> = [];
     /** Invalidates stale timer callbacks across close/reopen generations. */
     private openGeneration = 0;
+    /** Serializes same-instance open/close transitions in request order. */
+    private lifecycleTransitionChain: Promise<unknown> = Promise.resolve();
+    /** Newer requests synchronously invalidate a transition already running. */
+    private lifecycleRequestGeneration = 0;
+    /** Requested/settled state; direct open-on-open is rejected fail-closed. */
+    private lifecycleRequestedState:
+        | "opening"
+        | "open"
+        | "closing"
+        | "closed"
+        | undefined;
+    /** Cancels and joins maintenance admitted by the current open. */
+    private maintenanceAbortController?: AbortController;
+    private maintenanceTasks = new Set<Promise<unknown>>();
+    /** Public mutations admitted by the current open, joined before reset/close. */
+    private foregroundMutationTasks = new Set<Promise<unknown>>();
     /**
      * Guard D arming: false from the moment a bootstrap is decided until
      * verified retirement (or post-timeout quiescence), so a partial
@@ -1895,6 +1949,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessTransitionChain: Promise<unknown> = Promise.resolve();
     private writeReadinessLifecycleBlocked = false;
     private snapshotRunning = false;
+    private snapshotRunningGeneration: number | undefined;
     private sweepRunningGeneration: number | undefined;
     /** Last arrival authored by ANOTHER peer (local writes excluded). */
     private lastRemoteArrivalMs = 0;
@@ -1946,22 +2001,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
-    async open(args?: SharedFsOpenArgs) {
-        const internalArgs = args as SharedFsInternalOpenArgs | undefined;
-        const addressOpen = internalArgs?.addressOpen === true;
-        this.openedExistingAddress = addressOpen;
-        const partialWriteOverride =
-            addressOpen && args?.allowPartialWrites === true;
-        // Block new readiness transitions synchronously, then let a transition
-        // that already owns the serialization slot finish before changing the
-        // generation. This gives concurrent open/close a deterministic order:
-        // an active promotion succeeds durably, while a queued one observes the
-        // lifecycle block and performs no write.
+    private beginLifecycleRequest(kind: "open" | "close"): number {
+        this.lifecycleRequestGeneration =
+            (this.lifecycleRequestGeneration ?? 0) + 1;
+        const requestGeneration = this.lifecycleRequestGeneration;
         this.writeReadinessLifecycleBlocked = true;
-        // A same-program close -> reopen leaves the Documents EventTarget
-        // object intact. Detach the previous generation synchronously, before
-        // any await or state reset, so local replay during entries.open() can
-        // never be interpreted by the old listener as current remote evidence.
+
+        const lifecycleError = new SharedFsError(
+            "ECLOSED",
+            kind === "close"
+                ? "filesystem closed while background work was running"
+                : "filesystem reopened while background work was running"
+        );
+        this.maintenanceAbortController?.abort(lifecycleError);
+        this.bootstrapAbortController?.abort(lifecycleError);
+        this.gcSchedulerGeneration = (this.gcSchedulerGeneration || 0) + 1;
+        this.disposalContentGeneration =
+            (this.disposalContentGeneration ?? 0) + 1;
+        // Both close and open-on-open invalidate namespace plans
+        // synchronously. The serialized transition drains their admitted
+        // work before any counter, waiter, or chain is reset.
+        this.localNamingFenceEpoch = (this.localNamingFenceEpoch ?? 0) + 1;
+        for (const resolve of (
+            this.mountNamespaceFenceReleaseWaiters ?? []
+        ).splice(0)) {
+            resolve();
+        }
+        this.clearBootstrapTimers();
+
         if (this.changeListener) {
             this.entries.events.removeEventListener(
                 "change",
@@ -1969,10 +2036,95 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
+        if (this.trustChangeListener && this.trustGraph) {
+            this.trustGraph.trustGraph.events.removeEventListener(
+                "change",
+                this.trustChangeListener
+            );
+            this.trustChangeListener = undefined;
+        }
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
         }
+        if (kind === "close") {
+            this.writeReadinessWaiters ??= [];
+            const readinessError = new SharedFsError(
+                "ECLOSED",
+                "filesystem closed while awaiting write readiness"
+            );
+            for (const waiter of this.writeReadinessWaiters.splice(0)) {
+                waiter.reject(readinessError);
+            }
+        }
+        return requestGeneration;
+    }
+
+    private enqueueLifecycleTransition<T>(
+        transition: () => Promise<T>,
+        requirePriorSuccess: boolean
+    ): Promise<T> {
+        this.lifecycleTransitionChain ??= Promise.resolve();
+        const prior = this.lifecycleTransitionChain;
+        const run = requirePriorSuccess
+            ? prior.then(() => transition())
+            : prior.then(
+                  () => transition(),
+                  () => transition()
+              );
+        this.lifecycleTransitionChain = run;
+        return run;
+    }
+
+    private assertLifecycleRequestActive(requestGeneration: number) {
+        if (requestGeneration !== this.lifecycleRequestGeneration) {
+            throw new SharedFsError(
+                "ECLOSED",
+                "filesystem open was superseded by a newer lifecycle request"
+            );
+        }
+    }
+
+    async open(args?: SharedFsOpenArgs): Promise<void> {
+        if (
+            this.lifecycleRequestedState === "opening" ||
+            this.lifecycleRequestedState === "open"
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "filesystem is already open or has an open request in flight"
+            );
+        }
+        const requestGeneration = this.beginLifecycleRequest("open");
+        this.lifecycleRequestedState = "opening";
+        try {
+            await this.enqueueLifecycleTransition(
+                () => this.openLifecycleTransition(args, requestGeneration),
+                true
+            );
+            if (this.lifecycleRequestGeneration === requestGeneration) {
+                this.lifecycleRequestedState = "open";
+            }
+        } catch (error) {
+            if (this.lifecycleRequestGeneration === requestGeneration) {
+                // A failed/partially-open transition requires close cleanup
+                // before another open may reset ownership.
+                this.lifecycleRequestedState = "open";
+            }
+            throw error;
+        }
+    }
+
+    private async openLifecycleTransition(
+        args: SharedFsOpenArgs | undefined,
+        lifecycleRequestGeneration: number
+    ): Promise<void> {
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        const internalArgs = args as SharedFsInternalOpenArgs | undefined;
+        const addressOpen = internalArgs?.addressOpen === true;
+        this.openedExistingAddress = addressOpen;
+        const partialWriteOverride =
+            addressOpen && args?.allowPartialWrites === true;
         // A previous generation may still be inside remote snapshot discovery.
         // Cancel and join it before resetting any state: otherwise its late
         // fallback can recreate the sidecar directory after close/reopen.
@@ -1996,6 +2148,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapAbortController = undefined;
         this.bootstrapDecision ??= Promise.resolve();
         await this.bootstrapDecision.catch(() => {});
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        await this.drainMaintenanceTasks();
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         this.writeReadinessTransitionChain ??= Promise.resolve();
         this.stateWriteChain ??= Promise.resolve();
         this.clearBootstrapTimers();
@@ -2008,16 +2163,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         await this.writeReadinessTransitionChain;
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         let pendingStateWrites: Promise<unknown>;
         do {
             pendingStateWrites = this.stateWriteChain;
             await pendingStateWrites;
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         } while (pendingStateWrites !== this.stateWriteChain);
+        await this.drainAdmittedMutationWork();
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         // FIRST, before trust-graph/bootstrap/storage awaits: a handle for an
         // existing address must never inherit a stale ready bit from a prior
         // open generation. No caller can race a mutation through this gate.
         const openGeneration = (this.openGeneration || 0) + 1;
         this.openGeneration = openGeneration;
+        this.maintenanceAbortController = new AbortController();
         this.bootstrapTelemetry = internalArgs?.bootstrapTelemetry;
         this.bootstrapTelemetryNow = this.bootstrapTelemetry
             ? (args?.clock ?? Date.now)
@@ -2061,6 +2221,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessRemoteEvidence = false;
         this.writeReadinessQuietChecks = 0;
         this.writeReadinessCheckRunning = false;
+        this.writeReadinessCheckRunningRequestGeneration = undefined;
         this.legacyPromotionEligible = false;
         this.legacyPromotionCrashMarker = false;
         this.writeReadinessSource = undefined;
@@ -2095,6 +2256,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await this.trustGraph?.open({
             replicate: { factor: 1 } as any,
         });
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         this.clock = args?.clock ?? Date.now;
         this.skipHorizonMs = Math.max(
             5 * 60 * 1000,
@@ -2125,8 +2287,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // final append admission yet; monotonic invalidation prevents that
         // stale plan from aliasing a freshly opened generation.
         this.localNamingFenceEpoch = (this.localNamingFenceEpoch ?? 0) + 1;
-        this.disposalContentGeneration = 0;
         this.disposalPreparationRunning = false;
+        this.disposalPreparationRunningGeneration = undefined;
         this.trustVerdicts = new Map();
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
@@ -2160,18 +2322,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.stateWriteChain ??= Promise.resolve();
         this.writeReadinessTransitionChain ??= Promise.resolve();
         this.snapshotRunning = false;
+        this.snapshotRunningGeneration = undefined;
         this.sweepRunningGeneration = undefined;
+        this.gcRunning = false;
+        this.gcRunningGeneration = undefined;
         this.gcConsecutiveFailures = 0;
         this.gcFollowUpGateRetries = 0;
         this.gcSnapshotDeferrals = 0;
         this.gcPeerEvidenceWarned = false;
         this.gcPermanentSkipWarned = false;
         this.gcLastRun = undefined;
-        // Borsh bypasses field initializers on address-opened programs, so
-        // the previous value may be undefined here — never trust it.
-        this.gcSchedulerGeneration = (this.gcSchedulerGeneration || 0) + 1;
         // Injectable rng for the schedule's jitter draws (test-only).
         this.gcRng = (args as any)?.gcRng ?? Math.random;
+        this.maintenanceTasks = new Set();
+        this.foregroundMutationTasks = new Set();
         this.segmentLedgerChain = Promise.resolve();
         this.segmentLedgerReconciled = false;
         this.segmentReapFailureCycles = 0;
@@ -2213,15 +2377,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.trustChangeListener
                 );
             }
-            this.trustChangeListener = () => {
+            const trustLifecycleRequestGeneration =
+                this.lifecycleRequestGeneration;
+            const trustChangeListener = () => {
+                if (
+                    this.trustChangeListener !== trustChangeListener ||
+                    trustLifecycleRequestGeneration !==
+                        this.lifecycleRequestGeneration ||
+                    this.writeReadinessLifecycleBlocked
+                ) {
+                    return;
+                }
                 this.trustVerdicts.clear();
                 if (this.disposalPreparationRunning) {
                     this.disposalContentGeneration++;
                 }
             };
+            this.trustChangeListener = trustChangeListener;
             this.trustGraph.trustGraph.events.addEventListener(
                 "change",
-                this.trustChangeListener
+                trustChangeListener
             );
         }
         // The persisted state is read BEFORE the entries store opens: an
@@ -2230,6 +2405,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // configured bootstrap mode — a partial store must never judge
         // removals.
         const persisted = await this.readBootstrapState();
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         const marker = persisted.bootstrap;
         this.legacyPromotionEligible =
             addressOpen &&
@@ -2268,6 +2444,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 openGeneration,
                 true
             );
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
             this.writeReadinessSource = undefined;
         }
         if (addressOpen && !trustedWarmWriteReady) {
@@ -2296,6 +2473,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 openGeneration,
                 true
             );
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
             this.legacyPromotionCrashMarker = this.legacyPromotionEligible;
         }
         const bootstrapMarker =
@@ -2389,6 +2567,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     type: IndexableSharedFsEntry,
                 },
             });
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
             if (this.bootstrapTelemetry) {
                 const clockMs = this.bootstrapTelemetryNow!();
                 this.emitBootstrapTelemetry({
@@ -2421,6 +2600,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         }
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         // Cache maintenance runs on every peer; the resurrection guard only
         // on full replicas (and only while armed — see guardArmed).
         // Registering a change consumer also makes Documents materialize
@@ -2527,8 +2707,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         openGeneration,
                         bootstrapAbortController.signal
                     );
+                    this.assertLifecycleRequestActive(
+                        lifecycleRequestGeneration
+                    );
                 } finally {
-                    if (this.openGeneration === openGeneration) {
+                    if (
+                        this.openGeneration === openGeneration &&
+                        this.lifecycleRequestGeneration ===
+                            lifecycleRequestGeneration
+                    ) {
                         this.writeReadinessDecisionSettled = true;
                     }
                 }
@@ -2561,12 +2748,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.bootstrapDecision = run;
                 void run.then(
                     () => {
-                        if (this.openGeneration === openGeneration) {
+                        if (
+                            this.openGeneration === openGeneration &&
+                            this.lifecycleRequestGeneration ===
+                                lifecycleRequestGeneration
+                        ) {
                             this.writeReadinessDecisionSettled = true;
                         }
                     },
                     () => {
-                        if (this.openGeneration === openGeneration) {
+                        if (
+                            this.openGeneration === openGeneration &&
+                            this.lifecycleRequestGeneration ===
+                                lifecycleRequestGeneration
+                        ) {
                             this.writeReadinessDecisionSettled = true;
                         }
                     }
@@ -2577,7 +2772,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // candidate (mode off, or a partial replica): hold the
             // unverified posture until the store settles.
             this.bootstrapPhase = "unverified";
-            this.startQuiescenceChecker();
+            this.startQuiescenceChecker(openGeneration);
         }
         if (!bootstrapCandidate) {
             this.writeReadinessDecisionSettled = true;
@@ -2599,6 +2794,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // A creator returned as ready must leave an explicit
                 // warm-reopen proof before the caller can immediately close.
                 await openStateWrite;
+                this.assertLifecycleRequestActive(lifecycleRequestGeneration);
                 this.writeReadinessSource = "creator";
             } else {
                 void openStateWrite.catch(() => {});
@@ -2611,6 +2807,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             this.emitWriteReadyOnce(this.writeReadinessSource);
         }
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         this.writeReadinessLifecycleBlocked = false;
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
@@ -3048,10 +3245,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     async authorizeWriter(publicKey: PublicSignKey) {
         this.assertSafeMaintenanceReady("authorizeWriter");
-        if (!this.trustGraph) {
-            throw new Error("Shared filesystem is not access controlled");
-        }
-        await this.trustGraph.add(publicKey);
+        return this.runForegroundMutation(
+            "authorizeWriter",
+            async (context) => {
+                if (!this.trustGraph) {
+                    throw new Error(
+                        "Shared filesystem is not access controlled"
+                    );
+                }
+                this.enterForegroundMutationCriticalTail(context);
+                await this.trustGraph.add(publicKey);
+            }
+        );
     }
 
     /**
@@ -3067,10 +3272,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     async revokeWriter(publicKey: PublicSignKey) {
         this.assertSafeMaintenanceReady("revokeWriter");
-        if (!this.trustGraph) {
-            throw new Error("Shared filesystem is not access controlled");
-        }
-        await this.trustGraph.revoke(publicKey);
+        return this.runForegroundMutation("revokeWriter", async (context) => {
+            if (!this.trustGraph) {
+                throw new Error("Shared filesystem is not access controlled");
+            }
+            this.enterForegroundMutationCriticalTail(context);
+            await this.trustGraph.revoke(publicKey);
+        });
     }
 
     async isTrustedWriter(publicKey: PublicSignKey) {
@@ -3698,6 +3906,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         parentHeads: NamingLike[];
         observedContentHeads?: string[];
         expectedNamespaceEpoch?: number;
+        /** Starts a caller-owned critical tail only after naming admission. */
+        enterCriticalTail?: () => void;
     }) {
         const metadata = this.signedMetadata();
         if (properties.parentHeads.length > 8000) {
@@ -3722,6 +3932,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await this.withOrdinaryNamingAppend(
             "naming append",
             async () => {
+                properties.enterCriticalTail?.();
                 await this.entries.put(event, { unique: true });
                 this.cacheLocalWrite(event);
             },
@@ -4019,11 +4230,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     async mkdir(path: string) {
         this.assertWriteReady("mkdir");
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("mkdir");
+        return this.runForegroundMutation("mkdir", (context) =>
+            this.mkdirInner(path, namespaceEpoch, context)
+        );
+    }
+
+    private async mkdirInner(
+        path: string,
+        namespaceEpoch: number,
+        _context: ForegroundMutationContext
+    ) {
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             return;
         }
-        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("mkdir");
         this.assertWritableName(basename(normalized), "directory");
         if (await this.resolvePath(normalized)) {
             throw new SharedFsError(
@@ -4048,6 +4269,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     ): Promise<SharedFsWriteFileResult> {
         this.assertWriteReady("writeFile");
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("writeFile");
+        return this.runForegroundMutation("writeFile", (context) =>
+            this.writeFileInner(path, source, options, namespaceEpoch, context)
+        );
+    }
+
+    private async writeFileInner(
+        path: string,
+        source: Uint8Array | string | AsyncIterable<Uint8Array>,
+        options: WriteFileOptions,
+        namespaceEpoch: number,
+        context: ForegroundMutationContext
+    ): Promise<SharedFsWriteFileResult> {
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EISDIR", "Cannot write to root");
@@ -4256,6 +4489,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `File has ${uniqueChunks.length} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version)`
             );
         }
+        this.enterForegroundMutationCriticalTail(context);
         await this.touchChunks(uniqueChunks, options.dedup);
         // Path lookup, base loading, hashing and chunk IO all await. Recheck
         // immediately before publishing the node-scoped version so a local
@@ -4278,6 +4512,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             authorKey: metadata.authorKey,
             machineLabel: metadata.machineLabel,
         });
+        this.throwIfForegroundMutationInactive(context);
         await this.entries.put(version, { unique: true });
         this.cacheLocalWrite(version);
         // W2: the version now references the chunks; re-verify every chunk
@@ -4370,21 +4605,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // each mint a fresh directory node for the same new path segment
         // (the overlay is per call), manufacturing duplicate-name conflicts
         // from a single process.
-        const run = this.writeBatchChain.then(() =>
-            this.writeBatchInner(entries, options, namespaceEpoch)
-        );
-        this.writeBatchChain = run.then(
-            () => undefined,
-            () => undefined
-        );
-        return run;
+        return this.runForegroundMutation("writeBatch", (context) => {
+            const run = this.writeBatchChain.then(() =>
+                this.writeBatchInner(entries, options, namespaceEpoch, context)
+            );
+            // Queue admission is the established batch ownership boundary:
+            // close joins even a batch waiting behind an older local batch.
+            this.enterForegroundMutationCriticalTail(context);
+            this.writeBatchChain = run.then(
+                () => undefined,
+                () => undefined
+            );
+            return run;
+        });
     }
 
     private async writeBatchInner(
         entries: WriteBatchEntry[],
         options: WriteBatchOptions = {},
-        namespaceEpoch: number
+        namespaceEpoch: number,
+        context: ForegroundMutationContext
     ): Promise<WriteBatchResult> {
+        this.throwIfForegroundMutationInactive(context);
         const changesetId = options.changesetId ?? createId("changeset");
         if (changesetId.length === 0 || changesetId.length > 256) {
             throw new SharedFsError(
@@ -4394,6 +4636,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         if (entries.length === 0) {
             if (options.manifest) {
+                this.enterForegroundMutationCriticalTail(context);
                 const manifest = await this.publishChangesetManifest(
                     changesetId,
                     [],
@@ -4750,8 +4993,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // data — and never certifies: local manifest durability implies
         // every member was durably committed first. Edits to existing
         // files become visible at the versions phase (see the docstring).
+        if (allChunks.size > 0) {
+            this.enterForegroundMutationCriticalTail(context);
+        } else {
+            this.throwIfForegroundMutationInactive(context);
+        }
         await this.touchChunks([...allChunks.values()], options.dedup);
         if (versions.length > 0) {
+            this.enterForegroundMutationCriticalTail(context);
             await this.entries.putMany(versions, { unique: true });
         }
         if (options.dedup !== "off" && allChunks.size > 0) {
@@ -4769,6 +5018,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             await this.withOrdinaryNamingAppend(
                 "writeBatch naming append",
                 async () => {
+                    this.enterForegroundMutationCriticalTail(context);
                     await this.entries.putMany(namingEvents, { unique: true });
                     for (const event of namingEvents) {
                         this.cacheLocalWrite(event);
@@ -4779,6 +5029,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         let manifestResult: WriteBatchResult["manifest"];
         if (manifestMembers) {
+            this.enterForegroundMutationCriticalTail(context);
             manifestResult = await this.publishChangesetManifest(
                 changesetId,
                 manifestMembers.versionIds,
@@ -5328,6 +5579,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     async resolveConflict(path: string, versionId: string) {
         this.assertWriteReady("resolveConflict");
+        return this.runForegroundMutation("resolveConflict", (context) =>
+            this.resolveConflictInner(path, versionId, context)
+        );
+    }
+
+    private async resolveConflictInner(
+        path: string,
+        versionId: string,
+        context: ForegroundMutationContext
+    ) {
         const normalized = normalizeFsPath(path);
         const resolved = await this.resolvePath(normalized);
         if (!resolved || resolved.kind !== "file") {
@@ -5361,6 +5622,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             machineLabel: metadata.machineLabel,
             conflictResolution: true,
         });
+        this.enterForegroundMutationCriticalTail(context);
         await this.entries.put(resolution, { unique: true });
         this.cacheLocalWrite(resolution);
         return this.versionInfo(resolution, normalized, [resolution]);
@@ -5391,20 +5653,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.assertWriteReady(
             `mount namespace ${mutation?.type ?? "mutation"}`
         );
-        const run = this.mountNamespaceMutationChain.then(() =>
-            this.withMountNamespaceFence(() =>
-                this.mutateNamespaceForMountInner(mutation)
-            )
+        return this.runForegroundMutation(
+            `mount namespace ${mutation?.type ?? "mutation"}`,
+            (context) => {
+                const run = this.mountNamespaceMutationChain.then(() => {
+                    this.enterForegroundMutationCriticalTail(context);
+                    return this.withMountNamespaceFence(() =>
+                        this.mutateNamespaceForMountInner(mutation, context)
+                    );
+                });
+                this.mountNamespaceMutationChain = run.then(
+                    () => undefined,
+                    () => undefined
+                );
+                return run;
+            }
         );
-        this.mountNamespaceMutationChain = run.then(
-            () => undefined,
-            () => undefined
-        );
-        return run;
     }
 
     private async mutateNamespaceForMountInner(
-        mutation: SharedFsMountNamespaceMutation
+        mutation: SharedFsMountNamespaceMutation,
+        context: ForegroundMutationContext
     ): Promise<SharedFsMountNamespaceMutationResult> {
         const validNodeId = (value: unknown): value is string =>
             typeof value === "string" && value.length > 0;
@@ -5579,6 +5848,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 authorKey: metadata.authorKey,
                 machineLabel: metadata.machineLabel,
             });
+            this.throwIfForegroundMutationInactive(context);
             await this.entries.put(event, { unique: true });
             this.cacheLocalWrite(event);
             return {
@@ -5918,6 +6188,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             machineLabel: metadata.machineLabel,
         });
         const events = replacementDelete ? [replacementDelete, move] : [move];
+        this.throwIfForegroundMutationInactive(context);
         await this.entries.putMany(events, { unique: true });
         for (const event of events) this.cacheLocalWrite(event);
         return {
@@ -5933,6 +6204,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     async rm(path: string) {
         this.assertWriteReady("rm");
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("rm");
+        return this.runForegroundMutation("rm", (context) =>
+            this.rmInner(path, namespaceEpoch, context)
+        );
+    }
+
+    private async rmInner(
+        path: string,
+        namespaceEpoch: number,
+        _context: ForegroundMutationContext
+    ) {
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EINVAL", "Cannot remove root");
@@ -5985,6 +6266,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return;
         }
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("rename");
+        return this.runForegroundMutation("rename", (context) =>
+            this.renameInner(fromPath, toPath, namespaceEpoch, context)
+        );
+    }
+
+    private async renameInner(
+        fromPath: string,
+        toPath: string,
+        namespaceEpoch: number,
+        _context: ForegroundMutationContext
+    ) {
         const resolved = await this.resolvePath(fromPath);
         if (!resolved || resolved.kind === "root") {
             throw new SharedFsError(
@@ -6244,6 +6536,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch(
             "resolveNamingConflict"
         );
+        return this.runForegroundMutation("resolveNamingConflict", (context) =>
+            this.resolveNamingConflictInner(
+                nodeId,
+                action,
+                namespaceEpoch,
+                context
+            )
+        );
+    }
+
+    private async resolveNamingConflictInner(
+        nodeId: string,
+        action: ResolveNamingAction,
+        namespaceEpoch: number,
+        context: ForegroundMutationContext
+    ) {
         const state = await this.namingStateForNode(nodeId);
         if (!state) {
             throw new SharedFsError("ENOENT", `Unknown node: ${nodeId}`);
@@ -6332,6 +6640,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentHeads: state.heads,
             observedContentHeads: payload.observedContentHeads,
             expectedNamespaceEpoch: namespaceEpoch,
+            enterCriticalTail: () =>
+                this.enterForegroundMutationCriticalTail(context),
         });
         if (action.type === "restore" && nodeKindOf(nodeId) === "file") {
             // A restore must carry content: append a resolution version
@@ -6395,6 +6705,271 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `${operation} requires proven full-replica write readiness; allowPartialWrites permits namespace recovery writes only`
             );
         }
+    }
+
+    private currentMaintenanceContext(operation: string): MaintenanceContext {
+        const controller = this.maintenanceAbortController;
+        if (controller?.signal.aborted) {
+            throw (
+                controller.signal.reason ??
+                new SharedFsError(
+                    "ECLOSED",
+                    operation + " was interrupted by filesystem close"
+                )
+            );
+        }
+        if (!controller || this.writeReadinessLifecycleBlocked) {
+            throw new SharedFsError(
+                "ECLOSED",
+                operation + " cannot run outside an open filesystem lifecycle"
+            );
+        }
+        return {
+            generation: this.openGeneration,
+            signal: controller.signal,
+        };
+    }
+
+    private maintenanceContextIfActive(): MaintenanceContext | undefined {
+        const controller = this.maintenanceAbortController;
+        if (
+            !controller ||
+            controller.signal.aborted ||
+            this.writeReadinessLifecycleBlocked
+        ) {
+            return undefined;
+        }
+        return {
+            generation: this.openGeneration,
+            signal: controller.signal,
+        };
+    }
+
+    private maintenanceContextActive(context: MaintenanceContext): boolean {
+        return (
+            !context.signal.aborted &&
+            !this.writeReadinessLifecycleBlocked &&
+            context.generation === this.openGeneration &&
+            this.maintenanceAbortController?.signal === context.signal
+        );
+    }
+
+    private throwIfMaintenanceInactive(context: MaintenanceContext) {
+        if (this.maintenanceContextActive(context)) {
+            return;
+        }
+        throw (
+            context.signal.reason ??
+            new SharedFsError(
+                "ECLOSED",
+                "filesystem lifecycle ended while maintenance was running"
+            )
+        );
+    }
+
+    /** Enroll before the first await so close/reopen can deterministically join. */
+    private trackMaintenanceTask<T>(task: Promise<T>): Promise<T> {
+        this.maintenanceTasks ??= new Set();
+        this.maintenanceTasks.add(task);
+        void task.then(
+            () => this.maintenanceTasks.delete(task),
+            () => this.maintenanceTasks.delete(task)
+        );
+        return task;
+    }
+
+    private async drainMaintenanceTasks(): Promise<void> {
+        this.maintenanceTasks ??= new Set();
+        this.segmentLedgerChain ??= Promise.resolve();
+        for (;;) {
+            const tasks = [...this.maintenanceTasks];
+            const ledger = this.segmentLedgerChain;
+            await Promise.allSettled([...tasks, ledger]);
+            if (
+                this.maintenanceTasks.size === 0 &&
+                ledger === this.segmentLedgerChain
+            ) {
+                return;
+            }
+        }
+    }
+
+    private foregroundMutationContextActive(
+        context: ForegroundMutationContext
+    ): boolean {
+        return (
+            context.generation === this.openGeneration &&
+            context.owner === this.foregroundMutationTasks &&
+            (context.criticalTailEntered ||
+                !this.writeReadinessLifecycleBlocked)
+        );
+    }
+
+    private throwIfForegroundMutationInactive(
+        context: ForegroundMutationContext
+    ) {
+        if (this.foregroundMutationContextActive(context)) return;
+        throw new SharedFsError(
+            "ECLOSED",
+            "filesystem lifecycle ended while an admitted mutation was running"
+        );
+    }
+
+    /** Enroll the operation's deferred lease immediately before publication. */
+    private enterForegroundMutationCriticalTail(
+        context: ForegroundMutationContext
+    ) {
+        if (context.criticalTailEntered) return;
+        this.throwIfForegroundMutationInactive(context);
+        context.criticalTailEntered = true;
+        context.owner.add(context.criticalTail);
+    }
+
+    /**
+     * Acquire synchronously at a public mutation boundary. The captured set
+     * is intentional: cleanup from an older open must never delete ownership
+     * from the fresh set installed by a later open.
+     */
+    private runForegroundMutation<T>(
+        operation: string,
+        mutation: (context: ForegroundMutationContext) => Promise<T>
+    ): Promise<T> {
+        const admission = this.currentMaintenanceContext(operation);
+        const owner = (this.foregroundMutationTasks ??= new Set());
+        let settleCriticalTail!: () => void;
+        const criticalTail = new Promise<void>((resolve) => {
+            settleCriticalTail = resolve;
+        });
+        const context: ForegroundMutationContext = {
+            generation: admission.generation,
+            owner,
+            criticalTail,
+            settleCriticalTail,
+            criticalTailEntered: false,
+        };
+        let task: Promise<T>;
+        try {
+            task = mutation(context);
+        } catch (error) {
+            if (context.criticalTailEntered) {
+                owner.delete(criticalTail);
+                settleCriticalTail();
+            }
+            throw error;
+        }
+        const settled = () => {
+            if (context.criticalTailEntered) {
+                owner.delete(criticalTail);
+                settleCriticalTail();
+            }
+        };
+        void task.then(settled, settled);
+        return task;
+    }
+
+    private async drainForegroundMutationTasks(): Promise<void> {
+        this.foregroundMutationTasks ??= new Set();
+        for (;;) {
+            const tasks = [...this.foregroundMutationTasks];
+            if (tasks.length === 0) return;
+            await Promise.allSettled(tasks);
+        }
+    }
+
+    /**
+     * Join every owner admitted before beginLifecycleRequest fenced the old
+     * lifecycle. This is shared by close and reopen so neither path can reset
+     * counters/chains while their old-generation finally blocks are pending.
+     */
+    private async drainAdmittedMutationWork(): Promise<void> {
+        this.mountNamespaceMutationChain ??= Promise.resolve();
+        this.writeBatchChain ??= Promise.resolve();
+        this.guardIngestTasks ??= new Set();
+        this.pendingGuardVersions ??= new Map();
+        this.pendingGuardNaming ??= new Map();
+        this.ordinaryNamingAppendsInFlight ??= 0;
+        this.ordinaryNamingDrainWaiters ??= [];
+
+        await this.drainForegroundMutationTasks();
+        await this.mountNamespaceMutationChain.catch(() => {});
+        await this.writeBatchChain.catch(() => {});
+
+        // No new guard work is accepted after lifecycle admission closes.
+        // Join both ingest and flush generations; an interrupted naming flush
+        // requeues its private batch so the required close-time flush below
+        // can durably finish it.
+        for (;;) {
+            const ingest = [...this.guardIngestTasks];
+            if (ingest.length > 0) {
+                await Promise.allSettled(ingest);
+            }
+            const flush = this.guardFlushPromise;
+            if (flush) await flush.catch(() => {});
+            if (this.guardIngestTasks.size === 0 && !this.guardFlushPromise) {
+                break;
+            }
+        }
+        if (this.guardFlushTimer) {
+            clearTimeout(this.guardFlushTimer);
+            this.guardFlushTimer = undefined;
+        }
+        if (this.ordinaryNamingAppendsInFlight > 0) {
+            await new Promise<void>((resolve) =>
+                this.ordinaryNamingDrainWaiters.push(resolve)
+            );
+        }
+        if (
+            this.pendingGuardVersions.size > 0 ||
+            this.pendingGuardNaming.size > 0
+        ) {
+            await this.startGuardFlush(true);
+        }
+        if (
+            this.pendingGuardVersions.size > 0 ||
+            this.pendingGuardNaming.size > 0
+        ) {
+            // Do not reset away safety work this replica still owns. A failed
+            // close remains retryable and a queued open is rejected by the
+            // lifecycle transition chain.
+            throw new SharedFsError(
+                "EIO",
+                "filesystem resurrection guard could not finish required safety work before lifecycle transition"
+            );
+        }
+    }
+
+    private async maintenanceDelay(
+        delayMs: number,
+        context: MaintenanceContext
+    ): Promise<void> {
+        this.throwIfMaintenanceInactive(context);
+        await new Promise<void>((resolve, reject) => {
+            const cleanup = () => {
+                clearTimeout(timer);
+                context.signal.removeEventListener("abort", onAbort);
+            };
+            const onAbort = () => {
+                cleanup();
+                reject(
+                    context.signal.reason ??
+                        new SharedFsError(
+                            "ECLOSED",
+                            "filesystem closed during maintenance delay"
+                        )
+                );
+            };
+            const timer = setTimeout(
+                () => {
+                    cleanup();
+                    resolve();
+                },
+                Math.max(0, delayMs)
+            );
+            (timer as any)?.unref?.();
+            context.signal.addEventListener("abort", onAbort, { once: true });
+            if (context.signal.aborted) onAbort();
+        });
+        this.throwIfMaintenanceInactive(context);
     }
 
     private synchronizerIdle() {
@@ -6559,15 +7134,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             WRITE_READINESS_MIN_CHECK_MS,
             Math.min(1_000, Math.floor(this.writeReadinessSettleMs / 2))
         );
+        const lifecycleRequestGeneration = this.lifecycleRequestGeneration;
+        const active = () =>
+            generation === this.openGeneration &&
+            lifecycleRequestGeneration === this.lifecycleRequestGeneration &&
+            this.writeReadinessTimer === timer &&
+            !this.writeReadinessLifecycleBlocked &&
+            this.writeReadinessRequired;
         const check = async () => {
-            if (
-                this.writeReadinessCheckRunning ||
-                generation !== this.openGeneration ||
-                !this.writeReadinessRequired
-            ) {
+            if (this.writeReadinessCheckRunning || !active()) {
                 return;
             }
             this.writeReadinessCheckRunning = true;
+            this.writeReadinessCheckRunningRequestGeneration =
+                lifecycleRequestGeneration;
             try {
                 const settledPhase =
                     this.bootstrapPhase === "off" ||
@@ -6578,18 +7158,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     !settledPhase ||
                     !this.writeReadinessRemoteEvidence
                 ) {
-                    this.writeReadinessQuietChecks = 0;
+                    if (active()) this.writeReadinessQuietChecks = 0;
                     return;
                 }
                 const hasRemoteReplicator =
                     await this.hasConnectedRemoteReplicator();
                 if (
-                    generation !== this.openGeneration ||
-                    !this.writeReadinessRequired ||
+                    !active() ||
                     !hasRemoteReplicator ||
                     !this.synchronizerIdle()
                 ) {
-                    this.writeReadinessQuietChecks = 0;
+                    if (active()) this.writeReadinessQuietChecks = 0;
                     return;
                 }
                 this.emitSynchronizerIdleOnce();
@@ -6598,9 +7177,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.lastRemoteArrivalMs
                 );
                 if (this.clock() - quietSince < this.writeReadinessSettleMs) {
-                    this.writeReadinessQuietChecks = 0;
+                    if (active()) this.writeReadinessQuietChecks = 0;
                     return;
                 }
+                if (!active()) return;
                 this.writeReadinessQuietChecks++;
                 if (this.writeReadinessQuietChecks >= 2) {
                     await this.markWriteReady(generation);
@@ -6609,15 +7189,30 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // A durable marker failure must leave the gate and Guard D
                 // closed. Keep the timer alive and retry from a fresh pair of
                 // quiet checks instead of leaking an unhandled rejection.
-                this.writeReadinessQuietChecks = 0;
+                if (active()) this.writeReadinessQuietChecks = 0;
             } finally {
-                this.writeReadinessCheckRunning = false;
+                if (
+                    this.writeReadinessCheckRunningRequestGeneration ===
+                    lifecycleRequestGeneration
+                ) {
+                    this.writeReadinessCheckRunning = false;
+                    this.writeReadinessCheckRunningRequestGeneration =
+                        undefined;
+                }
             }
         };
-        this.writeReadinessTimer = setInterval(() => {
+        const timer = setInterval(() => {
+            if (!active()) {
+                clearInterval(timer);
+                if (this.writeReadinessTimer === timer) {
+                    this.writeReadinessTimer = undefined;
+                }
+                return;
+            }
             void check();
         }, intervalMs);
-        (this.writeReadinessTimer as any)?.unref?.();
+        this.writeReadinessTimer = timer;
+        (timer as any)?.unref?.();
         void check();
     }
 
@@ -6659,21 +7254,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async close(from?: any): Promise<boolean> {
-        // Stop queued promotions, but let a transition that already owns the
-        // slot finish its durable marker + memory update before close returns.
-        // A caller therefore never receives ECLOSED after its trust marker was
-        // actually committed.
-        this.writeReadinessLifecycleBlocked = true;
-        this.localNamingFenceEpoch = (this.localNamingFenceEpoch ?? 0) + 1;
-        for (const resolve of this.mountNamespaceFenceReleaseWaiters.splice(
-            0
-        )) {
-            resolve();
+        const requestGeneration = this.beginLifecycleRequest("close");
+        this.lifecycleRequestedState = "closing";
+        try {
+            const closed = await this.enqueueLifecycleTransition(
+                () => this.closeLifecycleTransition(from),
+                false
+            );
+            if (this.lifecycleRequestGeneration === requestGeneration) {
+                this.lifecycleRequestedState = "closed";
+            }
+            return closed;
+        } catch (error) {
+            if (this.lifecycleRequestGeneration === requestGeneration) {
+                // Required safety work remains owned by this open. Only a
+                // later close retry may proceed; direct open stays rejected.
+                this.lifecycleRequestedState = "open";
+            }
+            throw error;
         }
+    }
+
+    private async closeLifecycleTransition(from?: any): Promise<boolean> {
+        // The public wrapper synchronously stopped admission and aborted
+        // background work. The serialized transition now joins every owner
+        // before closing stores or allowing a queued reopen to begin.
         const lifecycleError = new SharedFsError(
             "ECLOSED",
             "filesystem closed while background work was running"
         );
+        const maintenanceAbortController = this.maintenanceAbortController;
         const bootstrapAbortController = this.bootstrapAbortController;
         bootstrapAbortController?.abort(lifecycleError);
         if (
@@ -6708,7 +7318,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // timers after close has returned.
         this.bootstrapDecision ??= Promise.resolve();
         await this.bootstrapDecision.catch(() => {});
+        await this.drainMaintenanceTasks();
         this.clearBootstrapTimers();
+        if (this.maintenanceAbortController === maintenanceAbortController) {
+            this.maintenanceAbortController = undefined;
+        }
         this.writeReadinessTransitionChain ??= Promise.resolve();
         this.stateWriteChain ??= Promise.resolve();
         await this.writeReadinessTransitionChain;
@@ -6717,6 +7331,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             pendingStateWrites = this.stateWriteChain;
             await pendingStateWrites;
         } while (pendingStateWrites !== this.stateWriteChain);
+        await this.drainAdmittedMutationWork();
         // The diagnostic callback belongs to this open only. Release the
         // caller's closure once every old-generation task and transition has
         // drained; a later reopen installs its own callback, if any.
@@ -6734,54 +7349,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.watchHub = undefined;
         this.changesetHub = undefined;
         this.resolveBootstrapWaiters({ verified: false });
-        await (this.mountNamespaceMutationChain ?? Promise.resolve()).catch(
-            () => {}
-        );
-        // Batches admitted before lifecycle closure may contain only content
-        // versions and therefore never enter the naming-append fence. Join
-        // the whole old chain before closing/resetting stores and caches.
-        await (this.writeBatchChain ?? Promise.resolve()).catch(() => {});
-        // No new guard work can be accepted after the change listener was
-        // removed above. Join every already-accepted ingest/flush generation;
-        // an active naming flush woken with ECLOSED requeues its copied batch.
-        let guardLifecycleSettled = false;
-        while (!guardLifecycleSettled) {
-            const ingest = [...(this.guardIngestTasks ?? [])];
-            if (ingest.length > 0) {
-                await Promise.allSettled(ingest);
-            }
-            const flush = this.guardFlushPromise;
-            if (flush) await flush.catch(() => {});
-            guardLifecycleSettled =
-                (this.guardIngestTasks?.size ?? 0) === 0 &&
-                !this.guardFlushPromise;
-        }
-        if (this.guardFlushTimer) {
-            clearTimeout(this.guardFlushTimer);
-            this.guardFlushTimer = undefined;
-        }
-        if (this.ordinaryNamingAppendsInFlight > 0) {
-            await new Promise<void>((resolve) =>
-                this.ordinaryNamingDrainWaiters.push(resolve)
-            );
-        }
-        if (
-            this.pendingGuardVersions.size > 0 ||
-            this.pendingGuardNaming.size > 0
-        ) {
-            await this.startGuardFlush(true);
-        }
-        if (
-            this.pendingGuardVersions.size > 0 ||
-            this.pendingGuardNaming.size > 0
-        ) {
-            // Do not close/reset away safety work the replica still owns.
-            // Leaving the program intact lets a later close retry the drain.
-            throw new SharedFsError(
-                "EIO",
-                "filesystem resurrection guard could not finish required safety work before close"
-            );
-        }
         const restoreCleanLegacyEligibility =
             this.legacyPromotionCrashMarker && this.legacyPromotionEligible;
         const closed = await super.close(from);
@@ -7213,7 +7780,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 "unverified",
                 "resuming a previously unverified bootstrap"
             );
-            this.startQuiescenceChecker();
+            this.startQuiescenceChecker(generation, signal);
             return;
         }
         // Content kinds only: replicated bootstrap/changeset manifests are
@@ -7375,7 +7942,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             { bootstrap: "unverified" },
             generation
         ).catch(() => {});
-        this.startQuiescenceChecker();
+        this.startQuiescenceChecker(generation);
         this.resolveBootstrapWaiters({ verified: false });
     }
 
@@ -8173,7 +8740,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 { bootstrap: "unverified" },
                 generation
             ).catch(() => {});
-            this.startQuiescenceChecker();
+            this.startQuiescenceChecker(generation);
             this.events.dispatchEvent(
                 new CustomEvent("bootstrap:converged", {
                     detail: { verified: false },
@@ -8193,25 +8760,52 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * consecutive checks — an honest heuristic, still strictly stronger
      * than today's config-only arming.
      */
-    private startQuiescenceChecker() {
+    private startQuiescenceChecker(
+        generation: number = this.openGeneration,
+        signal: AbortSignal | undefined = this.bootstrapAbortController?.signal
+    ) {
+        const lifecycleRequestGeneration = this.lifecycleRequestGeneration;
+        if (
+            generation !== this.openGeneration ||
+            lifecycleRequestGeneration !== this.lifecycleRequestGeneration ||
+            signal?.aborted
+        ) {
+            return;
+        }
+        if (this.quiescenceTimer) {
+            clearInterval(this.quiescenceTimer);
+            this.quiescenceTimer = undefined;
+        }
         this.quiescentChecks = 0;
-        this.quiescenceTimer = setInterval(() => {
-            if (this.bootstrapPhase !== "unverified") {
-                clearInterval(this.quiescenceTimer!);
-                this.quiescenceTimer = undefined;
+        const timer = setInterval(() => {
+            // clearInterval cannot retract a callback already queued by the
+            // event loop. Ownership must match before it can touch state.
+            if (this.quiescenceTimer !== timer) return;
+            const active =
+                generation === this.openGeneration &&
+                lifecycleRequestGeneration ===
+                    this.lifecycleRequestGeneration &&
+                !signal?.aborted;
+            if (!active || this.bootstrapPhase !== "unverified") {
+                clearInterval(timer);
+                if (this.quiescenceTimer === timer) {
+                    this.quiescenceTimer = undefined;
+                }
                 return;
             }
             const quiet =
                 this.clock() - this.lastArrivalMs > QUIESCENCE_WINDOW_MS;
             this.quiescentChecks = quiet ? this.quiescentChecks + 1 : 0;
             if (this.quiescentChecks >= 2) {
-                clearInterval(this.quiescenceTimer!);
+                clearInterval(timer);
+                if (this.quiescenceTimer !== timer) return;
                 this.quiescenceTimer = undefined;
                 this.bootstrapPhase = "converged";
                 this.setGuardArmed(!this.writeReadinessRequired);
-                void this.writeBootstrapState({ bootstrap: null }).catch(
-                    () => {}
-                );
+                void this.writeBootstrapState(
+                    { bootstrap: null },
+                    generation
+                ).catch(() => {});
                 this.events.dispatchEvent(
                     new CustomEvent("bootstrap:converged", {
                         detail: { verified: false },
@@ -8222,7 +8816,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.changesetHub?.overlayRetired();
             }
         }, QUIESCENCE_CHECK_INTERVAL_MS);
-        (this.quiescenceTimer as any)?.unref?.();
+        this.quiescenceTimer = timer;
+        (timer as any)?.unref?.();
     }
 
     /**
@@ -8576,7 +9171,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     private throwIfDisposalInterrupted(
         options: PrepareForDisposalOptions,
-        deadline: number | undefined
+        deadline: number | undefined,
+        context: MaintenanceContext
     ) {
         if (options.signal?.aborted) {
             throw (
@@ -8586,6 +9182,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (deadline !== undefined && Date.now() >= deadline) {
             throw this.disposalTimeoutError(options);
         }
+        this.throwIfMaintenanceInactive(context);
     }
 
     private disposalTimeoutError(options: PrepareForDisposalOptions) {
@@ -8619,12 +9216,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private awaitDisposalStep<T>(
         promise: Promise<T>,
         options: PrepareForDisposalOptions,
-        deadline: number | undefined
+        deadline: number | undefined,
+        context: MaintenanceContext
     ): Promise<T> {
-        this.throwIfDisposalInterrupted(options, deadline);
-        if (deadline === undefined && !options.signal) {
-            return promise;
-        }
+        this.throwIfDisposalInterrupted(options, deadline, context);
+        // A caller deadline may stop waiting before the local read/queue does.
+        // Keep the underlying operation enrolled so lifecycle teardown still
+        // joins it before closing the backing stores.
+        const settledPromise = this.trackMaintenanceTask(promise);
         return new Promise<T>((resolve, reject) => {
             let settled = false;
             let timer: ReturnType<typeof setTimeout> | undefined;
@@ -8633,9 +9232,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     clearTimeout(timer);
                 }
                 options.signal?.removeEventListener("abort", onAbort);
+                context.signal.removeEventListener("abort", onLifecycleAbort);
             };
             const resolveOnce = (value: T) => {
                 if (settled) return;
+                try {
+                    this.throwIfDisposalInterrupted(options, deadline, context);
+                } catch (error) {
+                    rejectOnce(error);
+                    return;
+                }
                 settled = true;
                 cleanup();
                 resolve(value);
@@ -8651,15 +9257,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     options.signal?.reason ??
                         new Error("Disposal barrier aborted")
                 );
+            const onLifecycleAbort = () =>
+                rejectOnce(
+                    context.signal.reason ??
+                        new SharedFsError(
+                            "ECLOSED",
+                            "filesystem closed while preparing for disposal"
+                        )
+                );
 
             options.signal?.addEventListener("abort", onAbort, { once: true });
+            context.signal.addEventListener("abort", onLifecycleAbort, {
+                once: true,
+            });
             if (deadline !== undefined) {
                 timer = setTimeout(
                     () => rejectOnce(this.disposalTimeoutError(options)),
                     Math.max(0, deadline - Date.now())
                 );
             }
-            promise.then(resolveOnce, rejectOnce);
+            if (options.signal?.aborted) onAbort();
+            if (context.signal.aborted) onLifecycleAbort();
+            settledPromise.then(resolveOnce, (error) => {
+                try {
+                    this.throwIfMaintenanceInactive(context);
+                } catch (lifecycleError) {
+                    rejectOnce(lifecycleError);
+                    return;
+                }
+                rejectOnce(error);
+            });
         });
     }
 
@@ -8691,9 +9318,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private async captureDisposalClosure(
         options: PrepareForDisposalOptions,
-        deadline: number | undefined
+        deadline: number | undefined,
+        context: MaintenanceContext
     ): Promise<DisposalClosure> {
-        this.throwIfDisposalInterrupted(options, deadline);
+        this.throwIfDisposalInterrupted(options, deadline, context);
         const [rawNamingRows, rawVersionRows] = await this.awaitDisposalStep(
             Promise.all([
                 this.queryRows([
@@ -8704,9 +9332,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 ]),
             ]),
             options,
-            deadline
+            deadline,
+            context
         );
-        this.throwIfDisposalInterrupted(options, deadline);
+        this.throwIfDisposalInterrupted(options, deadline, context);
 
         const namingByNode = new Map<string, NamingLike[]>();
         const rawNamingById = new Map<string, any>();
@@ -8773,7 +9402,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const chunks: DisposalEntryRef[] = [];
         const sortedChunkIds = [...chunkIds].sort(compareIds);
         for (let i = 0; i < sortedChunkIds.length; i += HEAD_QUERY_BATCH) {
-            this.throwIfDisposalInterrupted(options, deadline);
+            this.throwIfDisposalInterrupted(options, deadline, context);
             const batch = sortedChunkIds.slice(i, i + HEAD_QUERY_BATCH);
             const rows = await this.awaitDisposalStep(
                 this.queryRows([
@@ -8788,7 +9417,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                           ),
                 ]),
                 options,
-                deadline
+                deadline,
+                context
             );
             const byId = new Map(rows.map((row) => [row.id, row]));
             for (const id of batch) {
@@ -8802,13 +9432,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 chunks.push(this.disposalEntryRef(raw, "file chunk"));
             }
         }
-        this.throwIfDisposalInterrupted(options, deadline);
+        this.throwIfDisposalInterrupted(options, deadline, context);
 
         const trustEntries = this.trustGraph
             ? await this.awaitDisposalStep(
                   this.trustGraph.trustGraph.log.log.toArray(),
                   options,
-                  deadline
+                  deadline,
+                  context
               )
             : [];
         const trust = trustEntries.map((entry) => {
@@ -8823,7 +9454,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 hash: entry.hash,
             };
         });
-        this.throwIfDisposalInterrupted(options, deadline);
+        this.throwIfDisposalInterrupted(options, deadline, context);
 
         naming.sort((a, b) => compareIds(a.id, b.id));
         versions.sort((a, b) => compareIds(a.id, b.id));
@@ -8835,12 +9466,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         options: PrepareForDisposalOptions,
         deadline: number | undefined,
         progress: { confirmedEntries: number; receiptBatches: number },
-        documents: Documents<any, any> = this.entries
+        documents: Documents<any, any>,
+        context: MaintenanceContext
     ) {
         if (refs.length === 0) {
             return;
         }
-        this.throwIfDisposalInterrupted(options, deadline);
+        this.throwIfDisposalInterrupted(options, deadline, context);
         const entries = await this.awaitDisposalStep(
             mapWithConcurrency(refs, CHUNK_IO_CONCURRENCY, async (ref) => {
                 const entry = await documents.log.log.get(ref.hash);
@@ -8853,9 +9485,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 return entry;
             }),
             options,
-            deadline
+            deadline,
+            context
         );
-        this.throwIfDisposalInterrupted(options, deadline);
+        this.throwIfDisposalInterrupted(options, deadline, context);
         const remainingTimeout =
             deadline === undefined
                 ? undefined
@@ -8863,15 +9496,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Peerbit owns the receipt-phase deadline/abort so it can preserve
         // PersistedDeliveryError evidence instead of racing our generic local
         // step timer at the same deadline.
-        await documents.log.deliverPersistedEntries(entries, {
-            target: "replicators",
-            delivery: {
-                reliability: "persisted",
-                minAcks: options.minAcks,
-                timeout: remainingTimeout,
-                signal: options.signal,
-            },
-        });
+        const deliveryAbort = new AbortController();
+        const deliverySignals = [context.signal, options.signal].filter(
+            (signal): signal is AbortSignal => signal !== undefined
+        );
+        const abortDelivery = (event: Event) => {
+            const signal = event.target as AbortSignal;
+            if (!deliveryAbort.signal.aborted) {
+                deliveryAbort.abort(signal.reason);
+            }
+        };
+        for (const signal of deliverySignals) {
+            signal.addEventListener("abort", abortDelivery, { once: true });
+            if (signal.aborted && !deliveryAbort.signal.aborted) {
+                deliveryAbort.abort(signal.reason);
+            }
+        }
+        try {
+            await documents.log.deliverPersistedEntries(entries, {
+                target: "replicators",
+                delivery: {
+                    reliability: "persisted",
+                    minAcks: options.minAcks,
+                    timeout: remainingTimeout,
+                    signal: deliveryAbort.signal,
+                },
+            });
+        } finally {
+            for (const signal of deliverySignals) {
+                signal.removeEventListener("abort", abortDelivery);
+            }
+        }
+        this.throwIfDisposalInterrupted(options, deadline, context);
         progress.confirmedEntries += refs.length;
         progress.receiptBatches++;
     }
@@ -8911,150 +9567,185 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 ? undefined
                 : Date.now() + options.timeout;
         const progress = { confirmedEntries: 0, receiptBatches: 0 };
+        const context = this.currentMaintenanceContext("prepareForDisposal");
         this.disposalPreparationRunning = true;
-        try {
-            // `open()` starts auto-bootstrap beside normal replication. Its
-            // first local-index probe intentionally leaves phase="off", so
-            // phase is meaningful only after this decision has settled.
-            await this.awaitDisposalStep(
-                this.bootstrapDecision,
-                options,
-                deadline
-            );
-            if (
-                this.bootstrapPhase !== "off" &&
-                !(this.bootstrapPhase === "converged" && this.bootstrapVerified)
-            ) {
-                throw new SharedFsError(
-                    "EINVAL",
-                    "prepareForDisposal requires a fully verified local view; await verified bootstrap convergence before retrying"
-                );
-            }
-            // Drain an already-started writeBatch before choosing the closure.
-            // Other write APIs are guarded by the generation check below.
-            await this.awaitDisposalStep(
-                this.writeBatchChain,
-                options,
-                deadline
-            );
-            this.throwIfDisposalInterrupted(options, deadline);
-            this.throwIfDisposalGuardUnsettled();
-            const generation = this.disposalContentGeneration;
-            const closure = await this.captureDisposalClosure(
-                options,
-                deadline
-            );
-            this.throwIfDisposalGuardUnsettled();
-            if (this.disposalContentGeneration !== generation) {
-                throw new SharedFsError(
-                    "EIO",
-                    "filesystem content changed while capturing the disposal closure, or authorization state changed while capturing the disposal closure; quiesce writes, authorization changes, and replication, then retry"
-                );
-            }
-
-            for (
-                let i = 0;
-                i < closure.chunks.length;
-                i += DISPOSAL_CHUNK_BATCH_SIZE
-            ) {
-                await this.deliverDisposalBatch(
-                    closure.chunks.slice(i, i + DISPOSAL_CHUNK_BATCH_SIZE),
-                    options,
-                    deadline,
-                    progress
-                );
-                this.throwIfDisposalGuardUnsettled();
-                if (this.disposalContentGeneration !== generation) {
-                    throw new SharedFsError(
-                        "EIO",
-                        "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
-                    );
-                }
-            }
-            for (const refs of [closure.versions, closure.naming]) {
-                for (
-                    let i = 0;
-                    i < refs.length;
-                    i += DISPOSAL_METADATA_BATCH_SIZE
-                ) {
-                    await this.deliverDisposalBatch(
-                        refs.slice(i, i + DISPOSAL_METADATA_BATCH_SIZE),
+        this.disposalPreparationRunningGeneration = context.generation;
+        const run: Promise<PrepareForDisposalResult> =
+            (async (): Promise<PrepareForDisposalResult> => {
+                try {
+                    // `open()` starts auto-bootstrap beside normal replication. Its
+                    // first local-index probe intentionally leaves phase="off", so
+                    // phase is meaningful only after this decision has settled.
+                    await this.awaitDisposalStep(
+                        this.bootstrapDecision,
                         options,
                         deadline,
-                        progress
+                        context
+                    );
+                    if (
+                        this.bootstrapPhase !== "off" &&
+                        !(
+                            this.bootstrapPhase === "converged" &&
+                            this.bootstrapVerified
+                        )
+                    ) {
+                        throw new SharedFsError(
+                            "EINVAL",
+                            "prepareForDisposal requires a fully verified local view; await verified bootstrap convergence before retrying"
+                        );
+                    }
+                    // Drain an already-started writeBatch before choosing the closure.
+                    // Other write APIs are guarded by the generation check below.
+                    await this.awaitDisposalStep(
+                        this.writeBatchChain,
+                        options,
+                        deadline,
+                        context
+                    );
+                    this.throwIfDisposalInterrupted(options, deadline, context);
+                    this.throwIfDisposalGuardUnsettled();
+                    const generation = this.disposalContentGeneration;
+                    const closure = await this.captureDisposalClosure(
+                        options,
+                        deadline,
+                        context
                     );
                     this.throwIfDisposalGuardUnsettled();
                     if (this.disposalContentGeneration !== generation) {
                         throw new SharedFsError(
                             "EIO",
-                            "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
+                            "filesystem content changed while capturing the disposal closure, or authorization state changed while capturing the disposal closure; quiesce writes, authorization changes, and replication, then retry"
                         );
                     }
-                }
-            }
-            if (closure.trust.length > 0) {
-                const trustDocuments = this.trustGraph?.trustGraph as Documents<
-                    any,
-                    any
-                >;
-                if (!trustDocuments) {
-                    throw new SharedFsError(
-                        "EIO",
-                        "trusted-writer state disappeared during the disposal barrier"
-                    );
-                }
-                for (
-                    let i = 0;
-                    i < closure.trust.length;
-                    i += DISPOSAL_METADATA_BATCH_SIZE
-                ) {
-                    await this.deliverDisposalBatch(
-                        closure.trust.slice(
-                            i,
-                            i + DISPOSAL_METADATA_BATCH_SIZE
-                        ),
-                        options,
-                        deadline,
-                        progress,
-                        trustDocuments
-                    );
+
+                    for (
+                        let i = 0;
+                        i < closure.chunks.length;
+                        i += DISPOSAL_CHUNK_BATCH_SIZE
+                    ) {
+                        await this.deliverDisposalBatch(
+                            closure.chunks.slice(
+                                i,
+                                i + DISPOSAL_CHUNK_BATCH_SIZE
+                            ),
+                            options,
+                            deadline,
+                            progress,
+                            this.entries,
+                            context
+                        );
+                        this.throwIfDisposalGuardUnsettled();
+                        if (this.disposalContentGeneration !== generation) {
+                            throw new SharedFsError(
+                                "EIO",
+                                "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
+                            );
+                        }
+                    }
+                    for (const refs of [closure.versions, closure.naming]) {
+                        for (
+                            let i = 0;
+                            i < refs.length;
+                            i += DISPOSAL_METADATA_BATCH_SIZE
+                        ) {
+                            await this.deliverDisposalBatch(
+                                refs.slice(i, i + DISPOSAL_METADATA_BATCH_SIZE),
+                                options,
+                                deadline,
+                                progress,
+                                this.entries,
+                                context
+                            );
+                            this.throwIfDisposalGuardUnsettled();
+                            if (this.disposalContentGeneration !== generation) {
+                                throw new SharedFsError(
+                                    "EIO",
+                                    "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
+                                );
+                            }
+                        }
+                    }
+                    if (closure.trust.length > 0) {
+                        const trustDocuments = this.trustGraph
+                            ?.trustGraph as Documents<any, any>;
+                        if (!trustDocuments) {
+                            throw new SharedFsError(
+                                "EIO",
+                                "trusted-writer state disappeared during the disposal barrier"
+                            );
+                        }
+                        for (
+                            let i = 0;
+                            i < closure.trust.length;
+                            i += DISPOSAL_METADATA_BATCH_SIZE
+                        ) {
+                            await this.deliverDisposalBatch(
+                                closure.trust.slice(
+                                    i,
+                                    i + DISPOSAL_METADATA_BATCH_SIZE
+                                ),
+                                options,
+                                deadline,
+                                progress,
+                                trustDocuments,
+                                context
+                            );
+                            if (this.disposalContentGeneration !== generation) {
+                                throw new SharedFsError(
+                                    "EIO",
+                                    "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
+                                );
+                            }
+                        }
+                    }
+
+                    this.throwIfDisposalInterrupted(options, deadline, context);
                     if (this.disposalContentGeneration !== generation) {
                         throw new SharedFsError(
                             "EIO",
                             "filesystem content changed during the disposal barrier, or authorization state changed during the disposal barrier; quiesce writes, authorization changes, and replication, then retry"
                         );
                     }
-                }
-            }
 
-            const entries = {
-                chunks: closure.chunks.length,
-                versions: closure.versions.length,
-                naming: closure.naming.length,
-                trust: closure.trust.length,
-            };
-            const entryCount =
-                entries.chunks +
-                entries.versions +
-                entries.naming +
-                entries.trust;
-            return {
-                safeToDispose: true,
-                guarantee: "persisted-per-entry",
-                minAcksPerEntry: options.minAcks,
-                empty: entryCount === 0,
-                entries,
-                entryCount,
-                receiptBatches: progress.receiptBatches,
-            };
-        } catch (error) {
-            if (error instanceof PrepareForDisposalError) {
-                throw error;
-            }
-            throw new PrepareForDisposalError(error, progress.confirmedEntries);
-        } finally {
-            this.disposalPreparationRunning = false;
-        }
+                    const entries = {
+                        chunks: closure.chunks.length,
+                        versions: closure.versions.length,
+                        naming: closure.naming.length,
+                        trust: closure.trust.length,
+                    };
+                    const entryCount =
+                        entries.chunks +
+                        entries.versions +
+                        entries.naming +
+                        entries.trust;
+                    return {
+                        safeToDispose: true,
+                        guarantee: "persisted-per-entry",
+                        minAcksPerEntry: options.minAcks,
+                        empty: entryCount === 0,
+                        entries,
+                        entryCount,
+                        receiptBatches: progress.receiptBatches,
+                    };
+                } catch (error) {
+                    if (error instanceof PrepareForDisposalError) {
+                        throw error;
+                    }
+                    throw new PrepareForDisposalError(
+                        error,
+                        progress.confirmedEntries
+                    );
+                } finally {
+                    if (
+                        this.disposalPreparationRunningGeneration ===
+                        context.generation
+                    ) {
+                        this.disposalPreparationRunning = false;
+                        this.disposalPreparationRunningGeneration = undefined;
+                    }
+                }
+            })();
+        return this.trackMaintenanceTask(run);
     }
 
     /**
@@ -9074,54 +9765,67 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 "snapshotWrite requires a full replica (replicate: { factor: 1 })"
             );
         }
-        if (
-            this.trustGraph &&
-            !(await this.isTrustedWriter(this.node.identity.publicKey))
-        ) {
-            throw new SharedFsError(
-                "EINVAL",
-                "snapshotWrite requires a trusted writer key"
-            );
-        }
-        if (
-            this.bootstrapPhase !== "off" &&
-            this.bootstrapPhase !== "converged"
-        ) {
-            // Mirrors the GC gate: "unverified" positively asserts a
-            // partial view, and a fresh-timestamped partial snapshot
-            // would OUTRANK complete ones for every future joiner.
-            throw new SharedFsError(
-                "EINVAL",
-                "cannot materialize a snapshot from a partial (bootstrapping or unverified) view"
-            );
-        }
         if (this.snapshotRunning) {
             throw new SharedFsError(
                 "EINVAL",
                 "snapshotWrite is already running on this instance"
             );
         }
+        const context = this.currentMaintenanceContext("snapshotWrite");
         this.snapshotRunning = true;
-        try {
-            return await this.snapshotWriteInner(options);
-        } finally {
-            this.snapshotRunning = false;
-        }
+        this.snapshotRunningGeneration = context.generation;
+        const run = (async () => {
+            try {
+                if (
+                    this.trustGraph &&
+                    !(await this.isTrustedWriter(this.node.identity.publicKey))
+                ) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        "snapshotWrite requires a trusted writer key"
+                    );
+                }
+                this.throwIfMaintenanceInactive(context);
+                if (
+                    this.bootstrapPhase !== "off" &&
+                    this.bootstrapPhase !== "converged"
+                ) {
+                    // Mirrors the GC gate: "unverified" positively asserts a
+                    // partial view, and a fresh-timestamped partial snapshot
+                    // would OUTRANK complete ones for every future joiner.
+                    throw new SharedFsError(
+                        "EINVAL",
+                        "cannot materialize a snapshot from a partial (bootstrapping or unverified) view"
+                    );
+                }
+                return await this.snapshotWriteInner(options, context);
+            } finally {
+                if (this.snapshotRunningGeneration === context.generation) {
+                    this.snapshotRunning = false;
+                    this.snapshotRunningGeneration = undefined;
+                }
+            }
+        })();
+        return this.trackMaintenanceTask(run);
     }
 
     private async snapshotWriteInner(
-        options: { advisoryIgnorePatterns?: string[] } = {}
+        options: { advisoryIgnorePatterns?: string[] },
+        context: MaintenanceContext
     ): Promise<SnapshotWriteResult> {
+        this.throwIfMaintenanceInactive(context);
         const namingRows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "naming" }),
             ])
         ).map(namingRowOf);
+        this.throwIfMaintenanceInactive(context);
         const versionRows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "file-version" }),
             ])
         ).map(versionRowOf);
+        this.throwIfMaintenanceInactive(context);
         const headIds = new Set<string>();
         const nodes = new Set<string>();
         const namingByNode = new Map<string, NamingLike[]>();
@@ -9186,6 +9890,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                           )
                       ),
             ]);
+            this.throwIfMaintenanceInactive(context);
             for (const doc of docs) {
                 if (
                     !(doc instanceof NamingEvent) &&
@@ -9203,31 +9908,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 bucket.push(doc);
             }
         }
-        const segments: SegmentRef[] = [];
-        let docCount = 0n;
-        for (const shard of [...shards.keys()].sort((a, b) => a - b)) {
-            const docs = shards
-                .get(shard)!
-                .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-            const bytes = serialize(new SnapshotSegment({ entries: docs }));
-            const cid = (await (this.node.services.blocks as any).put(
-                bytes
-            )) as string;
-            segments.push(
-                new SegmentRef({
-                    cid,
-                    sha256: sha256Base64Sync(bytes),
-                    docCount: docs.length,
-                    byteLength: bytes.byteLength,
-                })
-            );
-            docCount += BigInt(docs.length);
-            totalBytes += BigInt(bytes.byteLength);
-        }
-        // Per-author sequence: read our previous manifest, if any.
+        // Resolve the sequence and previous live cids before the first block
+        // put. Once a put succeeds, every exit path can therefore persist an
+        // intent containing exactly the blocks this attempt created.
         const manifestId = `bootstrap:${this.authorKey()}`;
         let snapshotSeq = 1n;
         const previous = await this.getDocument<SharedFsEntry>(manifestId);
+        this.throwIfMaintenanceInactive(context);
         if (previous instanceof BootstrapManifest) {
             try {
                 snapshotSeq =
@@ -9256,19 +9943,74 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // published, or are pre-upgrade and exempt).
             }
         }
+        const segments: SegmentRef[] = [];
+        const successfulCids: SegmentLedgerCid[] = [];
+        let docCount = 0n;
+        // From the first successful block put through intent persistence this
+        // is one non-cancellable critical tail. If a later put fails, persist
+        // the successful prefix before surfacing the original put failure.
+        this.throwIfMaintenanceInactive(context);
+        try {
+            for (const shard of [...shards.keys()].sort((a, b) => a - b)) {
+                const docs = shards
+                    .get(shard)!
+                    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+                const bytes = serialize(new SnapshotSegment({ entries: docs }));
+                const cid = (await (this.node.services.blocks as any).put(
+                    bytes
+                )) as string;
+                // Enroll the cid before any subsequent construction can throw.
+                successfulCids.push({
+                    cid,
+                    bytes: bytes.byteLength,
+                });
+                segments.push(
+                    new SegmentRef({
+                        cid,
+                        sha256: sha256Base64Sync(bytes),
+                        docCount: docs.length,
+                        byteLength: bytes.byteLength,
+                    })
+                );
+                docCount += BigInt(docs.length);
+                totalBytes += BigInt(bytes.byteLength);
+            }
+        } catch (putError) {
+            if (successfulCids.length > 0) {
+                try {
+                    await this.recordSegmentIntent(
+                        successfulCids,
+                        prevDocCids,
+                        prevSeq,
+                        snapshotSeq.toString(),
+                        context
+                    );
+                } catch (intentError: any) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `snapshot segment put failed after ${successfulCids.length} successful block(s), and their reclamation intent could not be persisted: ${intentError?.message ?? intentError}`
+                    );
+                }
+            }
+            throw putError;
+        }
         // Record intent BEFORE the payload-cap check below can throw: a
         // cap-throwing publish loop must ledger each attempt's delta, not
         // strand freshly-put blocks (reap-time liveness keeps the live old
         // generation protected regardless of what `current` becomes).
         await this.recordSegmentIntent(
-            segments.map((segment) => ({
-                cid: segment.cid,
-                bytes: Number(segment.byteLength),
-            })),
+            successfulCids,
             prevDocCids,
             prevSeq,
-            snapshotSeq.toString()
+            snapshotSeq.toString(),
+            context
         );
+        this.throwIfMaintenanceInactive(context);
+        const advisoryIgnorePatterns =
+            options.advisoryIgnorePatterns ??
+            this.advisoryIgnorePublish ??
+            (await this.readAdvisoryFromRulesFile());
+        this.throwIfMaintenanceInactive(context);
         const payload = new SnapshotManifestPayload({
             storeId: this.id,
             snapshotSeq,
@@ -9279,10 +10021,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 bytes: totalBytes,
             }),
             segments,
-            advisoryIgnorePatterns:
-                options.advisoryIgnorePatterns ??
-                this.advisoryIgnorePublish ??
-                (await this.readAdvisoryFromRulesFile()),
+            advisoryIgnorePatterns,
         });
         const payloadBytes = serialize(payload);
         if (payloadBytes.byteLength > this.manifestPayloadCapBytes) {
@@ -9296,6 +10035,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         const signature = await this.node.identity.sign(payloadBytes);
+        this.throwIfMaintenanceInactive(context);
         const manifest = new BootstrapManifest({
             id: manifestId,
             payloadBytes,
@@ -9309,9 +10049,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
-        void this.reapSnapshotSegments(undefined, {
-            duringPublish: true,
-        }).catch(() => {});
+        if (this.maintenanceContextActive(context)) {
+            void this.reapSnapshotSegments(
+                undefined,
+                { duringPublish: true },
+                context
+            ).catch(() => {});
+        }
         return {
             snapshotSeq,
             createdAtWallMs: payload.createdAtWallMs,
@@ -9358,7 +10102,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (this.snapshotConfig.disabled || !this.isFullReplica()) {
             return;
         }
+        const context = this.maintenanceContextIfActive();
+        if (!context) {
+            return;
+        }
         const tick = async () => {
+            this.throwIfMaintenanceInactive(context);
             // Publish only from a whole view: a plain replica ("off") or
             // a VERIFIED converged bootstrap — never from "unverified" or
             // quiescence-armed states, whose fresh timestamps would
@@ -9382,6 +10131,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 const previous = await this.getDocument<SharedFsEntry>(
                     `bootstrap:${this.authorKey()}`
                 );
+                this.throwIfMaintenanceInactive(context);
                 if (previous instanceof BootstrapManifest) {
                     try {
                         const payload = deserialize(
@@ -9415,24 +10165,40 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             } finally {
                 await (probe as any).close?.();
             }
+            this.throwIfMaintenanceInactive(context);
             if (!populated) {
                 return;
             }
-            await this.snapshotWrite().catch((error: any) => {
+            try {
+                await this.snapshotWrite();
+            } catch (error: any) {
+                if (!this.maintenanceContextActive(context)) {
+                    return;
+                }
                 console.error(
                     "shared-fs: scheduled snapshot publication failed:",
                     error?.message ?? error
                 );
-            });
+            }
         };
-        this.snapshotTimer = setInterval(() => {
-            void tick().catch(() => {});
+        const runTick = () => {
+            if (!this.maintenanceContextActive(context)) {
+                return;
+            }
+            void this.trackMaintenanceTask(tick()).catch(() => {});
+        };
+        const interval = setInterval(() => {
+            if (this.snapshotTimer !== interval) {
+                return;
+            }
+            runTick();
         }, this.snapshotConfig.publishIntervalMs);
-        (this.snapshotTimer as any)?.unref?.();
+        this.snapshotTimer = interval;
+        (interval as any)?.unref?.();
         // First check soon after open so a populated replica with no (or
         // an aging) manifest does not wait a full interval.
         const early = setTimeout(() => {
-            void tick().catch(() => {});
+            runTick();
         }, 60_000);
         (early as any)?.unref?.();
         this.bootstrapTimers.push(early);
@@ -9517,8 +10283,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return ms * (1 + ratio * (2 * this.gcRng() - 1));
     }
 
-    private armGcTimer(delayMs: number, trigger: "interval" | "follow-up") {
-        const generation = this.gcSchedulerGeneration;
+    private armGcTimer(
+        delayMs: number,
+        trigger: "interval" | "follow-up",
+        generation: number = this.gcSchedulerGeneration,
+        context:
+            | MaintenanceContext
+            | undefined = this.maintenanceContextIfActive()
+    ) {
+        if (
+            !context ||
+            generation !== this.gcSchedulerGeneration ||
+            !this.maintenanceContextActive(context)
+        ) {
+            return;
+        }
         const delay = Math.max(0, delayMs);
         const prior =
             trigger === "interval" ? this.gcTimer : this.gcFollowUpTimer;
@@ -9526,12 +10305,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearTimeout(prior);
         }
         const timer = setTimeout(() => {
+            const current =
+                trigger === "interval" ? this.gcTimer : this.gcFollowUpTimer;
+            if (current !== timer) {
+                return;
+            }
             if (trigger === "interval") {
                 this.gcTimer = undefined;
             } else {
                 this.gcFollowUpTimer = undefined;
             }
-            void this.gcSchedulerTick(trigger, generation).catch(() => {});
+            if (
+                generation !== this.gcSchedulerGeneration ||
+                !this.maintenanceContextActive(context)
+            ) {
+                return;
+            }
+            void this.gcSchedulerTick(trigger, generation, context).catch(
+                () => {}
+            );
         }, delay);
         (timer as any)?.unref?.();
         if (trigger === "interval") {
@@ -9543,11 +10335,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
-    private async gcSchedulerTick(
+    private gcSchedulerTick(
         trigger: "interval" | "follow-up",
-        generation: number
+        generation: number,
+        context:
+            | MaintenanceContext
+            | undefined = this.maintenanceContextIfActive()
     ): Promise<void> {
-        if (this.closed || generation !== this.gcSchedulerGeneration) {
+        if (!context) {
+            return Promise.resolve();
+        }
+        return this.trackMaintenanceTask(
+            this.gcSchedulerTickInner(trigger, generation, context)
+        );
+    }
+
+    private async gcSchedulerTickInner(
+        trigger: "interval" | "follow-up",
+        generation: number,
+        context: MaintenanceContext
+    ): Promise<void> {
+        if (
+            this.closed ||
+            generation !== this.gcSchedulerGeneration ||
+            !this.maintenanceContextActive(context)
+        ) {
             return;
         }
         const config = this.gcScheduleConfig;
@@ -9557,12 +10369,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // execute there anyway, so gating loses nothing but time.
         const gateSkip = () => {
             if (trigger === "interval") {
-                this.armGcTimer(this.gcJittered(config.intervalMs), "interval");
+                this.armGcTimer(
+                    this.gcJittered(config.intervalMs),
+                    "interval",
+                    generation,
+                    context
+                );
             } else if (
                 this.gcFollowUpGateRetries++ <
                 GC_SCHEDULE_DEFAULTS.maxFollowUpGateRetries
             ) {
-                this.armGcTimer(config.followUpSlackMs, "follow-up");
+                this.armGcTimer(
+                    config.followUpSlackMs,
+                    "follow-up",
+                    generation,
+                    context
+                );
             }
         };
         if (
@@ -9602,16 +10424,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Courtesy, not correctness: GC against a mid-publish writer
             // just causes pointless resurrection churn.
             this.gcSnapshotDeferrals++;
-            this.armGcTimer(60_000, trigger);
+            this.armGcTimer(60_000, trigger, generation, context);
             return;
         }
         this.gcSnapshotDeferrals = 0;
         const startedMs = this.clock();
         let report: GcReport;
         try {
-            report = await this.collectGarbage(config.run);
+            report = await this.collectGarbageForContext(config.run, context);
         } catch (error: any) {
-            if (this.closed || generation !== this.gcSchedulerGeneration) {
+            if (
+                this.closed ||
+                generation !== this.gcSchedulerGeneration ||
+                !this.maintenanceContextActive(context)
+            ) {
                 return;
             }
             if (error?.code === "ERR_GC_PHASE") {
@@ -9657,11 +10483,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             2 ** (this.gcConsecutiveFailures - 1)
                     )
                 ),
-                "interval"
+                "interval",
+                generation,
+                context
             );
             return;
         }
-        if (this.closed || generation !== this.gcSchedulerGeneration) {
+        if (
+            this.closed ||
+            generation !== this.gcSchedulerGeneration ||
+            !this.maintenanceContextActive(context)
+        ) {
             return;
         }
         this.gcConsecutiveFailures = 0;
@@ -9692,10 +10524,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     config.followUpSlackMs,
                     this.gcRng
                 ),
-                "follow-up"
+                "follow-up",
+                generation,
+                context
             );
         }
-        this.armGcTimer(this.gcJittered(config.intervalMs), "interval");
+        this.armGcTimer(
+            this.gcJittered(config.intervalMs),
+            "interval",
+            generation,
+            context
+        );
     }
 
     /**
@@ -9800,11 +10639,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return;
         }
-        this.guardFlushTimer = setTimeout(() => {
+        const guardGeneration = this.guardLifecycleGeneration;
+        const openGeneration = this.openGeneration;
+        const lifecycleRequestGeneration = this.lifecycleRequestGeneration;
+        const timer = setTimeout(() => {
+            if (this.guardFlushTimer !== timer) return;
             this.guardFlushTimer = undefined;
+            if (
+                this.writeReadinessLifecycleBlocked ||
+                guardGeneration !== this.guardLifecycleGeneration ||
+                openGeneration !== this.openGeneration ||
+                lifecycleRequestGeneration !== this.lifecycleRequestGeneration
+            ) {
+                return;
+            }
             void this.startGuardFlush().catch(() => {});
         }, 300);
-        (this.guardFlushTimer as any)?.unref?.();
+        this.guardFlushTimer = timer;
+        (timer as any)?.unref?.();
     }
 
     private startGuardFlush(allowDuringClose = false): Promise<void> {
@@ -10193,11 +11045,301 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!directory) {
             return undefined;
         }
-        const { mkdir } = await import("node:fs/promises");
+        const fs = await import("node:fs/promises");
         const { join } = await import("node:path");
         const dir = join(directory, "shared-fs-snapshots");
-        await mkdir(dir, { recursive: true });
+        const created = await fs.mkdir(dir, { recursive: true });
+        if (created !== undefined) {
+            for (const durableDirectory of [dir, directory]) {
+                try {
+                    const handle = await fs.open(durableDirectory, "r");
+                    try {
+                        await handle.sync();
+                    } finally {
+                        await handle.close();
+                    }
+                } catch (error) {
+                    if (!directorySyncUnsupported(error)) throw error;
+                }
+            }
+        }
         return join(dir, `${this.address?.toString() ?? "unaddressed"}.json`);
+    }
+
+    /**
+     * Cross-process writer exclusion. A lock directory is the atomic claim;
+     * its synced owner record permits conservative dead-owner recovery. A
+     * stale claim is renamed to a token-specific tombstone (left in place so
+     * concurrent stale cleaners cannot later steal a fresh owner's lock).
+     */
+    private async acquireSegmentLedgerLock(
+        path: string,
+        signal?: AbortSignal
+    ): Promise<() => Promise<void>> {
+        const fs = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const lockPath = `${path}.lock`;
+        const ownerPath = join(lockPath, "owner.json");
+        const token = `${process.pid}-${toBase64URL(randomBytes(18))}`;
+        const candidatePath = `${lockPath}.candidate-${token}`;
+        const candidateOwnerPath = join(candidatePath, "owner.json");
+        const releasePath = `${lockPath}.release-${token}`;
+        const releaseOwnerPath = join(releasePath, "owner.json");
+        const owner = JSON.stringify({
+            token,
+            pid: process.pid,
+            createdAtMs: Date.now(),
+        });
+        const deadline = Date.now() + SEGMENT_LEDGER_LOCK_TIMEOUT_MS;
+
+        const throwIfAborted = () => {
+            if (signal?.aborted) {
+                throw (
+                    signal.reason ??
+                    new SharedFsError(
+                        "ECLOSED",
+                        "snapshot segment ledger lock acquisition was aborted"
+                    )
+                );
+            }
+        };
+        const waitForRetry = () =>
+            new Promise<void>((resolve, reject) => {
+                const cleanup = () => {
+                    clearTimeout(timer);
+                    signal?.removeEventListener("abort", onAbort);
+                };
+                const onAbort = () => {
+                    cleanup();
+                    reject(
+                        signal?.reason ??
+                            new SharedFsError(
+                                "ECLOSED",
+                                "snapshot segment ledger lock acquisition was aborted"
+                            )
+                    );
+                };
+                const timer = setTimeout(() => {
+                    cleanup();
+                    resolve();
+                }, SEGMENT_LEDGER_LOCK_RETRY_MS);
+                signal?.addEventListener("abort", onAbort, { once: true });
+                if (signal?.aborted) onAbort();
+            });
+        const reapDeadOwner = async (): Promise<boolean> => {
+            let parsed: {
+                token?: unknown;
+                pid?: unknown;
+                createdAtMs?: unknown;
+            };
+            let ownerStat: Awaited<ReturnType<typeof fs.stat>>;
+            try {
+                parsed = JSON.parse(await fs.readFile(ownerPath, "utf8"));
+                ownerStat = await fs.stat(ownerPath);
+            } catch {
+                // Missing/malformed ownership may be a live creator between
+                // mkdir and its synced record. Fail closed rather than remove.
+                return false;
+            }
+            if (
+                typeof parsed.token !== "string" ||
+                !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.token) ||
+                typeof parsed.pid !== "number" ||
+                !Number.isSafeInteger(parsed.pid) ||
+                parsed.pid <= 0 ||
+                typeof parsed.createdAtMs !== "number" ||
+                !Number.isFinite(parsed.createdAtMs)
+            ) {
+                return false;
+            }
+            const lastOwnedAtMs = Math.max(
+                parsed.createdAtMs,
+                ownerStat.mtimeMs
+            );
+            if (Date.now() - lastOwnedAtMs < SEGMENT_LEDGER_LOCK_STALE_MS) {
+                return false;
+            }
+            let ownerAlive = true;
+            try {
+                process.kill(parsed.pid, 0);
+            } catch (error) {
+                ownerAlive = (error as { code?: string })?.code !== "ESRCH";
+            }
+            if (ownerAlive) return false;
+            const stalePath = `${lockPath}.stale-${parsed.token}`;
+            try {
+                await fs.rename(lockPath, stalePath);
+                return true;
+            } catch (error) {
+                if (
+                    ["EEXIST", "ENOTEMPTY", "ENOENT"].includes(
+                        (error as { code?: string })?.code ?? ""
+                    )
+                ) {
+                    return false;
+                }
+                throw error;
+            }
+        };
+
+        // Fully prepare and sync ownership before publishing the fixed lock
+        // path. A crash can leave an ignored candidate, never an ownerless
+        // lock that wedges all future writers.
+        await fs.mkdir(candidatePath);
+        let candidateOwnerFile: Awaited<ReturnType<typeof fs.open>> | undefined;
+        try {
+            candidateOwnerFile = await fs.open(candidateOwnerPath, "wx", 0o600);
+            await candidateOwnerFile.writeFile(owner, "utf8");
+            await candidateOwnerFile.sync();
+            await candidateOwnerFile.close();
+            candidateOwnerFile = undefined;
+            try {
+                const candidateDirectory = await fs.open(candidatePath, "r");
+                try {
+                    await candidateDirectory.sync();
+                } finally {
+                    await candidateDirectory.close();
+                }
+            } catch (error) {
+                if (!directorySyncUnsupported(error)) throw error;
+            }
+        } catch (error) {
+            await candidateOwnerFile?.close().catch(() => {});
+            await fs.rm(candidatePath, { recursive: true, force: true });
+            throw error;
+        }
+
+        let acquired = false;
+        try {
+            for (;;) {
+                try {
+                    await fs.rename(candidatePath, lockPath);
+                    acquired = true;
+                    return async () => {
+                        try {
+                            const current = JSON.parse(
+                                await fs.readFile(ownerPath, "utf8")
+                            );
+                            if (current?.token !== token) {
+                                throw new SharedFsError(
+                                    "EIO",
+                                    "snapshot segment ledger lock ownership changed before release"
+                                );
+                            }
+                        } catch (error) {
+                            if (
+                                (error as { code?: string })?.code === "ENOENT"
+                            ) {
+                                return;
+                            }
+                            throw error;
+                        }
+                        try {
+                            // Vacate the shared name atomically. Contenders
+                            // may claim lockPath immediately afterward, while
+                            // cleanup can touch only this owner's private path.
+                            await fs.rename(lockPath, releasePath);
+                        } catch (error) {
+                            if (
+                                (error as { code?: string })?.code === "ENOENT"
+                            ) {
+                                return;
+                            }
+                            throw error;
+                        }
+                        let releasedOwner: any;
+                        try {
+                            releasedOwner = JSON.parse(
+                                await fs.readFile(releaseOwnerPath, "utf8")
+                            );
+                        } catch {
+                            // Never recursively remove a path whose moved
+                            // ownership cannot still be proven.
+                            throw new SharedFsError(
+                                "EIO",
+                                "snapshot segment ledger lock ownership was lost during release"
+                            );
+                        }
+                        if (releasedOwner?.token !== token) {
+                            throw new SharedFsError(
+                                "EIO",
+                                "snapshot segment ledger lock ownership changed during release"
+                            );
+                        }
+                        await fs.rm(releasePath, {
+                            recursive: true,
+                            force: true,
+                        });
+                    };
+                } catch (error) {
+                    const code = (error as { code?: string })?.code ?? "";
+                    if (
+                        !["EEXIST", "ENOTEMPTY"].includes(code) &&
+                        !(process.platform === "win32" && code === "EPERM")
+                    ) {
+                        throw error;
+                    }
+                }
+                // An already-admitted intent gets one immediate atomic claim
+                // even when close has just aborted its context. If ownership
+                // is contended, however, do not wait out the lock timeout.
+                throwIfAborted();
+                if (await reapDeadOwner()) continue;
+                if (Date.now() >= deadline) {
+                    throw new SharedFsError(
+                        "EIO",
+                        "snapshot segment ledger is locked by another live writer"
+                    );
+                }
+                await waitForRetry();
+            }
+        } finally {
+            if (!acquired) {
+                await fs.rm(candidatePath, {
+                    recursive: true,
+                    force: true,
+                });
+            }
+        }
+    }
+
+    /** Same-directory temp + fsync + atomic rename + parent-directory fsync. */
+    private async replaceSegmentLedger(path: string, contents: string) {
+        const fs = await import("node:fs/promises");
+        const { dirname } = await import("node:path");
+        const tempPath = `${path}.tmp-${process.pid}-${toBase64URL(
+            randomBytes(18)
+        )}`;
+        let file: Awaited<ReturnType<typeof fs.open>> | undefined;
+        let renamed = false;
+        try {
+            file = await fs.open(tempPath, "wx", 0o600);
+            await file.writeFile(contents, "utf8");
+            await file.sync();
+            await file.close();
+            file = undefined;
+            await fs.rename(tempPath, path);
+            renamed = true;
+            try {
+                const parent = await fs.open(dirname(path), "r");
+                try {
+                    await parent.sync();
+                } finally {
+                    await parent.close();
+                }
+            } catch (error) {
+                if (!directorySyncUnsupported(error)) throw error;
+            }
+        } finally {
+            await file?.close().catch(() => {});
+            if (!renamed) {
+                await fs.unlink(tempPath).catch((error) => {
+                    if ((error as { code?: string })?.code !== "ENOENT") {
+                        throw error;
+                    }
+                });
+            }
+        }
     }
 
     private async loadSegmentLedger(): Promise<SegmentLedger> {
@@ -10263,115 +11405,139 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Generation-CAS write. One conflict merges against the disk state and
-     * retries; a second consecutive conflict skips (the next trigger
-     * retries the whole operation).
+     * Generation-CAS write under a cross-process lock. The disk generation
+     * is read only after ownership is acquired, so read/merge/replace is one
+     * serialized transaction rather than a check-then-write TOCTOU.
      */
     private async saveSegmentLedgerCas(
         loadedGeneration: number,
         next: SegmentLedger,
-        reapedCids?: Set<string>
+        reapedCids?: Set<string>,
+        signal?: AbortSignal
     ): Promise<boolean> {
         const path = await this.segmentLedgerPath();
+        const removeReaped = (ledger: SegmentLedger) => {
+            if (!reapedCids || reapedCids.size === 0) return;
+            // Successful rm is the invariant's sanctioned exit: a merged
+            // concurrent copy must not resurrect already-removed cids.
+            ledger.retired = ledger.retired
+                .map((gen) => ({
+                    ...gen,
+                    cids: gen.cids.filter(
+                        (entry) => !reapedCids.has(entry.cid)
+                    ),
+                }))
+                .filter((gen) => gen.cids.length > 0);
+        };
         if (!path) {
-            next.generation = loadedGeneration + 1;
-            this.nodeMemorySegmentLedgers().set(this.segmentLedgerKey(), next);
+            // No await below: this read/merge/write is atomic on the JS turn
+            // even across multiple program instances sharing the same node.
+            const store = this.nodeMemorySegmentLedgers();
+            const disk = store.get(this.segmentLedgerKey());
+            const diskGeneration = disk?.generation ?? 0;
+            const payload =
+                disk && diskGeneration !== loadedGeneration
+                    ? mergeSegmentLedgers(disk, next, this.clock())
+                    : next;
+            removeReaped(payload);
+            capSegmentRetired(payload);
+            payload.generation = Math.max(diskGeneration, loadedGeneration) + 1;
+            store.set(this.segmentLedgerKey(), payload);
             return true;
         }
-        const { readFile, writeFile } = await import("node:fs/promises");
-        let expected = loadedGeneration;
-        let payload = next;
-        for (let attempt = 0; attempt < 2; attempt++) {
-            let disk: any;
+        const fs = await import("node:fs/promises");
+        const release = await this.acquireSegmentLedgerLock(path, signal);
+        try {
+            let disk: SegmentLedger | undefined;
             try {
-                disk = JSON.parse(await readFile(path, "utf8"));
-            } catch {
-                disk = undefined;
+                disk = normalizeSegmentLedger(
+                    JSON.parse(await fs.readFile(path, "utf8"))
+                );
+                if (
+                    !Number.isSafeInteger(disk.generation) ||
+                    disk.generation < 0
+                ) {
+                    throw new Error("invalid segment ledger generation");
+                }
+            } catch (error) {
+                if ((error as { code?: string })?.code === "ENOENT") {
+                    disk = undefined;
+                } else {
+                    throw new SharedFsError(
+                        "EIO",
+                        "snapshot segment ledger is unreadable; refusing to overwrite owned segment intent"
+                    );
+                }
             }
-            const diskGeneration = Number(disk?.generation ?? 0);
-            if (disk == null || diskGeneration === expected) {
-                payload.generation = Math.max(diskGeneration, expected) + 1;
-                await writeFile(path, JSON.stringify(payload));
-                return true;
-            }
-            payload = mergeSegmentLedgers(
-                normalizeSegmentLedger(disk),
-                payload,
-                this.clock()
-            );
-            if (reapedCids && reapedCids.size > 0) {
-                // Successful rm is the invariant's sanctioned exit: a
-                // concurrent writer's disk copy must not resurrect cids
-                // this reap just deleted, or the next reap double-counts
-                // them in segmentBlocksDeleted/reclaimedSegmentBytes.
-                payload.retired = payload.retired
-                    .map((gen) => ({
-                        ...gen,
-                        cids: gen.cids.filter(
-                            (entry) => !reapedCids.has(entry.cid)
-                        ),
-                    }))
-                    .filter((gen) => gen.cids.length > 0);
-            }
-            expected = diskGeneration;
+            const diskGeneration = disk?.generation ?? 0;
+            const payload =
+                disk && diskGeneration !== loadedGeneration
+                    ? mergeSegmentLedgers(disk, next, this.clock())
+                    : next;
+            removeReaped(payload);
+            capSegmentRetired(payload);
+            payload.generation = Math.max(diskGeneration, loadedGeneration) + 1;
+            await this.replaceSegmentLedger(path, JSON.stringify(payload));
+            return true;
+        } finally {
+            await release();
         }
-        return false;
     }
 
-    /**
-     * Publish-time intent record. Runs BEFORE any throw-capable publish
-     * step so a cap-throwing publish loop records each attempt's delta
-     * instead of stranding freshly-put blocks outside the ledger.
-     */
+    /** Publish-time intent record; manifest publication requires its success. */
     private recordSegmentIntent(
         newCids: SegmentLedgerCid[],
         prevDocCids: SegmentLedgerCid[],
         prevSeq: string,
-        newSeq: string
+        newSeq: string,
+        _context?: MaintenanceContext
     ): Promise<void> {
+        this.segmentLedgerChain ??= Promise.resolve();
         const run = this.segmentLedgerChain.then(async () => {
-            try {
-                const ledger = await this.loadSegmentLedger();
-                const loadedGeneration = ledger.generation;
-                const now = this.clock();
-                const newSet = new Set(newCids.map((c) => c.cid));
-                const prev = new Map<string, number>();
-                for (const entry of [
-                    ...prevDocCids,
-                    ...(ledger.current?.cids ?? []),
-                ]) {
-                    prev.set(entry.cid, entry.bytes);
-                }
-                const retiredNow = [...prev.entries()]
-                    .filter(([cid]) => !newSet.has(cid))
-                    .map(([cid, bytes]) => ({ cid, bytes }));
-                const nextLedger: SegmentLedger = {
-                    v: 1,
-                    generation: loadedGeneration,
-                    current: {
-                        cids: newCids,
-                        publishedAtMs: now,
-                        snapshotSeq: newSeq,
-                    },
-                    retired: [
-                        ...ledger.retired,
-                        ...(retiredNow.length > 0
-                            ? [
-                                  {
-                                      cids: retiredNow,
-                                      retiredAtMs: now,
-                                      snapshotSeq: prevSeq,
-                                  },
-                              ]
-                            : []),
-                    ],
-                };
-                capSegmentRetired(nextLedger);
-                await this.saveSegmentLedgerCas(loadedGeneration, nextLedger);
-            } catch (error: any) {
-                console.warn(
-                    "shared-fs: segment-ledger intent record failed:",
-                    error?.message ?? error
+            const ledger = await this.loadSegmentLedger();
+            const loadedGeneration = ledger.generation;
+            const now = this.clock();
+            const newSet = new Set(newCids.map((c) => c.cid));
+            const prev = new Map<string, number>();
+            for (const entry of [
+                ...prevDocCids,
+                ...(ledger.current?.cids ?? []),
+            ]) {
+                prev.set(entry.cid, entry.bytes);
+            }
+            const retiredNow = [...prev.entries()]
+                .filter(([cid]) => !newSet.has(cid))
+                .map(([cid, bytes]) => ({ cid, bytes }));
+            const nextLedger: SegmentLedger = {
+                v: 1,
+                generation: loadedGeneration,
+                current: {
+                    cids: newCids,
+                    publishedAtMs: now,
+                    snapshotSeq: newSeq,
+                },
+                retired: [
+                    ...ledger.retired,
+                    ...(retiredNow.length > 0
+                        ? [
+                              {
+                                  cids: retiredNow,
+                                  retiredAtMs: now,
+                                  snapshotSeq: prevSeq,
+                              },
+                          ]
+                        : []),
+                ],
+            };
+            capSegmentRetired(nextLedger);
+            const saved = await this.saveSegmentLedgerCas(
+                loadedGeneration,
+                nextLedger
+            );
+            if (!saved) {
+                throw new SharedFsError(
+                    "EIO",
+                    "snapshot segment intent could not be persisted after repeated ledger generation conflicts"
                 );
             }
         });
@@ -10379,28 +11545,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             () => undefined,
             () => undefined
         );
-        return run;
+        return this.trackMaintenanceTask(run);
     }
 
     private reapSnapshotSegments(
         nowMsArg?: number,
-        options?: { duringPublish?: boolean }
+        options?: { duringPublish?: boolean },
+        context?: MaintenanceContext
     ): Promise<{ deleted: number; bytes: bigint }> {
+        const ownedContext = context ?? this.maintenanceContextIfActive();
+        if (!ownedContext) {
+            return Promise.resolve({ deleted: 0, bytes: 0n });
+        }
+        this.segmentLedgerChain ??= Promise.resolve();
         const run = this.segmentLedgerChain.then(() =>
-            this.reapSnapshotSegmentsInner(nowMsArg, options)
+            this.reapSnapshotSegmentsInner(nowMsArg, options, ownedContext)
         );
         this.segmentLedgerChain = run.then(
             () => undefined,
             () => undefined
         );
-        return run;
+        return this.trackMaintenanceTask(run);
     }
 
     private async reapSnapshotSegmentsInner(
         nowMsArg?: number,
-        options?: { duringPublish?: boolean }
+        options?: { duringPublish?: boolean },
+        context?: MaintenanceContext
     ): Promise<{ deleted: number; bytes: bigint }> {
         const zero = { deleted: 0, bytes: 0n };
+        if (context && !this.maintenanceContextActive(context)) {
+            return zero;
+        }
         const settings = this.segmentReclaimSettings();
         if (!settings.enabled || !this.isFullReplica()) {
             return zero;
@@ -10416,6 +11592,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const now = nowMsArg ?? this.clock();
         const ledger = await this.loadSegmentLedger();
+        if (context && !this.maintenanceContextActive(context)) {
+            return zero;
+        }
         const loadedGeneration = ledger.generation;
         const expired = ledger.retired.filter(
             (gen) => gen.retiredAtMs <= now - settings.graceMs
@@ -10430,6 +11609,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const own = await this.getDocument<SharedFsEntry>(
             `bootstrap:${this.authorKey()}`
         );
+        if (context && !this.maintenanceContextActive(context)) {
+            return zero;
+        }
         if (!(own instanceof BootstrapManifest)) {
             return zero;
         }
@@ -10471,6 +11653,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 { local: true, remote: false, resolve: true }
             )
             .all();
+        if (context && !this.maintenanceContextActive(context)) {
+            return zero;
+        }
         for (const doc of manifestDocs as any[]) {
             if (!(doc instanceof BootstrapManifest) || doc.id === own.id) {
                 continue;
@@ -10498,32 +11683,90 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         }
         const blocks: any = this.node.services.blocks;
-        const deletedSet = new Set<string>();
+        // `acknowledgedSet` leaves the ledger after CAS: it includes blocks
+        // deleted now and blocks already absent from an earlier delete whose
+        // ledger CAS failed. Only `newlyDeletedSet` contributes report bytes.
+        const acknowledgedSet = new Set<string>();
+        const newlyDeletedSet = new Set<string>();
         const failedSet = new Set<string>();
         let bytes = 0n;
         const cids = [...rmCandidates.keys()];
-        let batchDone = false;
-        if (cids.length > 0 && typeof blocks.rmMany === "function") {
+        const presentCids: string[] = [];
+        const markDeleted = (cid: string) => {
+            acknowledgedSet.add(cid);
+            if (!newlyDeletedSet.has(cid)) {
+                newlyDeletedSet.add(cid);
+                bytes += BigInt(rmCandidates.get(cid) ?? 0);
+            }
+        };
+        for (const cid of cids) {
+            if (context && !this.maintenanceContextActive(context)) {
+                break;
+            }
+            if (typeof blocks.has !== "function") {
+                presentCids.push(cid);
+                continue;
+            }
             try {
-                await blocks.rmMany(cids);
+                if (await blocks.has(cid)) {
+                    presentCids.push(cid);
+                } else {
+                    acknowledgedSet.add(cid);
+                }
+            } catch {
+                // A presence probe failure is not proof of absence. Let rm
+                // make the authoritative attempt below.
+                presentCids.push(cid);
+            }
+        }
+        let batchDone = false;
+        if (
+            presentCids.length > 0 &&
+            typeof blocks.rmMany === "function" &&
+            (!context || this.maintenanceContextActive(context))
+        ) {
+            try {
+                await blocks.rmMany(presentCids);
                 batchDone = true;
-                for (const cid of cids) {
-                    deletedSet.add(cid);
-                    bytes += BigInt(rmCandidates.get(cid) ?? 0);
+                for (const cid of presentCids) {
+                    markDeleted(cid);
                 }
             } catch {
                 batchDone = false;
             }
         }
         if (!batchDone) {
-            for (const cid of cids) {
+            for (const cid of presentCids) {
+                if (context && !this.maintenanceContextActive(context)) {
+                    break;
+                }
+                if (typeof blocks.has === "function") {
+                    try {
+                        if (!(await blocks.has(cid))) {
+                            // rmMany may have deleted a prefix before failing,
+                            // or a previous run may have deleted it before a
+                            // failed CAS. Acknowledge without counting bytes.
+                            acknowledgedSet.add(cid);
+                            continue;
+                        }
+                    } catch {
+                        // Fall through to rm; presence remains unknown.
+                    }
+                }
                 try {
                     await blocks.rm(cid);
-                    deletedSet.add(cid);
-                    bytes += BigInt(rmCandidates.get(cid) ?? 0);
+                    markDeleted(cid);
                 } catch {
-                    // An absent-cid rm must not abort the batch; failures
-                    // keep their cids ledgered for retry.
+                    if (typeof blocks.has === "function") {
+                        try {
+                            if (!(await blocks.has(cid))) {
+                                acknowledgedSet.add(cid);
+                                continue;
+                            }
+                        } catch {
+                            // Unknown remains retryable in the ledger.
+                        }
+                    }
                     failedSet.add(cid);
                 }
             }
@@ -10540,7 +11783,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             const remaining = gen.cids.filter(
                 (entry) =>
-                    !deletedSet.has(entry.cid) && !currentSet.has(entry.cid)
+                    !acknowledgedSet.has(entry.cid) &&
+                    !currentSet.has(entry.cid)
             );
             if (remaining.length > 0) {
                 nextRetired.push({ ...gen, cids: remaining });
@@ -10565,12 +11809,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             current: ledger.current,
             retired: nextRetired,
         };
-        await this.saveSegmentLedgerCas(
+        const saved = await this.saveSegmentLedgerCas(
             loadedGeneration,
             nextLedger,
-            deletedSet
+            acknowledgedSet
         );
-        return { deleted: deletedSet.size, bytes };
+        if (!saved) {
+            throw new SharedFsError(
+                "EIO",
+                "reaped snapshot segments could not be acknowledged after repeated ledger generation conflicts"
+            );
+        }
+        return { deleted: newlyDeletedSet.size, bytes };
     }
 
     /**
@@ -10596,16 +11846,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         chunkId: string,
         expectedHead: string | undefined,
         sizeHint: number,
-        report: GcReport
+        report: GcReport,
+        context?: MaintenanceContext
     ) {
+        if (context) this.throwIfMaintenanceInactive(context);
         const value = await this.getDocument<FileChunk>(chunkId);
+        if (context) this.throwIfMaintenanceInactive(context);
+        if (!(value instanceof FileChunk)) {
+            // The resolved bytes are the only source from which a concurrent
+            // head-mismatch CUT can be repaired. Never initiate deletion when
+            // that recovery value is unavailable.
+            throw new SharedFsError(
+                "EIO",
+                `chunk ${chunkId} could not be resolved before verified deletion`
+            );
+        }
         try {
+            // Once the CUT starts, finish its head-mismatch recovery even if
+            // close aborts the surrounding run.
             const result: any = await this.entries.del(chunkId);
             const cutTarget = result?.entry?.meta?.next?.[0];
             if (expectedHead && cutTarget && cutTarget !== expectedHead) {
-                if (value instanceof FileChunk) {
-                    await this.entries.put(value);
-                }
+                await this.entries.put(value);
                 report.cutRecoveries++;
                 return;
             }
@@ -10619,25 +11881,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private gcRunning = false;
+    private gcRunningGeneration: number | undefined;
 
     async collectGarbage(options: GcOptions = {}): Promise<GcReport> {
         this.assertSafeMaintenanceReady("collectGarbage");
-        // A fresh open may still be deciding whether to bootstrap (a few
-        // seconds of manifest discovery); wait that decision out instead
-        // of failing spuriously.
-        await this.bootstrapDecision.catch(() => {});
-        if (
-            this.bootstrapPhase !== "off" &&
-            this.bootstrapPhase !== "converged"
-        ) {
-            // Belt and braces over the arrival-age and empty-ledger
-            // shields: a partial (bootstrapping or unverified) replica
-            // must not plan retirements at all.
-            throw new SharedFsError(
-                "ERR_GC_PHASE",
-                "collectGarbage is unavailable until the cold-start bootstrap converges"
-            );
-        }
+        const context = this.currentMaintenanceContext("collectGarbage");
+        return this.collectGarbageForContext(options, context);
+    }
+
+    private collectGarbageForContext(
+        options: GcOptions,
+        context: MaintenanceContext
+    ): Promise<GcReport> {
+        this.throwIfMaintenanceInactive(context);
         if (this.gcRunning) {
             throw new SharedFsError(
                 "EINVAL",
@@ -10645,20 +11901,45 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         this.gcRunning = true;
-        try {
-            return await this.collectGarbageInner(options);
-        } finally {
-            this.gcRunning = false;
-            // Suppression must never outlive the run — a leaked id would
-            // permanently blind Guard D for exactly the documents an aborted
-            // run was deleting.
-            this.gcSuppressed.clear();
-        }
+        this.gcRunningGeneration = context.generation;
+        const run = (async () => {
+            try {
+                // A fresh open may still be deciding whether to bootstrap (a
+                // few seconds of manifest discovery); wait that decision out
+                // instead of failing spuriously.
+                await this.bootstrapDecision.catch(() => {});
+                this.throwIfMaintenanceInactive(context);
+                if (
+                    this.bootstrapPhase !== "off" &&
+                    this.bootstrapPhase !== "converged"
+                ) {
+                    // Belt and braces over the arrival-age and empty-ledger
+                    // shields: a partial replica must not plan retirements.
+                    throw new SharedFsError(
+                        "ERR_GC_PHASE",
+                        "collectGarbage is unavailable until the cold-start bootstrap converges"
+                    );
+                }
+                return await this.collectGarbageInner(options, context);
+            } finally {
+                if (this.gcRunningGeneration === context.generation) {
+                    this.gcRunning = false;
+                    this.gcRunningGeneration = undefined;
+                    // Suppression must never outlive the run — a leaked id
+                    // would permanently blind Guard D for documents an
+                    // aborted run was deleting.
+                    this.gcSuppressed.clear();
+                }
+            }
+        })();
+        return this.trackMaintenanceTask(run);
     }
 
     private async collectGarbageInner(
-        options: GcOptions = {}
+        options: GcOptions = {},
+        context?: MaintenanceContext
     ): Promise<GcReport> {
+        if (context) this.throwIfMaintenanceInactive(context);
         if (!this.isFullReplica()) {
             const error = new SharedFsError(
                 "EINVAL",
@@ -10668,6 +11949,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             (error as any).gcPermanent = true;
             throw error;
         }
+        if (context) this.throwIfMaintenanceInactive(context);
         if (
             this.trustGraph &&
             !(await this.isTrustedWriter(this.node.identity.publicKey))
@@ -10679,6 +11961,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             (error as any).gcPermanent = true;
             throw error;
         }
+        if (context) this.throwIfMaintenanceInactive(context);
         const config = {
             keepVersions: options.keepVersions ?? GC_DEFAULTS.keepVersions,
             retentionMs: options.retentionMs ?? GC_DEFAULTS.retentionMs,
@@ -10733,13 +12016,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             config.retentionMs = retentionFloor;
         }
         const loaded = await this.loadGcLedger();
+        if (context) this.throwIfMaintenanceInactive(context);
         const ledger: GcLedger = config.dryRun
             ? JSON.parse(JSON.stringify(loaded))
             : loaded;
         const runStartedMs = config.nowMs;
 
-        const sleep = (ms: number) =>
-            new Promise((resolve) => setTimeout(resolve, ms));
+        const settle = (ms: number): Promise<void> =>
+            context
+                ? this.maintenanceDelay(ms, context)
+                : new Promise<void>((resolve) => setTimeout(resolve, ms));
 
         // ---------------- PLAN (pure function of the local set) -----------
         const buildPlan = async () => {
@@ -11117,6 +12403,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         };
 
         const plan = await buildPlan();
+        if (context) this.throwIfMaintenanceInactive(context);
 
         // ---------------- HEAL --------------------------------------------
         const damaged = new Set<string>();
@@ -11140,20 +12427,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 [...owners.entries()],
                 CHUNK_IO_CONCURRENCY,
                 async ([chunkId, nodeIds]) => {
+                    if (context) this.throwIfMaintenanceInactive(context);
                     if (await this.hasDocument(chunkId)) {
                         return;
                     }
+                    if (context) this.throwIfMaintenanceInactive(context);
                     try {
                         const healed = await this.fetchChunk(chunkId, chunkId);
+                        if (context) this.throwIfMaintenanceInactive(context);
                         await this.entries.put(healed, { unique: true });
                         report.healedChunks++;
                     } catch {
+                        if (context) {
+                            this.throwIfMaintenanceInactive(context);
+                        }
                         for (const nodeId of nodeIds) {
                             damaged.add(nodeId);
                         }
                     }
                 }
             );
+            if (context) this.throwIfMaintenanceInactive(context);
             for (const nodeId of damaged) {
                 report.warnings.push(
                     `node ${nodeId} has unrecoverable missing chunks; excluded from all deletion this run`
@@ -11164,9 +12458,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
         // ---------------- SETTLE + REVALIDATE -----------------------------
         if (!config.dryRun && config.settleMs > 0) {
-            await sleep(config.settleMs);
+            await settle(config.settleMs);
         }
         const settled = await buildPlan();
+        if (context) this.throwIfMaintenanceInactive(context);
         const retireVersions = new Map(
             [...plan.versionRetire].filter(
                 ([id, doc]) =>
@@ -11198,6 +12493,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     compareIds(a.id, b.id)
             );
             for (const doc of ordered) {
+                if (context) this.throwIfMaintenanceInactive(context);
                 try {
                     const executeOne = async () => {
                         const row = (await this.entries.index.get(doc.id, {
@@ -11208,8 +12504,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         if (!row) {
                             return false; // concurrent collector won
                         }
+                        if (context) this.throwIfMaintenanceInactive(context);
                         const expectedHead = row.__context?.head;
                         this.gcSuppressed.add(doc.id);
+                        // From CUT admission through a possible immutable
+                        // value recovery, this document is one critical tail.
                         const result: any = await this.entries.del(doc.id);
                         const cutTarget = result?.entry?.meta?.next?.[0];
                         if (
@@ -11250,6 +12549,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             report.compactedNamingEvents = await executeDeletes([
                 ...retireNaming.values(),
             ]);
+            if (context) this.throwIfMaintenanceInactive(context);
         } else {
             report.retiredVersions = retireVersions.size;
             report.compactedNamingEvents = retireNaming.size;
@@ -11295,8 +12595,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!config.dryRun && config.settleMs > 0) {
             // Let version CUTs propagate before chunk CUTs so remotes see
             // dereference-then-delete, not the reverse.
-            await sleep(config.settleMs);
+            await settle(config.settleMs);
         }
+        if (context) this.throwIfMaintenanceInactive(context);
 
         // Chunk candidates: refcount 0 against the post-retirement index and
         // old enough by arrival time.
@@ -11310,6 +12611,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 { local: true, remote: false, resolve: false }
             )
             .all()) as any[];
+        if (context) this.throwIfMaintenanceInactive(context);
         const orphaned = new Map<string, any>();
         const graceOldRows = chunkRows.filter(
             (row) =>
@@ -11320,6 +12622,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             graceOldRows,
             CHUNK_IO_CONCURRENCY,
             async (row) => {
+                if (context) this.throwIfMaintenanceInactive(context);
                 const iterator = this.entries.index.iterate(
                     {
                         query: [
@@ -11341,11 +12644,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 } finally {
                     await (iterator as any).close?.();
                 }
+                if (context) this.throwIfMaintenanceInactive(context);
                 if (!referenced) {
                     orphaned.set(row.id, row);
                 }
             }
         );
+        if (context) this.throwIfMaintenanceInactive(context);
         for (const [chunkId, record] of Object.entries(
             ledger.chunkCandidates
         )) {
@@ -11362,7 +12667,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     chunkId,
                     row.__context?.head,
                     Number(row.__context?.size ?? 0),
-                    report
+                    report,
+                    context
                 );
             }
             delete ledger.chunkCandidates[chunkId];
@@ -11378,7 +12684,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     chunkId,
                     row.__context?.head,
                     Number(row.__context?.size ?? 0),
-                    report
+                    report,
+                    context
                 );
             }
         } else {
@@ -11414,13 +12721,56 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     { local: true, remote: false, resolve: false }
                 )
                 .all()) as any[];
+            if (context) this.throwIfMaintenanceInactive(context);
             for (const row of manifestRows) {
                 const arrivalMs = this.contextModifiedMs(row.__context);
                 if (arrivalMs > runStartedMs - manifestAgeMs) {
                     continue;
                 }
                 if (!config.dryRun) {
-                    await this.entries.del(row.id);
+                    if (context) this.throwIfMaintenanceInactive(context);
+                    // Re-resolve both the immutable recovery value and the
+                    // current local head. A same-id re-put after the planning
+                    // scan refreshes retention and must not be swept as old.
+                    const manifest = await this.getDocument<ChangesetManifest>(
+                        row.id
+                    );
+                    if (context) this.throwIfMaintenanceInactive(context);
+                    const currentRow = (await this.entries.index.get(row.id, {
+                        local: true,
+                        remote: false,
+                        resolve: false,
+                    })) as any;
+                    const plannedHead = row.__context?.head;
+                    const expectedHead = currentRow?.__context?.head;
+                    if (
+                        !(manifest instanceof ChangesetManifest) ||
+                        typeof plannedHead !== "string" ||
+                        typeof expectedHead !== "string" ||
+                        expectedHead !== plannedHead ||
+                        this.contextModifiedMs(currentRow.__context) >
+                            runStartedMs - manifestAgeMs
+                    ) {
+                        continue;
+                    }
+                    if (context) this.throwIfMaintenanceInactive(context);
+                    try {
+                        // CUT admission through possible immutable recovery
+                        // is one critical tail: close joins it but does not
+                        // strand a concurrently refreshed manifest deleted.
+                        const result: any = await this.entries.del(row.id);
+                        const cutTarget = result?.entry?.meta?.next?.[0];
+                        if (cutTarget && cutTarget !== expectedHead) {
+                            await this.entries.put(manifest);
+                            report.cutRecoveries++;
+                            continue;
+                        }
+                    } catch (error) {
+                        if (error instanceof NotFoundError) {
+                            continue;
+                        }
+                        throw error;
+                    }
                 }
                 report.manifestsRetired++;
             }
@@ -11428,18 +12778,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
         ledger.lastRunMs = runStartedMs;
         if (!config.dryRun) {
+            if (context) this.throwIfMaintenanceInactive(context);
             await this.saveGcLedger(ledger);
+            if (context) this.throwIfMaintenanceInactive(context);
             // Reclaim own superseded snapshot segments on the same cadence
             // (manual CLI runs and scheduled runs alike). Best-effort: a
             // reap failure must never fail the GC run.
             try {
-                const reaped = await this.reapSnapshotSegments(config.nowMs);
+                const reaped = await this.reapSnapshotSegments(
+                    config.nowMs,
+                    undefined,
+                    context
+                );
                 report.segmentBlocksDeleted = reaped.deleted;
                 report.reclaimedSegmentBytes = reaped.bytes;
             } catch {
                 // reported via its own failure-cycle warning
             }
         }
+        if (context) this.throwIfMaintenanceInactive(context);
         if (report.chunkCandidatesRecorded > 0) {
             report.warnings.push(
                 `${report.chunkCandidatesRecorded} chunk candidate(s) recorded; run collectGarbage again after ${Math.round(config.minOrphanSpanMs / 60000)} minutes to reclaim their bytes`
