@@ -1,5 +1,14 @@
 # @peerbit/shared-fs
 
+## 0.13.8
+
+### Patch Changes
+
+- 102b5fa: Serialize filesystem lifecycle transitions and drain admitted write, disposal,
+  snapshot, and garbage-collection critical tails before storage closes. Persist
+  snapshot segment ownership through a locked, atomic, fsynced ledger and recover
+  or fail closed when reclamation races concurrent document updates.
+
 ## 0.13.7
 
 ### Patch Changes
