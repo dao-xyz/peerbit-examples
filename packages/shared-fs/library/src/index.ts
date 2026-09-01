@@ -355,6 +355,100 @@ type OpenReplicateOptions =
           };
       };
 
+/**
+ * Opt-in cold-join milestones. `atMs` is elapsed time since this open began;
+ * both it and phase durations use the filesystem's injected `clock`, when
+ * provided. The callback is diagnostic only: exceptions and rejected returns
+ * are ignored. It is invoked inline but never awaited, so keep it lightweight.
+ */
+export type BootstrapTelemetryEvent =
+    | {
+          type: "open:start";
+          atMs: number;
+          addressOpen: boolean;
+          mode: "auto" | "require" | "off";
+      }
+    | { type: "documents-open:start"; atMs: number }
+    | {
+          type: "documents-open:end";
+          atMs: number;
+          durationMs: number;
+      }
+    | { type: "manifest-discovery:start"; atMs: number }
+    | {
+          type: "manifest-discovery:end";
+          atMs: number;
+          durationMs: number;
+          candidates: number;
+          usable: number;
+          trusted: number;
+          invalid: number;
+          stale: number;
+      }
+    | {
+          type: "segments-fetch:start";
+          atMs: number;
+          segments: number;
+          documents: number;
+          /** Expected encoded bytes from the signed manifest. */
+          bytes: number;
+      }
+    | {
+          type: "segments-fetch:end";
+          atMs: number;
+          durationMs: number;
+          segments: number;
+          documents: number;
+          /** Encoded bytes actually fetched and verified. */
+          bytes: number;
+      }
+    | {
+          type: "overlay-install:start";
+          atMs: number;
+          documents: number;
+      }
+    | {
+          type: "overlay-ready";
+          atMs: number;
+          /** Time spent validating and installing fetched segment documents. */
+          durationMs: number;
+          documents: number;
+          pendingDocuments: number;
+      }
+    | {
+          type: "pending-drained";
+          atMs: number;
+          /** Time from overlay readiness until all snapshot ids were covered. */
+          durationMs: number;
+      }
+    | {
+          type: "overlay-retired";
+          atMs: number;
+          verified: boolean;
+          /** Present when retirement followed a verified pending drain. */
+          sincePendingDrainedMs?: number;
+      }
+    | {
+          type: "synchronizer-idle";
+          atMs: number;
+          /** Time since this filesystem open began. */
+          durationMs: number;
+      }
+    | {
+          type: "write-ready";
+          atMs: number;
+          /** Time since this filesystem open began. */
+          durationMs: number;
+          source: "creator" | "remote-settled" | "legacy-operator-assertion";
+      }
+    | {
+          type: "fallback";
+          atMs: number;
+          reason: string;
+          posture: "plain-join" | "unverified";
+      }
+    | { type: "aborted"; atMs: number; reason: string };
+
 export type SharedFsOpenArgs = {
     machineLabel?: string;
     /**
@@ -414,6 +508,8 @@ type SharedFsInternalOpenArgs = SharedFsOpenArgs & {
     addressOpen?: boolean;
     /** Test-only override for the post-sync quiet window. */
     writeReadinessSettleMs?: number;
+    /** openSharedFs-only callback; never serialized into the program. */
+    bootstrapTelemetry?: (event: BootstrapTelemetryEvent) => void;
 };
 
 export type BootstrapOptions = {
@@ -621,6 +717,10 @@ export type OpenSharedFsOptions = SharedFsOpenArgs & {
      * the shared store itself never consults these rules.
      */
     ignore?: IgnorePolicy;
+    /** Optional inline, non-awaited cold-join timing and phase diagnostics. */
+    telemetry?: {
+        bootstrap?: (event: BootstrapTelemetryEvent) => void;
+    };
 };
 
 export type SharedFsEntryInfo = {
@@ -1576,6 +1676,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private bootstrapVerified = false;
     /** Human-readable summary of the last bootstrap fallback, for status. */
     private bootstrapFailure: string | undefined;
+    /**
+     * Per-open, diagnostic-only callback and clocks. These are supplied via
+     * SharedFsInternalOpenArgs and are never part of the serialized program.
+     */
+    private bootstrapTelemetry:
+        | ((event: BootstrapTelemetryEvent) => void)
+        | undefined;
+    private bootstrapTelemetryNow: (() => number) | undefined;
+    private bootstrapTelemetryOpenStartedAtMs: number | undefined;
+    private bootstrapTelemetryLastAtMs = 0;
+    private bootstrapTelemetryDocumentsOpenStartedAtMs: number | undefined;
+    private bootstrapTelemetryManifestStartedAtMs: number | undefined;
+    private bootstrapTelemetrySegmentsStartedAtMs: number | undefined;
+    private bootstrapTelemetryOverlayInstallStartedAtMs: number | undefined;
+    private bootstrapTelemetryOverlayReadyAtMs: number | undefined;
+    private bootstrapTelemetryPendingDrainedAtMs: number | undefined;
+    private bootstrapTelemetryPendingDrainedEmitted = false;
+    private bootstrapTelemetryOverlayRetiredEmitted = false;
+    private bootstrapTelemetrySynchronizerIdleEmitted = false;
+    private bootstrapTelemetryWriteReadyEmitted = false;
+    private bootstrapTelemetryFallbackEmitted = false;
+    private bootstrapTelemetryAbortedEmitted = false;
     /** Serializes bootstrap state-file writes. */
     private stateWriteChain: Promise<unknown> = Promise.resolve();
     /**
@@ -1664,12 +1786,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // A previous generation may still be inside remote snapshot discovery.
         // Cancel and join it before resetting any state: otherwise its late
         // fallback can recreate the sidecar directory after close/reopen.
-        this.bootstrapAbortController?.abort(
+        const previousBootstrapController = this.bootstrapAbortController;
+        previousBootstrapController?.abort(
             new SharedFsError(
                 "ECLOSED",
                 "filesystem reopened while bootstrap was running"
             )
         );
+        if (
+            previousBootstrapController &&
+            (this.bootstrapPhase === "fetching" ||
+                this.bootstrapPhase === "overlay-active")
+        ) {
+            this.emitBootstrapAbortedOnce(
+                this.openGeneration,
+                previousBootstrapController.signal
+            );
+        }
         this.bootstrapAbortController = undefined;
         this.bootstrapDecision ??= Promise.resolve();
         await this.bootstrapDecision.catch(() => {});
@@ -1695,6 +1828,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // open generation. No caller can race a mutation through this gate.
         const openGeneration = (this.openGeneration || 0) + 1;
         this.openGeneration = openGeneration;
+        this.bootstrapTelemetry = internalArgs?.bootstrapTelemetry;
+        this.bootstrapTelemetryNow = this.bootstrapTelemetry
+            ? (args?.clock ?? Date.now)
+            : undefined;
+        this.bootstrapTelemetryOpenStartedAtMs = undefined;
+        this.bootstrapTelemetryLastAtMs = 0;
+        this.bootstrapTelemetryDocumentsOpenStartedAtMs = undefined;
+        this.bootstrapTelemetryManifestStartedAtMs = undefined;
+        this.bootstrapTelemetrySegmentsStartedAtMs = undefined;
+        this.bootstrapTelemetryOverlayInstallStartedAtMs = undefined;
+        this.bootstrapTelemetryOverlayReadyAtMs = undefined;
+        this.bootstrapTelemetryPendingDrainedAtMs = undefined;
+        this.bootstrapTelemetryPendingDrainedEmitted = false;
+        this.bootstrapTelemetryOverlayRetiredEmitted = false;
+        this.bootstrapTelemetrySynchronizerIdleEmitted = false;
+        this.bootstrapTelemetryWriteReadyEmitted = false;
+        this.bootstrapTelemetryFallbackEmitted = false;
+        this.bootstrapTelemetryAbortedEmitted = false;
+        if (this.bootstrapTelemetry) {
+            const atMs = this.bootstrapTelemetryNow!();
+            this.bootstrapTelemetryOpenStartedAtMs = atMs;
+            const bootstrapArg = args?.bootstrap;
+            const mode =
+                bootstrapArg === false
+                    ? ("off" as const)
+                    : typeof bootstrapArg === "object"
+                      ? (bootstrapArg.mode ?? "auto")
+                      : ("auto" as const);
+            this.emitBootstrapTelemetry({
+                type: "open:start",
+                atMs: 0,
+                addressOpen,
+                mode,
+            });
+        }
         this.writesReady = !addressOpen || partialWriteOverride;
         this.partialWriteOverride = partialWriteOverride;
         this.writeReadinessRequired = addressOpen && !partialWriteOverride;
@@ -1984,6 +2152,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (freshOpenListener) {
             this.entries.events.addEventListener("change", freshOpenListener);
         }
+        if (this.bootstrapTelemetry) {
+            const clockMs = this.bootstrapTelemetryNow!();
+            this.bootstrapTelemetryDocumentsOpenStartedAtMs = clockMs;
+            this.emitBootstrapTelemetry({
+                type: "documents-open:start",
+                atMs: this.bootstrapTelemetryElapsed(clockMs),
+            });
+        }
         try {
             await this.entries.open({
                 type: SharedFsEntry,
@@ -2004,6 +2180,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     type: IndexableSharedFsEntry,
                 },
             });
+            if (this.bootstrapTelemetry) {
+                const clockMs = this.bootstrapTelemetryNow!();
+                this.emitBootstrapTelemetry({
+                    type: "documents-open:end",
+                    atMs: this.bootstrapTelemetryElapsed(clockMs),
+                    durationMs: this.bootstrapTelemetryDuration(
+                        this.bootstrapTelemetryDocumentsOpenStartedAtMs ??
+                            clockMs,
+                        clockMs
+                    ),
+                });
+            }
         } finally {
             delete entrySyncOptions.profile;
             // Native defaults clone SyncOptions before SharedLog retains it.
@@ -2202,6 +2390,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 void openStateWrite.catch(() => {});
             }
         }
+        if (
+            this.writesReady &&
+            !this.partialWriteOverride &&
+            this.writeReadinessSource
+        ) {
+            this.emitWriteReadyOnce(this.writeReadinessSource);
+        }
         this.writeReadinessLifecycleBlocked = false;
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
@@ -2238,6 +2433,195 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         }
+    }
+
+    private emitBootstrapTelemetry(event: BootstrapTelemetryEvent) {
+        try {
+            const result = this.bootstrapTelemetry?.(event) as unknown;
+            if (
+                result &&
+                typeof (result as PromiseLike<unknown>).then === "function"
+            ) {
+                void Promise.resolve(result).catch(() => {});
+            }
+        } catch {
+            // Diagnostics must never influence open, replication, or safety.
+        }
+    }
+
+    private bootstrapTelemetryDuration(startedAtMs: number, atMs: number) {
+        return Math.max(0, atMs - startedAtMs);
+    }
+
+    private bootstrapTelemetryElapsed(atMs: number) {
+        const elapsed = this.bootstrapTelemetryDuration(
+            this.bootstrapTelemetryOpenStartedAtMs ?? atMs,
+            atMs
+        );
+        // Diagnostic clocks can be test-controlled or wall-clock adjusted;
+        // milestone order must remain directly sortable regardless.
+        this.bootstrapTelemetryLastAtMs = Math.max(
+            this.bootstrapTelemetryLastAtMs,
+            elapsed
+        );
+        return this.bootstrapTelemetryLastAtMs;
+    }
+
+    private emitManifestDiscoveryEnd(
+        candidates: number,
+        usable: number,
+        trusted: number,
+        invalid: number,
+        stale: number
+    ) {
+        if (
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetryManifestStartedAtMs === undefined
+        ) {
+            return;
+        }
+        const clockMs = this.bootstrapTelemetryNow!();
+        this.emitBootstrapTelemetry({
+            type: "manifest-discovery:end",
+            atMs: this.bootstrapTelemetryElapsed(clockMs),
+            durationMs: this.bootstrapTelemetryDuration(
+                this.bootstrapTelemetryManifestStartedAtMs,
+                clockMs
+            ),
+            candidates,
+            usable,
+            trusted,
+            invalid,
+            stale,
+        });
+    }
+
+    private emitPendingDrainedOnce() {
+        if (
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetryPendingDrainedEmitted
+        ) {
+            return;
+        }
+        const clockMs = this.bootstrapTelemetryNow!();
+        this.bootstrapTelemetryPendingDrainedEmitted = true;
+        this.bootstrapTelemetryPendingDrainedAtMs = clockMs;
+        this.emitBootstrapTelemetry({
+            type: "pending-drained",
+            atMs: this.bootstrapTelemetryElapsed(clockMs),
+            durationMs: this.bootstrapTelemetryDuration(
+                this.bootstrapTelemetryOverlayReadyAtMs ?? clockMs,
+                clockMs
+            ),
+        });
+    }
+
+    private emitOverlayRetiredOnce(verified: boolean) {
+        if (
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetryOverlayRetiredEmitted
+        ) {
+            return;
+        }
+        const clockMs = this.bootstrapTelemetryNow!();
+        this.bootstrapTelemetryOverlayRetiredEmitted = true;
+        const pendingDrainedAtMs = this.bootstrapTelemetryPendingDrainedAtMs;
+        this.emitBootstrapTelemetry({
+            type: "overlay-retired",
+            atMs: this.bootstrapTelemetryElapsed(clockMs),
+            verified,
+            ...(pendingDrainedAtMs === undefined
+                ? {}
+                : {
+                      sincePendingDrainedMs: this.bootstrapTelemetryDuration(
+                          pendingDrainedAtMs,
+                          clockMs
+                      ),
+                  }),
+        });
+    }
+
+    private emitSynchronizerIdleOnce() {
+        if (
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetrySynchronizerIdleEmitted
+        ) {
+            return;
+        }
+        const clockMs = this.bootstrapTelemetryNow!();
+        this.bootstrapTelemetrySynchronizerIdleEmitted = true;
+        this.emitBootstrapTelemetry({
+            type: "synchronizer-idle",
+            atMs: this.bootstrapTelemetryElapsed(clockMs),
+            durationMs: this.bootstrapTelemetryDuration(
+                this.bootstrapTelemetryOpenStartedAtMs ?? clockMs,
+                clockMs
+            ),
+        });
+    }
+
+    private emitWriteReadyOnce(
+        source: "creator" | "remote-settled" | "legacy-operator-assertion"
+    ) {
+        if (
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetryWriteReadyEmitted
+        ) {
+            return;
+        }
+        const clockMs = this.bootstrapTelemetryNow!();
+        this.bootstrapTelemetryWriteReadyEmitted = true;
+        this.emitBootstrapTelemetry({
+            type: "write-ready",
+            atMs: this.bootstrapTelemetryElapsed(clockMs),
+            durationMs: this.bootstrapTelemetryDuration(
+                this.bootstrapTelemetryOpenStartedAtMs ?? clockMs,
+                clockMs
+            ),
+            source,
+        });
+    }
+
+    private emitBootstrapFallbackOnce(
+        posture: "plain-join" | "unverified",
+        reason: string
+    ) {
+        if (
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetryFallbackEmitted
+        ) {
+            return;
+        }
+        this.bootstrapTelemetryFallbackEmitted = true;
+        this.emitBootstrapTelemetry({
+            type: "fallback",
+            atMs: this.bootstrapTelemetryElapsed(this.bootstrapTelemetryNow!()),
+            reason,
+            posture,
+        });
+    }
+
+    private emitBootstrapAbortedOnce(generation: number, signal: AbortSignal) {
+        if (
+            generation !== this.openGeneration ||
+            !signal.aborted ||
+            !this.bootstrapTelemetry ||
+            this.bootstrapTelemetryAbortedEmitted
+        ) {
+            return;
+        }
+        this.bootstrapTelemetryAbortedEmitted = true;
+        const reason =
+            signal.reason instanceof Error
+                ? signal.reason.message
+                : signal.reason === undefined
+                  ? "bootstrap was aborted"
+                  : String(signal.reason);
+        this.emitBootstrapTelemetry({
+            type: "aborted",
+            atMs: this.bootstrapTelemetryElapsed(this.bootstrapTelemetryNow!()),
+            reason,
+        });
     }
 
     private isFullReplica() {
@@ -4997,6 +5381,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.guardArmed = true;
             this.legacyPromotionEligible = false;
             this.writeReadinessSource = "remote-settled";
+            this.emitWriteReadyOnce("remote-settled");
             if (this.writeReadinessTimer) {
                 clearInterval(this.writeReadinessTimer);
                 this.writeReadinessTimer = undefined;
@@ -5049,13 +5434,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     !this.isFullReplica() ||
                     !this.writeReadinessDecisionSettled ||
                     !settledPhase ||
-                    !this.writeReadinessRemoteEvidence ||
-                    !(await this.hasConnectedRemoteReplicator()) ||
+                    !this.writeReadinessRemoteEvidence
+                ) {
+                    this.writeReadinessQuietChecks = 0;
+                    return;
+                }
+                const hasRemoteReplicator =
+                    await this.hasConnectedRemoteReplicator();
+                if (
+                    generation !== this.openGeneration ||
+                    !this.writeReadinessRequired ||
+                    !hasRemoteReplicator ||
                     !this.synchronizerIdle()
                 ) {
                     this.writeReadinessQuietChecks = 0;
                     return;
                 }
+                this.emitSynchronizerIdleOnce();
                 const quietSince = Math.max(
                     this.writeReadinessStartedAtMs,
                     this.lastRemoteArrivalMs
@@ -5131,7 +5526,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             "ECLOSED",
             "filesystem closed while background work was running"
         );
-        this.bootstrapAbortController?.abort(lifecycleError);
+        const bootstrapAbortController = this.bootstrapAbortController;
+        bootstrapAbortController?.abort(lifecycleError);
+        if (
+            bootstrapAbortController &&
+            (this.bootstrapPhase === "fetching" ||
+                this.bootstrapPhase === "overlay-active")
+        ) {
+            this.emitBootstrapAbortedOnce(
+                this.openGeneration,
+                bootstrapAbortController.signal
+            );
+        }
         this.bootstrapAbortController = undefined;
         if (this.changeListener) {
             this.entries.events.removeEventListener(
@@ -5163,6 +5569,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             pendingStateWrites = this.stateWriteChain;
             await pendingStateWrites;
         } while (pendingStateWrites !== this.stateWriteChain);
+        // The diagnostic callback belongs to this open only. Release the
+        // caller's closure once every old-generation task and transition has
+        // drained; a later reopen installs its own callback, if any.
+        this.bootstrapTelemetry = undefined;
+        this.bootstrapTelemetryNow = undefined;
         // A later reopen creates a fresh generation only after all old state
         // writes have drained, so it cannot race a stale marker onto disk.
         this.openGeneration = (this.openGeneration || 0) + 1;
@@ -5594,6 +6005,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const active = () =>
             generation === this.openGeneration && !signal.aborted;
         if (!active()) {
+            this.emitBootstrapAbortedOnce(generation, signal);
             return;
         }
         if (marker === "unverified") {
@@ -5601,6 +6013,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Guard D stays disarmed and GC gated until quiescence.
             this.bootstrapPhase = "unverified";
             this.guardArmed = false;
+            this.emitBootstrapFallbackOnce(
+                "unverified",
+                "resuming a previously unverified bootstrap"
+            );
             this.startQuiescenceChecker();
             return;
         }
@@ -5627,6 +6043,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             await (iterator as any).close?.();
         }
         if (!active()) {
+            this.emitBootstrapAbortedOnce(generation, signal);
             return;
         }
         if (!empty && !marker) {
@@ -5643,6 +6060,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             true
         );
         if (!active()) {
+            this.emitBootstrapAbortedOnce(generation, signal);
             return;
         }
         let installed = false;
@@ -5653,13 +6071,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             failure = error;
         }
         if (!active()) {
+            this.emitBootstrapAbortedOnce(generation, signal);
             return;
         }
         if (!installed) {
+            const reason =
+                this.bootstrapFailure ??
+                (failure instanceof Error
+                    ? failure.message
+                    : failure === undefined
+                      ? "no usable snapshot manifest was found in time"
+                      : String(failure));
             if (resumed) {
-                this.enterUnverified(generation);
+                this.enterUnverified(generation, reason);
             } else {
-                this.abandonBootstrap(generation);
+                this.abandonBootstrap(generation, reason);
             }
             if (this.bootstrapConfig.mode === "require") {
                 throw (
@@ -5673,6 +6099,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return;
         }
         this.bootstrapPhase = "overlay-active";
+        if (this.bootstrapTelemetry) {
+            const clockMs = this.bootstrapTelemetryNow!();
+            this.bootstrapTelemetryOverlayReadyAtMs = clockMs;
+            this.emitBootstrapTelemetry({
+                type: "overlay-ready",
+                atMs: this.bootstrapTelemetryElapsed(clockMs),
+                durationMs: this.bootstrapTelemetryDuration(
+                    this.bootstrapTelemetryOverlayInstallStartedAtMs ?? clockMs,
+                    clockMs
+                ),
+                documents: this.overlayDocs.size,
+                pendingDocuments: this.overlayPending.size,
+            });
+        }
         this.events.dispatchEvent(
             new CustomEvent("bootstrap:ready", {
                 detail: this.bootstrapStatus(),
@@ -5690,7 +6130,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * overlay state and re-arms the guard. Never valid for a resumed
      * partial store — that path takes enterUnverified().
      */
-    private abandonBootstrap(generation: number = this.openGeneration) {
+    private abandonBootstrap(
+        generation: number = this.openGeneration,
+        reason: string = this.bootstrapFailure ??
+            "no usable snapshot manifest was found"
+    ) {
         if (generation !== this.openGeneration) {
             return;
         }
@@ -5702,6 +6146,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "off";
         this.guardArmed = !this.writeReadinessRequired;
+        this.emitBootstrapFallbackOnce("plain-join", reason);
         void this.writeBootstrapState({ bootstrap: null }, generation).catch(
             () => {}
         );
@@ -5713,7 +6158,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * disarmed, GC gated, marker persisted, arming deferred to the
      * quiescence checker.
      */
-    private enterUnverified(generation: number = this.openGeneration) {
+    private enterUnverified(
+        generation: number = this.openGeneration,
+        reason: string = this.bootstrapFailure ??
+            "bootstrap verification did not complete"
+    ) {
         if (generation !== this.openGeneration) {
             return;
         }
@@ -5725,6 +6174,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "unverified";
         this.guardArmed = false;
+        this.emitBootstrapFallbackOnce("unverified", reason);
         void this.writeBootstrapState(
             { bootstrap: "unverified" },
             generation
@@ -5750,6 +6200,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         };
         throwIfAborted();
         const config = this.bootstrapConfig;
+        if (this.bootstrapTelemetry) {
+            const clockMs = this.bootstrapTelemetryNow!();
+            this.bootstrapTelemetryManifestStartedAtMs = clockMs;
+            this.emitBootstrapTelemetry({
+                type: "manifest-discovery:start",
+                atMs: this.bootstrapTelemetryElapsed(clockMs),
+            });
+        }
         const results = await this.entries.index
             .iterate(
                 {
@@ -5821,6 +6279,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             });
         }
         if (candidates.length === 0) {
+            this.emitManifestDiscoveryEnd(
+                invalid + stale,
+                0,
+                0,
+                invalid,
+                stale
+            );
             this.bootstrapFailure =
                 invalid + stale === 0
                     ? "no snapshot manifest candidates were discovered in time"
@@ -5865,6 +6330,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             });
         }
         if (trusted.length === 0) {
+            this.emitManifestDiscoveryEnd(
+                candidates.length + invalid + stale,
+                candidates.length,
+                0,
+                invalid,
+                stale
+            );
             this.bootstrapFailure = `${candidates.length} snapshot candidate(s) found, none from a trusted signer by the discovery deadline`;
             return false;
         }
@@ -5878,6 +6350,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 : candidate.payload.createdAtWallMs;
         trusted.sort((a, b) => compareBigint(rankOf(b), rankOf(a)));
         const chosen = trusted[0];
+        this.emitManifestDiscoveryEnd(
+            candidates.length + invalid + stale,
+            candidates.length,
+            trusted.length,
+            invalid,
+            stale
+        );
         this.bootstrapFailure = undefined;
         // Manifest-carried ADVISORY ignore patterns: installed into the
         // local slot at accept time — before any segment or chunk fetch —
@@ -5916,6 +6395,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ...(((this.node.services.pubsub as any)?.peers?.keys?.() ??
                 []) as Iterable<string>),
         ].slice(0, 16);
+        let fetchedSegmentBytes = 0;
+        if (this.bootstrapTelemetry) {
+            const clockMs = this.bootstrapTelemetryNow!();
+            this.bootstrapTelemetrySegmentsStartedAtMs = clockMs;
+            this.emitBootstrapTelemetry({
+                type: "segments-fetch:start",
+                atMs: this.bootstrapTelemetryElapsed(clockMs),
+                segments: chosen.payload.segments.length,
+                documents: Number(chosen.payload.counts.docs),
+                bytes: chosen.payload.segments.reduce(
+                    (total, segment) => total + Number(segment.byteLength),
+                    0
+                ),
+            });
+        }
         const segments = await mapWithConcurrency(
             chosen.payload.segments,
             config.segmentFetchConcurrency,
@@ -5952,9 +6446,35 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         `bootstrap segment count mismatch: ${ref.cid}`
                     );
                 }
+                if (this.bootstrapTelemetry) {
+                    fetchedSegmentBytes += bytes.byteLength;
+                }
                 return segment;
             }
         );
+        if (this.bootstrapTelemetry) {
+            const clockMs = this.bootstrapTelemetryNow!();
+            this.emitBootstrapTelemetry({
+                type: "segments-fetch:end",
+                atMs: this.bootstrapTelemetryElapsed(clockMs),
+                durationMs: this.bootstrapTelemetryDuration(
+                    this.bootstrapTelemetrySegmentsStartedAtMs ?? clockMs,
+                    clockMs
+                ),
+                segments: segments.length,
+                documents: segments.reduce(
+                    (total, segment) => total + segment.entries.length,
+                    0
+                ),
+                bytes: fetchedSegmentBytes,
+            });
+            this.bootstrapTelemetryOverlayInstallStartedAtMs = clockMs;
+            this.emitBootstrapTelemetry({
+                type: "overlay-install:start",
+                atMs: this.bootstrapTelemetryElapsed(clockMs),
+                documents: Number(chosen.payload.counts.docs),
+            });
+        }
         // Install, chunked with OCCASIONAL yields: each burst is tens of
         // milliseconds of pure CPU, and yielding per segment would make
         // the install queue 256 macrotask hops behind the concurrently
@@ -6370,6 +6890,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return;
         }
+        this.emitPendingDrainedOnce();
         if (this.verifiedRetirementTimer) {
             if (!rearm) {
                 return;
@@ -6431,6 +6952,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.bootstrapPhase = "converged";
             this.bootstrapVerified = true;
             this.guardArmed = !this.writeReadinessRequired;
+            this.emitOverlayRetiredOnce(true);
             void this.writeBootstrapState(
                 { bootstrap: null },
                 generation
@@ -6450,6 +6972,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // no worse than a plain join mid-sync — but Guard D stays
             // disarmed and GC gated until the store is quiescent.
             this.bootstrapPhase = "unverified";
+            this.emitOverlayRetiredOnce(false);
             void this.writeBootstrapState(
                 { bootstrap: "unverified" },
                 generation
@@ -6709,6 +7232,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.legacyPromotionEligible = false;
             this.writeReadinessSource = "legacy-operator-assertion";
             this.guardArmed = true;
+            this.emitWriteReadyOnce("legacy-operator-assertion");
             if (this.writeReadinessTimer) {
                 clearInterval(this.writeReadinessTimer);
                 this.writeReadinessTimer = undefined;
@@ -9843,6 +10367,8 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
     (args as SharedFsInternalOpenArgs).writeReadinessSettleMs = (
         options as any
     ).writeReadinessSettleMs;
+    (args as SharedFsInternalOpenArgs).bootstrapTelemetry =
+        options.telemetry?.bootstrap;
     // Test-only jitter rng rides along undocumented.
     (args as any).gcRng = (options as any).gcRng;
     const program = options.address
