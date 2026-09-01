@@ -39,7 +39,23 @@ peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shar
 
 The endpoint is provided by the TypeScript Peerbit daemon. TCP loopback is used
 for external adapters so the same IPC transport works on Linux, macOS, and
-Windows.
+Windows. The adapter keeps one serialized connection open for the mount
+session, matching cgofuse's current single-threaded mode. A transport failure
+fails the current filesystem operation and discards that connection; the next
+explicit operation reconnects. Requests are never replayed automatically
+because a lost response does not prove that a mutation was not applied.
+
+The portable IPC microbenchmark exercises the real Go client without requiring
+FUSE or Peerbit networking:
+
+```bash
+go test -run '^$' -bench '^BenchmarkIPCClientRoundTrip$' -benchmem -count=5
+```
+
+It reports metadata latency, 4 KiB through 1 MiB read/write throughput,
+allocations, and connections per operation. Its Go echo peer mirrors the
+JSON/base64 framing so the result isolates Go-client transport and framing
+costs; it does not include the Node daemon, FUSE, or Peerbit replication.
 
 ## Why Go?
 

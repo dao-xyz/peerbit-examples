@@ -24,6 +24,7 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 		client: newIPCClient(endpoint),
 		debug:  debug,
 	}
+	defer fs.client.close()
 	fs.debugf("starting mount endpoint=%s mountpoint=%s", endpoint, mountpoint)
 	if debug {
 		if err := fs.preflight(); err != nil {

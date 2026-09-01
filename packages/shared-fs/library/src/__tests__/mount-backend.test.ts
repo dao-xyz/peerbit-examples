@@ -1,4 +1,5 @@
 import { Peerbit } from "peerbit";
+import { createConnection } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     CONFLICTS_DIR,
@@ -974,6 +975,51 @@ describe("shared fs mount backend", () => {
 
             expect(decode(await fs.readFile("/tcp/file.txt"))).toBe("over tcp");
         } finally {
+            await server.close();
+        }
+    });
+
+    it("closes retained IPC sessions during server shutdown", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        const server = await createSharedFsIpcServer(
+            backend,
+            "tcp://127.0.0.1:0"
+        );
+        const endpoint = new URL(server.endpoint);
+        const socket = createConnection({
+            host: endpoint.hostname,
+            port: Number(endpoint.port),
+        });
+        try {
+            await new Promise<void>((resolve, reject) => {
+                const onError = (error: Error) => {
+                    socket.off("connect", onConnect);
+                    reject(error);
+                };
+                const onConnect = () => {
+                    socket.off("error", onError);
+                    resolve();
+                };
+                socket.once("error", onError);
+                socket.once("connect", onConnect);
+            });
+            const response = new Promise<void>((resolve, reject) => {
+                socket.once("data", () => resolve());
+                socket.once("error", reject);
+            });
+            socket.write(
+                `${JSON.stringify({ id: 1, op: "getattr", args: ["/"] })}\n`
+            );
+            await response;
+
+            const disconnected = new Promise<void>((resolve) => {
+                socket.once("close", () => resolve());
+            });
+            await server.close();
+            await disconnected;
+            await expect(server.close()).resolves.toBeUndefined();
+        } finally {
+            socket.destroy();
             await server.close();
         }
     });

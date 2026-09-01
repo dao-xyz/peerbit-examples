@@ -129,14 +129,33 @@ jobs:
                   sudo apt-get install -y fuse3 libfuse3-dev
                   sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
+            - name: Install macFUSE headers
+              if: runner.os == 'macOS'
+              shell: bash
+              run: |
+                  brew install --cask macfuse || true
+                  if [ ! -f /usr/local/include/fuse/fuse.h ] && [ ! -f /usr/local/include/osxfuse/fuse/fuse.h ]; then
+                    echo "macFUSE headers were not found after install." >&2
+                    exit 1
+                  fi
+
             - name: Test portable native adapter IPC
               working-directory: packages/shared-fs/native
               run: go test ./...
+
+            - name: Benchmark portable native adapter IPC (report only)
+              working-directory: packages/shared-fs/native
+              run: go test -run "^$" -bench "^BenchmarkIPCClientRoundTrip$" -benchmem -benchtime=1s -count=5
 
             - name: Build Linux native adapter
               if: runner.os == 'Linux'
               working-directory: packages/shared-fs/native
               run: go test -tags "native_mount fuse3" ./...
+
+            - name: Build macOS native adapter
+              if: runner.os == 'macOS'
+              working-directory: packages/shared-fs/native
+              run: go test -tags native_mount ./...
 
             - name: Build Windows native adapter
               if: runner.os == 'Windows'
