@@ -43,16 +43,46 @@ describe("bootstrap bench", () => {
             address: donor.address,
             machineLabel: "j",
         });
-        // Time to READY: overlay active.
-        while (
-            !["overlay-active", "converged"].includes(
-                joiner.bootstrapStatus().phase
-            )
-        ) {
-            await new Promise((r) => setTimeout(r, 10));
+        // Time to READY: overlay active. Convergence is deliberately measured
+        // from this point so the retirement tail is not hidden by the tree
+        // readability probe below.
+        let readyStatus = joiner.bootstrapStatus();
+        while (readyStatus.phase !== "overlay-active") {
+            if (
+                readyStatus.phase === "converged" ||
+                readyStatus.phase === "unverified"
+            ) {
+                throw new Error(
+                    `missed overlay-active phase: ${readyStatus.phase}`
+                );
+            }
+            await new Promise((r) => setTimeout(r, 5));
+            readyStatus = joiner.bootstrapStatus();
         }
         const tReady = performance.now() - t0;
-        const pendingAtReady = joiner.bootstrapStatus().pendingDocs;
+        const pendingAtReady = readyStatus.pendingDocs;
+        const converged = joiner.awaitBootstrapConverged().then((result) => ({
+            ...result,
+            atMs: performance.now() - t0,
+        }));
+        const pendingDrained = (async () => {
+            let status = readyStatus;
+            for (;;) {
+                if (
+                    status.phase === "overlay-active" &&
+                    status.pendingDocs === 0
+                ) {
+                    return performance.now() - t0;
+                }
+                if (status.phase !== "overlay-active") {
+                    throw new Error(
+                        `missed pending-zero observation: ${status.phase}`
+                    );
+                }
+                await new Promise((r) => setTimeout(r, 5));
+                status = joiner.bootstrapStatus();
+            }
+        })();
         // Full-tree readability probe at ready.
         const listStart = performance.now();
         const dirs = await joiner.list("/t");
@@ -63,8 +93,12 @@ describe("bootstrap bench", () => {
         const treeWalkMs = performance.now() - listStart;
         const sample = decode(await joiner.readFile("/t/d-42/f-42.txt"));
         const tTreeReadable = performance.now() - t0;
-        await joiner.awaitBootstrapConverged();
-        const tConverged = performance.now() - t0;
+        const [tPendingDrained, convergence] = await Promise.all([
+            pendingDrained,
+            converged,
+        ]);
+        const tConverged = convergence.atMs;
+        const retirementTail = tConverged - tPendingDrained;
         console.log(
             "bootstrap-bench:",
             JSON.stringify(
@@ -75,7 +109,10 @@ describe("bootstrap bench", () => {
                     files,
                     treeWalkMs,
                     tTreeReadableMs: tTreeReadable,
+                    tPendingDrainedMs: tPendingDrained,
                     tConvergedMs: tConverged,
+                    retirementTailMs: retirementTail,
+                    verified: convergence.verified,
                 },
                 (k, v) => (typeof v === "number" ? Number(v.toFixed(1)) : v)
             )
@@ -83,5 +120,6 @@ describe("bootstrap bench", () => {
         expect(dirs.length).toBe(200);
         expect(files).toBe(2000);
         expect(sample).toBe("payload 42");
+        expect(convergence.verified).toBe(true);
     });
 });

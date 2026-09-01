@@ -1564,6 +1564,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private bootstrapTimers: ReturnType<typeof setTimeout>[] = [];
     private snapshotTimer: ReturnType<typeof setInterval> | undefined;
     private supersessionTimer: ReturnType<typeof setInterval> | undefined;
+    private verifiedRetirementTimer: ReturnType<typeof setTimeout> | undefined;
     private quiescenceTimer: ReturnType<typeof setInterval> | undefined;
     private bootstrapWaiters: Array<(result: { verified: boolean }) => void> =
         [];
@@ -1586,7 +1587,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessTransitionChain: Promise<unknown> = Promise.resolve();
     private writeReadinessLifecycleBlocked = false;
     private snapshotRunning = false;
-    private sweepRunning = false;
+    private sweepRunningGeneration: number | undefined;
     /** Last arrival authored by ANOTHER peer (local writes excluded). */
     private lastRemoteArrivalMs = 0;
     /**
@@ -1782,7 +1783,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.stateWriteChain ??= Promise.resolve();
         this.writeReadinessTransitionChain ??= Promise.resolve();
         this.snapshotRunning = false;
-        this.sweepRunning = false;
+        this.sweepRunningGeneration = undefined;
         this.gcConsecutiveFailures = 0;
         this.gcFollowUpGateRetries = 0;
         this.gcSnapshotDeferrals = 0;
@@ -2078,13 +2079,32 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.applyCacheChanges(added, removed);
             this.watchHub?.ingest(added, removed);
             this.changesetHub?.ingest(added, removed);
-            if (this.overlayPending.size > 0) {
+            const removedMetadata = removed.some(
+                (value) =>
+                    value instanceof NamingEvent || value instanceof FileVersion
+            );
+            const overlayWasPending = this.overlayPending.size > 0;
+            if (overlayWasPending) {
                 for (const value of [...added, ...removed]) {
                     const id = (value as any)?.id;
                     if (typeof id === "string") {
                         this.overlayPending.delete(id);
                     }
                 }
+            }
+            if (
+                this.overlayPending.size === 0 &&
+                (overlayWasPending || removedMetadata)
+            ) {
+                // Removals can arrive in a purge/compaction burst after the
+                // last snapshot id was covered. Restart the quiet check for
+                // each such event; additions do not shrink the local view and
+                // therefore need not delay verified retirement.
+                this.maybeRetireVerified(
+                    this.openGeneration,
+                    this.bootstrapAbortController?.signal,
+                    removedMetadata
+                );
             }
             if (this.guardArmed && this.isFullReplica()) {
                 void this.guardAgainstLiveRemovals(removed).catch(() => {});
@@ -5075,6 +5095,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearInterval(this.supersessionTimer);
             this.supersessionTimer = undefined;
         }
+        if (this.verifiedRetirementTimer) {
+            clearTimeout(this.verifiedRetirementTimer);
+            this.verifiedRetirementTimer = undefined;
+        }
         if (this.quiescenceTimer) {
             clearInterval(this.quiescenceTimer);
             this.quiescenceTimer = undefined;
@@ -5658,7 +5682,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // attached earlier must re-snapshot or they serve a near-empty view
         // for the whole overlay window.
         this.watchHub?.resyncAll("snapshot", "bootstrap:ready");
-        this.startRetirementTracking();
+        this.startRetirementTracking(generation, signal);
     }
 
     /**
@@ -6110,26 +6134,45 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * deployments shortening graceMs below maxSnapshotAgeMs +
      * retirementTimeoutMs accept that detour.
      */
-    private startRetirementTracking() {
+    private startRetirementTracking(
+        generation: number = this.openGeneration,
+        signal?: AbortSignal
+    ) {
         this.supersessionTimer = setInterval(() => {
-            void this.supersessionSweep().catch(() => {});
+            void this.supersessionSweep(generation, signal).catch(() => {});
         }, SUPERSESSION_SWEEP_MS);
         (this.supersessionTimer as any)?.unref?.();
         this.bootstrapTimers.push(
             setTimeout(() => {
-                if (this.bootstrapPhase === "overlay-active") {
-                    this.retireOverlay(false);
+                if (
+                    generation === this.openGeneration &&
+                    !signal?.aborted &&
+                    this.bootstrapPhase === "overlay-active"
+                ) {
+                    this.retireOverlay(false, generation);
                 }
             }, this.bootstrapConfig.retirementTimeoutMs)
         );
+        // Replication can cover snapshot ids before segment installation has
+        // populated overlayPending, and a verified empty snapshot starts at
+        // zero. Reconcile once now instead of waiting for the first 5s tick;
+        // the normal large-stream throttle still applies.
+        void this.supersessionSweep(generation, signal).catch(() => {});
     }
 
-    private async supersessionSweep() {
-        if (this.bootstrapPhase !== "overlay-active" || this.sweepRunning) {
+    private async supersessionSweep(
+        generation: number = this.openGeneration,
+        signal?: AbortSignal
+    ) {
+        const active = () =>
+            generation === this.openGeneration &&
+            !signal?.aborted &&
+            this.bootstrapPhase === "overlay-active";
+        if (!active() || this.sweepRunningGeneration === generation) {
             return;
         }
         if (this.overlayPending.size === 0) {
-            this.maybeRetireVerified();
+            this.maybeRetireVerified(generation, signal);
             return;
         }
         // While REMOTE arrivals are streaming, coverage comes from change
@@ -6142,15 +6185,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return;
         }
-        this.sweepRunning = true;
+        this.sweepRunningGeneration = generation;
         try {
-            await this.supersessionSweepInner();
+            await this.supersessionSweepInner(generation, signal);
         } finally {
-            this.sweepRunning = false;
+            // An older sweep may finish after reopen has installed and begun
+            // a newer one. Only the generation that owns the marker clears it.
+            if (this.sweepRunningGeneration === generation) {
+                this.sweepRunningGeneration = undefined;
+            }
         }
     }
 
-    private async supersessionSweepInner() {
+    private async supersessionSweepInner(
+        generation: number,
+        signal?: AbortSignal
+    ) {
+        const active = () =>
+            generation === this.openGeneration &&
+            !signal?.aborted &&
+            this.bootstrapPhase === "overlay-active";
+        if (!active()) {
+            return;
+        }
         const byNode = new Map<string, Map<string, string>>(); // nodeId -> pendingId -> kind
         for (const [id, pending] of this.overlayPending) {
             let bucket = byNode.get(pending.nodeId);
@@ -6162,7 +6219,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const nodeIds = [...byNode.keys()];
         for (let i = 0; i < nodeIds.length; i += HEAD_QUERY_BATCH) {
-            if (this.bootstrapPhase !== "overlay-active") {
+            if (!active()) {
                 return;
             }
             const batch = nodeIds.slice(i, i + HEAD_QUERY_BATCH);
@@ -6179,6 +6236,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                           )
                       ),
             ]);
+            if (!active()) {
+                return;
+            }
             const present = new Set<string>();
             const rowsByNodeKind = new Map<string, any[]>();
             for (const row of rows) {
@@ -6288,31 +6348,69 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
             await new Promise((resolve) => setImmediate(resolve));
+            if (!active()) {
+                return;
+            }
         }
-        if (this.overlayPending.size === 0) {
-            this.maybeRetireVerified();
+        if (active() && this.overlayPending.size === 0) {
+            this.maybeRetireVerified(generation, signal);
         }
     }
 
-    private maybeRetireVerified() {
-        if (this.bootstrapPhase !== "overlay-active") {
+    private maybeRetireVerified(
+        generation: number = this.openGeneration,
+        signal?: AbortSignal,
+        rearm = false
+    ) {
+        if (
+            generation !== this.openGeneration ||
+            signal?.aborted ||
+            this.bootstrapPhase !== "overlay-active" ||
+            this.overlayPending.size !== 0
+        ) {
             return;
+        }
+        if (this.verifiedRetirementTimer) {
+            if (!rearm) {
+                return;
+            }
+            clearTimeout(this.verifiedRetirementTimer);
+            this.verifiedRetirementTimer = undefined;
         }
         // One guard-coalescing window plus a double check: retirement must
         // not race a burst of arrivals.
-        this.bootstrapTimers.push(
-            setTimeout(() => {
-                if (
-                    this.bootstrapPhase === "overlay-active" &&
-                    this.overlayPending.size === 0
-                ) {
-                    this.retireOverlay(true);
-                }
-            }, RETIRE_DOUBLE_CHECK_MS)
-        );
+        const timer = setTimeout(() => {
+            // A cleared timer can already be queued when close/reopen installs
+            // a replacement. Never let the stale callback clear or retire the
+            // newer generation's overlay.
+            if (this.verifiedRetirementTimer !== timer) {
+                return;
+            }
+            this.verifiedRetirementTimer = undefined;
+            if (
+                generation === this.openGeneration &&
+                !signal?.aborted &&
+                this.bootstrapPhase === "overlay-active" &&
+                this.overlayPending.size === 0
+            ) {
+                this.retireOverlay(true, generation);
+            }
+        }, RETIRE_DOUBLE_CHECK_MS);
+        this.verifiedRetirementTimer = timer;
+        (timer as any)?.unref?.();
     }
 
-    private retireOverlay(verified: boolean) {
+    private retireOverlay(
+        verified: boolean,
+        generation: number = this.openGeneration
+    ) {
+        if (generation !== this.openGeneration) {
+            return;
+        }
+        if (this.verifiedRetirementTimer) {
+            clearTimeout(this.verifiedRetirementTimer);
+            this.verifiedRetirementTimer = undefined;
+        }
         this.overlayNaming = new Map();
         this.overlayVersions = new Map();
         this.overlaySweep = new Map();
@@ -6333,7 +6431,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.bootstrapPhase = "converged";
             this.bootstrapVerified = true;
             this.guardArmed = !this.writeReadinessRequired;
-            void this.writeBootstrapState({ bootstrap: null }).catch(() => {});
+            void this.writeBootstrapState(
+                { bootstrap: null },
+                generation
+            ).catch(() => {});
             this.events.dispatchEvent(
                 new CustomEvent("bootstrap:converged", {
                     detail: { verified: true },
@@ -6349,9 +6450,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // no worse than a plain join mid-sync — but Guard D stays
             // disarmed and GC gated until the store is quiescent.
             this.bootstrapPhase = "unverified";
-            void this.writeBootstrapState({ bootstrap: "unverified" }).catch(
-                () => {}
-            );
+            void this.writeBootstrapState(
+                { bootstrap: "unverified" },
+                generation
+            ).catch(() => {});
             this.startQuiescenceChecker();
             this.events.dispatchEvent(
                 new CustomEvent("bootstrap:converged", {
