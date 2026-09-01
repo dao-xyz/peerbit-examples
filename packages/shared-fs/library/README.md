@@ -175,6 +175,24 @@ fast/slow split defaults to 2500 ms and can be changed with
 `PEERBIT_SHARED_FS_COLD_JOIN_SLOW_MS`; it is descriptive output, not a pass/fail
 latency assertion.
 
+For sustained collaboration, a separate manual benchmark runs three
+disk-backed, authenticated full replicas and makes all three write manifested
+batches concurrently. It waits for each exact changeset and its bytes on every
+replica, prints every round immediately, and finishes with p50/p95/max local
+commit, all-peer admission, and all-peer readability latency plus throughput:
+
+```bash
+PEERBIT_SHARED_FS_MULTI_WRITER_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/multi-writer-soak.bench.test.ts --reporter=verbose
+```
+
+The default is 30 rounds per writer. Set
+`PEERBIT_SHARED_FS_MULTI_WRITER_ROUNDS` to an integer from 10 through 200 for a
+shorter diagnostic or a longer soak. This benchmark uses normal write
+readiness and disables remote chunk fallback; it does not use the
+`allowPartialWrites` recovery escape hatch.
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
