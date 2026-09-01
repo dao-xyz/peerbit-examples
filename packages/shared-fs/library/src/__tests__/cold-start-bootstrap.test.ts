@@ -1213,6 +1213,26 @@ describe("shared fs cold-start bootstrap", () => {
                 retrySafe: true,
             });
             if (statusAtReady.phase === "overlay-active") {
+                // Capture all three scans before yielding. The overlay can
+                // legitimately finish replicating while the readable-tree
+                // assertions below await remote chunks; the partial-view
+                // contract applies at call time, not to an earlier status
+                // snapshot.
+                const gatedConflictScan = joiner.namingConflicts();
+                const gatedChangesetScan =
+                    joiner.versionsByChangeset("anything");
+                const allowedPartialConflictScan = joiner.namingConflicts(
+                    undefined,
+                    { allowPartial: true }
+                );
+                await expect(gatedConflictScan).rejects.toThrow(
+                    BootstrapPendingError
+                );
+                await expect(gatedChangesetScan).rejects.toThrow(
+                    BootstrapPendingError
+                );
+                await expect(allowedPartialConflictScan).resolves.toBeDefined();
+
                 // The whole point: the tree is correct while the log is
                 // still replicating behind it.
                 expect(statusAtReady.pendingDocs).toBeGreaterThan(0);
@@ -1233,16 +1253,6 @@ describe("shared fs cold-start bootstrap", () => {
                 expect(
                     decode(await joiner.readFile("/tree/dir-3/file-13.txt"))
                 ).toBe("content 13");
-                // Whole-store scans are gated while the view is partial.
-                await expect(joiner.namingConflicts()).rejects.toThrow(
-                    BootstrapPendingError
-                );
-                await expect(
-                    joiner.versionsByChangeset("anything")
-                ).rejects.toThrow(BootstrapPendingError);
-                await expect(
-                    joiner.namingConflicts(undefined, { allowPartial: true })
-                ).resolves.toBeDefined();
             }
             const converged = await joiner.awaitBootstrapConverged();
             expect(converged.verified).toBe(true);
