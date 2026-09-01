@@ -1,9 +1,12 @@
 import { sha256Base64Sync } from "@peerbit/crypto";
 import {
+    SHARED_FS_MOUNT_READ_SEMANTICS,
     SHARED_FS_MOUNT_WRITE_SEMANTICS,
     SharedFsError,
     type SharedFsConflict,
     type SharedFsEntryInfo,
+    type SharedFsMountReadSemantics,
+    type SharedFsMountReadSnapshot,
     type SharedFsMountWriteOutcome,
     type SharedFsMountWriteSemantics,
     type SharedFsVersionInfo,
@@ -21,6 +24,18 @@ import {
 } from "./path.js";
 
 export type SharedFsMountBackendTarget = {
+    /**
+     * Explicit, versioned exact-read handshake. Implementations advertising
+     * this value must return the exact requested version from
+     * `readVersionForMount`, after verifying both its content-addressed chunks
+     * and assembled whole-file hash. The returned bytes must be a fresh,
+     * mutable allocation that the mount owns.
+     */
+    mountReadSemantics?(): SharedFsMountReadSemantics | undefined;
+    readVersionForMount?(
+        path: string,
+        versionId: string
+    ): Promise<SharedFsMountReadSnapshot | undefined>;
     /**
      * Explicit, versioned write handshake. Implementations advertising this
      * value must hash input themselves, honor `noOpIfHeadVersionIds` as a
@@ -430,6 +445,44 @@ const sameFileSnapshot = (left: SharedFsEntryInfo, right: SharedFsEntryInfo) =>
     left.versionId === right.versionId &&
     sameHeads(left.headVersionIds, right.headVersionIds);
 
+const requireVerifiedReadSnapshot = (
+    value: unknown,
+    path: string,
+    requestedVersionId: string,
+    candidate: SharedFsEntryInfo,
+    confirmed: SharedFsEntryInfo
+): SharedFsMountReadSnapshot => {
+    const snapshot = value as Partial<SharedFsMountReadSnapshot> | undefined;
+    const valid =
+        snapshot !== undefined &&
+        snapshot !== null &&
+        snapshot.bytes instanceof Uint8Array &&
+        typeof snapshot.versionId === "string" &&
+        snapshot.versionId.length > 0 &&
+        typeof snapshot.nodeId === "string" &&
+        snapshot.nodeId.length > 0 &&
+        typeof snapshot.contentHash === "string" &&
+        snapshot.contentHash.length > 0 &&
+        typeof snapshot.size === "bigint" &&
+        snapshot.versionId === requestedVersionId &&
+        snapshot.versionId === candidate.versionId &&
+        snapshot.versionId === confirmed.versionId &&
+        snapshot.nodeId === candidate.nodeId &&
+        snapshot.nodeId === confirmed.nodeId &&
+        snapshot.contentHash === candidate.contentHash &&
+        snapshot.contentHash === confirmed.contentHash &&
+        snapshot.size === candidate.size &&
+        snapshot.size === confirmed.size &&
+        snapshot.size === BigInt(snapshot.bytes.byteLength);
+    if (!valid) {
+        throw new SharedFsBackendError(
+            "EIO",
+            `Mount read capability returned an invalid verified snapshot: ${path}`
+        );
+    }
+    return snapshot as SharedFsMountReadSnapshot;
+};
+
 const resizeHandle = (handle: OpenHandle, size: number) => {
     if (size < 0 || !Number.isFinite(size)) {
         throw new SharedFsBackendError("EINVAL", `Invalid size: ${size}`);
@@ -454,6 +507,8 @@ export const createSharedFsMountBackend = (
 ): SharedFsMountBackend => {
     const handles = new Map<number, OpenHandle>();
     let nextHandle = 1;
+    const delegatesReadVerification =
+        target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
     const delegatesWriteHashing =
         target.mountWriteSemantics?.() === SHARED_FS_MOUNT_WRITE_SEMANTICS;
 
@@ -876,10 +931,29 @@ export const createSharedFsMountBackend = (
                 }
 
                 let exact: Uint8Array | undefined;
+                let verifiedRead: unknown;
                 let readError: unknown;
                 if (!parsedFlags.truncate) {
                     try {
-                        exact = await target.readVersion(normalized, versionId);
+                        if (delegatesReadVerification) {
+                            if (
+                                typeof target.readVersionForMount !== "function"
+                            ) {
+                                throw new SharedFsBackendError(
+                                    "EIO",
+                                    `Mount read capability is missing its exact-version reader: ${normalized}`
+                                );
+                            }
+                            verifiedRead = await target.readVersionForMount(
+                                normalized,
+                                versionId
+                            );
+                        } else {
+                            exact = await target.readVersion(
+                                normalized,
+                                versionId
+                            );
+                        }
                     } catch (error) {
                         readError = error;
                     }
@@ -903,21 +977,46 @@ export const createSharedFsMountBackend = (
                 if (readError !== undefined) {
                     throw readError;
                 }
-                if (!parsedFlags.truncate && exact === undefined) {
-                    throw new SharedFsBackendError(
-                        "EIO",
-                        `Visible version is unavailable: ${normalized}`
-                    );
-                }
-                existing = parsedFlags.truncate ? new Uint8Array(0) : exact!;
-                // Bind no-op detection to the bytes actually opened, rather
-                // than separately observed metadata.
                 if (!parsedFlags.truncate) {
+                    let contentHash: string;
+                    if (delegatesReadVerification) {
+                        if (verifiedRead === undefined) {
+                            throw new SharedFsBackendError(
+                                "EIO",
+                                `Visible version is unavailable: ${normalized}`
+                            );
+                        }
+                        const verified = requireVerifiedReadSnapshot(
+                            verifiedRead,
+                            normalized,
+                            versionId,
+                            candidate,
+                            confirmed
+                        );
+                        exact = verified.bytes;
+                        contentHash = verified.contentHash;
+                    } else {
+                        if (exact === undefined) {
+                            throw new SharedFsBackendError(
+                                "EIO",
+                                `Visible version is unavailable: ${normalized}`
+                            );
+                        }
+                        // Legacy/custom targets do not attest that the exact
+                        // read was verified. Preserve the local hash that
+                        // binds fallback no-op detection to the opened bytes.
+                        contentHash = sha256Base64Sync(exact);
+                    }
+                    existing = exact;
                     entry = {
                         ...confirmed,
-                        contentHash: sha256Base64Sync(existing),
+                        contentHash,
                     };
                 } else {
+                    // O_TRUNC deliberately bypasses all exact-version reads;
+                    // its new buffer starts empty while the confirmed version
+                    // metadata remains the no-op baseline.
+                    existing = new Uint8Array(0);
                     entry = confirmed;
                 }
                 opened = true;

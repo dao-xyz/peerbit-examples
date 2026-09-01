@@ -10,7 +10,7 @@ import {
     openSharedFs,
     parseFlags,
     sharedFsBackendErrno,
-    type SharedFsHandle,
+    SharedFsHandle,
     type SharedFsMountBackendTarget,
     type WriteFileOptions,
 } from "../index.js";
@@ -43,6 +43,17 @@ const capableMountTarget = (
 ): SharedFsMountBackendTarget =>
     mountTarget(fs, {
         mountWriteSemantics: () => fs.mountWriteSemantics(),
+        ...overrides,
+    });
+
+const verifiedReadMountTarget = (
+    fs: SharedFsHandle,
+    overrides: Partial<SharedFsMountBackendTarget> = {}
+): SharedFsMountBackendTarget =>
+    mountTarget(fs, {
+        mountReadSemantics: () => fs.mountReadSemantics(),
+        readVersionForMount: (path, versionId) =>
+            fs.readVersionForMount(path, versionId),
         ...overrides,
     });
 
@@ -234,6 +245,272 @@ describe("shared fs mount backend", () => {
         expect(readVersion).not.toHaveBeenCalledWith("/stale.txt", ancestor.id);
         expect(writeFile).not.toHaveBeenCalled();
         expect(decode(await fs.readFile("/stale.txt"))).toBe("newest");
+    });
+
+    it("uses a target-verified exact snapshot without calling the legacy reader", async () => {
+        const written = await fs.writeFile("/verified-open.txt", "verified");
+        const readVersion = vi.fn(async () => {
+            throw new Error("legacy reader must not run");
+        });
+        const readVersionForMount = vi.fn((path: string, versionId: string) =>
+            fs.readVersionForMount(path, versionId)
+        );
+        const backend = createSharedFsMountBackend(
+            verifiedReadMountTarget(fs, {
+                readVersion,
+                readVersionForMount,
+            })
+        );
+
+        const handle = await backend.open("/verified-open.txt", {
+            read: true,
+            write: true,
+        });
+        expect(decode(await backend.read(handle, 1024, 0))).toBe("verified");
+        await backend.release(handle);
+
+        expect(readVersion).not.toHaveBeenCalled();
+        expect(readVersionForMount).toHaveBeenCalledOnce();
+        expect(readVersionForMount).toHaveBeenCalledWith(
+            "/verified-open.txt",
+            written.id
+        );
+    });
+
+    it("fails closed when a verified-read capability returns malformed binding metadata", async () => {
+        const written = await fs.writeFile("/invalid-read.txt", "verified");
+        const valid = await fs.readVersionForMount(
+            "/invalid-read.txt",
+            written.id
+        );
+        expect(valid).toBeDefined();
+        const invalidSnapshots: [string, unknown][] = [
+            ["null", null],
+            ["non-byte input", { ...valid, bytes: "verified" }],
+            ["wrong version", { ...valid, versionId: "version:other" }],
+            ["wrong node", { ...valid, nodeId: "file:other" }],
+            ["empty hash", { ...valid, contentHash: "" }],
+            ["wrong hash", { ...valid, contentHash: "not-the-head-hash" }],
+            ["wrong size", { ...valid, size: valid!.size + 1n }],
+            [
+                "byte-length mismatch",
+                { ...valid, bytes: valid!.bytes.subarray(1) },
+            ],
+        ];
+
+        for (const [label, invalid] of invalidSnapshots) {
+            const backend = createSharedFsMountBackend(
+                verifiedReadMountTarget(fs, {
+                    readVersionForMount: async () => invalid as any,
+                })
+            );
+            await expect(
+                backend.open("/invalid-read.txt", {
+                    read: true,
+                    write: true,
+                }),
+                label
+            ).rejects.toMatchObject({
+                code: "EIO",
+                message: expect.stringContaining("invalid verified snapshot"),
+            });
+        }
+    });
+
+    it("requires an advertised exact reader but lets O_TRUNC bypass it", async () => {
+        await fs.writeFile("/missing-capability-reader.txt", "old");
+        const readVersion = vi.fn((path: string, versionId: string) =>
+            fs.readVersion(path, versionId)
+        );
+        const target = verifiedReadMountTarget(fs, {
+            readVersion,
+            readVersionForMount: undefined,
+        });
+        const backend = createSharedFsMountBackend(target);
+
+        await expect(
+            backend.open("/missing-capability-reader.txt", {
+                read: true,
+                write: true,
+            })
+        ).rejects.toMatchObject({
+            code: "EIO",
+            message: expect.stringContaining(
+                "missing its exact-version reader"
+            ),
+        });
+        expect(readVersion).not.toHaveBeenCalled();
+
+        const truncated = await backend.open("/missing-capability-reader.txt", {
+            write: true,
+            truncate: true,
+        });
+        await backend.write(truncated, encode("new"), 0);
+        await backend.release(truncated);
+        expect(readVersion).not.toHaveBeenCalled();
+        expect(
+            decode(await fs.readFile("/missing-capability-reader.txt"))
+        ).toBe("new");
+    });
+
+    it("ignores an unknown read handshake and preserves the legacy fallback", async () => {
+        const written = await fs.writeFile("/future-read.txt", "legacy");
+        const readVersion = vi.fn((path: string, versionId: string) =>
+            fs.readVersion(path, versionId)
+        );
+        const readVersionForMount = vi.fn(async () => {
+            throw new Error("unknown capability must not run");
+        });
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                mountReadSemantics: () =>
+                    "verified-exact-version-snapshot-v2" as any,
+                readVersion,
+                readVersionForMount,
+            })
+        );
+
+        const handle = await backend.open("/future-read.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.release(handle);
+        expect(readVersion).toHaveBeenCalledOnce();
+        expect(readVersion).toHaveBeenCalledWith(
+            "/future-read.txt",
+            written.id
+        );
+        expect(readVersionForMount).not.toHaveBeenCalled();
+    });
+
+    it("does not let an inherited capability bypass an overridden exact reader", async () => {
+        class ReadWrapper extends SharedFsHandle {
+            override readVersion(path: string, versionId: string) {
+                return super.readVersion(path, versionId);
+            }
+        }
+
+        const written = await fs.writeFile("/wrapped-read.txt", "wrapped");
+        const wrapped = new ReadWrapper(fs.program);
+        expect(wrapped.mountReadSemantics()).toBeUndefined();
+        const readVersion = vi.spyOn(wrapped, "readVersion");
+        const readVersionForMount = vi.spyOn(wrapped, "readVersionForMount");
+
+        const backend = createSharedFsMountBackend(wrapped);
+        const handle = await backend.open("/wrapped-read.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.release(handle);
+
+        expect(readVersion).toHaveBeenCalledWith(
+            "/wrapped-read.txt",
+            written.id
+        );
+        expect(readVersionForMount).not.toHaveBeenCalled();
+    });
+
+    it("does not let an inherited capability bypass an overridden verified handle reader", async () => {
+        class VerifiedReadWrapper extends SharedFsHandle {
+            override readVersionForMount(path: string, versionId: string) {
+                return super.readVersionForMount(path, versionId);
+            }
+        }
+
+        const written = await fs.writeFile(
+            "/wrapped-verified-read.txt",
+            "wrapped"
+        );
+        const wrapped = new VerifiedReadWrapper(fs.program);
+        expect(wrapped.mountReadSemantics()).toBeUndefined();
+        const readVersion = vi.spyOn(wrapped, "readVersion");
+        const readVersionForMount = vi.spyOn(wrapped, "readVersionForMount");
+
+        const backend = createSharedFsMountBackend(wrapped);
+        const handle = await backend.open("/wrapped-verified-read.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.release(handle);
+
+        expect(readVersion).toHaveBeenCalledWith(
+            "/wrapped-verified-read.txt",
+            written.id
+        );
+        expect(readVersionForMount).not.toHaveBeenCalled();
+    });
+
+    it("does not let an inherited capability bypass an overridden program reader", async () => {
+        const written = await fs.writeFile(
+            "/program-verified-read.txt",
+            "program"
+        );
+        const programReadVersionForMount = vi.spyOn(
+            fs.program,
+            "readVersionForMount"
+        );
+        expect(fs.mountReadSemantics()).toBeUndefined();
+
+        const backend = createSharedFsMountBackend(fs);
+        const readVersion = vi.spyOn(fs, "readVersion");
+        const handle = await backend.open("/program-verified-read.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.release(handle);
+
+        expect(readVersion).toHaveBeenCalledWith(
+            "/program-verified-read.txt",
+            written.id
+        );
+        // The custom program implementation may still run behind the legacy
+        // reader; the mount nevertheless retains its own binding hash.
+        expect(programReadVersionForMount).toHaveBeenCalledWith(
+            "/program-verified-read.txt",
+            written.id
+        );
+    });
+
+    it("retries a verified snapshot when the same node advances heads", async () => {
+        const original = await fs.writeFile("/verified-race.txt", "original");
+        const entered = deferred();
+        const allowed = deferred();
+        let calls = 0;
+        const readVersionForMount = vi.fn(
+            async (path: string, versionId: string) => {
+                calls++;
+                const snapshot = await fs.readVersionForMount(path, versionId);
+                if (calls === 1) {
+                    entered.resolve();
+                    await allowed.promise;
+                }
+                return snapshot;
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            verifiedReadMountTarget(fs, { readVersionForMount })
+        );
+
+        const opening = backend.open("/verified-race.txt", {
+            read: true,
+            write: true,
+        });
+        await entered.promise;
+        const concurrent = await fs.writeFile(
+            "/verified-race.txt",
+            "concurrent"
+        );
+        expect(concurrent.nodeId).toBe(original.nodeId);
+        allowed.resolve();
+
+        const handle = await opening;
+        expect(decode(await backend.read(handle, 1024, 0))).toBe("concurrent");
+        await backend.release(handle);
+        expect(readVersionForMount).toHaveBeenCalledTimes(2);
+        expect(readVersionForMount.mock.calls.map((call) => call[1])).toEqual([
+            original.id,
+            concurrent.id,
+        ]);
     });
 
     it("fails a writable open when the path changes nodes during its exact read", async () => {
