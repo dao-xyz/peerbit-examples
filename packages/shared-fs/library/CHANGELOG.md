@@ -1,5 +1,11 @@
 # @peerbit/shared-fs
 
+## 0.13.4
+
+### Patch Changes
+
+- 08653c2: Delegate native-mount commit hashing and exact-head no-op checks to capable SharedFS targets, avoiding one redundant full-file SHA-256 pass on version-creating commits while preserving legacy target behavior.
+
 ## 0.13.3
 
 ### Patch Changes
