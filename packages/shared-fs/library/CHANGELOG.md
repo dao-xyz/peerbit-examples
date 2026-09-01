@@ -1,5 +1,32 @@
 # @peerbit/shared-fs
 
+## 0.13.0
+
+### Minor Changes
+
+- cf0d415: Add opt-in, exception-isolated cold-join telemetry for snapshot discovery,
+  fetch, overlay convergence, synchronizer idle, fallback, and write readiness.
+  Gate the repeatable cold-join benchmark behind an explicit environment flag.
+- 5967703: Fail closed on fresh-join writes until a full replica has a settled initial
+  view, expose retryable write-readiness APIs and EAGAIN across mount adapters,
+  and make writable mount commits use the exact visible version with a path/node
+  compare-and-set so replacement races cannot overwrite the new file. Add an
+  audited one-time legacy-replica trust workflow; keep partial-write recovery
+  session-only and block it from snapshots, GC, ACL changes, and disposal.
+  Persist readiness transitions with crash-safe, synchronized fail-closed
+  sidecar updates and recognize same-log replicators reached through relays, not
+  only direct neighbors.
+
+    Fence live trusted-writer grants and revocation tombstones alongside filesystem
+    content during durable machine disposal, and cancel/join cold-bootstrap work so
+    close and same-instance reopen cannot leak late state changes.
+
+### Patch Changes
+
+- 63b553f: Retire verified cold-start snapshot overlays after the existing 300 ms removal
+  quiet window instead of waiting for the next five-second supersession sweep.
+  Fence retirement queries and timers across close and reopen generations.
+
 ## 0.12.0
 
 ### Minor Changes
