@@ -313,6 +313,35 @@ const runMultiWriterDisposalScenario = async () => {
         }
     });
 
+    // Metadata admission can precede chunk replication. The disposal source
+    // must hold every referenced byte locally before it can ask remote peers
+    // to persist the captured closure. remoteChunkFetch is disabled above, so
+    // these exact reads are a local-store readiness barrier rather than a
+    // repair path. A missing chunk must fail here, before the crash checkpoint.
+    await waitUntil(async () => {
+        for (const file of expectedFiles) {
+            assert.equal(
+                bytesEqual(
+                    await disposableWriter.readFile(file.path),
+                    patternedBytes(file.seed, file.length)
+                ),
+                true
+            );
+        }
+        for (const [index, version] of conflictVersions.entries()) {
+            assert.equal(
+                bytesEqual(
+                    await disposableWriter.readVersion(
+                        conflictPath,
+                        version.id
+                    ),
+                    conflictPayloads[index]
+                ),
+                true
+            );
+        }
+    });
+
     await Promise.all(
         [peers[0], peers[1]].flatMap((remote) => [
             waitForRemoteReceiptCapability(disposableWriter, remote),
