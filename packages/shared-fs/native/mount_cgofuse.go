@@ -190,9 +190,10 @@ func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) int {
 	_ = mode
 	_ = dev
 	result, err := fs.client.request("open", path, map[string]interface{}{
-		"write":    true,
-		"create":   true,
-		"truncate": true,
+		"write":          true,
+		"create":         true,
+		"exclusive":      true,
+		"releaseFailure": "discard",
 	})
 	if err != nil {
 		return errno(err)
@@ -202,13 +203,8 @@ func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) int {
 }
 
 func (fs *peerbitFS) Create(path string, flags int, mode uint32) (int, uint64) {
-	_ = flags
 	_ = mode
-	result, err := fs.client.request("open", path, map[string]interface{}{
-		"write":    true,
-		"create":   true,
-		"truncate": true,
-	})
+	result, err := fs.client.request("open", path, flags)
 	if err != nil {
 		return errno(err), ^uint64(0)
 	}

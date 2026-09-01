@@ -298,12 +298,12 @@ peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
 
-Mounted writes are buffered by the native adapter and published as one signed
-Peerbit file version on `flush`, `fsync`, or `release`/close. `fsync` and
-`release` drain every buffer mutation accepted before their fence; writes that
-race a closing handle are rejected instead of being silently dropped. The CLI
-waits for write readiness before exposing the mount and rejects
-`mount --no-replicate`.
+Mounted writes are buffered by the native adapter. Each successful `flush`
+publishes the one frozen buffer generation it captured as a signed Peerbit file
+version. `fsync` and `release` drain every mutation accepted before their fence
+and can publish a follow-up generation; writes that race a closing handle are
+rejected instead of being silently dropped. The CLI waits for write readiness
+before exposing the mount and rejects `mount --no-replicate`.
 
 This mount fence is not a remote durability quorum. In particular, `fsync`
 does not call `prepareForDisposal()` and does not wait for persisted receipts
@@ -346,6 +346,51 @@ replacement; other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
+Open access modes are enforced per handle: wrong-direction reads, writes, and
+handle truncates return `EBADF`; missing writable opens require `O_CREAT`; and
+the portable fail-closed result for `O_RDONLY|O_TRUNC` is `EINVAL`. A read-only
+`O_CREAT` handle materializes an empty file at its first successful
+`flush`/`fsync`/release commit fence. `O_APPEND` relocates each write to the
+then-current end of that one handle. It does not serialize separate handles or
+peers, whose concurrent snapshots remain conflict versions rather than a
+globally concatenated stream.
+
+`O_CREAT|O_EXCL` excludes settled paths and backend-local pending creators with
+`EEXIST`. A second ordinary backend-local creator receives temporary `EAGAIN`
+until the first create fence settles, preventing two local expected-absent
+commits from both reporting success. This is not a distributed lock or
+globally linearizable open:
+disconnected or concurrently replicating peers can each observe an absent
+path, successfully create distinct nodes, and later expose the duplicate name
+through the normal conflict model. Creation remains
+commit-on-flush/fsync/release, so a race discovered after open can surface at
+that later fence. A confirmed absent-path loser is terminal and cannot recreate
+the path after the winner is removed; unrelated `EIO` and readiness failures
+remain retryable. Targets advertising the versioned native-mount write
+capability translate an exclusive commit-time loss to `EEXIST`; custom targets
+retain their original `EAGAIN` result.
+
+Custom mount targets that implement `expectedNodeId` compare-and-set should
+throw the exported `SharedFsExpectedNodeMismatchError` for an atomic mismatch.
+The mount uses that discriminator to terminalize an absent-path loser without a
+racy follow-up lookup; unrelated or untyped `EAGAIN` failures remain retryable.
+An initially absent nested create also captures the exact parent directory node
+while holding its reservation. If that built-in parent disappears, becomes a
+file, or is replaced by another directory node before the naming fence, the
+structured terminal `ENOENT`/`ENOTDIR`/`EAGAIN` result closes the old handle;
+generic custom-target failures with those codes remain retryable.
+
+Backend-local pending or in-flight absent-path creates temporarily gate
+`mkdir`, `rmdir`, `unlink`, and both the source and destination namespaces of
+`rename` with `EAGAIN`. This prevents a buffered creator from resurrecting a
+path after a competing namespace operation; retry the namespace operation after
+the create fence settles. Overlapping backend-local namespace transitions are
+also serialized with temporary `EAGAIN`, so chained renames cannot leave open
+handle paths behind. An external-adapter `Mknod` whose one-shot release fails is
+discarded so its unreachable exclusive reservation cannot block a later retry.
+Normal open handles retain buffered data and reservations across transient
+release failures.
+
 The first adapter path is intentionally experimental:
 
 - Linux requires FUSE/libfuse plus `fuse-native` or the external adapter.
@@ -355,6 +400,16 @@ The first adapter path is intentionally experimental:
   binary using cgofuse for Linux FUSE, macFUSE, and WinFsp.
   `peerbit-fs install-adapter` downloads the matching prebuilt adapter when a
   release asset exists.
+
+The external adapter forwards the flags supplied at its cgofuse callback
+boundary. Linux FUSE and macFUSE retain creation and status flags for `Create`;
+WinFsp translates Windows access, append, and overwrite semantics above FUSE
+and synthesizes its `Create` flags. The `fuse-native` API exposes flags for
+`open` but not for its `create` callback, so that shim conservatively requests
+read/write/create/exclusive access without truncation. It cannot preserve the
+caller's requested access mode or `O_APPEND` during creation, and an ordinary
+`O_CREAT` race may therefore return `EEXIST`. Use the external adapter when
+its platform translation is required.
 
 The portable backend distinguishes `flush` from the stronger handle fence used
 by `fsync`/`release`: a flush publishes one frozen buffer generation, while an

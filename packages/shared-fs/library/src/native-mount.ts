@@ -7,6 +7,7 @@ import {
     SharedFsBackendError,
     createSharedFsMountBackend,
 } from "./mount-backend.js";
+import { openFuseNativeCreate } from "./fuse-native-create.js";
 
 export type NativeMountOptions = {
     mountpoint: string;
@@ -294,16 +295,10 @@ export const mountNativeSharedFs = async (
                 _mode: number,
                 callback: (errno: number, fd?: number) => void
             ) {
-                backend
-                    .open(path, {
-                        write: true,
-                        create: true,
-                        truncate: true,
-                    })
-                    .then(
-                        (handle) => callback(0, handle),
-                        (error) => callback(toErrno(error))
-                    );
+                openFuseNativeCreate(backend, path).then(
+                    (handle) => callback(0, handle),
+                    (error) => callback(toErrno(error))
+                );
             },
             read(
                 _path: string,
