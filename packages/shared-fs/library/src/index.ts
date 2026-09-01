@@ -820,11 +820,20 @@ export type WriteFileOptions = {
     /**
      * Compare-and-set guard for path-bound writers such as native mounts.
      * A string requires the path to still resolve to that exact file node;
-     * null requires it to remain absent. A mismatch fails with EAGAIN before
-     * the replacement node can be edited. Ordinary API writes should leave
-     * this undefined to retain local-first conflict behavior.
+     * null requires it to remain absent. A mismatch throws
+     * SharedFsExpectedNodeMismatchError with code EAGAIN before the replacement
+     * node can be edited. A null-guarded create whose parent disappears,
+     * becomes a file, or fails an explicit parent-node guard throws
+     * SharedFsCreateParentMismatchError. Ordinary API writes should leave this
+     * undefined to retain local-first conflict behavior.
      */
     expectedNodeId?: string | null;
+    /**
+     * Parent-directory identity guard for an initially absent nested create.
+     * Valid only with `expectedNodeId: null`; omission preserves root creates
+     * and compatibility for callers that do not bind a parent directory.
+     */
+    expectedParentNodeId?: string;
     /**
      * Exact content-head ids observed by a native-mount writable open.
      * SharedFileSystem may return the existing visible version only when this
@@ -945,6 +954,55 @@ export class SharedFsError extends Error {
     ) {
         super(message);
         this.name = "SharedFsError";
+    }
+}
+
+export type SharedFsExpectedNodeMismatchCheckpoint =
+    | "initial"
+    | "no-op"
+    | "base-version"
+    | "before-version"
+    | "before-naming"
+    | "after-version";
+
+/**
+ * Atomic compare-and-set failure for `WriteFileOptions.expectedNodeId`.
+ * Consumers may distinguish this from unrelated retryable EAGAIN failures
+ * without a racy follow-up namespace lookup.
+ */
+export class SharedFsExpectedNodeMismatchError extends SharedFsError {
+    constructor(
+        readonly path: string,
+        readonly expectedNodeId: string | null,
+        readonly actualNodeId: string | null,
+        readonly checkpoint: SharedFsExpectedNodeMismatchCheckpoint,
+        message = `Path changed while writing ${path}; expected ${expectedNodeId ?? "an absent path"}, found ${actualNodeId ?? "an absent path"}`
+    ) {
+        super("EAGAIN", message);
+        this.name = "SharedFsExpectedNodeMismatchError";
+    }
+}
+
+/**
+ * A create guarded by `expectedNodeId: null` reached its naming fence after
+ * its parent disappeared, became a file, or was replaced by a different
+ * directory node. This is terminal for that create; retrying it after a later
+ * parent repair would resurrect stale buffered data.
+ */
+export class SharedFsCreateParentMismatchError extends SharedFsError {
+    readonly mismatchCode: "EAGAIN" | "ENOENT" | "ENOTDIR";
+
+    constructor(
+        readonly path: string,
+        readonly parentPath: string,
+        code: "EAGAIN" | "ENOENT" | "ENOTDIR",
+        message: string,
+        readonly expectedParentNodeId?: string,
+        readonly actualParentNodeId?: string | null
+    ) {
+        super(code, message);
+        this.mismatchCode = code;
+        this.name = "SharedFsCreateParentMismatchError";
     }
 }
 
@@ -3289,6 +3347,50 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
     }
 
+    private async resolveExpectedCreateParent(
+        path: string,
+        expectedParentNodeId?: string
+    ) {
+        const parentPath = dirname(path);
+        const resolved = await this.resolvePath(parentPath);
+        if (!resolved) {
+            throw new SharedFsCreateParentMismatchError(
+                path,
+                parentPath,
+                "ENOENT",
+                `Parent directory does not exist: ${parentPath}`,
+                expectedParentNodeId,
+                null
+            );
+        }
+        if (resolved.kind === "file") {
+            throw new SharedFsCreateParentMismatchError(
+                path,
+                parentPath,
+                "ENOTDIR",
+                `Parent path is a file: ${parentPath}`,
+                expectedParentNodeId,
+                resolved.nodeId
+            );
+        }
+        const actualParentNodeId =
+            resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
+        if (
+            expectedParentNodeId !== undefined &&
+            actualParentNodeId !== expectedParentNodeId
+        ) {
+            throw new SharedFsCreateParentMismatchError(
+                path,
+                parentPath,
+                "EAGAIN",
+                `Parent directory changed while creating ${path}; expected ${expectedParentNodeId}, found ${actualParentNodeId}`,
+                expectedParentNodeId,
+                actualParentNodeId
+            );
+        }
+        return actualParentNodeId;
+    }
+
     /**
      * Best-effort path of a node by walking winner parents upward. Used by
      * conflict reporting only; unreachable chains resolve under "/".
@@ -3696,6 +3798,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             throw new SharedFsError("EISDIR", "Cannot write to root");
         }
         this.assertWritableName(basename(normalized), "file");
+        const expectedParentNodeId = options.expectedParentNodeId;
+        if (
+            expectedParentNodeId !== undefined &&
+            (typeof expectedParentNodeId !== "string" ||
+                expectedParentNodeId.length === 0 ||
+                options.expectedNodeId !== null)
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "expectedParentNodeId requires a non-empty value paired with expectedNodeId: null"
+            );
+        }
         const noOpHeadVersionIds = options.noOpIfHeadVersionIds;
         if (noOpHeadVersionIds !== undefined) {
             const validIds =
@@ -3737,22 +3851,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const resolved = await this.resolvePath(normalized);
         const expectedNodeId = options.expectedNodeId;
         const resolvedNodeId = resolved?.nodeId ?? null;
-        const assertExpectedNode = async () => {
+        const assertExpectedNode = async (
+            checkpoint: SharedFsExpectedNodeMismatchCheckpoint
+        ) => {
             if (expectedNodeId === undefined) {
                 return;
             }
             const current = await this.resolvePath(normalized);
             const currentNodeId = current?.nodeId ?? null;
             if (currentNodeId !== expectedNodeId) {
-                throw new SharedFsError(
-                    "EAGAIN",
-                    `Path changed while writing ${normalized}; expected ${expectedNodeId ?? "an absent path"}, found ${currentNodeId ?? "an absent path"}`
+                throw new SharedFsExpectedNodeMismatchError(
+                    normalized,
+                    expectedNodeId,
+                    currentNodeId,
+                    checkpoint
                 );
             }
         };
         if (expectedNodeId !== undefined && resolvedNodeId !== expectedNodeId) {
-            throw new SharedFsError(
-                "EAGAIN",
+            throw new SharedFsExpectedNodeMismatchError(
+                normalized,
+                expectedNodeId,
+                resolvedNodeId,
+                "initial",
                 `Path changed before writing ${normalized}; expected ${expectedNodeId ?? "an absent path"}, found ${resolvedNodeId ?? "an absent path"}`
             );
         }
@@ -3793,7 +3914,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             currentHeads[0].contentHash === contentHash
         ) {
             if (expectedNodeId !== undefined) {
-                await assertExpectedNode();
+                await assertExpectedNode("no-op");
             }
             return {
                 ...this.versionInfo(currentHeads[0], normalized, currentHeads),
@@ -3812,7 +3933,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             currentHeads[0].contentHash === contentHash
         ) {
             if (expectedNodeId !== undefined) {
-                await assertExpectedNode();
+                await assertExpectedNode("no-op");
             }
             return this.versionInfo(currentHeads[0], normalized, currentHeads);
         }
@@ -3836,15 +3957,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         expectedNodeId !== undefined &&
                         parent.nodeId !== expectedNodeId
                     ) {
-                        throw new SharedFsError(
-                            "EAGAIN",
+                        throw new SharedFsExpectedNodeMismatchError(
+                            normalized,
+                            expectedNodeId,
+                            parent.nodeId,
+                            "base-version",
                             `Base version ${parentId} no longer belongs to the expected node at ${normalized}`
                         );
                     }
                     parentVersions.push(parent);
                 } else if (expectedNodeId !== undefined) {
-                    throw new SharedFsError(
-                        "EAGAIN",
+                    throw new SharedFsExpectedNodeMismatchError(
+                        normalized,
+                        expectedNodeId,
+                        null,
+                        "base-version",
                         `Base version ${parentId} is unavailable for the expected node at ${normalized}`
                     );
                 }
@@ -3880,7 +4007,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // replacement that landed during that work cannot receive these
         // bytes. The version always remains bound to the node captured above.
         if (expectedNodeId !== undefined) {
-            await assertExpectedNode();
+            await assertExpectedNode("before-version");
         }
         const metadata = this.signedMetadata();
         const nodeId = existingNodeId ?? createId("file");
@@ -3917,9 +4044,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // makes it visible. Writes to existing files never touch naming
             // — a concurrent rename can no longer be reverted by a save.
             if (expectedNodeId !== undefined) {
-                await assertExpectedNode();
+                await assertExpectedNode("before-naming");
             }
-            const parentId = await this.resolveParent(normalized);
+            const parentId =
+                expectedNodeId === null
+                    ? await this.resolveExpectedCreateParent(
+                          normalized,
+                          expectedParentNodeId
+                      )
+                    : await this.resolveParent(normalized);
             await this.appendNamingEvent({
                 nodeId,
                 parentId,
@@ -3932,7 +4065,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // just-written version stays attached to the old node and cannot
             // alter the replacement's visible content.
             if (expectedNodeId !== undefined) {
-                await assertExpectedNode();
+                await assertExpectedNode("after-version");
             }
         }
         const referenced = new Set(parentVersionIds);

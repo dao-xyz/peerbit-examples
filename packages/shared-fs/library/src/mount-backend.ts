@@ -2,7 +2,9 @@ import { sha256Base64Sync } from "@peerbit/crypto";
 import {
     SHARED_FS_MOUNT_READ_SEMANTICS,
     SHARED_FS_MOUNT_WRITE_SEMANTICS,
+    SharedFsCreateParentMismatchError,
     SharedFsError,
+    SharedFsExpectedNodeMismatchError,
     type SharedFsConflict,
     type SharedFsEntryInfo,
     type SharedFsMountReadSemantics,
@@ -48,6 +50,14 @@ export type SharedFsMountBackendTarget = {
         path: string,
         versionId: string
     ): Promise<Uint8Array | undefined>;
+    /**
+     * Implementations honoring `expectedNodeId` must throw
+     * SharedFsExpectedNodeMismatchError for that atomic mismatch. Untyped
+     * EAGAIN failures are treated as transient and remain retryable. Built-in
+     * null-guarded creates also throw SharedFsCreateParentMismatchError when
+     * their parent becomes invalid or fails `expectedParentNodeId` at the
+     * naming fence.
+     */
     writeFile(
         path: string,
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
@@ -110,6 +120,12 @@ export type SharedFsOpenFlags =
           create?: boolean;
           truncate?: boolean;
           append?: boolean;
+          exclusive?: boolean;
+          /**
+           * Internal one-shot adapter policy. `discard` closes an empty create
+           * handle after a failed release because the adapter cannot retry it.
+           */
+          releaseFailure?: "retain" | "discard";
       };
 
 export type SharedFsStat = {
@@ -177,14 +193,27 @@ type OpenHandle = {
     borrowedCommitSnapshot?: CommitSnapshot;
     /** Logical file length. */
     length: number;
+    read: boolean;
     write: boolean;
+    append: boolean;
     dirty: boolean;
     readOnly: boolean;
+    /** O_CREAT|O_EXCL was requested for an initially absent path. */
+    exclusiveCreate: boolean;
+    /** Backend-local reservation for an initially absent O_CREAT open. */
+    createIntent?: symbol;
+    /** Confirmed absent-path CAS loss; this handle can never publish again. */
+    terminal?: SharedFsBackendError;
+    /** Whether a failed release remains retryable or must close this handle. */
+    releaseFailure: "retain" | "discard";
     /**
-     * Node observed by a writable open. `null` means the path was absent.
-     * Read-only handles leave this undefined because they never commit.
+     * Node observed by a commit-capable open. `null` means the path was
+     * absent. Pure reads leave this undefined; read-only O_CREAT handles use
+     * null because their empty-file creation commits at the close fence.
      */
     openedNodeId?: string | null;
+    /** Exact non-root parent directory observed for an absent nested create. */
+    openedParentNodeId?: string;
     /** Exact version whose bytes seeded the writable buffer / last commit. */
     baseVersionIds?: string[];
     /** All content heads observed in the coherent writable-open snapshot. */
@@ -229,14 +258,17 @@ const OPEN_FLAG_TABLES: Record<
         O_WRONLY: number;
         O_RDWR: number;
         O_CREAT: number;
+        O_EXCL: number;
         O_TRUNC: number;
         O_APPEND: number;
     }
 > = {
+    // Values shared by the released Linux x64 and arm64 adapters.
     linux: {
         O_WRONLY: 0o1,
         O_RDWR: 0o2,
         O_CREAT: 0o100,
+        O_EXCL: 0o200,
         O_TRUNC: 0o1000,
         O_APPEND: 0o2000,
     },
@@ -244,6 +276,7 @@ const OPEN_FLAG_TABLES: Record<
         O_WRONLY: 0x1,
         O_RDWR: 0x2,
         O_CREAT: 0x200,
+        O_EXCL: 0x800,
         O_TRUNC: 0x400,
         O_APPEND: 0x8,
     },
@@ -252,6 +285,7 @@ const OPEN_FLAG_TABLES: Record<
         O_WRONLY: 0x1,
         O_RDWR: 0x2,
         O_CREAT: 0x100,
+        O_EXCL: 0x400,
         O_TRUNC: 0x200,
         O_APPEND: 0x8,
     },
@@ -289,10 +323,20 @@ const fileStat = (
     nlink: 1,
 });
 
+type ParsedSharedFsOpenFlags = {
+    read: boolean;
+    write: boolean;
+    create: boolean;
+    truncate: boolean;
+    append: boolean;
+    exclusive: boolean;
+    releaseFailure?: "retain" | "discard";
+};
+
 export const parseFlags = (
     flags: SharedFsOpenFlags | undefined,
     platform: NodeJS.Platform = process.platform
-) => {
+): ParsedSharedFsOpenFlags => {
     if (flags == null) {
         return {
             read: true,
@@ -300,6 +344,7 @@ export const parseFlags = (
             create: false,
             truncate: false,
             append: false,
+            exclusive: false,
         };
     }
     if (typeof flags === "string") {
@@ -312,6 +357,7 @@ export const parseFlags = (
             create: flags.includes("w") || flags.includes("a"),
             truncate: flags.includes("w"),
             append: flags.includes("a"),
+            exclusive: flags.includes("x"),
         };
     }
     if (typeof flags === "number") {
@@ -323,6 +369,7 @@ export const parseFlags = (
             read: access === 0 || access === table.O_RDWR,
             write: access === table.O_WRONLY || access === table.O_RDWR,
             create: (flags & table.O_CREAT) === table.O_CREAT,
+            exclusive: (flags & table.O_EXCL) === table.O_EXCL,
             truncate: (flags & table.O_TRUNC) === table.O_TRUNC,
             append: (flags & table.O_APPEND) === table.O_APPEND,
         };
@@ -333,6 +380,10 @@ export const parseFlags = (
         create: flags.create ?? false,
         truncate: flags.truncate ?? false,
         append: flags.append ?? false,
+        exclusive: flags.exclusive ?? false,
+        ...(flags.releaseFailure
+            ? { releaseFailure: flags.releaseFailure }
+            : {}),
     };
 };
 
@@ -506,6 +557,8 @@ export const createSharedFsMountBackend = (
     options: SharedFsMountBackendOptions = {}
 ): SharedFsMountBackend => {
     const handles = new Map<number, OpenHandle>();
+    const createIntents = new Map<string, Map<symbol, boolean>>();
+    const namespaceTransitions = new Map<symbol, readonly string[]>();
     let nextHandle = 1;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
@@ -535,12 +588,12 @@ export const createSharedFsMountBackend = (
         return conflicts.find((conflict) => conflict.path === filePath);
     };
 
-    const pendingWritableHandle = (path: string) => {
+    const pendingDirtyHandle = (path: string) => {
         for (const handle of handles.values()) {
             if (
                 handle.path === path &&
-                handle.write &&
                 !handle.readOnly &&
+                !handle.terminal &&
                 !handle.closing &&
                 handle.dirty
             ) {
@@ -548,6 +601,124 @@ export const createSharedFsMountBackend = (
             }
         }
         return undefined;
+    };
+
+    const isAtOrBelow = (path: string, ancestor: string) =>
+        path === ancestor ||
+        path.startsWith(ancestor === "/" ? "/" : ancestor + "/");
+
+    const reserveCreateIntent = (path: string, exclusive: boolean) => {
+        for (const transitionPaths of namespaceTransitions.values()) {
+            for (const transitionPath of transitionPaths) {
+                if (isAtOrBelow(path, transitionPath)) {
+                    // Namespace operations reserve every affected path before
+                    // their first await. Otherwise an O_CREAT lookup already
+                    // in flight could attach a reservation while a path is
+                    // moving, being created, or being removed.
+                    throw new SharedFsBackendError(
+                        "EAGAIN",
+                        `Path has an in-flight namespace transition; retry the create: ${path}`
+                    );
+                }
+            }
+        }
+        const active = createIntents.get(path);
+        if (active && active.size > 0) {
+            // This backend cannot attach a second handle to a not-yet-
+            // committed inode. Let ordinary callers retry after the local
+            // creator's commit fence instead of letting two expected-null
+            // commits publish distinct nodes and both report success.
+            throw new SharedFsBackendError(
+                exclusive ? "EEXIST" : "EAGAIN",
+                `Path already has a pending creator: ${path}`
+            );
+        }
+        const token = Symbol(path);
+        const intents = active ?? new Map<symbol, boolean>();
+        intents.set(token, exclusive);
+        if (!active) {
+            createIntents.set(path, intents);
+        }
+        return token;
+    };
+
+    const releaseCreateIntent = (path: string, token: symbol) => {
+        const intents = createIntents.get(path);
+        if (!intents) {
+            return;
+        }
+        intents.delete(token);
+        if (intents.size === 0) {
+            createIntents.delete(path);
+        }
+    };
+
+    const clearHandleCreateIntent = (handle: OpenHandle) => {
+        if (!handle.createIntent) {
+            return;
+        }
+        releaseCreateIntent(handle.path, handle.createIntent);
+        handle.createIntent = undefined;
+    };
+
+    const terminalizeCreateLoss = (
+        handle: OpenHandle,
+        error: SharedFsBackendError
+    ) => {
+        handle.terminal = error;
+        handle.dirty = false;
+        clearHandleCreateIntent(handle);
+    };
+
+    const hasCreateIntentAtOrBelow = (path: string) => {
+        for (const intentPath of createIntents.keys()) {
+            if (isAtOrBelow(intentPath, path)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const withNamespaceTransition = async <T>(
+        operation: string,
+        paths: readonly string[],
+        fn: () => Promise<T>
+    ): Promise<T> => {
+        const uniquePaths = [...new Set(paths)];
+        for (const path of uniquePaths) {
+            if (hasCreateIntentAtOrBelow(path)) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `${operation} conflicts with a pending creator at or below: ${path}`
+                );
+            }
+        }
+        for (const activePaths of namespaceTransitions.values()) {
+            for (const path of uniquePaths) {
+                if (
+                    activePaths.some(
+                        (activePath) =>
+                            isAtOrBelow(path, activePath) ||
+                            isAtOrBelow(activePath, path)
+                    )
+                ) {
+                    throw new SharedFsBackendError(
+                        "EAGAIN",
+                        `${operation} overlaps an in-flight namespace transition; retry: ${path}`
+                    );
+                }
+            }
+        }
+        // No await may appear between the preflight above and this token. An
+        // in-flight absent-path lookup must either reserve first (and make the
+        // preflight fail) or observe this transition and retry.
+        const token = Symbol(operation);
+        namespaceTransitions.set(token, uniquePaths);
+        try {
+            return await fn();
+        } finally {
+            namespaceTransitions.delete(token);
+        }
     };
 
     const getattrConflict = async (path: string): Promise<SharedFsStat> => {
@@ -697,6 +868,9 @@ export const createSharedFsMountBackend = (
                 // gap between open and writeFile's path resolution. `null`
                 // means this handle created a path that must still be absent.
                 expectedNodeId: handle.openedNodeId,
+                ...(handle.openedParentNodeId !== undefined
+                    ? { expectedParentNodeId: handle.openedParentNodeId }
+                    : {}),
                 ...(delegatesWriteHashing
                     ? {
                           noOpIfHeadVersionIds: [
@@ -706,11 +880,49 @@ export const createSharedFsMountBackend = (
                     : {}),
             };
             inputExposed = borrowInput;
-            const result = await target.writeFile(
-                handle.path,
-                bytes,
-                writeOptions
-            );
+            let result: Awaited<
+                ReturnType<SharedFsMountBackendTarget["writeFile"]>
+            >;
+            try {
+                result = await target.writeFile(
+                    handle.path,
+                    bytes,
+                    writeOptions
+                );
+            } catch (error) {
+                const expectedMismatch =
+                    error instanceof SharedFsExpectedNodeMismatchError &&
+                    error.expectedNodeId === null &&
+                    error.path === handle.path;
+                const createParentMismatch =
+                    error instanceof SharedFsCreateParentMismatchError &&
+                    error.path === handle.path
+                        ? error
+                        : undefined;
+                if (
+                    handle.openedNodeId === null &&
+                    (expectedMismatch || createParentMismatch)
+                ) {
+                    // The target's atomic expected-node guard identified this
+                    // absent create as a path or parent loser. Do not perform
+                    // a later stat: either namespace may already be repaired,
+                    // but this handle must never resurrect its stale buffer.
+                    const terminal = createParentMismatch
+                        ? new SharedFsBackendError(
+                              createParentMismatch.mismatchCode,
+                              createParentMismatch.message
+                          )
+                        : new SharedFsBackendError(
+                              handle.exclusiveCreate && delegatesWriteHashing
+                                  ? "EEXIST"
+                                  : "EAGAIN",
+                              `Path was created concurrently; the losing handle is closed: ${handle.path}`
+                          );
+                    terminalizeCreateLoss(handle, terminal);
+                    throw terminal;
+                }
+                throw error;
+            }
             let committed =
                 result &&
                 typeof result.id === "string" &&
@@ -787,9 +999,16 @@ export const createSharedFsMountBackend = (
             // of being incorrectly discarded.
             handle.openedHeadVersionIds = [committed.id];
             handle.openedNodeId = committed.nodeId;
+            handle.openedParentNodeId = undefined;
             handle.baseContentHash = committed.contentHash;
+            // The first successful create commit makes the path visible in
+            // the target, so the backend-local absent-path reservation is no
+            // longer needed. Later writes use the committed node id.
+            clearHandleCreateIntent(handle);
         } catch (error) {
-            handle.dirty = true;
+            if (!handle.terminal) {
+                handle.dirty = true;
+            }
             throw error;
         } finally {
             if (handle.borrowedCommitSnapshot === snapshot && !inputExposed) {
@@ -835,7 +1054,7 @@ export const createSharedFsMountBackend = (
 
     const requireHandle = (handle: number) => {
         const openHandle = handles.get(handle);
-        if (!openHandle) {
+        if (!openHandle || openHandle.terminal) {
             throw badHandle(handle);
         }
         return openHandle;
@@ -845,11 +1064,42 @@ export const createSharedFsMountBackend = (
         normalized: string,
         parsedFlags: ReturnType<typeof parseFlags>
     ): Promise<number> => {
-        if (parsedFlags.write) {
-            assertWriteReady(`Writable open for ${normalized}`);
+        if (!parsedFlags.read && !parsedFlags.write) {
+            throw new SharedFsBackendError(
+                "EINVAL",
+                `Open has no valid access mode: ${normalized}`
+            );
+        }
+        if (parsedFlags.exclusive && !parsedFlags.create) {
+            throw new SharedFsBackendError(
+                "EINVAL",
+                `O_EXCL requires O_CREAT: ${normalized}`
+            );
+        }
+        if (parsedFlags.truncate && !parsedFlags.write) {
+            // POSIX leaves O_RDONLY|O_TRUNC unspecified. Fail closed instead
+            // of silently ignoring the requested destructive operation.
+            throw new SharedFsBackendError(
+                "EINVAL",
+                `O_TRUNC requires write access: ${normalized}`
+            );
+        }
+        const mutatingOpen =
+            parsedFlags.write || parsedFlags.create || parsedFlags.truncate;
+        if (mutatingOpen) {
+            assertWriteReady(`Mutating open for ${normalized}`);
+        }
+        if (normalized === "/") {
+            if (parsedFlags.create && parsedFlags.exclusive) {
+                throw new SharedFsBackendError(
+                    "EEXIST",
+                    "Path already exists: /"
+                );
+            }
+            throw new SharedFsBackendError("EISDIR", "Path is a directory: /");
         }
         if (isConflictPath(normalized)) {
-            if (parsedFlags.write) {
+            if (mutatingOpen) {
                 throw new SharedFsBackendError(
                     "EROFS",
                     `Path is read-only: ${normalized}`
@@ -861,15 +1111,19 @@ export const createSharedFsMountBackend = (
                 path: normalized,
                 buffer,
                 length: buffer.byteLength,
+                read: true,
                 write: false,
+                append: false,
                 dirty: false,
                 readOnly: true,
+                exclusiveCreate: false,
+                releaseFailure: "retain",
                 closing: false,
                 mutationGeneration: 0,
             });
             return handle;
         }
-        if (parsedFlags.write && target.ignoreCheck?.(normalized).ignored) {
+        if (mutatingOpen && target.ignoreCheck?.(normalized).ignored) {
             // Reject-mode ignore policies must fail at open(), where
             // tools handle errors — a buffered write failing only at
             // flush/release reads as silent data loss.
@@ -878,194 +1132,265 @@ export const createSharedFsMountBackend = (
                 `Path is artifact-ignored: ${normalized}`
             );
         }
-        let entry = await findEntry(target, normalized);
-        if (entry?.kind === "directory") {
-            throw new SharedFsBackendError(
-                "EISDIR",
-                `Path is a directory: ${normalized}`
-            );
-        }
-        if (!entry && !parsedFlags.create && !parsedFlags.write) {
-            throw notFound(normalized);
-        }
-        let existing: Uint8Array = new Uint8Array(0);
-        if (!parsedFlags.write) {
-            // Read-only opens deliberately retain readFile's newest-complete-
-            // ancestor fallback while a visible version's chunks replicate.
-            existing = entry
-                ? ((await target.readFile(normalized)) ?? new Uint8Array(0))
-                : new Uint8Array(0);
-        } else {
-            // A writable handle must never seed its buffer from readFile's
-            // ancestor fallback and then claim the visible head as its base.
-            // Take a coherent {node, visible version, all heads} snapshot,
-            // fetch exactly that visible version, and re-check the snapshot.
-            // Same-node content races retry; replacement/removal fails closed.
-            const maxSnapshotAttempts = 3;
-            let opened = false;
-            for (let attempt = 0; attempt < maxSnapshotAttempts; attempt++) {
-                if (!entry) {
-                    const confirmed = await findEntry(target, normalized);
-                    if (!confirmed) {
-                        existing = new Uint8Array(0);
-                        opened = true;
-                        break;
-                    }
-                    if (confirmed.kind === "directory") {
-                        throw new SharedFsBackendError(
-                            "EISDIR",
-                            `Path is a directory: ${normalized}`
-                        );
-                    }
-                    entry = confirmed;
-                    continue;
-                }
-
-                const candidate = entry;
-                const versionId = candidate.versionId;
-                if (!versionId) {
-                    throw new SharedFsBackendError(
-                        "EIO",
-                        `File has no visible version: ${normalized}`
-                    );
-                }
-
-                let exact: Uint8Array | undefined;
-                let verifiedRead: unknown;
-                let readError: unknown;
-                if (!parsedFlags.truncate) {
-                    try {
-                        if (delegatesReadVerification) {
-                            if (
-                                typeof target.readVersionForMount !== "function"
-                            ) {
-                                throw new SharedFsBackendError(
-                                    "EIO",
-                                    `Mount read capability is missing its exact-version reader: ${normalized}`
-                                );
-                            }
-                            verifiedRead = await target.readVersionForMount(
-                                normalized,
-                                versionId
-                            );
-                        } else {
-                            exact = await target.readVersion(
-                                normalized,
-                                versionId
-                            );
-                        }
-                    } catch (error) {
-                        readError = error;
-                    }
-                }
-
-                const confirmed = await findEntry(target, normalized);
-                if (
-                    !confirmed ||
-                    confirmed.kind !== "file" ||
-                    confirmed.nodeId !== candidate.nodeId
-                ) {
-                    throw new SharedFsBackendError(
-                        "EAGAIN",
-                        `Path changed while it was being opened: ${normalized}`
-                    );
-                }
-                if (!sameFileSnapshot(candidate, confirmed)) {
-                    entry = confirmed;
-                    continue;
-                }
-                if (readError !== undefined) {
-                    throw readError;
-                }
-                if (!parsedFlags.truncate) {
-                    let contentHash: string;
-                    if (delegatesReadVerification) {
-                        if (verifiedRead === undefined) {
-                            throw new SharedFsBackendError(
-                                "EIO",
-                                `Visible version is unavailable: ${normalized}`
-                            );
-                        }
-                        const verified = requireVerifiedReadSnapshot(
-                            verifiedRead,
-                            normalized,
-                            versionId,
-                            candidate,
-                            confirmed
-                        );
-                        exact = verified.bytes;
-                        contentHash = verified.contentHash;
-                    } else {
-                        if (exact === undefined) {
-                            throw new SharedFsBackendError(
-                                "EIO",
-                                `Visible version is unavailable: ${normalized}`
-                            );
-                        }
-                        // Legacy/custom targets do not attest that the exact
-                        // read was verified. Preserve the local hash that
-                        // binds fallback no-op detection to the opened bytes.
-                        contentHash = sha256Base64Sync(exact);
-                    }
-                    existing = exact;
-                    entry = {
-                        ...confirmed,
-                        contentHash,
-                    };
-                } else {
-                    // O_TRUNC deliberately bypasses all exact-version reads;
-                    // its new buffer starts empty while the confirmed version
-                    // metadata remains the no-op baseline.
-                    existing = new Uint8Array(0);
-                    entry = confirmed;
-                }
-                opened = true;
-                break;
-            }
-            if (!opened) {
+        let createIntent: symbol | undefined;
+        let openedParentNodeId: string | undefined;
+        try {
+            let entry = await findEntry(target, normalized);
+            if (entry && parsedFlags.create && parsedFlags.exclusive) {
                 throw new SharedFsBackendError(
-                    "EAGAIN",
-                    `File changed repeatedly while it was being opened: ${normalized}`
+                    "EEXIST",
+                    `Path already exists: ${normalized}`
                 );
             }
+            if (entry?.kind === "directory") {
+                throw new SharedFsBackendError(
+                    "EISDIR",
+                    `Path is a directory: ${normalized}`
+                );
+            }
+            if (!entry && !parsedFlags.create) {
+                throw notFound(normalized);
+            }
+            if (!entry) {
+                // Reserve synchronously after the first absent lookup. This
+                // closes the same-backend gap between concurrent async opens
+                // without changing the distributed naming protocol.
+                createIntent = reserveCreateIntent(
+                    normalized,
+                    parsedFlags.exclusive
+                );
+                const parentPath = dirname(normalized);
+                if (parentPath !== "/") {
+                    // Validate while the child intent is held. Mount namespace
+                    // removals/renames at this parent now fail EAGAIN, and any
+                    // validation failure unwinds through the intent cleanup.
+                    const parent = await findEntry(target, parentPath);
+                    if (!parent) {
+                        throw new SharedFsBackendError(
+                            "ENOENT",
+                            `Parent directory does not exist: ${parentPath}`
+                        );
+                    }
+                    if (parent.kind !== "directory") {
+                        throw new SharedFsBackendError(
+                            "ENOTDIR",
+                            `Parent path is not a directory: ${parentPath}`
+                        );
+                    }
+                    openedParentNodeId = parent.nodeId;
+                }
+            }
+
+            let existing: Uint8Array = new Uint8Array(0);
+            if (!parsedFlags.write) {
+                // Read-only opens deliberately retain readFile's newest-
+                // complete-ancestor fallback while a visible version's chunks
+                // replicate. An absent O_CREAT handle starts as an empty,
+                // readable buffer and materializes it at its commit fence.
+                existing = entry
+                    ? ((await target.readFile(normalized)) ?? new Uint8Array(0))
+                    : new Uint8Array(0);
+            } else {
+                // A writable handle must never seed its buffer from readFile's
+                // ancestor fallback and then claim the visible head as its
+                // base. Take a coherent {node, visible version, all heads}
+                // snapshot, fetch exactly that visible version, and re-check
+                // the snapshot. Same-node content races retry;
+                // replacement/removal fails closed.
+                const maxSnapshotAttempts = 3;
+                let opened = false;
+                for (
+                    let attempt = 0;
+                    attempt < maxSnapshotAttempts;
+                    attempt++
+                ) {
+                    if (!entry) {
+                        const confirmed = await findEntry(target, normalized);
+                        if (!confirmed) {
+                            existing = new Uint8Array(0);
+                            opened = true;
+                            break;
+                        }
+                        if (parsedFlags.create && parsedFlags.exclusive) {
+                            throw new SharedFsBackendError(
+                                "EEXIST",
+                                `Path already exists: ${normalized}`
+                            );
+                        }
+                        if (confirmed.kind === "directory") {
+                            throw new SharedFsBackendError(
+                                "EISDIR",
+                                `Path is a directory: ${normalized}`
+                            );
+                        }
+                        if (createIntent) {
+                            releaseCreateIntent(normalized, createIntent);
+                            createIntent = undefined;
+                        }
+                        openedParentNodeId = undefined;
+                        entry = confirmed;
+                        continue;
+                    }
+
+                    const candidate = entry;
+                    const versionId = candidate.versionId;
+                    if (!versionId) {
+                        throw new SharedFsBackendError(
+                            "EIO",
+                            `File has no visible version: ${normalized}`
+                        );
+                    }
+
+                    let exact: Uint8Array | undefined;
+                    let verifiedRead: unknown;
+                    let readError: unknown;
+                    if (!parsedFlags.truncate) {
+                        try {
+                            if (delegatesReadVerification) {
+                                if (
+                                    typeof target.readVersionForMount !==
+                                    "function"
+                                ) {
+                                    throw new SharedFsBackendError(
+                                        "EIO",
+                                        `Mount read capability is missing its exact-version reader: ${normalized}`
+                                    );
+                                }
+                                verifiedRead = await target.readVersionForMount(
+                                    normalized,
+                                    versionId
+                                );
+                            } else {
+                                exact = await target.readVersion(
+                                    normalized,
+                                    versionId
+                                );
+                            }
+                        } catch (error) {
+                            readError = error;
+                        }
+                    }
+
+                    const confirmed = await findEntry(target, normalized);
+                    if (
+                        !confirmed ||
+                        confirmed.kind !== "file" ||
+                        confirmed.nodeId !== candidate.nodeId
+                    ) {
+                        throw new SharedFsBackendError(
+                            "EAGAIN",
+                            `Path changed while it was being opened: ${normalized}`
+                        );
+                    }
+                    if (!sameFileSnapshot(candidate, confirmed)) {
+                        entry = confirmed;
+                        continue;
+                    }
+                    if (readError !== undefined) {
+                        throw readError;
+                    }
+                    if (!parsedFlags.truncate) {
+                        let contentHash: string;
+                        if (delegatesReadVerification) {
+                            if (verifiedRead === undefined) {
+                                throw new SharedFsBackendError(
+                                    "EIO",
+                                    `Visible version is unavailable: ${normalized}`
+                                );
+                            }
+                            const verified = requireVerifiedReadSnapshot(
+                                verifiedRead,
+                                normalized,
+                                versionId,
+                                candidate,
+                                confirmed
+                            );
+                            exact = verified.bytes;
+                            contentHash = verified.contentHash;
+                        } else {
+                            if (exact === undefined) {
+                                throw new SharedFsBackendError(
+                                    "EIO",
+                                    `Visible version is unavailable: ${normalized}`
+                                );
+                            }
+                            // Legacy/custom targets do not attest that the
+                            // exact read was verified. Preserve the local hash
+                            // that binds fallback no-op detection to the opened
+                            // bytes.
+                            contentHash = sha256Base64Sync(exact);
+                        }
+                        existing = exact;
+                        entry = {
+                            ...confirmed,
+                            contentHash,
+                        };
+                    } else {
+                        // O_TRUNC deliberately bypasses all exact-version
+                        // reads; its new buffer starts empty while confirmed
+                        // version metadata remains the no-op baseline.
+                        existing = new Uint8Array(0);
+                        entry = confirmed;
+                    }
+                    opened = true;
+                    break;
+                }
+                if (!opened) {
+                    throw new SharedFsBackendError(
+                        "EAGAIN",
+                        `File changed repeatedly while it was being opened: ${normalized}`
+                    );
+                }
+            }
+            const handle = nextHandle++;
+            const dirty =
+                parsedFlags.truncate || (parsedFlags.create && !entry);
+            const mayCommit = parsedFlags.write || dirty;
+            handles.set(handle, {
+                path: normalized,
+                buffer: existing,
+                length: existing.byteLength,
+                read: parsedFlags.read,
+                write: parsedFlags.write,
+                append: parsedFlags.append,
+                dirty,
+                readOnly: false,
+                exclusiveCreate:
+                    parsedFlags.create && parsedFlags.exclusive && !entry,
+                createIntent,
+                releaseFailure: parsedFlags.releaseFailure ?? "retain",
+                closing: false,
+                openedNodeId: mayCommit ? (entry?.nodeId ?? null) : undefined,
+                openedParentNodeId:
+                    mayCommit && !entry ? openedParentNodeId : undefined,
+                // Editing the deterministic visible version is not an
+                // implicit conflict-resolution operation. Base only on the
+                // exact version whose bytes seeded the buffer, leaving other
+                // heads preserved.
+                baseVersionIds:
+                    mayCommit && entry?.versionId
+                        ? [entry.versionId]
+                        : mayCommit
+                          ? entry?.headVersionIds
+                          : undefined,
+                openedHeadVersionIds:
+                    mayCommit && entry?.headVersionIds !== undefined
+                        ? [...entry.headVersionIds]
+                        : undefined,
+                // The no-op-save check compares the FINAL buffer hash against
+                // the opened head, so it applies to truncate opens too: shell
+                // `> file` / editor rewrite-in-place of identical content must
+                // not mint a new version.
+                baseContentHash: mayCommit ? entry?.contentHash : undefined,
+                mutationGeneration: 0,
+            });
+            return handle;
+        } catch (error) {
+            if (createIntent) {
+                releaseCreateIntent(normalized, createIntent);
+            }
+            throw error;
         }
-        const handle = nextHandle++;
-        const dirty =
-            parsedFlags.write &&
-            (parsedFlags.create || parsedFlags.truncate) &&
-            // Opening an existing file with O_CREAT (no O_TRUNC) is not a
-            // modification.
-            !(entry && !parsedFlags.truncate);
-        handles.set(handle, {
-            path: normalized,
-            buffer: existing,
-            length: existing.byteLength,
-            write: parsedFlags.write,
-            dirty,
-            readOnly: false,
-            closing: false,
-            openedNodeId: parsedFlags.write
-                ? (entry?.nodeId ?? null)
-                : undefined,
-            // Editing the deterministic visible version is not an implicit
-            // conflict-resolution operation. Base only on the exact version
-            // whose bytes seeded the buffer, leaving other heads preserved.
-            baseVersionIds:
-                parsedFlags.write && entry?.versionId
-                    ? [entry.versionId]
-                    : entry?.headVersionIds,
-            openedHeadVersionIds:
-                parsedFlags.write && entry?.headVersionIds !== undefined
-                    ? [...entry.headVersionIds]
-                    : undefined,
-            // The no-op-save check compares the FINAL buffer hash against
-            // the opened head, so it applies to truncate opens too: shell
-            // `> file` / editor rewrite-in-place of identical content must
-            // not mint a new version.
-            baseContentHash: entry?.contentHash,
-            mutationGeneration: 0,
-        });
-        return handle;
     };
 
     const backend: SharedFsMountBackend = {
@@ -1078,7 +1403,7 @@ export const createSharedFsMountBackend = (
                 if (isConflictPath(normalized)) {
                     return getattrConflict(normalized);
                 }
-                const pending = pendingWritableHandle(normalized);
+                const pending = pendingDirtyHandle(normalized);
                 if (pending) {
                     // Uncommitted writes are visible to stat like on a local
                     // filesystem (size reflects the buffer).
@@ -1147,8 +1472,8 @@ export const createSharedFsMountBackend = (
                 );
                 for (const handle of handles.values()) {
                     if (
-                        handle.write &&
                         !handle.readOnly &&
+                        !handle.terminal &&
                         handle.dirty &&
                         dirname(handle.path) === normalized
                     ) {
@@ -1174,6 +1499,12 @@ export const createSharedFsMountBackend = (
 
         async read(handle: number, size: number, offset: number) {
             const openHandle = requireHandle(handle);
+            if (!openHandle.read) {
+                throw new SharedFsBackendError(
+                    "EBADF",
+                    `File handle is not readable: ${handle}`
+                );
+            }
             if (offset >= openHandle.length || size <= 0) {
                 return new Uint8Array(0);
             }
@@ -1186,32 +1517,36 @@ export const createSharedFsMountBackend = (
         },
 
         async write(handle: number, data: Uint8Array, offset: number) {
-            assertWriteReady(`Write on handle ${handle}`);
             const openHandle = requireHandle(handle);
             if (openHandle.closing) {
                 throw badHandle(handle);
             }
             if (!openHandle.write) {
                 throw new SharedFsBackendError(
-                    "EACCES",
+                    "EBADF",
                     `File handle is not writable: ${handle}`
                 );
             }
-            if (offset < 0) {
+            assertWriteReady(`Write on handle ${handle}`);
+            // O_APPEND positions every accepted write at the then-current end
+            // of this handle. There is no await between observing length and
+            // mutating it, so concurrent calls on one backend serialize here.
+            const writeOffset = openHandle.append ? openHandle.length : offset;
+            if (writeOffset < 0) {
                 throw new SharedFsBackendError(
                     "EINVAL",
-                    `Invalid offset: ${offset}`
+                    `Invalid offset: ${writeOffset}`
                 );
             }
-            const end = offset + data.byteLength;
-            if (data.byteLength > 0 || offset > openHandle.length) {
+            const end = writeOffset + data.byteLength;
+            if (data.byteLength > 0 || writeOffset > openHandle.length) {
                 ensureMutableCapacity(openHandle, end);
             }
-            if (offset > openHandle.length) {
+            if (writeOffset > openHandle.length) {
                 // Sparse write: zero the gap.
-                openHandle.buffer.fill(0, openHandle.length, offset);
+                openHandle.buffer.fill(0, openHandle.length, writeOffset);
             }
-            openHandle.buffer.set(data, offset);
+            openHandle.buffer.set(data, writeOffset);
             openHandle.length = Math.max(openHandle.length, end);
             openHandle.dirty = true;
             openHandle.mutationGeneration++;
@@ -1220,9 +1555,6 @@ export const createSharedFsMountBackend = (
 
         async truncate(targetRef: number | string, size: number) {
             return wrap(async () => {
-                assertWriteReady(
-                    `Truncate ${typeof targetRef === "number" ? `on handle ${targetRef}` : normalizeFsPath(targetRef)}`
-                );
                 if (typeof targetRef === "number") {
                     const openHandle = requireHandle(targetRef);
                     if (openHandle.closing) {
@@ -1230,21 +1562,23 @@ export const createSharedFsMountBackend = (
                     }
                     if (!openHandle.write) {
                         throw new SharedFsBackendError(
-                            "EACCES",
+                            "EBADF",
                             `File handle is not writable: ${targetRef}`
                         );
                     }
+                    assertWriteReady(`Truncate on handle ${targetRef}`);
                     resizeHandle(openHandle, size);
                     return;
                 }
                 const normalized = normalizeFsPath(targetRef);
+                assertWriteReady(`Truncate ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
                         "EROFS",
                         `Path is read-only: ${normalized}`
                     );
                 }
-                const pending = pendingWritableHandle(normalized);
+                const pending = pendingDirtyHandle(normalized);
                 if (pending) {
                     resizeHandle(pending, size);
                     return;
@@ -1255,6 +1589,7 @@ export const createSharedFsMountBackend = (
                     create: false,
                     truncate: false,
                     append: false,
+                    exclusive: false,
                 });
                 const openHandle = requireHandle(handle);
                 try {
@@ -1279,6 +1614,11 @@ export const createSharedFsMountBackend = (
             if (!openHandle) {
                 return;
             }
+            if (openHandle.terminal) {
+                clearHandleCreateIntent(openHandle);
+                handles.delete(handle);
+                return;
+            }
             if (openHandle.releasing) {
                 return openHandle.releasing;
             }
@@ -1287,9 +1627,22 @@ export const createSharedFsMountBackend = (
             // mutationGeneration; later attempts fail with EBADF.
             openHandle.closing = true;
             const releasing = wrap(() => commitStable(openHandle))
-                .then(() => {
-                    handles.delete(handle);
-                })
+                .then(
+                    () => {
+                        handles.delete(handle);
+                    },
+                    (error) => {
+                        if (
+                            openHandle.terminal ||
+                            openHandle.releaseFailure === "discard"
+                        ) {
+                            clearHandleCreateIntent(openHandle);
+                            openHandle.dirty = false;
+                            handles.delete(handle);
+                        }
+                        throw error;
+                    }
+                )
                 .finally(() => {
                     if (
                         handles.get(handle) === openHandle &&
@@ -1315,13 +1668,19 @@ export const createSharedFsMountBackend = (
                         `Path is read-only: ${normalized}`
                     );
                 }
-                if (await findEntry(target, normalized)) {
-                    throw new SharedFsBackendError(
-                        "EEXIST",
-                        `Path already exists: ${normalized}`
-                    );
-                }
-                await target.mkdir(normalized);
+                return withNamespaceTransition(
+                    `mkdir ${normalized}`,
+                    [normalized],
+                    async () => {
+                        if (await findEntry(target, normalized)) {
+                            throw new SharedFsBackendError(
+                                "EEXIST",
+                                `Path already exists: ${normalized}`
+                            );
+                        }
+                        await target.mkdir(normalized);
+                    }
+                );
             });
         },
 
@@ -1335,17 +1694,23 @@ export const createSharedFsMountBackend = (
                         `Path is read-only: ${normalized}`
                     );
                 }
-                const entry = await findEntry(target, normalized);
-                if (!entry) {
-                    throw notFound(normalized);
-                }
-                if (entry.kind !== "directory") {
-                    throw new SharedFsBackendError(
-                        "ENOTDIR",
-                        `Path is not a directory: ${normalized}`
-                    );
-                }
-                await target.rm(normalized);
+                return withNamespaceTransition(
+                    `rmdir ${normalized}`,
+                    [normalized],
+                    async () => {
+                        const entry = await findEntry(target, normalized);
+                        if (!entry) {
+                            throw notFound(normalized);
+                        }
+                        if (entry.kind !== "directory") {
+                            throw new SharedFsBackendError(
+                                "ENOTDIR",
+                                `Path is not a directory: ${normalized}`
+                            );
+                        }
+                        await target.rm(normalized);
+                    }
+                );
             });
         },
 
@@ -1360,15 +1725,21 @@ export const createSharedFsMountBackend = (
                         "Conflict metadata is read-only"
                     );
                 }
-                await target.rename(fromPath, toPath);
-                for (const handle of handles.values()) {
-                    if (handle.path === fromPath) {
-                        handle.path = toPath;
-                    } else if (handle.path.startsWith(fromPath + "/")) {
-                        handle.path =
-                            toPath + handle.path.slice(fromPath.length);
+                return withNamespaceTransition(
+                    `rename ${fromPath} to ${toPath}`,
+                    [fromPath, toPath],
+                    async () => {
+                        await target.rename(fromPath, toPath);
+                        for (const handle of handles.values()) {
+                            if (handle.path === fromPath) {
+                                handle.path = toPath;
+                            } else if (handle.path.startsWith(fromPath + "/")) {
+                                handle.path =
+                                    toPath + handle.path.slice(fromPath.length);
+                            }
+                        }
                     }
-                }
+                );
             });
         },
 
@@ -1382,17 +1753,23 @@ export const createSharedFsMountBackend = (
                         `Path is read-only: ${normalized}`
                     );
                 }
-                const entry = await findEntry(target, normalized);
-                if (!entry) {
-                    throw notFound(normalized);
-                }
-                if (entry.kind !== "file") {
-                    throw new SharedFsBackendError(
-                        "EISDIR",
-                        `Path is a directory: ${normalized}`
-                    );
-                }
-                await target.rm(normalized);
+                return withNamespaceTransition(
+                    `unlink ${normalized}`,
+                    [normalized],
+                    async () => {
+                        const entry = await findEntry(target, normalized);
+                        if (!entry) {
+                            throw notFound(normalized);
+                        }
+                        if (entry.kind !== "file") {
+                            throw new SharedFsBackendError(
+                                "EISDIR",
+                                `Path is a directory: ${normalized}`
+                            );
+                        }
+                        await target.rm(normalized);
+                    }
+                );
             });
         },
     };
