@@ -454,8 +454,35 @@ describe("shared fs durable machine disposal", () => {
             // Take the in-memory writer offline after its admitted conflict
             // converges so it cannot own a replica range during the barrier.
             // The disk-backed receiver has been an eligible full replica for
-            // every entry from the start.
+            // every entry from the start. Fence the deliberate leadership
+            // transition on both logs before asking for an exact persisted
+            // receipt; otherwise a slow runner can still plan against the
+            // stopped writer and correctly fail the barrier closed.
             await stopPeer(writerPeer);
+            await sourcePeer.dial(receiverPeer);
+            const receiverKey = receiverPeer.identity.publicKey;
+            const receiverHash = receiverKey.hashcode();
+            const writerHash = writerKey.hashcode();
+            await Promise.all(
+                [
+                    source.program.entries.log,
+                    source.program.trustGraph!.trustGraph.log,
+                ].map(async (log) => {
+                    await log.waitForReplicator(receiverKey, {
+                        timeout: WAIT_TIMEOUT_MS,
+                    });
+                    await waitUntil(async () => {
+                        const replicators = await log.getReplicators();
+                        expect(replicators.has(receiverHash)).toBe(true);
+                        expect(replicators.has(writerHash)).toBe(false);
+                    });
+                    await waitForRemoteReceiptCapability(
+                        source,
+                        receiverPeer,
+                        log
+                    );
+                })
+            );
 
             const disposal = await source.prepareForDisposal({
                 minAcks: 1,
