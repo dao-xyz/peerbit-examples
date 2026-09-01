@@ -259,9 +259,18 @@ peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
 
-Mounted writes are buffered by the native adapter and committed as one signed
-Peerbit file version on `flush`, `fsync`, or `release`/close. The CLI waits for
-write readiness before exposing the mount and rejects `mount --no-replicate`.
+Mounted writes are buffered by the native adapter and published as one signed
+Peerbit file version on `flush`, `fsync`, or `release`/close. `fsync` and
+`release` drain every buffer mutation accepted before their fence; writes that
+race a closing handle are rejected instead of being silently dropped. The CLI
+waits for write readiness before exposing the mount and rejects
+`mount --no-replicate`.
+
+This mount fence is not a remote durability quorum. In particular, `fsync`
+does not call `prepareForDisposal()` and does not wait for persisted receipts
+from another machine. Portable CI verifies recovery of the default disk-backed
+Peerbit store after forced process termination immediately following `fsync`,
+but that is not a claim that every custom mount target survives host power loss.
 
 `peerbit-fs create` is access-controlled by default. Use `peerbit-fs create
 --no-auth` only for explicitly unauthenticated test/demo filesystems. Another
@@ -307,6 +316,12 @@ The first adapter path is intentionally experimental:
   binary using cgofuse for Linux FUSE, macFUSE, and WinFsp.
   `peerbit-fs install-adapter` downloads the matching prebuilt adapter when a
   release asset exists.
+
+The portable backend distinguishes `flush` from the stronger handle fence used
+by `fsync`/`release`: a flush publishes one frozen buffer generation, while an
+fsync/release drains mutations accepted during an in-flight publication before
+returning. This closes an editor-save race, but the current target interface
+still has no backend-independent hardware cache or power-loss barrier.
 
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
@@ -474,6 +489,15 @@ The guarantee is deliberately narrow:
 This is stronger than a changeset barrier: `awaitChangeset()` proves local
 admission and readability, while `prepareForDisposal()` requests persisted
 remote delivery for every entry in the captured disposal closure.
+
+The portable durability campaign also exercises the operational boundary: it
+forces the three authenticated replica instances to terminate without
+`Peerbit.stop()` immediately after a persisted `minAcks: 2` result, deletes the
+source directory, and reopens each acknowledged custodian alone with remote
+chunk fetching disabled. That proves recovery after application-process death
+on the tested disk backend. It does not emulate a kernel/host power cut or
+storage-controller cache loss; those require a VM or hardware power-fault
+campaign whose storage stack is configured and observed explicitly.
 
 ## Unattended lifecycle
 

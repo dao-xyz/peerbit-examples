@@ -305,7 +305,7 @@ describe("shared fs mount backend", () => {
         expect((await fs.stat("/new-directory"))?.kind).toBe("directory");
     });
 
-    it("freezes in-flight commit bytes while later writes remain dirty", async () => {
+    it("keeps a concurrent later write dirty after one flush pass", async () => {
         let writeStarted!: () => void;
         let allowWrite!: () => void;
         const started = new Promise<void>((resolve) => {
@@ -348,6 +348,206 @@ describe("shared fs mount backend", () => {
         expect(decode(await fs.readFile("/during-flush.txt"))).toBe("old");
         await backend.release(handle);
         expect(decode(await fs.readFile("/during-flush.txt"))).toBe("new");
+        expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("drains concurrent buffer mutations before fsync resolves", async () => {
+        let firstWriteStarted!: () => void;
+        let secondWriteStarted!: () => void;
+        let allowFirstWrite!: () => void;
+        let allowSecondWrite!: () => void;
+        const firstStarted = new Promise<void>((resolve) => {
+            firstWriteStarted = resolve;
+        });
+        const secondStarted = new Promise<void>((resolve) => {
+            secondWriteStarted = resolve;
+        });
+        const firstAllowed = new Promise<void>((resolve) => {
+            allowFirstWrite = resolve;
+        });
+        const secondAllowed = new Promise<void>((resolve) => {
+            allowSecondWrite = resolve;
+        });
+        let writes = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                writes++;
+                if (writes === 1) {
+                    firstWriteStarted();
+                    await firstAllowed;
+                } else if (writes === 2) {
+                    secondWriteStarted();
+                    await secondAllowed;
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/during-fsync.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("aaa"), 0);
+
+        const syncing = backend.fsync(handle);
+        await firstStarted;
+        await backend.write(handle, encode("bbb"), 0);
+        allowFirstWrite();
+        await secondStarted;
+        await backend.write(handle, encode("ccc"), 0);
+        allowSecondWrite();
+        await syncing;
+
+        expect(decode(await fs.readFile("/during-fsync.txt"))).toBe("ccc");
+        expect(writeFile).toHaveBeenCalledTimes(3);
+        await backend.release(handle);
+        expect(writeFile).toHaveBeenCalledTimes(3);
+    });
+
+    it("drains accepted writes and rejects mutations after release begins", async () => {
+        let writeStarted!: () => void;
+        let allowWrite!: () => void;
+        const started = new Promise<void>((resolve) => {
+            writeStarted = resolve;
+        });
+        const allowed = new Promise<void>((resolve) => {
+            allowWrite = resolve;
+        });
+        let writes = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                writes++;
+                if (writes === 1) {
+                    writeStarted();
+                    await allowed;
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/during-release.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("accepted"), 0);
+
+        const flushing = backend.flush(handle);
+        await started;
+        await backend.write(handle, encode("new value"), 0);
+        const releasing = backend.release(handle);
+        await expect(
+            backend.write(handle, encode("too late"), 0)
+        ).rejects.toMatchObject({ code: "EBADF" });
+        await expect(backend.truncate(handle, 1)).rejects.toMatchObject({
+            code: "EBADF",
+        });
+        allowWrite();
+        await Promise.all([flushing, releasing]);
+
+        expect(decode(await fs.readFile("/during-release.txt"))).toBe(
+            "new value"
+        );
+        expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("shares one in-flight fence across concurrent release calls", async () => {
+        let writeStarted!: () => void;
+        let allowWrite!: () => void;
+        const started = new Promise<void>((resolve) => {
+            writeStarted = resolve;
+        });
+        const allowed = new Promise<void>((resolve) => {
+            allowWrite = resolve;
+        });
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                writeStarted();
+                await allowed;
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/concurrent-release.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("once"), 0);
+
+        const firstRelease = backend.release(handle);
+        await started;
+        let secondSettled = false;
+        const secondRelease = backend.release(handle).then(() => {
+            secondSettled = true;
+        });
+        await Promise.resolve();
+        expect(secondSettled).toBe(false);
+
+        allowWrite();
+        await Promise.all([firstRelease, secondRelease]);
+        expect(decode(await fs.readFile("/concurrent-release.txt"))).toBe(
+            "once"
+        );
+        expect(writeFile).toHaveBeenCalledOnce();
+    });
+
+    it("retains a dirty closing handle when release commit fails", async () => {
+        let attempts = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                attempts++;
+                if (attempts === 1) {
+                    throw new Error("injected commit failure");
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/release-retry.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("retry me"), 0);
+
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EIO",
+            message: "injected commit failure",
+        });
+        await expect(
+            backend.write(handle, encode("too late"), 0)
+        ).rejects.toMatchObject({ code: "EBADF" });
+
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/release-retry.txt"))).toBe(
+            "retry me"
+        );
         expect(writeFile).toHaveBeenCalledTimes(2);
     });
 

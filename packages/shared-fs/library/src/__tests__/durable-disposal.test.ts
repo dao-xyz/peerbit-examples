@@ -188,9 +188,10 @@ describe("shared fs durable machine disposal", () => {
         await stopPeer(sourcePeer);
         await rm(sourceDirectory, { recursive: true, force: true });
 
-        // Power-cycle the acknowledged replica too, then open it with no
-        // network and no remote chunk fallback. Every successful read below is
-        // therefore served from the receiver's crash-safe on-disk state.
+        // Gracefully close and reopen the acknowledged replica too, then open
+        // it with no network and no remote chunk fallback. Every successful
+        // read below is therefore served from the receiver's persisted local
+        // state. Abrupt termination is covered by the process-crash harness.
         await stopPeer(receiverPeer);
         const reopenedPeer = await trackPeer({ directory: receiverDirectory });
         const reopened = await openSharedFs({
