@@ -730,6 +730,10 @@ Fleet caveats:
 - The segment ledger lives beside the store
   (`shared-fs-snapshots/<address>.json`); peers without a directory keep
   it in memory, matching their in-memory block store.
+- A normal Peerbit state directory is single-process. The ledger serializes
+  and crash-safely replaces its own sidecar, but it cannot make a custom block
+  store safe for two processes that concurrently publish and reap the same
+  blocks. Externally serialize those processes or disable `segmentReclaim`.
 - Generations published before this feature were never recorded and are
   permanently exempt (the positive-record safety rule): a one-time bloat
   that stops growing. Wipe the block store and re-replicate to reclaim
