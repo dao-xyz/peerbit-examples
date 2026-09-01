@@ -119,10 +119,21 @@ export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
 export const SHARED_FS_MOUNT_WRITE_SEMANTICS =
     "self-hashed-exact-head-noop-v1" as const;
+export const SHARED_FS_MOUNT_READ_SEMANTICS =
+    "verified-exact-version-snapshot-v1" as const;
 
 export type SharedFsMountWriteSemantics =
     typeof SHARED_FS_MOUNT_WRITE_SEMANTICS;
 export type SharedFsMountWriteOutcome = "unchanged" | "created";
+export type SharedFsMountReadSemantics = typeof SHARED_FS_MOUNT_READ_SEMANTICS;
+export type SharedFsMountReadSnapshot = {
+    /** Fresh, mutable bytes whose whole-file hash was verified by the target. */
+    bytes: Uint8Array;
+    versionId: string;
+    nodeId: string;
+    contentHash: string;
+    size: bigint;
+};
 
 /**
  * How many chunk documents are appended / fetched concurrently for one file.
@@ -4701,7 +4712,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         throw firstError;
     }
 
-    async readVersion(path: string, versionId: string) {
+    /**
+     * Exact-version read for the native-mount capability. `readFileVersion`
+     * verifies every content-addressed chunk and the assembled whole-file
+     * hash before this method exposes either the bytes or their metadata.
+     * The returned contiguous buffer is the same allocation that was
+     * verified; callers own it and may mutate it.
+     */
+    async readVersionForMount(
+        path: string,
+        versionId: string
+    ): Promise<SharedFsMountReadSnapshot | undefined> {
         const normalized = normalizeFsPath(path);
         const resolved = await this.resolvePath(normalized);
         if (!resolved || resolved.kind !== "file") {
@@ -4715,7 +4736,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return undefined;
         }
         this.pinVersions([version.id]);
-        return this.readFileVersion(version, normalized);
+        const bytes = await this.readFileVersion(version, normalized);
+        return {
+            bytes,
+            versionId: version.id,
+            nodeId: version.nodeId,
+            contentHash: version.contentHash,
+            size: version.size,
+        };
+    }
+
+    async readVersion(path: string, versionId: string) {
+        return (await this.readVersionForMount(path, versionId))?.bytes;
     }
 
     async list(path = "/"): Promise<SharedFsEntryInfo[]> {
@@ -10288,6 +10320,31 @@ export class SharedFsHandle {
         return SHARED_FS_MOUNT_WRITE_SEMANTICS;
     }
 
+    /**
+     * Versioned native-mount read handshake. Exact-version reads exposed by
+     * `readVersionForMount` have already passed chunk and whole-file hash
+     * verification, and return that same verified allocation with its bound
+     * version metadata.
+     */
+    mountReadSemantics(): SharedFsMountReadSemantics | undefined {
+        // An inherited capability must not bypass a wrapper's overridden
+        // exact-read semantics or an overridden reader on its delegated
+        // program. Such wrappers retain the legacy mount path unless they
+        // explicitly override and re-advertise this capability.
+        const usesDefaultHandleReaders =
+            this.readVersion === SharedFsHandle.prototype.readVersion &&
+            this.readVersionForMount ===
+                SharedFsHandle.prototype.readVersionForMount;
+        const usesDefaultProgramReaders =
+            this.program.readVersion ===
+                SharedFileSystem.prototype.readVersion &&
+            this.program.readVersionForMount ===
+                SharedFileSystem.prototype.readVersionForMount;
+        return usesDefaultHandleReaders && usesDefaultProgramReaders
+            ? SHARED_FS_MOUNT_READ_SEMANTICS
+            : undefined;
+    }
+
     stat(path: string) {
         return this.program.stat(path);
     }
@@ -10306,6 +10363,10 @@ export class SharedFsHandle {
 
     readVersion(path: string, versionId: string) {
         return this.program.readVersion(path, versionId);
+    }
+
+    readVersionForMount(path: string, versionId: string) {
+        return this.program.readVersionForMount(path, versionId);
     }
 
     mkdir(path: string) {

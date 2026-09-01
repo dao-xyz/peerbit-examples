@@ -214,6 +214,24 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
   src/__tests__/mount-backend-cow.bench.test.ts --reporter=verbose
 ```
 
+The separate writable-open benchmark isolates the exact-version read path for
+existing 4, 64, and 256 MiB files. In both modes its fake target allocates one
+fresh snapshot and performs one whole-file SHA-256 verification, modeling
+`SharedFileSystem.readVersion()` after chunk assembly. The fallback mount then
+hashes those bytes again for its local no-op baseline; the versioned verified
+path returns strictly bound version/node/hash/size metadata and reuses the
+target's verified hash without another byte copy or hash. It reports five-run
+p50 open, target-copy, and target-hash times plus a descriptive paired delta.
+It does not model chunk fetch/verification, Peerbit document resolution,
+authorization, replication, storage IO, commits, or read-buffer copies, and it
+has no timing budget:
+
+```bash
+PEERBIT_SHARED_FS_MOUNT_OPEN_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/mount-backend-open-hash.bench.test.ts --reporter=verbose
+```
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a

@@ -5,6 +5,7 @@ import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     DEFAULT_FILE_CHUNK_SIZE,
+    SHARED_FS_MOUNT_READ_SEMANTICS,
     encodePublicSignKey,
     openSharedFs,
     runSharedFsBenchmark,
@@ -249,6 +250,33 @@ describe("shared fs library", () => {
             baseVersionIds: heads,
         });
         expect(await fs.versions("/stable.txt")).toHaveLength(3);
+    });
+
+    it("exposes the same target-verified allocation with exact mount metadata", async () => {
+        const written = await fs.writeFile(
+            "/verified-mount-read.txt",
+            "verified snapshot"
+        );
+        expect(fs.mountReadSemantics()).toBe(SHARED_FS_MOUNT_READ_SEMANTICS);
+
+        const snapshot = await fs.readVersionForMount(
+            "/verified-mount-read.txt",
+            written.id
+        );
+        expect(snapshot).toMatchObject({
+            versionId: written.id,
+            nodeId: written.nodeId,
+            contentHash: written.contentHash,
+            size: written.size,
+        });
+        expect(decode(snapshot?.bytes)).toBe("verified snapshot");
+
+        // The assembled, verified allocation is mount-owned. Mutating it must
+        // not mutate the immutable chunk documents behind a later exact read.
+        snapshot!.bytes[0] ^= 0xff;
+        expect(
+            decode(await fs.readVersion("/verified-mount-read.txt", written.id))
+        ).toBe("verified snapshot");
     });
 
     it("delegates mount hashing without weakening exact-head no-op semantics", async () => {
