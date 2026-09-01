@@ -10,6 +10,7 @@ import {
     openSharedFs,
     type SharedFsHandle,
 } from "../index.js";
+import { FileVersion } from "../model.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -198,6 +199,188 @@ describe("shared fs cold-start bootstrap", () => {
             await reopenedPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
         }
+    });
+
+    it("retires promptly when the final pending overlay document arrives", async () => {
+        const peer = await createPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "exact-arrival-retirement",
+        });
+        const program: any = fs.program;
+        const pending = (id: string) =>
+            new Map([
+                [id, { nodeId: "exact-arrival-node", kind: "file-version" }],
+            ]);
+        const version = (id: string) =>
+            new FileVersion({
+                id,
+                nodeId: "exact-arrival-node",
+                causalDepth: 1n,
+                contentHash: "empty",
+                size: 0n,
+                chunkIds: [],
+                createdAt: 1n,
+                authorKey: "test-author",
+                machineLabel: "test-machine",
+            });
+        program.bootstrapPhase = "overlay-active";
+        program.bootstrapVerified = false;
+        program.guardArmed = false;
+        program.overlayPending = pending("first-final-id");
+
+        // Exercise the real Documents change consumer. This fixture does not
+        // start the five-second supersession sweep, so verified convergence
+        // can only happen through the exact non-empty -> empty transition.
+        program.changeListener({
+            detail: { added: [version("first-final-id")], removed: [] },
+        });
+        expect(program.overlayPending.size).toBe(0);
+        const firstTimer = program.verifiedRetirementTimer;
+        expect(firstTimer).toBeDefined();
+
+        // Concurrent sweep completion must reuse the already scheduled check.
+        program.maybeRetireVerified();
+        expect(program.verifiedRetirementTimer).toBe(firstTimer);
+
+        // Additions do not shrink the view and leave the coalescing deadline
+        // alone, while a metadata-removal burst restarts the quiet check.
+        program.changeListener({
+            detail: { added: [version("later-addition")], removed: [] },
+        });
+        expect(program.verifiedRetirementTimer).toBe(firstTimer);
+        program.changeListener({
+            detail: { added: [], removed: [version("later-removal")] },
+        });
+        expect(program.verifiedRetirementTimer).toBeDefined();
+        expect(program.verifiedRetirementTimer).not.toBe(firstTimer);
+
+        // The same cancellation path used by close/reopen must disarm it.
+        program.clearBootstrapTimers();
+        expect(program.verifiedRetirementTimer).toBeUndefined();
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(program.bootstrapPhase).toBe("overlay-active");
+
+        // A subsequent generation of pending work can schedule normally and
+        // converges after the 300 ms double-check, without a sweep tick.
+        program.overlayPending = pending("second-final-id");
+        program.changeListener({
+            detail: { added: [version("second-final-id")], removed: [] },
+        });
+        await waitUntil(
+            () => {
+                expect(program.bootstrapPhase).toBe("converged");
+                expect(program.bootstrapVerified).toBe(true);
+            },
+            { timeoutMs: 1_500, intervalMs: 10 }
+        );
+    });
+
+    it("reconciles already-covered and empty overlays immediately", async () => {
+        const peer = await createPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "immediate-retirement-reconcile",
+        });
+        const program: any = fs.program;
+        const generation = program.openGeneration;
+        program.bootstrapPhase = "overlay-active";
+        program.bootstrapVerified = false;
+        program.guardArmed = false;
+
+        // A verified empty snapshot has no final change event to wake the
+        // tracker, but must still schedule the verified double-check now.
+        program.overlayPending = new Map();
+        program.startRetirementTracking(generation);
+        expect(program.verifiedRetirementTimer).toBeDefined();
+        program.clearBootstrapTimers();
+
+        // Likewise, replication may have committed a snapshot id before the
+        // overlay was installed. The initial query reconciles that state
+        // without waiting for the five-second interval.
+        program.overlayPending = new Map([
+            [
+                "already-present",
+                {
+                    nodeId: "already-present-node",
+                    kind: "file-version",
+                },
+            ],
+        ]);
+        program.queryRows = async () => [
+            {
+                id: "already-present",
+                nodeId: "already-present-node",
+                kind: "file-version",
+                causalRefs: [],
+                causalDepth: 1n,
+            },
+        ];
+        program.startRetirementTracking(generation);
+        await waitUntil(
+            () => {
+                expect(program.overlayPending.size).toBe(0);
+                expect(program.verifiedRetirementTimer).toBeDefined();
+            },
+            { timeoutMs: 1_000, intervalMs: 5 }
+        );
+        program.clearBootstrapTimers();
+    });
+
+    it("ignores a supersession query that completes after reopen", async () => {
+        const peer = await createPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "stale-retirement-sweep",
+        });
+        const program: any = fs.program;
+        const originalGeneration = program.openGeneration;
+        const originalQueryRows = program.queryRows.bind(program);
+        let resolveQuery!: (rows: unknown[]) => void;
+        program.bootstrapPhase = "overlay-active";
+        program.overlayPending = new Map([
+            [
+                "same-id-across-reopen",
+                { nodeId: "same-node", kind: "file-version" },
+            ],
+        ]);
+        program.queryRows = () =>
+            new Promise<unknown[]>((resolve) => {
+                resolveQuery = resolve;
+            });
+
+        const staleSweep = program.supersessionSweep(originalGeneration);
+        await waitUntil(() => expect(resolveQuery).toBeTypeOf("function"), {
+            timeoutMs: 1_000,
+            intervalMs: 5,
+        });
+        const reopenedGeneration = originalGeneration + 1;
+        program.openGeneration = reopenedGeneration;
+        program.overlayPending = new Map([
+            [
+                "same-id-across-reopen",
+                { nodeId: "same-node", kind: "file-version" },
+            ],
+        ]);
+        // Model a new generation that began its own sweep before the stale
+        // query returned; the old finally must not clear this ownership.
+        program.sweepRunningGeneration = reopenedGeneration;
+        resolveQuery([
+            {
+                id: "same-id-across-reopen",
+                nodeId: "same-node",
+                kind: "file-version",
+                causalRefs: [],
+                causalDepth: 1n,
+            },
+        ]);
+        await staleSweep;
+        expect(program.overlayPending.has("same-id-across-reopen")).toBe(true);
+        expect(program.sweepRunningGeneration).toBe(reopenedGeneration);
+
+        program.queryRows = originalQueryRows;
+        program.sweepRunningGeneration = undefined;
+        program.bootstrapPhase = "off";
     });
 
     it("keeps fresh observers closed unless partial writes are explicit", async () => {
