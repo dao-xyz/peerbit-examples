@@ -685,7 +685,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         }
                         throw error;
                     }
-                    const backend = createSharedFsMountBackend(fsHandle);
+                    const backend = createSharedFsMountBackend(fsHandle, {
+                        // SharedFileSystem treats chunk input as immutable and
+                        // may retain its views, so the backend transfers a
+                        // stable COW snapshot instead of copying on release.
+                        writeFileInput: "immutable-borrowed",
+                    });
                     const externalAdapter = await resolveExternalNativeAdapter(
                         argv.nativeAdapter
                     );

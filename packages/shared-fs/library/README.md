@@ -193,6 +193,19 @@ shorter diagnostic or a longer soak. This benchmark uses normal write
 readiness and disables remote chunk fallback; it does not use the
 `allowPartialWrites` recovery escape hatch.
 
+The mount backend's manual copy-on-write benchmark isolates 4, 64, and 256 MiB
+commit buffers behind a gated fake target that retains the immutable commit
+input after resolution. Each size runs in a fresh `--expose-gc` child and
+reports commit time, first post-commit mutation time, and
+RSS/external/ArrayBuffer memory snapshots and deltas. The numbers are
+descriptive only; there are no performance budgets:
+
+```bash
+PEERBIT_SHARED_FS_MOUNT_COW_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/mount-backend-cow.bench.test.ts --reporter=verbose
+```
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
