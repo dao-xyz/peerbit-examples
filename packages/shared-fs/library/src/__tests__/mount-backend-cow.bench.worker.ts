@@ -180,6 +180,7 @@ const run = async (
         writeFileInput: "immutable-borrowed",
     });
     const handle = await backend.open("/cow-benchmark.bin", {
+        read: true,
         write: true,
         create: true,
         truncate: true,
