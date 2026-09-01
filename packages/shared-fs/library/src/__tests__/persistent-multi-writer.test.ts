@@ -13,11 +13,6 @@ import {
 const WAIT_TIMEOUT_MS = process.env.CI ? 120_000 : 45_000;
 const TEST_TIMEOUT_MS = process.env.CI ? 240_000 : 150_000;
 
-// @peerbit/shared-log does not export this session capability from its package
-// root yet. Keep the wire bit aligned with its durable-delivery integration
-// tests so this scenario waits for actual receipt-capable remote leaders.
-const PERSISTED_ENTRY_RECEIPTS_CAPABILITY = 1 << 5;
-
 const bytesEqual = (left: Uint8Array | undefined, right: Uint8Array) =>
     !!left &&
     left.byteLength === right.byteLength &&
@@ -79,21 +74,43 @@ describe("shared fs persistent multi-writer lifecycle", () => {
 
     const waitForRemoteReceiptCapability = async (
         source: SharedFsHandle,
-        remote: Peerbit,
+        remote: Peerbit | Peerbit[],
         log: any = source.program.entries.log
     ) => {
-        await log.waitForReplicator(remote.identity.publicKey, {
-            roleAge: 0,
-            timeout: WAIT_TIMEOUT_MS,
-        });
-        const remoteHash = remote.identity.publicKey.hashcode();
-        await waitUntil(() => {
-            const capabilities = (
-                log as { _peerSyncCapabilities: Map<string, number> }
-            )._peerSyncCapabilities.get(remoteHash);
-            expect(
-                (capabilities ?? 0) & PERSISTED_ENTRY_RECEIPTS_CAPABILITY
-            ).toBe(PERSISTED_ENTRY_RECEIPTS_CAPABILITY);
+        const remotes = Array.isArray(remote) ? remote : [remote];
+        const remoteHashes = remotes.map((peer) =>
+            peer.identity.publicKey.hashcode()
+        );
+        await waitUntil(async () => {
+            // Retry a quiet same-identity reconnect readiness exchange before
+            // any irreversible persisted-delivery commit has been admitted.
+            await Promise.all(
+                remotes.map((peer) =>
+                    log.waitForReplicator(peer.identity.publicKey, {
+                        timeout: Math.min(15_000, WAIT_TIMEOUT_MS),
+                    })
+                )
+            );
+            // Persisted delivery rejects stale capability sessions and plans
+            // leaders afresh for each exact entry. Assert those same facts for
+            // both custodians at once so minAcks:2 cannot pass a split view.
+            for (const remoteHash of remoteHashes) {
+                expect(
+                    log.persistedReceiptPeerSession(remoteHash)
+                ).toBeDefined();
+            }
+            const entries = await log.log.toArray();
+            const replicas = log.replicas.min.getValue(log);
+            for (const entry of entries) {
+                const leaders = await log.findLeadersFromEntry(
+                    entry,
+                    replicas,
+                    { freshLeaderPlan: true }
+                );
+                for (const remoteHash of remoteHashes) {
+                    expect(leaders.has(remoteHash)).toBe(true);
+                }
+            }
         });
     };
 
@@ -266,11 +283,18 @@ describe("shared fs persistent multi-writer lifecycle", () => {
             );
             const allChangesetsAdmittedMs = performance.now() - batchStartedAt;
             for (const fs of handles) {
-                for (const [path, expected] of expectedFiles) {
-                    expect(bytesEqual(await fs.readFile(path), expected)).toBe(
-                        true
-                    );
-                }
+                // A changeset manifest proves that its version and naming
+                // members arrived; chunks replicate on their own log. Wait on
+                // the invariant this campaign actually needs before disabling
+                // remote fetch or restarting a replica: every referenced byte
+                // is locally readable on every custodian.
+                await waitUntil(async () => {
+                    for (const [path, expected] of expectedFiles) {
+                        expect(
+                            bytesEqual(await fs.readFile(path), expected)
+                        ).toBe(true);
+                    }
+                });
             }
             const allBatchBytesReadableMs = performance.now() - batchStartedAt;
 
@@ -373,16 +397,17 @@ describe("shared fs persistent multi-writer lifecycle", () => {
             // Dispose the machine that was just restarted. The two remaining
             // disk-backed writers must each acknowledge every data and trust
             // entry before its state directory is removed.
-            await Promise.all(
-                [network[0], network[1]].flatMap((remote) => [
-                    waitForRemoteReceiptCapability(reopenedWriter, remote),
-                    waitForRemoteReceiptCapability(
-                        reopenedWriter,
-                        remote,
-                        reopenedWriter.program.trustGraph!.trustGraph.log
-                    ),
-                ])
-            );
+            await Promise.all([
+                waitForRemoteReceiptCapability(reopenedWriter, [
+                    network[0],
+                    network[1],
+                ]),
+                waitForRemoteReceiptCapability(
+                    reopenedWriter,
+                    [network[0], network[1]],
+                    reopenedWriter.program.trustGraph!.trustGraph.log
+                ),
+            ]);
             const disposalStartedAt = performance.now();
             const disposal = await reopenedWriter.prepareForDisposal({
                 minAcks: 2,
