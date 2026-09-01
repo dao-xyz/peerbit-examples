@@ -63,6 +63,17 @@ export type SharedFsMountBackendTarget = {
     };
 };
 
+export type SharedFsMountBackendOptions = {
+    /**
+     * Avoid an eager file-sized commit copy by giving `writeFile` an immutable
+     * Uint8Array view. The target may retain that view indefinitely, but must
+     * never mutate it; the backend detaches before any later handle mutation.
+     * Unknown/custom targets keep the isolated-copy default for backwards
+     * compatibility.
+     */
+    writeFileInput?: "immutable-borrowed";
+};
+
 export type SharedFsOpenFlags =
     | number
     | string
@@ -135,6 +146,8 @@ type OpenHandle = {
     path: string;
     /** Backing store; may be larger than `length`. */
     buffer: Uint8Array;
+    /** Commit snapshot currently borrowing `buffer` from this handle. */
+    borrowedCommitSnapshot?: CommitSnapshot;
     /** Logical file length. */
     length: number;
     write: boolean;
@@ -166,6 +179,12 @@ type OpenHandle = {
      * metadata while writes continue on the same handle; this generation keeps
      * an older no-op check from clearing the newer write's dirty bit.
      */
+    mutationGeneration: number;
+};
+
+type CommitSnapshot = {
+    buffer: Uint8Array;
+    length: number;
     mutationGeneration: number;
 };
 
@@ -360,21 +379,26 @@ const findEntry = async (
     return entries.find((entry) => entry.name === basename(normalized));
 };
 
-const growTo = (handle: OpenHandle, capacity: number) => {
-    if (handle.buffer.byteLength >= capacity) {
+const ensureMutableCapacity = (handle: OpenHandle, capacity: number) => {
+    const borrowedSnapshot = handle.borrowedCommitSnapshot;
+    const borrowed = borrowedSnapshot?.buffer === handle.buffer;
+    if (!borrowed && handle.buffer.byteLength >= capacity) {
         return;
     }
-    let next = Math.max(handle.buffer.byteLength * 2, 64 * 1024);
-    while (next < capacity) {
-        next *= 2;
+    let next = handle.buffer.byteLength;
+    if (next < capacity) {
+        next = Math.max(next * 2, 64 * 1024);
+        while (next < capacity) {
+            next *= 2;
+        }
     }
     const buffer = new Uint8Array(next);
     buffer.set(handle.buffer.subarray(0, handle.length));
     handle.buffer = buffer;
+    if (borrowed && handle.borrowedCommitSnapshot === borrowedSnapshot) {
+        handle.borrowedCommitSnapshot = undefined;
+    }
 };
-
-const contentOf = (handle: OpenHandle) =>
-    handle.buffer.subarray(0, handle.length);
 
 const sameHeads = (left?: string[], right?: string[]) => {
     if (left === undefined || right === undefined) {
@@ -398,11 +422,13 @@ const resizeHandle = (handle: OpenHandle, size: number) => {
     if (size < 0 || !Number.isFinite(size)) {
         throw new SharedFsBackendError("EINVAL", `Invalid size: ${size}`);
     }
+    if (size !== handle.length) {
+        ensureMutableCapacity(handle, size);
+    }
     if (size < handle.length) {
         // Zero the tail so a later grow does not resurrect stale bytes.
         handle.buffer.fill(0, size, handle.length);
     } else if (size > handle.length) {
-        growTo(handle, size);
         handle.buffer.fill(0, handle.length, size);
     }
     handle.length = size;
@@ -411,7 +437,8 @@ const resizeHandle = (handle: OpenHandle, size: number) => {
 };
 
 export const createSharedFsMountBackend = (
-    target: SharedFsMountBackendTarget
+    target: SharedFsMountBackendTarget,
+    options: SharedFsMountBackendOptions = {}
 ): SharedFsMountBackend => {
     const handles = new Map<number, OpenHandle>();
     let nextHandle = 1;
@@ -511,55 +538,85 @@ export const createSharedFsMountBackend = (
                 `Path is read-only: ${handle.path}`
             );
         }
-        // Freeze this commit's bytes. The backing buffer remains writable
-        // while writeFile awaits chunk/document IO; a subarray view here
-        // would let a concurrent write mutate the in-flight version.
-        const bytes = contentOf(handle).slice();
-        const contentHash = sha256Base64Sync(bytes);
-        const mutationGeneration = handle.mutationGeneration;
+        const snapshot: CommitSnapshot = {
+            buffer: handle.buffer,
+            length: handle.length,
+            mutationGeneration: handle.mutationGeneration,
+        };
+        // A subarray would retain unused geometric-growth capacity forever in
+        // targets that keep chunk views. Borrow only exact-sized buffers;
+        // otherwise preserve the legacy exact-length copy.
+        const borrowInput =
+            options.writeFileInput === "immutable-borrowed" &&
+            snapshot.buffer.byteLength === snapshot.length &&
+            snapshot.buffer.byteOffset === 0 &&
+            snapshot.buffer.buffer instanceof ArrayBuffer &&
+            snapshot.buffer.buffer.byteLength === snapshot.length;
         if (
-            handle.baseContentHash !== undefined &&
-            handle.baseContentHash === contentHash &&
-            (handle.baseVersionIds?.length ?? 0) <= 1 &&
-            handle.openedHeadVersionIds !== undefined
+            borrowInput &&
+            handle.borrowedCommitSnapshot?.buffer !== snapshot.buffer
         ) {
-            // An equal byte buffer is a no-op only while the exact content
-            // head snapshot opened by this handle is still current. A
-            // same-node concurrent version must not make an explicit rewrite
-            // disappear: fall through and publish it as a concurrent head.
-            const current = await findEntry(target, handle.path);
-            const sameNode =
-                typeof handle.openedNodeId === "string" &&
-                current?.kind === "file" &&
-                current.nodeId === handle.openedNodeId;
-            if (!sameNode) {
-                throw new SharedFsBackendError(
-                    "EAGAIN",
-                    `Path changed after it was opened: ${handle.path}`
-                );
-            }
-            if (
-                current.headVersionIds !== undefined &&
-                sameHeads(handle.openedHeadVersionIds, current.headVersionIds)
-            ) {
-                // Editors flush/fsync liberally: do not mint a new version
-                // when neither the bytes nor the exact causal snapshot moved.
-                // A write may have changed the backing buffer while the stat
-                // above was in flight. In that case this frozen snapshot is
-                // still a no-op, but the newer buffer must remain dirty.
-                if (handle.mutationGeneration === mutationGeneration) {
-                    handle.dirty = false;
-                }
-                return;
-            }
+            // Concurrent mutations detach lazily, keeping these exact bytes
+            // stable without copying the whole file on the common path.
+            handle.borrowedCommitSnapshot = snapshot;
         }
-        // Clear before awaiting only when this frozen buffer is still current.
-        // The same-head validation above may itself have awaited while a newer
-        // write mutated the handle; that newer generation must remain dirty.
-        if (handle.mutationGeneration === mutationGeneration) {
-            handle.dirty = false;
-        }
+        let inputExposed = false;
         try {
+            const bytes = borrowInput
+                ? snapshot.buffer.subarray(0, snapshot.length)
+                : snapshot.buffer.slice(0, snapshot.length);
+            const contentHash = sha256Base64Sync(bytes);
+            if (
+                handle.baseContentHash !== undefined &&
+                handle.baseContentHash === contentHash &&
+                (handle.baseVersionIds?.length ?? 0) <= 1 &&
+                handle.openedHeadVersionIds !== undefined
+            ) {
+                // An equal byte buffer is a no-op only while the exact content
+                // head snapshot opened by this handle is still current. A
+                // same-node concurrent version must not make an explicit
+                // rewrite disappear: fall through and publish it as a
+                // concurrent head.
+                const current = await findEntry(target, handle.path);
+                const sameNode =
+                    typeof handle.openedNodeId === "string" &&
+                    current?.kind === "file" &&
+                    current.nodeId === handle.openedNodeId;
+                if (!sameNode) {
+                    throw new SharedFsBackendError(
+                        "EAGAIN",
+                        `Path changed after it was opened: ${handle.path}`
+                    );
+                }
+                if (
+                    current.headVersionIds !== undefined &&
+                    sameHeads(
+                        handle.openedHeadVersionIds,
+                        current.headVersionIds
+                    )
+                ) {
+                    // Editors flush/fsync liberally: do not mint a new version
+                    // when neither the bytes nor the exact causal snapshot
+                    // moved. A write may have detached the backing buffer
+                    // while the stat above was in flight. In that case this
+                    // snapshot is still a no-op, but the newer buffer must
+                    // remain dirty.
+                    if (
+                        handle.mutationGeneration ===
+                        snapshot.mutationGeneration
+                    ) {
+                        handle.dirty = false;
+                    }
+                    return;
+                }
+            }
+            // Clear before awaiting only when this snapshot's generation is
+            // still current. The same-head validation above may itself have
+            // awaited while a newer write mutated the handle; that newer
+            // generation must remain dirty.
+            if (handle.mutationGeneration === snapshot.mutationGeneration) {
+                handle.dirty = false;
+            }
             const writeOptions: WriteFileOptions & {
                 expectedNodeId?: string | null;
             } = {
@@ -569,6 +626,7 @@ export const createSharedFsMountBackend = (
                 // means this handle created a path that must still be absent.
                 expectedNodeId: handle.openedNodeId,
             };
+            inputExposed = borrowInput;
             const result = await target.writeFile(
                 handle.path,
                 bytes,
@@ -623,6 +681,10 @@ export const createSharedFsMountBackend = (
         } catch (error) {
             handle.dirty = true;
             throw error;
+        } finally {
+            if (handle.borrowedCommitSnapshot === snapshot && !inputExposed) {
+                handle.borrowedCommitSnapshot = undefined;
+            }
         }
     };
 
@@ -988,7 +1050,9 @@ export const createSharedFsMountBackend = (
                 );
             }
             const end = offset + data.byteLength;
-            growTo(openHandle, end);
+            if (data.byteLength > 0 || offset > openHandle.length) {
+                ensureMutableCapacity(openHandle, end);
+            }
             if (offset > openHandle.length) {
                 // Sparse write: zero the gap.
                 openHandle.buffer.fill(0, openHandle.length, offset);

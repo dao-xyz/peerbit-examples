@@ -37,6 +37,54 @@ const mountTarget = (
     ...overrides,
 });
 
+const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((resolvePromise) => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
+};
+
+const gatedBorrowingBackend = (
+    fs: SharedFsHandle,
+    openedBytes: Uint8Array,
+    options: { failCalls?: number } = {}
+) => {
+    const firstStarted = deferred();
+    const firstAllowed = deferred();
+    const inputs: Uint8Array[] = [];
+    let calls = 0;
+    const writeFile = vi.fn(
+        async (
+            path: string,
+            source: Uint8Array | string | AsyncIterable<Uint8Array>,
+            writeOptions?: WriteFileOptions
+        ) => {
+            if (!(source instanceof Uint8Array)) {
+                throw new Error("mount commits must use Uint8Array input");
+            }
+            calls++;
+            inputs.push(source);
+            if (calls === 1) {
+                firstStarted.resolve();
+                await firstAllowed.promise;
+            }
+            if (calls <= (options.failCalls ?? 0)) {
+                throw new Error("injected commit failure");
+            }
+            return fs.writeFile(path, source, writeOptions);
+        }
+    );
+    const backend = createSharedFsMountBackend(
+        mountTarget(fs, {
+            readVersion: async () => openedBytes,
+            writeFile,
+        }),
+        { writeFileInput: "immutable-borrowed" }
+    );
+    return { backend, firstStarted, firstAllowed, inputs, writeFile };
+};
+
 describe("shared fs mount backend", () => {
     let peer: Peerbit;
     let fs: SharedFsHandle;
@@ -350,6 +398,298 @@ describe("shared fs mount backend", () => {
         await backend.release(handle);
         expect(decode(await fs.readFile("/during-flush.txt"))).toBe("new");
         expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("borrows a commit snapshot and detaches an overlapping write", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/cow-overlap.txt", openedBytes.slice());
+        const { backend, firstStarted, firstAllowed, inputs, writeFile } =
+            gatedBorrowingBackend(fs, openedBytes);
+        const handle = await backend.open("/cow-overlap.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("old!"), 0);
+
+        const flushing = backend.flush(handle);
+        await firstStarted.promise;
+        expect(inputs[0].buffer).toBe(openedBytes.buffer);
+        expect(decode(inputs[0])).toBe("old!");
+
+        await backend.write(handle, encode("new!"), 0);
+        expect(decode(inputs[0])).toBe("old!");
+        firstAllowed.resolve();
+        await flushing;
+
+        expect(decode(await fs.readFile("/cow-overlap.txt"))).toBe("old!");
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/cow-overlap.txt"))).toBe("new!");
+        expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a settled immutable snapshot stable across a later handle write", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/cow-settled.txt", openedBytes.slice());
+        const inputs: Uint8Array[] = [];
+        const committedIds: string[] = [];
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                inputs.push(source);
+                const result = await fs.writeFile(path, source, options);
+                committedIds.push(result.id);
+                return result;
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                readVersion: async () => openedBytes,
+                writeFile,
+            }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/cow-settled.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("old!"), 0);
+        await backend.flush(handle);
+
+        expect(inputs[0].buffer).toBe(openedBytes.buffer);
+        expect(decode(await fs.readFile("/cow-settled.txt"))).toBe("old!");
+        // Dirty operations that do not actually mutate bytes must not replace
+        // and then clear the already-exposed protection token on their no-op
+        // commit path.
+        await backend.truncate(handle, 4);
+        await backend.write(handle, new Uint8Array(0), 0);
+        await backend.flush(handle);
+        expect(writeFile).toHaveBeenCalledOnce();
+
+        await backend.write(handle, encode("new!"), 0);
+
+        // SharedFileSystem retains chunk views after writeFile resolves. The
+        // next handle mutation must detach instead of corrupting that version.
+        expect(decode(inputs[0])).toBe("old!");
+        expect(decode(await fs.readFile("/cow-settled.txt"))).toBe("old!");
+        expect(
+            decode(await fs.readVersion("/cow-settled.txt", committedIds[0]))
+        ).toBe("old!");
+
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/cow-settled.txt"))).toBe("new!");
+        expect(
+            decode(await fs.readVersion("/cow-settled.txt", committedIds[0]))
+        ).toBe("old!");
+    });
+
+    it("copies logical bytes instead of lending oversized buffer slack", async () => {
+        const inputs: Uint8Array[] = [];
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                inputs.push(source);
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/cow-slack.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        // Geometric growth gives this one-byte file 64 KiB of handle capacity.
+        await backend.write(handle, encode("a"), 0);
+        await backend.flush(handle);
+
+        expect(inputs[0].byteLength).toBe(1);
+        expect(inputs[0].buffer.byteLength).toBe(1);
+        await backend.write(handle, encode("b"), 0);
+        expect(decode(inputs[0])).toBe("a");
+        expect(decode(await fs.readFile("/cow-slack.txt"))).toBe("a");
+
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/cow-slack.txt"))).toBe("b");
+    });
+
+    it("copies an exact-length view backed by an oversized allocation", async () => {
+        const backing = new Uint8Array(64 * 1024);
+        const openedBytes = backing.subarray(100, 104);
+        openedBytes.set(encode("base"));
+        await fs.writeFile("/cow-view-slack.txt", openedBytes.slice());
+        const inputs: Uint8Array[] = [];
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                inputs.push(source);
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                readVersion: async () => openedBytes,
+                writeFile,
+            }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/cow-view-slack.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("save"), 0);
+        await backend.flush(handle);
+
+        expect(inputs[0].byteLength).toBe(4);
+        expect(inputs[0].buffer.byteLength).toBe(4);
+        expect(inputs[0].buffer).not.toBe(backing.buffer);
+        await backend.release(handle);
+    });
+
+    it("keeps a borrowed commit snapshot stable across an overlapping shrink", async () => {
+        const openedBytes = encode("ABCDEFGH");
+        await fs.writeFile("/cow-shrink.txt", openedBytes.slice());
+        const { backend, firstStarted, firstAllowed, inputs } =
+            gatedBorrowingBackend(fs, openedBytes);
+        const handle = await backend.open("/cow-shrink.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("1234"), 0);
+
+        const flushing = backend.flush(handle);
+        await firstStarted.promise;
+        expect(decode(inputs[0])).toBe("1234EFGH");
+
+        await backend.truncate(handle, 3);
+        expect(decode(inputs[0])).toBe("1234EFGH");
+        firstAllowed.resolve();
+        await flushing;
+
+        expect(decode(await fs.readFile("/cow-shrink.txt"))).toBe("1234EFGH");
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/cow-shrink.txt"))).toBe("123");
+    });
+
+    it("keeps a borrowed commit snapshot stable across an overlapping sparse grow", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/cow-grow.txt", openedBytes.slice());
+        const { backend, firstStarted, firstAllowed, inputs } =
+            gatedBorrowingBackend(fs, openedBytes);
+        const handle = await backend.open("/cow-grow.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("old!"), 0);
+
+        const flushing = backend.flush(handle);
+        await firstStarted.promise;
+        const sparseOffset = 70 * 1024;
+        await backend.write(handle, encode("Z"), sparseOffset);
+        expect(decode(inputs[0])).toBe("old!");
+        firstAllowed.resolve();
+        await flushing;
+        await backend.release(handle);
+
+        const committed = await fs.readFile("/cow-grow.txt");
+        expect(committed?.byteLength).toBe(sparseOffset + 1);
+        expect(decode(committed?.subarray(0, 4))).toBe("old!");
+        expect(
+            committed?.subarray(4, sparseOffset).every((byte) => byte === 0)
+        ).toBe(true);
+        expect(committed?.[sparseOffset]).toBe("Z".charCodeAt(0));
+    });
+
+    it("keeps rejected immutable snapshots stable across concurrent and later mutations", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/cow-failure.txt", openedBytes.slice());
+        const { backend, firstStarted, firstAllowed, inputs, writeFile } =
+            gatedBorrowingBackend(fs, openedBytes, { failCalls: 2 });
+        const handle = await backend.open("/cow-failure.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("old!"), 0);
+
+        const flushing = backend.flush(handle);
+        await firstStarted.promise;
+        await backend.write(handle, encode("mid!"), 0);
+        expect(decode(inputs[0])).toBe("old!");
+        firstAllowed.resolve();
+        await expect(flushing).rejects.toMatchObject({ code: "EIO" });
+
+        // A second rejection occurs without an overlapping mutation, leaving
+        // its exposed marker responsible for the later detachment.
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+        });
+        await backend.write(handle, encode("new!"), 0);
+        expect(decode(inputs[0])).toBe("old!");
+        expect(decode(inputs[1])).toBe("mid!");
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/cow-failure.txt"))).toBe("new!");
+        expect(writeFile).toHaveBeenCalledTimes(3);
+    });
+
+    it("isolates custom targets that mutate and retain commit input by default", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/isolated-target.txt", openedBytes.slice());
+        let retained: Uint8Array | undefined;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                retained = source;
+                const result = await fs.writeFile(path, source, options);
+                source.fill("x".charCodeAt(0));
+                return result;
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                readVersion: async () => openedBytes,
+                writeFile,
+            })
+        );
+        const handle = await backend.open("/isolated-target.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("save"), 0);
+        await backend.flush(handle);
+
+        expect(retained?.buffer).not.toBe(openedBytes.buffer);
+        expect(decode(retained)).toBe("xxxx");
+        expect(decode(await backend.read(handle, 4, 0))).toBe("save");
+        retained?.fill("y".charCodeAt(0));
+        expect(decode(await backend.read(handle, 4, 0))).toBe("save");
+
+        await backend.release(handle);
+        expect(writeFile).toHaveBeenCalledOnce();
     });
 
     it("drains concurrent buffer mutations before fsync resolves", async () => {
