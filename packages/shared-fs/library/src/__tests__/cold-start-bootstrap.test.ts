@@ -1204,7 +1204,9 @@ describe("shared fs cold-start bootstrap", () => {
             );
             const statusAtReady = joiner.bootstrapStatus();
             expect(statusAtReady.writeReady).toBe(false);
-            await expect(
+            // Attach every call-time contract assertion before yielding: the
+            // overlay may legitimately converge as soon as this turn ends.
+            const earlyWriteAssertion = expect(
                 joiner.writeFile("/from-joiner.txt", "too early")
             ).rejects.toMatchObject({
                 name: "SharedFsWritePendingError",
@@ -1213,6 +1215,26 @@ describe("shared fs cold-start bootstrap", () => {
                 retrySafe: true,
             });
             if (statusAtReady.phase === "overlay-active") {
+                // Attach all three scans before yielding. The overlay can
+                // legitimately finish replicating while the readable-tree
+                // assertions below await remote chunks; the partial-view
+                // contract applies at call time, not to an earlier status
+                // snapshot.
+                const scanAssertions = [
+                    expect(joiner.namingConflicts()).rejects.toThrow(
+                        BootstrapPendingError
+                    ),
+                    expect(
+                        joiner.versionsByChangeset("anything")
+                    ).rejects.toThrow(BootstrapPendingError),
+                    expect(
+                        joiner.namingConflicts(undefined, {
+                            allowPartial: true,
+                        })
+                    ).resolves.toBeDefined(),
+                ];
+                await Promise.all([earlyWriteAssertion, ...scanAssertions]);
+
                 // The whole point: the tree is correct while the log is
                 // still replicating behind it.
                 expect(statusAtReady.pendingDocs).toBeGreaterThan(0);
@@ -1233,16 +1255,8 @@ describe("shared fs cold-start bootstrap", () => {
                 expect(
                     decode(await joiner.readFile("/tree/dir-3/file-13.txt"))
                 ).toBe("content 13");
-                // Whole-store scans are gated while the view is partial.
-                await expect(joiner.namingConflicts()).rejects.toThrow(
-                    BootstrapPendingError
-                );
-                await expect(
-                    joiner.versionsByChangeset("anything")
-                ).rejects.toThrow(BootstrapPendingError);
-                await expect(
-                    joiner.namingConflicts(undefined, { allowPartial: true })
-                ).resolves.toBeDefined();
+            } else {
+                await earlyWriteAssertion;
             }
             const converged = await joiner.awaitBootstrapConverged();
             expect(converged.verified).toBe(true);
