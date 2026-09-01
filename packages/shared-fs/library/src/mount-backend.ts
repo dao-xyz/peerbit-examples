@@ -962,7 +962,11 @@ export const createSharedFsMountBackend = (
                 return new Uint8Array(0);
             }
             const end = Math.min(openHandle.length, offset + size);
-            return openHandle.buffer.subarray(offset, end);
+            // Reads are snapshots. Returning a subarray would expose the live
+            // handle buffer: caller mutation or a later write/truncate could
+            // change already-returned bytes without advancing the mutation
+            // generation or dirtying the handle.
+            return new Uint8Array(openHandle.buffer.subarray(offset, end));
         },
 
         async write(handle: number, data: Uint8Array, offset: number) {

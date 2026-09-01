@@ -97,6 +97,16 @@ jobs:
                   project_dir="$RUNNER_TEMP/shared-fs-install-smoke"
                   adapter_dir="$RUNNER_TEMP/shared-fs-native-adapter"
                   cd "$project_dir"
+                  if [[ "${GITHUB_HEAD_REF:-}" == changeset-release/* ]]; then
+                    # A version PR's package version has no matching native
+                    # release until after merge. Validate its installer against
+                    # the latest published cohort instead of waiting on an
+                    # asset that cannot exist yet.
+                    published_adapter_version="$(npm view @peerbit/shared-fs-cli version)"
+                    test -n "$published_adapter_version"
+                    export SHARED_FS_NATIVE_ADAPTER_VERSION="$published_adapter_version"
+                    echo "version PR: validating native adapter ${published_adapter_version}"
+                  fi
                   adapter_path="$(bash "$GITHUB_WORKSPACE/scripts/shared-fs-install-adapter-with-retry.sh" "$adapter_dir" node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js)"
                   test -f "$adapter_path"
                   if [ "$RUNNER_OS" != "Windows" ]; then

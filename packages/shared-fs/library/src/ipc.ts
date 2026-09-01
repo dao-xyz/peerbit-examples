@@ -58,7 +58,13 @@ type IpcResponse =
       };
 
 const encodeBytes = (bytes: Uint8Array) => ({
-    $bytes: Buffer.from(bytes).toString("base64"),
+    // Buffer.from(Uint8Array) copies. A bounded view avoids that redundant
+    // allocation while still respecting subarray offsets and lengths.
+    $bytes: Buffer.from(
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength
+    ).toString("base64"),
 });
 
 const decodeBytes = (value: unknown): unknown => {
@@ -68,7 +74,9 @@ const decodeBytes = (value: unknown): unknown => {
     if (value && typeof value === "object") {
         const maybeBytes = value as { $bytes?: unknown };
         if (typeof maybeBytes.$bytes === "string") {
-            return new Uint8Array(Buffer.from(maybeBytes.$bytes, "base64"));
+            // Buffer is a Uint8Array. Return the decoder-owned allocation
+            // directly instead of copying it into a second Uint8Array.
+            return Buffer.from(maybeBytes.$bytes, "base64");
         }
         return Object.fromEntries(
             Object.entries(value).map(([key, entry]) => [

@@ -667,16 +667,68 @@ describe("shared fs mount backend", () => {
                 create: true,
                 truncate: true,
             });
-            await client.write(handle, encode("over ipc"), 0);
+            const sharedBacking = new SharedArrayBuffer(12);
+            const framed = new Uint8Array(sharedBacking, 2, 8);
+            framed.set(encode("over ipc"));
+            await client.write(handle, framed, 0);
             await client.release(handle);
 
             const stat = await client.getattr("/ipc/file.txt");
             expect(stat.kind).toBe("file");
             expect(stat.size).toBe("over ipc".length);
             expect(decode(await fs.readFile("/ipc/file.txt"))).toBe("over ipc");
+
+            // Decoded Buffers may use a pooled backing allocation. Re-encoding
+            // a subarray must honor its view bounds and never leak slab bytes.
+            const readHandle = await client.open("/ipc/file.txt", {
+                read: true,
+            });
+            const decodedBytes = await client.read(readHandle, 1024, 0);
+            await client.release(readHandle);
+            const copyHandle = await client.open("/ipc/copy.txt", {
+                write: true,
+                create: true,
+                truncate: true,
+            });
+            await client.write(copyHandle, decodedBytes.subarray(2, 6), 0);
+            await client.release(copyHandle);
+            expect(decode(await fs.readFile("/ipc/copy.txt"))).toBe("er i");
         } finally {
             await server.close();
         }
+    });
+
+    it("returns read snapshots isolated from callers and later mutations", async () => {
+        await fs.writeFile("/owned.txt", "hello");
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                // Exercise Buffer-backed handles: Buffer.slice/subarray would
+                // preserve the alias even though Buffer is a Uint8Array.
+                readVersion: async () => Buffer.from("hello"),
+            })
+        );
+        const handle = await backend.open("/owned.txt", {
+            read: true,
+            write: true,
+        });
+
+        const callerOwned = await backend.read(handle, 3, 1);
+        expect(decode(callerOwned)).toBe("ell");
+        callerOwned[0] = "X".charCodeAt(0);
+        expect(decode(await backend.read(handle, 1024, 0))).toBe("hello");
+
+        const beforeWrite = await backend.read(handle, 1024, 0);
+        await backend.write(handle, encode("Y"), 0);
+        expect(decode(beforeWrite)).toBe("hello");
+        expect(decode(await backend.read(handle, 1024, 0))).toBe("Yello");
+
+        const beforeTruncate = await backend.read(handle, 1024, 0);
+        await backend.truncate(handle, 2);
+        expect(decode(beforeTruncate)).toBe("Yello");
+        expect(decode(await backend.read(handle, 1024, 0))).toBe("Ye");
+
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/owned.txt"))).toBe("Ye");
     });
 
     it("truncates open handles and paths, shrinking and zero-fill growing", async () => {
