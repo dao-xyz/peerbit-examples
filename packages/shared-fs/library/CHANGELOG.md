@@ -1,5 +1,11 @@
 # @peerbit/shared-fs
 
+## 0.13.3
+
+### Patch Changes
+
+- 62104e4: Reduce large mount-write peak memory by transferring exact-sized immutable commit buffers to trusted targets and detaching on later handle mutation, while preserving isolated copies for custom targets by default.
+
 ## 0.13.2
 
 ### Patch Changes
