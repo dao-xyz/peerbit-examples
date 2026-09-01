@@ -130,6 +130,51 @@ reports `writeReadinessSource` and `legacyPromotionEligible` for audit and
 diagnosis. `allowPartialWrites` is for exporting or repairing data during one
 session, not for migration.
 
+## Cold-join telemetry
+
+Pass an opt-in callback to measure one address-open without retaining a
+profiling hook in Peerbit's shared log:
+
+```ts
+const fs = await openSharedFs({
+    peerbit,
+    address,
+    telemetry: {
+        bootstrap(event) {
+            console.log(event.type, event.atMs);
+        },
+    },
+});
+```
+
+Every `BootstrapTelemetryEvent.atMs` is monotonic elapsed time since that open
+started (`open:start` is zero). Stage events additionally report their own
+`durationMs` and relevant counts. The stream covers document-store open,
+manifest discovery, segment fetch, overlay installation and readiness,
+pending-document drain, verified or unverified overlay retirement,
+synchronizer idle, write readiness, fallback, and abort. A callback exception
+or rejected return is ignored so observability cannot change filesystem
+behavior. Callbacks run inline and returned promises are not awaited, so keep
+the handler lightweight and hand events to an external queue for slower work.
+When no callback is supplied, Shared FS does not read telemetry clocks or
+allocate telemetry events.
+
+The manual benchmark creates one 500-file donor and 15 sequential fresh
+joiners, then prints p50/p95/max milestones and fast/slow overlay-ready
+clusters. It waits for write readiness as well as readability, so a slow-path
+sample can take several minutes. It is excluded from normal test runs:
+
+```bash
+PEERBIT_SHARED_FS_COLD_JOIN_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/bootstrap-bench.bench.test.ts --reporter=verbose
+```
+
+Set `PEERBIT_SHARED_FS_COLD_JOIN_RUNS` to an integer from 10 through 20. The
+fast/slow split defaults to 2500 ms and can be changed with
+`PEERBIT_SHARED_FS_COLD_JOIN_SLOW_MS`; it is descriptive output, not a pass/fail
+latency assertion.
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
