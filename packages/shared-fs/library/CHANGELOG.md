@@ -1,5 +1,11 @@
 # @peerbit/shared-fs
 
+## 0.13.5
+
+### Patch Changes
+
+- 56df5fc: Reuse SharedFileSystem's target-verified exact-version snapshot when opening an existing file for native-mount writes, removing the mount's duplicate whole-file SHA-256 pass without changing chunk or whole-file verification. Custom mount targets retain the legacy local-hash fallback unless they explicitly implement the versioned verified-read capability.
+
 ## 0.13.4
 
 ### Patch Changes
