@@ -2,6 +2,7 @@ import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import {
     NamingEvent,
+    createSharedFsMountBackend,
     openSharedFs,
     type IgnoreAwareFs,
     type SharedFsHandle,
@@ -120,6 +121,35 @@ describe("shared fs artifact ignores", () => {
         // A directory move that would carry an anchored boundary with it.
         await fs.mkdir("/apps");
         await expect(fs.rename("/apps", "/apps2")).rejects.toThrow(/boundary/);
+    });
+
+    it("keeps delegated mount commits behind the ignore-aware write override", async () => {
+        const peer = await createPeer();
+        const fs = (await openSharedFs({
+            peerbit: peer,
+            machineLabel: "a",
+            ignore: {},
+        })) as IgnoreAwareFs;
+        await fs.writeFile("/later.tmp", "base");
+        const backend = createSharedFsMountBackend(fs);
+        const handle = await backend.open("/later.tmp", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, new TextEncoder().encode("next"), 0);
+
+        // Change policy after open so the mount's early ignoreCheck cannot be
+        // the enforcing layer. The inherited capability must still dispatch
+        // through IgnoreAwareFs.writeFile at commit time.
+        await fs.program.writeFile("/.artifactignore", "later.tmp\n");
+        await waitUntil(() => {
+            expect(fs.ignoreCheck("/later.tmp").ignored).toBe(true);
+        });
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EACCES",
+        });
+        expect(decode(await fs.program.readFile("/later.tmp"))).toBe("base");
     });
 
     it("skips ignored batch entries explicitly under onIgnored: skip", async () => {

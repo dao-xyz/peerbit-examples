@@ -251,6 +251,171 @@ describe("shared fs library", () => {
         expect(await fs.versions("/stable.txt")).toHaveLength(3);
     });
 
+    it("delegates mount hashing without weakening exact-head no-op semantics", async () => {
+        const original = await fs.writeFile("/mount-stable.txt", "same");
+        const unchanged = await fs.writeFile("/mount-stable.txt", "same", {
+            baseVersionIds: [original.id],
+            expectedNodeId: original.nodeId,
+            noOpIfHeadVersionIds: [original.id],
+        });
+        expect(unchanged).toMatchObject({
+            id: original.id,
+            nodeId: original.nodeId,
+            mountWriteOutcome: "unchanged",
+        });
+        expect(await fs.versions("/mount-stable.txt")).toHaveLength(1);
+
+        const changed = await fs.writeFile("/mount-stable.txt", "next", {
+            baseVersionIds: [original.id],
+            expectedNodeId: original.nodeId,
+            noOpIfHeadVersionIds: [original.id],
+        });
+        expect(changed.mountWriteOutcome).toBe("created");
+        expect(changed.id).not.toBe(original.id);
+        expect(await fs.versions("/mount-stable.txt")).toHaveLength(2);
+    });
+
+    it("publishes a delegated mount rewrite when the opened heads are stale", async () => {
+        const original = await fs.writeFile("/mount-race.txt", "original");
+        const concurrent = await fs.writeFile("/mount-race.txt", "concurrent");
+
+        const mounted = await fs.writeFile("/mount-race.txt", "original", {
+            baseVersionIds: [original.id],
+            expectedNodeId: original.nodeId,
+            noOpIfHeadVersionIds: [original.id],
+        });
+
+        expect(mounted.mountWriteOutcome).toBe("created");
+        expect(mounted.parentVersionIds).toEqual([original.id]);
+        const heads = (await fs.versions("/mount-race.txt")).filter(
+            (version) => version.head
+        );
+        expect(heads.map((version) => version.id).sort()).toEqual(
+            [concurrent.id, mounted.id].sort()
+        );
+    });
+
+    it("accepts an exact multi-head mount snapshot without resolving it", async () => {
+        const original = await fs.writeFile("/mount-conflict.txt", "base");
+        await fs.writeFile("/mount-conflict.txt", "left", {
+            baseVersionIds: [original.id],
+        });
+        await fs.writeFile("/mount-conflict.txt", "right", {
+            baseVersionIds: [original.id],
+        });
+        const before = await fs.versions("/mount-conflict.txt");
+        const heads = before.filter((version) => version.head);
+        const visible = await fs.stat("/mount-conflict.txt");
+        expect(visible?.kind).toBe("file");
+        const visibleId = visible!.versionId!;
+        const visibleBytes = await fs.readVersion(
+            "/mount-conflict.txt",
+            visibleId
+        );
+
+        const unchanged = await fs.writeFile(
+            "/mount-conflict.txt",
+            visibleBytes!,
+            {
+                baseVersionIds: [visibleId],
+                expectedNodeId: visible!.nodeId,
+                noOpIfHeadVersionIds: heads.map((version) => version.id),
+            }
+        );
+
+        expect(unchanged).toMatchObject({
+            id: visibleId,
+            mountWriteOutcome: "unchanged",
+        });
+        expect(await fs.versions("/mount-conflict.txt")).toHaveLength(
+            before.length
+        );
+        expect(
+            (await fs.versions("/mount-conflict.txt"))
+                .filter((version) => version.head)
+                .map((version) => version.id)
+                .sort()
+        ).toEqual(heads.map((version) => version.id).sort());
+    });
+
+    it("does not trust malformed mount head sets or stale node ids", async () => {
+        const original = await fs.writeFile("/mount-guard.txt", "same");
+        await expect(
+            fs.writeFile("/mount-guard.txt", "same", {
+                baseVersionIds: [original.id],
+                expectedNodeId: original.nodeId,
+                noOpIfHeadVersionIds: [original.id, original.id],
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+
+        await fs.rm("/mount-guard.txt");
+        const replacement = await fs.writeFile("/mount-guard.txt", "same");
+        expect(replacement.nodeId).not.toBe(original.nodeId);
+        await expect(
+            fs.writeFile("/mount-guard.txt", "same", {
+                baseVersionIds: [original.id],
+                expectedNodeId: original.nodeId,
+                noOpIfHeadVersionIds: [original.id],
+            })
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+    });
+
+    it("fails closed on malformed delegated mount write options", async () => {
+        const original = await fs.writeFile("/mount-options.txt", "same");
+        const validExisting = {
+            baseVersionIds: [original.id],
+            expectedNodeId: original.nodeId,
+            noOpIfHeadVersionIds: [original.id],
+        };
+        await expect(
+            fs.writeFile("/mount-options.txt", "same", {
+                ...validExisting,
+                expectedNodeId: undefined,
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        await expect(
+            fs.writeFile("/mount-options.txt", "same", {
+                ...validExisting,
+                baseVersionIds: undefined,
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        await expect(
+            fs.writeFile("/mount-options.txt", "same", {
+                ...validExisting,
+                baseVersionIds: original.id as unknown as string[],
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        await expect(
+            fs.writeFile("/mount-options.txt", "same", {
+                ...validExisting,
+                noOpIfHeadVersionIds: Array.from(
+                    { length: 8001 },
+                    (_, index) => `version:${index}`
+                ),
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        await expect(
+            fs.writeFile("/mount-options.txt", "same", {
+                ...validExisting,
+                noOpIfHeadVersionIds: [original.id, 1] as unknown as string[],
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        await expect(
+            fs.writeFile("/mount-options.txt", "same", {
+                ...validExisting,
+                chunkSize: 1,
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        expect(await fs.versions("/mount-options.txt")).toHaveLength(1);
+
+        const created = await fs.writeFile("/mount-created.txt", "created", {
+            expectedNodeId: null,
+            noOpIfHeadVersionIds: [],
+        });
+        expect(created.mountWriteOutcome).toBe("created");
+        expect(decode(await fs.readFile("/mount-created.txt"))).toBe("created");
+    });
+
     it("recreates deleted paths on fresh nodes and heals restore collisions", async () => {
         await fs.writeFile("/note.txt", "first life");
         const first = await fs.stat("/note.txt");

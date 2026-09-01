@@ -37,6 +37,15 @@ const mountTarget = (
     ...overrides,
 });
 
+const capableMountTarget = (
+    fs: SharedFsHandle,
+    overrides: Partial<SharedFsMountBackendTarget> = {}
+): SharedFsMountBackendTarget =>
+    mountTarget(fs, {
+        mountWriteSemantics: () => fs.mountWriteSemantics(),
+        ...overrides,
+    });
+
 const deferred = () => {
     let resolve!: () => void;
     const promise = new Promise<void>((resolvePromise) => {
@@ -448,7 +457,7 @@ describe("shared fs mount backend", () => {
             }
         );
         const backend = createSharedFsMountBackend(
-            mountTarget(fs, {
+            capableMountTarget(fs, {
                 readVersion: async () => openedBytes,
                 writeFile,
             }),
@@ -469,7 +478,7 @@ describe("shared fs mount backend", () => {
         await backend.truncate(handle, 4);
         await backend.write(handle, new Uint8Array(0), 0);
         await backend.flush(handle);
-        expect(writeFile).toHaveBeenCalledOnce();
+        expect(writeFile).toHaveBeenCalledTimes(2);
 
         await backend.write(handle, encode("new!"), 0);
 
@@ -926,6 +935,33 @@ describe("shared fs mount backend", () => {
         ).toHaveLength(1);
     });
 
+    it("retains local hash validation for legacy custom targets", async () => {
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                const result = await fs.writeFile(path, source, options);
+                return { ...result, contentHash: "not-the-source-hash" };
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/legacy-hash-check.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("checked"), 0);
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect(writeFile).toHaveBeenCalledOnce();
+    });
+
     it("exposes conflicts through the metadata namespace", async () => {
         const backend = createSharedFsMountBackend(fs);
         await fs.writeFile("/note.txt", "base");
@@ -1126,7 +1162,16 @@ describe("shared fs mount backend", () => {
     });
 
     it("does not mint a new version when flushing unchanged content", async () => {
-        const backend = createSharedFsMountBackend(fs);
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            capableMountTarget(fs, { writeFile })
+        );
         await fs.writeFile("/stable.txt", "same content");
         const versionsBefore = (await fs.versions("/stable.txt")).length;
 
@@ -1171,6 +1216,275 @@ describe("shared fs mount backend", () => {
         await backend.release(truncated);
         expect((await fs.versions("/stable.txt")).length).toBe(
             versionsBefore + 1
+        );
+        expect(writeFile).toHaveBeenCalledTimes(3);
+        expect(writeFile.mock.calls[0]?.[2]).toMatchObject({
+            noOpIfHeadVersionIds: expect.any(Array),
+        });
+    });
+
+    it("publishes a capable rewrite when heads advance inside target.writeFile", async () => {
+        const original = await fs.writeFile(
+            "/capable-head-race.txt",
+            "original"
+        );
+        const entered = deferred();
+        const allowed = deferred();
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                entered.resolve();
+                await allowed.promise;
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            capableMountTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/capable-head-race.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("original"), 0);
+
+        const flushing = backend.flush(handle);
+        await entered.promise;
+        const concurrent = await fs.writeFile(
+            "/capable-head-race.txt",
+            "concurrent"
+        );
+        allowed.resolve();
+        await flushing;
+        await backend.release(handle);
+
+        const heads = (await fs.versions("/capable-head-race.txt")).filter(
+            (version) => version.head
+        );
+        expect(heads.map((version) => version.id)).toContain(concurrent.id);
+        const mounted = heads.find((version) => version.id !== concurrent.id)!;
+        expect(mounted.parentVersionIds).toEqual([original.id]);
+        expect(
+            decode(await fs.readVersion("/capable-head-race.txt", mounted.id))
+        ).toBe("original");
+    });
+
+    it("rejects a capable commit after the opened path is replaced", async () => {
+        await fs.writeFile("/capable-replaced.txt", "original");
+        const backend = createSharedFsMountBackend(fs);
+        const handle = await backend.open("/capable-replaced.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("edited!!"), 0);
+        await fs.rm("/capable-replaced.txt");
+        await fs.writeFile("/capable-replaced.txt", "replacement");
+
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect(decode(await fs.readFile("/capable-replaced.txt"))).toBe(
+            "replacement"
+        );
+    });
+
+    it("keeps a concurrent mutation dirty after a capable no-op", async () => {
+        await fs.writeFile("/capable-buffer-race.txt", "base");
+        const entered = deferred();
+        const allowed = deferred();
+        let calls = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                calls++;
+                if (calls === 1) {
+                    entered.resolve();
+                    await allowed.promise;
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            capableMountTarget(fs, { writeFile }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/capable-buffer-race.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("base"), 0);
+
+        const flushing = backend.flush(handle);
+        await entered.promise;
+        await backend.write(handle, encode("next"), 0);
+        allowed.resolve();
+        await flushing;
+        expect(decode(await fs.readFile("/capable-buffer-race.txt"))).toBe(
+            "base"
+        );
+
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/capable-buffer-race.txt"))).toBe(
+            "next"
+        );
+        expect(writeFile).toHaveBeenCalledTimes(2);
+    });
+
+    it("protects capable no-op input retained by a forwarding target", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/capable-retained-noop.txt", openedBytes.slice());
+        const retained: Uint8Array[] = [];
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                retained.push(source);
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            capableMountTarget(fs, {
+                readVersion: async () => openedBytes,
+                writeFile,
+            }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/capable-retained-noop.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("base"), 0);
+        await backend.flush(handle);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(retained[0])).toBe("base");
+
+        await backend.write(handle, encode("next"), 0);
+        expect(decode(retained[0])).toBe("base");
+        await backend.release(handle);
+        expect(decode(retained[0])).toBe("base");
+        expect(decode(await fs.readFile("/capable-retained-noop.txt"))).toBe(
+            "next"
+        );
+    });
+
+    it("keeps capability input protected when an outcome is missing", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/capable-invalid-outcome.txt", openedBytes.slice());
+        const retained: Uint8Array[] = [];
+        const committedIds: string[] = [];
+        let calls = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                calls++;
+                retained.push(source);
+                const result = await fs.writeFile(path, source, options);
+                committedIds.push(result.id);
+                if (calls === 1) {
+                    const { mountWriteOutcome: _outcome, ...metadata } = result;
+                    return metadata;
+                }
+                return result;
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            capableMountTarget(fs, {
+                readVersion: async () => openedBytes,
+                writeFile,
+            }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/capable-invalid-outcome.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("old!"), 0);
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+            message: expect.stringContaining("invalid metadata"),
+        });
+        await backend.write(handle, encode("new!"), 0);
+        expect(decode(retained[0])).toBe("old!");
+
+        await backend.release(handle);
+        expect(decode(retained[0])).toBe("old!");
+        expect(
+            decode(
+                await fs.readVersion(
+                    "/capable-invalid-outcome.txt",
+                    committedIds[1]
+                )
+            )
+        ).toBe("new!");
+        expect(
+            (await fs.versions("/capable-invalid-outcome.txt")).filter(
+                (version) => version.head
+            )
+        ).toHaveLength(2);
+    });
+
+    it("keeps rejected capable input protected before retry", async () => {
+        const openedBytes = encode("base");
+        await fs.writeFile("/capable-rejection.txt", openedBytes.slice());
+        const retained: Uint8Array[] = [];
+        let calls = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                if (!(source instanceof Uint8Array)) {
+                    throw new Error("mount commits must use Uint8Array input");
+                }
+                calls++;
+                retained.push(source);
+                if (calls === 1) {
+                    throw new Error("injected capable rejection");
+                }
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            capableMountTarget(fs, {
+                readVersion: async () => openedBytes,
+                writeFile,
+            }),
+            { writeFileInput: "immutable-borrowed" }
+        );
+        const handle = await backend.open("/capable-rejection.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("old!"), 0);
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+            message: "injected capable rejection",
+        });
+        await backend.write(handle, encode("new!"), 0);
+        expect(decode(retained[0])).toBe("old!");
+        await backend.release(handle);
+        expect(decode(retained[0])).toBe("old!");
+        expect(decode(await fs.readFile("/capable-rejection.txt"))).toBe(
+            "new!"
         );
     });
 

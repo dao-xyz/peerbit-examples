@@ -1,8 +1,11 @@
 import { sha256Base64Sync } from "@peerbit/crypto";
 import {
+    SHARED_FS_MOUNT_WRITE_SEMANTICS,
     SharedFsError,
     type SharedFsConflict,
     type SharedFsEntryInfo,
+    type SharedFsMountWriteOutcome,
+    type SharedFsMountWriteSemantics,
     type SharedFsVersionInfo,
     type WriteFileOptions,
 } from "./index.js";
@@ -18,6 +21,13 @@ import {
 } from "./path.js";
 
 export type SharedFsMountBackendTarget = {
+    /**
+     * Explicit, versioned write handshake. Implementations advertising this
+     * value must hash input themselves, honor `noOpIfHeadVersionIds` as a
+     * conditional exact-head no-op (mismatch still writes), and return
+     * `mountWriteOutcome`.
+     */
+    mountWriteSemantics?(): SharedFsMountWriteSemantics;
     readFile(path: string): Promise<Uint8Array | undefined>;
     readVersion(
         path: string,
@@ -27,10 +37,12 @@ export type SharedFsMountBackendTarget = {
         path: string,
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options?: WriteFileOptions
-    ): Promise<Pick<
-        SharedFsVersionInfo,
-        "id" | "nodeId" | "contentHash"
-    > | void>;
+    ): Promise<
+        | (Pick<SharedFsVersionInfo, "id" | "nodeId" | "contentHash"> & {
+              mountWriteOutcome?: SharedFsMountWriteOutcome;
+          })
+        | void
+    >;
     mkdir(path: string): Promise<unknown>;
     rm(path: string): Promise<unknown>;
     rename(from: string, to: string): Promise<unknown>;
@@ -442,6 +454,8 @@ export const createSharedFsMountBackend = (
 ): SharedFsMountBackend => {
     const handles = new Map<number, OpenHandle>();
     let nextHandle = 1;
+    const delegatesWriteHashing =
+        target.mountWriteSemantics?.() === SHARED_FS_MOUNT_WRITE_SEMANTICS;
 
     const assertWriteReady = (operation: string) => {
         const readiness = target.bootstrapStatus?.();
@@ -565,8 +579,11 @@ export const createSharedFsMountBackend = (
             const bytes = borrowInput
                 ? snapshot.buffer.subarray(0, snapshot.length)
                 : snapshot.buffer.slice(0, snapshot.length);
-            const contentHash = sha256Base64Sync(bytes);
+            const contentHash = delegatesWriteHashing
+                ? undefined
+                : sha256Base64Sync(bytes);
             if (
+                !delegatesWriteHashing &&
                 handle.baseContentHash !== undefined &&
                 handle.baseContentHash === contentHash &&
                 (handle.baseVersionIds?.length ?? 0) <= 1 &&
@@ -625,6 +642,13 @@ export const createSharedFsMountBackend = (
                 // gap between open and writeFile's path resolution. `null`
                 // means this handle created a path that must still be absent.
                 expectedNodeId: handle.openedNodeId,
+                ...(delegatesWriteHashing
+                    ? {
+                          noOpIfHeadVersionIds: [
+                              ...(handle.openedHeadVersionIds ?? []),
+                          ],
+                      }
+                    : {}),
             };
             inputExposed = borrowInput;
             const result = await target.writeFile(
@@ -639,6 +663,18 @@ export const createSharedFsMountBackend = (
                 typeof result.contentHash === "string"
                     ? result
                     : undefined;
+            const mountWriteOutcome = committed?.mountWriteOutcome;
+            if (
+                delegatesWriteHashing &&
+                (!committed ||
+                    (mountWriteOutcome !== "unchanged" &&
+                        mountWriteOutcome !== "created"))
+            ) {
+                throw new SharedFsBackendError(
+                    "EIO",
+                    `Mount write capability returned invalid metadata: ${handle.path}`
+                );
+            }
             if (!committed) {
                 // Keep custom/legacy adapters that return void correct: reload
                 // the committed visible version instead of retaining a null
@@ -663,12 +699,31 @@ export const createSharedFsMountBackend = (
             if (
                 (typeof handle.openedNodeId === "string" &&
                     handle.openedNodeId !== committed.nodeId) ||
-                committed.contentHash !== contentHash
+                (!delegatesWriteHashing &&
+                    committed.contentHash !== contentHash)
             ) {
                 throw new SharedFsBackendError(
                     "EAGAIN",
                     `Path changed while it was being committed: ${handle.path}`
                 );
+            }
+            if (delegatesWriteHashing && mountWriteOutcome === "unchanged") {
+                const unchangedIsValid =
+                    handle.baseVersionIds?.length === 1 &&
+                    handle.openedHeadVersionIds !== undefined &&
+                    committed.id === handle.baseVersionIds[0] &&
+                    typeof handle.openedNodeId === "string" &&
+                    committed.nodeId === handle.openedNodeId;
+                if (!unchangedIsValid) {
+                    throw new SharedFsBackendError(
+                        "EIO",
+                        `Mount write capability returned an invalid unchanged result: ${handle.path}`
+                    );
+                }
+                // The target has observed `bytes` and the immutable-borrowed
+                // contract permits indefinite retention even on a no-op.
+                // Keep this buffer protected until the handle detaches.
+                return;
             }
             handle.baseVersionIds = [committed.id];
             // The common single-head case remains eligible for a later no-op.

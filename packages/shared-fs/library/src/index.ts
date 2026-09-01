@@ -117,6 +117,12 @@ export { Peerbit } from "peerbit";
 
 export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
+export const SHARED_FS_MOUNT_WRITE_SEMANTICS =
+    "self-hashed-exact-head-noop-v1" as const;
+
+export type SharedFsMountWriteSemantics =
+    typeof SHARED_FS_MOUNT_WRITE_SEMANTICS;
+export type SharedFsMountWriteOutcome = "unchanged" | "created";
 
 /**
  * How many chunk documents are appended / fetched concurrently for one file.
@@ -808,6 +814,15 @@ export type WriteFileOptions = {
      * this undefined to retain local-first conflict behavior.
      */
     expectedNodeId?: string | null;
+    /**
+     * Exact content-head ids observed by a native-mount writable open.
+     * SharedFileSystem may return the existing visible version only when this
+     * complete set, the explicit singleton base, the node guard, and its own
+     * hash of `source` all still match. A head mismatch publishes against the
+     * explicit base instead of rejecting the write. This is an internal mount
+     * capability input; callers must never supply or trust a content hash.
+     */
+    noOpIfHeadVersionIds?: string[];
     chunkSize?: number;
     /**
      * "verify" (default): dedup-skip a chunk only when a fresh witness
@@ -815,6 +830,11 @@ export type WriteFileOptions = {
      * "off": always re-put every chunk (partition-proof mode).
      */
     dedup?: "verify" | "off";
+};
+
+export type SharedFsWriteFileResult = SharedFsVersionInfo & {
+    /** Present only for the versioned native-mount write capability. */
+    mountWriteOutcome?: SharedFsMountWriteOutcome;
 };
 
 export type WriteBatchEntry =
@@ -3658,13 +3678,50 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         path: string,
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options: WriteFileOptions = {}
-    ) {
+    ): Promise<SharedFsWriteFileResult> {
         this.assertWriteReady("writeFile");
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EISDIR", "Cannot write to root");
         }
         this.assertWritableName(basename(normalized), "file");
+        const noOpHeadVersionIds = options.noOpIfHeadVersionIds;
+        if (noOpHeadVersionIds !== undefined) {
+            const validIds =
+                Array.isArray(noOpHeadVersionIds) &&
+                noOpHeadVersionIds.length <= 8000 &&
+                noOpHeadVersionIds.every(
+                    (id) => typeof id === "string" && id.length > 0
+                );
+            const uniqueIds = validIds
+                ? new Set(noOpHeadVersionIds)
+                : undefined;
+            const existingMountShape =
+                validIds &&
+                typeof options.expectedNodeId === "string" &&
+                options.expectedNodeId.length > 0 &&
+                Array.isArray(options.baseVersionIds) &&
+                options.baseVersionIds.length === 1 &&
+                typeof options.baseVersionIds[0] === "string" &&
+                options.baseVersionIds[0].length > 0 &&
+                uniqueIds?.has(options.baseVersionIds[0]) === true;
+            const createMountShape =
+                validIds &&
+                options.expectedNodeId === null &&
+                options.baseVersionIds === undefined &&
+                noOpHeadVersionIds.length === 0;
+            if (
+                !validIds ||
+                uniqueIds!.size !== noOpHeadVersionIds.length ||
+                options.chunkSize !== undefined ||
+                (!existingMountShape && !createMountShape)
+            ) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "Invalid native-mount exact-head no-op request"
+                );
+            }
+        }
         const bytes = await toBytes(source);
         const resolved = await this.resolvePath(normalized);
         const expectedNodeId = options.expectedNodeId;
@@ -3698,12 +3755,46 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const currentHeads = existingNodeId
             ? await this.headsForNode(existingNodeId)
             : [];
+        // Keep hashing at the historical post-lookup point for every caller.
+        // In particular, do not lengthen the interval in which a caller-owned
+        // Uint8Array could change after its digest was computed.
         const contentHash = sha256Base64Sync(bytes);
+        const expectedHeadIds =
+            noOpHeadVersionIds !== undefined
+                ? new Set(noOpHeadVersionIds)
+                : undefined;
+        const exactHeadSetMatches =
+            noOpHeadVersionIds !== undefined &&
+            expectedHeadIds !== undefined &&
+            noOpHeadVersionIds.length === currentHeads.length &&
+            expectedHeadIds.size === noOpHeadVersionIds.length &&
+            currentHeads.every((head) => expectedHeadIds.has(head.id));
+        const explicitBaseId =
+            options.baseVersionIds?.length === 1
+                ? options.baseVersionIds[0]
+                : undefined;
+        if (
+            noOpHeadVersionIds !== undefined &&
+            options.chunkSize === undefined &&
+            explicitBaseId !== undefined &&
+            currentHeads[0]?.id === explicitBaseId &&
+            exactHeadSetMatches &&
+            currentHeads[0].contentHash === contentHash
+        ) {
+            if (expectedNodeId !== undefined) {
+                await assertExpectedNode();
+            }
+            return {
+                ...this.versionInfo(currentHeads[0], normalized, currentHeads),
+                mountWriteOutcome: "unchanged",
+            };
+        }
         // Idempotent save: identical content over a single unchanged head is
         // a no-op — no new version, no new chunks, nothing to replicate.
         // Explicit baseVersionIds (conflict flows) and explicit chunk sizes
         // (re-chunking migrations) always create a version.
         if (
+            noOpHeadVersionIds === undefined &&
             options.baseVersionIds === undefined &&
             options.chunkSize === undefined &&
             currentHeads.length === 1 &&
@@ -3838,7 +3929,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             version,
             ...currentHeads.filter((head) => !referenced.has(head.id)),
         ];
-        return this.versionInfo(version, normalized, heads);
+        const result = this.versionInfo(version, normalized, heads);
+        return noOpHeadVersionIds !== undefined
+            ? { ...result, mountWriteOutcome: "created" }
+            : result;
     }
 
     /**
@@ -10183,6 +10277,15 @@ export class SharedFsHandle {
 
     get localPublicKey() {
         return this.program.localPublicKey;
+    }
+
+    /**
+     * Versioned native-mount handshake. The implementation hashes write input
+     * itself, uses `noOpIfHeadVersionIds` only for a conditional exact-head
+     * no-op (mismatch still writes), and returns an explicit outcome.
+     */
+    mountWriteSemantics(): SharedFsMountWriteSemantics {
+        return SHARED_FS_MOUNT_WRITE_SEMANTICS;
     }
 
     stat(path: string) {
