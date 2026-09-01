@@ -11,10 +11,6 @@ import {
 import { FileChunk, type NamingEvent } from "../model.js";
 
 const WAIT_TIMEOUT_MS = process.env.CI ? 90_000 : 30_000;
-// The capability is intentionally session-scoped. It is not currently
-// exported from @peerbit/shared-log's package root, so mirror its wire bit in
-// this integration test just as the upstream document integration test does.
-const PERSISTED_ENTRY_RECEIPTS_CAPABILITY = 1 << 5;
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -69,23 +65,44 @@ describe("shared fs durable machine disposal", () => {
 
     const waitForRemoteReceiptCapability = async (
         source: SharedFsHandle,
-        remote: Peerbit,
+        remote: Peerbit | Peerbit[],
         log: any = source.program.entries.log
     ) => {
-        await log.waitForReplicator(remote.identity.publicKey, {
-            roleAge: 0,
-            timeout: WAIT_TIMEOUT_MS,
-        });
-        const remoteHash = remote.identity.publicKey.hashcode();
-        await waitUntil(() => {
-            const capabilities = (
-                log as {
-                    _peerSyncCapabilities: Map<string, number>;
+        const remotes = Array.isArray(remote) ? remote : [remote];
+        const remoteHashes = remotes.map((peer) =>
+            peer.identity.publicKey.hashcode()
+        );
+        await waitUntil(async () => {
+            // A same-identity stop/reopen can miss one quiet replication-info
+            // exchange. Retry this readiness probe; no filesystem commit or
+            // disposal delivery has started yet.
+            await Promise.all(
+                remotes.map((peer) =>
+                    log.waitForReplicator(peer.identity.publicKey, {
+                        timeout: Math.min(15_000, WAIT_TIMEOUT_MS),
+                    })
+                )
+            );
+            // Match persisted delivery's actual admission facts. A capability
+            // bit by itself may belong to an old transport session, and an
+            // eager role can precede the rebalance that assigns exact entries.
+            for (const remoteHash of remoteHashes) {
+                expect(
+                    log.persistedReceiptPeerSession(remoteHash)
+                ).toBeDefined();
+            }
+            const entries = await log.log.toArray();
+            const replicas = log.replicas.min.getValue(log);
+            for (const entry of entries) {
+                const leaders = await log.findLeadersFromEntry(
+                    entry,
+                    replicas,
+                    { freshLeaderPlan: true }
+                );
+                for (const remoteHash of remoteHashes) {
+                    expect(leaders.has(remoteHash)).toBe(true);
                 }
-            )._peerSyncCapabilities.get(remoteHash);
-            expect(
-                (capabilities ?? 0) & PERSISTED_ENTRY_RECEIPTS_CAPABILITY
-            ).toBe(PERSISTED_ENTRY_RECEIPTS_CAPABILITY);
+            }
         });
     };
 
@@ -141,8 +158,6 @@ describe("shared fs durable machine disposal", () => {
             remoteChunkFetch: false,
             gc: false,
         });
-        await waitForRemoteReceiptCapability(source, receiverPeer);
-
         await source.mkdir("/workspace");
         await source.mkdir("/workspace/docs");
         const sharedContent = "aaaabbbbccccdddd";
@@ -156,6 +171,7 @@ describe("shared fs durable machine disposal", () => {
             chunkSize: 4,
         });
         await source.rm("/workspace/docs/deleted.txt");
+        await waitForRemoteReceiptCapability(source, receiverPeer);
 
         const disposal = await source.prepareForDisposal({
             minAcks: 1,
@@ -266,12 +282,6 @@ describe("shared fs durable machine disposal", () => {
                     })
                 )
             );
-            await Promise.all(
-                receiverPeers.map((receiverPeer) =>
-                    waitForRemoteReceiptCapability(source, receiverPeer)
-                )
-            );
-
             await source.writeFile("/contested.txt", "base");
             const baseVersionIds = (await source.versions("/contested.txt"))
                 .filter((version) => version.head)
@@ -288,6 +298,7 @@ describe("shared fs durable machine disposal", () => {
                     .map((version) => version.id)
                     .sort()
             ).toEqual(expectedHeadIds);
+            await waitForRemoteReceiptCapability(source, receiverPeers);
 
             const disposal = await source.prepareForDisposal({
                 minAcks: 2,
@@ -390,13 +401,6 @@ describe("shared fs durable machine disposal", () => {
                 remoteChunkFetch: false,
                 gc: false,
             });
-            await waitForRemoteReceiptCapability(source, receiverPeer);
-            await waitForRemoteReceiptCapability(
-                source,
-                receiverPeer,
-                source.program.trustGraph!.trustGraph.log
-            );
-
             await source.authorizeWriter(writerKey);
             await waitUntil(async () => {
                 expect(await writer.isTrustedWriter(writerKey)).toBe(true);
@@ -468,19 +472,16 @@ describe("shared fs durable machine disposal", () => {
                     source.program.entries.log,
                     source.program.trustGraph!.trustGraph.log,
                 ].map(async (log) => {
-                    await log.waitForReplicator(receiverKey, {
-                        timeout: WAIT_TIMEOUT_MS,
-                    });
-                    await waitUntil(async () => {
-                        const replicators = await log.getReplicators();
-                        expect(replicators.has(receiverHash)).toBe(true);
-                        expect(replicators.has(writerHash)).toBe(false);
-                    });
                     await waitForRemoteReceiptCapability(
                         source,
                         receiverPeer,
                         log
                     );
+                    await waitUntil(async () => {
+                        const replicators = await log.getReplicators();
+                        expect(replicators.has(receiverHash)).toBe(true);
+                        expect(replicators.has(writerHash)).toBe(false);
+                    });
                 })
             );
 
@@ -576,7 +577,6 @@ describe("shared fs durable machine disposal", () => {
             gc: false,
         });
         const trustLog = source.program.trustGraph!.trustGraph.log;
-        await waitForRemoteReceiptCapability(source, receiverPeer, trustLog);
 
         const writerKey = writerPeer.identity.publicKey;
         await source.authorizeWriter(writerKey);
@@ -587,6 +587,7 @@ describe("shared fs durable machine disposal", () => {
         await waitUntil(async () => {
             expect(await receiver.isTrustedWriter(writerKey)).toBe(false);
         });
+        await waitForRemoteReceiptCapability(source, receiverPeer, trustLog);
 
         const disposal = await source.prepareForDisposal({
             minAcks: 1,
@@ -643,8 +644,8 @@ describe("shared fs durable machine disposal", () => {
             gc: false,
         });
         const trustLog = source.program.trustGraph!.trustGraph.log as any;
-        await waitForRemoteReceiptCapability(source, receiverPeer, trustLog);
         await source.authorizeWriter(firstWriter.identity.publicKey);
+        await waitForRemoteReceiptCapability(source, receiverPeer, trustLog);
 
         const deliver = trustLog.deliverPersistedEntries.bind(trustLog);
         let injected = false;
@@ -701,12 +702,29 @@ describe("shared fs durable machine disposal", () => {
             bootstrap: false,
             gc: false,
         });
-        await source.program.entries.log.waitForReplicator(
-            memoryReceiver.identity.publicKey,
-            { roleAge: 0, timeout: WAIT_TIMEOUT_MS }
-        );
-
         await source.writeFile("/not-durable.txt", "local commit survives");
+        const memoryLog = source.program.entries.log as any;
+        const memoryReceiverHash = memoryReceiver.identity.publicKey.hashcode();
+        await waitUntil(async () => {
+            await memoryLog.waitForReplicator(
+                memoryReceiver.identity.publicKey,
+                { timeout: Math.min(15_000, WAIT_TIMEOUT_MS) }
+            );
+            const entries = await memoryLog.log.toArray();
+            expect(entries.length).toBeGreaterThan(0);
+            const replicas = memoryLog.replicas.min.getValue(memoryLog);
+            for (const entry of entries) {
+                const leaders = await memoryLog.findLeadersFromEntry(
+                    entry,
+                    replicas,
+                    { freshLeaderPlan: true }
+                );
+                expect(leaders.has(memoryReceiverHash)).toBe(true);
+            }
+            expect(
+                memoryLog.persistedReceiptPeerSession(memoryReceiverHash)
+            ).toBeUndefined();
+        });
 
         let failure: unknown;
         try {
@@ -764,8 +782,8 @@ describe("shared fs durable machine disposal", () => {
             bootstrap: false,
             gc: false,
         });
-        await waitForRemoteReceiptCapability(source, receiverPeer);
         await source.writeFile("/before.txt", "captured");
+        await waitForRemoteReceiptCapability(source, receiverPeer);
 
         const log = source.program.entries.log;
         const deliver = log.deliverPersistedEntries.bind(log);
