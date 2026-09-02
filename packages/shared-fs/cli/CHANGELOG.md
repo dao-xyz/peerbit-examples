@@ -1,5 +1,12 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.12
+
+### Patch Changes
+
+- f4f3b6d: Make unsupported native chmod, chown, and timestamp mutations fail closed, and
+  report the synthetic metadata and access-check contract through CLI status.
+
 ## 0.13.11
 
 ### Patch Changes
