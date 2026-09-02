@@ -241,13 +241,18 @@ authenticated, disk-backed full replicas in three separate Node processes over
 loopback networking. It measures concurrent manifested batches with metadata
 admission separated from byte readability, a mount-style temporary-file
 `fsync`/release/rename replacement of a seeded target, deterministic same-base
-content conflict and resolution, a normal garbage-collection pass, abrupt
-`SIGKILL` of one writer, a no-listener offline reopen and write from that
-writer's durable directory, and reconnect. Exact manifests, bytes, editor node
-identity, conflict heads, trusted keys, identity reuse, zero fresh-data GC
-reclamation, and exact recursive-tree convergence are hard assertions. Latency,
-CPU, RSS, and state-directory growth are descriptive output rather than
-performance budgets:
+content conflict and resolution, abrupt `SIGKILL` of one writer, and a
+network-gated reopen from that writer's durable directory. The isolated worker
+has no listeners, denies every inbound and outbound connection, and must report
+zero live connections before and after its divergent write. While it is
+isolated, the offline writer and the surviving component edit the same captured
+base; reconnect must expose exactly both heads and bytes on every replica before
+an explicit resolution. A normal garbage-collection pass and a final
+network-gated, zero-connection reopen then audit the resolved tree. Exact
+manifests, bytes, editor node identity, conflict heads, trusted keys, identity
+reuse, zero fresh-data GC reclamation, and exact recursive-tree convergence are
+hard assertions. Latency, CPU, current/high-water RSS, phase memory, and
+state-directory growth are descriptive output rather than performance budgets:
 
 ```bash
 PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK=1 \

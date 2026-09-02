@@ -31,12 +31,24 @@ export type ProcessSoakConflictExpectation =
           heads: Array<{
               versionId: string;
               content: ProcessSoakContentExpectation;
+              parentVersionIds?: string[];
+          }>;
+      }
+    | {
+          /** Exact current content heads, including the valid one-head case. */
+          mode: "version-heads";
+          path: string;
+          heads: Array<{
+              versionId: string;
+              content: ProcessSoakContentExpectation;
+              parentVersionIds?: string[];
           }>;
       }
     | { mode: "resolved"; path: string };
 
-export type ProcessSoakMetrics = {
+export type ProcessSoakRuntimeMetrics = {
     rssBytes: number;
+    maxRssBytes: number;
     heapUsedBytes: number;
     externalBytes: number;
     arrayBuffersBytes: number;
@@ -44,7 +56,15 @@ export type ProcessSoakMetrics = {
     systemCpuMicros: number;
     fsReadOps: number;
     fsWriteOps: number;
+};
+
+export type ProcessSoakMetrics = ProcessSoakRuntimeMetrics & {
     storageBytes: number;
+};
+
+export type ProcessSoakNetworkStatus = {
+    connectionCount: number;
+    remotePeers: string[];
 };
 
 export type ProcessSoakReadyMessage = {
@@ -111,6 +131,8 @@ export type ProcessSoakWorkerCommand =
           timeoutMs: number;
       })
     | (ProcessSoakRequestBase & { type: "collect-garbage" })
+    | (ProcessSoakRequestBase & { type: "network-status" })
+    | (ProcessSoakRequestBase & { type: "runtime-metrics" })
     | (ProcessSoakRequestBase & { type: "metrics" })
     | (ProcessSoakRequestBase & { type: "shutdown" });
 

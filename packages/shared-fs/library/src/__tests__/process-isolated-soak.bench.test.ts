@@ -12,8 +12,10 @@ import type {
     ProcessSoakFileExpectation,
     ProcessSoakGcResult,
     ProcessSoakMetrics,
+    ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
     ProcessSoakReadyMessage,
+    ProcessSoakRuntimeMetrics,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
@@ -358,6 +360,20 @@ const sumMetric = (
     key: keyof ProcessSoakMetrics
 ) => metrics.reduce((total, sample) => total + sample[key], 0);
 
+const captureRuntimeMetrics = (workers: RunningWorker[]) =>
+    Promise.all(
+        workers.map((worker) =>
+            worker.request<ProcessSoakRuntimeMetrics>({
+                type: "runtime-metrics",
+            })
+        )
+    );
+
+const withoutStorage = ({
+    storageBytes: _storageBytes,
+    ...runtime
+}: ProcessSoakMetrics): ProcessSoakRuntimeMetrics => runtime;
+
 const treeFromFiles = (
     files: Iterable<ProcessSoakFileExpectation>
 ): ProcessSoakTreeExpectation[] => {
@@ -418,7 +434,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
     });
 
     it(
-        "measures separate durable processes through edits, conflict, GC, SIGKILL, and warm reopen",
+        "measures separate durable processes through edits, partition healing, GC, SIGKILL, and warm reopen",
         { timeout: TEST_TIMEOUT_MS },
         async () => {
             const rounds = configuredRounds();
@@ -510,6 +526,12 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     worker.request<ProcessSoakMetrics>({ type: "metrics" })
                 )
             );
+            const phaseRuntimeMetrics: Record<
+                string,
+                ProcessSoakRuntimeMetrics[]
+            > = {
+                baseline: baselineMetrics.map(withoutStorage),
+            };
             const expected = new Map<string, ProcessSoakFileExpectation>(
                 seedFiles.map((file) => [file.path, file])
             );
@@ -644,6 +666,8 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     )
                 );
             }
+            phaseRuntimeMetrics.afterRounds =
+                await captureRuntimeMetrics(workers);
 
             const editorFiles = workers.map((_, writer) => {
                 const payload = createProcessSoakGeneratedContent(
@@ -722,26 +746,49 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             );
             const editorAllPeersReadableMs =
                 performance.now() - editorStartedAt;
+            phaseRuntimeMetrics.afterEditor =
+                await captureRuntimeMetrics(workers);
 
+            const partitionBaseContent = "partition-base";
             const base = await workers[0].request<ProcessSoakBatchResult>({
                 type: "write-batch",
                 changesetId: "process-soak-conflict-base",
-                entries: [{ path: "/contested.txt", content: "base" }],
+                entries: [
+                    { path: "/contested.txt", content: "base" },
+                    {
+                        path: "/partitioned.txt",
+                        content: partitionBaseContent,
+                    },
+                ],
             });
-            logicalContentBytesWritten += Buffer.byteLength("base");
-            logicalWriteOperations++;
+            logicalContentBytesWritten +=
+                Buffer.byteLength("base") +
+                Buffer.byteLength(partitionBaseContent);
+            logicalWriteOperations += 2;
             const baseVersionId = base.versionIds[0];
+            const partitionBaseVersionId = base.versionIds[1];
             expect(baseVersionId).toBeTypeOf("string");
+            expect(partitionBaseVersionId).toBeTypeOf("string");
             await Promise.all(
                 workers.map((worker) =>
                     worker.request<ProcessSoakVerifyResult>({
                         type: "verify",
                         changesets: [base.changeset],
-                        files: [{ path: "/contested.txt", content: "base" }],
+                        files: [
+                            { path: "/contested.txt", content: "base" },
+                            {
+                                path: "/partitioned.txt",
+                                content: partitionBaseContent,
+                            },
+                        ],
                         timeoutMs: COMMAND_TIMEOUT_MS,
                     })
                 )
             );
+            expected.set("/partitioned.txt", {
+                path: "/partitioned.txt",
+                content: partitionBaseContent,
+            });
             const conflictPayloads = workers.map((_, writer) =>
                 createProcessSoakGeneratedContent(
                     `conflict-writer=${writer};`,
@@ -828,6 +875,8 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 path: "/contested.txt",
                 content: selectedHead.content,
             });
+            phaseRuntimeMetrics.afterConnectedConflictResolution =
+                await captureRuntimeMetrics(workers);
 
             const killedReady = ready[2];
             const killedWorker = workers[2];
@@ -844,6 +893,14 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             const peerRecreateMs = performance.now() - restartStartedAt;
             expect(offlineRestartedReady.identity).toBe(killedReady.identity);
             expect(offlineRestartedReady.addresses).toEqual([]);
+            const offlineNetworkBeforeOpen =
+                await offlineRestarted.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                });
+            expect(offlineNetworkBeforeOpen).toEqual({
+                connectionCount: 0,
+                remotePeers: [],
+            });
             const offlineReopen =
                 await offlineRestarted.request<ProcessSoakOpenResult>({
                     type: "open",
@@ -853,6 +910,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 });
             expect(offlineReopen.identity).toBe(killedReady.identity);
             expect(offlineReopen.gcScheduled).toBe(true);
+            expect(offlineReopen.writeReadinessSource).toBe("remote-settled");
             const offlineAuditStartedAt = performance.now();
             await offlineRestarted.request<ProcessSoakVerifyResult>({
                 type: "verify",
@@ -871,6 +929,117 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 timeoutMs: COMMAND_TIMEOUT_MS,
             });
             const offlineAuditMs = performance.now() - offlineAuditStartedAt;
+            const offlineNetworkBeforeDivergence =
+                await offlineRestarted.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                });
+            expect(offlineNetworkBeforeDivergence).toEqual({
+                connectionCount: 0,
+                remotePeers: [],
+            });
+
+            const partitionPayloads = [
+                createProcessSoakGeneratedContent(
+                    "partition=online;",
+                    "partition:online",
+                    payloadBytes
+                ),
+                createProcessSoakGeneratedContent(
+                    "partition=offline;",
+                    "partition:offline",
+                    payloadBytes
+                ),
+            ];
+            const partitionDivergentStartedAt = performance.now();
+            const [partitionOnlineWrite, partitionOfflineWrite] =
+                await Promise.all([
+                    workers[0].request<ProcessSoakConflictWriteResult>({
+                        type: "write-conflict",
+                        path: "/partitioned.txt",
+                        content: partitionPayloads[0].content,
+                        baseVersionIds: [partitionBaseVersionId!],
+                    }),
+                    offlineRestarted.request<ProcessSoakConflictWriteResult>({
+                        type: "write-conflict",
+                        path: "/partitioned.txt",
+                        content: partitionPayloads[1].content,
+                        baseVersionIds: [partitionBaseVersionId!],
+                    }),
+                ]);
+            const partitionHeads = [
+                {
+                    versionId: partitionOnlineWrite.versionId,
+                    content: partitionPayloads[0].expectation,
+                    parentVersionIds: [partitionBaseVersionId!],
+                },
+                {
+                    versionId: partitionOfflineWrite.versionId,
+                    content: partitionPayloads[1].expectation,
+                    parentVersionIds: [partitionBaseVersionId!],
+                },
+            ];
+            expect(
+                new Set(partitionHeads.map((head) => head.versionId)).size
+            ).toBe(2);
+            for (const payload of partitionPayloads) {
+                logicalContentBytesWritten += Buffer.byteLength(
+                    payload.content
+                );
+                logicalWriteOperations++;
+            }
+            const partitionSplitVerifyStartedAt = performance.now();
+            const [onlineSplitVerifications, offlineSplitVerification] =
+                await Promise.all([
+                    Promise.all(
+                        workers.slice(0, 2).map((worker) =>
+                            worker.request<ProcessSoakVerifyResult>({
+                                type: "verify",
+                                conflict: {
+                                    mode: "version-heads",
+                                    path: "/partitioned.txt",
+                                    heads: [partitionHeads[0]],
+                                },
+                                noNamingConflicts: ["/partitioned.txt"],
+                                timeoutMs: COMMAND_TIMEOUT_MS,
+                            })
+                        )
+                    ),
+                    offlineRestarted.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/partitioned.txt",
+                            heads: [partitionHeads[1]],
+                        },
+                        noNamingConflicts: ["/partitioned.txt"],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    }),
+                ]);
+            expect(
+                onlineSplitVerifications.map(
+                    (verification) => verification.visibleConflictHash
+                )
+            ).toEqual([
+                partitionPayloads[0].expectation.sha256,
+                partitionPayloads[0].expectation.sha256,
+            ]);
+            expect(offlineSplitVerification.visibleConflictHash).toBe(
+                partitionPayloads[1].expectation.sha256
+            );
+            const offlineNetworkAfterDivergence =
+                await offlineRestarted.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                });
+            expect(offlineNetworkAfterDivergence).toEqual({
+                connectionCount: 0,
+                remotePeers: [],
+            });
+            const partitionSplitVerifiedMs =
+                performance.now() - partitionSplitVerifyStartedAt;
+            phaseRuntimeMetrics.partitionedOnlineComponent =
+                await captureRuntimeMetrics(workers.slice(0, 2));
+            phaseRuntimeMetrics.partitionedOfflineComponent =
+                await captureRuntimeMetrics([offlineRestarted]);
 
             const postRestartPayload = createProcessSoakGeneratedContent(
                 "post-restart;",
@@ -928,13 +1097,14 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     timeoutMs: COMMAND_TIMEOUT_MS,
                 });
             expect(networkReopen.identity).toBe(killedReady.identity);
+            expect(networkReopen.writeReadinessSource).toBe("remote-settled");
             await restarted.request({
                 type: "dial",
                 addresses: [dialAddress(ready[0]), dialAddress(ready[1])],
             });
             workers = [workers[0], workers[1], restarted];
             ready = [ready[0], ready[1], restartedReady];
-            await Promise.all(
+            const partitionHealVerifications = await Promise.all(
                 workers.map((worker) =>
                     worker.request<ProcessSoakVerifyResult>({
                         type: "verify",
@@ -945,13 +1115,68 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                                 content: postRestartPayload.expectation,
                             },
                         ],
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/partitioned.txt",
+                            heads: partitionHeads,
+                        },
+                        noNamingConflicts: ["/partitioned.txt"],
                         exactTree: treeFromFiles(expected.values()),
                         timeoutMs: COMMAND_TIMEOUT_MS,
                     })
                 )
             );
+            expect(
+                new Set(
+                    partitionHealVerifications.map(
+                        (verification) => verification.visibleConflictHash
+                    )
+                ).size
+            ).toBe(1);
+            expect(partitionHeads.map((head) => head.content.sha256)).toContain(
+                partitionHealVerifications[0].visibleConflictHash
+            );
+            const partitionRestartToVisibleMs =
+                performance.now() - networkRestartStartedAt;
+            const partitionDivergentToVisibleMs =
+                performance.now() - partitionDivergentStartedAt;
             const postRestartAllPeersReadableMs =
                 performance.now() - postRestartStartedAt;
+            phaseRuntimeMetrics.afterPartitionHeal =
+                await captureRuntimeMetrics(workers);
+
+            const selectedPartitionHead = partitionHeads[1];
+            const partitionResolveStartedAt = performance.now();
+            const partitionResolve = await workers[0].request<{
+                localCommitMs: number;
+            }>({
+                type: "resolve-conflict",
+                path: "/partitioned.txt",
+                versionId: selectedPartitionHead.versionId,
+            });
+            expected.set("/partitioned.txt", {
+                path: "/partitioned.txt",
+                content: selectedPartitionHead.content,
+            });
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [expected.get("/partitioned.txt")!],
+                        conflict: {
+                            mode: "resolved",
+                            path: "/partitioned.txt",
+                        },
+                        noNamingConflicts: ["/partitioned.txt"],
+                        exactTree: treeFromFiles(expected.values()),
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const partitionAllPeersResolvedMs =
+                performance.now() - partitionResolveStartedAt;
+            phaseRuntimeMetrics.afterPartitionResolution =
+                await captureRuntimeMetrics(workers);
 
             const gc = await workers[0].request<ProcessSoakGcResult>({
                 type: "collect-garbage",
@@ -987,6 +1212,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         },
                         noNamingConflicts: [
                             "/contested.txt",
+                            "/partitioned.txt",
                             ...editorFiles.map((file) => file.path),
                         ],
                         exactTree: treeFromFiles(expected.values()),
@@ -994,6 +1220,93 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     })
                 )
             );
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        conflict: {
+                            mode: "resolved",
+                            path: "/partitioned.txt",
+                        },
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            phaseRuntimeMetrics.afterGc = await captureRuntimeMetrics(workers);
+
+            const finalNetworkWorker = workers[2];
+            const finalNetworkStop = await stopWorker(finalNetworkWorker);
+            expect(finalNetworkStop.code).toBe(0);
+            activeWorkers.delete(finalNetworkWorker);
+            const finalOfflineRestartStartedAt = performance.now();
+            const finalOffline = startWorker(2, directories[2], {
+                offline: true,
+            });
+            activeWorkers.add(finalOffline);
+            const finalOfflineReady = await finalOffline.ready;
+            const finalOfflinePeerRecreateMs =
+                performance.now() - finalOfflineRestartStartedAt;
+            expect(finalOfflineReady.identity).toBe(killedReady.identity);
+            expect(finalOfflineReady.addresses).toEqual([]);
+            const finalOfflineNetworkBeforeOpen =
+                await finalOffline.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                });
+            expect(finalOfflineNetworkBeforeOpen).toEqual({
+                connectionCount: 0,
+                remotePeers: [],
+            });
+            const finalOfflineOpen =
+                await finalOffline.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: "process-soak-writer-2-final-offline",
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                });
+            expect(finalOfflineOpen.identity).toBe(killedReady.identity);
+            expect(finalOfflineOpen.gcScheduled).toBe(true);
+            expect(finalOfflineOpen.writeReadinessSource).toBe(
+                "remote-settled"
+            );
+            const finalOfflineAuditStartedAt = performance.now();
+            await finalOffline.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                files: [...expected.values()],
+                absentPaths: [...absent],
+                trustedPublicKeys,
+                conflict: {
+                    mode: "resolved",
+                    path: "/contested.txt",
+                },
+                noNamingConflicts: [
+                    "/contested.txt",
+                    "/partitioned.txt",
+                    ...editorFiles.map((file) => file.path),
+                ],
+                exactTree: treeFromFiles(expected.values()),
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            await finalOffline.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                conflict: {
+                    mode: "resolved",
+                    path: "/partitioned.txt",
+                },
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            const finalOfflineAuditMs =
+                performance.now() - finalOfflineAuditStartedAt;
+            const finalOfflineNetworkAfterAudit =
+                await finalOffline.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                });
+            expect(finalOfflineNetworkAfterAudit).toEqual({
+                connectionCount: 0,
+                remotePeers: [],
+            });
+            phaseRuntimeMetrics.finalOfflineReopen =
+                await captureRuntimeMetrics([finalOffline]);
+            workers = [workers[0], workers[1], finalOffline];
             const finalMetrics = await Promise.all(
                 workers.map((worker) =>
                     worker.request<ProcessSoakMetrics>({ type: "metrics" })
@@ -1033,6 +1346,26 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     resolveLocalCommitMs: resolveCommit.localCommitMs,
                     allPeersResolvedMs: allPeersConflictResolvedMs,
                 },
+                partition: {
+                    divergentLocalCommitMs: {
+                        online: partitionOnlineWrite.localCommitMs,
+                        offline: partitionOfflineWrite.localCommitMs,
+                    },
+                    splitComponentsVerifiedMs: partitionSplitVerifiedMs,
+                    divergentWriteToAllPeersVisibleMs:
+                        partitionDivergentToVisibleMs,
+                    networkRestartToAllPeersVisibleMs:
+                        partitionRestartToVisibleMs,
+                    deterministicVisibleHash:
+                        partitionHealVerifications[0].visibleConflictHash,
+                    offlineNetworkEvidence: {
+                        beforeOpen: offlineNetworkBeforeOpen,
+                        beforeDivergence: offlineNetworkBeforeDivergence,
+                        afterDivergence: offlineNetworkAfterDivergence,
+                    },
+                    resolveLocalCommitMs: partitionResolve.localCommitMs,
+                    allPeersResolvedMs: partitionAllPeersResolvedMs,
+                },
                 restart: {
                     killToCloseMs,
                     offlinePeerCreateReportedMs:
@@ -1051,6 +1384,18 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     networkWriteReadinessSource:
                         networkReopen.writeReadinessSource,
                     postRestartAllPeersReadableMs,
+                    finalOfflinePeerCreateReportedMs:
+                        finalOfflineReady.peerCreateMs,
+                    finalOfflinePeerRecreateWallMs: finalOfflinePeerRecreateMs,
+                    finalOfflineFsOpenMs: finalOfflineOpen.openMs,
+                    finalOfflineWriteReadyMs: finalOfflineOpen.writeReadyMs,
+                    finalOfflineWriteReadinessSource:
+                        finalOfflineOpen.writeReadinessSource,
+                    finalOfflineAuditMs,
+                    finalOfflineNetworkEvidence: {
+                        beforeOpen: finalOfflineNetworkBeforeOpen,
+                        afterAudit: finalOfflineNetworkAfterAudit,
+                    },
                 },
                 gc,
                 resources: {
@@ -1061,6 +1406,10 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     totalRssBytes: {
                         baseline: sumMetric(baselineMetrics, "rssBytes"),
                         final: sumMetric(finalMetrics, "rssBytes"),
+                    },
+                    totalMaxRssBytes: {
+                        baseline: sumMetric(baselineMetrics, "maxRssBytes"),
+                        final: sumMetric(finalMetrics, "maxRssBytes"),
                     },
                     totalHeapUsedBytes: {
                         baseline: sumMetric(baselineMetrics, "heapUsedBytes"),
@@ -1075,6 +1424,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         logicalContentBytesWritten === 0
                             ? 0
                             : storageGrowthBytes / logicalContentBytesWritten,
+                    phases: phaseRuntimeMetrics,
                 },
                 rawRounds: roundReports,
             };
