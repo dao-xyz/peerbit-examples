@@ -222,6 +222,7 @@ const configureExternalNativeAdapterEnv = async () => {
 const readNativeStatus = async () => {
     const externalAdapter = await configureExternalNativeAdapterEnv();
     const support = await getNativeMountSupport();
+    const windows = support.platform === "win32";
     return {
         platform: support.platform,
         adapter: support.adapter,
@@ -229,6 +230,26 @@ const readNativeStatus = async () => {
         available: support.available,
         missing: [...support.missing],
         notes: [...support.notes],
+        metadata: {
+            modes: {
+                source: "synthetic-fixed",
+                directory: windows ? "0777" : "0755",
+                file: windows ? "0666" : "0644",
+                creationModePreserved: false,
+            },
+            ownership: "synthetic-adapter",
+            accessChecks: "existence-only",
+            timestamps: {
+                mtime: "logical-or-synthetic",
+                ctime: "logical-or-synthetic",
+                atime: "mirrors-mtime",
+            },
+            mutations: {
+                chmod: false,
+                chown: false,
+                utimens: false,
+            },
+        },
     };
 };
 
@@ -241,6 +262,15 @@ const printNativeRequirements = async (status?: NativeStatus) => {
     console.log(`adapter: ${native.adapter}`);
     console.log(`external adapter: ${native.externalAdapter ?? "not found"}`);
     console.log(`available: ${native.available ? "yes" : "no"}`);
+    console.log(
+        `metadata modes: synthetic (directories ${native.metadata.modes.directory}, files ${native.metadata.modes.file}; creation mode not preserved)`
+    );
+    console.log(`metadata ownership: ${native.metadata.ownership}`);
+    console.log(`metadata access checks: ${native.metadata.accessChecks}`);
+    console.log(
+        `metadata timestamps: mtime/ctime ${native.metadata.timestamps.mtime}; atime ${native.metadata.timestamps.atime}`
+    );
+    console.log("metadata mutations: chmod/chown/utimens unsupported");
     if (native.missing.length > 0) {
         console.log("missing:");
         for (const item of native.missing) {

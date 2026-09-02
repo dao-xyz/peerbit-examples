@@ -164,6 +164,7 @@ jobs:
               run: node scripts/shared-fs-build-packages.mjs
 
             - name: Run external native adapter smoke
+              shell: bash
               run: scripts/shared-fs-external-native-smoke.sh
 
     cleanup-macos:

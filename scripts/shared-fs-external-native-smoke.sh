@@ -21,6 +21,22 @@ unmount_path() {
   fi
 }
 
+stat_mode() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    stat -f "%Lp" "$1"
+  else
+    stat -c "%a" "$1"
+  fi
+}
+
+stat_mtime() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    stat -f "%m" "$1"
+  else
+    stat -c "%Y" "$1"
+  fi
+}
+
 remove_path() {
   local target="$1"
   rm -rf "$target" >/dev/null 2>&1 && return 0
@@ -53,8 +69,37 @@ node packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint" \
   >"$log" 2>&1 &
 mount_pid="$!"
 
+wait_for_mount_exit() {
+  local attempts="$1"
+  local attempt
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
+      wait "$mount_pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 cleanup() {
+  if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
+    wait "$mount_pid" >/dev/null 2>&1 || true
+    unmount_path "$mountpoint"
+    return
+  fi
+
   kill -INT "$mount_pid" >/dev/null 2>&1 || true
+  if wait_for_mount_exit 10; then
+    unmount_path "$mountpoint"
+    return
+  fi
+
+  unmount_path "$mountpoint"
+  kill -TERM "$mount_pid" >/dev/null 2>&1 || true
+  if ! wait_for_mount_exit 5; then
+    kill -KILL "$mount_pid" >/dev/null 2>&1 || true
+  fi
   wait "$mount_pid" >/dev/null 2>&1 || true
   unmount_path "$mountpoint"
 }
@@ -84,6 +129,25 @@ grep -q "Mounted " "$log" || { cat "$log"; exit 1; }
 mkdir "$mountpoint/docs"
 printf "hello external native" > "$mountpoint/docs/hello.txt"
 test "$(cat "$mountpoint/docs/hello.txt")" = "hello external native"
+
+metadata_path="$mountpoint/docs/hello.txt"
+mode_before="$(stat_mode "$metadata_path")"
+if chmod 600 "$metadata_path" 2>/dev/null; then
+  echo "chmod unexpectedly succeeded for synthetic Shared FS metadata" >&2
+  exit 1
+fi
+test "$(stat_mode "$metadata_path")" = "$mode_before"
+
+mtime_before="$(stat_mtime "$metadata_path")"
+if touch -t 200001010000 "$metadata_path" 2>/dev/null; then
+  echo "explicit timestamp update unexpectedly succeeded for synthetic Shared FS metadata" >&2
+  exit 1
+fi
+test "$(stat_mtime "$metadata_path")" = "$mtime_before"
+
 mv "$mountpoint/docs/hello.txt" "$mountpoint/docs/renamed.txt"
 test "$(cat "$mountpoint/docs/renamed.txt")" = "hello external native"
 rm -f "$mountpoint/docs/renamed.txt"
+test ! -e "$mountpoint/docs/renamed.txt"
+rmdir "$mountpoint/docs"
+test ! -e "$mountpoint/docs"

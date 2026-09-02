@@ -57,6 +57,30 @@ allocations, and connections per operation. Its Go echo peer mirrors the
 JSON/base64 framing so the result isolates Go-client transport and framing
 costs; it does not include the Node daemon, FUSE, or Peerbit replication.
 
+## POSIX metadata limits
+
+The shared model currently persists names and file content, not POSIX mode,
+ownership, or explicitly assigned timestamps. Native stat results therefore
+use synthetic fixed modes: directories are `0755` and files are `0644` on
+Linux and macOS; WinFsp normalizes those to `0777` and `0666`. Modes passed to
+create, mknod, and mkdir are not persisted.
+
+The external adapter rejects chmod, chown, and explicit timestamp updates with
+`ENOSYS` instead of falsely reporting that unrepresented state was saved. The
+optional in-process adapter does not implement these mutations either.
+Ownership is adapter-synthetic and is not a replicated permission boundary.
+The external adapter's access callback checks path existence but does not
+enforce its requested read/write/execute mask, so `access(2)` and tools such as
+`test -w` are advisory. Mount mode and owner fields are not an authorization
+boundary; use Shared FS trusted-writer authorization for write access.
+
+Reported mtime/ctime values are logical or synthetic filesystem times, not
+user-settable POSIX metadata. File mtime normally follows the visible content
+version, while directory mtime follows its naming event rather than child
+changes. Reported atime mirrors mtime and is not persisted separately.
+`peerbit-fs status --json` exposes these limits under
+`nativeMount.metadata`.
+
 ## Why Go?
 
 The Peerbit filesystem logic remains TypeScript. Go is only used for the thin
