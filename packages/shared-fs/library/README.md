@@ -752,12 +752,17 @@ at most `namingCompactionBatchLimit` events retire per node per run
 (default 500, shallowest-first) so upgrade-day backlogs drain in bounded
 bursts.
 
-Superseded snapshot **segment blocks** are reclaimed too, after a grace
+Superseded snapshot **segment blocks** can be reclaimed after a grace
 period (`snapshot: { segmentReclaim: { graceMs } }`, default 3 h,
-disable with `segmentReclaim: false`). Only positively recorded own
-segments are ever deleted, re-verified at deletion time against every
-locally known live manifest — identical content across authors dedups
-to identical cids, and another author's live manifest protects them.
+disable with `segmentReclaim: false`). Physical deletion runs only when the
+open asserts `blockStoreAccess: "store-exclusive"`; `shared` and the default
+`unknown` keep snapshot publication available but disable segment reclamation.
+An explicit reclaim object without that assertion fails with `EINVAL`. The CLI
+leaves access `unknown` because its state directory may contain more than one
+filesystem. Only positively recorded own segments are ever deleted, re-verified
+at deletion time against every locally known live manifest — identical content
+across authors dedups to identical cids, and another author's live manifest
+protects them.
 Fleet caveats:
 
 - The grace is floored at the bootstrap staleness cap
@@ -768,10 +773,15 @@ Fleet caveats:
 - The segment ledger lives beside the store
   (`shared-fs-snapshots/<address>.json`); peers without a directory keep
   it in memory, matching their in-memory block store.
-- A normal Peerbit state directory is single-process. The ledger serializes
-  and crash-safely replaces its own sidecar, but it cannot make a custom block
-  store safe for two processes that concurrently publish and reap the same
-  blocks. Externally serialize those processes or disable `segmentReclaim`.
+- `store-exclusive` is a store-wide lifetime assertion: this open must be the
+  sole owner, publisher, and reaper of every snapshot segment it may delete,
+  across every active or inactive program instance and process. Snapshot
+  segment bytes are content-addressed and can deduplicate across filesystems,
+  while one filesystem cannot discover another's live manifests. The local
+  segment-ledger lock therefore cannot establish exclusivity for a physical
+  store shared with another filesystem, directory, host, or process. Leave
+  access `unknown`, declare it `shared`, or set `segmentReclaim: false` unless
+  that exclusivity is guaranteed for the whole open lifetime.
 - Generations published before this feature were never recorded and are
   permanently exempt (the positive-record safety rule): a one-time bloat
   that stops growing. Wipe the block store and re-replicate to reclaim

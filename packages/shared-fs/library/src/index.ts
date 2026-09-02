@@ -28,7 +28,11 @@ import {
     StringMatch,
     type Query,
 } from "@peerbit/document";
-import { Program } from "@peerbit/program";
+import {
+    Program,
+    type ProgramClient,
+    type ProgramInitializationOptions,
+} from "@peerbit/program";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
@@ -516,6 +520,9 @@ export type BootstrapTelemetryEvent =
       }
     | { type: "aborted"; atMs: number; reason: string };
 
+/** Caller-supplied physical block-store ownership contract for reclamation. */
+export type BlockStoreAccess = "store-exclusive" | "shared" | "unknown";
+
 export type SharedFsOpenArgs = {
     machineLabel?: string;
     /**
@@ -565,6 +572,15 @@ export type SharedFsOpenArgs = {
      * workflows. It never persists a write-readiness proof.
      */
     allowPartialWrites?: boolean;
+    /**
+     * Concurrency contract for the physical block store. Snapshot segment
+     * deletion is enabled only when this open is the sole owner, publisher,
+     * and reaper of every snapshot segment it may delete, across every active
+     * or inactive program instance and process for its full lifetime. `shared`
+     * and the default `unknown` keep snapshot publication available but
+     * disable physical segment reclamation.
+     */
+    blockStoreAccess?: BlockStoreAccess;
     /** Snapshot publication policy for trusted full replicas. */
     snapshot?: SnapshotPublishOptions;
 };
@@ -606,7 +622,10 @@ export type SnapshotPublishOptions = {
      * joiner may still be fetching a manifest up to that old — the cap must
      * be fleet-consistent or a joiner with a larger one can select a
      * manifest whose segments were already reaped and fall back to log
-     * replication). `false` disables reclamation entirely.
+     * replication). Physical deletion additionally requires
+     * `blockStoreAccess: "store-exclusive"`; shared and unknown stores are
+     * disabled, and an explicit reclaim object then fails. `false` disables
+     * reclamation entirely.
      */
     segmentReclaim?: false | { graceMs?: number };
 };
@@ -1039,6 +1058,33 @@ export class SharedFsError extends Error {
         this.name = "SharedFsError";
     }
 }
+
+const validateBlockStoreAccess = (
+    args?: SharedFsOpenArgs
+): BlockStoreAccess => {
+    const access = args?.blockStoreAccess ?? "unknown";
+    if (
+        access !== "store-exclusive" &&
+        access !== "shared" &&
+        access !== "unknown"
+    ) {
+        throw new SharedFsError(
+            "EINVAL",
+            `invalid blockStoreAccess ${String(access)}; expected "store-exclusive", "shared", or "unknown"`
+        );
+    }
+    if (
+        args?.snapshot?.segmentReclaim !== undefined &&
+        args.snapshot.segmentReclaim !== false &&
+        access !== "store-exclusive"
+    ) {
+        throw new SharedFsError(
+            "EINVAL",
+            'snapshot.segmentReclaim requires blockStoreAccess: "store-exclusive"; shared or unknown block stores cannot safely delete snapshot segments. Use snapshot.segmentReclaim: false or assert that this open is the sole owner, publisher, and reaper of every snapshot segment it may delete across all active or inactive program instances and processes for its full lifetime.'
+        );
+    }
+    return access;
+};
 
 export type SharedFsExpectedNodeMismatchCheckpoint =
     | "initial"
@@ -1975,6 +2021,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         mode: "off" as "auto" | "require" | "off",
         ...BOOTSTRAP_DEFAULTS,
     };
+    private blockStoreAccess: BlockStoreAccess = "unknown";
     private snapshotConfig = { ...SNAPSHOT_DEFAULTS, disabled: false };
     private gcScheduleConfig: {
         disabled: boolean;
@@ -2000,6 +2047,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     // longer matches (the program was reopened) dies silently.
     private gcSchedulerGeneration = 0;
     private gcRng: () => number = Math.random;
+    /**
+     * Serializes every snapshot block-store mutation on this program. The
+     * store-exclusive contract excludes other program instances; this chain
+     * closes the remaining same-instance publish-versus-reap race.
+     */
+    private snapshotBlockStoreChain: Promise<unknown> = Promise.resolve();
     private segmentLedgerChain: Promise<unknown> = Promise.resolve();
     private segmentLedgerReconciled = false;
     private segmentReapFailureCycles = 0;
@@ -2111,6 +2164,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
+    async beforeOpen(
+        node: ProgramClient,
+        options?: ProgramInitializationOptions<SharedFsOpenArgs, this>
+    ): Promise<void> {
+        // ProgramHandler registers a program during super.beforeOpen(). Reject
+        // unsafe reclaim first so an address-loaded instance never poisons
+        // the handler cache or enters partially initialized cleanup.
+        validateBlockStoreAccess(options?.args);
+        await super.beforeOpen(node, options);
+    }
+
     private beginLifecycleRequest(kind: "open" | "close"): number {
         this.lifecycleRequestGeneration =
             (this.lifecycleRequestGeneration ?? 0) + 1;
@@ -2205,6 +2269,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 "filesystem is already open or has an open request in flight"
             );
         }
+        // Validate before beginning a lifecycle request. A rejected unsafe
+        // reclaim configuration must leave this program immediately reusable.
+        validateBlockStoreAccess(args);
         const requestGeneration = this.beginLifecycleRequest("open");
         this.lifecycleRequestedState = "opening";
         try {
@@ -2446,6 +2513,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.gcRng = (args as any)?.gcRng ?? Math.random;
         this.maintenanceTasks = new Set();
         this.foregroundMutationTasks = new Set();
+        this.snapshotBlockStoreChain = Promise.resolve();
         this.segmentLedgerChain = Promise.resolve();
         this.segmentLedgerReconciled = false;
         this.segmentReapFailureCycles = 0;
@@ -2466,6 +2534,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                       ? (bootstrapArg.mode ?? "auto")
                       : "auto",
         };
+        this.blockStoreAccess = args?.blockStoreAccess ?? "unknown";
         this.snapshotConfig = {
             ...SNAPSHOT_DEFAULTS,
             disabled: false,
@@ -6998,15 +7067,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return task;
     }
 
+    /**
+     * Hold the instance-local snapshot block-store fence for one whole
+     * publisher or reaper operation. Callers that also touch the segment
+     * ledger must acquire this chain first and the ledger chain second.
+     */
+    private queueSnapshotBlockStoreTask<T>(task: () => Promise<T>): Promise<T> {
+        this.snapshotBlockStoreChain ??= Promise.resolve();
+        const run = this.snapshotBlockStoreChain.then(task);
+        this.snapshotBlockStoreChain = run.then(
+            () => undefined,
+            () => undefined
+        );
+        return this.trackMaintenanceTask(run);
+    }
+
     private async drainMaintenanceTasks(): Promise<void> {
         this.maintenanceTasks ??= new Set();
+        this.snapshotBlockStoreChain ??= Promise.resolve();
         this.segmentLedgerChain ??= Promise.resolve();
         for (;;) {
             const tasks = [...this.maintenanceTasks];
+            const blockStore = this.snapshotBlockStoreChain;
             const ledger = this.segmentLedgerChain;
-            await Promise.allSettled([...tasks, ledger]);
+            await Promise.allSettled([...tasks, blockStore, ledger]);
             if (
                 this.maintenanceTasks.size === 0 &&
+                blockStore === this.snapshotBlockStoreChain &&
                 ledger === this.segmentLedgerChain
             ) {
                 return;
@@ -10001,8 +10088,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const context = this.currentMaintenanceContext("snapshotWrite");
         this.snapshotRunning = true;
         this.snapshotRunningGeneration = context.generation;
-        const run = (async () => {
+        const run = this.queueSnapshotBlockStoreTask(async () => {
             try {
+                // This task may have waited behind a reaper. Close/reopen can
+                // invalidate it while queued, before it may touch the store.
+                this.throwIfMaintenanceInactive(context);
                 if (
                     this.trustGraph &&
                     !(await this.isTrustedWriter(this.node.identity.publicKey))
@@ -10032,8 +10122,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.snapshotRunningGeneration = undefined;
                 }
             }
-        })();
-        return this.trackMaintenanceTask(run);
+        });
+        // Queue the publish-tail reaper only after the publisher has released
+        // the block-store fence. Rejection schedules no deletion work.
+        void run.then(
+            () => {
+                if (this.maintenanceContextActive(context)) {
+                    void this.reapSnapshotSegments(undefined, context).catch(
+                        () => {}
+                    );
+                }
+            },
+            () => {}
+        );
+        return run;
     }
 
     private async snapshotWriteInner(
@@ -10276,13 +10378,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
-        if (this.maintenanceContextActive(context)) {
-            void this.reapSnapshotSegments(
-                undefined,
-                { duringPublish: true },
-                context
-            ).catch(() => {});
-        }
         return {
             snapshotSeq,
             createdAtWallMs: payload.createdAtWallMs,
@@ -11236,7 +11331,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             | false
             | { graceMs?: number }
             | undefined;
-        if (raw === false) {
+        if (raw === false || this.blockStoreAccess !== "store-exclusive") {
             return { enabled: false, graceMs: 0 };
         }
         const requested = raw?.graceMs ?? SEGMENT_RECLAIM_DEFAULT_GRACE_MS;
@@ -11777,27 +11872,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     private reapSnapshotSegments(
         nowMsArg?: number,
-        options?: { duringPublish?: boolean },
         context?: MaintenanceContext
     ): Promise<{ deleted: number; bytes: bigint }> {
         const ownedContext = context ?? this.maintenanceContextIfActive();
         if (!ownedContext) {
             return Promise.resolve({ deleted: 0, bytes: 0n });
         }
-        this.segmentLedgerChain ??= Promise.resolve();
-        const run = this.segmentLedgerChain.then(() =>
-            this.reapSnapshotSegmentsInner(nowMsArg, options, ownedContext)
-        );
-        this.segmentLedgerChain = run.then(
-            () => undefined,
-            () => undefined
-        );
-        return this.trackMaintenanceTask(run);
+        // Disabled/shared/unknown stores have no deletion plane to fence.
+        // Return synchronously instead of waiting behind a publisher.
+        if (!this.segmentReclaimSettings().enabled || !this.isFullReplica()) {
+            return Promise.resolve({ deleted: 0, bytes: 0n });
+        }
+        return this.queueSnapshotBlockStoreTask(() => {
+            // Lock order is always block store -> ledger. snapshotWrite holds
+            // the same outer fence before recordSegmentIntent joins ledger.
+            this.segmentLedgerChain ??= Promise.resolve();
+            const run = this.segmentLedgerChain.then(() =>
+                this.reapSnapshotSegmentsInner(nowMsArg, ownedContext)
+            );
+            this.segmentLedgerChain = run.then(
+                () => undefined,
+                () => undefined
+            );
+            return run;
+        });
     }
 
     private async reapSnapshotSegmentsInner(
         nowMsArg?: number,
-        options?: { duringPublish?: boolean },
         context?: MaintenanceContext
     ): Promise<{ deleted: number; bytes: bigint }> {
         const zero = { deleted: 0, bytes: 0n };
@@ -11806,15 +11908,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const settings = this.segmentReclaimSettings();
         if (!settings.enabled || !this.isFullReplica()) {
-            return zero;
-        }
-        if (this.snapshotRunning && !options?.duringPublish) {
-            // A publish's shard puts land BEFORE its intent reaches the
-            // ledger chain; a reap ordered between them could rm a block
-            // the new manifest is about to reference. The publish-tail
-            // trigger passes duringPublish (its own puts and intent are
-            // complete by then). Cross-process overlap keeps the same
-            // tiny residual window as the metadata GC — accepted.
             return zero;
         }
         const now = nowMsArg ?? this.clock();
@@ -13014,7 +13107,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             try {
                 const reaped = await this.reapSnapshotSegments(
                     config.nowMs,
-                    undefined,
                     context
                 );
                 report.segmentBlocksDeleted = reaped.deleted;
@@ -13300,6 +13392,9 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
             );
         }
     }
+    // Reject before loading/saving a program or entering ProgramHandler.
+    // beforeOpen repeats this for callers that use Peerbit/Program directly.
+    validateBlockStoreAccess(options);
     const args: SharedFsOpenArgs = {
         machineLabel: options.machineLabel,
         replicate: options.replicate,
@@ -13313,6 +13408,7 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
             ? options.bootstrap
             : (options.bootstrap ?? false),
         allowPartialWrites: options.allowPartialWrites,
+        blockStoreAccess: options.blockStoreAccess,
         snapshot: options.snapshot,
         gc: options.gc,
     };
