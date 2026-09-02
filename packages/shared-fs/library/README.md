@@ -280,16 +280,69 @@ not a retry of that benchmark. It also deliberately avoids
 `prepareForDisposal()`, whose persisted-receipt session recovery is tracked
 separately upstream.
 
+The same process harness also has a separately gated long-churn campaign that
+connects those lifecycle slices. A fresh owner writes the canonical 500-file
+fixture across 50 leaf directories beneath `/t` and publishes its
+551-node/1051-document snapshot. Ten fresh disk-backed processes then join
+sequentially with bootstrap mode `require`, scheduled GC and remote chunk
+fallback disabled. Every join must emit the complete verified-overlay telemetry
+path, reach normal write readiness, and read the exact local tree; fallback and
+unverified retirement are hard failures. The tenth durable directory is
+reopened offline before it becomes the second authenticated writer:
+
+```bash
+PEERBIT_SHARED_FS_PROCESS_LONG_CHURN=1 \
+PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_JOINS=10 \
+PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_ROUNDS=10 \
+PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_HOT_VERSIONS=15 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/process-isolated-soak.bench.test.ts --reporter=verbose
+```
+
+After the joins, both writers produce manifested batches, exercise a complete
+mount-style editor save, and create two exact content heads from one captured
+base. The conflict deliberately remains unresolved while a 15-version hot file
+is aged past the default 30-day retention window with a fleet-wide injected
+clock. The campaign overrides `keepVersions` to 3, `settleMs` to 0, and the
+orphan span to 60 seconds. The first explicit ledger GC must retire metadata
+and record chunk candidates without deleting chunk entries. After the orphan
+span, the second pass must reclaim chunks while preserving both conflict heads
+and every visible file.
+
+Between those GC passes, the retained writer publishes a temporary editor file
+through `fsync` and is immediately killed before release or rename. Its same
+directory and identity must reopen with networking physically gated, preserve
+the old target and the exact temporary bytes, complete the replacement rename
+offline, and converge after reconnect. The campaign ends by reopening both
+writers offline with remote chunk fallback disabled and auditing the complete
+tree, trust set, conflict heads, and file bytes. These durability and
+correctness properties are hard assertions. Join/write/reopen latencies,
+memory, filesystem counters, directory growth, and storage-growth ratios remain
+descriptive; the test does not treat a lack of physical directory shrink as a
+GC failure.
+
+Defaults are 10 joins, 10 two-writer rounds, 15 hot-file versions, and 4096-byte
+generated payload bodies. Joins accept 10 through 20, rounds 10 through 200,
+hot versions 15 through 100, and payloads 256 bytes through 1 MiB. The special
+`JOINS=1`, `ROUNDS=1`, and `HOT_VERSIONS=5` values are only for validating the
+harness. Every completed join and round is printed immediately as
+`process-long-churn-cold-join:` and `process-long-churn-round:` JSON, followed
+by one `process-long-churn:` aggregate. The campaign is manual, can run for up
+to two hours, and is not enabled in required pull-request CI.
+
 Each runtime sample includes a parent-assigned process generation, OS PID,
 worker number, Peerbit identity, and online/offline network mode so replacement
-lifetimes remain distinguishable even if the OS reuses a PID. In addition to
-the workload phases, the final cohort is sampled immediately before and after
+lifetimes remain distinguishable even if the OS reuses a PID. In the original
+process-isolated soak, the final cohort is sampled immediately before and after
 the offline recursive audit, after two explicit GC requests separated by
 event-loop turns, after SharedFS close, after Peerbit stop, and once more after
-two stopped-process GC requests. The workers run with `--expose-gc`; these
-samples diagnose collectible JavaScript reachability and resource shutdown,
-not a memory budget or proof that finalizers, native resources, or allocator
-arenas were released, and no test asserts that collection lowers a category.
+two stopped-process GC requests. The long-churn campaign instead records three
+cohorts: the two online writers at baseline, the two online writers after the
+workload, and both fully reopened offline for the final audit. The workers run
+with `--expose-gc`; these samples diagnose collectible JavaScript reachability
+and resource shutdown, not a memory budget or proof that finalizers, native
+resources, or allocator arenas were released, and no test asserts that
+collection lowers a category.
 RSS can remain at an allocator or native high-water mark. `maxRSS`, CPU, and
 filesystem counters are cumulative for one OS-process lifetime and reset when a
 replacement generation starts. A fleet `maxRSS` aggregate is therefore a sum
