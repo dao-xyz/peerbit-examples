@@ -1262,6 +1262,7 @@ describe("shared fs cold-start bootstrap", () => {
             expect(converged.verified).toBe(true);
             const statusAfter = joiner.bootstrapStatus();
             expect(statusAfter.phase).toBe("converged");
+            expect(statusAfter.snapshotCoverageVerified).toBe(true);
             expect(statusAfter.guardArmed).toBe(false);
             expect(statusAfter.pendingDocs).toBe(0);
             await joiner.awaitWriteReady();
@@ -1323,6 +1324,12 @@ describe("shared fs cold-start bootstrap", () => {
                 );
             });
             expect(joiner.bootstrapStatus().phase).toBe("off");
+            expect(joiner.bootstrapStatus().snapshotCoverageVerified).toBe(
+                false
+            );
+            await expect(joiner.awaitBootstrapConverged()).resolves.toEqual({
+                verified: false,
+            });
             expect(joiner.bootstrapStatus().guardArmed).toBe(false);
             // The donor is intentionally quiescent after the join starts. A
             // successful network log commit is correlated with its immediately
@@ -1693,6 +1700,7 @@ describe("shared fs cold-start bootstrap", () => {
                 expect(joiner.bootstrapStatus().phase).toBe("unverified");
             });
             const status = joiner.bootstrapStatus();
+            expect(status.snapshotCoverageVerified).toBe(false);
             expect(status.guardArmed).toBe(false);
             await expect(joiner.awaitBootstrapConverged()).resolves.toEqual({
                 verified: false,

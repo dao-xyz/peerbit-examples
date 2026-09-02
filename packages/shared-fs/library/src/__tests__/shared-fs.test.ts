@@ -5,7 +5,10 @@ import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     DEFAULT_FILE_CHUNK_SIZE,
+    FileVersion,
+    NamingEvent,
     SHARED_FS_MOUNT_READ_SEMANTICS,
+    SharedFsExpectedNamingConflictMismatchError,
     encodePublicSignKey,
     openSharedFs,
     runSharedFsBenchmark,
@@ -39,6 +42,20 @@ const patternedBytes = (size: number) => {
     }
     return bytes;
 };
+
+const forkVersion = (parent: FileVersion, id: string) =>
+    new FileVersion({
+        id,
+        nodeId: parent.nodeId,
+        parentVersionIds: [parent.id],
+        causalDepth: parent.causalDepth + 1n,
+        contentHash: parent.contentHash,
+        size: parent.size,
+        chunkIds: parent.chunkIds,
+        createdAt: parent.createdAt + 1n,
+        authorKey: parent.authorKey,
+        machineLabel: parent.machineLabel,
+    });
 
 const waitUntil = async (
     assertion: () => Promise<void> | void,
@@ -491,6 +508,78 @@ describe("shared fs library", () => {
         expect(contents).toEqual(new Set(["first life", "second life"]));
     });
 
+    it("rejects a stale duplicate-name action when the other claimant moved", async () => {
+        await fs.writeFile("/topology.txt", "first life");
+        const first = (await fs.stat("/topology.txt"))!;
+        await fs.rm("/topology.txt");
+        await fs.writeFile("/topology.txt", "second life");
+        await fs.resolveNamingConflict(first.nodeId, { type: "restore" });
+
+        const duplicate = (await fs.namingConflicts()).find(
+            (candidate) => candidate.type === "duplicate-name"
+        )!;
+        const shadowedNodeId = duplicate.shadowedNodeIds![0];
+        const targetHeadsBefore: string[] = [];
+        for (const eventId of duplicate.eventIds) {
+            const event = await fs.program.entries.index.get(eventId, {
+                local: true,
+                remote: false,
+                resolve: true,
+            });
+            if (
+                event instanceof NamingEvent &&
+                event.nodeId === shadowedNodeId
+            ) {
+                targetHeadsBefore.push(event.id);
+            }
+        }
+        targetHeadsBefore.sort();
+
+        // The visible winner moves away. The shadowed target's own naming
+        // heads do not change, but it is no longer conflicted and becomes the
+        // sole visible file at the original path.
+        await fs.resolveNamingConflict(duplicate.nodeId, {
+            type: "move",
+            to: "/topology-moved.txt",
+        });
+        expect(
+            (await fs.namingConflicts()).filter(
+                (conflict) =>
+                    conflict.nodeId === shadowedNodeId ||
+                    conflict.shadowedNodeIds?.includes(shadowedNodeId)
+            )
+        ).toEqual([]);
+
+        await expect(
+            fs.resolveNamingConflict(
+                shadowedNodeId,
+                { type: "delete" },
+                { expectedConflicts: [duplicate] }
+            )
+        ).rejects.toMatchObject({
+            code: "EAGAIN",
+            retryable: true,
+            retrySafe: true,
+            expectedConflicts: [
+                expect.objectContaining({
+                    type: duplicate.type,
+                    nodeId: duplicate.nodeId,
+                    path: duplicate.path,
+                    eventIds: [...duplicate.eventIds].sort(),
+                    shadowedNodeIds: [
+                        ...(duplicate.shadowedNodeIds ?? []),
+                    ].sort(),
+                }),
+            ],
+            actualConflicts: [],
+            actualHeadEventIds: targetHeadsBefore,
+        });
+        expect(decode(await fs.readFile("/topology.txt"))).toMatch(/life$/);
+        expect(decode(await fs.readFile("/topology-moved.txt"))).toMatch(
+            /life$/
+        );
+    });
+
     it("chunks and reads large files", async () => {
         const bytes = patternedBytes(DEFAULT_FILE_CHUNK_SIZE * 2 + 17);
         await fs.writeFile("/large.bin", bytes);
@@ -532,6 +621,207 @@ describe("shared fs library", () => {
         expect(decode(await fs.readVersion("/note.txt", right.id))).toBe(
             "right"
         );
+    });
+
+    it("acknowledges delete-vs-edit heads and fences stale naming actions", async () => {
+        await fs.writeFile("/deleted-race.txt", "recoverable");
+        const entry = (await fs.stat("/deleted-race.txt"))!;
+        const [baseInfo] = await fs.versions("/deleted-race.txt");
+        const base = (await fs.program.entries.index.get(baseInfo.id, {
+            local: true,
+            remote: false,
+            resolve: true,
+        })) as FileVersion;
+
+        await fs.rm("/deleted-race.txt");
+        const concurrent = new FileVersion({
+            id: "version:deterministic-delete-vs-edit",
+            nodeId: entry.nodeId,
+            parentVersionIds: [base.id],
+            causalDepth: base.causalDepth + 1n,
+            contentHash: base.contentHash,
+            size: base.size,
+            chunkIds: base.chunkIds,
+            createdAt: base.createdAt + 1n,
+            authorKey: base.authorKey,
+            machineLabel: base.machineLabel,
+        });
+        await fs.program.entries.put(concurrent, { unique: true });
+
+        const conflict = (await fs.namingConflicts()).find(
+            (candidate) => candidate.type === "delete-vs-edit"
+        );
+        expect(conflict).toMatchObject({
+            nodeId: entry.nodeId,
+            recoverableVersionIds: [concurrent.id],
+        });
+        const expectedConflicts = [conflict!];
+
+        await fs.resolveNamingConflict(
+            entry.nodeId,
+            { type: "delete" },
+            { expectedConflicts }
+        );
+        expect(
+            (await fs.namingConflicts()).filter(
+                (candidate) => candidate.nodeId === entry.nodeId
+            )
+        ).toEqual([]);
+        expect(await fs.stat("/deleted-race.txt")).toBeUndefined();
+
+        await fs.resolveNamingConflict(entry.nodeId, { type: "restore" });
+        expect(decode(await fs.readFile("/deleted-race.txt"))).toBe(
+            "recoverable"
+        );
+        const staleDelete = fs.resolveNamingConflict(
+            entry.nodeId,
+            { type: "delete" },
+            { expectedConflicts }
+        );
+        await expect(staleDelete).rejects.toBeInstanceOf(
+            SharedFsExpectedNamingConflictMismatchError
+        );
+        await expect(staleDelete).rejects.toMatchObject({
+            code: "EAGAIN",
+            retryable: true,
+            retrySafe: true,
+            nodeId: entry.nodeId,
+            expectedEventIds: [...conflict!.eventIds].sort(),
+            expectedConflicts: [
+                expect.objectContaining({
+                    type: conflict!.type,
+                    nodeId: conflict!.nodeId,
+                    path: conflict!.path,
+                    eventIds: [...conflict!.eventIds].sort(),
+                    recoverableVersionIds: [
+                        ...(conflict!.recoverableVersionIds ?? []),
+                    ].sort(),
+                }),
+            ],
+            actualHeadEventIds: expect.not.arrayContaining(conflict!.eventIds),
+        });
+        expect(decode(await fs.readFile("/deleted-race.txt"))).toBe(
+            "recoverable"
+        );
+    });
+
+    it("revalidates a guarded delete after snapshotting content heads", async () => {
+        await fs.writeFile("/late-delete.txt", "base");
+        const entry = (await fs.stat("/late-delete.txt"))!;
+        const [baseInfo] = await fs.versions("/late-delete.txt");
+        const base = (await fs.program.entries.index.get(baseInfo.id, {
+            local: true,
+            remote: false,
+            resolve: true,
+        })) as FileVersion;
+        await fs.rm("/late-delete.txt");
+        const concurrent = forkVersion(
+            base,
+            "version:delete-before-final-validation"
+        );
+        await fs.program.entries.put(concurrent, { unique: true });
+        const expectedConflict = (await fs.namingConflicts()).find(
+            (conflict) =>
+                conflict.type === "delete-vs-edit" &&
+                conflict.nodeId === entry.nodeId
+        )!;
+        const late = forkVersion(
+            concurrent,
+            "version:delete-during-content-snapshot"
+        );
+
+        const program = fs.program as any;
+        const originalHeadsForNode = program.headsForNode;
+        let injected = false;
+        program.headsForNode = async (nodeId: string) => {
+            if (nodeId === entry.nodeId && !injected) {
+                injected = true;
+                await fs.program.entries.put(late, { unique: true });
+            }
+            return originalHeadsForNode.call(program, nodeId);
+        };
+        try {
+            await expect(
+                fs.resolveNamingConflict(
+                    entry.nodeId,
+                    { type: "delete" },
+                    { expectedConflicts: [expectedConflict] }
+                )
+            ).rejects.toMatchObject({
+                code: "EAGAIN",
+                retryable: true,
+                retrySafe: true,
+            });
+        } finally {
+            program.headsForNode = originalHeadsForNode;
+        }
+        expect(injected).toBe(true);
+        expect(await fs.stat("/late-delete.txt")).toBeUndefined();
+        expect(
+            (await fs.namingConflicts()).find(
+                (conflict) =>
+                    conflict.type === "delete-vs-edit" &&
+                    conflict.nodeId === entry.nodeId
+            )
+        ).toMatchObject({ recoverableVersionIds: [late.id] });
+    });
+
+    it("keeps content arriving after guarded restore validation concurrent", async () => {
+        await fs.writeFile("/late-restore.txt", "base");
+        const entry = (await fs.stat("/late-restore.txt"))!;
+        const [baseInfo] = await fs.versions("/late-restore.txt");
+        const base = (await fs.program.entries.index.get(baseInfo.id, {
+            local: true,
+            remote: false,
+            resolve: true,
+        })) as FileVersion;
+        await fs.rm("/late-restore.txt");
+        const concurrent = forkVersion(
+            base,
+            "version:restore-before-final-validation"
+        );
+        await fs.program.entries.put(concurrent, { unique: true });
+        const expectedConflict = (await fs.namingConflicts()).find(
+            (conflict) =>
+                conflict.type === "delete-vs-edit" &&
+                conflict.nodeId === entry.nodeId
+        )!;
+        const late = forkVersion(
+            concurrent,
+            "version:restore-after-final-validation"
+        );
+
+        const program = fs.program as any;
+        const originalAppendNamingEvent = program.appendNamingEvent;
+        let injected = false;
+        program.appendNamingEvent = async (...args: unknown[]) => {
+            if (!injected) {
+                injected = true;
+                await fs.program.entries.put(late, { unique: true });
+            }
+            return originalAppendNamingEvent.apply(program, args);
+        };
+        try {
+            await fs.resolveNamingConflict(
+                entry.nodeId,
+                { type: "restore" },
+                { expectedConflicts: [expectedConflict] }
+            );
+        } finally {
+            program.appendNamingEvent = originalAppendNamingEvent;
+        }
+        expect(injected).toBe(true);
+        expect(await fs.stat("/late-restore.txt")).toBeDefined();
+        const contentConflict = (await fs.conflicts("/late-restore.txt"))[0];
+        expect(contentConflict).toBeDefined();
+        expect(contentConflict.versions.map((version) => version.id)).toContain(
+            late.id
+        );
+        expect(
+            (await fs.namingConflicts()).filter(
+                (conflict) => conflict.nodeId === entry.nodeId
+            )
+        ).toEqual([]);
     });
 
     it("runs the baseline benchmark workload", async () => {

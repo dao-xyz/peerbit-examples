@@ -4,6 +4,7 @@ import {
     SharedFsHandle,
     SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
     type ResolveNamingAction,
+    type ResolveNamingConflictOptions,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
     type SharedFsMountNamespaceSemantics,
@@ -392,10 +393,14 @@ export class IgnoreAwareFs extends SharedFsHandle {
         });
     }
 
-    resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
+    resolveNamingConflict(
+        nodeId: string,
+        action: ResolveNamingAction,
+        options?: ResolveNamingConflictOptions
+    ) {
         // Pass-through: conflicts on ignored paths are resolvable via
         // namingConflicts(..., { includeIgnored: true }).
-        return super.resolveNamingConflict(nodeId, action);
+        return super.resolveNamingConflict(nodeId, action, options);
     }
 
     async snapshotWrite() {
