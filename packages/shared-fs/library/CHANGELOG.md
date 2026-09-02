@@ -1,5 +1,11 @@
 # @peerbit/shared-fs
 
+## 0.13.11
+
+### Patch Changes
+
+- 4e6e4e2: Harden snapshot segment-ledger locking and recovery. Lifecycle cancellation now reaches contended publish and reap ledger writes, existing ownerless lock paths fail closed on POSIX, and deterministic lock/fault checkpoints cover stale-owner races, atomic replacement, and process-crash recovery.
+
 ## 0.13.10
 
 ### Patch Changes
