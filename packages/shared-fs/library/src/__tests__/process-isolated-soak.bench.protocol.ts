@@ -46,9 +46,19 @@ export type ProcessSoakConflictExpectation =
       }
     | { mode: "resolved"; path: string };
 
+export type ProcessSoakProcessIdentity = {
+    worker: number;
+    generation: number;
+    pid: number;
+    identity: string;
+    networkMode: "online" | "offline";
+};
+
 export type ProcessSoakRuntimeMetrics = {
+    process: ProcessSoakProcessIdentity;
     rssBytes: number;
     maxRssBytes: number;
+    heapTotalBytes: number;
     heapUsedBytes: number;
     externalBytes: number;
     arrayBuffersBytes: number;
@@ -133,8 +143,13 @@ export type ProcessSoakWorkerCommand =
     | (ProcessSoakRequestBase & { type: "collect-garbage" })
     | (ProcessSoakRequestBase & { type: "network-status" })
     | (ProcessSoakRequestBase & { type: "runtime-metrics" })
+    | (ProcessSoakRequestBase & { type: "requested-gc-runtime-metrics" })
     | (ProcessSoakRequestBase & { type: "metrics" })
-    | (ProcessSoakRequestBase & { type: "shutdown" });
+    | (ProcessSoakRequestBase & {
+          type: "shutdown";
+          captureMetrics?: boolean;
+          requestGcAfterStop?: boolean;
+      });
 
 export type ProcessSoakResponseMessage =
     | {
@@ -215,3 +230,19 @@ export type ProcessSoakGcResult = {
         warnings: string[];
     };
 };
+
+export type ProcessSoakRequestedGcMetricsResult = {
+    settleWallMs: number;
+    metrics: ProcessSoakRuntimeMetrics;
+};
+
+export type ProcessSoakShutdownResult =
+    | { captured: false }
+    | {
+          captured: true;
+          beforeClose: ProcessSoakRuntimeMetrics;
+          afterFsClose: ProcessSoakRuntimeMetrics;
+          afterPeerStop: ProcessSoakRuntimeMetrics;
+          afterStopRequestedGc?: ProcessSoakRuntimeMetrics;
+          gcSettleWallMs?: number;
+      };

@@ -19,7 +19,10 @@ import type {
     ProcessSoakMetrics,
     ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
+    ProcessSoakProcessIdentity,
+    ProcessSoakRequestedGcMetricsResult,
     ProcessSoakRuntimeMetrics,
+    ProcessSoakShutdownResult,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
@@ -30,10 +33,17 @@ import { processSoakContentHash } from "./process-isolated-soak.bench.payload.js
 const worker = Number(process.argv[2]);
 const directory = process.argv[3];
 const offline = process.argv[4] === "offline";
+const generation = Number(process.argv[5]);
 
-if (!Number.isInteger(worker) || worker < 0 || !directory) {
+if (
+    !Number.isInteger(worker) ||
+    worker < 0 ||
+    !directory ||
+    !Number.isInteger(generation) ||
+    generation < 1
+) {
     throw new Error(
-        "Expected process-isolated-soak.bench.worker.ts <worker> <directory>"
+        "Expected process-isolated-soak.bench.worker.ts <worker> <directory> <network-mode> <generation>"
     );
 }
 
@@ -79,12 +89,16 @@ const directoryBytes = async (path: string): Promise<number> => {
     return bytes;
 };
 
-const runtimeMetrics = (): ProcessSoakRuntimeMetrics => {
+const runtimeMetrics = (
+    processIdentity: ProcessSoakProcessIdentity
+): ProcessSoakRuntimeMetrics => {
     const memory = process.memoryUsage();
     const resources = process.resourceUsage();
     return {
+        process: processIdentity,
         rssBytes: memory.rss,
         maxRssBytes: resources.maxRSS * 1024,
+        heapTotalBytes: memory.heapTotal,
         heapUsedBytes: memory.heapUsed,
         externalBytes: memory.external,
         arrayBuffersBytes: memory.arrayBuffers,
@@ -95,10 +109,32 @@ const runtimeMetrics = (): ProcessSoakRuntimeMetrics => {
     };
 };
 
-const metrics = async (): Promise<ProcessSoakMetrics> => {
+const metrics = async (
+    processIdentity: ProcessSoakProcessIdentity
+): Promise<ProcessSoakMetrics> => {
     return {
-        ...runtimeMetrics(),
+        ...runtimeMetrics(processIdentity),
         storageBytes: await directoryBytes(directory),
+    };
+};
+
+const requestedGcRuntimeMetrics = async (
+    processIdentity: ProcessSoakProcessIdentity
+): Promise<ProcessSoakRequestedGcMetricsResult> => {
+    const gc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
+    assert.equal(
+        typeof gc,
+        "function",
+        "Process soak worker must run with --expose-gc"
+    );
+    const startedAt = performance.now();
+    gc();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    gc();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return {
+        settleWallMs: performance.now() - startedAt,
+        metrics: runtimeMetrics(processIdentity),
     };
 };
 
@@ -176,6 +212,13 @@ const main = async () => {
             : {}),
     });
     const peerCreateMs = performance.now() - peerCreateStartedAt;
+    const processIdentity = {
+        worker,
+        generation,
+        pid: process.pid,
+        identity: peer.identity.publicKey.hashcode(),
+        networkMode: offline ? "offline" : "online",
+    } satisfies ProcessSoakProcessIdentity;
     let fs: SharedFsHandle | undefined;
 
     const requireFs = () => {
@@ -500,12 +543,44 @@ const main = async () => {
                 ].sort(),
             } satisfies ProcessSoakNetworkStatus;
         }
-        if (command.type === "runtime-metrics") return runtimeMetrics();
-        if (command.type === "metrics") return metrics();
+        if (command.type === "runtime-metrics") {
+            return runtimeMetrics(processIdentity);
+        }
+        if (command.type === "requested-gc-runtime-metrics") {
+            return requestedGcRuntimeMetrics(processIdentity);
+        }
+        if (command.type === "metrics") return metrics(processIdentity);
         if (command.type === "shutdown") {
+            assert.equal(
+                command.requestGcAfterStop === true &&
+                    command.captureMetrics !== true,
+                false,
+                "Shutdown GC diagnostics require captureMetrics"
+            );
+            const beforeClose = command.captureMetrics
+                ? runtimeMetrics(processIdentity)
+                : undefined;
             await fs?.close();
+            fs = undefined;
+            const afterFsClose = command.captureMetrics
+                ? runtimeMetrics(processIdentity)
+                : undefined;
             await peer.stop();
-            return { stopped: true };
+            if (!command.captureMetrics) {
+                return { captured: false } satisfies ProcessSoakShutdownResult;
+            }
+            const afterPeerStop = runtimeMetrics(processIdentity);
+            const requestedGc = command.requestGcAfterStop
+                ? await requestedGcRuntimeMetrics(processIdentity)
+                : undefined;
+            return {
+                captured: true,
+                beforeClose: beforeClose!,
+                afterFsClose: afterFsClose!,
+                afterPeerStop,
+                afterStopRequestedGc: requestedGc?.metrics,
+                gcSettleWallMs: requestedGc?.settleWallMs,
+            } satisfies ProcessSoakShutdownResult;
         }
         command satisfies never;
     };
@@ -513,7 +588,7 @@ const main = async () => {
     await send({
         type: "ready",
         worker,
-        identity: peer.identity.publicKey.hashcode(),
+        identity: processIdentity.identity,
         publicKey: encodePublicSignKey(peer.identity.publicKey),
         addresses: peer.getMultiaddrs().map((address) => address.toString()),
         peerCreateMs,

@@ -15,7 +15,9 @@ import type {
     ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
     ProcessSoakReadyMessage,
+    ProcessSoakRequestedGcMetricsResult,
     ProcessSoakRuntimeMetrics,
+    ProcessSoakShutdownResult,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
@@ -41,7 +43,9 @@ type ProcessSoakCommandInput = CommandInput<ProcessSoakWorkerCommand>;
 
 type RunningWorker = {
     index: number;
+    generation: number;
     directory: string;
+    networkMode: "online" | "offline";
     child: ChildProcess;
     ready: Promise<ProcessSoakReadyMessage>;
     closed: Promise<{
@@ -55,6 +59,19 @@ type RunningWorker = {
     diagnostics(): string;
     hasClosed(): boolean;
 };
+
+type ProcessSoakStopResult = {
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    shutdown?: ProcessSoakShutdownResult;
+};
+
+type CapturedProcessSoakShutdownResult = Extract<
+    ProcessSoakShutdownResult,
+    { captured: true }
+>;
+
+let nextWorkerGeneration = 0;
 
 const configuredRounds = () => {
     const rounds = Number(
@@ -120,11 +137,18 @@ const startWorker = (
     directory: string,
     options: { offline?: boolean } = {}
 ): RunningWorker => {
+    const networkMode = options.offline ? "offline" : "online";
+    const generation = ++nextWorkerGeneration;
     const child = fork(
         workerPath,
-        [String(index), directory, options.offline ? "offline" : "online"],
+        [String(index), directory, networkMode, String(generation)],
         {
-            execArgv: ["--enable-source-maps", "--import", "tsx"],
+            execArgv: [
+                "--expose-gc",
+                "--enable-source-maps",
+                "--import",
+                "tsx",
+            ],
             env: { ...process.env, NODE_ENV: "test" },
             stdio: ["ignore", "pipe", "pipe", "ipc"],
         }
@@ -254,7 +278,9 @@ const startWorker = (
 
     const running: RunningWorker = {
         index,
+        generation,
         directory,
+        networkMode,
         child,
         ready,
         closed,
@@ -310,10 +336,21 @@ const startWorker = (
 const isRunning = (worker: RunningWorker) =>
     worker.child.exitCode === null && worker.child.signalCode === null;
 
-const stopWorker = async (worker: RunningWorker) => {
+const stopWorker = async (
+    worker: RunningWorker,
+    options: { captureMetrics?: boolean; requestGcAfterStop?: boolean } = {}
+): Promise<ProcessSoakStopResult> => {
     if (!isRunning(worker)) return worker.closed;
+    let shutdown: ProcessSoakShutdownResult;
     try {
-        await worker.request({ type: "shutdown" }, 30_000);
+        shutdown = await worker.request<ProcessSoakShutdownResult>(
+            {
+                type: "shutdown",
+                captureMetrics: options.captureMetrics,
+                requestGcAfterStop: options.requestGcAfterStop,
+            },
+            options.requestGcAfterStop ? REQUEST_TIMEOUT_MS : 30_000
+        );
     } catch (error) {
         if (isRunning(worker)) worker.child.kill("SIGKILL");
         await withTimeout(
@@ -323,11 +360,12 @@ const stopWorker = async (worker: RunningWorker) => {
         );
         throw error;
     }
-    return withTimeout(
+    const closed = await withTimeout(
         worker.closed,
         30_000,
         `Process soak worker ${worker.index} did not close after shutdown`
     );
+    return { ...closed, shutdown };
 };
 
 const killWorker = async (worker: RunningWorker) => {
@@ -355,19 +393,139 @@ const dialAddress = (ready: ProcessSoakReadyMessage) => {
 const sumStorage = (metrics: ProcessSoakMetrics[]) =>
     metrics.reduce((total, sample) => total + sample.storageBytes, 0);
 
-const sumMetric = (
-    metrics: ProcessSoakMetrics[],
-    key: keyof ProcessSoakMetrics
-) => metrics.reduce((total, sample) => total + sample[key], 0);
+const validateRuntimeMetric = async (
+    worker: RunningWorker,
+    sample: ProcessSoakRuntimeMetrics
+) => {
+    const ready = await worker.ready;
+    expect(sample.process).toEqual({
+        worker: worker.index,
+        generation: worker.generation,
+        pid: worker.child.pid,
+        identity: ready.identity,
+        networkMode: worker.networkMode,
+    });
+    for (const value of [
+        sample.rssBytes,
+        sample.maxRssBytes,
+        sample.heapTotalBytes,
+        sample.heapUsedBytes,
+        sample.externalBytes,
+        sample.arrayBuffersBytes,
+        sample.userCpuMicros,
+        sample.systemCpuMicros,
+        sample.fsReadOps,
+        sample.fsWriteOps,
+    ]) {
+        expect(Number.isFinite(value)).toBe(true);
+        expect(value).toBeGreaterThanOrEqual(0);
+    }
+    expect(sample.process.pid).toBeGreaterThan(0);
+    expect(sample.heapUsedBytes).toBeLessThanOrEqual(sample.heapTotalBytes);
+};
 
-const captureRuntimeMetrics = (workers: RunningWorker[]) =>
-    Promise.all(
+const validateRuntimeMetrics = async (
+    workers: RunningWorker[],
+    samples: ProcessSoakRuntimeMetrics[]
+) => {
+    expect(samples).toHaveLength(workers.length);
+    await Promise.all(
+        samples.map((sample, index) =>
+            validateRuntimeMetric(workers[index], sample)
+        )
+    );
+    expect(new Set(samples.map((sample) => sample.process.pid)).size).toBe(
+        workers.length
+    );
+};
+
+const captureRuntimeMetrics = async (workers: RunningWorker[]) => {
+    const samples = await Promise.all(
         workers.map((worker) =>
             worker.request<ProcessSoakRuntimeMetrics>({
                 type: "runtime-metrics",
             })
         )
     );
+    await validateRuntimeMetrics(workers, samples);
+    return samples;
+};
+
+const captureRequestedGcRuntimeMetrics = async (workers: RunningWorker[]) => {
+    const results = await Promise.all(
+        workers.map((worker) =>
+            worker.request<ProcessSoakRequestedGcMetricsResult>({
+                type: "requested-gc-runtime-metrics",
+            })
+        )
+    );
+    await validateRuntimeMetrics(
+        workers,
+        results.map((result) => result.metrics)
+    );
+    for (const result of results) {
+        expect(Number.isFinite(result.settleWallMs)).toBe(true);
+        expect(result.settleWallMs).toBeGreaterThanOrEqual(0);
+    }
+    return results;
+};
+
+const aggregateFleetMemory = (metrics: ProcessSoakRuntimeMetrics[]) => ({
+    processCount: metrics.length,
+    processes: metrics.map((sample) => sample.process),
+    sumCurrentRssBytes: metrics.reduce(
+        (total, sample) => total + sample.rssBytes,
+        0
+    ),
+    sumProcessLifetimeMaxRssBytes: metrics.reduce(
+        (total, sample) => total + sample.maxRssBytes,
+        0
+    ),
+    sumHeapTotalBytes: metrics.reduce(
+        (total, sample) => total + sample.heapTotalBytes,
+        0
+    ),
+    sumHeapUsedBytes: metrics.reduce(
+        (total, sample) => total + sample.heapUsedBytes,
+        0
+    ),
+    sumExternalBytes: metrics.reduce(
+        (total, sample) => total + sample.externalBytes,
+        0
+    ),
+    sumArrayBuffersBytes: metrics.reduce(
+        (total, sample) => total + sample.arrayBuffersBytes,
+        0
+    ),
+});
+
+const validateShutdownResult = async (
+    worker: RunningWorker,
+    result: ProcessSoakStopResult
+): Promise<CapturedProcessSoakShutdownResult> => {
+    expect(result.code).toBe(0);
+    expect(result.shutdown).toBeDefined();
+    const shutdown = result.shutdown!;
+    expect(shutdown.captured).toBe(true);
+    if (!shutdown.captured) {
+        throw new Error("Expected captured shutdown metrics");
+    }
+    const samples = [
+        shutdown.beforeClose,
+        shutdown.afterFsClose,
+        shutdown.afterPeerStop,
+    ];
+    expect(shutdown.afterStopRequestedGc).toBeDefined();
+    expect(shutdown.gcSettleWallMs).toBeTypeOf("number");
+    samples.push(shutdown.afterStopRequestedGc!);
+    const gcSettleWallMs = shutdown.gcSettleWallMs!;
+    expect(Number.isFinite(gcSettleWallMs)).toBe(true);
+    expect(gcSettleWallMs).toBeGreaterThanOrEqual(0);
+    await Promise.all(
+        samples.map((sample) => validateRuntimeMetric(worker, sample))
+    );
+    return shutdown;
+};
 
 const withoutStorage = ({
     storageBytes: _storageBytes,
@@ -526,6 +684,10 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     worker.request<ProcessSoakMetrics>({ type: "metrics" })
                 )
             );
+            await validateRuntimeMetrics(
+                workers,
+                baselineMetrics.map(withoutStorage)
+            );
             const phaseRuntimeMetrics: Record<
                 string,
                 ProcessSoakRuntimeMetrics[]
@@ -539,7 +701,6 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             const localCommitSamples: number[] = [];
             const allPeersAdmittedSamples: number[] = [];
             const allPeersReadableSamples: number[] = [];
-            const roundReports: Array<Record<string, unknown>> = [];
             let logicalContentBytesWritten = 0;
             let logicalWriteOperations = 0;
 
@@ -656,7 +817,6 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         0
                     ),
                 };
-                roundReports.push(roundReport);
                 console.log(
                     "process-isolated-soak-round:",
                     JSON.stringify(roundReport, (_key, value) =>
@@ -1080,6 +1240,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             });
             const offlineStop = await stopWorker(offlineRestarted);
             expect(offlineStop.code).toBe(0);
+            expect(offlineStop.shutdown).toEqual({ captured: false });
             activeWorkers.delete(offlineRestarted);
 
             const networkRestartStartedAt = performance.now();
@@ -1237,6 +1398,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             const finalNetworkWorker = workers[2];
             const finalNetworkStop = await stopWorker(finalNetworkWorker);
             expect(finalNetworkStop.code).toBe(0);
+            expect(finalNetworkStop.shutdown).toEqual({ captured: false });
             activeWorkers.delete(finalNetworkWorker);
             const finalOfflineRestartStartedAt = performance.now();
             const finalOffline = startWorker(2, directories[2], {
@@ -1268,6 +1430,9 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             expect(finalOfflineOpen.writeReadinessSource).toBe(
                 "remote-settled"
             );
+            workers = [workers[0], workers[1], finalOffline];
+            phaseRuntimeMetrics.beforeFinalOfflineAudit =
+                await captureRuntimeMetrics(workers);
             const finalOfflineAuditStartedAt = performance.now();
             await finalOffline.request<ProcessSoakVerifyResult>({
                 type: "verify",
@@ -1296,6 +1461,8 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             });
             const finalOfflineAuditMs =
                 performance.now() - finalOfflineAuditStartedAt;
+            phaseRuntimeMetrics.afterFinalOfflineAudit =
+                await captureRuntimeMetrics(workers);
             const finalOfflineNetworkAfterAudit =
                 await finalOffline.request<ProcessSoakNetworkStatus>({
                     type: "network-status",
@@ -1304,17 +1471,73 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 connectionCount: 0,
                 remotePeers: [],
             });
-            phaseRuntimeMetrics.finalOfflineReopen =
-                await captureRuntimeMetrics([finalOffline]);
-            workers = [workers[0], workers[1], finalOffline];
             const finalMetrics = await Promise.all(
                 workers.map((worker) =>
                     worker.request<ProcessSoakMetrics>({ type: "metrics" })
                 )
             );
+            await validateRuntimeMetrics(
+                workers,
+                finalMetrics.map(withoutStorage)
+            );
+            const finalRequestedGcMetrics =
+                await captureRequestedGcRuntimeMetrics(workers);
+            phaseRuntimeMetrics.afterFinalRequestedGc =
+                finalRequestedGcMetrics.map((result) => result.metrics);
             const baselineStorageBytes = sumStorage(baselineMetrics);
             const finalStorageBytes = sumStorage(finalMetrics);
             const storageGrowthBytes = finalStorageBytes - baselineStorageBytes;
+            const stops = await Promise.allSettled(
+                workers.map((worker) =>
+                    stopWorker(worker, {
+                        captureMetrics: true,
+                        requestGcAfterStop: true,
+                    })
+                )
+            );
+            for (const worker of workers) {
+                if (worker.hasClosed()) activeWorkers.delete(worker);
+            }
+            const unclosed = workers.filter((worker) => !worker.hasClosed());
+            expect(
+                unclosed,
+                "Every process-soak worker must confirm close before state removal"
+            ).toEqual([]);
+            const failedStop = stops.find(
+                (result): result is PromiseRejectedResult =>
+                    result.status === "rejected"
+            );
+            if (failedStop) throw failedStop.reason;
+            const finalShutdowns = await Promise.all(
+                stops.map((result, index) => {
+                    if (result.status === "rejected") throw result.reason;
+                    return validateShutdownResult(workers[index], result.value);
+                })
+            );
+            phaseRuntimeMetrics.beforeGracefulShutdown = finalShutdowns.map(
+                (shutdown) => shutdown.beforeClose
+            );
+            phaseRuntimeMetrics.afterFsClose = finalShutdowns.map(
+                (shutdown) => shutdown.afterFsClose
+            );
+            phaseRuntimeMetrics.afterPeerStop = finalShutdowns.map(
+                (shutdown) => shutdown.afterPeerStop
+            );
+            phaseRuntimeMetrics.afterStopRequestedGc = finalShutdowns.map(
+                (shutdown) => shutdown.afterStopRequestedGc!
+            );
+            const baselineFleetMemory = aggregateFleetMemory(
+                baselineMetrics.map(withoutStorage)
+            );
+            const finalFleetMemory = aggregateFleetMemory(
+                finalMetrics.map(withoutStorage)
+            );
+            const fleetMemoryByPhase = Object.fromEntries(
+                Object.entries(phaseRuntimeMetrics).map(([phase, samples]) => [
+                    phase,
+                    aggregateFleetMemory(samples),
+                ])
+            );
             const report = {
                 rounds,
                 writers: workers.length,
@@ -1403,17 +1626,10 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     final: finalMetrics,
                     logicalWriteOperations,
                     logicalContentBytesWritten,
-                    totalRssBytes: {
-                        baseline: sumMetric(baselineMetrics, "rssBytes"),
-                        final: sumMetric(finalMetrics, "rssBytes"),
-                    },
-                    totalMaxRssBytes: {
-                        baseline: sumMetric(baselineMetrics, "maxRssBytes"),
-                        final: sumMetric(finalMetrics, "maxRssBytes"),
-                    },
-                    totalHeapUsedBytes: {
-                        baseline: sumMetric(baselineMetrics, "heapUsedBytes"),
-                        final: sumMetric(finalMetrics, "heapUsedBytes"),
+                    fleetMemorySums: {
+                        baseline: baselineFleetMemory,
+                        final: finalFleetMemory,
+                        phases: fleetMemoryByPhase,
                     },
                     totalStorageBytes: {
                         baseline: baselineStorageBytes,
@@ -1425,8 +1641,19 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                             ? 0
                             : storageGrowthBytes / logicalContentBytesWritten,
                     phases: phaseRuntimeMetrics,
+                    finalRequestedGcSettleWallMs: finalRequestedGcMetrics.map(
+                        (result) => ({
+                            process: result.metrics.process,
+                            settleWallMs: result.settleWallMs,
+                        })
+                    ),
+                    finalShutdownGcSettleWallMs: finalShutdowns.map(
+                        (shutdown) => ({
+                            process: shutdown.afterStopRequestedGc!.process,
+                            settleWallMs: shutdown.gcSettleWallMs!,
+                        })
+                    ),
                 },
-                rawRounds: roundReports,
             };
             console.log(
                 "process-isolated-soak:",
@@ -1434,29 +1661,6 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     typeof value === "number" ? Number(value.toFixed(1)) : value
                 )
             );
-
-            const stops = await Promise.allSettled(
-                workers.map((worker) => stopWorker(worker))
-            );
-            for (const worker of workers) {
-                if (worker.hasClosed()) activeWorkers.delete(worker);
-            }
-            const unclosed = workers.filter((worker) => !worker.hasClosed());
-            expect(
-                unclosed,
-                "Every process-soak worker must confirm close before state removal"
-            ).toEqual([]);
-            const failedStop = stops.find(
-                (result): result is PromiseRejectedResult =>
-                    result.status === "rejected"
-            );
-            if (failedStop) throw failedStop.reason;
-            expect(
-                stops.every(
-                    (result) =>
-                        result.status === "fulfilled" && result.value.code === 0
-                )
-            ).toBe(true);
             await rm(root, { recursive: true, force: true });
             temporaryDirectories.delete(root);
         }
