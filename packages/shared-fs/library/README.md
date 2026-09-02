@@ -236,6 +236,40 @@ shorter diagnostic or a longer soak. This benchmark uses normal write
 readiness and disables remote chunk fallback; it does not use the
 `allowPartialWrites` recovery escape hatch.
 
+For a stronger lifecycle boundary, the process-isolated soak runs three
+authenticated, disk-backed full replicas in three separate Node processes over
+loopback networking. It measures concurrent manifested batches with metadata
+admission separated from byte readability, a mount-style temporary-file
+`fsync`/release/rename replacement of a seeded target, deterministic same-base
+content conflict and resolution, a normal garbage-collection pass, abrupt
+`SIGKILL` of one writer, a no-listener offline reopen and write from that
+writer's durable directory, and reconnect. Exact manifests, bytes, editor node
+identity, conflict heads, trusted keys, identity reuse, zero fresh-data GC
+reclamation, and exact recursive-tree convergence are hard assertions. Latency,
+CPU, RSS, and state-directory growth are descriptive output rather than
+performance budgets:
+
+```bash
+PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK=1 \
+PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_ROUNDS=30 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/process-isolated-soak.bench.test.ts --reporter=verbose
+```
+
+Use one round to validate the harness itself; real soak values are integers from
+10 through 200. Payloads default to 4096 bytes and can be set from 256 bytes
+through 1 MiB with
+`PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES`. Every completed round
+prints `process-isolated-soak-round:` immediately, followed by one aggregate
+`process-isolated-soak:` report. All replicas keep scheduled GC enabled, while
+the explicit measured GC pass uses normal retention, so a short run exercises
+planning and safety without pretending newly written data should be reclaimed.
+The campaign uses `bootstrap: false` and disables remote chunk fallback: it is a
+steady-state and warm-restart complement to the separate cold-join benchmark,
+not a retry of that benchmark. It also deliberately avoids
+`prepareForDisposal()`, whose persisted-receipt session recovery is tracked
+separately upstream.
+
 The mount backend's manual copy-on-write benchmark isolates 4, 64, and 256 MiB
 commit buffers behind a gated fake target that retains the immutable commit
 input after resolution. For every size it runs a legacy fallback (mount and
