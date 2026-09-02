@@ -560,6 +560,7 @@ describe("snapshot segment reclamation", () => {
         let gateIntent = true;
         let closeReturned = false;
         let intentTailCompleted = false;
+        let intentSignal: AbortSignal | undefined;
 
         vi.spyOn(blocksAny, "put").mockImplementation(
             async (...args: any[]) => {
@@ -573,6 +574,7 @@ describe("snapshot segment reclamation", () => {
                 if (closeReturned) staleMutations.push("ledger");
                 if (gateIntent) {
                     gateIntent = false;
+                    intentSignal = args[3];
                     intentEntered.resolve();
                     await intentAllowed.promise;
                 }
@@ -596,11 +598,15 @@ describe("snapshot segment reclamation", () => {
         let closing: Promise<boolean> | undefined;
         try {
             await intentEntered.promise;
+            const maintenanceSignal = program.maintenanceAbortController.signal;
+            expect(intentSignal).toBe(maintenanceSignal);
             closing = program.close().then((result: boolean) => {
                 closeReturned = true;
                 completionOrder.push("close");
                 return result;
             });
+            expect(intentSignal?.aborted).toBe(true);
+            expect(intentSignal?.reason).toMatchObject({ code: "ECLOSED" });
             // close() aborts the lifecycle synchronously before its first await.
             // Releasing now makes completion order, not elapsed time, the proof.
             intentAllowed.resolve();
@@ -686,6 +692,7 @@ describe("snapshot segment reclamation", () => {
         let deletedCids: string[] = [];
         let blocksAbsentAtCas = false;
         let ledgerCasCompleted = false;
+        let ledgerCasSignal: AbortSignal | undefined;
         vi.spyOn(program, "saveSegmentLedgerCas").mockImplementation(
             async (...args: any[]) => {
                 if (closeReturned) staleLedgerWrites++;
@@ -696,6 +703,7 @@ describe("snapshot segment reclamation", () => {
                     reapedCids.size > 0;
                 if (isTargetCas) {
                     gateLedgerCas = false;
+                    ledgerCasSignal = args[3];
                     deletedCids = [...reapedCids];
                     blocksAbsentAtCas = (
                         await Promise.all(
@@ -724,6 +732,8 @@ describe("snapshot segment reclamation", () => {
         let closeObservedCompletedReaper = false;
         try {
             await ledgerCasEntered.promise;
+            const maintenanceSignal = program.maintenanceAbortController.signal;
+            expect(ledgerCasSignal).toBe(maintenanceSignal);
             closing = program.close().then((result: boolean) => {
                 closeObservedCompletedReaper =
                     ledgerCasCompleted && reaperSettled;
@@ -731,6 +741,8 @@ describe("snapshot segment reclamation", () => {
                 completionOrder.push("close");
                 return result;
             });
+            expect(ledgerCasSignal?.aborted).toBe(true);
+            expect(ledgerCasSignal?.reason).toMatchObject({ code: "ECLOSED" });
             ledgerCasAllowed.resolve();
 
             const [result] = await Promise.all([reaping, closing]);
