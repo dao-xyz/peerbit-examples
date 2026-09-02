@@ -17,7 +17,9 @@ import type {
     ProcessSoakEditorResult,
     ProcessSoakGcResult,
     ProcessSoakMetrics,
+    ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
+    ProcessSoakRuntimeMetrics,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
@@ -77,11 +79,12 @@ const directoryBytes = async (path: string): Promise<number> => {
     return bytes;
 };
 
-const metrics = async (): Promise<ProcessSoakMetrics> => {
+const runtimeMetrics = (): ProcessSoakRuntimeMetrics => {
     const memory = process.memoryUsage();
     const resources = process.resourceUsage();
     return {
         rssBytes: memory.rss,
+        maxRssBytes: resources.maxRSS * 1024,
         heapUsedBytes: memory.heapUsed,
         externalBytes: memory.external,
         arrayBuffersBytes: memory.arrayBuffers,
@@ -89,6 +92,12 @@ const metrics = async (): Promise<ProcessSoakMetrics> => {
         systemCpuMicros: resources.systemCPUTime,
         fsReadOps: resources.fsRead,
         fsWriteOps: resources.fsWrite,
+    };
+};
+
+const metrics = async (): Promise<ProcessSoakMetrics> => {
+    return {
+        ...runtimeMetrics(),
         storageBytes: await directoryBytes(directory),
     };
 };
@@ -148,7 +157,23 @@ const main = async () => {
     const peerCreateStartedAt = performance.now();
     const peer = await Peerbit.create({
         directory,
-        ...(offline ? { libp2p: { addresses: { listen: [] } } } : {}),
+        ...(offline
+            ? {
+                  libp2p: {
+                      addresses: { listen: [] },
+                      connectionGater: {
+                          denyDialPeer: () => true,
+                          denyDialMultiaddr: () => true,
+                          denyInboundConnection: () => true,
+                          denyOutboundConnection: () => true,
+                          denyInboundEncryptedConnection: () => true,
+                          denyOutboundEncryptedConnection: () => true,
+                          denyInboundUpgradedConnection: () => true,
+                          denyOutboundUpgradedConnection: () => true,
+                      },
+                  },
+              }
+            : {}),
     });
     const peerCreateMs = performance.now() - peerCreateStartedAt;
     let fs: SharedFsHandle | undefined;
@@ -370,6 +395,54 @@ const main = async () => {
                             head.content
                         );
                     }
+                } else if (command.conflict?.mode === "version-heads") {
+                    const expected = command.conflict.heads
+                        .map((head) => head.versionId)
+                        .sort();
+                    const versions = await current.versions(
+                        command.conflict.path
+                    );
+                    const actual = versions
+                        .filter((version) => version.head)
+                        .map((version) => version.id)
+                        .sort();
+                    assert.deepEqual(actual, expected);
+                    const conflicts = await current.conflicts(
+                        command.conflict.path
+                    );
+                    if (expected.length > 1) {
+                        assert.equal(conflicts.length, 1);
+                        assert.deepEqual(
+                            conflicts[0].versions
+                                .map((version) => version.id)
+                                .sort(),
+                            expected
+                        );
+                    } else {
+                        assert.deepEqual(conflicts, []);
+                    }
+                    for (const head of command.conflict.heads) {
+                        if (head.parentVersionIds) {
+                            const version = versions.find(
+                                (candidate) => candidate.id === head.versionId
+                            );
+                            assert(
+                                version,
+                                `Missing version ${head.versionId}`
+                            );
+                            assert.deepEqual(
+                                [...version.parentVersionIds].sort(),
+                                [...head.parentVersionIds].sort()
+                            );
+                        }
+                        assertExpectedContent(
+                            await current.readVersion(
+                                command.conflict.path,
+                                head.versionId
+                            ),
+                            head.content
+                        );
+                    }
                 } else if (command.conflict?.mode === "resolved") {
                     assert.deepEqual(
                         await current.conflicts(command.conflict.path),
@@ -378,7 +451,10 @@ const main = async () => {
                 }
             }, remainingMs("exact state verification"));
             let visibleConflictHash: string | undefined;
-            if (command.conflict?.mode === "heads") {
+            if (
+                command.conflict?.mode === "heads" ||
+                command.conflict?.mode === "version-heads"
+            ) {
                 const visibleConflict = await current.readFile(
                     command.conflict.path
                 );
@@ -390,7 +466,7 @@ const main = async () => {
                             expectedContentHash(head.content) ===
                             visibleConflictHash
                     ),
-                    "Visible conflict head did not match any exact version"
+                    "Visible head did not match any exact version"
                 );
             }
             return {
@@ -411,9 +487,23 @@ const main = async () => {
                 },
             } satisfies ProcessSoakGcResult;
         }
+        if (command.type === "network-status") {
+            const connections = peer.libp2p.getConnections();
+            return {
+                connectionCount: connections.length,
+                remotePeers: [
+                    ...new Set(
+                        connections.map((connection) =>
+                            connection.remotePeer.toString()
+                        )
+                    ),
+                ].sort(),
+            } satisfies ProcessSoakNetworkStatus;
+        }
+        if (command.type === "runtime-metrics") return runtimeMetrics();
         if (command.type === "metrics") return metrics();
         if (command.type === "shutdown") {
-            fs?.close();
+            await fs?.close();
             await peer.stop();
             return { stopped: true };
         }
