@@ -37,7 +37,14 @@ function of the replicated documents. Concurrent renames, delete-vs-edit
 races, duplicate-name creates, and unreachable nodes are surfaced through
 `namingConflicts()` and settled with `resolveNamingConflict(nodeId, action)`
 (`keep` / `restore` / `delete` / `move`) — a delete that raced a concurrent
-edit is recoverable, not lost.
+edit is recoverable, not lost. Operator workflows can pass the complete
+conflicts involving the target as `{ expectedConflicts }` in the third
+argument. The library rechecks the exact local conflict topology immediately
+before deriving the action, including other duplicate-name claimants and
+recoverable delete-vs-edit versions. A changed view fails retryably with
+`SharedFsExpectedNamingConflictMismatchError`. Guarded delete/restore actions
+snapshot content before that final check and only acknowledge/supersede those
+heads; content arriving later remains recoverable or concurrent.
 
 ## Node-guarded mount namespace mutations
 
@@ -329,10 +336,41 @@ peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
+peerbit-fs naming-conflicts <address>
+peerbit-fs resolve-conflict <address> <path> <version-id>
+peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move>
 peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
+
+`conflicts --json` exposes every content head in the converged local view in a
+document carrying address/filter/view metadata plus a `conflicts` array. The
+records include actionable version ids and bigint metadata encoded as decimal
+strings. Observer mode can inspect an existing local store but its
+`fullReplica: false` view does not prove completeness.
+`naming-conflicts --json` exposes each conflict type, visible winner node,
+naming event ids, shadowed claimant ids, and recoverable content ids. Content
+resolution explicitly selects one current head; naming resolution accepts
+`keep`, `restore`, `delete`, or `move --to <path>`. For duplicate names,
+normally move or delete a listed shadowed claimant: keeping the visible winner
+alone does not remove the other claim. Delete-vs-edit conflicts can be restored
+with their concurrent content intact, while unreachable nodes normally need a
+move to a reachable parent or deletion.
+
+The two resolution commands require a full write-ready replica and a trusted
+local writer. They reject ids outside the currently visible local conflict;
+naming resolution also supplies the complete `expectedConflicts` topology so a
+change to the target, another duplicate-name claimant, or recoverable content
+visible at execution fails retryably instead of accepting a stale action. That
+is not a global transaction: a later arrival stays concurrent and may
+re-conflict. Inspect again after every action. Resolution
+also does not request persisted remote receipts; use `prepare-disposal`
+separately before retiring that machine. `status --json` emits one document
+with native support, and `--include-conflicts` opts into separate content and
+naming counts/records. The scans are omitted by default because they scale with
+retained metadata; naming `--path` likewise filters output only after a
+whole-namespace conflict scan.
 
 Mounted writes are buffered by the native adapter. Each successful `flush` or
 `fsync` persists through the mutation generation captured when its fence

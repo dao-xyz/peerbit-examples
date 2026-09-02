@@ -621,6 +621,13 @@ export type BootstrapPhase =
 export type BootstrapStatus = {
     phase: BootstrapPhase;
     /**
+     * True only after the accepted snapshot's document ids were covered before
+     * overlay retirement. This is not a global network-frontier proof. It stays
+     * false for bootstrap-disabled/off views and for a quiescence-based
+     * recovery from an unverified retirement.
+     */
+    snapshotCoverageVerified: boolean;
+    /**
      * False on a fresh address-open until initial replication has produced a
      * settled, full-replica view. Mutations fail with
      * SharedFsWritePendingError while this is false.
@@ -875,6 +882,17 @@ export type ResolveNamingAction =
     | { type: "delete" }
     | { type: "move"; to: string };
 
+export type ResolveNamingConflictOptions = {
+    /**
+     * Exact conflict records present in the local view the caller acted on.
+     * Resolution fails retryably unless the complete set of conflicts still
+     * involving the target node matches this view. This additionally catches
+     * topology changes on other duplicate-name claimants whose target-node
+     * heads did not change.
+     */
+    expectedConflicts?: SharedFsNamingConflict[];
+};
+
 export type WriteFileOptions = {
     /**
      * Allows callers that observed an older base to publish a concurrent version.
@@ -1072,6 +1090,29 @@ export class SharedFsExpectedNamespaceMismatchError extends SharedFsError {
     }
 }
 
+/** A naming-conflict resolution observed a newer target-node head. */
+export class SharedFsExpectedNamingConflictMismatchError extends SharedFsError {
+    readonly retryable = true;
+    readonly retrySafe = true;
+    readonly expectedEventIds: string[];
+
+    constructor(
+        readonly nodeId: string,
+        readonly expectedConflicts: SharedFsNamingConflict[],
+        readonly actualConflicts: SharedFsNamingConflict[],
+        readonly actualHeadEventIds: string[],
+        message = `Naming conflict changed for ${nodeId}; inspect namingConflicts() and retry with the new conflict view`
+    ) {
+        super("EAGAIN", message);
+        this.name = "SharedFsExpectedNamingConflictMismatchError";
+        this.expectedEventIds = [
+            ...new Set(
+                expectedConflicts.flatMap((conflict) => conflict.eventIds)
+            ),
+        ].sort();
+    }
+}
+
 /**
  * A create guarded by `expectedNodeId: null` reached its naming fence after
  * its parent disappeared, became a file, or was replaced by a different
@@ -1183,6 +1224,75 @@ const chunkBytes = (bytes: Uint8Array, chunkSize = DEFAULT_FILE_CHUNK_SIZE) => {
  * unlike localeCompare, which is banned from winner logic).
  */
 const compareIds = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+const namingConflictInvolvesNode = (
+    conflict: SharedFsNamingConflict,
+    nodeId: string
+) =>
+    conflict.nodeId === nodeId ||
+    (conflict.shadowedNodeIds ?? []).includes(nodeId);
+
+const canonicalNamingConflictView = (
+    conflicts: SharedFsNamingConflict[]
+): SharedFsNamingConflict[] =>
+    conflicts
+        .map((conflict) => ({
+            type: conflict.type,
+            nodeId: conflict.nodeId,
+            path: conflict.path,
+            eventIds: [...new Set(conflict.eventIds)].sort(compareIds),
+            ...(conflict.shadowedNodeIds
+                ? {
+                      shadowedNodeIds: [
+                          ...new Set(conflict.shadowedNodeIds),
+                      ].sort(compareIds),
+                  }
+                : {}),
+            ...(conflict.recoverableVersionIds
+                ? {
+                      recoverableVersionIds: [
+                          ...new Set(conflict.recoverableVersionIds),
+                      ].sort(compareIds),
+                  }
+                : {}),
+        }))
+        .sort((left, right) =>
+            compareIds(JSON.stringify(left), JSON.stringify(right))
+        );
+
+const sameNamingConflictView = (
+    left: SharedFsNamingConflict[],
+    right: SharedFsNamingConflict[]
+) =>
+    JSON.stringify(canonicalNamingConflictView(left)) ===
+    JSON.stringify(canonicalNamingConflictView(right));
+
+const isNonEmptyStringArray = (value: unknown): value is string[] =>
+    Array.isArray(value) &&
+    value.every((entry) => typeof entry === "string" && entry.length > 0);
+
+const isSharedFsNamingConflict = (
+    value: unknown
+): value is SharedFsNamingConflict => {
+    if (!value || typeof value !== "object") {
+        return false;
+    }
+    const conflict = value as Partial<SharedFsNamingConflict>;
+    return (
+        (conflict.type === "multi-head" ||
+            conflict.type === "duplicate-name" ||
+            conflict.type === "delete-vs-edit" ||
+            conflict.type === "unreachable") &&
+        typeof conflict.nodeId === "string" &&
+        conflict.nodeId.length > 0 &&
+        typeof conflict.path === "string" &&
+        isNonEmptyStringArray(conflict.eventIds) &&
+        (conflict.shadowedNodeIds === undefined ||
+            isNonEmptyStringArray(conflict.shadowedNodeIds)) &&
+        (conflict.recoverableVersionIds === undefined ||
+            isNonEmptyStringArray(conflict.recoverableVersionIds))
+    );
+};
 
 const compareBigint = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -6443,7 +6553,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 nodeId: slot.nodeId,
                 path: await this.pathForNode(slot.nodeId, stateCache),
                 shadowedNodeIds: slot.shadowed,
-                eventIds: claimants.map((state) => state.winner.id),
+                eventIds: [
+                    ...new Set(
+                        claimants.flatMap((state) =>
+                            state.heads.map((head) => head.id)
+                        )
+                    ),
+                ],
             });
         }
 
@@ -6469,7 +6585,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         type: "delete-vs-edit",
                         nodeId: state.nodeId,
                         path: await this.pathForNode(state.nodeId, stateCache),
-                        eventIds: [state.winner.id],
+                        eventIds: state.heads.map((head) => head.id),
                         recoverableVersionIds: recoverable.map(
                             (head) => head.id
                         ),
@@ -6531,8 +6647,51 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * agree with the asserted payload (quiescence — concurrent identical
      * resolutions converge without ping-pong).
      */
-    async resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
+    async resolveNamingConflict(
+        nodeId: string,
+        action: ResolveNamingAction,
+        options: ResolveNamingConflictOptions = {}
+    ) {
         this.assertWriteReady("resolveNamingConflict");
+        let expectedConflicts: SharedFsNamingConflict[] | undefined;
+        if (options.expectedConflicts !== undefined) {
+            const supplied = options.expectedConflicts;
+            const identifierCount = Array.isArray(supplied)
+                ? supplied.reduce(
+                      (total, conflict) =>
+                          total +
+                          (Array.isArray(conflict?.eventIds)
+                              ? conflict.eventIds.length
+                              : 0) +
+                          (Array.isArray(conflict?.shadowedNodeIds)
+                              ? conflict.shadowedNodeIds.length
+                              : 0) +
+                          (Array.isArray(conflict?.recoverableVersionIds)
+                              ? conflict.recoverableVersionIds.length
+                              : 0),
+                      0
+                  )
+                : 0;
+            if (
+                !Array.isArray(supplied) ||
+                supplied.length === 0 ||
+                supplied.length > 16_000 ||
+                identifierCount > 16_000 ||
+                !supplied.every(
+                    (conflict) =>
+                        isSharedFsNamingConflict(conflict) &&
+                        namingConflictInvolvesNode(conflict, nodeId)
+                )
+            ) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "resolveNamingConflict expectedConflicts must contain 1..16000 valid conflicts involving the target node and at most 16000 identifiers"
+                );
+            }
+            // Own the caller-provided view before any await so later mutation
+            // of the options object cannot weaken the fence.
+            expectedConflicts = canonicalNamingConflictView(supplied);
+        }
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch(
             "resolveNamingConflict"
         );
@@ -6540,6 +6699,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.resolveNamingConflictInner(
                 nodeId,
                 action,
+                { expectedConflicts },
                 namespaceEpoch,
                 context
             )
@@ -6549,12 +6709,80 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async resolveNamingConflictInner(
         nodeId: string,
         action: ResolveNamingAction,
+        options: ResolveNamingConflictOptions,
         namespaceEpoch: number,
         context: ForegroundMutationContext
     ) {
+        let deleteContentHeadIds: string[] | undefined;
+        let restoreContentSnapshot:
+            | { heads: FileVersion[]; visible: FileVersion }
+            | undefined;
+        if (nodeKindOf(nodeId) === "file") {
+            if (action.type === "delete") {
+                deleteContentHeadIds = (await this.headsForNode(nodeId))
+                    .map((head) => head.id)
+                    .sort(compareIds);
+            } else if (action.type === "restore") {
+                const documents = await this.versionDocumentsForNode(nodeId);
+                if (documents.length === 0) {
+                    // Never produce a contentless ghost: if every version of
+                    // this node has been reclaimed, say so before publishing
+                    // the naming assertion.
+                    throw new SharedFsError(
+                        "ENOENT",
+                        "no recoverable content survives for this node"
+                    );
+                }
+                const heads = this.contentHeads(documents);
+                const visible = heads[0];
+                if (!(visible instanceof FileVersion)) {
+                    throw new SharedFsError(
+                        "EIO",
+                        "restored node's winning version document is unavailable"
+                    );
+                }
+                restoreContentSnapshot = { heads, visible };
+            }
+        }
+        // Content is deliberately snapshotted before this final topology
+        // check. A head visible by the check changes delete-vs-edit topology
+        // and rejects a stale action; a head arriving afterwards is never
+        // added to the delete acknowledgement or restore parents and remains
+        // concurrent/recoverable.
+        const actualConflicts = options.expectedConflicts
+            ? canonicalNamingConflictView(
+                  (await this.namingConflicts()).filter((conflict) =>
+                      namingConflictInvolvesNode(conflict, nodeId)
+                  )
+              )
+            : undefined;
         const state = await this.namingStateForNode(nodeId);
         if (!state) {
             throw new SharedFsError("ENOENT", `Unknown node: ${nodeId}`);
+        }
+        if (options.expectedConflicts !== undefined) {
+            const expectedEventIds = new Set(
+                options.expectedConflicts.flatMap(
+                    (conflict) => conflict.eventIds
+                )
+            );
+            const actualHeadEventIds = state.heads
+                .map((head) => head.id)
+                .sort(compareIds);
+            if (
+                !sameNamingConflictView(
+                    options.expectedConflicts,
+                    actualConflicts ?? []
+                ) ||
+                actualHeadEventIds.some((id) => !expectedEventIds.has(id))
+            ) {
+                throw new SharedFsExpectedNamingConflictMismatchError(
+                    nodeId,
+                    options.expectedConflicts,
+                    actualConflicts ?? [],
+                    actualHeadEventIds
+                );
+            }
         }
         let payload: {
             parentId: string;
@@ -6572,17 +6800,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 break;
             }
             case "restore": {
-                if (
-                    nodeKindOf(nodeId) === "file" &&
-                    (await this.versionDocumentsForNode(nodeId)).length === 0
-                ) {
-                    // Never produce a contentless ghost: if every version of
-                    // this node has been reclaimed, say so loudly.
-                    throw new SharedFsError(
-                        "ENOENT",
-                        "no recoverable content survives for this node"
-                    );
-                }
                 payload = {
                     parentId: state.winner.parentId,
                     name: state.winner.name,
@@ -6591,15 +6808,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 break;
             }
             case "delete": {
-                const heads =
-                    nodeKindOf(nodeId) === "file"
-                        ? await this.headsForNode(nodeId)
-                        : [];
                 payload = {
                     parentId: state.winner.parentId,
                     name: state.winner.name,
                     deleted: true,
-                    observedContentHeads: heads.map((head) => head.id),
+                    observedContentHeads: deleteContentHeadIds ?? [],
                 };
                 break;
             }
@@ -6624,11 +6837,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 break;
             }
         }
-        const settled =
+        let settled =
             state.heads.length === 1 &&
             state.winner.parentId === payload.parentId &&
             state.winner.name === payload.name &&
             state.winner.deleted === payload.deleted;
+        if (
+            settled &&
+            action.type === "delete" &&
+            nodeKindOf(nodeId) === "file"
+        ) {
+            const winner = await this.getDocument<SharedFsEntry>(
+                state.winner.id
+            );
+            const alreadyObserved =
+                winner instanceof NamingEvent
+                    ? new Set(winner.observedContentHeads)
+                    : new Set<string>();
+            settled = (payload.observedContentHeads ?? []).every((id) =>
+                alreadyObserved.has(id)
+            );
+        }
         if (settled) {
             return;
         }
@@ -6648,17 +6877,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // re-referencing the visible head and re-put/touch its chunks,
             // so the restored file is race-proof against a concurrent chunk
             // sweep exactly like a fresh edit is.
-            const docs = await this.versionDocumentsForNode(nodeId);
-            const heads = this.contentHeads(docs);
-            const visibleDoc = heads[0];
-            if (!(visibleDoc instanceof FileVersion)) {
-                throw new SharedFsError(
-                    "EIO",
-                    "restored node's winning version document is unavailable"
-                );
-            }
+            const { heads, visible } = restoreContentSnapshot!;
             {
-                const visible = visibleDoc;
                 const chunkDocs: FileChunk[] = [];
                 for (const chunkId of new Set(visible.chunkIds)) {
                     const chunk = await this.getDocument<FileChunk>(chunkId);
@@ -8845,6 +9065,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     bootstrapStatus(): BootstrapStatus {
         return {
             phase: this.bootstrapPhase,
+            snapshotCoverageVerified:
+                this.bootstrapPhase === "converged" && this.bootstrapVerified,
             writeReady:
                 this.writesReady && !this.writeReadinessLifecycleBlocked,
             partialWriteOverride: this.partialWriteOverride,
@@ -9125,9 +9347,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
+    /**
+     * Wait until any active snapshot overlay retires. `verified` narrowly
+     * means the accepted snapshot's ids were covered before retirement; it is
+     * false when bootstrap is off/plain-join or retirement was unverified.
+     */
     awaitBootstrapConverged(): Promise<{ verified: boolean }> {
         if (this.bootstrapPhase === "off") {
-            return Promise.resolve({ verified: true });
+            return Promise.resolve({ verified: false });
         }
         if (this.bootstrapPhase === "converged") {
             return Promise.resolve({ verified: this.bootstrapVerified });
@@ -12963,8 +13190,12 @@ export class SharedFsHandle {
         return this.program.namingConflicts(path, options);
     }
 
-    resolveNamingConflict(nodeId: string, action: ResolveNamingAction) {
-        return this.program.resolveNamingConflict(nodeId, action);
+    resolveNamingConflict(
+        nodeId: string,
+        action: ResolveNamingAction,
+        options?: ResolveNamingConflictOptions
+    ) {
+        return this.program.resolveNamingConflict(nodeId, action, options);
     }
 
     collectGarbage(options?: GcOptions) {

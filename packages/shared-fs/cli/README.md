@@ -21,6 +21,9 @@ peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
+peerbit-fs naming-conflicts <address>
+peerbit-fs resolve-conflict <address> <path> <version-id>
+peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move>
 peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
@@ -33,13 +36,96 @@ optimized for code workspaces.
 `status` prints the current native mount adapter, whether its prerequisites are
 available on the host, and any missing pieces before optionally opening an
 address. Address status also reports write readiness, its durable source, and
-whether the local directory is eligible for one-time legacy promotion.
+whether the local directory is eligible for one-time legacy promotion. Add
+`--json` for one JSON document containing `nativeMount` and either a
+`filesystem` object or `null`. Routine status does not scan retained conflict
+metadata; add `--include-conflicts` to include the current local content and
+naming records plus separate `contentCount` and `namingCount` fields. Those
+whole-store scans are deliberately opt-in because they can dominate status
+latency and memory on a large/history-heavy workspace. During bootstrap the
+diagnostic records may be partial; check their `partial` flag and the adjacent
+bootstrap phase before treating them as an operator fence. `partial: false`
+requires a stable, write-ready full replica whose accepted snapshot coverage
+was verified for the entire scan. Observer, off/plain-join, fetching,
+overlay-active, unverified, and changing bootstrap views remain partial. The
+records also report their local-replica scope and before/after phases; even a
+verified local scan is not a global network frontier.
 
 `create` creates an access-controlled filesystem rooted at the local Peerbit
 identity. Use `create --no-auth` only for explicitly unauthenticated test/demo
 filesystems. Another machine can run `peerbit-fs whoami` to print its writer
 key; the owner can then run `peerbit-fs trust <address> <public-key>` to
 authorize that writer.
+
+## Inspect and resolve conflicts
+
+Content conflicts preserve every concurrently written head. Inspect all of
+them, or one file/path prefix, before explicitly choosing the version whose
+bytes should become visible:
+
+```bash
+peerbit-fs conflicts "$ADDRESS" --json
+peerbit-fs conflicts "$ADDRESS" --path /docs/report.md
+peerbit-fs resolve-conflict \
+  "$ADDRESS" /docs/report.md <version-id> --json
+```
+
+The JSON document includes address, path filter, view metadata, and a
+`conflicts` array. Each record contains the file's `nodeId`,
+`visibleVersionId`, and every head in the converged local view: immutable
+version id, content hash, parent ids, author, machine, size, and creation time.
+Size and time are decimal strings so the output is safe to parse in JavaScript.
+`snapshotCoverageVerified` means only that every id in the accepted signed
+snapshot was covered before overlay retirement; it is not a global/log-frontier
+claim and remains false for bootstrap-off/plain-join views. Inspection still
+permits `--no-replicate` for an existing local store, but its
+`fullReplica: false` view does not prove completeness. Resolution writes a new
+version that references the selected bytes and causally supersedes the heads
+visible when it executes; the other immutable versions remain readable until
+normal retention/GC policy eventually permits reclaiming them.
+
+Namespace conflicts are inspected and acted on separately:
+
+```bash
+peerbit-fs naming-conflicts "$ADDRESS" --json
+peerbit-fs resolve-naming-conflict \
+  "$ADDRESS" <node-id> keep
+peerbit-fs resolve-naming-conflict \
+  "$ADDRESS" <node-id> move --to /recovered/report.md
+```
+
+The optional naming `--path` is an output filter; naming conflict discovery
+still rebuilds the local namespace state before filtering.
+
+Use the conflict type and listed ids deliberately:
+
+- `multi-head`: `keep` normally asserts the deterministic visible placement.
+- `duplicate-name`: move or delete one of the listed `shadowedNodeIds` (keeping
+  the visible winner alone normally leaves the collision unresolved).
+- `delete-vs-edit`: `restore` recovers surviving edited content; `delete`
+  acknowledges the currently visible content heads.
+- `unreachable`: move the node below a reachable directory, or delete it.
+
+`move` can itself target an occupied slot and create another duplicate-name
+conflict, so inspect again after every action. The resolution JSON returns the
+conflicts observed before the action and any still involving that node
+afterwards.
+
+Resolution commands reject `--no-replicate`, wait for write readiness, require
+the local identity to be trusted on authenticated filesystems, and reject ids
+that are not part of the currently visible conflict. Naming actions pass the
+complete listed conflict records into the library. The library rechecks their
+exact local topology—including other duplicate-name claimants and recoverable
+delete-vs-edit versions—and fails retryably if it changed before execution.
+Delete/restore also publish only against content heads snapshotted before that
+final check, so later content stays recoverable or concurrent. This is a local
+observed-view fence, not a global transaction: an event arriving after that read
+can reintroduce a conflict later.
+Content resolution reports both the heads
+observed during CLI preflight and the heads actually superseded so automation
+can detect its corresponding race. Neither command waits for persisted remote
+acknowledgements; run `prepare-disposal` separately before retiring the
+resolving machine.
 
 ## Install
 
