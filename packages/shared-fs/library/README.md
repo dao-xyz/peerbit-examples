@@ -280,6 +280,33 @@ not a retry of that benchmark. It also deliberately avoids
 `prepareForDisposal()`, whose persisted-receipt session recovery is tracked
 separately upstream.
 
+Each runtime sample includes a parent-assigned process generation, OS PID,
+worker number, Peerbit identity, and online/offline network mode so replacement
+lifetimes remain distinguishable even if the OS reuses a PID. In addition to
+the workload phases, the final cohort is sampled immediately before and after
+the offline recursive audit, after two explicit GC requests separated by
+event-loop turns, after SharedFS close, after Peerbit stop, and once more after
+two stopped-process GC requests. The workers run with `--expose-gc`; these
+samples diagnose collectible JavaScript reachability and resource shutdown,
+not a memory budget or proof that finalizers, native resources, or allocator
+arenas were released, and no test asserts that collection lowers a category.
+RSS can remain at an allocator or native high-water mark. `maxRSS`, CPU, and
+filesystem counters are cumulative for one OS-process lifetime and reset when a
+replacement generation starts. A fleet `maxRSS` aggregate is therefore a sum
+of per-process lifetime highs, not an observed simultaneous fleet peak, and can
+fall when the cohort changes; compare baseline and final sums together with
+their raw process generations. Shutdown samples are taken in the still-live
+worker immediately before process exit, not after the OS has reclaimed the
+process. The stopped Peerbit object also remains reachable through that worker,
+so the last sample measures resources released by stop plus collectible
+filesystem state, not a fully unreachable Peerbit object graph. Heap total,
+heap used, external, and ArrayBuffer bytes are reported and aggregated
+independently. ArrayBuffer bytes are already a subset of external memory, and
+both counters overlap with memory that can contribute to RSS rather than
+equalling resident pages, so the categories must not be summed into a synthetic
+total. Reported GC settle wall time includes both requests and both event-loop
+turns; it is not GC CPU time.
+
 The mount backend's manual copy-on-write benchmark isolates 4, 64, and 256 MiB
 commit buffers behind a gated fake target that retains the immutable commit
 input after resolution. For every size it runs a legacy fallback (mount and
