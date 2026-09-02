@@ -1,5 +1,12 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.10
+
+### Patch Changes
+
+- Updated dependencies [509b0ed]
+    - @peerbit/shared-fs@0.13.10
+
 ## 0.13.9
 
 ### Patch Changes

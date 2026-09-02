@@ -1,5 +1,13 @@
 # @peerbit/shared-fs
 
+## 0.13.10
+
+### Patch Changes
+
+- 509b0ed: Gate snapshot segment deletion on an explicit store-exclusive block-store
+  contract while keeping snapshot publication available for shared and unknown
+  custom stores.
+
 ## 0.13.9
 
 ### Patch Changes
