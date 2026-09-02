@@ -257,12 +257,17 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
 ```
 
 Use one round to validate the harness itself; real soak values are integers from
-10 through 200. Payloads default to 4096 bytes and can be set from 256 bytes
-through 1 MiB with
-`PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES`. Every completed round
-prints `process-isolated-soak-round:` immediately, followed by one aggregate
-`process-isolated-soak:` report. All replicas keep scheduled GC enabled, while
-the explicit measured GC pass uses normal retention, so a short run exercises
+10 through 200. Generated payload bodies default to 4096 bytes and can be set
+from 256 bytes through 1 MiB with
+`PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES`. The payload stream is
+preceded by a small descriptive prefix and is deterministic but unique per file,
+writer, and round so content-addressed dedup does not turn storage measurements
+into a repeated-content best case. Every
+completed round prints `process-isolated-soak-round:` immediately, followed by
+one aggregate `process-isolated-soak:` report. The reported state-directory
+growth is a descriptive fleet-wide ratio over logical bytes written, not a
+write-amplification claim. All replicas keep scheduled GC enabled, while the
+explicit measured GC pass uses normal retention, so a short run exercises
 planning and safety without pretending newly written data should be reclaimed.
 The campaign uses `bootstrap: false` and disables remote chunk fallback: it is a
 steady-state and warm-restart complement to the separate cold-join benchmark,

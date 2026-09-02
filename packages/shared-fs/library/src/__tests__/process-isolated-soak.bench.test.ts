@@ -19,6 +19,7 @@ import type {
     ProcessSoakWorkerCommand,
     ProcessSoakWorkerMessage,
 } from "./process-isolated-soak.bench.protocol.js";
+import { createProcessSoakGeneratedContent } from "./process-isolated-soak.bench.payload.js";
 
 const enabled = process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK === "1";
 const manualDescribe = enabled ? describe : describe.skip;
@@ -517,34 +518,32 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             const allPeersAdmittedSamples: number[] = [];
             const allPeersReadableSamples: number[] = [];
             const roundReports: Array<Record<string, unknown>> = [];
-            const payload = "x".repeat(payloadBytes);
             let logicalContentBytesWritten = 0;
             let logicalWriteOperations = 0;
 
             for (let round = 0; round < rounds; round++) {
-                const roundStartedAt = performance.now();
                 const entries = workers.map((_, writer) => {
                     const hotPath = `/writers/writer-${writer}/hot.bin`;
                     const historyPath = `/writers/writer-${writer}/history/round-${round}.bin`;
                     const scratchPath = `/writers/writer-${writer}/scratch-${round}.txt`;
-                    const hot = `round=${round};writer=${writer};hot;${payload}`;
-                    const history = `round=${round};writer=${writer};history;${payload}`;
+                    const hotPayload = createProcessSoakGeneratedContent(
+                        `round=${round};writer=${writer};hot;`,
+                        `hot:${round}:${writer}`,
+                        payloadBytes
+                    );
+                    const historyPayload = createProcessSoakGeneratedContent(
+                        `round=${round};writer=${writer};history;`,
+                        `history:${round}:${writer}`,
+                        payloadBytes
+                    );
                     const scratch = `round=${round};writer=${writer};scratch`;
                     expected.set(hotPath, {
                         path: hotPath,
-                        content: {
-                            prefix: `round=${round};writer=${writer};hot;`,
-                            repeated: "x",
-                            count: payloadBytes,
-                        },
+                        content: hotPayload.expectation,
                     });
                     expected.set(historyPath, {
                         path: historyPath,
-                        content: {
-                            prefix: `round=${round};writer=${writer};history;`,
-                            repeated: "x",
-                            count: payloadBytes,
-                        },
+                        content: historyPayload.expectation,
                     });
                     expected.set(scratchPath, {
                         path: scratchPath,
@@ -555,8 +554,8 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         | { path: string; content: string }
                         | { path: string; delete: true }
                     > = [
-                        { path: hotPath, content: hot },
-                        { path: historyPath, content: history },
+                        { path: hotPath, content: hotPayload.content },
+                        { path: historyPath, content: historyPayload.content },
                         { path: scratchPath, content: scratch },
                     ];
                     if (round > 0) {
@@ -567,6 +566,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     }
                     return batch;
                 });
+                const roundStartedAt = performance.now();
                 const commits = await Promise.all(
                     workers.map((worker, writer) =>
                         worker.request<ProcessSoakBatchResult>({
@@ -645,11 +645,18 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 );
             }
 
-            const editorFiles = workers.map((_, writer) => ({
-                tempPath: `/writers/writer-${writer}/.editor-${writer}.tmp`,
-                path: `/writers/writer-${writer}/editor-current.txt`,
-                content: `editor=${writer};${payload}`,
-            }));
+            const editorFiles = workers.map((_, writer) => {
+                const payload = createProcessSoakGeneratedContent(
+                    `editor=${writer};`,
+                    `editor:${writer}`,
+                    payloadBytes
+                );
+                return {
+                    tempPath: `/writers/writer-${writer}/.editor-${writer}.tmp`,
+                    path: `/writers/writer-${writer}/editor-current.txt`,
+                    ...payload,
+                };
+            });
             const editorSeedFiles = editorFiles.map((file, writer) => ({
                 path: file.path,
                 content: `editor-base=${writer}`,
@@ -680,7 +687,9 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 workers.map((worker, writer) =>
                     worker.request<ProcessSoakEditorResult>({
                         type: "editor-save",
-                        ...editorFiles[writer],
+                        tempPath: editorFiles[writer].tempPath,
+                        path: editorFiles[writer].path,
+                        content: editorFiles[writer].content,
                     })
                 )
             );
@@ -689,7 +698,10 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 expect(result.targetNodeId).not.toBe(result.replacedNodeId);
             }
             for (const file of editorFiles) {
-                expected.set(file.path, file);
+                expected.set(file.path, {
+                    path: file.path,
+                    content: file.expectation,
+                });
                 absent.add(file.tempPath);
                 logicalContentBytesWritten += Buffer.byteLength(file.content);
                 logicalWriteOperations++;
@@ -698,9 +710,9 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 workers.map((worker) =>
                     worker.request<ProcessSoakVerifyResult>({
                         type: "verify",
-                        files: editorFiles.map(({ path, content }) => ({
+                        files: editorFiles.map(({ path, expectation }) => ({
                             path,
-                            content,
+                            content: expectation,
                         })),
                         absentPaths: editorFiles.map((file) => file.tempPath),
                         noNamingConflicts: editorFiles.map((file) => file.path),
@@ -730,10 +742,17 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     })
                 )
             );
-            const conflictStartedAt = performance.now();
-            const conflictContents = workers.map(
-                (_, writer) => `conflict-writer=${writer};${payload}`
+            const conflictPayloads = workers.map((_, writer) =>
+                createProcessSoakGeneratedContent(
+                    `conflict-writer=${writer};`,
+                    `conflict:${writer}`,
+                    payloadBytes
+                )
             );
+            const conflictContents = conflictPayloads.map(
+                (payload) => payload.content
+            );
+            const conflictStartedAt = performance.now();
             const conflictWrites = await Promise.all(
                 workers.map((worker, writer) =>
                     worker.request<ProcessSoakConflictWriteResult>({
@@ -750,7 +769,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             }
             const conflictHeads = conflictWrites.map((result, writer) => ({
                 versionId: result.versionId,
-                content: conflictContents[writer],
+                content: conflictPayloads[writer].expectation,
             }));
             const conflictVerifications = await Promise.all(
                 workers.map((worker) =>
@@ -769,7 +788,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             expect(
                 new Set(
                     conflictVerifications.map(
-                        (verification) => verification.visibleConflictContent
+                        (verification) => verification.visibleConflictHash
                     )
                 ).size
             ).toBe(1);
@@ -853,7 +872,11 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             });
             const offlineAuditMs = performance.now() - offlineAuditStartedAt;
 
-            const postRestartContent = `post-restart;${payload}`;
+            const postRestartPayload = createProcessSoakGeneratedContent(
+                "post-restart;",
+                "post-restart",
+                payloadBytes
+            );
             const postRestartStartedAt = performance.now();
             const postRestart =
                 await offlineRestarted.request<ProcessSoakBatchResult>({
@@ -862,15 +885,17 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     entries: [
                         {
                             path: "/writers/writer-2/post-restart.txt",
-                            content: postRestartContent,
+                            content: postRestartPayload.content,
                         },
                     ],
                 });
             expected.set("/writers/writer-2/post-restart.txt", {
                 path: "/writers/writer-2/post-restart.txt",
-                content: postRestartContent,
+                content: postRestartPayload.expectation,
             });
-            logicalContentBytesWritten += Buffer.byteLength(postRestartContent);
+            logicalContentBytesWritten += Buffer.byteLength(
+                postRestartPayload.content
+            );
             logicalWriteOperations++;
             await offlineRestarted.request<ProcessSoakVerifyResult>({
                 type: "verify",
@@ -878,7 +903,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 files: [
                     {
                         path: "/writers/writer-2/post-restart.txt",
-                        content: postRestartContent,
+                        content: postRestartPayload.expectation,
                     },
                 ],
                 exactTree: treeFromFiles(expected.values()),
@@ -917,7 +942,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         files: [
                             {
                                 path: "/writers/writer-2/post-restart.txt",
-                                content: postRestartContent,
+                                content: postRestartPayload.expectation,
                             },
                         ],
                         exactTree: treeFromFiles(expected.values()),

@@ -1,12 +1,16 @@
+export type ProcessSoakContentExpectation =
+    | string
+    | {
+          generator: "xorshift32-ascii-v1";
+          prefix: string;
+          seed: number;
+          bytes: number;
+          sha256: string;
+      };
+
 export type ProcessSoakFileExpectation = {
     path: string;
-    content:
-        | string
-        | {
-              prefix: string;
-              repeated: string;
-              count: number;
-          };
+    content: ProcessSoakContentExpectation;
 };
 
 export type ProcessSoakTreeExpectation = {
@@ -24,7 +28,10 @@ export type ProcessSoakConflictExpectation =
     | {
           mode: "heads";
           path: string;
-          heads: Array<{ versionId: string; content: string }>;
+          heads: Array<{
+              versionId: string;
+              content: ProcessSoakContentExpectation;
+          }>;
       }
     | { mode: "resolved"; path: string };
 
@@ -162,7 +169,7 @@ export type ProcessSoakConflictWriteResult = {
 
 export type ProcessSoakVerifyResult = {
     durationMs: number;
-    visibleConflictContent?: string;
+    visibleConflictHash?: string;
 };
 
 export type ProcessSoakGcResult = {
