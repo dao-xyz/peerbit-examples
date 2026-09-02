@@ -8,21 +8,28 @@ import {
     decodePublicSignKey,
     encodePublicSignKey,
     openSharedFs,
+    type BootstrapTelemetryEvent,
     type SharedFsHandle,
+    type SharedFsMountBackend,
 } from "../index.js";
 import type {
     ProcessSoakBatchResult,
+    ProcessSoakBootstrapStatus,
+    ProcessSoakClockOffsetResult,
     ProcessSoakContentExpectation,
     ProcessSoakConflictWriteResult,
+    ProcessSoakEditorFsyncCheckpointResult,
     ProcessSoakEditorResult,
     ProcessSoakGcResult,
     ProcessSoakMetrics,
+    ProcessSoakMountRenameResult,
     ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
     ProcessSoakProcessIdentity,
     ProcessSoakRequestedGcMetricsResult,
     ProcessSoakRuntimeMetrics,
     ProcessSoakShutdownResult,
+    ProcessSoakSnapshotWriteResult,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
@@ -34,6 +41,9 @@ const worker = Number(process.argv[2]);
 const directory = process.argv[3];
 const offline = process.argv[4] === "offline";
 const generation = Number(process.argv[5]);
+let logicalClockOffsetMs = 0;
+
+const logicalNow = () => Date.now() + logicalClockOffsetMs;
 
 if (
     !Number.isInteger(worker) ||
@@ -143,9 +153,13 @@ const decode = (value: Uint8Array | undefined) =>
 
 const assertExpectedContent = (
     actual: Uint8Array | undefined,
-    expected: ProcessSoakContentExpectation
+    expected: ProcessSoakContentExpectation,
+    path?: string
 ) => {
-    assert(actual, "Expected file content to exist");
+    assert(
+        actual,
+        `Expected file content to exist${path ? ` at ${path}` : ""}`
+    );
     if (typeof expected === "string") {
         assert.equal(decode(actual), expected);
         return;
@@ -161,6 +175,26 @@ const expectedContentHash = (expected: ProcessSoakContentExpectation) =>
     typeof expected === "string"
         ? processSoakContentHash(expected)
         : expected.sha256;
+
+const serializeBootstrapStatus = (
+    status: ReturnType<SharedFsHandle["bootstrapStatus"]>
+): ProcessSoakBootstrapStatus => {
+    const { manifest, msSinceLastArrival, ...serializable } = status;
+    return {
+        ...serializable,
+        manifest: manifest
+            ? {
+                  ...manifest,
+                  snapshotSeq: manifest.snapshotSeq.toString(),
+                  createdAtWallMs: manifest.createdAtWallMs.toString(),
+                  docs: manifest.docs.toString(),
+              }
+            : undefined,
+        msSinceLastArrival: Number.isFinite(msSinceLastArrival)
+            ? msSinceLastArrival
+            : null,
+    };
+};
 
 const exactTree = async (fs: SharedFsHandle) => {
     const entries: ProcessSoakTreeExpectation[] = [];
@@ -220,10 +254,30 @@ const main = async () => {
         networkMode: offline ? "offline" : "online",
     } satisfies ProcessSoakProcessIdentity;
     let fs: SharedFsHandle | undefined;
+    let retainedEditorCheckpoint:
+        | {
+              backend: SharedFsMountBackend;
+              handle: number;
+          }
+        | undefined;
 
     const requireFs = () => {
         if (!fs) throw new Error("Shared FS is not open in this worker");
         return fs;
+    };
+
+    const networkStatus = (): ProcessSoakNetworkStatus => {
+        const connections = peer.libp2p.getConnections();
+        return {
+            connectionCount: connections.length,
+            remotePeers: [
+                ...new Set(
+                    connections.map((connection) =>
+                        connection.remotePeer.toString()
+                    )
+                ),
+            ].sort(),
+        };
     };
 
     const handle = async (command: ProcessSoakWorkerCommand) => {
@@ -233,9 +287,32 @@ const main = async () => {
             );
             return { connected: command.addresses.length };
         }
+        if (command.type === "set-clock-offset") {
+            assert(
+                Number.isFinite(command.offsetMs) &&
+                    Number.isSafeInteger(command.offsetMs) &&
+                    command.offsetMs >= 0,
+                "Process soak clock offset must be a finite nonnegative safe integer"
+            );
+            const logicalNowMs = Date.now() + command.offsetMs;
+            assert(
+                Number.isSafeInteger(logicalNowMs),
+                "Process soak logical clock must remain a safe integer"
+            );
+            logicalClockOffsetMs = command.offsetMs;
+            return {
+                offsetMs: logicalClockOffsetMs,
+                logicalNowMs: logicalNow(),
+            } satisfies ProcessSoakClockOffsetResult;
+        }
         if (command.type === "open") {
             if (fs) throw new Error("Shared FS is already open in this worker");
             const deadline = Date.now() + command.timeoutMs;
+            const bootstrapTelemetry: BootstrapTelemetryEvent[] = [];
+            const bootstrap =
+                command.bootstrap === "require"
+                    ? ({ mode: "require" } as const)
+                    : (command.bootstrap ?? false);
             const openStartedAt = performance.now();
             fs = await openSharedFs({
                 peerbit: peer,
@@ -244,9 +321,18 @@ const main = async () => {
                     : { rootKey: peer.identity.publicKey }),
                 machineLabel: command.machineLabel,
                 replicate: { factor: 1 },
-                bootstrap: false,
-                remoteChunkFetch: false,
-                gc: { schedule: true },
+                clock: logicalNow,
+                bootstrap,
+                remoteChunkFetch: command.remoteChunkFetch ?? false,
+                gc: command.gcSchedule === false ? false : { schedule: true },
+                ...(command.captureBootstrapTelemetry
+                    ? {
+                          telemetry: {
+                              bootstrap: (event: BootstrapTelemetryEvent) =>
+                                  bootstrapTelemetry.push(event),
+                          },
+                      }
+                    : {}),
             });
             const openMs = performance.now() - openStartedAt;
             const readyStartedAt = performance.now();
@@ -260,6 +346,34 @@ const main = async () => {
                 await fs.awaitWriteReady({ timeout: remaining });
             }
             const writeReadyMs = performance.now() - readyStartedAt;
+            let bootstrapConvergence: { verified: boolean } | undefined;
+            if (command.awaitBootstrapConverged) {
+                const remaining = deadline - Date.now();
+                if (remaining <= 0) {
+                    throw new Error(
+                        "Process soak filesystem open exhausted its total timeout before bootstrap convergence"
+                    );
+                }
+                let timeout: ReturnType<typeof setTimeout> | undefined;
+                try {
+                    bootstrapConvergence = await Promise.race([
+                        fs.awaitBootstrapConverged(),
+                        new Promise<never>((_, reject) => {
+                            timeout = setTimeout(
+                                () =>
+                                    reject(
+                                        new Error(
+                                            "Process soak filesystem open timed out awaiting bootstrap convergence"
+                                        )
+                                    ),
+                                remaining
+                            );
+                        }),
+                    ]);
+                } finally {
+                    if (timeout) clearTimeout(timeout);
+                }
+            }
             const status = fs.bootstrapStatus();
             return {
                 address: fs.address!,
@@ -268,6 +382,9 @@ const main = async () => {
                 writeReadyMs,
                 writeReadinessSource: status.writeReadinessSource,
                 gcScheduled: fs.gcStatus().scheduled,
+                bootstrapStatus: serializeBootstrapStatus(status),
+                bootstrapConvergence,
+                bootstrapTelemetry,
             } satisfies ProcessSoakOpenResult;
         }
         if (command.type === "authorize") {
@@ -295,6 +412,20 @@ const main = async () => {
                 },
                 versionIds: result.results.map((version) => version?.id),
             } satisfies ProcessSoakBatchResult;
+        }
+        if (command.type === "snapshot-write") {
+            const startedAt = performance.now();
+            const snapshot = await requireFs().snapshotWrite();
+            return {
+                durationMs: performance.now() - startedAt,
+                snapshotSeq: snapshot.snapshotSeq.toString(),
+                createdAtWallMs: snapshot.createdAtWallMs.toString(),
+                nodes: snapshot.nodes.toString(),
+                docs: snapshot.docs.toString(),
+                bytes: snapshot.bytes.toString(),
+                segments: snapshot.segments,
+                manifestId: snapshot.manifestId,
+            } satisfies ProcessSoakSnapshotWriteResult;
         }
         if (command.type === "editor-save") {
             const current = requireFs();
@@ -345,6 +476,93 @@ const main = async () => {
                 targetNodeId: target.nodeId,
             } satisfies ProcessSoakEditorResult;
         }
+        if (command.type === "editor-fsync-checkpoint") {
+            assert.equal(
+                retainedEditorCheckpoint,
+                undefined,
+                "Process soak worker already retains an editor fsync checkpoint"
+            );
+            const current = requireFs();
+            const backend = createSharedFsMountBackend(current);
+            const bytes = new TextEncoder().encode(command.content);
+            const targetBefore = await current.stat(command.path);
+            assert.equal(targetBefore?.kind, "file");
+            const targetContentBefore = await current.readFile(command.path);
+            assert(
+                targetContentBefore,
+                "Expected editor target bytes to exist"
+            );
+            const totalStartedAt = performance.now();
+            const file = await backend.open(command.tempPath, {
+                write: true,
+                create: true,
+                truncate: true,
+            });
+            const split = Math.max(1, Math.floor(bytes.byteLength / 3));
+            const writeStartedAt = performance.now();
+            await backend.write(file, bytes.subarray(0, split), 0);
+            await backend.write(file, bytes.subarray(split), split);
+            const writeMs = performance.now() - writeStartedAt;
+            const fsyncStartedAt = performance.now();
+            await backend.fsync(file);
+            const fsyncMs = performance.now() - fsyncStartedAt;
+
+            const fsyncedTemp = await current.stat(command.tempPath);
+            assert.equal(fsyncedTemp?.kind, "file");
+            assert.notEqual(fsyncedTemp.nodeId, targetBefore.nodeId);
+            assert.equal(
+                decode(await current.readFile(command.tempPath)),
+                command.content
+            );
+            const targetAfter = await current.stat(command.path);
+            assert.equal(targetAfter?.kind, "file");
+            assert.equal(targetAfter.nodeId, targetBefore.nodeId);
+            assert.deepEqual(
+                await current.readFile(command.path),
+                targetContentBefore
+            );
+
+            // Keep both objects strongly reachable and intentionally do not
+            // release or rename. The parent SIGKILL is the durability boundary.
+            retainedEditorCheckpoint = { backend, handle: file };
+            return {
+                writeMs,
+                fsyncMs,
+                totalMs: performance.now() - totalStartedAt,
+                tempNodeId: fsyncedTemp.nodeId,
+                targetNodeId: targetBefore.nodeId,
+            } satisfies ProcessSoakEditorFsyncCheckpointResult;
+        }
+        if (command.type === "mount-rename") {
+            const current = requireFs();
+            const backend = createSharedFsMountBackend(current);
+            const source = await current.stat(command.fromPath);
+            assert.equal(source?.kind, "file");
+            const sourceContent = await current.readFile(command.fromPath);
+            assert(
+                sourceContent,
+                "Expected mount rename source bytes to exist"
+            );
+            const replaced = await current.stat(command.toPath);
+            if (replaced) assert.equal(replaced.kind, "file");
+            const startedAt = performance.now();
+            await backend.rename(command.fromPath, command.toPath);
+            const renameMs = performance.now() - startedAt;
+            assert.equal(await current.stat(command.fromPath), undefined);
+            const target = await current.stat(command.toPath);
+            assert.equal(target?.kind, "file");
+            assert.equal(target.nodeId, source.nodeId);
+            assert.deepEqual(
+                await current.readFile(command.toPath),
+                sourceContent
+            );
+            return {
+                renameMs,
+                sourceNodeId: source.nodeId,
+                replacedNodeId: replaced?.nodeId ?? null,
+                targetNodeId: target.nodeId,
+            } satisfies ProcessSoakMountRenameResult;
+        }
         if (command.type === "write-conflict") {
             const current = requireFs();
             const startedAt = performance.now();
@@ -379,12 +597,20 @@ const main = async () => {
                 return remaining;
             };
             for (const changeset of command.changesets ?? []) {
-                const status = await current.awaitChangeset(changeset.id, {
-                    manifestId: changeset.manifestId,
-                    timeoutMs: remainingMs(
-                        `changeset ${changeset.id} admission`
-                    ),
-                });
+                let status;
+                try {
+                    status = await current.awaitChangeset(changeset.id, {
+                        manifestId: changeset.manifestId,
+                        timeoutMs: remainingMs(
+                            `changeset ${changeset.id} admission`
+                        ),
+                    });
+                } catch (error: any) {
+                    throw new Error(
+                        `${error?.message ?? String(error)}; network=${JSON.stringify(networkStatus())}`,
+                        { cause: error }
+                    );
+                }
                 assert.equal(status.complete, true);
                 assert.equal(status.verdict, "complete");
                 assert.equal(status.expected, changeset.memberCount);
@@ -394,7 +620,8 @@ const main = async () => {
                 for (const file of command.files ?? []) {
                     assertExpectedContent(
                         await current.readFile(file.path),
-                        file.content
+                        file.content,
+                        file.path
                     );
                 }
                 for (const path of command.absentPaths ?? []) {
@@ -519,7 +746,10 @@ const main = async () => {
         }
         if (command.type === "collect-garbage") {
             const startedAt = performance.now();
-            const report = await requireFs().collectGarbage({ settleMs: 0 });
+            const report = await requireFs().collectGarbage({
+                ...command.options,
+                settleMs: command.options?.settleMs ?? 0,
+            });
             return {
                 durationMs: performance.now() - startedAt,
                 report: {
@@ -531,17 +761,7 @@ const main = async () => {
             } satisfies ProcessSoakGcResult;
         }
         if (command.type === "network-status") {
-            const connections = peer.libp2p.getConnections();
-            return {
-                connectionCount: connections.length,
-                remotePeers: [
-                    ...new Set(
-                        connections.map((connection) =>
-                            connection.remotePeer.toString()
-                        )
-                    ),
-                ].sort(),
-            } satisfies ProcessSoakNetworkStatus;
+            return networkStatus();
         }
         if (command.type === "runtime-metrics") {
             return runtimeMetrics(processIdentity);
@@ -560,6 +780,10 @@ const main = async () => {
             const beforeClose = command.captureMetrics
                 ? runtimeMetrics(processIdentity)
                 : undefined;
+            // An editor checkpoint deliberately remains unreleased. Keeping a
+            // read here prevents future cleanup refactors from making it weakly
+            // reachable before the requested SIGKILL boundary.
+            void retainedEditorCheckpoint;
             await fs?.close();
             fs = undefined;
             const afterFsClose = command.captureMetrics

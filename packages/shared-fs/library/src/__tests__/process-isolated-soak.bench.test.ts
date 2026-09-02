@@ -8,16 +8,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import type {
     ProcessSoakBatchResult,
     ProcessSoakConflictWriteResult,
+    ProcessSoakEditorFsyncCheckpointResult,
     ProcessSoakEditorResult,
     ProcessSoakFileExpectation,
     ProcessSoakGcResult,
     ProcessSoakMetrics,
+    ProcessSoakMountRenameResult,
     ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
     ProcessSoakReadyMessage,
     ProcessSoakRequestedGcMetricsResult,
     ProcessSoakRuntimeMetrics,
     ProcessSoakShutdownResult,
+    ProcessSoakSnapshotWriteResult,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
@@ -25,12 +28,18 @@ import type {
 } from "./process-isolated-soak.bench.protocol.js";
 import { createProcessSoakGeneratedContent } from "./process-isolated-soak.bench.payload.js";
 
-const enabled = process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK === "1";
-const manualDescribe = enabled ? describe : describe.skip;
+const soakEnabled = process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK === "1";
+const longChurnEnabled =
+    process.env.PEERBIT_SHARED_FS_PROCESS_LONG_CHURN === "1";
+const manualDescribe =
+    soakEnabled || longChurnEnabled ? describe : describe.skip;
+const soakIt = soakEnabled ? it : it.skip;
+const longChurnIt = longChurnEnabled ? it : it.skip;
 const COMMAND_TIMEOUT_MS = process.env.CI ? 240_000 : 180_000;
 const RESPONSE_MARGIN_MS = 15_000;
 const REQUEST_TIMEOUT_MS = COMMAND_TIMEOUT_MS + RESPONSE_MARGIN_MS;
 const TEST_TIMEOUT_MS = 30 * 60_000;
+const LONG_CHURN_TEST_TIMEOUT_MS = 2 * 60 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 const workerPath = fileURLToPath(
     new URL("./process-isolated-soak.bench.worker.ts", import.meta.url)
@@ -96,6 +105,61 @@ const configuredPayloadBytes = () => {
     if (!Number.isInteger(bytes) || bytes < 256 || bytes > 1024 * 1024) {
         throw new Error(
             "PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES must be an integer from 256 through 1048576"
+        );
+    }
+    return bytes;
+};
+
+const configuredLongChurnInteger = (
+    name: string,
+    fallback: number,
+    options: { smoke: number; minimum: number; maximum: number }
+) => {
+    const value = Number(process.env[name] ?? fallback);
+    if (
+        !Number.isInteger(value) ||
+        (value !== options.smoke &&
+            (value < options.minimum || value > options.maximum))
+    ) {
+        throw new Error(
+            `${name} must be ${options.smoke} for a harness smoke or an integer from ${options.minimum} through ${options.maximum}`
+        );
+    }
+    return value;
+};
+
+const configuredLongChurnJoins = () =>
+    configuredLongChurnInteger(
+        "PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_JOINS",
+        10,
+        {
+            smoke: 1,
+            minimum: 10,
+            maximum: 20,
+        }
+    );
+
+const configuredLongChurnRounds = () =>
+    configuredLongChurnInteger(
+        "PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_ROUNDS",
+        10,
+        { smoke: 1, minimum: 10, maximum: 200 }
+    );
+
+const configuredLongChurnHotVersions = () =>
+    configuredLongChurnInteger(
+        "PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_HOT_VERSIONS",
+        15,
+        { smoke: 5, minimum: 15, maximum: 100 }
+    );
+
+const configuredLongChurnPayloadBytes = () => {
+    const bytes = Number(
+        process.env.PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_PAYLOAD_BYTES ?? 4_096
+    );
+    if (!Number.isInteger(bytes) || bytes < 256 || bytes > 1024 * 1024) {
+        throw new Error(
+            "PEERBIT_SHARED_FS_PROCESS_LONG_CHURN_PAYLOAD_BYTES must be an integer from 256 through 1048576"
         );
     }
     return bytes;
@@ -591,7 +655,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
         if (failedStop) throw failedStop.reason;
     });
 
-    it(
+    soakIt(
         "measures separate durable processes through edits, partition healing, GC, SIGKILL, and warm reopen",
         { timeout: TEST_TIMEOUT_MS },
         async () => {
@@ -1657,6 +1721,1005 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             };
             console.log(
                 "process-isolated-soak:",
+                JSON.stringify(report, (_key, value) =>
+                    typeof value === "number" ? Number(value.toFixed(1)) : value
+                )
+            );
+            await rm(root, { recursive: true, force: true });
+            temporaryDirectories.delete(root);
+        }
+    );
+
+    longChurnIt(
+        "proves verified cold joins, two-writer churn, fsync crash recovery, two-pass GC, and offline completeness",
+        { timeout: LONG_CHURN_TEST_TIMEOUT_MS },
+        async () => {
+            const joinRuns = configuredLongChurnJoins();
+            const rounds = configuredLongChurnRounds();
+            const hotVersions = configuredLongChurnHotVersions();
+            const payloadBytes = configuredLongChurnPayloadBytes();
+            const root = await mkdtemp(
+                join(tmpdir(), "peerbit-shared-fs-process-long-churn-")
+            );
+            temporaryDirectories.add(root);
+            const ownerDirectory = join(root, "owner");
+            const owner = startWorker(0, ownerDirectory);
+            activeWorkers.add(owner);
+            const ownerReady = await owner.ready;
+            const ownerOpen = await owner.request<ProcessSoakOpenResult>({
+                type: "open",
+                machineLabel: "process-long-churn-owner",
+                timeoutMs: COMMAND_TIMEOUT_MS,
+                bootstrap: false,
+                remoteChunkFetch: false,
+                gcSchedule: false,
+            });
+            expect(ownerOpen.gcScheduled).toBe(false);
+
+            const fixtureFiles = Array.from({ length: 500 }, (_, index) => ({
+                path: `/t/d-${index % 50}/f-${index}.txt`,
+                content: `payload ${index}`,
+            }));
+            const expected = new Map<string, ProcessSoakFileExpectation>(
+                fixtureFiles.map((file) => [file.path, file])
+            );
+            const absent = new Set<string>();
+            let logicalContentBytesWritten = fixtureFiles.reduce(
+                (total, file) => total + Buffer.byteLength(file.content),
+                0
+            );
+            let logicalWriteOperations = fixtureFiles.length;
+            const fixtureSeed = await owner.request<ProcessSoakBatchResult>({
+                type: "write-batch",
+                changesetId: "process-long-churn-fixture",
+                entries: fixtureFiles,
+            });
+            const snapshot =
+                await owner.request<ProcessSoakSnapshotWriteResult>({
+                    type: "snapshot-write",
+                });
+            expect(snapshot.nodes).toBe("551");
+            expect(snapshot.docs).toBe("1051");
+            expect(BigInt(snapshot.bytes)).toBeGreaterThan(0n);
+            expect(snapshot.segments).toBeGreaterThan(0);
+
+            const requiredBootstrapEvents = [
+                "open:start",
+                "documents-open:start",
+                "documents-open:end",
+                "manifest-discovery:start",
+                "manifest-discovery:end",
+                "segments-fetch:start",
+                "segments-fetch:end",
+                "overlay-install:start",
+                "overlay-ready",
+                "pending-drained",
+                "overlay-retired",
+                "synchronizer-idle",
+                "write-ready",
+            ];
+            const coldJoinSamples: Array<{
+                run: number;
+                peerCreateMs: number;
+                openMs: number;
+                writeReadyMs: number;
+                localTreeAuditMs: number;
+                bootstrapEvents: ProcessSoakOpenResult["bootstrapTelemetry"];
+            }> = [];
+            let writer!: RunningWorker;
+            let writerReady!: ProcessSoakReadyMessage;
+            let writerDirectory = "";
+            for (let run = 0; run < joinRuns; run++) {
+                const directory = join(root, `cold-join-${run + 1}`);
+                const joiner = startWorker(run + 1, directory);
+                activeWorkers.add(joiner);
+                const joinerReady = await joiner.ready;
+                await joiner.request({
+                    type: "dial",
+                    addresses: [dialAddress(ownerReady)],
+                });
+                const opened = await joiner.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: `process-long-churn-cold-join-${run + 1}`,
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                    bootstrap: "require",
+                    remoteChunkFetch: false,
+                    gcSchedule: false,
+                    captureBootstrapTelemetry: true,
+                    awaitBootstrapConverged: true,
+                });
+                expect(opened.gcScheduled).toBe(false);
+                expect(opened.bootstrapConvergence).toEqual({ verified: true });
+                expect(opened.bootstrapStatus).toMatchObject({
+                    phase: "converged",
+                    snapshotCoverageVerified: true,
+                    writeReady: true,
+                    writeReadinessSource: "remote-settled",
+                    pendingDocs: 0,
+                    guardArmed: true,
+                    manifest: { docs: "1051" },
+                });
+                const bootstrapEvents = opened.bootstrapTelemetry;
+                const eventTypes = bootstrapEvents.map((event) => event.type);
+                expect(
+                    eventTypes.filter((type) =>
+                        requiredBootstrapEvents.includes(type)
+                    )
+                ).toEqual(requiredBootstrapEvents);
+                expect(
+                    bootstrapEvents.filter(
+                        (event) =>
+                            event.type === "fallback" ||
+                            event.type === "aborted"
+                    )
+                ).toEqual([]);
+                for (let index = 1; index < bootstrapEvents.length; index++) {
+                    expect(bootstrapEvents[index].atMs).toBeGreaterThanOrEqual(
+                        bootstrapEvents[index - 1].atMs
+                    );
+                }
+                expect(
+                    bootstrapEvents.find(
+                        (event) => event.type === "overlay-retired"
+                    )
+                ).toMatchObject({ verified: true });
+                const auditStartedAt = performance.now();
+                await joiner.request<ProcessSoakVerifyResult>({
+                    type: "verify",
+                    changesets: [fixtureSeed.changeset],
+                    files: fixtureFiles,
+                    exactTree: treeFromFiles(fixtureFiles),
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                });
+                const sample = {
+                    run: run + 1,
+                    peerCreateMs: joinerReady.peerCreateMs,
+                    openMs: opened.openMs,
+                    writeReadyMs: opened.writeReadyMs,
+                    localTreeAuditMs: performance.now() - auditStartedAt,
+                    bootstrapEvents,
+                };
+                coldJoinSamples.push(sample);
+                console.log(
+                    "process-long-churn-cold-join:",
+                    JSON.stringify(sample, (_key, value) =>
+                        typeof value === "number"
+                            ? Number(value.toFixed(1))
+                            : value
+                    )
+                );
+                if (run === joinRuns - 1) {
+                    writer = joiner;
+                    writerReady = joinerReady;
+                    writerDirectory = directory;
+                } else {
+                    const stopped = await stopWorker(joiner);
+                    expect(stopped.code).toBe(0);
+                    activeWorkers.delete(joiner);
+                }
+            }
+
+            const retainedIdentity = writerReady.identity;
+            const writerIndex = writer.index;
+            const retainedStop = await stopWorker(writer);
+            expect(retainedStop.code).toBe(0);
+            activeWorkers.delete(writer);
+            const retainedOffline = startWorker(writerIndex, writerDirectory, {
+                offline: true,
+            });
+            activeWorkers.add(retainedOffline);
+            const retainedOfflineReady = await retainedOffline.ready;
+            expect(retainedOfflineReady.identity).toBe(retainedIdentity);
+            expect(retainedOfflineReady.addresses).toEqual([]);
+            expect(
+                await retainedOffline.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                })
+            ).toEqual({ connectionCount: 0, remotePeers: [] });
+            const retainedOfflineOpen =
+                await retainedOffline.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: "process-long-churn-retained-offline",
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                    bootstrap: false,
+                    remoteChunkFetch: false,
+                    gcSchedule: false,
+                });
+            expect(retainedOfflineOpen.writeReadinessSource).toBe(
+                "remote-settled"
+            );
+            await retainedOffline.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                files: fixtureFiles,
+                exactTree: treeFromFiles(fixtureFiles),
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            expect(
+                await retainedOffline.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                })
+            ).toEqual({ connectionCount: 0, remotePeers: [] });
+            const retainedOfflineStop = await stopWorker(retainedOffline);
+            expect(retainedOfflineStop.code).toBe(0);
+            activeWorkers.delete(retainedOffline);
+
+            writer = startWorker(writerIndex, writerDirectory);
+            activeWorkers.add(writer);
+            writerReady = await writer.ready;
+            expect(writerReady.identity).toBe(retainedIdentity);
+            await writer.request({
+                type: "dial",
+                addresses: [dialAddress(ownerReady)],
+            });
+            const writerOpen = await writer.request<ProcessSoakOpenResult>({
+                type: "open",
+                address: ownerOpen.address,
+                machineLabel: "process-long-churn-writer",
+                timeoutMs: COMMAND_TIMEOUT_MS,
+                bootstrap: false,
+                remoteChunkFetch: false,
+                gcSchedule: false,
+            });
+            expect(writerOpen.writeReadinessSource).toBe("remote-settled");
+            await owner.request({
+                type: "authorize",
+                publicKeys: [writerReady.publicKey],
+            });
+            const trustedPublicKeys = [
+                ownerReady.publicKey,
+                writerReady.publicKey,
+            ];
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        trustedPublicKeys,
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const baseFiles = [
+                {
+                    path: "/collaboration/editor.txt",
+                    content: "editor-base",
+                },
+                {
+                    path: "/collaboration/crash.txt",
+                    content: "crash-base",
+                },
+                {
+                    path: "/collaboration/contested.bin",
+                    content: "conflict-base",
+                },
+                {
+                    path: "/collaboration/hot.bin",
+                    content: "hot-base",
+                },
+                {
+                    path: "/writers/writer-0/seed.txt",
+                    content: "writer-0-base",
+                },
+                {
+                    path: "/writers/writer-1/seed.txt",
+                    content: "writer-1-base",
+                },
+            ];
+            const bases = await owner.request<ProcessSoakBatchResult>({
+                type: "write-batch",
+                changesetId: "process-long-churn-bases",
+                entries: baseFiles,
+            });
+            baseFiles.forEach((file) => expected.set(file.path, file));
+            logicalContentBytesWritten += baseFiles.reduce(
+                (total, file) => total + Buffer.byteLength(file.content),
+                0
+            );
+            logicalWriteOperations += baseFiles.length;
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        changesets: [bases.changeset],
+                        files: baseFiles,
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const baselineMetrics = await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakMetrics>({ type: "metrics" })
+                )
+            );
+            await validateRuntimeMetrics(
+                [owner, writer],
+                baselineMetrics.map(withoutStorage)
+            );
+            const baselineLogicalContentBytesWritten =
+                logicalContentBytesWritten;
+
+            const roundSamples: Array<{
+                round: number;
+                localCommitMs: number[];
+                allPeersAdmittedMs: number;
+                allPeersReadableMs: number;
+            }> = [];
+            for (let round = 0; round < rounds; round++) {
+                const entries = [owner, writer].map((_, writerNumber) => {
+                    const hot = createProcessSoakGeneratedContent(
+                        `round=${round};writer=${writerNumber};hot;`,
+                        `long-churn:round:${round}:writer:${writerNumber}:hot`,
+                        payloadBytes
+                    );
+                    const history = createProcessSoakGeneratedContent(
+                        `round=${round};writer=${writerNumber};history;`,
+                        `long-churn:round:${round}:writer:${writerNumber}:history`,
+                        payloadBytes
+                    );
+                    const hotPath = `/writers/writer-${writerNumber}/hot.bin`;
+                    const historyPath = `/writers/writer-${writerNumber}/history/round-${round}.bin`;
+                    expected.set(hotPath, {
+                        path: hotPath,
+                        content: hot.expectation,
+                    });
+                    expected.set(historyPath, {
+                        path: historyPath,
+                        content: history.expectation,
+                    });
+                    logicalContentBytesWritten +=
+                        Buffer.byteLength(hot.content) +
+                        Buffer.byteLength(history.content);
+                    logicalWriteOperations += 2;
+                    return {
+                        entries: [
+                            { path: hotPath, content: hot.content },
+                            { path: historyPath, content: history.content },
+                        ],
+                        files: [
+                            { path: hotPath, content: hot.expectation },
+                            {
+                                path: historyPath,
+                                content: history.expectation,
+                            },
+                        ],
+                    };
+                });
+                const startedAt = performance.now();
+                const commits = await Promise.all(
+                    [owner, writer].map((worker, writerNumber) =>
+                        worker.request<ProcessSoakBatchResult>({
+                            type: "write-batch",
+                            changesetId: `process-long-churn-round-${round}-writer-${writerNumber}`,
+                            entries: entries[writerNumber].entries,
+                        })
+                    )
+                );
+                await Promise.all(
+                    [owner, writer].map((worker) =>
+                        worker.request<ProcessSoakVerifyResult>({
+                            type: "verify",
+                            changesets: commits.map(
+                                (commit) => commit.changeset
+                            ),
+                            timeoutMs: COMMAND_TIMEOUT_MS,
+                        })
+                    )
+                );
+                const allPeersAdmittedMs = performance.now() - startedAt;
+                await Promise.all(
+                    [owner, writer].map((worker) =>
+                        worker.request<ProcessSoakVerifyResult>({
+                            type: "verify",
+                            files: entries.flatMap((entry) => entry.files),
+                            timeoutMs: COMMAND_TIMEOUT_MS,
+                        })
+                    )
+                );
+                const sample = {
+                    round: round + 1,
+                    localCommitMs: commits.map(
+                        (commit) => commit.localCommitMs
+                    ),
+                    allPeersAdmittedMs,
+                    allPeersReadableMs: performance.now() - startedAt,
+                };
+                roundSamples.push(sample);
+                console.log(
+                    "process-long-churn-round:",
+                    JSON.stringify(sample, (_key, value) =>
+                        typeof value === "number"
+                            ? Number(value.toFixed(1))
+                            : value
+                    )
+                );
+            }
+
+            const editorPayload = createProcessSoakGeneratedContent(
+                "editor-safe-save;",
+                "long-churn:editor-safe-save",
+                payloadBytes
+            );
+            const editor = await writer.request<ProcessSoakEditorResult>({
+                type: "editor-save",
+                tempPath: "/collaboration/.editor.tmp",
+                path: "/collaboration/editor.txt",
+                content: editorPayload.content,
+            });
+            expect(editor.targetNodeId).toBe(editor.tempNodeId);
+            expect(editor.targetNodeId).not.toBe(editor.replacedNodeId);
+            expected.set("/collaboration/editor.txt", {
+                path: "/collaboration/editor.txt",
+                content: editorPayload.expectation,
+            });
+            absent.add("/collaboration/.editor.tmp");
+            logicalContentBytesWritten += Buffer.byteLength(
+                editorPayload.content
+            );
+            logicalWriteOperations++;
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [expected.get("/collaboration/editor.txt")!],
+                        absentPaths: ["/collaboration/.editor.tmp"],
+                        noNamingConflicts: ["/collaboration/editor.txt"],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const conflictBaseVersionId = bases.versionIds[2];
+            expect(conflictBaseVersionId).toBeTypeOf("string");
+            const conflictPayloads = [owner, writer].map((_, index) =>
+                createProcessSoakGeneratedContent(
+                    `conflict-writer=${index};`,
+                    `long-churn:conflict:${index}`,
+                    payloadBytes
+                )
+            );
+            const conflictWrites = await Promise.all(
+                [owner, writer].map((worker, index) =>
+                    worker.request<ProcessSoakConflictWriteResult>({
+                        type: "write-conflict",
+                        path: "/collaboration/contested.bin",
+                        content: conflictPayloads[index].content,
+                        baseVersionIds: [conflictBaseVersionId!],
+                    })
+                )
+            );
+            logicalContentBytesWritten += conflictPayloads.reduce(
+                (total, payload) => total + Buffer.byteLength(payload.content),
+                0
+            );
+            logicalWriteOperations += conflictPayloads.length;
+            const conflictHeads = conflictWrites.map((write, index) => ({
+                versionId: write.versionId,
+                content: conflictPayloads[index].expectation,
+                parentVersionIds: [conflictBaseVersionId!],
+            }));
+            const conflictVisibility = await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/collaboration/contested.bin",
+                            heads: conflictHeads,
+                        },
+                        noNamingConflicts: ["/collaboration/contested.bin"],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            expect(
+                new Set(
+                    conflictVisibility.map(
+                        (verification) => verification.visibleConflictHash
+                    )
+                ).size
+            ).toBe(1);
+            const visibleConflictHash =
+                conflictVisibility[0].visibleConflictHash;
+            const visibleConflict = conflictHeads.find(
+                (head) => head.content.sha256 === visibleConflictHash
+            );
+            expect(visibleConflict).toBeDefined();
+            expected.set("/collaboration/contested.bin", {
+                path: "/collaboration/contested.bin",
+                content: visibleConflict!.content,
+            });
+
+            const hotChangesets: ProcessSoakBatchResult["changeset"][] = [];
+            let hotExpectation!: ProcessSoakFileExpectation;
+            for (let version = 0; version < hotVersions; version++) {
+                const payload = createProcessSoakGeneratedContent(
+                    `hot-version=${version};`,
+                    `long-churn:hot-version:${version}`,
+                    payloadBytes
+                );
+                const committed = await owner.request<ProcessSoakBatchResult>({
+                    type: "write-batch",
+                    changesetId: `process-long-churn-hot-version-${version}`,
+                    entries: [
+                        {
+                            path: "/collaboration/hot.bin",
+                            content: payload.content,
+                        },
+                    ],
+                });
+                hotChangesets.push(committed.changeset);
+                hotExpectation = {
+                    path: "/collaboration/hot.bin",
+                    content: payload.expectation,
+                };
+                expected.set(hotExpectation.path, hotExpectation);
+                logicalContentBytesWritten += Buffer.byteLength(
+                    payload.content
+                );
+                logicalWriteOperations++;
+            }
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        changesets: hotChangesets,
+                        files: [hotExpectation],
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/collaboration/contested.bin",
+                            heads: conflictHeads,
+                        },
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const dayMs = 24 * 60 * 60 * 1000;
+            const firstGcOffsetMs = 40 * dayMs;
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request({
+                        type: "set-clock-offset",
+                        offsetMs: firstGcOffsetMs,
+                    })
+                )
+            );
+            const gcOptions = {
+                keepVersions: 3,
+                settleMs: 0,
+                minOrphanSpanMs: 60_000,
+            };
+            const firstGc = await owner.request<ProcessSoakGcResult>({
+                type: "collect-garbage",
+                options: gcOptions,
+            });
+            expect(firstGc.report.retiredVersions).toBeGreaterThan(0);
+            expect(firstGc.report.chunkCandidatesRecorded).toBeGreaterThan(0);
+            expect(firstGc.report.deletedChunks).toBe(0);
+            expect(firstGc.report.damagedNodeIds).toEqual([]);
+            expect(firstGc.report.conflictedNodes).toBe(0);
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [...expected.values()],
+                        absentPaths: [...absent],
+                        trustedPublicKeys,
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/collaboration/contested.bin",
+                            heads: conflictHeads,
+                        },
+                        noNamingConflicts: ["/"],
+                        exactTree: treeFromFiles(expected.values()),
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const crashPayload = createProcessSoakGeneratedContent(
+                "crash-safe-save;",
+                "long-churn:crash-safe-save",
+                payloadBytes
+            );
+            const crashTempPath = "/collaboration/.crash.txt.tmp";
+            const checkpoint =
+                await writer.request<ProcessSoakEditorFsyncCheckpointResult>({
+                    type: "editor-fsync-checkpoint",
+                    tempPath: crashTempPath,
+                    path: "/collaboration/crash.txt",
+                    content: crashPayload.content,
+                });
+            expect(checkpoint.tempNodeId).not.toBe(checkpoint.targetNodeId);
+            const crashStartedAt = performance.now();
+            await killWorker(writer);
+            activeWorkers.delete(writer);
+            const crashToCloseMs = performance.now() - crashStartedAt;
+
+            const crashOffline = startWorker(writerIndex, writerDirectory, {
+                offline: true,
+            });
+            activeWorkers.add(crashOffline);
+            const crashOfflineReady = await crashOffline.ready;
+            expect(crashOfflineReady.identity).toBe(retainedIdentity);
+            expect(crashOfflineReady.addresses).toEqual([]);
+            await crashOffline.request({
+                type: "set-clock-offset",
+                offsetMs: firstGcOffsetMs,
+            });
+            const crashOfflineNetworkBeforeOpen =
+                await crashOffline.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                });
+            expect(crashOfflineNetworkBeforeOpen).toEqual({
+                connectionCount: 0,
+                remotePeers: [],
+            });
+            const crashReopenStartedAt = performance.now();
+            const crashOfflineOpen =
+                await crashOffline.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: "process-long-churn-crash-offline",
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                    bootstrap: false,
+                    remoteChunkFetch: false,
+                    gcSchedule: false,
+                });
+            const crashOfflineOpenMs = performance.now() - crashReopenStartedAt;
+            expect(crashOfflineOpen.writeReadinessSource).toBe(
+                "remote-settled"
+            );
+            await crashOffline.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                files: [
+                    ...expected.values(),
+                    {
+                        path: crashTempPath,
+                        content: crashPayload.expectation,
+                    },
+                ],
+                trustedPublicKeys,
+                conflict: {
+                    mode: "version-heads",
+                    path: "/collaboration/contested.bin",
+                    heads: conflictHeads,
+                },
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            const recoveredRename =
+                await crashOffline.request<ProcessSoakMountRenameResult>({
+                    type: "mount-rename",
+                    fromPath: crashTempPath,
+                    toPath: "/collaboration/crash.txt",
+                });
+            expect(recoveredRename.sourceNodeId).toBe(checkpoint.tempNodeId);
+            expect(recoveredRename.replacedNodeId).toBe(
+                checkpoint.targetNodeId
+            );
+            expect(recoveredRename.targetNodeId).toBe(checkpoint.tempNodeId);
+            expected.set("/collaboration/crash.txt", {
+                path: "/collaboration/crash.txt",
+                content: crashPayload.expectation,
+            });
+            absent.add(crashTempPath);
+            logicalContentBytesWritten += Buffer.byteLength(
+                crashPayload.content
+            );
+            logicalWriteOperations++;
+            await crashOffline.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                files: [...expected.values()],
+                absentPaths: [...absent],
+                conflict: {
+                    mode: "version-heads",
+                    path: "/collaboration/contested.bin",
+                    heads: conflictHeads,
+                },
+                noNamingConflicts: ["/"],
+                exactTree: treeFromFiles(expected.values()),
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            expect(
+                await crashOffline.request<ProcessSoakNetworkStatus>({
+                    type: "network-status",
+                })
+            ).toEqual({ connectionCount: 0, remotePeers: [] });
+            const crashOfflineStop = await stopWorker(crashOffline);
+            expect(crashOfflineStop.code).toBe(0);
+            activeWorkers.delete(crashOffline);
+
+            writer = startWorker(writerIndex, writerDirectory);
+            activeWorkers.add(writer);
+            writerReady = await writer.ready;
+            expect(writerReady.identity).toBe(retainedIdentity);
+            await writer.request({
+                type: "set-clock-offset",
+                offsetMs: firstGcOffsetMs,
+            });
+            await writer.request({
+                type: "dial",
+                addresses: [dialAddress(ownerReady)],
+            });
+            await writer.request<ProcessSoakOpenResult>({
+                type: "open",
+                address: ownerOpen.address,
+                machineLabel: "process-long-churn-writer-reconnected",
+                timeoutMs: COMMAND_TIMEOUT_MS,
+                bootstrap: false,
+                remoteChunkFetch: false,
+                gcSchedule: false,
+            });
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [expected.get("/collaboration/crash.txt")!],
+                        absentPaths: [crashTempPath],
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/collaboration/contested.bin",
+                            heads: conflictHeads,
+                        },
+                        noNamingConflicts: ["/"],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const secondGcOffsetMs = firstGcOffsetMs + 120_000;
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request({
+                        type: "set-clock-offset",
+                        offsetMs: secondGcOffsetMs,
+                    })
+                )
+            );
+            const secondGc = await owner.request<ProcessSoakGcResult>({
+                type: "collect-garbage",
+                options: gcOptions,
+            });
+            expect(secondGc.report.deletedChunks).toBeGreaterThan(0);
+            expect(BigInt(secondGc.report.reclaimedChunkBytes)).toBeGreaterThan(
+                0n
+            );
+            expect(secondGc.report.damagedNodeIds).toEqual([]);
+            await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [...expected.values()],
+                        absentPaths: [...absent],
+                        trustedPublicKeys,
+                        conflict: {
+                            mode: "version-heads",
+                            path: "/collaboration/contested.bin",
+                            heads: conflictHeads,
+                        },
+                        noNamingConflicts: ["/"],
+                        exactTree: treeFromFiles(expected.values()),
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const onlineFinalMetrics = await Promise.all(
+                [owner, writer].map((worker) =>
+                    worker.request<ProcessSoakMetrics>({ type: "metrics" })
+                )
+            );
+            await validateRuntimeMetrics(
+                [owner, writer],
+                onlineFinalMetrics.map(withoutStorage)
+            );
+            const onlineStops = await Promise.all([
+                stopWorker(owner),
+                stopWorker(writer),
+            ]);
+            expect(onlineStops.map((result) => result.code)).toEqual([0, 0]);
+            activeWorkers.delete(owner);
+            activeWorkers.delete(writer);
+
+            const finalOfflineOwner = startWorker(0, ownerDirectory, {
+                offline: true,
+            });
+            const finalOfflineWriter = startWorker(
+                writerIndex,
+                writerDirectory,
+                { offline: true }
+            );
+            activeWorkers.add(finalOfflineOwner);
+            activeWorkers.add(finalOfflineWriter);
+            const finalOfflineReady = await Promise.all([
+                finalOfflineOwner.ready,
+                finalOfflineWriter.ready,
+            ]);
+            expect(finalOfflineReady.map((ready) => ready.identity)).toEqual([
+                ownerReady.identity,
+                retainedIdentity,
+            ]);
+            expect(finalOfflineReady.map((ready) => ready.addresses)).toEqual([
+                [],
+                [],
+            ]);
+            for (const worker of [finalOfflineOwner, finalOfflineWriter]) {
+                await worker.request({
+                    type: "set-clock-offset",
+                    offsetMs: secondGcOffsetMs,
+                });
+                expect(
+                    await worker.request<ProcessSoakNetworkStatus>({
+                        type: "network-status",
+                    })
+                ).toEqual({ connectionCount: 0, remotePeers: [] });
+                await worker.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: `process-long-churn-final-offline-${worker.index}`,
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                    bootstrap: false,
+                    remoteChunkFetch: false,
+                    gcSchedule: false,
+                });
+                await worker.request<ProcessSoakVerifyResult>({
+                    type: "verify",
+                    files: [...expected.values()],
+                    absentPaths: [...absent],
+                    trustedPublicKeys,
+                    conflict: {
+                        mode: "version-heads",
+                        path: "/collaboration/contested.bin",
+                        heads: conflictHeads,
+                    },
+                    noNamingConflicts: ["/"],
+                    exactTree: treeFromFiles(expected.values()),
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                });
+                expect(
+                    await worker.request<ProcessSoakNetworkStatus>({
+                        type: "network-status",
+                    })
+                ).toEqual({ connectionCount: 0, remotePeers: [] });
+            }
+            const finalOfflineMetrics = await Promise.all(
+                [finalOfflineOwner, finalOfflineWriter].map((worker) =>
+                    worker.request<ProcessSoakMetrics>({ type: "metrics" })
+                )
+            );
+            await validateRuntimeMetrics(
+                [finalOfflineOwner, finalOfflineWriter],
+                finalOfflineMetrics.map(withoutStorage)
+            );
+            const finalStops = await Promise.all([
+                stopWorker(finalOfflineOwner),
+                stopWorker(finalOfflineWriter),
+            ]);
+            expect(finalStops.map((result) => result.code)).toEqual([0, 0]);
+            activeWorkers.delete(finalOfflineOwner);
+            activeWorkers.delete(finalOfflineWriter);
+
+            const localCommitSamples = roundSamples.flatMap(
+                (sample) => sample.localCommitMs
+            );
+            const bootstrapMilestonesMs = Object.fromEntries(
+                requiredBootstrapEvents.map((type) => [
+                    type,
+                    distribution(
+                        coldJoinSamples.map((sample) => {
+                            const event = sample.bootstrapEvents.find(
+                                (candidate) => candidate.type === type
+                            );
+                            expect(event).toBeDefined();
+                            return event!.atMs;
+                        })
+                    ),
+                ])
+            );
+            const bootstrapDurationsMs = Object.fromEntries(
+                requiredBootstrapEvents.flatMap((type) => {
+                    const values = coldJoinSamples.flatMap((sample) => {
+                        const event = sample.bootstrapEvents.find(
+                            (candidate) => candidate.type === type
+                        );
+                        return event && "durationMs" in event
+                            ? [event.durationMs]
+                            : [];
+                    });
+                    return values.length > 0
+                        ? [[type, distribution(values)] as const]
+                        : [];
+                })
+            );
+            const baselineFleetMemory = aggregateFleetMemory(
+                baselineMetrics.map(withoutStorage)
+            );
+            const onlineFinalFleetMemory = aggregateFleetMemory(
+                onlineFinalMetrics.map(withoutStorage)
+            );
+            const finalOfflineFleetMemory = aggregateFleetMemory(
+                finalOfflineMetrics.map(withoutStorage)
+            );
+            const baselineStorageBytes = sumStorage(baselineMetrics);
+            const onlineFinalStorageBytes = sumStorage(onlineFinalMetrics);
+            const storageGrowthBytes =
+                onlineFinalStorageBytes - baselineStorageBytes;
+            const postBaselineLogicalContentBytesWritten =
+                logicalContentBytesWritten - baselineLogicalContentBytesWritten;
+            const report = {
+                joinRuns,
+                rounds,
+                writers: 2,
+                hotVersions,
+                payloadBytes,
+                snapshot,
+                coldJoin: {
+                    peerCreateMs: distribution(
+                        coldJoinSamples.map((sample) => sample.peerCreateMs)
+                    ),
+                    openMs: distribution(
+                        coldJoinSamples.map((sample) => sample.openMs)
+                    ),
+                    writeReadyMs: distribution(
+                        coldJoinSamples.map((sample) => sample.writeReadyMs)
+                    ),
+                    localTreeAuditMs: distribution(
+                        coldJoinSamples.map((sample) => sample.localTreeAuditMs)
+                    ),
+                    milestonesMs: bootstrapMilestonesMs,
+                    durationsMs: bootstrapDurationsMs,
+                    samples: coldJoinSamples,
+                },
+                multiWriter: {
+                    localCommitMs: distribution(localCommitSamples),
+                    allPeersAdmittedMs: distribution(
+                        roundSamples.map((sample) => sample.allPeersAdmittedMs)
+                    ),
+                    allPeersReadableMs: distribution(
+                        roundSamples.map((sample) => sample.allPeersReadableMs)
+                    ),
+                    samples: roundSamples,
+                },
+                editor,
+                crashRecovery: {
+                    checkpoint,
+                    crashToCloseMs,
+                    offlineOpenMs: crashOfflineOpenMs,
+                    recoveredRename,
+                },
+                conflict: {
+                    heads: conflictHeads.map((head) => head.versionId),
+                    visibleHash: visibleConflictHash,
+                },
+                gc: { first: firstGc, second: secondGc },
+                resources: {
+                    logicalWriteOperations,
+                    logicalContentBytesWritten,
+                    postBaselineLogicalContentBytesWritten,
+                    baseline: baselineMetrics,
+                    onlineFinal: onlineFinalMetrics,
+                    finalOffline: finalOfflineMetrics,
+                    fleetMemorySums: {
+                        baseline: baselineFleetMemory,
+                        onlineFinal: onlineFinalFleetMemory,
+                        finalOffline: finalOfflineFleetMemory,
+                    },
+                    totalStorageBytes: {
+                        baseline: baselineStorageBytes,
+                        onlineFinal: onlineFinalStorageBytes,
+                        growth: storageGrowthBytes,
+                    },
+                    storageGrowthPerLogicalByte:
+                        postBaselineLogicalContentBytesWritten === 0
+                            ? null
+                            : storageGrowthBytes /
+                              postBaselineLogicalContentBytesWritten,
+                },
+            };
+            console.log(
+                "process-long-churn:",
                 JSON.stringify(report, (_key, value) =>
                     typeof value === "number" ? Number(value.toFixed(1)) : value
                 )

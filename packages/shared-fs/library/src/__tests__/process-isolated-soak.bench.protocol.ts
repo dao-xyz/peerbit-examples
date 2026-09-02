@@ -1,3 +1,5 @@
+import type { BootstrapStatus, BootstrapTelemetryEvent } from "../index.js";
+
 export type ProcessSoakContentExpectation =
     | string
     | {
@@ -77,6 +79,32 @@ export type ProcessSoakNetworkStatus = {
     remotePeers: string[];
 };
 
+export type ProcessSoakBootstrapStatus = Omit<
+    BootstrapStatus,
+    "manifest" | "msSinceLastArrival"
+> & {
+    manifest?: {
+        authorKey: string;
+        snapshotSeq: string;
+        createdAtWallMs: string;
+        ageMs: number;
+        docs: string;
+    };
+    /** `null` serializes BootstrapStatus's initial positive infinity. */
+    msSinceLastArrival: number | null;
+};
+
+export type ProcessSoakGcOptions = {
+    keepVersions?: number;
+    retentionMs?: number;
+    graceMs?: number;
+    chunkGraceMs?: number;
+    namingGraceMs?: number;
+    settleMs?: number;
+    minOrphanSpanMs?: number;
+    nowMs?: number;
+};
+
 export type ProcessSoakReadyMessage = {
     type: "ready";
     worker: number;
@@ -96,10 +124,19 @@ export type ProcessSoakWorkerCommand =
           addresses: string[];
       })
     | (ProcessSoakRequestBase & {
+          type: "set-clock-offset";
+          offsetMs: number;
+      })
+    | (ProcessSoakRequestBase & {
           type: "open";
           address?: string;
           machineLabel: string;
           timeoutMs: number;
+          bootstrap?: false | "auto" | "require";
+          remoteChunkFetch?: boolean;
+          gcSchedule?: boolean;
+          captureBootstrapTelemetry?: boolean;
+          awaitBootstrapConverged?: boolean;
       })
     | (ProcessSoakRequestBase & {
           type: "authorize";
@@ -112,11 +149,23 @@ export type ProcessSoakWorkerCommand =
               { path: string; content: string } | { path: string; delete: true }
           >;
       })
+    | (ProcessSoakRequestBase & { type: "snapshot-write" })
     | (ProcessSoakRequestBase & {
           type: "editor-save";
           tempPath: string;
           path: string;
           content: string;
+      })
+    | (ProcessSoakRequestBase & {
+          type: "editor-fsync-checkpoint";
+          tempPath: string;
+          path: string;
+          content: string;
+      })
+    | (ProcessSoakRequestBase & {
+          type: "mount-rename";
+          fromPath: string;
+          toPath: string;
       })
     | (ProcessSoakRequestBase & {
           type: "write-conflict";
@@ -140,7 +189,10 @@ export type ProcessSoakWorkerCommand =
           conflict?: ProcessSoakConflictExpectation;
           timeoutMs: number;
       })
-    | (ProcessSoakRequestBase & { type: "collect-garbage" })
+    | (ProcessSoakRequestBase & {
+          type: "collect-garbage";
+          options?: ProcessSoakGcOptions;
+      })
     | (ProcessSoakRequestBase & { type: "network-status" })
     | (ProcessSoakRequestBase & { type: "runtime-metrics" })
     | (ProcessSoakRequestBase & { type: "requested-gc-runtime-metrics" })
@@ -181,12 +233,31 @@ export type ProcessSoakOpenResult = {
     writeReadyMs: number;
     writeReadinessSource?: string;
     gcScheduled: boolean;
+    bootstrapStatus: ProcessSoakBootstrapStatus;
+    bootstrapConvergence?: { verified: boolean };
+    bootstrapTelemetry: BootstrapTelemetryEvent[];
+};
+
+export type ProcessSoakClockOffsetResult = {
+    offsetMs: number;
+    logicalNowMs: number;
 };
 
 export type ProcessSoakBatchResult = {
     localCommitMs: number;
     changeset: ProcessSoakChangesetRef;
     versionIds: Array<string | undefined>;
+};
+
+export type ProcessSoakSnapshotWriteResult = {
+    durationMs: number;
+    snapshotSeq: string;
+    createdAtWallMs: string;
+    nodes: string;
+    docs: string;
+    bytes: string;
+    segments: number;
+    manifestId: string;
 };
 
 export type ProcessSoakEditorResult = {
@@ -196,6 +267,21 @@ export type ProcessSoakEditorResult = {
     totalMs: number;
     replacedNodeId: string;
     tempNodeId: string;
+    targetNodeId: string;
+};
+
+export type ProcessSoakEditorFsyncCheckpointResult = {
+    writeMs: number;
+    fsyncMs: number;
+    totalMs: number;
+    tempNodeId: string;
+    targetNodeId: string;
+};
+
+export type ProcessSoakMountRenameResult = {
+    renameMs: number;
+    sourceNodeId: string;
+    replacedNodeId: string | null;
     targetNodeId: string;
 };
 
