@@ -82,17 +82,43 @@ try {
   }
 
   New-Item -ItemType Directory -Force -Path (Join-Path $MountRoot "docs") | Out-Null
-  Set-Content -NoNewline -Path (Join-Path $MountRoot "docs\hello.txt") -Value "hello external native"
-  $Value = Get-Content -Raw -Path (Join-Path $MountRoot "docs\hello.txt")
+  $MetadataPath = Join-Path $MountRoot "docs\hello.txt"
+  Set-Content -NoNewline -Path $MetadataPath -Value "hello external native"
+  $Value = Get-Content -Raw -Path $MetadataPath
   if ($Value -ne "hello external native") {
     throw "unexpected file contents: $Value"
   }
+
+  $LastWriteBefore = (Get-Item -LiteralPath $MetadataPath).LastWriteTimeUtc
+  $TimestampMutationFailed = $false
+  try {
+    [System.IO.File]::SetLastWriteTimeUtc($MetadataPath, [DateTime]::Parse("2000-01-01T00:00:00Z").ToUniversalTime())
+  } catch {
+    $TimestampMutationFailed = $true
+  }
+  if (-not $TimestampMutationFailed) {
+    throw "explicit timestamp update unexpectedly succeeded for synthetic Shared FS metadata"
+  }
+  $LastWriteAfter = (Get-Item -LiteralPath $MetadataPath).LastWriteTimeUtc
+  if ($LastWriteAfter -ne $LastWriteBefore) {
+    throw "failed timestamp update changed Shared FS metadata from $LastWriteBefore to $LastWriteAfter"
+  }
+
   Rename-Item -Path (Join-Path $MountRoot "docs\hello.txt") -NewName "renamed.txt"
   $Renamed = Get-Content -Raw -Path (Join-Path $MountRoot "docs\renamed.txt")
   if ($Renamed -ne "hello external native") {
     throw "unexpected renamed file contents: $Renamed"
   }
-  Remove-Item -Force -Path (Join-Path $MountRoot "docs\renamed.txt")
+  $RenamedPath = Join-Path $MountRoot "docs\renamed.txt"
+  Remove-Item -Force -Path $RenamedPath
+  if (Test-Path -LiteralPath $RenamedPath) {
+    throw "renamed file still exists after removal"
+  }
+  $DocsPath = Join-Path $MountRoot "docs"
+  Remove-Item -Force -Path $DocsPath
+  if (Test-Path -LiteralPath $DocsPath) {
+    throw "docs directory still exists after removal"
+  }
 } catch {
   Stop-MountProcess
   Write-MountLogs

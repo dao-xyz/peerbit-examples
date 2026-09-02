@@ -4,6 +4,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -15,6 +16,44 @@ func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	})
 	if got != -fuse.EAGAIN {
 		t.Fatalf("expected %d, got %d", -fuse.EAGAIN, got)
+	}
+}
+
+func TestUnsupportedMetadataMutationsFailClosed(t *testing.T) {
+	// A nil IPC client makes an accidental request fail loudly. Metadata is not
+	// represented by the Shared FS model, so the adapter must reject these
+	// operations before it can report false success for any path.
+	fs := &peerbitFS{}
+	requestedTimes := []fuse.Timespec{
+		fuse.NewTimespec(time.Unix(946684800, 0)),
+		fuse.NewTimespec(time.Unix(946684801, 0)),
+	}
+	tests := []struct {
+		name string
+		run  func() int
+	}{
+		{
+			name: "chmod",
+			run:  func() int { return fs.Chmod("/missing", 0o755) },
+		},
+		{
+			name: "chown",
+			run:  func() int { return fs.Chown("/missing", 1000, 1000) },
+		},
+		{
+			name: "utimens",
+			run: func() int {
+				return fs.Utimens("/missing", requestedTimes)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.run(); got != -fuse.ENOSYS {
+				t.Fatalf("expected %d, got %d", -fuse.ENOSYS, got)
+			}
+		})
 	}
 }
 

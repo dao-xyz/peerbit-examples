@@ -164,6 +164,7 @@ jobs:
               run: node scripts/shared-fs-build-packages.mjs
 
             - name: Run external native adapter smoke
+              shell: bash
               run: scripts/shared-fs-external-native-smoke.sh
 
     cleanup-macos:
@@ -273,16 +274,16 @@ jobs:
             - name: Checkout
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-            - name: Setup pnpm
-              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-              with:
-                  run_install: false
-
             - name: Setup Node
               uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
                   package-manager-cache: false
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+              with:
+                  run_install: false
 
             - name: Setup Go
               uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -333,6 +334,10 @@ jobs:
               if: always()
               shell: powershell
               run: |
+                  if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+                    Write-Host "pnpm is unavailable; no store size to report."
+                    return
+                  }
                   $StorePath = pnpm store path
                   Write-Host "pnpm store path: $StorePath"
                   if (Test-Path -LiteralPath $StorePath) {

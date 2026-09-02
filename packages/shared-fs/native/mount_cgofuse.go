@@ -274,20 +274,20 @@ func (fs *peerbitFS) Mkdir(path string, mode uint32) int {
 func (fs *peerbitFS) Chmod(path string, mode uint32) int {
 	_ = path
 	_ = mode
-	return 0
+	return -fuse.ENOSYS
 }
 
 func (fs *peerbitFS) Chown(path string, uid uint32, gid uint32) int {
 	_ = path
 	_ = uid
 	_ = gid
-	return 0
+	return -fuse.ENOSYS
 }
 
 func (fs *peerbitFS) Utimens(path string, tmsp []fuse.Timespec) int {
 	_ = path
 	_ = tmsp
-	return 0
+	return -fuse.ENOSYS
 }
 
 func (fs *peerbitFS) Rmdir(path string) int {

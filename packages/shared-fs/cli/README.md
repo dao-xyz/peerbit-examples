@@ -38,7 +38,10 @@ available on the host, and any missing pieces before optionally opening an
 address. Address status also reports write readiness, its durable source, and
 whether the local directory is eligible for one-time legacy promotion. Add
 `--json` for one JSON document containing `nativeMount` and either a
-`filesystem` object or `null`. Routine status does not scan retained conflict
+`filesystem` object or `null`. `nativeMount.metadata` reports the synthetic
+fixed file/directory modes, non-persisted creation mode, synthetic ownership,
+existence-only OS access checks, logical timestamps, and unsupported
+chmod/chown/utimens mutations. Routine status does not scan retained conflict
 metadata; add `--include-conflicts` to include the current local content and
 naming records plus separate `contentCount` and `namingCount` fields. Those
 whole-store scans are deliberately opt-in because they can dominate status
@@ -154,6 +157,16 @@ Native runtime prerequisites are platform-specific:
 - macOS: macFUSE. With Homebrew, run `brew install --cask macfuse`, then approve
   macFUSE in System Settings and reboot if macOS requires it.
 - Windows: WinFsp runtime must be installed before mounting.
+
+Native metadata is intentionally limited while the shared model persists only
+names and file content. Linux/macOS stat reports synthetic `0755` directories
+and `0644` files; Windows normalizes them to `0777` and `0666`. Creation modes
+are not persisted, ownership is adapter-synthetic, and atime mirrors the
+logical/synthetic mtime. chmod, chown, and explicit timestamp updates are
+unsupported and fail instead of claiming success. These fields are not an
+authorization boundary. The external adapter checks only path existence in its
+OS access callback, so `access(2)` and `test -w` are advisory. Use the Shared FS
+trusted-writer model for write authorization.
 
 Create and mount an authenticated shared filesystem:
 

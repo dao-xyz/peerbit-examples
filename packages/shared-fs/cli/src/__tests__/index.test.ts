@@ -16,6 +16,27 @@ const stopPeer = async (peer: Peerbit) => {
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
+const expectedNativeMetadata = {
+    modes: {
+        source: "synthetic-fixed",
+        directory: process.platform === "win32" ? "0777" : "0755",
+        file: process.platform === "win32" ? "0666" : "0644",
+        creationModePreserved: false,
+    },
+    ownership: "synthetic-adapter",
+    accessChecks: "existence-only",
+    timestamps: {
+        mtime: "logical-or-synthetic",
+        ctime: "logical-or-synthetic",
+        atime: "mirrors-mtime",
+    },
+    mutations: {
+        chmod: false,
+        chown: false,
+        utimens: false,
+    },
+};
+
 const seedConflicts = async () => {
     const directory = await fs.mkdtemp(
         path.join(os.tmpdir(), "peerbit-shared-fs-cli-conflicts-")
@@ -603,6 +624,7 @@ describe("peerbit-fs cli", () => {
             expect(status.nativeMount).toMatchObject({
                 platform: expect.any(String),
                 available: expect.any(Boolean),
+                metadata: expectedNativeMetadata,
             });
             expect(status.filesystem).toMatchObject({
                 address: fixture.address,
@@ -642,7 +664,9 @@ describe("peerbit-fs cli", () => {
             await runCli(["status", "--json"]);
             expect(log).toHaveBeenCalledTimes(1);
             expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
-                nativeMount: expect.any(Object),
+                nativeMount: {
+                    metadata: expectedNativeMetadata,
+                },
                 filesystem: null,
             });
         } finally {

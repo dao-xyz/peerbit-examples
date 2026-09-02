@@ -517,6 +517,18 @@ other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
+The shared model does not yet persist POSIX mode, owner, or explicit timestamp
+metadata. Native stat results use synthetic fixed modes (`0755` directories and
+`0644` files on Linux/macOS, normalized to `0777`/`0666` on Windows), synthetic
+ownership, logical/synthetic mtime and ctime, and atime mirrored from mtime.
+Creation modes are not preserved. chmod, chown, and explicit timestamp changes
+are unsupported and fail rather than falsely claiming persistence. These
+fields are not an authorization boundary; use Shared FS writer authorization.
+The external adapter's OS access callback checks path existence but not its
+requested mask, so `access(2)` and `test -w` are advisory.
+The machine-readable contract is available at
+`peerbit-fs status --json` under `nativeMount.metadata`.
+
 Open access modes are enforced per handle: wrong-direction reads, writes, and
 handle truncates return `EBADF`; missing writable opens require `O_CREAT`; and
 the portable fail-closed result for `O_RDONLY|O_TRUNC` is `EINVAL`. A read-only
