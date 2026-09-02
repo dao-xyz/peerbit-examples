@@ -1609,6 +1609,78 @@ const SEGMENT_LEDGER_LOCK_TIMEOUT_MS = 5_000;
 const SEGMENT_LEDGER_LOCK_STALE_MS = 30_000;
 const SEGMENT_LEDGER_LOCK_RETRY_MS = 20;
 
+type SegmentLedgerFaultPoint =
+    | "lock-candidate-durable"
+    | "lock-stale-owner-eligible"
+    | "lock-stale-owner-detached"
+    | "lock-acquired"
+    | "ledger-read"
+    | "ledger-temp-durable"
+    | "ledger-replaced"
+    | "ledger-directory-durable"
+    | "lock-release-detached"
+    | "lock-release-cleaned";
+type SegmentLedgerFaultContext = {
+    ledgerPath: string;
+    artifactPath?: string;
+    token?: string;
+    loadedGeneration?: number;
+    diskGeneration?: number;
+};
+type SegmentLedgerRuntime = {
+    wallClockMs: () => number;
+    monotonicMs: () => number;
+    pid: () => number;
+    isProcessAlive: (pid: number) => boolean;
+    waitForRetry: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+    nextToken: () => string;
+    onStage?: (
+        stage: SegmentLedgerFaultPoint,
+        context: SegmentLedgerFaultContext
+    ) => void | Promise<void>;
+};
+
+const segmentLedgerAbortReason = (signal?: AbortSignal) =>
+    signal?.reason ??
+    new SharedFsError(
+        "ECLOSED",
+        "snapshot segment ledger lock acquisition was aborted"
+    );
+
+const waitForSegmentLedgerRetry = (delayMs: number, signal?: AbortSignal) =>
+    new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+        };
+        const onAbort = () => {
+            cleanup();
+            reject(segmentLedgerAbortReason(signal));
+        };
+        const timer = setTimeout(() => {
+            cleanup();
+            resolve();
+        }, delayMs);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+    });
+
+const createSegmentLedgerRuntime = (): SegmentLedgerRuntime => ({
+    wallClockMs: Date.now,
+    monotonicMs: () => performance.now(),
+    pid: () => process.pid,
+    isProcessAlive: (pid) => {
+        try {
+            process.kill(pid, 0);
+            return true;
+        } catch (error) {
+            return (error as { code?: string })?.code !== "ESRCH";
+        }
+    },
+    waitForRetry: waitForSegmentLedgerRetry,
+    nextToken: () => `${process.pid}-${toBase64URL(randomBytes(18))}`,
+});
+
 type SegmentLedgerCid = { cid: string; bytes: number };
 type SegmentLedgerGen = {
     cids: SegmentLedgerCid[];
@@ -2001,6 +2073,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private gcSchedulerGeneration = 0;
     private gcRng: () => number = Math.random;
     private segmentLedgerChain: Promise<unknown> = Promise.resolve();
+    private segmentLedgerRuntime: SegmentLedgerRuntime =
+        createSegmentLedgerRuntime();
     private segmentLedgerReconciled = false;
     private segmentReapFailureCycles = 0;
     private segmentGraceWarned = false;
@@ -2447,6 +2521,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.maintenanceTasks = new Set();
         this.foregroundMutationTasks = new Set();
         this.segmentLedgerChain = Promise.resolve();
+        this.segmentLedgerRuntime = createSegmentLedgerRuntime();
         this.segmentLedgerReconciled = false;
         this.segmentReapFailureCycles = 0;
         this.segmentGraceWarned = false;
@@ -11250,6 +11325,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return { enabled: true, graceMs: Math.max(requested, floor) };
     }
 
+    /** Instance-local deterministic seam; intentionally absent from open args. */
+    private setSegmentLedgerRuntimeForTest(
+        overrides: Partial<SegmentLedgerRuntime> = {}
+    ) {
+        this.segmentLedgerRuntime = {
+            ...createSegmentLedgerRuntime(),
+            ...overrides,
+        };
+    }
+
     /**
      * Directory-less peers keep the ledger on the NODE, not the program
      * instance: the in-memory block store also lives on the node and
@@ -11305,54 +11390,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     ): Promise<() => Promise<void>> {
         const fs = await import("node:fs/promises");
         const { join } = await import("node:path");
+        const runtime =
+            this.segmentLedgerRuntime ?? createSegmentLedgerRuntime();
         const lockPath = `${path}.lock`;
         const ownerPath = join(lockPath, "owner.json");
-        const token = `${process.pid}-${toBase64URL(randomBytes(18))}`;
+        const token = runtime.nextToken();
         const candidatePath = `${lockPath}.candidate-${token}`;
         const candidateOwnerPath = join(candidatePath, "owner.json");
         const releasePath = `${lockPath}.release-${token}`;
         const releaseOwnerPath = join(releasePath, "owner.json");
         const owner = JSON.stringify({
             token,
-            pid: process.pid,
-            createdAtMs: Date.now(),
+            pid: runtime.pid(),
+            createdAtMs: runtime.wallClockMs(),
         });
-        const deadline = Date.now() + SEGMENT_LEDGER_LOCK_TIMEOUT_MS;
+        const deadline = runtime.monotonicMs() + SEGMENT_LEDGER_LOCK_TIMEOUT_MS;
 
         const throwIfAborted = () => {
             if (signal?.aborted) {
-                throw (
-                    signal.reason ??
-                    new SharedFsError(
-                        "ECLOSED",
-                        "snapshot segment ledger lock acquisition was aborted"
-                    )
-                );
+                throw segmentLedgerAbortReason(signal);
             }
         };
-        const waitForRetry = () =>
-            new Promise<void>((resolve, reject) => {
-                const cleanup = () => {
-                    clearTimeout(timer);
-                    signal?.removeEventListener("abort", onAbort);
-                };
-                const onAbort = () => {
-                    cleanup();
-                    reject(
-                        signal?.reason ??
-                            new SharedFsError(
-                                "ECLOSED",
-                                "snapshot segment ledger lock acquisition was aborted"
-                            )
-                    );
-                };
-                const timer = setTimeout(() => {
-                    cleanup();
-                    resolve();
-                }, SEGMENT_LEDGER_LOCK_RETRY_MS);
-                signal?.addEventListener("abort", onAbort, { once: true });
-                if (signal?.aborted) onAbort();
-            });
         const reapDeadOwner = async (): Promise<boolean> => {
             let parsed: {
                 token?: unknown;
@@ -11383,25 +11441,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parsed.createdAtMs,
                 ownerStat.mtimeMs
             );
-            if (Date.now() - lastOwnedAtMs < SEGMENT_LEDGER_LOCK_STALE_MS) {
+            if (
+                runtime.wallClockMs() - lastOwnedAtMs <
+                SEGMENT_LEDGER_LOCK_STALE_MS
+            ) {
                 return false;
             }
-            let ownerAlive = true;
-            try {
-                process.kill(parsed.pid, 0);
-            } catch (error) {
-                ownerAlive = (error as { code?: string })?.code !== "ESRCH";
+            if (runtime.isProcessAlive(parsed.pid)) return false;
+            const onEligible = runtime.onStage;
+            if (onEligible) {
+                await onEligible("lock-stale-owner-eligible", {
+                    ledgerPath: path,
+                    artifactPath: lockPath,
+                    token: parsed.token,
+                });
             }
-            if (ownerAlive) return false;
             const stalePath = `${lockPath}.stale-${parsed.token}`;
             try {
                 await fs.rename(lockPath, stalePath);
+                const onStage = runtime.onStage;
+                if (onStage) {
+                    await onStage("lock-stale-owner-detached", {
+                        ledgerPath: path,
+                        artifactPath: stalePath,
+                        token: parsed.token,
+                    });
+                }
                 return true;
             } catch (error) {
+                const code = (error as { code?: string })?.code ?? "";
                 if (
-                    ["EEXIST", "ENOTEMPTY", "ENOENT"].includes(
-                        (error as { code?: string })?.code ?? ""
-                    )
+                    ["EEXIST", "ENOTEMPTY", "ENOENT"].includes(code) ||
+                    (process.platform === "win32" && code === "EPERM")
                 ) {
                     return false;
                 }
@@ -11430,6 +11501,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             } catch (error) {
                 if (!directorySyncUnsupported(error)) throw error;
             }
+            const onStage = runtime.onStage;
+            if (onStage) {
+                await onStage("lock-candidate-durable", {
+                    ledgerPath: path,
+                    artifactPath: candidatePath,
+                    token,
+                });
+            }
         } catch (error) {
             await candidateOwnerFile?.close().catch(() => {});
             await fs.rm(candidatePath, { recursive: true, force: true });
@@ -11439,10 +11518,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let acquired = false;
         try {
             for (;;) {
+                let lockPathAbsent = false;
                 try {
+                    await fs.lstat(lockPath);
+                } catch (error) {
+                    if ((error as { code?: string })?.code === "ENOENT") {
+                        lockPathAbsent = true;
+                    } else {
+                        throw error;
+                    }
+                }
+                try {
+                    if (!lockPathAbsent) {
+                        const occupied = new Error(
+                            "snapshot segment ledger lock path exists"
+                        ) as NodeJS.ErrnoException;
+                        occupied.code = "EEXIST";
+                        throw occupied;
+                    }
                     await fs.rename(candidatePath, lockPath);
                     acquired = true;
-                    return async () => {
+                    const release = async () => {
                         try {
                             const current = JSON.parse(
                                 await fs.readFile(ownerPath, "utf8")
@@ -11457,7 +11553,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             if (
                                 (error as { code?: string })?.code === "ENOENT"
                             ) {
-                                return;
+                                try {
+                                    await fs.lstat(lockPath);
+                                } catch (lockError) {
+                                    if (
+                                        (lockError as { code?: string })
+                                            ?.code === "ENOENT"
+                                    ) {
+                                        return;
+                                    }
+                                    throw lockError;
+                                }
+                                throw new SharedFsError(
+                                    "EIO",
+                                    "snapshot segment ledger lock ownership was lost before release"
+                                );
                             }
                             throw error;
                         }
@@ -11473,6 +11583,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                                 return;
                             }
                             throw error;
+                        }
+                        const onDetached = runtime.onStage;
+                        if (onDetached) {
+                            await onDetached("lock-release-detached", {
+                                ledgerPath: path,
+                                artifactPath: releasePath,
+                                token,
+                            });
                         }
                         let releasedOwner: any;
                         try {
@@ -11497,7 +11615,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             recursive: true,
                             force: true,
                         });
+                        const onCleaned = runtime.onStage;
+                        if (onCleaned) {
+                            await onCleaned("lock-release-cleaned", {
+                                ledgerPath: path,
+                                artifactPath: releasePath,
+                                token,
+                            });
+                        }
                     };
+                    const onAcquired = runtime.onStage;
+                    if (onAcquired) {
+                        try {
+                            await onAcquired("lock-acquired", {
+                                ledgerPath: path,
+                                artifactPath: lockPath,
+                                token,
+                            });
+                        } catch (error) {
+                            await release();
+                            throw error;
+                        }
+                    }
+                    return release;
                 } catch (error) {
                     const code = (error as { code?: string })?.code ?? "";
                     if (
@@ -11512,13 +11652,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // is contended, however, do not wait out the lock timeout.
                 throwIfAborted();
                 if (await reapDeadOwner()) continue;
-                if (Date.now() >= deadline) {
+                if (runtime.monotonicMs() >= deadline) {
                     throw new SharedFsError(
                         "EIO",
                         "snapshot segment ledger is locked by another live writer"
                     );
                 }
-                await waitForRetry();
+                await runtime.waitForRetry(
+                    SEGMENT_LEDGER_LOCK_RETRY_MS,
+                    signal
+                );
             }
         } finally {
             if (!acquired) {
@@ -11534,9 +11677,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async replaceSegmentLedger(path: string, contents: string) {
         const fs = await import("node:fs/promises");
         const { dirname } = await import("node:path");
-        const tempPath = `${path}.tmp-${process.pid}-${toBase64URL(
-            randomBytes(18)
-        )}`;
+        const runtime =
+            this.segmentLedgerRuntime ?? createSegmentLedgerRuntime();
+        const token = runtime.nextToken();
+        const tempPath = `${path}.tmp-${token}`;
         let file: Awaited<ReturnType<typeof fs.open>> | undefined;
         let renamed = false;
         try {
@@ -11545,8 +11689,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             await file.sync();
             await file.close();
             file = undefined;
+            const onTempDurable = runtime.onStage;
+            if (onTempDurable) {
+                await onTempDurable("ledger-temp-durable", {
+                    ledgerPath: path,
+                    artifactPath: tempPath,
+                    token,
+                });
+            }
             await fs.rename(tempPath, path);
             renamed = true;
+            const onReplaced = runtime.onStage;
+            if (onReplaced) {
+                await onReplaced("ledger-replaced", {
+                    ledgerPath: path,
+                    artifactPath: path,
+                    token,
+                });
+            }
             try {
                 const parent = await fs.open(dirname(path), "r");
                 try {
@@ -11556,6 +11716,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             } catch (error) {
                 if (!directorySyncUnsupported(error)) throw error;
+            }
+            const onDirectoryDurable = runtime.onStage;
+            if (onDirectoryDurable) {
+                await onDirectoryDurable("ledger-directory-durable", {
+                    ledgerPath: path,
+                    artifactPath: dirname(path),
+                    token,
+                });
             }
         } finally {
             await file?.close().catch(() => {});
@@ -11643,6 +11811,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         signal?: AbortSignal
     ): Promise<boolean> {
         const path = await this.segmentLedgerPath();
+        const runtime =
+            this.segmentLedgerRuntime ?? createSegmentLedgerRuntime();
         const removeReaped = (ledger: SegmentLedger) => {
             if (!reapedCids || reapedCids.size === 0) return;
             // Successful rm is the invariant's sanctioned exit: a merged
@@ -11697,6 +11867,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
             const diskGeneration = disk?.generation ?? 0;
+            const onLedgerRead = runtime.onStage;
+            if (onLedgerRead) {
+                await onLedgerRead("ledger-read", {
+                    ledgerPath: path,
+                    artifactPath: path,
+                    loadedGeneration,
+                    diskGeneration,
+                });
+            }
             const payload =
                 disk && diskGeneration !== loadedGeneration
                     ? mergeSegmentLedgers(disk, next, this.clock())
@@ -11717,7 +11896,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         prevDocCids: SegmentLedgerCid[],
         prevSeq: string,
         newSeq: string,
-        _context?: MaintenanceContext
+        context?: MaintenanceContext
     ): Promise<void> {
         this.segmentLedgerChain ??= Promise.resolve();
         const run = this.segmentLedgerChain.then(async () => {
@@ -11759,7 +11938,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             capSegmentRetired(nextLedger);
             const saved = await this.saveSegmentLedgerCas(
                 loadedGeneration,
-                nextLedger
+                nextLedger,
+                undefined,
+                context?.signal
             );
             if (!saved) {
                 throw new SharedFsError(
@@ -12039,7 +12220,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const saved = await this.saveSegmentLedgerCas(
             loadedGeneration,
             nextLedger,
-            acknowledgedSet
+            acknowledgedSet,
+            context?.signal
         );
         if (!saved) {
             throw new SharedFsError(

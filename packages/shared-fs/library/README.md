@@ -768,10 +768,26 @@ Fleet caveats:
 - The segment ledger lives beside the store
   (`shared-fs-snapshots/<address>.json`); peers without a directory keep
   it in memory, matching their in-memory block store.
+- Dead-lock recovery uses local OS PID liveness and therefore assumes one
+  host and PID namespace. Do not share a Peerbit state directory between
+  hosts or isolated containers through NFS, SMB, or a host-mounted volume.
+  PID reuse fails closed and may leave the ledger locked until that process
+  exits.
+- Ledger files are fsynced and atomically replaced. POSIX also requires the
+  parent-directory fsync to succeed; Windows accepts the documented platform
+  errors for unsupported directory fsync, so its tests prove process-crash
+  atomicity rather than POSIX-equivalent physical power-loss durability.
+- A process crash can leave a token-named candidate, temporary ledger, stale
+  lock, or release directory beside the live ledger. These artifacts are inert
+  and never interpreted as current state, but one small artifact can accumulate
+  per interrupted crash stage.
 - A normal Peerbit state directory is single-process. The ledger serializes
   and crash-safely replaces its own sidecar, but it cannot make a custom block
   store safe for two processes that concurrently publish and reap the same
   blocks. Externally serialize those processes or disable `segmentReclaim`.
+  If a contended publisher is cancelled after putting a segment but before
+  recording its intent, the untracked block is retained safely but can consume
+  space.
 - Generations published before this feature were never recorded and are
   permanently exempt (the positive-record safety rule): a one-time bloat
   that stops growing. Wipe the block store and re-replicate to reclaim
