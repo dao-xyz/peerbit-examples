@@ -12,9 +12,9 @@ import {
 } from "../index.js";
 import type {
     ProcessSoakBatchResult,
+    ProcessSoakContentExpectation,
     ProcessSoakConflictWriteResult,
     ProcessSoakEditorResult,
-    ProcessSoakFileExpectation,
     ProcessSoakGcResult,
     ProcessSoakMetrics,
     ProcessSoakOpenResult,
@@ -23,6 +23,7 @@ import type {
     ProcessSoakWorkerCommand,
     ProcessSoakWorkerMessage,
 } from "./process-isolated-soak.bench.protocol.js";
+import { processSoakContentHash } from "./process-isolated-soak.bench.payload.js";
 
 const worker = Number(process.argv[2]);
 const directory = process.argv[3];
@@ -95,12 +96,26 @@ const metrics = async (): Promise<ProcessSoakMetrics> => {
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
 
-const expectedContent = (file: ProcessSoakFileExpectation) =>
-    typeof file.content === "string"
-        ? file.content
-        : `${file.content.prefix}${file.content.repeated.repeat(
-              file.content.count
-          )}`;
+const assertExpectedContent = (
+    actual: Uint8Array | undefined,
+    expected: ProcessSoakContentExpectation
+) => {
+    assert(actual, "Expected file content to exist");
+    if (typeof expected === "string") {
+        assert.equal(decode(actual), expected);
+        return;
+    }
+    assert.equal(
+        actual.byteLength,
+        Buffer.byteLength(expected.prefix) + expected.bytes
+    );
+    assert.equal(processSoakContentHash(actual), expected.sha256);
+};
+
+const expectedContentHash = (expected: ProcessSoakContentExpectation) =>
+    typeof expected === "string"
+        ? processSoakContentHash(expected)
+        : expected.sha256;
 
 const exactTree = async (fs: SharedFsHandle) => {
     const entries: ProcessSoakTreeExpectation[] = [];
@@ -309,9 +324,9 @@ const main = async () => {
             }
             await waitUntil(async () => {
                 for (const file of command.files ?? []) {
-                    assert.equal(
-                        decode(await current.readFile(file.path)),
-                        expectedContent(file)
+                    assertExpectedContent(
+                        await current.readFile(file.path),
+                        file.content
                     );
                 }
                 for (const path of command.absentPaths ?? []) {
@@ -347,12 +362,10 @@ const main = async () => {
                         .sort();
                     assert.deepEqual(actual, expected);
                     for (const head of command.conflict.heads) {
-                        assert.equal(
-                            decode(
-                                await current.readVersion(
-                                    command.conflict.path,
-                                    head.versionId
-                                )
+                        assertExpectedContent(
+                            await current.readVersion(
+                                command.conflict.path,
+                                head.versionId
                             ),
                             head.content
                         );
@@ -364,21 +377,25 @@ const main = async () => {
                     );
                 }
             }, remainingMs("exact state verification"));
-            let visibleConflictContent: string | undefined;
+            let visibleConflictHash: string | undefined;
             if (command.conflict?.mode === "heads") {
-                visibleConflictContent = decode(
-                    await current.readFile(command.conflict.path)
+                const visibleConflict = await current.readFile(
+                    command.conflict.path
                 );
+                assert(visibleConflict, "Expected a visible conflict head");
+                visibleConflictHash = processSoakContentHash(visibleConflict);
                 assert(
                     command.conflict.heads.some(
-                        (head) => head.content === visibleConflictContent
+                        (head) =>
+                            expectedContentHash(head.content) ===
+                            visibleConflictHash
                     ),
                     "Visible conflict head did not match any exact version"
                 );
             }
             return {
                 durationMs: performance.now() - startedAt,
-                visibleConflictContent,
+                visibleConflictHash,
             } satisfies ProcessSoakVerifyResult;
         }
         if (command.type === "collect-garbage") {
