@@ -236,6 +236,45 @@ shorter diagnostic or a longer soak. This benchmark uses normal write
 readiness and disables remote chunk fallback; it does not use the
 `allowPartialWrites` recovery escape hatch.
 
+For a stronger lifecycle boundary, the process-isolated soak runs three
+authenticated, disk-backed full replicas in three separate Node processes over
+loopback networking. It measures concurrent manifested batches with metadata
+admission separated from byte readability, a mount-style temporary-file
+`fsync`/release/rename replacement of a seeded target, deterministic same-base
+content conflict and resolution, a normal garbage-collection pass, abrupt
+`SIGKILL` of one writer, a no-listener offline reopen and write from that
+writer's durable directory, and reconnect. Exact manifests, bytes, editor node
+identity, conflict heads, trusted keys, identity reuse, zero fresh-data GC
+reclamation, and exact recursive-tree convergence are hard assertions. Latency,
+CPU, RSS, and state-directory growth are descriptive output rather than
+performance budgets:
+
+```bash
+PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK=1 \
+PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_ROUNDS=30 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/process-isolated-soak.bench.test.ts --reporter=verbose
+```
+
+Use one round to validate the harness itself; real soak values are integers from
+10 through 200. Generated payload bodies default to 4096 bytes and can be set
+from 256 bytes through 1 MiB with
+`PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES`. The payload stream is
+preceded by a small descriptive prefix and is deterministic but unique per file,
+writer, and round so content-addressed dedup does not turn storage measurements
+into a repeated-content best case. Every
+completed round prints `process-isolated-soak-round:` immediately, followed by
+one aggregate `process-isolated-soak:` report. The reported state-directory
+growth is a descriptive fleet-wide ratio over logical bytes written, not a
+write-amplification claim. All replicas keep scheduled GC enabled, while the
+explicit measured GC pass uses normal retention, so a short run exercises
+planning and safety without pretending newly written data should be reclaimed.
+The campaign uses `bootstrap: false` and disables remote chunk fallback: it is a
+steady-state and warm-restart complement to the separate cold-join benchmark,
+not a retry of that benchmark. It also deliberately avoids
+`prepareForDisposal()`, whose persisted-receipt session recovery is tracked
+separately upstream.
+
 The mount backend's manual copy-on-write benchmark isolates 4, 64, and 256 MiB
 commit buffers behind a gated fake target that retains the immutable commit
 input after resolution. For every size it runs a legacy fallback (mount and
@@ -752,12 +791,17 @@ at most `namingCompactionBatchLimit` events retire per node per run
 (default 500, shallowest-first) so upgrade-day backlogs drain in bounded
 bursts.
 
-Superseded snapshot **segment blocks** are reclaimed too, after a grace
+Superseded snapshot **segment blocks** can be reclaimed after a grace
 period (`snapshot: { segmentReclaim: { graceMs } }`, default 3 h,
-disable with `segmentReclaim: false`). Only positively recorded own
-segments are ever deleted, re-verified at deletion time against every
-locally known live manifest — identical content across authors dedups
-to identical cids, and another author's live manifest protects them.
+disable with `segmentReclaim: false`). Physical deletion runs only when the
+open asserts `blockStoreAccess: "store-exclusive"`; `shared` and the default
+`unknown` keep snapshot publication available but disable segment reclamation.
+An explicit reclaim object without that assertion fails with `EINVAL`. The CLI
+leaves access `unknown` because its state directory may contain more than one
+filesystem. Only positively recorded own segments are ever deleted, re-verified
+at deletion time against every locally known live manifest — identical content
+across authors dedups to identical cids, and another author's live manifest
+protects them.
 Fleet caveats:
 
 - The grace is floored at the bootstrap staleness cap
@@ -768,6 +812,15 @@ Fleet caveats:
 - The segment ledger lives beside the store
   (`shared-fs-snapshots/<address>.json`); peers without a directory keep
   it in memory, matching their in-memory block store.
+- `store-exclusive` is a store-wide lifetime assertion: this open must be the
+  sole owner, publisher, and reaper of every snapshot segment it may delete,
+  across every active or inactive program instance and process. Snapshot
+  segment bytes are content-addressed and can deduplicate across filesystems,
+  while one filesystem cannot discover another's live manifests. The local
+  segment-ledger lock therefore cannot establish exclusivity for a physical
+  store shared with another filesystem, directory, host, or process. Leave
+  access `unknown`, declare it `shared`, or set `segmentReclaim: false` unless
+  that exclusivity is guaranteed for the whole open lifetime.
 - Dead-lock recovery uses local OS PID liveness and therefore assumes one
   host and PID namespace. Do not share a Peerbit state directory between
   hosts or isolated containers through NFS, SMB, or a host-mounted volume.

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { openSharedFs, type SharedFsHandle } from "../index.js";
+import {
+    SharedFileSystem,
+    openSharedFs,
+    type SharedFsHandle,
+} from "../index.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -66,6 +70,7 @@ describe("snapshot segment reclamation", () => {
             peerbit: peer,
             machineLabel: "segment-gc",
             clock: () => fakeNow,
+            blockStoreAccess: "store-exclusive",
         });
     });
 
@@ -301,21 +306,211 @@ describe("snapshot segment reclamation", () => {
         }
     });
 
-    it("skips reaping while a publish is in flight (except its own tail)", async () => {
-        await seedFiles(4);
+    it("queues a reaper behind the publisher's whole block-store mutation", async () => {
+        await seedFiles(8);
         await fs.snapshotWrite();
-        await fs.writeFile("/f-0.txt", "mutated");
+        await fs.writeFile("/f-0.txt", "first retired generation");
         fakeNow += 1_000;
         await fs.snapshotWrite();
+        // Drain the successful publish-tail reap while still inside grace.
+        await reap(fakeNow);
+
+        await fs.writeFile("/f-1.txt", "publisher owns the store fence");
+        fakeNow += 1_000;
         const program: any = fs.program;
-        // A concurrent publish has put its shard blocks but its intent may
-        // not have reached the ledger chain yet — reap must stand down.
-        program.snapshotRunning = true;
-        const skipped = await reap(fakeNow + 24 * HOUR_MS);
-        expect(skipped.deleted).toBe(0);
-        program.snapshotRunning = false;
-        const real = await reap(fakeNow + 24 * HOUR_MS);
-        expect(real.deleted).toBeGreaterThan(0);
+        const blocksAny: any = program.node.services.blocks;
+        const originalPut = blocksAny.put.bind(blocksAny);
+        const putEntered = deferred();
+        const allowPutReturn = deferred();
+        let gatePut = true;
+        const putSpy = vi
+            .spyOn(blocksAny, "put")
+            .mockImplementation(async (...args: any[]) => {
+                const cid = await originalPut(...args);
+                if (gatePut) {
+                    gatePut = false;
+                    putEntered.resolve();
+                    await allowPutReturn.promise;
+                }
+                return cid;
+            });
+
+        const publishing = fs.snapshotWrite();
+        let reaping: Promise<{ deleted: number; bytes: bigint }> | undefined;
+        try {
+            await putEntered.promise;
+            const loadSpy = vi.spyOn(program, "loadSegmentLedger");
+            const hasSpy = vi.spyOn(blocksAny, "has");
+            reaping = reap(fakeNow + 24 * HOUR_MS);
+            // Give every runnable promise continuation a turn. The reaper is
+            // enrolled, but may not enter ledger or block-store reads yet.
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(loadSpy).not.toHaveBeenCalled();
+            expect(hasSpy).not.toHaveBeenCalled();
+
+            allowPutReturn.resolve();
+            await Promise.all([publishing, reaping]);
+            const current = await manifestCids();
+            expect(current.length).toBeGreaterThan(0);
+            for (const cid of current) {
+                expect(await blocksAny.has(cid)).toBe(true);
+            }
+        } finally {
+            allowPutReturn.resolve();
+            await Promise.allSettled(
+                [publishing, reaping].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            putSpy.mockRestore();
+        }
+    });
+
+    it("queues a publisher admitted after a reaper owns the store fence", async () => {
+        await seedFiles(8);
+        await fs.snapshotWrite();
+        await fs.writeFile("/f-0.txt", "retire a block before reverse race");
+        fakeNow += 1_000;
+        await fs.snapshotWrite();
+        await reap(fakeNow);
+        await fs.writeFile("/f-1.txt", "publish after reverse race");
+        fakeNow += 1_000;
+
+        const program: any = fs.program;
+        const blocksAny: any = program.node.services.blocks;
+        const originalHas = blocksAny.has.bind(blocksAny);
+        const hasEntered = deferred();
+        const allowHasReturn = deferred();
+        let gateHas = true;
+        const hasSpy = vi
+            .spyOn(blocksAny, "has")
+            .mockImplementation(async (...args: any[]) => {
+                if (gateHas) {
+                    gateHas = false;
+                    hasEntered.resolve();
+                    await allowHasReturn.promise;
+                }
+                return originalHas(...args);
+            });
+        const reaping = reap(fakeNow + 24 * HOUR_MS);
+        let publishing: Promise<unknown> | undefined;
+        try {
+            await hasEntered.promise;
+            const putSpy = vi.spyOn(blocksAny, "put");
+            publishing = fs.snapshotWrite();
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(putSpy).not.toHaveBeenCalled();
+
+            allowHasReturn.resolve();
+            await Promise.all([reaping, publishing]);
+            expect(putSpy).toHaveBeenCalled();
+            const current = await manifestCids();
+            expect(current.length).toBeGreaterThan(0);
+            for (const cid of current) {
+                expect(await originalHas(cid)).toBe(true);
+            }
+            putSpy.mockRestore();
+        } finally {
+            allowHasReturn.resolve();
+            await Promise.allSettled(
+                [reaping, publishing].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            hasSpy.mockRestore();
+        }
+    });
+
+    it("close drains an entered reaper and aborts its queued publisher", async () => {
+        await seedFiles(8);
+        await fs.snapshotWrite();
+        await fs.writeFile("/f-0.txt", "retire before close queue");
+        fakeNow += 1_000;
+        await fs.snapshotWrite();
+        await reap(fakeNow);
+        await fs.writeFile("/f-1.txt", "queued publisher must not enter");
+        fakeNow += 1_000;
+
+        const program: any = fs.program;
+        const blocksAny: any = program.node.services.blocks;
+        const originalHas = blocksAny.has.bind(blocksAny);
+        const hasEntered = deferred();
+        const allowHasReturn = deferred();
+        let gateHas = true;
+        const hasSpy = vi
+            .spyOn(blocksAny, "has")
+            .mockImplementation(async (...args: any[]) => {
+                if (gateHas) {
+                    gateHas = false;
+                    hasEntered.resolve();
+                    await allowHasReturn.promise;
+                }
+                return originalHas(...args);
+            });
+        let reaperSettled = false;
+        const reaping = reap(fakeNow + 24 * HOUR_MS).finally(() => {
+            reaperSettled = true;
+        });
+        let publishing: Promise<unknown> | undefined;
+        let closing:
+            | Promise<{ closed: boolean; ownersSettled: boolean }>
+            | undefined;
+        try {
+            await hasEntered.promise;
+            const putSpy = vi.spyOn(blocksAny, "put");
+            let publisherSettled = false;
+            publishing = fs
+                .snapshotWrite()
+                .then(
+                    () => undefined,
+                    (error) => error
+                )
+                .finally(() => {
+                    publisherSettled = true;
+                });
+            closing = program.close().then((closed: boolean) => ({
+                closed,
+                ownersSettled: reaperSettled && publisherSettled,
+            }));
+            allowHasReturn.resolve();
+
+            const [, publishError, closeResult] = await Promise.all([
+                reaping,
+                publishing,
+                closing,
+            ]);
+            expect(publishError).toMatchObject({ code: "ECLOSED" });
+            expect(putSpy).not.toHaveBeenCalled();
+            expect(closeResult).toEqual({
+                closed: true,
+                ownersSettled: true,
+            });
+
+            const reopened = await (peer as any).open(program, {
+                existing: "reuse",
+                args: {
+                    machineLabel: "segment-store-queue-reopen",
+                    allowPartialWrites: true,
+                    addressOpen: true,
+                    bootstrap: false,
+                    blockStoreAccess: "store-exclusive",
+                    snapshot: { disabled: true },
+                    gc: false,
+                },
+            });
+            expect(reopened).toBe(program);
+            putSpy.mockRestore();
+        } finally {
+            allowHasReturn.resolve();
+            await Promise.allSettled(
+                [reaping, publishing, closing].filter(
+                    (task): task is Promise<unknown> => task !== undefined
+                )
+            );
+            hasSpy.mockRestore();
+        }
     });
 
     it("memory ledger survives a program reopen on the same node", async () => {
@@ -337,6 +532,7 @@ describe("snapshot segment reclamation", () => {
             address,
             machineLabel: "segment-gc-reopen",
             clock: () => fakeNow,
+            blockStoreAccess: "store-exclusive",
         });
         const retiredAfter = (await loadLedger()).retired;
         expect(
@@ -671,6 +867,198 @@ describe("snapshot segment reclamation", () => {
         }
     });
 
+    it("rejects unsafe explicit reclaim before changing lifecycle state", async () => {
+        const program: any = fs.program;
+        await program.close();
+        const requestGeneration = program.lifecycleRequestGeneration;
+        const requestedState = program.lifecycleRequestedState;
+
+        for (const blockStoreAccess of ["shared", "unknown"] as const) {
+            await expect(
+                program.open({
+                    blockStoreAccess,
+                    snapshot: { segmentReclaim: {} },
+                })
+            ).rejects.toMatchObject({ code: "EINVAL" });
+            expect(program.lifecycleRequestGeneration).toBe(requestGeneration);
+            expect(program.lifecycleRequestedState).toBe(requestedState);
+        }
+        await expect(
+            program.open({ blockStoreAccess: "invalid" as any })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        expect(program.lifecycleRequestGeneration).toBe(requestGeneration);
+        expect(program.lifecycleRequestedState).toBe(requestedState);
+
+        const reopened = await (peer as any).open(program, {
+            existing: "reuse",
+            args: {
+                machineLabel: "segment-reclaim-safe-reopen",
+                blockStoreAccess: "shared",
+                snapshot: { disabled: true, segmentReclaim: false },
+                bootstrap: false,
+                gc: false,
+            },
+        });
+        expect(reopened).toBe(program);
+    });
+
+    it("preflights unsafe reclaim before helper reuse or address registration", async () => {
+        const program: any = fs.program;
+        const address = program.address.toString();
+
+        // openSharedFs uses existing:"reuse". Validation must run before
+        // Peerbit can return this already-open store-exclusive program for an
+        // incompatible shared-store reclaim request.
+        await expect(
+            openSharedFs({
+                peerbit: peer,
+                id: program.id,
+                machineLabel: "invalid-reuse",
+                blockStoreAccess: "shared",
+                snapshot: { segmentReclaim: {} },
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        expect(program.closed).toBe(false);
+        expect(program.blockStoreAccess).toBe("store-exclusive");
+
+        await program.close();
+        await expect(
+            SharedFileSystem.open(address, peer as any, {
+                args: {
+                    blockStoreAccess: "shared",
+                    snapshot: { segmentReclaim: {} },
+                },
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+
+        // The rejected deserialized program was never registered. A valid
+        // static address open on the same Peerbit instance remains usable.
+        const reopened = await SharedFileSystem.open(address, peer as any, {
+            args: {
+                machineLabel: "valid-after-address-preflight",
+                blockStoreAccess: "shared",
+                snapshot: { disabled: true, segmentReclaim: false },
+                bootstrap: false,
+                gc: false,
+            },
+        });
+        expect(reopened.closed).toBe(false);
+        expect((reopened as any).blockStoreAccess).toBe("shared");
+    });
+
+    it("defaults block-store access to unknown and skips the deletion plane", async () => {
+        const program: any = fs.program;
+        await program.close();
+        const reopened = await (peer as any).open(program, {
+            existing: "reuse",
+            args: {
+                machineLabel: "segment-reclaim-unknown",
+                snapshot: { disabled: true },
+                bootstrap: false,
+                gc: false,
+            },
+        });
+        expect(reopened).toBe(program);
+        expect(program.blockStoreAccess).toBe("unknown");
+
+        const blocksAny: any = program.node.services.blocks;
+        const loadSpy = vi.spyOn(program, "loadSegmentLedger");
+        const hasSpy = vi.spyOn(blocksAny, "has");
+        const rmSpy = vi.spyOn(blocksAny, "rm");
+        const rmManySpy =
+            typeof blocksAny.rmMany === "function"
+                ? vi.spyOn(blocksAny, "rmMany")
+                : undefined;
+        const result = await reap(fakeNow + 24 * HOUR_MS);
+        expect(result).toEqual({ deleted: 0, bytes: 0n });
+        expect(loadSpy).not.toHaveBeenCalled();
+        expect(hasSpy).not.toHaveBeenCalled();
+        expect(rmSpy).not.toHaveBeenCalled();
+        expect(rmManySpy?.mock.calls ?? []).toHaveLength(0);
+    });
+
+    it("never reaps a shared store while a publisher is paused after block put", async () => {
+        await peer.stop();
+        peer = await Peerbit.create();
+        fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "segment-reclaim-shared-race",
+            clock: () => fakeNow,
+            blockStoreAccess: "shared",
+            snapshot: { disabled: true },
+            gc: false,
+        });
+        await seedFiles(12);
+        await fs.snapshotWrite();
+        await fs.writeFile("/f-0.txt", "retire one shard");
+        fakeNow += 1_000;
+        await fs.snapshotWrite();
+        expect((await loadLedger()).retired.length).toBeGreaterThan(0);
+
+        const program: any = fs.program;
+        const blocksAny: any = program.node.services.blocks;
+        const originalPut = blocksAny.put.bind(blocksAny);
+        const originalHas = blocksAny.has.bind(blocksAny);
+        const putEntered = deferred();
+        const allowPutReturn = deferred();
+        let pausedCid: string | undefined;
+        let pauseNextPut = true;
+        const putSpy = vi
+            .spyOn(blocksAny, "put")
+            .mockImplementation(async (...args: any[]) => {
+                const cid = await originalPut(...args);
+                if (pauseNextPut) {
+                    pauseNextPut = false;
+                    pausedCid = cid;
+                    putEntered.resolve();
+                    await allowPutReturn.promise;
+                }
+                return cid;
+            });
+
+        await fs.writeFile("/f-1.txt", "publisher paused after put");
+        fakeNow += 1_000;
+        const publishing = fs.snapshotWrite();
+        try {
+            await putEntered.promise;
+            const loadSpy = vi.spyOn(program, "loadSegmentLedger");
+            const hasSpy = vi.spyOn(blocksAny, "has");
+            const rmSpy = vi.spyOn(blocksAny, "rm");
+            const rmManySpy =
+                typeof blocksAny.rmMany === "function"
+                    ? vi.spyOn(blocksAny, "rmMany")
+                    : undefined;
+            const iterateSpy = vi.spyOn(program.entries.index, "iterate");
+
+            const skipped = await reap(fakeNow + 24 * HOUR_MS);
+            expect(skipped).toEqual({ deleted: 0, bytes: 0n });
+            expect(loadSpy).not.toHaveBeenCalled();
+            expect(hasSpy).not.toHaveBeenCalled();
+            expect(rmSpy).not.toHaveBeenCalled();
+            expect(rmManySpy?.mock.calls ?? []).toHaveLength(0);
+            expect(iterateSpy).not.toHaveBeenCalled();
+            expect(pausedCid).toBeDefined();
+            expect(await originalHas(pausedCid!)).toBe(true);
+
+            loadSpy.mockRestore();
+            hasSpy.mockRestore();
+            rmSpy.mockRestore();
+            rmManySpy?.mockRestore();
+            iterateSpy.mockRestore();
+            allowPutReturn.resolve();
+            await publishing;
+            const current = await manifestCids();
+            expect(current.length).toBeGreaterThan(0);
+            for (const cid of current) {
+                expect(await originalHas(cid)).toBe(true);
+            }
+        } finally {
+            allowPutReturn.resolve();
+            await Promise.allSettled([publishing]);
+            putSpy.mockRestore();
+        }
+    });
+
     it("clamps a sub-floor grace with a warning", async () => {
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
         await peer.stop();
@@ -679,6 +1067,7 @@ describe("snapshot segment reclamation", () => {
             peerbit: peer,
             machineLabel: "segment-gc-floor",
             clock: () => fakeNow,
+            blockStoreAccess: "store-exclusive",
             snapshot: { segmentReclaim: { graceMs: 60_000 } },
         });
         await seedFiles(4);
@@ -706,6 +1095,7 @@ describe("snapshot segment reclamation", () => {
             peerbit: peer,
             machineLabel: "segment-gc-off",
             clock: () => fakeNow,
+            blockStoreAccess: "shared",
             snapshot: { segmentReclaim: false },
         });
         await seedFiles(4);

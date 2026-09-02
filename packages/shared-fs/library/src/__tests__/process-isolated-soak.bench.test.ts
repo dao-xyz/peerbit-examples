@@ -1,0 +1,1114 @@
+import { fork, type ChildProcess } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import type {
+    ProcessSoakBatchResult,
+    ProcessSoakConflictWriteResult,
+    ProcessSoakEditorResult,
+    ProcessSoakFileExpectation,
+    ProcessSoakGcResult,
+    ProcessSoakMetrics,
+    ProcessSoakOpenResult,
+    ProcessSoakReadyMessage,
+    ProcessSoakTreeExpectation,
+    ProcessSoakVerifyResult,
+    ProcessSoakWorkerCommand,
+    ProcessSoakWorkerMessage,
+} from "./process-isolated-soak.bench.protocol.js";
+import { createProcessSoakGeneratedContent } from "./process-isolated-soak.bench.payload.js";
+
+const enabled = process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK === "1";
+const manualDescribe = enabled ? describe : describe.skip;
+const COMMAND_TIMEOUT_MS = process.env.CI ? 240_000 : 180_000;
+const RESPONSE_MARGIN_MS = 15_000;
+const REQUEST_TIMEOUT_MS = COMMAND_TIMEOUT_MS + RESPONSE_MARGIN_MS;
+const TEST_TIMEOUT_MS = 30 * 60_000;
+const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
+const workerPath = fileURLToPath(
+    new URL("./process-isolated-soak.bench.worker.ts", import.meta.url)
+);
+
+type CommandInput<T> = T extends { requestId: string }
+    ? Omit<T, "requestId">
+    : never;
+type ProcessSoakCommandInput = CommandInput<ProcessSoakWorkerCommand>;
+
+type RunningWorker = {
+    index: number;
+    directory: string;
+    child: ChildProcess;
+    ready: Promise<ProcessSoakReadyMessage>;
+    closed: Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+    }>;
+    request<T>(
+        command: ProcessSoakCommandInput,
+        timeoutMs?: number
+    ): Promise<T>;
+    diagnostics(): string;
+    hasClosed(): boolean;
+};
+
+const configuredRounds = () => {
+    const rounds = Number(
+        process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_ROUNDS ?? 30
+    );
+    if (
+        !Number.isInteger(rounds) ||
+        (rounds !== 1 && (rounds < 10 || rounds > 200))
+    ) {
+        throw new Error(
+            "PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_ROUNDS must be 1 for a harness smoke or an integer from 10 through 200"
+        );
+    }
+    return rounds;
+};
+
+const configuredPayloadBytes = () => {
+    const bytes = Number(
+        process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES ??
+            4_096
+    );
+    if (!Number.isInteger(bytes) || bytes < 256 || bytes > 1024 * 1024) {
+        throw new Error(
+            "PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK_PAYLOAD_BYTES must be an integer from 256 through 1048576"
+        );
+    }
+    return bytes;
+};
+
+const percentile = (values: number[], ratio: number) => {
+    const sorted = [...values].sort((left, right) => left - right);
+    return sorted[Math.max(0, Math.ceil(sorted.length * ratio) - 1)];
+};
+
+const distribution = (values: number[]) => ({
+    p50: percentile(values, 0.5),
+    p95: percentile(values, 0.95),
+    p99: percentile(values, 0.99),
+    max: Math.max(...values),
+});
+
+const withTimeout = <T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string
+) =>
+    new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        promise.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (error) => {
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
+
+const startWorker = (
+    index: number,
+    directory: string,
+    options: { offline?: boolean } = {}
+): RunningWorker => {
+    const child = fork(
+        workerPath,
+        [String(index), directory, options.offline ? "offline" : "online"],
+        {
+            execArgv: ["--enable-source-maps", "--import", "tsx"],
+            env: { ...process.env, NODE_ENV: "test" },
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+        }
+    );
+    let output = "";
+    let nextRequest = 0;
+    let readySettled = false;
+    const pending = new Map<
+        string,
+        {
+            resolve(value: unknown): void;
+            reject(error: Error): void;
+            timer: NodeJS.Timeout;
+        }
+    >();
+    const append = (chunk: unknown) => {
+        output += Buffer.isBuffer(chunk)
+            ? chunk.toString("utf8")
+            : String(chunk);
+        if (output.length > MAX_DIAGNOSTIC_BYTES) {
+            output = output.slice(-MAX_DIAGNOSTIC_BYTES);
+        }
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+
+    let resolveReady!: (message: ProcessSoakReadyMessage) => void;
+    let rejectReady!: (error: Error) => void;
+    const rawReady = new Promise<ProcessSoakReadyMessage>((resolve, reject) => {
+        resolveReady = resolve;
+        rejectReady = reject;
+    });
+    const diagnostics = () => output.trim();
+    const decoratedError = (message: string, stack?: string) => {
+        const captured = diagnostics();
+        const error = new Error(
+            captured ? `${message}\nWorker output:\n${captured}` : message
+        );
+        if (stack) error.stack = `${error.stack}\nWorker stack:\n${stack}`;
+        return error;
+    };
+    const failReady = (error: Error) => {
+        if (readySettled) return;
+        readySettled = true;
+        rejectReady(error);
+    };
+    const failPending = (error: Error) => {
+        for (const request of pending.values()) {
+            clearTimeout(request.timer);
+            request.reject(error);
+        }
+        pending.clear();
+    };
+
+    let resolveClosed!: (value: {
+        code: number | null;
+        signal: NodeJS.Signals | null;
+    }) => void;
+    const closed = new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+    }>((resolve) => {
+        resolveClosed = resolve;
+    });
+    let closeConfirmed = false;
+    child.once("close", (code, signal) => {
+        closeConfirmed = true;
+        resolveClosed({ code, signal });
+        const error = decoratedError(
+            `Process soak worker ${index} closed (code=${String(code)}, signal=${String(signal)})`
+        );
+        failReady(error);
+        failPending(error);
+    });
+    child.once("error", (error) => {
+        const decorated = decoratedError(
+            `Process soak worker ${index} failed: ${error.message}`
+        );
+        failReady(decorated);
+        failPending(decorated);
+    });
+    child.on("message", (raw: unknown) => {
+        const message = raw as ProcessSoakWorkerMessage;
+        if (message?.type === "ready") {
+            if (!readySettled) {
+                readySettled = true;
+                resolveReady(message);
+            }
+            return;
+        }
+        if (message?.type === "fatal") {
+            const error = decoratedError(
+                `Process soak worker ${index} failed: ${message.message}`,
+                message.stack
+            );
+            failReady(error);
+            failPending(error);
+            return;
+        }
+        if (message?.type !== "response") return;
+        const request = pending.get(message.requestId);
+        if (!request) return;
+        pending.delete(message.requestId);
+        clearTimeout(request.timer);
+        if (message.ok) {
+            request.resolve(message.value);
+        } else {
+            request.reject(
+                decoratedError(
+                    `Process soak worker ${index} command failed: ${message.error.message}`,
+                    message.error.stack
+                )
+            );
+        }
+    });
+
+    const ready = withTimeout(
+        rawReady,
+        REQUEST_TIMEOUT_MS,
+        `Timed out waiting for process soak worker ${index}`
+    ).catch((error) => {
+        if (child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+        }
+        throw error;
+    });
+
+    const running: RunningWorker = {
+        index,
+        directory,
+        child,
+        ready,
+        closed,
+        diagnostics,
+        hasClosed: () => closeConfirmed,
+        request<T>(
+            command: ProcessSoakCommandInput,
+            timeoutMs = REQUEST_TIMEOUT_MS
+        ) {
+            if (child.exitCode !== null || child.signalCode !== null) {
+                return Promise.reject(
+                    decoratedError(
+                        `Process soak worker ${index} is not running`
+                    )
+                );
+            }
+            const requestId = `${index}-${++nextRequest}`;
+            return new Promise<T>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    pending.delete(requestId);
+                    if (child.exitCode === null && child.signalCode === null) {
+                        child.kill("SIGKILL");
+                    }
+                    reject(
+                        decoratedError(
+                            `Process soak worker ${index} command ${command.type} timed out after ${timeoutMs} ms`
+                        )
+                    );
+                }, timeoutMs);
+                pending.set(requestId, {
+                    resolve: (value) => resolve(value as T),
+                    reject,
+                    timer,
+                });
+                child.send({ ...command, requestId }, (error) => {
+                    if (!error) return;
+                    const request = pending.get(requestId);
+                    if (!request) return;
+                    pending.delete(requestId);
+                    clearTimeout(request.timer);
+                    reject(
+                        decoratedError(
+                            `Could not send ${command.type} to process soak worker ${index}: ${error.message}`
+                        )
+                    );
+                });
+            });
+        },
+    };
+    return running;
+};
+
+const isRunning = (worker: RunningWorker) =>
+    worker.child.exitCode === null && worker.child.signalCode === null;
+
+const stopWorker = async (worker: RunningWorker) => {
+    if (!isRunning(worker)) return worker.closed;
+    try {
+        await worker.request({ type: "shutdown" }, 30_000);
+    } catch (error) {
+        if (isRunning(worker)) worker.child.kill("SIGKILL");
+        await withTimeout(
+            worker.closed,
+            30_000,
+            `Process soak worker ${worker.index} did not close after failed shutdown`
+        );
+        throw error;
+    }
+    return withTimeout(
+        worker.closed,
+        30_000,
+        `Process soak worker ${worker.index} did not close after shutdown`
+    );
+};
+
+const killWorker = async (worker: RunningWorker) => {
+    if (!isRunning(worker)) return worker.closed;
+    expect(worker.child.kill("SIGKILL")).toBe(true);
+    const closed = await withTimeout(
+        worker.closed,
+        30_000,
+        `Process soak worker ${worker.index} did not close after SIGKILL`
+    );
+    if (process.platform !== "win32") expect(closed.signal).toBe("SIGKILL");
+    return closed;
+};
+
+const dialAddress = (ready: ProcessSoakReadyMessage) => {
+    const address = ready.addresses.find(
+        (candidate) => !candidate.includes("/p2p-circuit")
+    );
+    if (!address) {
+        throw new Error(`Worker ${ready.worker} reported no dialable address`);
+    }
+    return address;
+};
+
+const sumStorage = (metrics: ProcessSoakMetrics[]) =>
+    metrics.reduce((total, sample) => total + sample.storageBytes, 0);
+
+const sumMetric = (
+    metrics: ProcessSoakMetrics[],
+    key: keyof ProcessSoakMetrics
+) => metrics.reduce((total, sample) => total + sample[key], 0);
+
+const treeFromFiles = (
+    files: Iterable<ProcessSoakFileExpectation>
+): ProcessSoakTreeExpectation[] => {
+    const tree = new Map<string, "directory" | "file">();
+    for (const file of files) {
+        const segments = file.path.split("/").filter(Boolean);
+        for (let index = 1; index < segments.length; index++) {
+            tree.set(`/${segments.slice(0, index).join("/")}`, "directory");
+        }
+        tree.set(file.path, "file");
+    }
+    return [...tree]
+        .map(([path, kind]) => ({ path, kind }))
+        .sort((left, right) => left.path.localeCompare(right.path));
+};
+
+manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
+    const activeWorkers = new Set<RunningWorker>();
+    const temporaryDirectories = new Set<string>();
+
+    afterEach(async () => {
+        const workers = [...activeWorkers];
+        const stopped = await Promise.allSettled(
+            workers.map((worker) => stopWorker(worker))
+        );
+        for (const worker of workers) {
+            if (worker.hasClosed()) activeWorkers.delete(worker);
+        }
+        const unclosed = workers.filter((worker) => !worker.hasClosed());
+        if (unclosed.length > 0) {
+            throw new Error(
+                `Refusing to remove process-soak state while workers ${unclosed
+                    .map((worker) => worker.index)
+                    .join(", ")} have not confirmed close`
+            );
+        }
+        const failedStop = stopped.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        );
+        const removed = await Promise.allSettled(
+            [...temporaryDirectories].map((directory) =>
+                rm(directory, { recursive: true, force: true })
+            )
+        );
+        const directories = [...temporaryDirectories];
+        removed.forEach((result, index) => {
+            if (result.status === "fulfilled") {
+                temporaryDirectories.delete(directories[index]);
+            }
+        });
+        const failedRemoval = removed.find(
+            (result): result is PromiseRejectedResult =>
+                result.status === "rejected"
+        );
+        if (failedRemoval) throw failedRemoval.reason;
+        if (failedStop) throw failedStop.reason;
+    });
+
+    it(
+        "measures separate durable processes through edits, conflict, GC, SIGKILL, and warm reopen",
+        { timeout: TEST_TIMEOUT_MS },
+        async () => {
+            const rounds = configuredRounds();
+            const payloadBytes = configuredPayloadBytes();
+            const root = await mkdtemp(
+                join(tmpdir(), "peerbit-shared-fs-process-soak-")
+            );
+            temporaryDirectories.add(root);
+            const directories = Array.from({ length: 3 }, (_, index) =>
+                join(root, `peer-${index}`)
+            );
+            let workers = directories.map((directory, index) => {
+                const worker = startWorker(index, directory);
+                activeWorkers.add(worker);
+                return worker;
+            });
+            let ready = await Promise.all(
+                workers.map((worker) => worker.ready)
+            );
+            expect(new Set(ready.map((message) => message.identity)).size).toBe(
+                3
+            );
+
+            await workers[0].request({
+                type: "dial",
+                addresses: [dialAddress(ready[1]), dialAddress(ready[2])],
+            });
+            await workers[1].request({
+                type: "dial",
+                addresses: [dialAddress(ready[2])],
+            });
+
+            const ownerOpen = await workers[0].request<ProcessSoakOpenResult>({
+                type: "open",
+                machineLabel: "process-soak-owner",
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            expect(ownerOpen.gcScheduled).toBe(true);
+            await workers[0].request({
+                type: "authorize",
+                publicKeys: ready.slice(1).map((message) => message.publicKey),
+            });
+            const seed = await workers[0].request<ProcessSoakBatchResult>({
+                type: "write-batch",
+                changesetId: "process-soak-seed",
+                entries: [
+                    { path: "/seed.txt", content: "process-isolated-ready" },
+                    ...ready.map((_, index) => ({
+                        path: `/writers/writer-${index}/seed.txt`,
+                        content: `writer ${index}`,
+                    })),
+                ],
+            });
+            const replicaOpens = await Promise.all(
+                workers.slice(1).map((worker, offset) =>
+                    worker.request<ProcessSoakOpenResult>({
+                        type: "open",
+                        address: ownerOpen.address,
+                        machineLabel: `process-soak-writer-${offset + 1}`,
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            for (const opened of replicaOpens) {
+                expect(opened.gcScheduled).toBe(true);
+            }
+            const trustedPublicKeys = ready.map((message) => message.publicKey);
+            const seedFiles = [
+                { path: "/seed.txt", content: "process-isolated-ready" },
+                ...ready.map((_, index) => ({
+                    path: `/writers/writer-${index}/seed.txt`,
+                    content: `writer ${index}`,
+                })),
+            ];
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        changesets: [seed.changeset],
+                        files: seedFiles,
+                        trustedPublicKeys,
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+
+            const baselineMetrics = await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakMetrics>({ type: "metrics" })
+                )
+            );
+            const expected = new Map<string, ProcessSoakFileExpectation>(
+                seedFiles.map((file) => [file.path, file])
+            );
+            const absent = new Set<string>();
+            const localCommitSamples: number[] = [];
+            const allPeersAdmittedSamples: number[] = [];
+            const allPeersReadableSamples: number[] = [];
+            const roundReports: Array<Record<string, unknown>> = [];
+            let logicalContentBytesWritten = 0;
+            let logicalWriteOperations = 0;
+
+            for (let round = 0; round < rounds; round++) {
+                const entries = workers.map((_, writer) => {
+                    const hotPath = `/writers/writer-${writer}/hot.bin`;
+                    const historyPath = `/writers/writer-${writer}/history/round-${round}.bin`;
+                    const scratchPath = `/writers/writer-${writer}/scratch-${round}.txt`;
+                    const hotPayload = createProcessSoakGeneratedContent(
+                        `round=${round};writer=${writer};hot;`,
+                        `hot:${round}:${writer}`,
+                        payloadBytes
+                    );
+                    const historyPayload = createProcessSoakGeneratedContent(
+                        `round=${round};writer=${writer};history;`,
+                        `history:${round}:${writer}`,
+                        payloadBytes
+                    );
+                    const scratch = `round=${round};writer=${writer};scratch`;
+                    expected.set(hotPath, {
+                        path: hotPath,
+                        content: hotPayload.expectation,
+                    });
+                    expected.set(historyPath, {
+                        path: historyPath,
+                        content: historyPayload.expectation,
+                    });
+                    expected.set(scratchPath, {
+                        path: scratchPath,
+                        content: scratch,
+                    });
+                    absent.delete(scratchPath);
+                    const batch: Array<
+                        | { path: string; content: string }
+                        | { path: string; delete: true }
+                    > = [
+                        { path: hotPath, content: hotPayload.content },
+                        { path: historyPath, content: historyPayload.content },
+                        { path: scratchPath, content: scratch },
+                    ];
+                    if (round > 0) {
+                        const prior = `/writers/writer-${writer}/scratch-${round - 1}.txt`;
+                        batch.push({ path: prior, delete: true });
+                        expected.delete(prior);
+                        absent.add(prior);
+                    }
+                    return batch;
+                });
+                const roundStartedAt = performance.now();
+                const commits = await Promise.all(
+                    workers.map((worker, writer) =>
+                        worker.request<ProcessSoakBatchResult>({
+                            type: "write-batch",
+                            changesetId: `process-soak-${round}-${writer}`,
+                            entries: entries[writer],
+                        })
+                    )
+                );
+                for (const entry of entries.flat()) {
+                    if ("content" in entry) {
+                        logicalContentBytesWritten += Buffer.byteLength(
+                            entry.content
+                        );
+                        logicalWriteOperations++;
+                    }
+                }
+                localCommitSamples.push(
+                    ...commits.map((commit) => commit.localCommitMs)
+                );
+                const roundFiles = entries.flatMap((batch) =>
+                    batch.flatMap((entry) =>
+                        "content" in entry ? [expected.get(entry.path)!] : []
+                    )
+                );
+                const roundAbsent = entries.flatMap((batch) =>
+                    batch.flatMap((entry) =>
+                        "delete" in entry ? [entry.path] : []
+                    )
+                );
+                await Promise.all(
+                    workers.map((worker) =>
+                        worker.request<ProcessSoakVerifyResult>({
+                            type: "verify",
+                            changesets: commits.map(
+                                (commit) => commit.changeset
+                            ),
+                            timeoutMs: COMMAND_TIMEOUT_MS,
+                        })
+                    )
+                );
+                const allPeersAdmittedMs = performance.now() - roundStartedAt;
+                allPeersAdmittedSamples.push(allPeersAdmittedMs);
+                await Promise.all(
+                    workers.map((worker) =>
+                        worker.request<ProcessSoakVerifyResult>({
+                            type: "verify",
+                            files: roundFiles,
+                            absentPaths: roundAbsent,
+                            timeoutMs: COMMAND_TIMEOUT_MS,
+                        })
+                    )
+                );
+                const allPeersReadableMs = performance.now() - roundStartedAt;
+                allPeersReadableSamples.push(allPeersReadableMs);
+                const roundReport = {
+                    round: round + 1,
+                    localCommitMs: commits.map(
+                        (commit) => commit.localCommitMs
+                    ),
+                    allPeersAdmittedMs,
+                    allPeersReadableMs,
+                    operations: entries.reduce(
+                        (total, batch) => total + batch.length,
+                        0
+                    ),
+                };
+                roundReports.push(roundReport);
+                console.log(
+                    "process-isolated-soak-round:",
+                    JSON.stringify(roundReport, (_key, value) =>
+                        typeof value === "number"
+                            ? Number(value.toFixed(1))
+                            : value
+                    )
+                );
+            }
+
+            const editorFiles = workers.map((_, writer) => {
+                const payload = createProcessSoakGeneratedContent(
+                    `editor=${writer};`,
+                    `editor:${writer}`,
+                    payloadBytes
+                );
+                return {
+                    tempPath: `/writers/writer-${writer}/.editor-${writer}.tmp`,
+                    path: `/writers/writer-${writer}/editor-current.txt`,
+                    ...payload,
+                };
+            });
+            const editorSeedFiles = editorFiles.map((file, writer) => ({
+                path: file.path,
+                content: `editor-base=${writer}`,
+            }));
+            const editorSeed = await workers[0].request<ProcessSoakBatchResult>(
+                {
+                    type: "write-batch",
+                    changesetId: "process-soak-editor-base",
+                    entries: editorSeedFiles,
+                }
+            );
+            for (const file of editorSeedFiles) {
+                logicalContentBytesWritten += Buffer.byteLength(file.content);
+                logicalWriteOperations++;
+            }
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        changesets: [editorSeed.changeset],
+                        files: editorSeedFiles,
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const editorStartedAt = performance.now();
+            const editorResults = await Promise.all(
+                workers.map((worker, writer) =>
+                    worker.request<ProcessSoakEditorResult>({
+                        type: "editor-save",
+                        tempPath: editorFiles[writer].tempPath,
+                        path: editorFiles[writer].path,
+                        content: editorFiles[writer].content,
+                    })
+                )
+            );
+            for (const result of editorResults) {
+                expect(result.targetNodeId).toBe(result.tempNodeId);
+                expect(result.targetNodeId).not.toBe(result.replacedNodeId);
+            }
+            for (const file of editorFiles) {
+                expected.set(file.path, {
+                    path: file.path,
+                    content: file.expectation,
+                });
+                absent.add(file.tempPath);
+                logicalContentBytesWritten += Buffer.byteLength(file.content);
+                logicalWriteOperations++;
+            }
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: editorFiles.map(({ path, expectation }) => ({
+                            path,
+                            content: expectation,
+                        })),
+                        absentPaths: editorFiles.map((file) => file.tempPath),
+                        noNamingConflicts: editorFiles.map((file) => file.path),
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const editorAllPeersReadableMs =
+                performance.now() - editorStartedAt;
+
+            const base = await workers[0].request<ProcessSoakBatchResult>({
+                type: "write-batch",
+                changesetId: "process-soak-conflict-base",
+                entries: [{ path: "/contested.txt", content: "base" }],
+            });
+            logicalContentBytesWritten += Buffer.byteLength("base");
+            logicalWriteOperations++;
+            const baseVersionId = base.versionIds[0];
+            expect(baseVersionId).toBeTypeOf("string");
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        changesets: [base.changeset],
+                        files: [{ path: "/contested.txt", content: "base" }],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const conflictPayloads = workers.map((_, writer) =>
+                createProcessSoakGeneratedContent(
+                    `conflict-writer=${writer};`,
+                    `conflict:${writer}`,
+                    payloadBytes
+                )
+            );
+            const conflictContents = conflictPayloads.map(
+                (payload) => payload.content
+            );
+            const conflictStartedAt = performance.now();
+            const conflictWrites = await Promise.all(
+                workers.map((worker, writer) =>
+                    worker.request<ProcessSoakConflictWriteResult>({
+                        type: "write-conflict",
+                        path: "/contested.txt",
+                        content: conflictContents[writer],
+                        baseVersionIds: [baseVersionId!],
+                    })
+                )
+            );
+            for (const content of conflictContents) {
+                logicalContentBytesWritten += Buffer.byteLength(content);
+                logicalWriteOperations++;
+            }
+            const conflictHeads = conflictWrites.map((result, writer) => ({
+                versionId: result.versionId,
+                content: conflictPayloads[writer].expectation,
+            }));
+            const conflictVerifications = await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        conflict: {
+                            mode: "heads",
+                            path: "/contested.txt",
+                            heads: conflictHeads,
+                        },
+                        noNamingConflicts: ["/contested.txt"],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            expect(
+                new Set(
+                    conflictVerifications.map(
+                        (verification) => verification.visibleConflictHash
+                    )
+                ).size
+            ).toBe(1);
+            const allPeersConflictVisibleMs =
+                performance.now() - conflictStartedAt;
+            const selectedHead = conflictHeads[2];
+            const resolveStartedAt = performance.now();
+            const resolveCommit = await workers[0].request<{
+                localCommitMs: number;
+            }>({
+                type: "resolve-conflict",
+                path: "/contested.txt",
+                versionId: selectedHead.versionId,
+            });
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [
+                            {
+                                path: "/contested.txt",
+                                content: selectedHead.content,
+                            },
+                        ],
+                        conflict: {
+                            mode: "resolved",
+                            path: "/contested.txt",
+                        },
+                        noNamingConflicts: ["/contested.txt"],
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const allPeersConflictResolvedMs =
+                performance.now() - resolveStartedAt;
+            expected.set("/contested.txt", {
+                path: "/contested.txt",
+                content: selectedHead.content,
+            });
+
+            const killedReady = ready[2];
+            const killedWorker = workers[2];
+            const killStartedAt = performance.now();
+            await killWorker(killedWorker);
+            activeWorkers.delete(killedWorker);
+            const killToCloseMs = performance.now() - killStartedAt;
+            const restartStartedAt = performance.now();
+            const offlineRestarted = startWorker(2, directories[2], {
+                offline: true,
+            });
+            activeWorkers.add(offlineRestarted);
+            const offlineRestartedReady = await offlineRestarted.ready;
+            const peerRecreateMs = performance.now() - restartStartedAt;
+            expect(offlineRestartedReady.identity).toBe(killedReady.identity);
+            expect(offlineRestartedReady.addresses).toEqual([]);
+            const offlineReopen =
+                await offlineRestarted.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: "process-soak-writer-2-restarted",
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                });
+            expect(offlineReopen.identity).toBe(killedReady.identity);
+            expect(offlineReopen.gcScheduled).toBe(true);
+            const offlineAuditStartedAt = performance.now();
+            await offlineRestarted.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                files: [...expected.values()],
+                absentPaths: [...absent],
+                trustedPublicKeys,
+                conflict: {
+                    mode: "resolved",
+                    path: "/contested.txt",
+                },
+                noNamingConflicts: [
+                    "/contested.txt",
+                    ...editorFiles.map((file) => file.path),
+                ],
+                exactTree: treeFromFiles(expected.values()),
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            const offlineAuditMs = performance.now() - offlineAuditStartedAt;
+
+            const postRestartPayload = createProcessSoakGeneratedContent(
+                "post-restart;",
+                "post-restart",
+                payloadBytes
+            );
+            const postRestartStartedAt = performance.now();
+            const postRestart =
+                await offlineRestarted.request<ProcessSoakBatchResult>({
+                    type: "write-batch",
+                    changesetId: "process-soak-post-restart",
+                    entries: [
+                        {
+                            path: "/writers/writer-2/post-restart.txt",
+                            content: postRestartPayload.content,
+                        },
+                    ],
+                });
+            expected.set("/writers/writer-2/post-restart.txt", {
+                path: "/writers/writer-2/post-restart.txt",
+                content: postRestartPayload.expectation,
+            });
+            logicalContentBytesWritten += Buffer.byteLength(
+                postRestartPayload.content
+            );
+            logicalWriteOperations++;
+            await offlineRestarted.request<ProcessSoakVerifyResult>({
+                type: "verify",
+                changesets: [postRestart.changeset],
+                files: [
+                    {
+                        path: "/writers/writer-2/post-restart.txt",
+                        content: postRestartPayload.expectation,
+                    },
+                ],
+                exactTree: treeFromFiles(expected.values()),
+                timeoutMs: COMMAND_TIMEOUT_MS,
+            });
+            const offlineStop = await stopWorker(offlineRestarted);
+            expect(offlineStop.code).toBe(0);
+            activeWorkers.delete(offlineRestarted);
+
+            const networkRestartStartedAt = performance.now();
+            const restarted = startWorker(2, directories[2]);
+            activeWorkers.add(restarted);
+            const restartedReady = await restarted.ready;
+            const networkPeerRecreateMs =
+                performance.now() - networkRestartStartedAt;
+            expect(restartedReady.identity).toBe(killedReady.identity);
+            const networkReopen =
+                await restarted.request<ProcessSoakOpenResult>({
+                    type: "open",
+                    address: ownerOpen.address,
+                    machineLabel: "process-soak-writer-2-reconnected",
+                    timeoutMs: COMMAND_TIMEOUT_MS,
+                });
+            expect(networkReopen.identity).toBe(killedReady.identity);
+            await restarted.request({
+                type: "dial",
+                addresses: [dialAddress(ready[0]), dialAddress(ready[1])],
+            });
+            workers = [workers[0], workers[1], restarted];
+            ready = [ready[0], ready[1], restartedReady];
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        changesets: [postRestart.changeset],
+                        files: [
+                            {
+                                path: "/writers/writer-2/post-restart.txt",
+                                content: postRestartPayload.expectation,
+                            },
+                        ],
+                        exactTree: treeFromFiles(expected.values()),
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const postRestartAllPeersReadableMs =
+                performance.now() - postRestartStartedAt;
+
+            const gc = await workers[0].request<ProcessSoakGcResult>({
+                type: "collect-garbage",
+            });
+            expect(gc.report).toEqual({
+                dryRun: false,
+                healedChunks: 0,
+                damagedNodeIds: [],
+                retiredVersions: 0,
+                compactedNamingEvents: 0,
+                purgedNodes: 0,
+                deletedChunks: 0,
+                reclaimedChunkBytes: "0",
+                chunkCandidatesRecorded: 0,
+                purgeCandidatesRecorded: 0,
+                conflictedNodes: 0,
+                cutRecoveries: 0,
+                manifestsRetired: 0,
+                segmentBlocksDeleted: 0,
+                reclaimedSegmentBytes: "0",
+                warnings: [],
+            });
+            await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakVerifyResult>({
+                        type: "verify",
+                        files: [...expected.values()],
+                        absentPaths: [...absent],
+                        trustedPublicKeys,
+                        conflict: {
+                            mode: "resolved",
+                            path: "/contested.txt",
+                        },
+                        noNamingConflicts: [
+                            "/contested.txt",
+                            ...editorFiles.map((file) => file.path),
+                        ],
+                        exactTree: treeFromFiles(expected.values()),
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                    })
+                )
+            );
+            const finalMetrics = await Promise.all(
+                workers.map((worker) =>
+                    worker.request<ProcessSoakMetrics>({ type: "metrics" })
+                )
+            );
+            const baselineStorageBytes = sumStorage(baselineMetrics);
+            const finalStorageBytes = sumStorage(finalMetrics);
+            const storageGrowthBytes = finalStorageBytes - baselineStorageBytes;
+            const report = {
+                rounds,
+                writers: workers.length,
+                processes: workers.length,
+                payloadBytes,
+                localCommitMs: distribution(localCommitSamples),
+                allPeersAdmittedMs: distribution(allPeersAdmittedSamples),
+                allPeersReadableMs: distribution(allPeersReadableSamples),
+                editor: {
+                    fsyncMs: distribution(
+                        editorResults.map((result) => result.fsyncMs)
+                    ),
+                    releaseMs: distribution(
+                        editorResults.map((result) => result.releaseMs)
+                    ),
+                    renameMs: distribution(
+                        editorResults.map((result) => result.renameMs)
+                    ),
+                    totalLocalSaveMs: distribution(
+                        editorResults.map((result) => result.totalMs)
+                    ),
+                    allPeersReadableMs: editorAllPeersReadableMs,
+                },
+                conflict: {
+                    localCommitMs: distribution(
+                        conflictWrites.map((result) => result.localCommitMs)
+                    ),
+                    allPeersVisibleMs: allPeersConflictVisibleMs,
+                    resolveLocalCommitMs: resolveCommit.localCommitMs,
+                    allPeersResolvedMs: allPeersConflictResolvedMs,
+                },
+                restart: {
+                    killToCloseMs,
+                    offlinePeerCreateReportedMs:
+                        offlineRestartedReady.peerCreateMs,
+                    offlinePeerRecreateWallMs: peerRecreateMs,
+                    offlineFsOpenMs: offlineReopen.openMs,
+                    offlineWriteReadyMs: offlineReopen.writeReadyMs,
+                    offlineWriteReadinessSource:
+                        offlineReopen.writeReadinessSource,
+                    offlineAuditMs,
+                    postRestartLocalCommitMs: postRestart.localCommitMs,
+                    networkPeerCreateReportedMs: restartedReady.peerCreateMs,
+                    networkPeerRecreateWallMs: networkPeerRecreateMs,
+                    networkFsOpenMs: networkReopen.openMs,
+                    networkWriteReadyMs: networkReopen.writeReadyMs,
+                    networkWriteReadinessSource:
+                        networkReopen.writeReadinessSource,
+                    postRestartAllPeersReadableMs,
+                },
+                gc,
+                resources: {
+                    baseline: baselineMetrics,
+                    final: finalMetrics,
+                    logicalWriteOperations,
+                    logicalContentBytesWritten,
+                    totalRssBytes: {
+                        baseline: sumMetric(baselineMetrics, "rssBytes"),
+                        final: sumMetric(finalMetrics, "rssBytes"),
+                    },
+                    totalHeapUsedBytes: {
+                        baseline: sumMetric(baselineMetrics, "heapUsedBytes"),
+                        final: sumMetric(finalMetrics, "heapUsedBytes"),
+                    },
+                    totalStorageBytes: {
+                        baseline: baselineStorageBytes,
+                        final: finalStorageBytes,
+                        growth: storageGrowthBytes,
+                    },
+                    storageGrowthPerLogicalByte:
+                        logicalContentBytesWritten === 0
+                            ? 0
+                            : storageGrowthBytes / logicalContentBytesWritten,
+                },
+                rawRounds: roundReports,
+            };
+            console.log(
+                "process-isolated-soak:",
+                JSON.stringify(report, (_key, value) =>
+                    typeof value === "number" ? Number(value.toFixed(1)) : value
+                )
+            );
+
+            const stops = await Promise.allSettled(
+                workers.map((worker) => stopWorker(worker))
+            );
+            for (const worker of workers) {
+                if (worker.hasClosed()) activeWorkers.delete(worker);
+            }
+            const unclosed = workers.filter((worker) => !worker.hasClosed());
+            expect(
+                unclosed,
+                "Every process-soak worker must confirm close before state removal"
+            ).toEqual([]);
+            const failedStop = stops.find(
+                (result): result is PromiseRejectedResult =>
+                    result.status === "rejected"
+            );
+            if (failedStop) throw failedStop.reason;
+            expect(
+                stops.every(
+                    (result) =>
+                        result.status === "fulfilled" && result.value.code === 0
+                )
+            ).toBe(true);
+            await rm(root, { recursive: true, force: true });
+            temporaryDirectories.delete(root);
+        }
+    );
+});
