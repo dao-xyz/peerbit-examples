@@ -1,4 +1,5 @@
 import type { BootstrapStatus, BootstrapTelemetryEvent } from "../index.js";
+import type { ProcessSoakStorageSnapshot } from "./process-isolated-soak-storage.js";
 
 export type ProcessSoakContentExpectation =
     | string
@@ -70,8 +71,59 @@ export type ProcessSoakRuntimeMetrics = {
     fsWriteOps: number;
 };
 
+export type ProcessSoakMemorySnapshot = {
+    rssBytes: number;
+    heapTotalBytes: number;
+    heapUsedBytes: number;
+    externalBytes: number;
+    arrayBuffersBytes: number;
+};
+
+export type ProcessSoakMemoryCalibration = {
+    samples: {
+        harnessLoaded: ProcessSoakMemorySnapshot;
+        productModulesLoaded: ProcessSoakMemorySnapshot;
+        peerCreated: ProcessSoakMemorySnapshot;
+        sharedFsOpened?: ProcessSoakMemorySnapshot;
+    };
+    /** Signed arithmetic differences; stages are not assumed to be monotonic. */
+    deltas: {
+        productModulesLoadedMinusHarnessLoaded: ProcessSoakMemorySnapshot;
+        peerCreatedMinusProductModulesLoaded: ProcessSoakMemorySnapshot;
+        sharedFsOpenedMinusPeerCreated?: ProcessSoakMemorySnapshot;
+    };
+};
+
 export type ProcessSoakMetrics = ProcessSoakRuntimeMetrics & {
-    storageBytes: number;
+    storage: ProcessSoakStorageSnapshot;
+};
+
+export type ProcessSoakStoragePhaseName =
+    | "baseline-open"
+    | "online-final-open"
+    | "after-clean-close"
+    | "reopened-before-audit-open"
+    | "reopened-after-audit-open"
+    | "reopened-after-clean-close";
+
+export type ProcessSoakStoragePhaseReport = {
+    phase: ProcessSoakStoragePhaseName;
+    lifecycle: "worker-open" | "parent-after-confirmed-clean-close";
+    samples: Array<{
+        process: ProcessSoakProcessIdentity;
+        stateDirectory: string;
+        storage: ProcessSoakStorageSnapshot;
+    }>;
+    fleet: ProcessSoakStorageSnapshot;
+};
+
+export type ProcessSoakContentLedger = {
+    submitted: {
+        baseline: { operations: number; bytes: number };
+        measured: { operations: number; bytes: number };
+        total: { operations: number; bytes: number };
+    };
+    finalVisible: { files: number; bytes: number };
 };
 
 export type ProcessSoakNetworkStatus = {
@@ -109,9 +161,11 @@ export type ProcessSoakReadyMessage = {
     type: "ready";
     worker: number;
     identity: string;
+    process: ProcessSoakProcessIdentity;
     publicKey: string;
     addresses: string[];
     peerCreateMs: number;
+    memoryCalibration: ProcessSoakMemoryCalibration;
 };
 
 type ProcessSoakRequestBase = {
@@ -236,6 +290,7 @@ export type ProcessSoakOpenResult = {
     bootstrapStatus: ProcessSoakBootstrapStatus;
     bootstrapConvergence?: { verified: boolean };
     bootstrapTelemetry: BootstrapTelemetryEvent[];
+    memoryCalibration: ProcessSoakMemoryCalibration;
 };
 
 export type ProcessSoakClockOffsetResult = {

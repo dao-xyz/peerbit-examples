@@ -7,12 +7,15 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
     ProcessSoakBatchResult,
+    ProcessSoakContentLedger,
     ProcessSoakConflictWriteResult,
     ProcessSoakEditorFsyncCheckpointResult,
     ProcessSoakEditorResult,
     ProcessSoakFileExpectation,
     ProcessSoakGcResult,
     ProcessSoakMetrics,
+    ProcessSoakMemoryCalibration,
+    ProcessSoakMemorySnapshot,
     ProcessSoakMountRenameResult,
     ProcessSoakNetworkStatus,
     ProcessSoakOpenResult,
@@ -21,12 +24,18 @@ import type {
     ProcessSoakRuntimeMetrics,
     ProcessSoakShutdownResult,
     ProcessSoakSnapshotWriteResult,
+    ProcessSoakStoragePhaseName,
+    ProcessSoakStoragePhaseReport,
     ProcessSoakTreeExpectation,
     ProcessSoakVerifyResult,
     ProcessSoakWorkerCommand,
     ProcessSoakWorkerMessage,
 } from "./process-isolated-soak.bench.protocol.js";
 import { createProcessSoakGeneratedContent } from "./process-isolated-soak.bench.payload.js";
+import {
+    aggregateProcessSoakStorageSnapshots,
+    scanProcessSoakStateDirectory,
+} from "./process-isolated-soak-storage.js";
 
 const soakEnabled = process.env.PEERBIT_SHARED_FS_PROCESS_ISOLATED_SOAK === "1";
 const longChurnEnabled =
@@ -454,8 +463,207 @@ const dialAddress = (ready: ProcessSoakReadyMessage) => {
     return address;
 };
 
-const sumStorage = (metrics: ProcessSoakMetrics[]) =>
-    metrics.reduce((total, sample) => total + sample.storageBytes, 0);
+const processForWorker = async (
+    worker: RunningWorker
+): Promise<ProcessSoakReadyMessage["process"]> => {
+    const ready = await worker.ready;
+    expect(ready.process).toEqual({
+        worker: worker.index,
+        generation: worker.generation,
+        pid: worker.child.pid,
+        identity: ready.identity,
+        networkMode: worker.networkMode,
+    });
+    return ready.process;
+};
+
+const openStoragePhase = async (
+    phase: ProcessSoakStoragePhaseName,
+    workers: RunningWorker[],
+    metrics: ProcessSoakMetrics[]
+): Promise<ProcessSoakStoragePhaseReport> => {
+    expect(metrics).toHaveLength(workers.length);
+    const expectedProcesses = await Promise.all(
+        workers.map((worker) => processForWorker(worker))
+    );
+    const samples = metrics.map((sample, index) => {
+        expect(sample.process).toEqual(expectedProcesses[index]);
+        return {
+            process: sample.process,
+            stateDirectory: workers[index].directory,
+            storage: sample.storage,
+        };
+    });
+    return {
+        phase,
+        lifecycle: "worker-open",
+        samples,
+        fleet: aggregateProcessSoakStorageSnapshots(
+            samples.map((sample) => sample.storage)
+        ),
+    };
+};
+
+const closedStoragePhase = async (
+    phase: ProcessSoakStoragePhaseName,
+    workers: RunningWorker[],
+    stops: ProcessSoakStopResult[]
+): Promise<ProcessSoakStoragePhaseReport> => {
+    expect(stops).toHaveLength(workers.length);
+    const samples = await Promise.all(
+        workers.map(async (worker, index) => {
+            expect(stops[index].code).toBe(0);
+            expect(stops[index].signal).toBeNull();
+            expect(worker.hasClosed()).toBe(true);
+            return {
+                process: await processForWorker(worker),
+                stateDirectory: worker.directory,
+                storage: await scanProcessSoakStateDirectory(worker.directory),
+            };
+        })
+    );
+    return {
+        phase,
+        lifecycle: "parent-after-confirmed-clean-close",
+        samples,
+        fleet: aggregateProcessSoakStorageSnapshots(
+            samples.map((sample) => sample.storage)
+        ),
+    };
+};
+
+const expectedContentBytes = (
+    content: ProcessSoakFileExpectation["content"]
+) =>
+    typeof content === "string"
+        ? Buffer.byteLength(content)
+        : Buffer.byteLength(content.prefix) + content.bytes;
+
+const contentLedger = (
+    baseline: { operations: number; bytes: number },
+    total: { operations: number; bytes: number },
+    finalFiles: Iterable<ProcessSoakFileExpectation>
+): ProcessSoakContentLedger => {
+    expect(total.operations).toBeGreaterThanOrEqual(baseline.operations);
+    expect(total.bytes).toBeGreaterThanOrEqual(baseline.bytes);
+    const files = [...finalFiles];
+    return {
+        submitted: {
+            baseline,
+            measured: {
+                operations: total.operations - baseline.operations,
+                bytes: total.bytes - baseline.bytes,
+            },
+            total,
+        },
+        finalVisible: {
+            files: files.length,
+            bytes: files.reduce(
+                (sum, file) => sum + expectedContentBytes(file.content),
+                0
+            ),
+        },
+    };
+};
+
+const storageGrowth = (
+    from: ProcessSoakStoragePhaseReport,
+    to: ProcessSoakStoragePhaseReport,
+    replicaCount: number,
+    measuredSubmittedBytes: number
+) => {
+    const ratios = (fleetBytes: number | null) => ({
+        fleetBytes,
+        fleetPerMeasuredSubmittedContentByte:
+            fleetBytes === null || measuredSubmittedBytes === 0
+                ? null
+                : fleetBytes / measuredSubmittedBytes,
+        perReplicaEquivalentPerMeasuredSubmittedContentByte:
+            fleetBytes === null || measuredSubmittedBytes === 0
+                ? null
+                : fleetBytes / replicaCount / measuredSubmittedBytes,
+    });
+    const allocatedGrowthBytes =
+        from.fleet.allocatedBytes === null || to.fleet.allocatedBytes === null
+            ? null
+            : to.fleet.allocatedBytes - from.fleet.allocatedBytes;
+    return {
+        from: from.phase,
+        to: to.phase,
+        apparentRegularFileBytes: ratios(
+            to.fleet.apparentRegularFileBytes -
+                from.fleet.apparentRegularFileBytes
+        ),
+        allocatedRegularFileBlockBytes: ratios(allocatedGrowthBytes),
+    };
+};
+
+const memoryCalibrationReport = (
+    ready: ProcessSoakReadyMessage[],
+    opens: ProcessSoakOpenResult[]
+): Array<{
+    process: ProcessSoakReadyMessage["process"];
+    calibration: ProcessSoakMemoryCalibration;
+}> => {
+    expect(opens).toHaveLength(ready.length);
+    const fields = [
+        "rssBytes",
+        "heapTotalBytes",
+        "heapUsedBytes",
+        "externalBytes",
+        "arrayBuffersBytes",
+    ] as const satisfies ReadonlyArray<keyof ProcessSoakMemorySnapshot>;
+    const expectDelta = (
+        current: ProcessSoakMemorySnapshot,
+        previous: ProcessSoakMemorySnapshot,
+        delta: ProcessSoakMemorySnapshot
+    ) => {
+        for (const field of fields) {
+            expect(delta[field]).toBe(current[field] - previous[field]);
+        }
+    };
+    return opens.map((open, index) => {
+        const initial = ready[index].memoryCalibration;
+        const calibration = open.memoryCalibration;
+        expect(initial.samples.sharedFsOpened).toBeUndefined();
+        expect(initial.deltas.sharedFsOpenedMinusPeerCreated).toBeUndefined();
+        expect({
+            harnessLoaded: calibration.samples.harnessLoaded,
+            productModulesLoaded: calibration.samples.productModulesLoaded,
+            peerCreated: calibration.samples.peerCreated,
+        }).toEqual(initial.samples);
+        const opened = calibration.samples.sharedFsOpened;
+        const openedDelta = calibration.deltas.sharedFsOpenedMinusPeerCreated;
+        expect(opened).toBeDefined();
+        expect(openedDelta).toBeDefined();
+        for (const sample of [
+            calibration.samples.harnessLoaded,
+            calibration.samples.productModulesLoaded,
+            calibration.samples.peerCreated,
+            opened!,
+        ]) {
+            for (const field of fields) {
+                expect(Number.isFinite(sample[field])).toBe(true);
+                expect(sample[field]).toBeGreaterThanOrEqual(0);
+            }
+        }
+        expectDelta(
+            calibration.samples.productModulesLoaded,
+            calibration.samples.harnessLoaded,
+            calibration.deltas.productModulesLoadedMinusHarnessLoaded
+        );
+        expectDelta(
+            calibration.samples.peerCreated,
+            calibration.samples.productModulesLoaded,
+            calibration.deltas.peerCreatedMinusProductModulesLoaded
+        );
+        expectDelta(opened!, calibration.samples.peerCreated, openedDelta!);
+        return {
+            process: ready[index].process,
+            calibration,
+        };
+    });
+};
 
 const validateRuntimeMetric = async (
     worker: RunningWorker,
@@ -592,7 +800,7 @@ const validateShutdownResult = async (
 };
 
 const withoutStorage = ({
-    storageBytes: _storageBytes,
+    storage: _storage,
     ...runtime
 }: ProcessSoakMetrics): ProcessSoakRuntimeMetrics => runtime;
 
@@ -676,6 +884,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             let ready = await Promise.all(
                 workers.map((worker) => worker.ready)
             );
+            const baselineReady = [...ready];
             expect(new Set(ready.map((message) => message.identity)).size).toBe(
                 3
             );
@@ -731,6 +940,10 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     content: `writer ${index}`,
                 })),
             ];
+            const startupMemoryCalibration = memoryCalibrationReport(
+                baselineReady,
+                [ownerOpen, ...replicaOpens]
+            );
             await Promise.all(
                 workers.map((worker) =>
                     worker.request<ProcessSoakVerifyResult>({
@@ -752,6 +965,11 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 workers,
                 baselineMetrics.map(withoutStorage)
             );
+            const baselineStorage = await openStoragePhase(
+                "baseline-open",
+                workers,
+                baselineMetrics
+            );
             const phaseRuntimeMetrics: Record<
                 string,
                 ProcessSoakRuntimeMetrics[]
@@ -765,8 +983,15 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             const localCommitSamples: number[] = [];
             const allPeersAdmittedSamples: number[] = [];
             const allPeersReadableSamples: number[] = [];
-            let logicalContentBytesWritten = 0;
-            let logicalWriteOperations = 0;
+            const baselineSubmittedContent = {
+                operations: seedFiles.length,
+                bytes: seedFiles.reduce(
+                    (total, file) => total + expectedContentBytes(file.content),
+                    0
+                ),
+            };
+            let logicalContentBytesWritten = baselineSubmittedContent.bytes;
+            let logicalWriteOperations = baselineSubmittedContent.operations;
 
             for (let round = 0; round < rounds; round++) {
                 const entries = workers.map((_, writer) => {
@@ -1548,9 +1773,11 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 await captureRequestedGcRuntimeMetrics(workers);
             phaseRuntimeMetrics.afterFinalRequestedGc =
                 finalRequestedGcMetrics.map((result) => result.metrics);
-            const baselineStorageBytes = sumStorage(baselineMetrics);
-            const finalStorageBytes = sumStorage(finalMetrics);
-            const storageGrowthBytes = finalStorageBytes - baselineStorageBytes;
+            const reopenedAfterAuditStorage = await openStoragePhase(
+                "reopened-after-audit-open",
+                workers,
+                finalMetrics
+            );
             const stops = await Promise.allSettled(
                 workers.map((worker) =>
                     stopWorker(worker, {
@@ -1572,6 +1799,15 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     result.status === "rejected"
             );
             if (failedStop) throw failedStop.reason;
+            const completedStops = stops.map((result) => {
+                if (result.status === "rejected") throw result.reason;
+                return result.value;
+            });
+            const reopenedAfterCloseStorage = await closedStoragePhase(
+                "reopened-after-clean-close",
+                workers,
+                completedStops
+            );
             const finalShutdowns = await Promise.all(
                 stops.map((result, index) => {
                     if (result.status === "rejected") throw result.reason;
@@ -1602,6 +1838,16 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     aggregateFleetMemory(samples),
                 ])
             );
+            const submittedContent = contentLedger(
+                baselineSubmittedContent,
+                {
+                    operations: logicalWriteOperations,
+                    bytes: logicalContentBytesWritten,
+                },
+                expected.values()
+            );
+            const measuredSubmittedBytes =
+                submittedContent.submitted.measured.bytes;
             const report = {
                 rounds,
                 writers: workers.length,
@@ -1688,22 +1934,26 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 resources: {
                     baseline: baselineMetrics,
                     final: finalMetrics,
-                    logicalWriteOperations,
-                    logicalContentBytesWritten,
+                    startupMemoryCalibration,
+                    content: submittedContent,
                     fleetMemorySums: {
                         baseline: baselineFleetMemory,
                         final: finalFleetMemory,
                         phases: fleetMemoryByPhase,
                     },
-                    totalStorageBytes: {
-                        baseline: baselineStorageBytes,
-                        final: finalStorageBytes,
-                        growth: storageGrowthBytes,
+                    stateDirectoryStorage: {
+                        phases: [
+                            baselineStorage,
+                            reopenedAfterAuditStorage,
+                            reopenedAfterCloseStorage,
+                        ],
+                        growth: storageGrowth(
+                            baselineStorage,
+                            reopenedAfterAuditStorage,
+                            workers.length,
+                            measuredSubmittedBytes
+                        ),
                     },
-                    storageGrowthPerLogicalByte:
-                        logicalContentBytesWritten === 0
-                            ? 0
-                            : storageGrowthBytes / logicalContentBytesWritten,
                     phases: phaseRuntimeMetrics,
                     finalRequestedGcSettleWallMs: finalRequestedGcMetrics.map(
                         (result) => ({
@@ -1805,6 +2055,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 writeReadyMs: number;
                 localTreeAuditMs: number;
                 bootstrapEvents: ProcessSoakOpenResult["bootstrapTelemetry"];
+                memoryCalibration: ProcessSoakMemoryCalibration;
             }> = [];
             let writer!: RunningWorker;
             let writerReady!: ProcessSoakReadyMessage;
@@ -1879,6 +2130,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     writeReadyMs: opened.writeReadyMs,
                     localTreeAuditMs: performance.now() - auditStartedAt,
                     bootstrapEvents,
+                    memoryCalibration: opened.memoryCalibration,
                 };
                 coldJoinSamples.push(sample);
                 console.log(
@@ -2039,6 +2291,16 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             );
             const baselineLogicalContentBytesWritten =
                 logicalContentBytesWritten;
+            const baselineLogicalWriteOperations = logicalWriteOperations;
+            const baselineStartupMemoryCalibration = memoryCalibrationReport(
+                [ownerReady, writerReady],
+                [ownerOpen, writerOpen]
+            );
+            const baselineStorage = await openStoragePhase(
+                "baseline-open",
+                [owner, writer],
+                baselineMetrics
+            );
 
             const roundSamples: Array<{
                 round: number;
@@ -2515,11 +2777,21 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 [owner, writer],
                 onlineFinalMetrics.map(withoutStorage)
             );
+            const onlineFinalStorage = await openStoragePhase(
+                "online-final-open",
+                [owner, writer],
+                onlineFinalMetrics
+            );
             const onlineStops = await Promise.all([
                 stopWorker(owner),
                 stopWorker(writer),
             ]);
             expect(onlineStops.map((result) => result.code)).toEqual([0, 0]);
+            const afterCleanCloseStorage = await closedStoragePhase(
+                "after-clean-close",
+                [owner, writer],
+                onlineStops
+            );
             activeWorkers.delete(owner);
             activeWorkers.delete(writer);
 
@@ -2545,7 +2817,9 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 [],
                 [],
             ]);
-            for (const worker of [finalOfflineOwner, finalOfflineWriter]) {
+            const finalOfflineWorkers = [finalOfflineOwner, finalOfflineWriter];
+            const finalOfflineOpens: ProcessSoakOpenResult[] = [];
+            for (const worker of finalOfflineWorkers) {
                 await worker.request({
                     type: "set-clock-offset",
                     offsetMs: secondGcOffsetMs,
@@ -2555,15 +2829,33 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         type: "network-status",
                     })
                 ).toEqual({ connectionCount: 0, remotePeers: [] });
-                await worker.request<ProcessSoakOpenResult>({
-                    type: "open",
-                    address: ownerOpen.address,
-                    machineLabel: `process-long-churn-final-offline-${worker.index}`,
-                    timeoutMs: COMMAND_TIMEOUT_MS,
-                    bootstrap: false,
-                    remoteChunkFetch: false,
-                    gcSchedule: false,
-                });
+                finalOfflineOpens.push(
+                    await worker.request<ProcessSoakOpenResult>({
+                        type: "open",
+                        address: ownerOpen.address,
+                        machineLabel: `process-long-churn-final-offline-${worker.index}`,
+                        timeoutMs: COMMAND_TIMEOUT_MS,
+                        bootstrap: false,
+                        remoteChunkFetch: false,
+                        gcSchedule: false,
+                    })
+                );
+            }
+            const reopenedBeforeAuditMetrics = await Promise.all(
+                finalOfflineWorkers.map((worker) =>
+                    worker.request<ProcessSoakMetrics>({ type: "metrics" })
+                )
+            );
+            await validateRuntimeMetrics(
+                finalOfflineWorkers,
+                reopenedBeforeAuditMetrics.map(withoutStorage)
+            );
+            const reopenedBeforeAuditStorage = await openStoragePhase(
+                "reopened-before-audit-open",
+                finalOfflineWorkers,
+                reopenedBeforeAuditMetrics
+            );
+            for (const worker of finalOfflineWorkers) {
                 await worker.request<ProcessSoakVerifyResult>({
                     type: "verify",
                     files: [...expected.values()],
@@ -2585,19 +2877,29 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 ).toEqual({ connectionCount: 0, remotePeers: [] });
             }
             const finalOfflineMetrics = await Promise.all(
-                [finalOfflineOwner, finalOfflineWriter].map((worker) =>
+                finalOfflineWorkers.map((worker) =>
                     worker.request<ProcessSoakMetrics>({ type: "metrics" })
                 )
             );
             await validateRuntimeMetrics(
-                [finalOfflineOwner, finalOfflineWriter],
+                finalOfflineWorkers,
                 finalOfflineMetrics.map(withoutStorage)
+            );
+            const reopenedAfterAuditStorage = await openStoragePhase(
+                "reopened-after-audit-open",
+                finalOfflineWorkers,
+                finalOfflineMetrics
             );
             const finalStops = await Promise.all([
                 stopWorker(finalOfflineOwner),
                 stopWorker(finalOfflineWriter),
             ]);
             expect(finalStops.map((result) => result.code)).toEqual([0, 0]);
+            const reopenedAfterCleanCloseStorage = await closedStoragePhase(
+                "reopened-after-clean-close",
+                finalOfflineWorkers,
+                finalStops
+            );
             activeWorkers.delete(finalOfflineOwner);
             activeWorkers.delete(finalOfflineWriter);
 
@@ -2642,12 +2944,19 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
             const finalOfflineFleetMemory = aggregateFleetMemory(
                 finalOfflineMetrics.map(withoutStorage)
             );
-            const baselineStorageBytes = sumStorage(baselineMetrics);
-            const onlineFinalStorageBytes = sumStorage(onlineFinalMetrics);
-            const storageGrowthBytes =
-                onlineFinalStorageBytes - baselineStorageBytes;
-            const postBaselineLogicalContentBytesWritten =
-                logicalContentBytesWritten - baselineLogicalContentBytesWritten;
+            const submittedContent = contentLedger(
+                {
+                    operations: baselineLogicalWriteOperations,
+                    bytes: baselineLogicalContentBytesWritten,
+                },
+                {
+                    operations: logicalWriteOperations,
+                    bytes: logicalContentBytesWritten,
+                },
+                expected.values()
+            );
+            const measuredSubmittedBytes =
+                submittedContent.submitted.measured.bytes;
             const report = {
                 joinRuns,
                 rounds,
@@ -2695,27 +3004,39 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 },
                 gc: { first: firstGc, second: secondGc },
                 resources: {
-                    logicalWriteOperations,
-                    logicalContentBytesWritten,
-                    postBaselineLogicalContentBytesWritten,
                     baseline: baselineMetrics,
                     onlineFinal: onlineFinalMetrics,
+                    reopenedBeforeAudit: reopenedBeforeAuditMetrics,
                     finalOffline: finalOfflineMetrics,
+                    memoryCalibration: {
+                        baseline: baselineStartupMemoryCalibration,
+                        reopened: memoryCalibrationReport(
+                            finalOfflineReady,
+                            finalOfflineOpens
+                        ),
+                    },
+                    content: submittedContent,
                     fleetMemorySums: {
                         baseline: baselineFleetMemory,
                         onlineFinal: onlineFinalFleetMemory,
                         finalOffline: finalOfflineFleetMemory,
                     },
-                    totalStorageBytes: {
-                        baseline: baselineStorageBytes,
-                        onlineFinal: onlineFinalStorageBytes,
-                        growth: storageGrowthBytes,
+                    stateDirectoryStorage: {
+                        phases: [
+                            baselineStorage,
+                            onlineFinalStorage,
+                            afterCleanCloseStorage,
+                            reopenedBeforeAuditStorage,
+                            reopenedAfterAuditStorage,
+                            reopenedAfterCleanCloseStorage,
+                        ],
+                        growth: storageGrowth(
+                            baselineStorage,
+                            onlineFinalStorage,
+                            finalOfflineWorkers.length,
+                            measuredSubmittedBytes
+                        ),
                     },
-                    storageGrowthPerLogicalByte:
-                        postBaselineLogicalContentBytesWritten === 0
-                            ? null
-                            : storageGrowthBytes /
-                              postBaselineLogicalContentBytesWritten,
                 },
             };
             console.log(
