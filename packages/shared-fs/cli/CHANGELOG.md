@@ -1,5 +1,15 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.14
+
+### Patch Changes
+
+- 263f30e: Add an exact-conflict-fenced directory merge repair that reparents observed
+  direct children without changing node identities, preserves destination child
+  collisions, and exposes the action and structured result through the CLI.
+- Updated dependencies [263f30e]
+    - @peerbit/shared-fs@0.13.13
+
 ## 0.13.13
 
 ### Patch Changes
