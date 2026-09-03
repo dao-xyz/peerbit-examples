@@ -1,23 +1,15 @@
-import {
-    NativeMountUnavailableError,
+import type {
+    BootstrapStatus,
+    MergeDirectoryResolutionResult,
+    PrepareForDisposalResult,
+    ResolveNamingAction,
+    SharedFsConflict,
+    SharedFsNamingConflict,
+    SharedFsVersionInfo,
     Peerbit,
-    type BootstrapStatus,
-    type MergeDirectoryResolutionResult,
-    type PrepareForDisposalResult,
-    type ResolveNamingAction,
-    type SharedFsConflict,
-    type SharedFsNamingConflict,
-    type SharedFsVersionInfo,
     createSharedFsIpcServer,
-    createSharedFsMountBackend,
-    decodePublicSignKey,
-    encodePublicSignKey,
-    getNativeMountSupport,
     mountNativeSharedFs,
-    normalizeFsPath,
-    openSharedFs,
     runSharedFsBenchmark,
-    unmountNativeMountpoint,
 } from "@peerbit/shared-fs";
 import { multiaddr } from "@multiformats/multiaddr";
 import chalk from "chalk";
@@ -31,6 +23,24 @@ import {
     installNativeAdapter,
     resolveExternalNativeAdapter,
 } from "./native-adapter.js";
+
+type SharedFsRuntime = typeof import("@peerbit/shared-fs");
+
+let sharedFsRuntimePromise: Promise<SharedFsRuntime> | undefined;
+
+/** Keep parser-only CLI paths independent from Peerbit's heavyweight runtime. */
+const loadSharedFsRuntime = () =>
+    (sharedFsRuntimePromise ??= import("@peerbit/shared-fs"));
+
+const createPeerbitForCli = async (directory?: string) => {
+    const { Peerbit } = await loadSharedFsRuntime();
+    return Peerbit.create({ directory });
+};
+
+const normalizeCliFsPath = async (value: string) => {
+    const { normalizeFsPath } = await loadSharedFsRuntime();
+    return normalizeFsPath(value);
+};
 
 const DEFAULT_DIRECTORY_NAME = "peerbit-shared-fs";
 // Every syncing machine keeps a full replica: a mount must be able to serve
@@ -222,6 +232,7 @@ const configureExternalNativeAdapterEnv = async () => {
 
 const readNativeStatus = async () => {
     const externalAdapter = await configureExternalNativeAdapterEnv();
+    const { getNativeMountSupport } = await loadSharedFsRuntime();
     const support = await getNativeMountSupport();
     const windows = support.platform === "win32";
     return {
@@ -367,17 +378,17 @@ export const conflictScanIsPartial = (
     before.snapshotCoverageVerified !== after.snapshotCoverageVerified ||
     before.writeReady !== after.writeReady;
 
-const namingActionFromCli = (
+const namingActionFromCli = async (
     action: string,
     to: string | undefined
-): ResolveNamingAction => {
+): Promise<ResolveNamingAction> => {
     if (action === "move") {
         if (!to) {
             throw new Error(
                 "resolve-naming-conflict move requires --to <path>"
             );
         }
-        return { type: "move", to: normalizeFsPath(to) };
+        return { type: "move", to: await normalizeCliFsPath(to) };
     }
     if (to !== undefined) {
         throw new Error(
@@ -455,6 +466,7 @@ const openCliFs = async (
         rootKey?: Peerbit["identity"]["publicKey"];
     }
 ) => {
+    const { openSharedFs } = await loadSharedFsRuntime();
     const programArgs: CliProgramArgs =
         options.replicate === false
             ? { replicate: false }
@@ -553,7 +565,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     );
                 }
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     const fsHandle = await openCliFs(peerbit, {
                         machineLabel: argv.machine,
@@ -585,8 +597,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
             "print the local Peerbit writer public key",
             (command) => command,
             async (argv) => {
+                const { encodePublicSignKey } = await loadSharedFsRuntime();
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     console.log(
                         encodePublicSignKey(peerbit.identity.publicKey)
@@ -613,7 +626,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: argv.replicate !== false,
@@ -623,6 +636,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: argv.replicate,
                     });
+                    const { decodePublicSignKey } = await loadSharedFsRuntime();
                     await fsHandle.authorizeWriter(
                         decodePublicSignKey(String(argv.publicKey))
                     );
@@ -649,7 +663,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: argv.replicate !== false,
@@ -659,6 +673,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: argv.replicate,
                     });
+                    const { decodePublicSignKey } = await loadSharedFsRuntime();
                     const key = decodePublicSignKey(String(argv.publicKey));
                     await fsHandle.revokeWriter(key);
                     const stillTrusted = await fsHandle.isTrustedWriter(key);
@@ -770,7 +785,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     );
                 }
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: false,
@@ -831,8 +846,14 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         "mount requires a full replica; --no-replicate is not allowed for a writable mount"
                     );
                 }
+                const {
+                    NativeMountUnavailableError,
+                    createSharedFsIpcServer,
+                    createSharedFsMountBackend,
+                    mountNativeSharedFs,
+                } = await loadSharedFsRuntime();
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 let ipc:
                     | Awaited<ReturnType<typeof createSharedFsIpcServer>>
                     | undefined;
@@ -961,7 +982,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     await printNativeRequirements(nativeMount);
                 }
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: argv.replicate !== false,
@@ -1127,7 +1148,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: argv.replicate !== false,
@@ -1150,7 +1171,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     if (argv.json) {
                         printJson({
                             address: fsHandle.address,
-                            path: argv.path ? normalizeFsPath(argv.path) : null,
+                            path: argv.path
+                                ? await normalizeCliFsPath(argv.path)
+                                : null,
                             view: {
                                 fullReplica: argv.replicate !== false,
                                 bootstrapPhase: bootstrap.phase,
@@ -1208,7 +1231,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: argv.replicate !== false,
@@ -1230,7 +1253,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     if (argv.json) {
                         printJson({
                             address: fsHandle.address,
-                            path: argv.path ? normalizeFsPath(argv.path) : null,
+                            path: argv.path
+                                ? await normalizeCliFsPath(argv.path)
+                                : null,
                             view: {
                                 fullReplica: argv.replicate !== false,
                                 bootstrapPhase: bootstrap.phase,
@@ -1306,7 +1331,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
             async (argv) => {
                 assertResolutionReplica("resolve-conflict", argv.replicate);
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer);
                     const fsHandle = await openCliFs(peerbit, {
@@ -1319,7 +1344,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         peerbit,
                         argv.writeReadyTimeoutMs
                     );
-                    const normalizedPath = normalizeFsPath(argv.path);
+                    const normalizedPath = await normalizeCliFsPath(argv.path);
                     const visible = await fsHandle.conflicts(normalizedPath);
                     const selectedConflict = visible.find(
                         (conflict) =>
@@ -1423,13 +1448,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description: "Print machine-readable JSON.",
                     }),
             async (argv) => {
-                const action = namingActionFromCli(argv.action, argv.to);
+                const action = await namingActionFromCli(argv.action, argv.to);
                 assertResolutionReplica(
                     "resolve-naming-conflict",
                     argv.replicate
                 );
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer);
                     const fsHandle = await openCliFs(peerbit, {
@@ -1561,7 +1586,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     if (argv.address) {
                         await connectToNetwork(peerbit, argv.peer, {
@@ -1573,6 +1598,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: argv.replicate,
                     });
+                    const { runSharedFsBenchmark } =
+                        await loadSharedFsRuntime();
                     const result = await runSharedFsBenchmark(fsHandle, {
                         root: argv.root,
                         largeFileSize: argv.largeSize,
@@ -1623,7 +1650,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 }
                 const result = await (async () => {
                     const directory = resolveDirectory(argv.directory);
-                    const peerbit = await Peerbit.create({ directory });
+                    const peerbit = await createPeerbitForCli(directory);
                     try {
                         await connectToNetwork(peerbit, argv.peer, {
                             bootstrap: true,
@@ -1728,7 +1755,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     return;
                 }
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: true,
@@ -1857,7 +1884,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     return;
                 }
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await Peerbit.create({ directory });
+                const peerbit = await createPeerbitForCli(directory);
                 try {
                     await connectToNetwork(peerbit, argv.peer, {
                         bootstrap: true,
@@ -1935,6 +1962,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     demandOption: true,
                 }),
             async (argv) => {
+                const { unmountNativeMountpoint } = await loadSharedFsRuntime();
                 await unmountNativeMountpoint(
                     normalizeNativeMountpoint(String(argv.mountpoint))
                 );
