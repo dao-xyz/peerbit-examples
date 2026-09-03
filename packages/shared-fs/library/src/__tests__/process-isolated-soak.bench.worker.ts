@@ -1,16 +1,9 @@
 import assert from "node:assert/strict";
-import { lstat, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { Peerbit } from "peerbit";
-import {
-    createSharedFsMountBackend,
-    decodePublicSignKey,
-    encodePublicSignKey,
-    openSharedFs,
-    type BootstrapTelemetryEvent,
-    type SharedFsHandle,
-    type SharedFsMountBackend,
+import type {
+    BootstrapTelemetryEvent,
+    SharedFsHandle,
+    SharedFsMountBackend,
 } from "../index.js";
 import type {
     ProcessSoakBatchResult,
@@ -21,6 +14,8 @@ import type {
     ProcessSoakEditorFsyncCheckpointResult,
     ProcessSoakEditorResult,
     ProcessSoakGcResult,
+    ProcessSoakMemoryCalibration,
+    ProcessSoakMemorySnapshot,
     ProcessSoakMetrics,
     ProcessSoakMountRenameResult,
     ProcessSoakNetworkStatus,
@@ -36,6 +31,7 @@ import type {
     ProcessSoakWorkerMessage,
 } from "./process-isolated-soak.bench.protocol.js";
 import { processSoakContentHash } from "./process-isolated-soak.bench.payload.js";
+import { scanProcessSoakStateDirectory } from "./process-isolated-soak-storage.js";
 
 const worker = Number(process.argv[2]);
 const directory = process.argv[3];
@@ -75,29 +71,29 @@ const send = (message: ProcessSoakWorkerMessage) =>
         });
     });
 
-const directoryBytes = async (path: string): Promise<number> => {
-    let entries;
-    try {
-        entries = await readdir(path, { withFileTypes: true });
-    } catch (error: any) {
-        if (error?.code === "ENOENT") return 0;
-        throw error;
-    }
-    let bytes = 0;
-    for (const entry of entries) {
-        const child = join(path, entry.name);
-        if (entry.isDirectory()) {
-            bytes += await directoryBytes(child);
-            continue;
-        }
-        try {
-            bytes += (await lstat(child)).size;
-        } catch (error: any) {
-            if (error?.code !== "ENOENT") throw error;
-        }
-    }
-    return bytes;
+const memorySnapshot = (): ProcessSoakMemorySnapshot => {
+    const memory = process.memoryUsage();
+    return {
+        rssBytes: memory.rss,
+        heapTotalBytes: memory.heapTotal,
+        heapUsedBytes: memory.heapUsed,
+        externalBytes: memory.external,
+        arrayBuffersBytes: memory.arrayBuffers,
+    };
 };
+
+const subtractMemory = (
+    current: ProcessSoakMemorySnapshot,
+    previous: ProcessSoakMemorySnapshot
+): ProcessSoakMemorySnapshot => ({
+    rssBytes: current.rssBytes - previous.rssBytes,
+    heapTotalBytes: current.heapTotalBytes - previous.heapTotalBytes,
+    heapUsedBytes: current.heapUsedBytes - previous.heapUsedBytes,
+    externalBytes: current.externalBytes - previous.externalBytes,
+    arrayBuffersBytes: current.arrayBuffersBytes - previous.arrayBuffersBytes,
+});
+
+const harnessLoadedMemory = memorySnapshot();
 
 const runtimeMetrics = (
     processIdentity: ProcessSoakProcessIdentity
@@ -124,7 +120,7 @@ const metrics = async (
 ): Promise<ProcessSoakMetrics> => {
     return {
         ...runtimeMetrics(processIdentity),
-        storageBytes: await directoryBytes(directory),
+        storage: await scanProcessSoakStateDirectory(directory),
     };
 };
 
@@ -132,11 +128,9 @@ const requestedGcRuntimeMetrics = async (
     processIdentity: ProcessSoakProcessIdentity
 ): Promise<ProcessSoakRequestedGcMetricsResult> => {
     const gc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
-    assert.equal(
-        typeof gc,
-        "function",
-        "Process soak worker must run with --expose-gc"
-    );
+    if (typeof gc !== "function") {
+        throw new Error("Process soak worker must run with --expose-gc");
+    }
     const startedAt = performance.now();
     gc();
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -224,6 +218,18 @@ const waitUntil = async (assertion: () => Promise<void>, timeoutMs: number) => {
 };
 
 const main = async () => {
+    const [peerbitModule, sharedFsModule] = await Promise.all([
+        import("peerbit"),
+        import("../index.js"),
+    ]);
+    const { Peerbit } = peerbitModule;
+    const {
+        createSharedFsMountBackend,
+        decodePublicSignKey,
+        encodePublicSignKey,
+        openSharedFs,
+    } = sharedFsModule;
+    const productModulesLoadedMemory = memorySnapshot();
     const peerCreateStartedAt = performance.now();
     const peer = await Peerbit.create({
         directory,
@@ -246,6 +252,29 @@ const main = async () => {
             : {}),
     });
     const peerCreateMs = performance.now() - peerCreateStartedAt;
+    const peerCreatedMemory = memorySnapshot();
+    let sharedFsOpenedMemory: ProcessSoakMemorySnapshot | undefined;
+    const memoryCalibration = (): ProcessSoakMemoryCalibration => ({
+        samples: {
+            harnessLoaded: harnessLoadedMemory,
+            productModulesLoaded: productModulesLoadedMemory,
+            peerCreated: peerCreatedMemory,
+            sharedFsOpened: sharedFsOpenedMemory,
+        },
+        deltas: {
+            productModulesLoadedMinusHarnessLoaded: subtractMemory(
+                productModulesLoadedMemory,
+                harnessLoadedMemory
+            ),
+            peerCreatedMinusProductModulesLoaded: subtractMemory(
+                peerCreatedMemory,
+                productModulesLoadedMemory
+            ),
+            sharedFsOpenedMinusPeerCreated: sharedFsOpenedMemory
+                ? subtractMemory(sharedFsOpenedMemory, peerCreatedMemory)
+                : undefined,
+        },
+    });
     const processIdentity = {
         worker,
         generation,
@@ -334,6 +363,7 @@ const main = async () => {
                       }
                     : {}),
             });
+            sharedFsOpenedMemory = memorySnapshot();
             const openMs = performance.now() - openStartedAt;
             const readyStartedAt = performance.now();
             if (command.address) {
@@ -385,6 +415,7 @@ const main = async () => {
                 bootstrapStatus: serializeBootstrapStatus(status),
                 bootstrapConvergence,
                 bootstrapTelemetry,
+                memoryCalibration: memoryCalibration(),
             } satisfies ProcessSoakOpenResult;
         }
         if (command.type === "authorize") {
@@ -813,9 +844,11 @@ const main = async () => {
         type: "ready",
         worker,
         identity: processIdentity.identity,
+        process: processIdentity,
         publicKey: encodePublicSignKey(peer.identity.publicKey),
         addresses: peer.getMultiaddrs().map((address) => address.toString()),
         peerCreateMs,
+        memoryCalibration: memoryCalibration(),
     });
 
     let commandChain = Promise.resolve();

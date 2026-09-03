@@ -294,10 +294,22 @@ writer, and round so content-addressed dedup does not turn storage measurements
 into a repeated-content best case. Every
 completed round prints `process-isolated-soak-round:` immediately, followed by
 one aggregate `process-isolated-soak:` report. The reported state-directory
-growth is a descriptive fleet-wide ratio over logical bytes written, not a
-write-amplification claim. All replicas keep scheduled GC enabled, while the
-explicit measured GC pass uses normal retention, so a short run exercises
-planning and safety without pretending newly written data should be reclaimed.
+accounting retains a snapshot for every worker and identity. It reports
+regular-file apparent bytes and counts, directory counts, regular-file
+allocated block bytes (`stat.blocks * 512`) when the platform exposes them,
+and dynamic buckets for every immediate top-level state component. Allocation
+is summed per directory entry: hard-linked files count once per link, while
+directory and symbolic-link inode blocks are excluded. Symbolic links are not
+followed. The phase-aware
+content ledger separates baseline, measured, and total submitted content
+operations and bytes from final visible file bytes. The fleet apparent-growth
+ratio divides summed replica growth by measured submitted content bytes; the
+per-replica equivalent divides that fleet value by the replica count. Matching
+allocated-block growth and ratios are reported when both endpoint snapshots
+support them. These are descriptive storage ratios, not write-amplification
+claims. All replicas keep scheduled GC enabled, while the explicit measured GC
+pass uses normal retention, so a short run exercises planning and safety without
+pretending newly written data should be reclaimed.
 The campaign uses `bootstrap: false` and disables remote chunk fallback: it is a
 steady-state and warm-restart complement to the separate cold-join benchmark,
 not a retry of that benchmark. It also deliberately avoids
@@ -341,9 +353,9 @@ offline, and converge after reconnect. The campaign ends by reopening both
 writers offline with remote chunk fallback disabled and auditing the complete
 tree, trust set, conflict heads, and file bytes. These durability and
 correctness properties are hard assertions. Join/write/reopen latencies,
-memory, filesystem counters, directory growth, and storage-growth ratios remain
-descriptive; the test does not treat a lack of physical directory shrink as a
-GC failure.
+memory, filesystem counters, and phase-aware state-directory measurements
+remain descriptive; the test does not treat a lack of physical directory
+shrink as a GC failure.
 
 Defaults are 10 joins, 10 two-writer rounds, 15 hot-file versions, and 4096-byte
 generated payload bodies. Joins accept 10 through 20, rounds 10 through 200,
@@ -356,17 +368,30 @@ to two hours, and is not enabled in required pull-request CI.
 
 Each runtime sample includes a parent-assigned process generation, OS PID,
 worker number, Peerbit identity, and online/offline network mode so replacement
-lifetimes remain distinguishable even if the OS reuses a PID. In the original
-process-isolated soak, the final cohort is sampled immediately before and after
-the offline recursive audit, after two explicit GC requests separated by
-event-loop turns, after SharedFS close, after Peerbit stop, and once more after
-two stopped-process GC requests. The long-churn campaign instead records three
-cohorts: the two online writers at baseline, the two online writers after the
-workload, and both fully reopened offline for the final audit. The workers run
-with `--expose-gc`; these samples diagnose collectible JavaScript reachability
-and resource shutdown, not a memory budget or proof that finalizers, native
-resources, or allocator arenas were released, and no test asserts that
-collection lowers a category.
+lifetimes remain distinguishable even if the OS reuses a PID. Each worker also
+samples whole-process memory with only the harness loaded, after dynamically
+importing the Peerbit and SharedFS product modules, after creating the peer, and
+after opening SharedFS. Aggregate reports retain those calibrations for their
+named baseline and final-reopen cohorts, while each cold-join sample retains its
+own calibration; intermediate restart generations are represented by their
+runtime samples rather than a calibration ledger. The retained calibrations
+include raw samples and signed adjacent stage deltas. Module loading, garbage
+collection, and allocator behavior can make categories move in either direction,
+so these stages are not a monotonic allocation ledger.
+
+In the original process-isolated soak, the final cohort is sampled immediately
+before and after the offline recursive audit, after two explicit GC requests
+separated by event-loop turns, after SharedFS close, after Peerbit stop, and
+once more after two stopped-process GC requests. The long-churn storage report
+keeps six named phases: baseline while open, online-final while open, after the
+confirmed clean close, reopened before the offline audit, reopened after the
+audit, and after the reopened cohort's confirmed clean close. Open snapshots
+come from their identified workers. Closed snapshots are scanned by the parent
+only after each child has reported a graceful exit, so buffered close work is
+not mislabeled as open-state growth. The workers run with `--expose-gc`; these
+samples diagnose collectible JavaScript reachability and resource shutdown,
+not a memory budget or proof that finalizers, native resources, or allocator
+arenas were released, and no test asserts that collection lowers a category.
 RSS can remain at an allocator or native high-water mark. `maxRSS`, CPU, and
 filesystem counters are cumulative for one OS-process lifetime and reset when a
 replacement generation starts. A fleet `maxRSS` aggregate is therefore a sum
