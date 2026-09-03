@@ -328,45 +328,139 @@ describe("shared fs multi-peer", () => {
         }
     );
 
-    it(
-        "converges concurrent same-name directory creates on every peer",
-        { retry: 1 },
-        async () => {
-            const network = await createNetwork(5);
-            const handles = await openAll(network);
-            const [, b, c] = handles;
-
-            await Promise.all([b.mkdir("/shared"), c.mkdir("/shared")]);
-            // Each creator writes a child under the path it just created.
-            await Promise.all([
-                b.writeFile("/shared/from-b.txt", "b"),
-                c.writeFile("/shared/from-c.txt", "c"),
-            ]);
-
-            await waitUntil(async () => {
-                // Namespace agreement first so a failure is attributable to
-                // divergence, not to a missing API. Children created under a
-                // losing duplicate node may be unreachable — a known v0
-                // model limitation — but reachability must be identical on
-                // every peer, and at least one child must be visible.
-                const referenceSnapshot = await snapshot(handles[0], "/shared");
-                expect(referenceSnapshot.names.length).toBeGreaterThanOrEqual(
-                    1
-                );
-                for (const handle of handles.slice(1)) {
-                    expect(await snapshot(handle, "/shared")).toEqual(
-                        referenceSnapshot
-                    );
-                }
-                const reference = await handles[0].stat("/shared");
-                expect(reference?.kind).toBe("directory");
-                for (const handle of handles.slice(1)) {
-                    const stat = await handle.stat("/shared");
-                    expect(stat?.nodeId).toBe(reference!.nodeId);
-                }
+    it("explicitly merges directory trees created across a real partition", async () => {
+        let partitioned = false;
+        const network: Peerbit[] = [];
+        for (let index = 0; index < 3; index++) {
+            const peer = await Peerbit.create({
+                libp2p: {
+                    connectionGater: {
+                        denyDialPeer: () => partitioned,
+                        denyDialMultiaddr: () => partitioned,
+                        denyInboundConnection: () => partitioned,
+                        denyOutboundConnection: () => partitioned,
+                        denyInboundEncryptedConnection: () => partitioned,
+                        denyOutboundEncryptedConnection: () => partitioned,
+                        denyInboundUpgradedConnection: () => partitioned,
+                        denyOutboundUpgradedConnection: () => partitioned,
+                    },
+                },
             });
+            peers.push(peer);
+            network.push(peer);
         }
-    );
+        await network[0].dial(network[1]);
+        await network[0].dial(network[2]);
+        await network[1].dial(network[2]);
+        const handles = await openAll(network);
+        const [observer, b, c] = handles;
+
+        partitioned = true;
+        await Promise.all([
+            network[0].hangUp(network[1].identity.publicKey),
+            network[0].hangUp(network[2].identity.publicKey),
+            network[1].hangUp(network[2].identity.publicKey),
+        ]);
+        await waitUntil(() => {
+            for (const peer of network) {
+                expect(peer.libp2p.getConnections()).toHaveLength(0);
+            }
+        });
+
+        await b.writeBatch([{ path: "/shared/from-b.txt", content: "b" }]);
+        const bDirectory = (await b.stat("/shared"))!;
+        const bFile = (await b.stat("/shared/from-b.txt"))!;
+        await c.writeBatch([
+            { path: "/shared/nested/from-c.txt", content: "c" },
+        ]);
+        const cDirectory = (await c.stat("/shared"))!;
+        const cNested = (await c.stat("/shared/nested"))!;
+        const cFile = (await c.stat("/shared/nested/from-c.txt"))!;
+        expect(bDirectory.nodeId).not.toBe(cDirectory.nodeId);
+
+        partitioned = false;
+        await network[0].dial(network[1]);
+        await network[0].dial(network[2]);
+        await network[1].dial(network[2]);
+
+        // Do not run an observed-view repair until the operator's peer
+        // has received every known subtree node. Anything that arrives
+        // later remains recoverable, but is intentionally outside this
+        // non-transactional merge.
+        const observerProgram = observer.program as any;
+        await waitUntil(async () => {
+            for (const entry of [
+                bDirectory,
+                bFile,
+                cDirectory,
+                cNested,
+                cFile,
+            ]) {
+                expect(
+                    await observerProgram.namingStateForNode(entry.nodeId)
+                ).toBeDefined();
+            }
+            expect(
+                (await observerProgram.headsForNode(bFile.nodeId)).length
+            ).toBeGreaterThan(0);
+            expect(
+                (await observerProgram.headsForNode(cFile.nodeId)).length
+            ).toBeGreaterThan(0);
+        });
+
+        let duplicate:
+            | Awaited<ReturnType<SharedFsHandle["namingConflicts"]>>[number]
+            | undefined;
+        await waitUntil(async () => {
+            duplicate = (await observer.namingConflicts()).find(
+                (conflict) =>
+                    conflict.type === "duplicate-name" &&
+                    conflict.path === "/shared"
+            );
+            expect(duplicate?.shadowedNodeIds).toHaveLength(1);
+            expect(
+                new Set([duplicate!.nodeId, ...duplicate!.shadowedNodeIds!])
+            ).toEqual(new Set([bDirectory.nodeId, cDirectory.nodeId]));
+        });
+        const sourceNodeId = duplicate!.shadowedNodeIds![0];
+        const expectedConflicts = (await observer.namingConflicts()).filter(
+            (conflict) =>
+                conflict.nodeId === sourceNodeId ||
+                conflict.shadowedNodeIds?.includes(sourceNodeId)
+        );
+        await observer.resolveNamingConflict(
+            sourceNodeId,
+            { type: "merge-directory" },
+            { expectedConflicts }
+        );
+
+        await waitUntil(async () => {
+            for (const handle of handles) {
+                expect(
+                    decode(await handle.readFile("/shared/from-b.txt"))
+                ).toBe("b");
+                expect(
+                    decode(await handle.readFile("/shared/nested/from-c.txt"))
+                ).toBe("c");
+                expect((await handle.stat("/shared/from-b.txt"))?.nodeId).toBe(
+                    bFile.nodeId
+                );
+                expect((await handle.stat("/shared/nested"))?.nodeId).toBe(
+                    cNested.nodeId
+                );
+                expect(
+                    (await handle.stat("/shared/nested/from-c.txt"))?.nodeId
+                ).toBe(cFile.nodeId);
+                expect(
+                    (await handle.namingConflicts()).find(
+                        (conflict) =>
+                            conflict.type === "duplicate-name" &&
+                            conflict.path === "/shared"
+                    )
+                ).toBeUndefined();
+            }
+        });
+    });
 
     it(
         "converges delete racing a concurrent write to one agreed, legitimate outcome",

@@ -128,6 +128,58 @@ const seedConflicts = async () => {
     }
 };
 
+const seedDirectoryConflict = async () => {
+    const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), "peerbit-shared-fs-cli-directory-merge-")
+    );
+    const peer = await Peerbit.create({ directory });
+    let seeded = false;
+    try {
+        const shared = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "cli-directory-merge-seed",
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+
+        await shared.mkdir("/shared");
+        const target = (await shared.stat("/shared"))!;
+        await shared.writeFile("/shared/from-target.txt", "target");
+        await shared.rename("/shared", "/held");
+        await shared.mkdir("/shared");
+        const source = (await shared.stat("/shared"))!;
+        await shared.writeFile("/shared/from-source.txt", "source");
+        const sourceFile = (await shared.stat("/shared/from-source.txt"))!;
+        await shared.resolveNamingConflict(target.nodeId, {
+            type: "move",
+            to: "/shared",
+        });
+        const duplicate = (await shared.namingConflicts()).find(
+            (conflict) =>
+                conflict.type === "duplicate-name" &&
+                conflict.shadowedNodeIds?.includes(source.nodeId)
+        );
+        if (!duplicate) {
+            throw new Error("failed to seed directory duplicate conflict");
+        }
+
+        seeded = true;
+        return {
+            directory,
+            address: shared.address,
+            sourceNodeId: source.nodeId,
+            targetNodeId: target.nodeId,
+            sourceFileNodeId: sourceFile.nodeId,
+        };
+    } finally {
+        await stopPeer(peer);
+        if (!seeded) {
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    }
+};
+
 const mockCliBootstrap = () => {
     const createPeerbit = Peerbit.create.bind(Peerbit);
     return vi.spyOn(Peerbit, "create").mockImplementation(async (options) => {
@@ -493,6 +545,20 @@ describe("peerbit-fs cli", () => {
             ).rejects.toThrow(
                 "resolve-naming-conflict --to is only valid with the move action"
             );
+            await expect(
+                runCli([
+                    "resolve-naming-conflict",
+                    "zb2rh-not-opened",
+                    "dir:missing",
+                    "merge-directory",
+                    "--to",
+                    "/elsewhere",
+                    "--directory",
+                    "",
+                ])
+            ).rejects.toThrow(
+                "resolve-naming-conflict --to is only valid with the move action"
+            );
             expect(createSpy).not.toHaveBeenCalled();
         } finally {
             createSpy.mockRestore();
@@ -850,6 +916,81 @@ describe("peerbit-fs cli", () => {
                     decode(await reopened.readFile("/duplicate-restored.txt")),
                 ])
             ).toEqual(new Set(["first life", "second life"]));
+        } finally {
+            createSpy?.mockRestore();
+            log.mockRestore();
+            if (reopenedPeer) {
+                await stopPeer(reopenedPeer);
+            }
+            await fs.rm(fixture.directory, { recursive: true, force: true });
+        }
+    });
+
+    it("merges a shadowed directory through the CLI and reports the repair", async () => {
+        const fixture = await seedDirectoryConflict();
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        let createSpy: ReturnType<typeof mockCliBootstrap> | undefined;
+        let reopenedPeer: Peerbit | undefined;
+        try {
+            createSpy = mockCliBootstrap();
+            await runCli([
+                "resolve-naming-conflict",
+                fixture.address,
+                fixture.sourceNodeId,
+                "merge-directory",
+                "--json",
+                "--directory",
+                fixture.directory,
+            ]);
+            createSpy.mockRestore();
+            createSpy = undefined;
+
+            expect(log).toHaveBeenCalledTimes(1);
+            const result = JSON.parse(String(log.mock.calls[0]?.[0]));
+            expect(result).toMatchObject({
+                address: fixture.address,
+                nodeId: fixture.sourceNodeId,
+                action: { type: "merge-directory" },
+                observedConflicts: [
+                    expect.objectContaining({ type: "duplicate-name" }),
+                ],
+                remainingConflicts: [],
+                resolution: {
+                    type: "directory-merged",
+                    sourceNodeId: fixture.sourceNodeId,
+                    targetNodeId: fixture.targetNodeId,
+                    movedNodeIds: [fixture.sourceFileNodeId],
+                    eventIds: expect.any(Array),
+                },
+            });
+
+            reopenedPeer = await Peerbit.create({
+                directory: fixture.directory,
+            });
+            const reopened = await openSharedFs({
+                peerbit: reopenedPeer,
+                address: fixture.address,
+                machineLabel: "cli-directory-merge-verify",
+                replicate: { factor: 1 },
+                bootstrap: false,
+                gc: false,
+            });
+            expect(
+                decode(await reopened.readFile("/shared/from-target.txt"))
+            ).toBe("target");
+            expect(
+                decode(await reopened.readFile("/shared/from-source.txt"))
+            ).toBe("source");
+            expect(
+                (await reopened.stat("/shared/from-source.txt"))?.nodeId
+            ).toBe(fixture.sourceFileNodeId);
+            expect(
+                (await reopened.namingConflicts()).find(
+                    (conflict) =>
+                        conflict.type === "duplicate-name" &&
+                        conflict.path === "/shared"
+                )
+            ).toBeUndefined();
         } finally {
             createSpy?.mockRestore();
             log.mockRestore();

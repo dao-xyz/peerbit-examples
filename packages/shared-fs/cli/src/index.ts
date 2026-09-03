@@ -2,6 +2,7 @@ import {
     NativeMountUnavailableError,
     Peerbit,
     type BootstrapStatus,
+    type MergeDirectoryResolutionResult,
     type PrepareForDisposalResult,
     type ResolveNamingAction,
     type SharedFsConflict,
@@ -383,7 +384,12 @@ const namingActionFromCli = (
             "resolve-naming-conflict --to is only valid with the move action"
         );
     }
-    if (action === "keep" || action === "restore" || action === "delete") {
+    if (
+        action === "keep" ||
+        action === "restore" ||
+        action === "delete" ||
+        action === "merge-directory"
+    ) {
         return { type: action };
     }
     throw new Error(`Unknown naming conflict action: ${action}`);
@@ -1378,7 +1384,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
         )
         .command(
             "resolve-naming-conflict <address> <node-id> <action>",
-            "apply an explicit keep, restore, delete, or move action to a visible naming conflict",
+            "apply an explicit keep, restore, delete, move, or merge-directory action to a visible naming conflict",
             (command) =>
                 command
                     .positional("address", {
@@ -1391,7 +1397,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     })
                     .positional("action", {
                         type: "string",
-                        choices: ["keep", "restore", "delete", "move"],
+                        choices: [
+                            "keep",
+                            "restore",
+                            "delete",
+                            "move",
+                            "merge-directory",
+                        ],
                         demandOption: true,
                     })
                     .option("to", {
@@ -1446,9 +1458,17 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             )
                         ),
                     ].sort();
-                    await fsHandle.resolveNamingConflict(argv.nodeId, action, {
-                        expectedConflicts: observedConflicts,
-                    });
+                    const resolution = await fsHandle.resolveNamingConflict(
+                        argv.nodeId,
+                        action,
+                        {
+                            expectedConflicts: observedConflicts,
+                        }
+                    );
+                    const mergeResolution =
+                        action.type === "merge-directory"
+                            ? (resolution as MergeDirectoryResolutionResult)
+                            : undefined;
                     const remainingConflicts = conflictsInvolvingNode(
                         await fsHandle.namingConflicts(),
                         argv.nodeId
@@ -1464,6 +1484,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         remainingConflicts: remainingConflicts.map(
                             namingConflictForJson
                         ),
+                        ...(mergeResolution
+                            ? { resolution: mergeResolution }
+                            : {}),
                     };
                     if (argv.json) {
                         printJson(result);
@@ -1476,6 +1499,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     );
                     if (action.type === "move") {
                         console.log(`destination: ${action.to}`);
+                    }
+                    if (mergeResolution?.type === "directory-merged") {
+                        console.log(
+                            `reparented direct children: ${mergeResolution.movedNodeIds.length}`
+                        );
                     }
                     console.log(
                         `remaining visible conflicts involving node: ${remainingConflicts.length}`
