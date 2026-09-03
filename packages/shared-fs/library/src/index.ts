@@ -2031,7 +2031,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessStartedAtMs = 0;
     private writeReadinessSettleMs = WRITE_READINESS_SETTLE_MS;
     private writeReadinessQuietChecks = 0;
-    private writeReadinessTimer: ReturnType<typeof setInterval> | undefined;
+    private writeReadinessTimer: ReturnType<typeof setTimeout> | undefined;
     private writeReadinessCheckRunning = false;
     /** Owns the async readiness probe so an older finally cannot unlock a reopen. */
     private writeReadinessCheckRunningRequestGeneration: number | undefined;
@@ -7482,7 +7482,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.writeReadinessSource = "remote-settled";
             this.emitWriteReadyOnce("remote-settled");
             if (this.writeReadinessTimer) {
-                clearInterval(this.writeReadinessTimer);
+                clearTimeout(this.writeReadinessTimer);
                 this.writeReadinessTimer = undefined;
             }
             this.events.dispatchEvent(
@@ -7517,19 +7517,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             Math.min(1_000, Math.floor(this.writeReadinessSettleMs / 2))
         );
         const lifecycleRequestGeneration = this.lifecycleRequestGeneration;
-        const active = () =>
+        const lifecycleActive = () =>
             generation === this.openGeneration &&
             lifecycleRequestGeneration === this.lifecycleRequestGeneration &&
-            this.writeReadinessTimer === timer &&
             !this.writeReadinessLifecycleBlocked &&
             this.writeReadinessRequired;
-        const check = async () => {
-            if (this.writeReadinessCheckRunning || !active()) {
+        const owns = (timer: ReturnType<typeof setTimeout>) =>
+            lifecycleActive() && this.writeReadinessTimer === timer;
+        const schedule = (delayMs: number) => {
+            if (!lifecycleActive()) {
+                return;
+            }
+            const timer = setTimeout(
+                () => void check(timer),
+                Math.max(0, Math.ceil(delayMs))
+            );
+            this.writeReadinessTimer = timer;
+            (timer as any)?.unref?.();
+        };
+        const check = async (timer: ReturnType<typeof setTimeout>) => {
+            if (!owns(timer)) {
+                return;
+            }
+            if (this.writeReadinessCheckRunning) {
+                // Recursive scheduling prevents overlap in the normal case.
+                // A lifecycle edge with an older async check can still leave
+                // the flag set briefly, so retry instead of stranding the
+                // current generation.
+                this.writeReadinessTimer = undefined;
+                schedule(WRITE_READINESS_MIN_CHECK_MS);
                 return;
             }
             this.writeReadinessCheckRunning = true;
             this.writeReadinessCheckRunningRequestGeneration =
                 lifecycleRequestGeneration;
+            let nextDelayMs = intervalMs;
             try {
                 const settledPhase =
                     this.bootstrapPhase === "off" ||
@@ -7540,17 +7562,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     !settledPhase ||
                     !this.writeReadinessRemoteEvidence
                 ) {
-                    if (active()) this.writeReadinessQuietChecks = 0;
+                    if (owns(timer)) this.writeReadinessQuietChecks = 0;
                     return;
                 }
                 const hasRemoteReplicator =
                     await this.hasConnectedRemoteReplicator();
                 if (
-                    !active() ||
+                    !owns(timer) ||
                     !hasRemoteReplicator ||
                     !this.synchronizerIdle()
                 ) {
-                    if (active()) this.writeReadinessQuietChecks = 0;
+                    if (owns(timer)) this.writeReadinessQuietChecks = 0;
                     return;
                 }
                 this.emitSynchronizerIdleOnce();
@@ -7558,20 +7580,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.writeReadinessStartedAtMs,
                     this.lastRemoteArrivalMs
                 );
-                if (this.clock() - quietSince < this.writeReadinessSettleMs) {
-                    if (active()) this.writeReadinessQuietChecks = 0;
+                const quietRemainingMs =
+                    this.writeReadinessSettleMs - (this.clock() - quietSince);
+                if (quietRemainingMs > 0) {
+                    if (owns(timer)) this.writeReadinessQuietChecks = 0;
+                    // Poll prerequisites normally, but once they are all
+                    // satisfied park directly on the quiet deadline. The old
+                    // interval quantized the first qualified check by up to a
+                    // full second on the production five-second window.
+                    nextDelayMs = Math.max(
+                        WRITE_READINESS_MIN_CHECK_MS,
+                        quietRemainingMs
+                    );
                     return;
                 }
-                if (!active()) return;
+                if (!owns(timer)) return;
                 this.writeReadinessQuietChecks++;
                 if (this.writeReadinessQuietChecks >= 2) {
                     await this.markWriteReady(generation);
+                } else {
+                    // Re-evaluate every prerequisite independently once more
+                    // after the minimum scheduler gap. The five-second quiet
+                    // window has already elapsed; another full polling period
+                    // added latency without strengthening that window.
+                    nextDelayMs = WRITE_READINESS_MIN_CHECK_MS;
                 }
             } catch {
                 // A durable marker failure must leave the gate and Guard D
                 // closed. Keep the timer alive and retry from a fresh pair of
                 // quiet checks instead of leaking an unhandled rejection.
-                if (active()) this.writeReadinessQuietChecks = 0;
+                if (owns(timer)) this.writeReadinessQuietChecks = 0;
             } finally {
                 if (
                     this.writeReadinessCheckRunningRequestGeneration ===
@@ -7581,21 +7619,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.writeReadinessCheckRunningRequestGeneration =
                         undefined;
                 }
+                if (owns(timer)) {
+                    schedule(nextDelayMs);
+                }
             }
         };
-        const timer = setInterval(() => {
-            if (!active()) {
-                clearInterval(timer);
-                if (this.writeReadinessTimer === timer) {
-                    this.writeReadinessTimer = undefined;
-                }
-                return;
-            }
-            void check();
-        }, intervalMs);
-        this.writeReadinessTimer = timer;
-        (timer as any)?.unref?.();
-        void check();
+        schedule(0);
     }
 
     private clearBootstrapTimers() {
@@ -7618,7 +7647,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.quiescenceTimer = undefined;
         }
         if (this.writeReadinessTimer) {
-            clearInterval(this.writeReadinessTimer);
+            clearTimeout(this.writeReadinessTimer);
             this.writeReadinessTimer = undefined;
         }
         if (this.snapshotTimer) {
@@ -9409,7 +9438,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.setGuardArmed(true);
             this.emitWriteReadyOnce("legacy-operator-assertion");
             if (this.writeReadinessTimer) {
-                clearInterval(this.writeReadinessTimer);
+                clearTimeout(this.writeReadinessTimer);
                 this.writeReadinessTimer = undefined;
             }
             this.events.dispatchEvent(
