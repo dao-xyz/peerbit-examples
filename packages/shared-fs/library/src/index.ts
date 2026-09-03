@@ -1977,11 +1977,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private namingRowCache = new Map<string, Map<string, NamingLike>>();
     /**
      * Per-node change counters (bumped for added AND removed, whether or
-     * not a bucket exists) plus a global epoch bumped on evictions: a cache
-     * fill only installs its snapshot when nothing changed for that node
-     * during the fill's awaits — otherwise the node stays cold and the next
-     * access re-queries. Closes the fill/event race that would otherwise
-     * leave a warm bucket stale forever.
+     * not a bucket exists) plus a monotonic global epoch bumped on opens,
+     * bulk invalidation, and evictions: a cache fill only installs its
+     * snapshot when nothing changed for that node during the fill's awaits —
+     * otherwise the node stays cold and the next access re-queries. Closes
+     * fill/event and cross-lifecycle races that would otherwise leave a warm
+     * bucket stale forever.
      */
     private cacheEpochs = new Map<string, number>();
     private cacheGlobalEpoch = 0;
@@ -2522,7 +2523,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.versionRowCache = new Map();
         this.namingRowCache = new Map();
         this.cacheEpochs = new Map();
-        this.cacheGlobalEpoch = 0;
+        // Never reuse a generation on the same program instance. Public
+        // reads are not lifecycle-owned and a row query that already
+        // returned can finish after close -> reopen; a reset to zero would
+        // let that old fill alias a fresh zero epoch and warm the new caches
+        // with its previous-session snapshot.
+        this.cacheGlobalEpoch = (this.cacheGlobalEpoch ?? 0) + 1;
         this.slotSweepCache = new Map();
         this.writeBatchChain = Promise.resolve();
         this.mountNamespaceMutationChain = Promise.resolve();

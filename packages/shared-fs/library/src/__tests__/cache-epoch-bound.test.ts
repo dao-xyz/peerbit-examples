@@ -74,6 +74,62 @@ describe("shared fs cache epoch bounds", () => {
         expect(decode(await fs.readFile("/f.txt"))).toBe("v2");
     });
 
+    it("rejects an old public-list fill that completes after close and reopen", async () => {
+        await fs.mkdir("/dir");
+        await fs.writeFile("/dir/old.txt", "old");
+
+        const reopen = async (machineLabel: string) => {
+            const reopened = await (peer as any).open(program, {
+                existing: "reuse",
+                args: {
+                    machineLabel,
+                    allowPartialWrites: true,
+                    addressOpen: true,
+                    bootstrap: false,
+                    gc: false,
+                },
+            });
+            expect(reopened).toBe(program);
+        };
+
+        // Reopen once so persisted rows begin with missing per-node epochs,
+        // exactly as they do when entries.open ingests them before the cache
+        // listener is registered. Warm only path resolution; the directory's
+        // child sweep remains cold for the parked public list below.
+        await program.close();
+        await reopen("epoch-bound-before-park");
+        const directory = await fs.stat("/dir");
+        expect(directory?.kind).toBe("directory");
+        const parentId = directory!.nodeId;
+        expect(program.slotSweepCache.has(parentId)).toBe(false);
+        expect(program.cacheEpochs.get(`slot:${parentId}`)).toBeUndefined();
+
+        const capturedGeneration = program.cacheGlobalEpoch;
+        const { release, parkedReached } = parkNextRowQuery(program);
+        const staleList = fs.list("/dir");
+        await parkedReached;
+
+        // The parked sweep has only old.txt. Publish another child, then
+        // replace every cache during a real same-instance reopen before the
+        // old query is allowed to finish.
+        await fs.writeFile("/dir/new.txt", "new");
+        await program.close();
+        await reopen("epoch-bound-after-park");
+        expect(program.cacheGlobalEpoch).toBeGreaterThan(capturedGeneration);
+        expect(program.slotSweepCache.has(parentId)).toBe(false);
+
+        release();
+        expect((await staleList).map((entry) => entry.name)).toEqual([
+            "old.txt",
+        ]);
+        // The old fill may return its snapshot to its original caller, but
+        // it must not populate the freshly opened program's sweep cache.
+        expect(program.slotSweepCache.has(parentId)).toBe(false);
+        expect((await fs.list("/dir")).map((entry) => entry.name).sort()).toEqual(
+            ["new.txt", "old.txt"]
+        );
+    });
+
     it("keeps epoch metadata bounded under high-cardinality churn", () => {
         program.constructor.CACHE_NODE_LIMIT = originalCacheNodeLimit;
         const generationBefore = program.cacheGlobalEpoch;
