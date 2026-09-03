@@ -125,9 +125,9 @@ describe("shared fs cache epoch bounds", () => {
         // The old fill may return its snapshot to its original caller, but
         // it must not populate the freshly opened program's sweep cache.
         expect(program.slotSweepCache.has(parentId)).toBe(false);
-        expect((await fs.list("/dir")).map((entry) => entry.name).sort()).toEqual(
-            ["new.txt", "old.txt"]
-        );
+        expect(
+            (await fs.list("/dir")).map((entry) => entry.name).sort()
+        ).toEqual(["new.txt", "old.txt"]);
     });
 
     it("keeps epoch metadata bounded under high-cardinality churn", () => {
