@@ -3619,10 +3619,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     private bumpEpoch(nodeId: string) {
         this.cacheEpochs.set(nodeId, (this.cacheEpochs.get(nodeId) ?? 0) + 1);
+        this.boundCacheEpochs();
     }
 
     private epochOf(nodeId: string) {
         return `${this.cacheGlobalEpoch}:${this.cacheEpochs.get(nodeId) ?? 0}`;
+    }
+
+    /**
+     * Epoch entries exist even for cold nodes, so replicated high-cardinality
+     * churn must bound them independently of the row caches. Advance the
+     * global generation before deleting any per-node counter: otherwise a
+     * fill that captured local epoch zero could race an event whose newly
+     * created counter is pruned and mistake the reused zero for no change.
+     */
+    private boundCacheEpochs() {
+        if (this.cacheEpochs.size <= SharedFileSystem.CACHE_NODE_LIMIT) {
+            return;
+        }
+        this.cacheGlobalEpoch++;
+        const evict = Math.ceil(this.cacheEpochs.size / 10);
+        let count = 0;
+        for (const key of this.cacheEpochs.keys()) {
+            this.cacheEpochs.delete(key);
+            if (++count >= evict) {
+                break;
+            }
+        }
     }
 
     /** Evict the oldest ~10% (Map iteration order) instead of thrashing. */

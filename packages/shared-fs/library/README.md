@@ -85,7 +85,10 @@ CRDT limitation above.
 Metadata operations (`stat`, `list`, `readFile`, path resolution) are served by
 indexed queries against the local document index — cost scales with the result,
 not with the total store size, and file content chunks are only loaded by
-reads. Every syncing peer keeps a full replica by default
+reads. The warm row-bucket maps and per-key change-counter map each use the
+same 50,000-entry cap; oldest entries are evicted in batches, and epoch
+eviction invalidates any in-flight fill before its counter can be reused.
+Every syncing peer keeps a full replica by default
 (`replicate: { factor: 1 }`); pass `replicate: false` for a peer that should
 not store content — reads then fall back to bounded remote chunk fetches
 (`remoteChunkFetch`), and locally authored entries are always kept.
