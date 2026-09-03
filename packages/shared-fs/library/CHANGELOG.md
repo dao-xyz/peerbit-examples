@@ -1,5 +1,15 @@
 # @peerbit/shared-fs
 
+## 0.13.12
+
+### Patch Changes
+
+- 4f63d3a: Schedule joined-replica write-readiness checks directly on the required quiet
+  deadline, then revalidate after the minimum independent-check gap. This removes
+  up to two seconds of timer quantization without shortening the five-second
+  settled-view window or weakening remote-replica, synchronizer-idle, durable
+  marker, cancellation, and lifecycle checks.
+
 ## 0.13.11
 
 ### Patch Changes
