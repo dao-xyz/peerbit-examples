@@ -7,6 +7,7 @@ import {
     DEFAULT_FILE_CHUNK_SIZE,
     FileVersion,
     NamingEvent,
+    ROOT_NODE_ID,
     SHARED_FS_MOUNT_READ_SEMANTICS,
     SharedFsExpectedNamingConflictMismatchError,
     encodePublicSignKey,
@@ -506,6 +507,436 @@ describe("shared fs library", () => {
             decode(await fs.readFile("/note-restored.txt")),
         ]);
         expect(contents).toEqual(new Set(["first life", "second life"]));
+    });
+
+    it("merges a shadowed directory while preserving child identities and collisions", async () => {
+        await fs.mkdir("/shared");
+        const targetDirectory = (await fs.stat("/shared"))!;
+        await fs.writeFile("/shared/from-target.txt", "target");
+        await fs.writeFile("/shared/collision.txt", "target collision");
+        const targetCollision = (await fs.stat("/shared/collision.txt"))!;
+        await fs.rename("/shared", "/held");
+
+        await fs.mkdir("/shared");
+        const sourceDirectory = (await fs.stat("/shared"))!;
+        await fs.writeFile("/shared/from-source.txt", "source");
+        const sourceFile = (await fs.stat("/shared/from-source.txt"))!;
+        await fs.writeFile("/shared/collision.txt", "source collision");
+        const sourceCollision = (await fs.stat("/shared/collision.txt"))!;
+        await fs.mkdir("/shared/source-tree");
+        const sourceTree = (await fs.stat("/shared/source-tree"))!;
+        await fs.writeFile("/shared/source-tree/nested.txt", "nested");
+        const nestedFile = (await fs.stat("/shared/source-tree/nested.txt"))!;
+
+        // Reassert the older directory into the occupied slot. Its greater
+        // causal depth makes it the visible claimant and leaves the newer
+        // directory (with its own subtree) shadowed.
+        await fs.resolveNamingConflict(targetDirectory.nodeId, {
+            type: "move",
+            to: "/shared",
+        });
+        const duplicate = (await fs.namingConflicts()).find(
+            (conflict) =>
+                conflict.type === "duplicate-name" &&
+                conflict.path === "/shared"
+        )!;
+        expect(duplicate.nodeId).toBe(targetDirectory.nodeId);
+        expect(duplicate.shadowedNodeIds).toEqual([sourceDirectory.nodeId]);
+        const expectedConflicts = (await fs.namingConflicts()).filter(
+            (conflict) =>
+                conflict.nodeId === sourceDirectory.nodeId ||
+                conflict.shadowedNodeIds?.includes(sourceDirectory.nodeId)
+        );
+
+        await expect(
+            fs.resolveNamingConflict(sourceDirectory.nodeId, {
+                type: "merge-directory",
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+
+        const resolution = await fs.resolveNamingConflict(
+            sourceDirectory.nodeId,
+            { type: "merge-directory" },
+            { expectedConflicts }
+        );
+        if (!resolution) {
+            throw new Error("directory merge did not return its repair plan");
+        }
+        expect(resolution).toMatchObject({
+            type: "directory-merged",
+            sourceNodeId: sourceDirectory.nodeId,
+            targetNodeId: targetDirectory.nodeId,
+        });
+        expect(new Set(resolution.movedNodeIds)).toEqual(
+            new Set([
+                sourceFile.nodeId,
+                sourceCollision.nodeId,
+                sourceTree.nodeId,
+            ])
+        );
+        expect(resolution.movedNodeIds).not.toContain(nestedFile.nodeId);
+        expect(resolution.eventIds).toHaveLength(
+            resolution.movedNodeIds.length + 1
+        );
+
+        expect((await fs.stat("/shared"))?.nodeId).toBe(targetDirectory.nodeId);
+        expect(decode(await fs.readFile("/shared/from-target.txt"))).toBe(
+            "target"
+        );
+        expect(decode(await fs.readFile("/shared/from-source.txt"))).toBe(
+            "source"
+        );
+        expect((await fs.stat("/shared/from-source.txt"))?.nodeId).toBe(
+            sourceFile.nodeId
+        );
+        expect((await fs.stat("/shared/source-tree"))?.nodeId).toBe(
+            sourceTree.nodeId
+        );
+        expect((await fs.stat("/shared/source-tree/nested.txt"))?.nodeId).toBe(
+            nestedFile.nodeId
+        );
+        expect(
+            decode(await fs.readFile("/shared/source-tree/nested.txt"))
+        ).toBe("nested");
+
+        const remaining = await fs.namingConflicts();
+        expect(
+            remaining.find(
+                (conflict) =>
+                    conflict.type === "duplicate-name" &&
+                    conflict.path === "/shared"
+            )
+        ).toBeUndefined();
+        const childCollision = remaining.find(
+            (conflict) =>
+                conflict.type === "duplicate-name" &&
+                conflict.path === "/shared/collision.txt"
+        )!;
+        expect(
+            new Set([
+                childCollision.nodeId,
+                ...(childCollision.shadowedNodeIds ?? []),
+            ])
+        ).toEqual(new Set([targetCollision.nodeId, sourceCollision.nodeId]));
+
+        const lastEvent = await fs.program.entries.index.get(
+            resolution.eventIds.at(-1)!,
+            { local: true, remote: false, resolve: true }
+        );
+        expect(lastEvent).toBeInstanceOf(NamingEvent);
+        expect(lastEvent).toMatchObject({
+            nodeId: sourceDirectory.nodeId,
+            deleted: true,
+        });
+
+        // A write not present in the operator's final local view is not
+        // swallowed by the source tombstone. When that ordinary event later
+        // arrives, the existing conflict surface exposes it as unreachable
+        // so an operator can move it into the merged directory explicitly.
+        const lateChild = new NamingEvent({
+            id: "naming:late-directory-merge-child",
+            nodeId: "dir:late-directory-merge-child",
+            parentId: sourceDirectory.nodeId,
+            name: "late-child",
+            causalDepth: 1n,
+            parentNamingIds: [],
+            createdAt: BigInt(Date.now()),
+            authorKey: encodePublicSignKey(peer.identity.publicKey),
+            machineLabel: "late-remote-writer",
+        });
+        await fs.program.entries.put(lateChild, { unique: true });
+        const unreachable = (await fs.namingConflicts()).find(
+            (conflict) =>
+                conflict.type === "unreachable" &&
+                conflict.nodeId === lateChild.nodeId
+        )!;
+        expect(unreachable).toBeDefined();
+        await fs.resolveNamingConflict(
+            lateChild.nodeId,
+            { type: "move", to: "/shared/late-child" },
+            { expectedConflicts: [unreachable] }
+        );
+        expect((await fs.stat("/shared/late-child"))?.nodeId).toBe(
+            lateChild.nodeId
+        );
+    });
+
+    it("rejects invalid file-directory and multi-head directory merges", async () => {
+        await fs.writeFile("/mixed", "file");
+        const file = (await fs.stat("/mixed"))!;
+        await fs.rename("/mixed", "/held-file");
+        await fs.mkdir("/mixed");
+        const directory = (await fs.stat("/mixed"))!;
+        await fs.resolveNamingConflict(file.nodeId, {
+            type: "move",
+            to: "/mixed",
+        });
+        let expectedConflicts = (await fs.namingConflicts()).filter(
+            (conflict) =>
+                conflict.nodeId === directory.nodeId ||
+                conflict.shadowedNodeIds?.includes(directory.nodeId)
+        );
+        await expect(
+            fs.resolveNamingConflict(
+                directory.nodeId,
+                { type: "merge-directory" },
+                { expectedConflicts }
+            )
+        ).rejects.toMatchObject({ code: "ENOTDIR" });
+
+        await fs.mkdir("/directories");
+        const target = (await fs.stat("/directories"))!;
+        await fs.rename("/directories", "/held-directory");
+        await fs.mkdir("/directories");
+        const source = (await fs.stat("/directories"))!;
+        await fs.resolveNamingConflict(target.nodeId, {
+            type: "move",
+            to: "/directories",
+        });
+
+        const sourceState = await (fs.program as any).namingStateForNode(
+            source.nodeId
+        );
+        const base = sourceState.heads[0] as NamingEvent;
+        const fork = new NamingEvent({
+            id: "naming:~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~merge-fork",
+            nodeId: source.nodeId,
+            parentId: base.parentId,
+            name: "directory-fork",
+            causalDepth: base.causalDepth,
+            parentNamingIds: base.parentNamingIds,
+            createdAt: base.createdAt + 1n,
+            authorKey: encodePublicSignKey(peer.identity.publicKey),
+            machineLabel: "test-machine",
+        });
+        await fs.program.entries.put(fork, { unique: true });
+        expectedConflicts = (await fs.namingConflicts()).filter(
+            (conflict) =>
+                conflict.nodeId === source.nodeId ||
+                conflict.shadowedNodeIds?.includes(source.nodeId)
+        );
+        expect(
+            expectedConflicts.some((conflict) => conflict.type === "multi-head")
+        ).toBe(true);
+        await expect(
+            fs.resolveNamingConflict(
+                source.nodeId,
+                { type: "merge-directory" },
+                { expectedConflicts }
+            )
+        ).rejects.toMatchObject({ code: "EINVAL" });
+    });
+
+    it("publishes nothing when a source child has independent naming heads", async () => {
+        await fs.mkdir("/shared");
+        const target = (await fs.stat("/shared"))!;
+        await fs.rename("/shared", "/held");
+        await fs.mkdir("/shared");
+        const source = (await fs.stat("/shared"))!;
+        await fs.mkdir("/shared/stable-child");
+        const stableChild = (await fs.stat("/shared/stable-child"))!;
+        await fs.mkdir("/shared/racing-child");
+        const racingChild = (await fs.stat("/shared/racing-child"))!;
+        await fs.resolveNamingConflict(target.nodeId, {
+            type: "move",
+            to: "/shared",
+        });
+
+        const racingState = await (fs.program as any).namingStateForNode(
+            racingChild.nodeId
+        );
+        const base = racingState.heads[0] as NamingEvent;
+        await fs.program.entries.put(
+            new NamingEvent({
+                id: "naming:~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~child-fork",
+                nodeId: racingChild.nodeId,
+                parentId: ROOT_NODE_ID,
+                name: "racing-child-moved",
+                causalDepth: base.causalDepth + 1n,
+                parentNamingIds: base.parentNamingIds,
+                createdAt: base.createdAt + 1n,
+                authorKey: encodePublicSignKey(peer.identity.publicKey),
+                machineLabel: "remote-child-writer",
+            }),
+            { unique: true }
+        );
+        const expectedConflicts = (await fs.namingConflicts()).filter(
+            (conflict) =>
+                conflict.nodeId === source.nodeId ||
+                conflict.shadowedNodeIds?.includes(source.nodeId)
+        );
+
+        await expect(
+            fs.resolveNamingConflict(
+                source.nodeId,
+                { type: "merge-directory" },
+                { expectedConflicts }
+            )
+        ).rejects.toMatchObject({ code: "EINVAL" });
+
+        const sourceState = await (fs.program as any).namingStateForNode(
+            source.nodeId
+        );
+        const stableState = await (fs.program as any).namingStateForNode(
+            stableChild.nodeId
+        );
+        const stillRacing = await (fs.program as any).namingStateForNode(
+            racingChild.nodeId
+        );
+        expect(sourceState.winner.deleted).toBe(false);
+        expect(stableState.winner.parentId).toBe(source.nodeId);
+        expect(stillRacing.heads).toHaveLength(2);
+        expect(stillRacing.winner.parentId).toBe(ROOT_NODE_ID);
+        expect(
+            (await fs.namingConflicts()).find(
+                (conflict) =>
+                    conflict.type === "duplicate-name" &&
+                    conflict.shadowedNodeIds?.includes(source.nodeId)
+            )
+        ).toBeDefined();
+    });
+
+    it("rejects a directory merge when another shadow claimant moves during planning", async () => {
+        await fs.mkdir("/shared");
+        const first = (await fs.stat("/shared"))!;
+        await fs.rename("/shared", "/held-first");
+        await fs.mkdir("/shared");
+        const second = (await fs.stat("/shared"))!;
+        await fs.rename("/shared", "/held-second");
+        await fs.mkdir("/shared");
+        const source = (await fs.stat("/shared"))!;
+        await fs.writeFile("/shared/kept.txt", "kept");
+        const sourceChild = (await fs.stat("/shared/kept.txt"))!;
+        await fs.resolveNamingConflict(first.nodeId, {
+            type: "move",
+            to: "/shared",
+        });
+        await fs.resolveNamingConflict(second.nodeId, {
+            type: "move",
+            to: "/shared",
+        });
+
+        const before = await fs.namingConflicts();
+        const duplicate = before.find(
+            (conflict) =>
+                conflict.type === "duplicate-name" &&
+                conflict.path === "/shared" &&
+                conflict.shadowedNodeIds?.includes(source.nodeId)
+        )!;
+        const movingShadow = duplicate.shadowedNodeIds!.find(
+            (nodeId) => nodeId !== source.nodeId
+        )!;
+        expect(movingShadow).toBeDefined();
+        const movingState = await (fs.program as any).namingStateForNode(
+            movingShadow
+        );
+        const movingHeads = movingState.heads as NamingEvent[];
+        const moveAway = new NamingEvent({
+            id: "naming:shadow-claimant-moved-during-merge",
+            nodeId: movingShadow,
+            parentId: movingState.winner.parentId,
+            name: "departed-shadow",
+            causalDepth:
+                1n +
+                movingHeads.reduce(
+                    (maximum, head) =>
+                        head.causalDepth > maximum ? head.causalDepth : maximum,
+                    0n
+                ),
+            parentNamingIds: movingHeads.map((head) => head.id),
+            createdAt: BigInt(Date.now()),
+            authorKey: encodePublicSignKey(peer.identity.publicKey),
+            machineLabel: "remote-shadow-writer",
+        });
+        const expectedConflicts = before.filter(
+            (conflict) =>
+                conflict.nodeId === source.nodeId ||
+                conflict.shadowedNodeIds?.includes(source.nodeId)
+        );
+
+        const index = fs.program.entries.index;
+        const originalIterate = index.iterate.bind(index);
+        let injected = false;
+        index.iterate = ((request: any, options: any) => {
+            const iterator = originalIterate(request, options);
+            const sourceChildScan = request?.query?.some(
+                (query: any) =>
+                    query?.value === source.nodeId &&
+                    Array.isArray(query?.key) &&
+                    query.key.includes("parentId")
+            );
+            if (sourceChildScan) {
+                const originalClose = iterator.close.bind(iterator);
+                iterator.close = async () => {
+                    await originalClose();
+                    if (!injected) {
+                        injected = true;
+                        await fs.program.entries.put(moveAway, {
+                            unique: true,
+                        });
+                    }
+                };
+            }
+            return iterator;
+        }) as typeof index.iterate;
+        try {
+            await expect(
+                fs.resolveNamingConflict(
+                    source.nodeId,
+                    { type: "merge-directory" },
+                    { expectedConflicts }
+                )
+            ).rejects.toMatchObject({
+                code: "EAGAIN",
+                retryable: true,
+                retrySafe: true,
+            });
+        } finally {
+            index.iterate = originalIterate;
+        }
+        expect(injected).toBe(true);
+        const sourceState = await (fs.program as any).namingStateForNode(
+            source.nodeId
+        );
+        const childState = await (fs.program as any).namingStateForNode(
+            sourceChild.nodeId
+        );
+        expect(sourceState.winner.deleted).toBe(false);
+        expect(childState.winner.parentId).toBe(source.nodeId);
+    });
+
+    it("bounds supplied naming-conflict strings before canonicalization", async () => {
+        const nodeId = "dir:bounded-conflict-input";
+        const conflict = {
+            type: "multi-head" as const,
+            nodeId,
+            path: "/" + "x".repeat(4_096),
+            eventIds: ["naming:bounded-conflict-input"],
+        };
+        await expect(
+            fs.resolveNamingConflict(
+                nodeId,
+                { type: "keep" },
+                { expectedConflicts: [conflict] }
+            )
+        ).rejects.toMatchObject({ code: "EINVAL" });
+
+        const aggregateConflict = {
+            ...conflict,
+            path: "x".repeat(4_096),
+        };
+        await expect(
+            fs.resolveNamingConflict(
+                nodeId,
+                { type: "keep" },
+                {
+                    expectedConflicts: Array.from(
+                        { length: 257 },
+                        () => aggregateConflict
+                    ),
+                }
+            )
+        ).rejects.toMatchObject({ code: "EINVAL" });
     });
 
     it("rejects a stale duplicate-name action when the other claimant moved", async () => {

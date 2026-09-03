@@ -23,7 +23,7 @@ peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs naming-conflicts <address>
 peerbit-fs resolve-conflict <address> <path> <version-id>
-peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move>
+peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move|merge-directory>
 peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
@@ -95,6 +95,8 @@ peerbit-fs resolve-naming-conflict \
   "$ADDRESS" <node-id> keep
 peerbit-fs resolve-naming-conflict \
   "$ADDRESS" <node-id> move --to /recovered/report.md
+peerbit-fs resolve-naming-conflict \
+  "$ADDRESS" <shadowed-directory-node-id> merge-directory --json
 ```
 
 The optional naming `--path` is an output filter; naming conflict discovery
@@ -104,7 +106,13 @@ Use the conflict type and listed ids deliberately:
 
 - `multi-head`: `keep` normally asserts the deterministic visible placement.
 - `duplicate-name`: move or delete one of the listed `shadowedNodeIds` (keeping
-  the visible winner alone normally leaves the collision unresolved).
+  the visible winner alone normally leaves the collision unresolved). When
+  both claimants are directories, `merge-directory` moves every observed live
+  direct child of one shadowed claimant into the visible directory without
+  changing node ids; nested subtrees follow their directory node, while child
+  name collisions remain explicit duplicate-name conflicts. Resolve any
+  source, target, or direct-child node with multiple naming heads first; the
+  merge fails before publishing a partial repair.
 - `delete-vs-edit`: `restore` recovers surviving edited content; `delete`
   acknowledges the currently visible content heads.
 - `unreachable`: move the node below a reachable directory, or delete it.
@@ -112,7 +120,8 @@ Use the conflict type and listed ids deliberately:
 `move` can itself target an occupied slot and create another duplicate-name
 conflict, so inspect again after every action. The resolution JSON returns the
 conflicts observed before the action and any still involving that node
-afterwards.
+afterwards. A successful directory merge additionally reports its source and
+target node ids, moved direct-child ids, and naming-event ids.
 
 Resolution commands reject `--no-replicate`, wait for write readiness, require
 the local identity to be trusted on authenticated filesystems, and reject ids
@@ -123,7 +132,15 @@ delete-vs-edit versions—and fails retryably if it changed before execution.
 Delete/restore also publish only against content heads snapshotted before that
 final check, so later content stays recoverable or concurrent. This is a local
 observed-view fence, not a global transaction: an event arriving after that read
-can reintroduce a conflict later.
+can reintroduce a conflict later. Directory merge is likewise bounded and
+observed-view-only: its child moves and source tombstone are submitted in one
+local batch with the tombstone last, but replicas may ingest those independent
+events in another order; there is no cross-node causal edge or remote
+atomicity. Reinspect before retrying after a reported publication error. A
+child first seen later beneath the deleted source is surfaced as an
+`unreachable` conflict and can be moved into the merged tree. The event format
+is unchanged, so older replicas converge during a rolling upgrade even though
+only upgraded libraries/CLIs expose this action.
 Content resolution reports both the heads
 observed during CLI preflight and the heads actually superseded so automation
 can detect its corresponding race. Neither command waits for persisted remote

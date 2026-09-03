@@ -207,6 +207,22 @@ const REMOTE_CHUNK_FETCH_TIMEOUT_MS = 10_000;
 const HEAD_QUERY_BATCH = 64;
 
 /**
+ * Directory conflict merge is an explicit repair operation, not an
+ * unbounded recursive rewrite. Moving a direct directory child carries its
+ * whole subtree, so these limits bound metadata fanout without bounding
+ * descendant count.
+ */
+const DIRECTORY_MERGE_MAX_CANDIDATE_NODES = 12_000;
+const DIRECTORY_MERGE_MAX_LIVE_CHILDREN = 4_096;
+const DIRECTORY_MERGE_MAX_PARENT_REFS = 12_000;
+const DIRECTORY_MERGE_MAX_NAMING_EVENTS_PER_NODE = 1_024;
+const DIRECTORY_MERGE_MAX_NAMING_ROWS_PER_SCAN = 64_000;
+const DIRECTORY_MERGE_MAX_TOTAL_NAMING_ROWS = 256_000;
+const DIRECTORY_MERGE_MAX_ANCESTOR_DEPTH = 1_024;
+const EXPECTED_NAMING_CONFLICT_MAX_STRING_CODE_UNITS = 4_096;
+const EXPECTED_NAMING_CONFLICT_MAX_TOTAL_STRING_CODE_UNITS = 1_048_576;
+
+/**
  * Disposal receipts are streamed in bounded groups so a multi-gigabyte
  * filesystem never materializes every chunk entry in memory at once. The
  * protocol still applies `minAcks` independently to every entry hash.
@@ -899,7 +915,24 @@ export type ResolveNamingAction =
     | { type: "keep" }
     | { type: "restore" }
     | { type: "delete" }
-    | { type: "move"; to: string };
+    | { type: "move"; to: string }
+    /**
+     * Merge one shadowed directory claimant into the visible directory at
+     * the same slot. Every observed live direct child is reparented without
+     * changing its node id, then the source directory is tombstoned.
+     * `expectedConflicts` is mandatory for this action.
+     */
+    | { type: "merge-directory" };
+
+export type MergeDirectoryResolutionResult = {
+    type: "directory-merged";
+    sourceNodeId: string;
+    targetNodeId: string;
+    /** Direct child node ids reparented by this observed-view operation. */
+    movedNodeIds: string[];
+    /** Naming events in publication order; the source tombstone is last. */
+    eventIds: string[];
+};
 
 export type ResolveNamingConflictOptions = {
     /**
@@ -6786,17 +6819,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Settle a naming conflict on a node by appending one event that
-     * causally dominates every current head. No-op when the heads already
-     * agree with the asserted payload (quiescence — concurrent identical
-     * resolutions converge without ping-pong).
+     * Settle a naming conflict on a node. Ordinary actions append one event
+     * that causally dominates every current head. `merge-directory` is an
+     * explicit, bounded observed-view repair: it reparents direct children
+     * without changing their ids and publishes the source tombstone last.
+     * It is deliberately not a global transaction; arrivals after the final
+     * local check remain ordinary recoverable naming conflicts.
      */
     async resolveNamingConflict(
         nodeId: string,
         action: ResolveNamingAction,
         options: ResolveNamingConflictOptions = {}
-    ) {
+    ): Promise<MergeDirectoryResolutionResult | void> {
         this.assertWriteReady("resolveNamingConflict");
+        if (action.type === "merge-directory") {
+            this.assertSafeMaintenanceReady(
+                "resolveNamingConflict merge-directory"
+            );
+            this.assertNotBootstrapPartial(
+                "resolveNamingConflict merge-directory",
+                false
+            );
+            if (!this.isFullReplica()) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "merge-directory requires a full replica (replicate: { factor: 1 })"
+                );
+            }
+        }
         let expectedConflicts: SharedFsNamingConflict[] | undefined;
         if (options.expectedConflicts !== undefined) {
             const supplied = options.expectedConflicts;
@@ -6816,11 +6866,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                       0
                   )
                 : 0;
+            let stringCodeUnits = 0;
+            const boundedStrings = Array.isArray(supplied)
+                ? supplied.every((conflict) => {
+                      if (!isSharedFsNamingConflict(conflict)) return false;
+                      const strings = [
+                          conflict.nodeId,
+                          conflict.path,
+                          ...conflict.eventIds,
+                          ...(conflict.shadowedNodeIds ?? []),
+                          ...(conflict.recoverableVersionIds ?? []),
+                      ];
+                      return strings.every((value) => {
+                          stringCodeUnits += value.length;
+                          return (
+                              value.length <=
+                                  EXPECTED_NAMING_CONFLICT_MAX_STRING_CODE_UNITS &&
+                              stringCodeUnits <=
+                                  EXPECTED_NAMING_CONFLICT_MAX_TOTAL_STRING_CODE_UNITS
+                          );
+                      });
+                  })
+                : false;
             if (
                 !Array.isArray(supplied) ||
                 supplied.length === 0 ||
                 supplied.length > 16_000 ||
                 identifierCount > 16_000 ||
+                !boundedStrings ||
                 !supplied.every(
                     (conflict) =>
                         isSharedFsNamingConflict(conflict) &&
@@ -6829,12 +6902,38 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ) {
                 throw new SharedFsError(
                     "EINVAL",
-                    "resolveNamingConflict expectedConflicts must contain 1..16000 valid conflicts involving the target node and at most 16000 identifiers"
+                    "resolveNamingConflict expectedConflicts must contain 1..16000 valid conflicts involving the target node, at most 16000 identifiers, strings no longer than 4096 code units, and at most 1048576 total string code units"
                 );
             }
             // Own the caller-provided view before any await so later mutation
             // of the options object cannot weaken the fence.
             expectedConflicts = canonicalNamingConflictView(supplied);
+        }
+        if (
+            action.type === "merge-directory" &&
+            expectedConflicts === undefined
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                "merge-directory requires the exact expectedConflicts view"
+            );
+        }
+        if (action.type === "merge-directory") {
+            return this.runForegroundMutation(
+                "resolveNamingConflict merge-directory",
+                (context) => {
+                    // Own the operation across the namespace-fence wait so
+                    // close cannot tear down its stores mid-plan.
+                    this.enterForegroundMutationCriticalTail(context);
+                    return this.withMountNamespaceFence(() =>
+                        this.mergeDirectoryConflictInner(
+                            nodeId,
+                            expectedConflicts!,
+                            context
+                        )
+                    );
+                }
+            );
         }
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch(
             "resolveNamingConflict"
@@ -6850,9 +6949,509 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         );
     }
 
+    private async mergeDirectoryConflictInner(
+        sourceNodeId: string,
+        expectedConflicts: SharedFsNamingConflict[],
+        context: ForegroundMutationContext
+    ): Promise<MergeDirectoryResolutionResult> {
+        const namespaceEpoch = this.localNamingFenceEpoch;
+        if (!this.mountNamespaceFenceActive) {
+            throw new SharedFsError(
+                "EAGAIN",
+                "merge-directory requires an active local namespace fence; retry"
+            );
+        }
+        const expectedDuplicates = expectedConflicts.filter(
+            (conflict) =>
+                conflict.type === "duplicate-name" &&
+                conflict.shadowedNodeIds?.includes(sourceNodeId)
+        );
+        if (expectedDuplicates.length !== 1) {
+            throw new SharedFsError(
+                "EINVAL",
+                "merge-directory requires exactly one duplicate-name conflict in which the source is shadowed"
+            );
+        }
+        const targetNodeId = expectedDuplicates[0].nodeId;
+        if (
+            targetNodeId === sourceNodeId ||
+            nodeKindOf(sourceNodeId) !== "directory" ||
+            nodeKindOf(targetNodeId) !== "directory"
+        ) {
+            throw new SharedFsError(
+                "ENOTDIR",
+                "merge-directory requires distinct shadowed and visible directory claimants"
+            );
+        }
+
+        let totalNamingRowsRead = 0;
+        const boundedNamingRows = async (
+            query: Query[],
+            requestedLimit: number,
+            label: string
+        ): Promise<NamingLike[]> => {
+            const totalRemaining =
+                DIRECTORY_MERGE_MAX_TOTAL_NAMING_ROWS - totalNamingRowsRead;
+            const limit = Math.max(0, Math.min(requestedLimit, totalRemaining));
+            const iterator = this.entries.index.iterate(
+                { query },
+                { local: true, remote: false, resolve: false }
+            );
+            try {
+                const rows = (await iterator.next(limit + 1)) as any[];
+                if (rows.length > limit) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        `merge-directory ${label} exceeds its bounded naming-history plan; compact naming history or move the shadowed directory to a recovery path and merge it in smaller operator-controlled batches`
+                    );
+                }
+                totalNamingRowsRead += rows.length;
+                return rows.map(namingRowOf);
+            } finally {
+                await (iterator as any).close?.();
+            }
+        };
+        const boundedNamingStates = async (
+            nodeIds: string[],
+            label: string
+        ): Promise<Map<string, NodeNamingState>> => {
+            const unique = [...new Set(nodeIds)];
+            if (unique.length > DIRECTORY_MERGE_MAX_CANDIDATE_NODES) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `merge-directory candidate cap (${DIRECTORY_MERGE_MAX_CANDIDATE_NODES}) exceeded while reading ${label}`
+                );
+            }
+            const byNode = new Map<string, NamingLike[]>(
+                unique.map((nodeId) => [nodeId, []])
+            );
+            let scanRows = 0;
+            for (
+                let offset = 0;
+                offset < unique.length;
+                offset += HEAD_QUERY_BATCH
+            ) {
+                const batch = unique.slice(offset, offset + HEAD_QUERY_BATCH);
+                const rows = await boundedNamingRows(
+                    [
+                        new StringMatch({ key: "kind", value: "naming" }),
+                        batch.length === 1
+                            ? new StringMatch({
+                                  key: "nodeId",
+                                  value: batch[0],
+                              })
+                            : new Or(
+                                  batch.map(
+                                      (nodeId) =>
+                                          new StringMatch({
+                                              key: "nodeId",
+                                              value: nodeId,
+                                          })
+                                  )
+                              ),
+                    ],
+                    DIRECTORY_MERGE_MAX_NAMING_ROWS_PER_SCAN - scanRows,
+                    label
+                );
+                scanRows += rows.length;
+                for (const row of rows) {
+                    byNode.get(row.nodeId)?.push(row);
+                }
+            }
+            const states = new Map<string, NodeNamingState>();
+            for (const [nodeId, events] of byNode) {
+                if (
+                    events.length > DIRECTORY_MERGE_MAX_NAMING_EVENTS_PER_NODE
+                ) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        `merge-directory node ${nodeId} exceeds the per-node naming-history cap (${DIRECTORY_MERGE_MAX_NAMING_EVENTS_PER_NODE}); compact naming history or repair this node separately before retrying`
+                    );
+                }
+                const state = computeNamingState(nodeId, events);
+                if (state) states.set(nodeId, state);
+            }
+            return states;
+        };
+        const boundedParentRows = (
+            parentId: string,
+            label: string,
+            name?: string
+        ): Promise<NamingLike[]> =>
+            boundedNamingRows(
+                [
+                    new StringMatch({ key: "kind", value: "naming" }),
+                    new StringMatch({ key: "parentId", value: parentId }),
+                    ...(name === undefined
+                        ? []
+                        : [new StringMatch({ key: "name", value: name })]),
+                ],
+                DIRECTORY_MERGE_MAX_NAMING_ROWS_PER_SCAN,
+                label
+            );
+        const sameHeads = (left: NamingLike[], right: NamingLike[]) =>
+            left.length === right.length &&
+            left.every((head, index) => head.id === right[index]?.id);
+        const pathAndReachability = async (
+            nodeId: string,
+            knownStates: Map<string, NodeNamingState>,
+            label: string
+        ): Promise<{ path: string; reachable: boolean }> => {
+            const names: string[] = [];
+            const visited = new Set<string>();
+            let current = nodeId;
+            let reachable = true;
+            let depth = 0;
+            let first = true;
+            while (current !== ROOT_NODE_ID) {
+                if (
+                    visited.has(current) ||
+                    depth++ >= DIRECTORY_MERGE_MAX_ANCESTOR_DEPTH
+                ) {
+                    reachable = false;
+                    break;
+                }
+                visited.add(current);
+                let state = knownStates.get(current);
+                if (!state) {
+                    state = (
+                        await boundedNamingStates(
+                            [current],
+                            `${label} ancestry`
+                        )
+                    ).get(current);
+                    if (state) knownStates.set(current, state);
+                }
+                if (!state) {
+                    reachable = false;
+                    break;
+                }
+                names.unshift(state.winner.name);
+                if (!first && state.winner.deleted) reachable = false;
+                first = false;
+                current = state.winner.parentId;
+            }
+            return {
+                path: "/" + names.join("/"),
+                reachable: reachable && current === ROOT_NODE_ID,
+            };
+        };
+        const mismatch = (
+            actualConflicts: SharedFsNamingConflict[],
+            source?: NodeNamingState
+        ): never => {
+            throw new SharedFsExpectedNamingConflictMismatchError(
+                sourceNodeId,
+                expectedConflicts,
+                actualConflicts,
+                source?.heads.map((head) => head.id).sort(compareIds) ?? [],
+                `Directory merge view changed for ${sourceNodeId}; inspect namingConflicts() and retry`
+            );
+        };
+        const readTopology = async () => {
+            const firstStates = await boundedNamingStates(
+                [sourceNodeId, targetNodeId],
+                "source and target histories"
+            );
+            const firstSource = firstStates.get(sourceNodeId);
+            if (!firstSource) {
+                return mismatch([], firstSource);
+            }
+            const parentRows = await boundedParentRows(
+                firstSource.winner.parentId,
+                "duplicate-slot scan",
+                firstSource.winner.name
+            );
+            const candidateNodeIds = [
+                ...new Set([
+                    sourceNodeId,
+                    targetNodeId,
+                    ...parentRows.map((row) => row.nodeId),
+                ]),
+            ].sort(compareIds);
+            if (candidateNodeIds.length > DIRECTORY_MERGE_MAX_CANDIDATE_NODES) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `merge-directory duplicate-slot candidate cap (${DIRECTORY_MERGE_MAX_CANDIDATE_NODES}) exceeded; move the shadowed directory to a recovery path and merge it in smaller operator-controlled batches`
+                );
+            }
+            const states = await boundedNamingStates(
+                candidateNodeIds,
+                "duplicate-slot claimant histories"
+            );
+            const source = states.get(sourceNodeId);
+            const target = states.get(targetNodeId);
+            if (!source || !target) {
+                return mismatch([], source);
+            }
+            if (!sameHeads(firstSource.heads, source.heads)) {
+                return mismatch([], source);
+            }
+            const knownStates = new Map(states);
+            const sourceLocation = await pathAndReachability(
+                sourceNodeId,
+                knownStates,
+                "source"
+            );
+            const actualConflicts: SharedFsNamingConflict[] = [];
+            if (source.conflicted) {
+                actualConflicts.push({
+                    type: "multi-head",
+                    nodeId: sourceNodeId,
+                    path: sourceLocation.path,
+                    eventIds: source.heads.map((head) => head.id),
+                });
+            }
+            let duplicate:
+                | {
+                      nodeId: string;
+                      state: NodeNamingState;
+                      shadowed: string[];
+                  }
+                | undefined;
+            if (!source.winner.deleted) {
+                duplicate = this.pickSlotWinner(
+                    source.winner.parentId,
+                    source.winner.name,
+                    states
+                );
+                if (duplicate && duplicate.shadowed.length > 0) {
+                    const claimants = [...states.values()].filter(
+                        (state) =>
+                            !state.winner.deleted &&
+                            state.winner.parentId === source.winner.parentId &&
+                            state.winner.name === source.winner.name
+                    );
+                    const winnerLocation = await pathAndReachability(
+                        duplicate.nodeId,
+                        knownStates,
+                        "duplicate winner"
+                    );
+                    actualConflicts.push({
+                        type: "duplicate-name",
+                        nodeId: duplicate.nodeId,
+                        path: winnerLocation.path,
+                        shadowedNodeIds: duplicate.shadowed,
+                        eventIds: [
+                            ...new Set(
+                                claimants.flatMap((state) =>
+                                    state.heads.map((head) => head.id)
+                                )
+                            ),
+                        ],
+                    });
+                }
+                if (!sourceLocation.reachable) {
+                    actualConflicts.push({
+                        type: "unreachable",
+                        nodeId: sourceNodeId,
+                        path: sourceLocation.path,
+                        eventIds: source.heads.map((head) => head.id),
+                    });
+                }
+            }
+            const canonicalActual =
+                canonicalNamingConflictView(actualConflicts);
+            if (!sameNamingConflictView(expectedConflicts, canonicalActual)) {
+                return mismatch(canonicalActual, source);
+            }
+            const targetLocation = await pathAndReachability(
+                targetNodeId,
+                knownStates,
+                "target"
+            );
+            if (
+                source.heads.length !== 1 ||
+                target.heads.length !== 1 ||
+                source.conflicted ||
+                target.conflicted ||
+                !sourceLocation.reachable ||
+                !targetLocation.reachable
+            ) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    "merge-directory requires reachable directory claimants with one settled naming head each; resolve multi-head or unreachable conflicts first"
+                );
+            }
+            if (
+                source.winner.deleted ||
+                target.winner.deleted ||
+                duplicate?.nodeId !== targetNodeId ||
+                !duplicate.shadowed.includes(sourceNodeId) ||
+                source.winner.parentId !== target.winner.parentId ||
+                source.winner.name !== target.winner.name
+            ) {
+                return mismatch(canonicalActual, source);
+            }
+            return { actualConflicts: canonicalActual, source, target };
+        };
+        const readChildren = async (sourceHeads: NamingLike[]) => {
+            const rows = await boundedParentRows(
+                sourceNodeId,
+                "source direct-child scan"
+            );
+            const candidateNodeIds = [
+                ...new Set(rows.map((row) => row.nodeId)),
+            ].sort(compareIds);
+            if (candidateNodeIds.length > DIRECTORY_MERGE_MAX_CANDIDATE_NODES) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `merge-directory candidate cap (${DIRECTORY_MERGE_MAX_CANDIDATE_NODES}) exceeded; move the shadowed directory to a recovery path and merge it in smaller operator-controlled batches`
+                );
+            }
+            const states = await boundedNamingStates(
+                candidateNodeIds,
+                "source direct-child histories"
+            );
+            for (const state of states.values()) {
+                const hasCurrentSourceHead = state.heads.some(
+                    (head) => head.parentId === sourceNodeId
+                );
+                if (
+                    hasCurrentSourceHead &&
+                    (state.heads.length !== 1 || state.conflicted)
+                ) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        `merge-directory child ${state.nodeId} has multiple naming heads; resolve it before merging the parent directory`
+                    );
+                }
+            }
+            const live = [...states.values()]
+                .filter(
+                    (state) =>
+                        !state.winner.deleted &&
+                        state.winner.parentId === sourceNodeId
+                )
+                .sort((left, right) => compareIds(left.nodeId, right.nodeId));
+            if (live.length > DIRECTORY_MERGE_MAX_LIVE_CHILDREN) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `merge-directory live-child cap (${DIRECTORY_MERGE_MAX_LIVE_CHILDREN}) exceeded; move the shadowed directory to a recovery path and merge it in smaller operator-controlled batches`
+                );
+            }
+            for (const state of live) {
+                if (
+                    state.nodeId === sourceNodeId ||
+                    state.nodeId === targetNodeId
+                ) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        "merge-directory rejected a cyclic direct-child topology"
+                    );
+                }
+                if (state.heads.length !== 1 || state.conflicted) {
+                    throw new SharedFsError(
+                        "EINVAL",
+                        `merge-directory child ${state.nodeId} has multiple naming heads; resolve it before merging the parent directory`
+                    );
+                }
+            }
+            const parentRefs =
+                sourceHeads.length +
+                live.reduce((total, state) => total + state.heads.length, 0);
+            if (parentRefs > DIRECTORY_MERGE_MAX_PARENT_REFS) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `merge-directory causal-reference cap (${DIRECTORY_MERGE_MAX_PARENT_REFS}) exceeded; resolve child naming heads before retrying`
+                );
+            }
+            const fingerprint = JSON.stringify(
+                live.map((state) => ({
+                    nodeId: state.nodeId,
+                    heads: state.heads
+                        .map((head) => ({
+                            id: head.id,
+                            parentId: head.parentId,
+                            name: head.name,
+                            deleted: head.deleted,
+                            causalDepth: String(head.causalDepth),
+                        }))
+                        .sort((left, right) => compareIds(left.id, right.id)),
+                }))
+            );
+            return { live, fingerprint };
+        };
+
+        const initial = await readTopology();
+        const observedChildren = await readChildren(initial.source.heads);
+
+        // Re-read the physical child set, then make the exact conflict/head
+        // check the final awaited planning read. The local namespace fence
+        // excludes local mutations; a remote arrival after this point remains
+        // a normal multi-head/unreachable conflict.
+        const fencedChildren = await readChildren(initial.source.heads);
+        if (observedChildren.fingerprint !== fencedChildren.fingerprint) {
+            mismatch(initial.actualConflicts, initial.source);
+        }
+        const fenced = await readTopology();
+
+        if (
+            !this.mountNamespaceFenceActive ||
+            this.localNamingFenceEpoch !== namespaceEpoch
+        ) {
+            throw new SharedFsError(
+                "EAGAIN",
+                "merge-directory lost its local namespace fence before planning; inspect conflicts and retry"
+            );
+        }
+
+        const metadata = this.signedMetadata();
+        const moves = fencedChildren.live.map(
+            (child) =>
+                new NamingEvent({
+                    id: createId("naming"),
+                    nodeId: child.nodeId,
+                    parentId: targetNodeId,
+                    name: child.winner.name,
+                    causalDepth: maxDepth(child.heads),
+                    parentNamingIds: child.heads.map((head) => head.id),
+                    createdAt: metadata.timestamp,
+                    authorKey: metadata.authorKey,
+                    machineLabel: metadata.machineLabel,
+                })
+        );
+        const sourceTombstone = new NamingEvent({
+            id: createId("naming"),
+            nodeId: sourceNodeId,
+            parentId: fenced.source.winner.parentId,
+            name: fenced.source.winner.name,
+            deleted: true,
+            causalDepth: maxDepth(fenced.source.heads),
+            parentNamingIds: fenced.source.heads.map((head) => head.id),
+            createdAt: metadata.timestamp,
+            authorKey: metadata.authorKey,
+            machineLabel: metadata.machineLabel,
+        });
+        // The source tombstone is last in the one locally planned append
+        // batch. These entries are independent: a remote may ingest the
+        // tombstone before one or more child moves, which is why this API is
+        // explicitly an observed-view repair rather than a global transaction.
+        const events = [...moves, sourceTombstone];
+        this.throwIfForegroundMutationInactive(context);
+        if (
+            !this.mountNamespaceFenceActive ||
+            this.localNamingFenceEpoch !== namespaceEpoch
+        ) {
+            throw new SharedFsError(
+                "EAGAIN",
+                "merge-directory lost its local namespace fence before publication; inspect conflicts and retry"
+            );
+        }
+        await this.entries.putMany(events, { unique: true });
+        for (const event of events) this.cacheLocalWrite(event);
+        return {
+            type: "directory-merged",
+            sourceNodeId,
+            targetNodeId,
+            movedNodeIds: moves.map((event) => event.nodeId),
+            eventIds: events.map((event) => event.id),
+        };
+    }
+
     private async resolveNamingConflictInner(
         nodeId: string,
-        action: ResolveNamingAction,
+        action: Exclude<ResolveNamingAction, { type: "merge-directory" }>,
         options: ResolveNamingConflictOptions,
         namespaceEpoch: number,
         context: ForegroundMutationContext

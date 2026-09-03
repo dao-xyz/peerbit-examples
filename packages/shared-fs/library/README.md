@@ -36,8 +36,8 @@ writes never touch naming, and every visible choice is a pure clock-free
 function of the replicated documents. Concurrent renames, delete-vs-edit
 races, duplicate-name creates, and unreachable nodes are surfaced through
 `namingConflicts()` and settled with `resolveNamingConflict(nodeId, action)`
-(`keep` / `restore` / `delete` / `move`) — a delete that raced a concurrent
-edit is recoverable, not lost. Operator workflows can pass the complete
+(`keep` / `restore` / `delete` / `move` / `merge-directory`) — a delete that
+raced a concurrent edit is recoverable, not lost. Operator workflows can pass the complete
 conflicts involving the target as `{ expectedConflicts }` in the third
 argument. The library rechecks the exact local conflict topology immediately
 before deriving the action, including other duplicate-name claimants and
@@ -45,6 +45,30 @@ recoverable delete-vs-edit versions. A changed view fails retryably with
 `SharedFsExpectedNamingConflictMismatchError`. Guarded delete/restore actions
 snapshot content before that final check and only acknowledge/supersede those
 heads; content arriving later remains recoverable or concurrent.
+
+`merge-directory` is an explicit repair for a duplicate-name conflict between
+directories. Invoke it on one listed shadowed directory and always pass the
+complete `expectedConflicts` view. From a full, write-ready replica it moves
+every observed live direct child claimant to the visible directory without
+changing child ids; moving a directory therefore carries its whole subtree.
+Children that collide by name at the destination remain surfaced as ordinary
+duplicate-name conflicts instead of being replaced. The planner rejects
+file/directory pairs, unreachable claimants/children, and bounded-history or
+fanout limits before publishing anything. A source, target, or direct child
+with more than one current naming head must be resolved separately first, even
+when its locally selected payloads happen to agree.
+
+This repair is intentionally not a distributed transaction. Child moves and
+the source tombstone are submitted in one local batch with the tombstone last,
+but there is no cross-node causal edge or remote atomicity: the independent
+events can reach another replica in a different order. If publication reports
+an error, inspect the namespace before retrying because the outcome may be
+uncertain. A write that was absent from both validation passes may later appear
+beneath the deleted source; it is retained and surfaced as an `unreachable`
+conflict for an explicit `move`, not silently discarded. Reinspect conflicts
+after every merge. The emitted documents use the existing naming-event format,
+so rolling upgrades are wire-compatible: older replicas converge on the repair
+but cannot initiate the new action or interpret its structured result.
 
 ## Node-guarded mount namespace mutations
 
@@ -462,7 +486,7 @@ peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs naming-conflicts <address>
 peerbit-fs resolve-conflict <address> <path> <version-id>
-peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move>
+peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move|merge-directory>
 peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
@@ -476,11 +500,14 @@ strings. Observer mode can inspect an existing local store but its
 `naming-conflicts --json` exposes each conflict type, visible winner node,
 naming event ids, shadowed claimant ids, and recoverable content ids. Content
 resolution explicitly selects one current head; naming resolution accepts
-`keep`, `restore`, `delete`, or `move --to <path>`. For duplicate names,
-normally move or delete a listed shadowed claimant: keeping the visible winner
-alone does not remove the other claim. Delete-vs-edit conflicts can be restored
-with their concurrent content intact, while unreachable nodes normally need a
-move to a reachable parent or deletion.
+`keep`, `restore`, `delete`, `move --to <path>`, or `merge-directory`. For
+duplicate files, normally move or delete a listed shadowed claimant: keeping
+the visible winner alone does not remove the other claim. For duplicate
+directories, `merge-directory` reparents all observed direct children of one
+shadowed claimant into the visible directory, preserving node identities and
+subtrees while leaving any child-name collisions explicit. Delete-vs-edit
+conflicts can be restored with their concurrent content intact, while
+unreachable nodes normally need a move to a reachable parent or deletion.
 
 The two resolution commands require a full write-ready replica and a trusted
 local writer. They reject ids outside the currently visible local conflict;
@@ -488,7 +515,9 @@ naming resolution also supplies the complete `expectedConflicts` topology so a
 change to the target, another duplicate-name claimant, or recoverable content
 visible at execution fails retryably instead of accepting a stale action. That
 is not a global transaction: a later arrival stays concurrent and may
-re-conflict. Inspect again after every action. Resolution
+re-conflict. A directory child first observed after a merge can be exposed as
+unreachable beneath the tombstoned source and remains recoverable by moving it.
+Inspect again after every action. Resolution
 also does not request persisted remote receipts; use `prepare-disposal`
 separately before retiring that machine. `status --json` emits one document
 with native support, and `--include-conflicts` opts into separate content and
