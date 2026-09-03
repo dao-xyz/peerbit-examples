@@ -296,10 +296,16 @@ export class ChangesetBarrierHub {
         changesetId: string,
         pin: boolean
     ): Promise<Tracker> {
-        let tracker = this.trackers.get(changesetId);
+        if (this.closed) {
+            throw this.host.makeError("ECLOSED", "store closed");
+        }
+        const tracker = this.trackers.get(changesetId);
         if (tracker) {
             this.touch(tracker);
             await tracker.initialized;
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
+            }
             if (pin) tracker.pinned += 1; // only after a successful init
             return tracker;
         }
@@ -319,10 +325,19 @@ export class ChangesetBarrierHub {
         this.bufferingTrackers.add(fresh);
         fresh.initialized = (async () => {
             const manifests = await this.host.manifestsFor(changesetId);
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
+            }
             const arrived = await this.host.arrivedMemberIds(changesetId);
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
+            }
             for (const id of arrived) fresh.observed.add(id);
             for (const { manifest, localArrivalMs } of manifests) {
                 await this.installManifest(fresh, manifest, localArrivalMs);
+            }
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
             }
             // Drain the buffer through the normal paths.
             const buffered = fresh.buffer;
@@ -331,6 +346,9 @@ export class ChangesetBarrierHub {
             for (const manifest of buffered?.manifests ?? []) {
                 await this.installManifest(fresh, manifest, undefined);
             }
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
+            }
             for (const id of buffered?.added ?? []) {
                 this.observeOnTracker(fresh, id);
             }
@@ -338,7 +356,13 @@ export class ChangesetBarrierHub {
                 // The buffer saturated during init: re-probe the indexed
                 // fast path once so nothing recorded there is missed.
                 const again = await this.host.arrivedMemberIds(changesetId);
+                if (this.closed) {
+                    throw this.host.makeError("ECLOSED", "store closed");
+                }
                 for (const id of again) this.observeOnTracker(fresh, id);
+            }
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
             }
             this.evaluateCompletion(fresh);
         })();
@@ -351,6 +375,10 @@ export class ChangesetBarrierHub {
             this.dropTracker(fresh);
             throw error;
         }
+        if (this.closed) {
+            this.dropTracker(fresh);
+            throw this.host.makeError("ECLOSED", "store closed");
+        }
         if (pin) fresh.pinned += 1;
         this.evictIfNeeded();
         return fresh;
@@ -362,6 +390,9 @@ export class ChangesetBarrierHub {
         manifest: ChangesetManifest,
         localArrivalMs: number | undefined
     ): Promise<void> {
+        if (this.closed) {
+            throw this.host.makeError("ECLOSED", "store closed");
+        }
         if (tracker.manifests.has(manifest.id)) return;
         if (tracker.manifests.size >= MAX_MANIFESTS_PER_TRACKER) {
             // Bounded against manifest-minting writers; documented cap.
@@ -406,7 +437,11 @@ export class ChangesetBarrierHub {
         // id was admitted", period.
         for (const id of [...(track.pending ?? [])]) {
             if (track.pending === null) break;
-            if (await this.host.hasDocumentId(id)) {
+            const present = await this.host.hasDocumentId(id);
+            if (this.closed) {
+                throw this.host.makeError("ECLOSED", "store closed");
+            }
+            if (present) {
                 this.observeOnTracker(tracker, id);
             }
         }
@@ -626,6 +661,7 @@ export class ChangesetBarrierHub {
     }
 
     private evaluateCompletion(tracker: Tracker): void {
+        if (this.closed) return;
         this.settleWaiters(tracker);
         // Session-latched complete emission (unscoped view).
         const status = this.status(tracker.changesetId);
@@ -658,6 +694,7 @@ export class ChangesetBarrierHub {
     }
 
     private settleWaiters(tracker: Tracker): void {
+        if (this.closed) return;
         if (tracker.waiters.length === 0) return;
         const remaining: Waiter[] = [];
         for (const waiter of tracker.waiters) {
@@ -859,9 +896,7 @@ export class ChangesetBarrierHub {
             stream.close();
             return stream;
         }
-        options?.signal?.addEventListener("abort", () => stream.close(), {
-            once: true,
-        });
+        if (options?.signal) stream.bindSignal(options.signal);
         if (options?.changesetId) {
             // Scoped streams pin their tracker while subscribed; a stream
             // that closed before the tracker resolved releases immediately.
@@ -879,6 +914,7 @@ export class ChangesetBarrierHub {
     }
 
     private emitEvent(event: ChangesetEvent): void {
+        if (this.closed) return;
         if (event.type === "complete" && this.host.overlayActive()) {
             // The served view may lag genuine log admissions during the
             // overlay; emitting early would break "a read triggered by
@@ -899,6 +935,7 @@ export class ChangesetBarrierHub {
         if (this.closed) return;
         this.closed = true;
         if (this.historicTimer) clearInterval(this.historicTimer);
+        this.historicTimer = undefined;
         for (const tracker of this.trackers.values()) {
             for (const waiter of tracker.waiters) {
                 if (waiter.settled) continue;
@@ -910,9 +947,13 @@ export class ChangesetBarrierHub {
             tracker.waiters = [];
         }
         for (const stream of [...this.streams]) stream.close();
+        this.streams.clear();
         this.trackers.clear();
         this.pendingIndex.clear();
-        this.overlayQueue = [];
+        this.bufferingTrackers.clear();
+        this.emittedOnce.clear();
+        this.probedIds.clear();
+        this.overlayQueue.length = 0;
     }
 }
 
@@ -928,12 +969,19 @@ class ChangesetStreamImpl implements ChangesetWatcher {
     private pending: ChangesetEvent[] | null = null;
     private iteratorActive = false;
     private iteratorWake: (() => void) | null = null;
+    private signalCleanup?: () => void;
 
     constructor(
         readonly scopeChangesetId: string | undefined,
-        private detach: () => void,
+        private detach: (() => void) | undefined,
         private host: ChangesetHost
     ) {}
+
+    bindSignal(signal: AbortSignal): void {
+        const onAbort = () => this.close();
+        signal.addEventListener("abort", onAbort, { once: true });
+        this.signalCleanup = () => signal.removeEventListener("abort", onAbort);
+    }
 
     offer(event: ChangesetEvent): void {
         if (this.closed) return;
@@ -1008,10 +1056,22 @@ class ChangesetStreamImpl implements ChangesetWatcher {
     close(): void {
         if (this.closed) return;
         this.closed = true;
-        this.detach();
+        const detach = this.detach;
+        this.detach = undefined;
+        detach?.();
+        this.signalCleanup?.();
+        this.signalCleanup = undefined;
         this.pending = null;
-        this.iteratorWake?.();
-        for (const cb of [...this.closeCbs]) cb();
+        const iteratorWake = this.iteratorWake;
+        this.iteratorWake = null;
+        iteratorWake?.();
+        for (const cb of [...this.closeCbs]) {
+            try {
+                cb();
+            } catch {
+                /* subscriber errors are theirs */
+            }
+        }
         this.changeCbs.clear();
         this.errorCbs.clear();
         this.closeCbs.clear();
