@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -419,5 +420,77 @@ func TestIPCClientReconnectsOnlyAfterFailedRequest(t *testing.T) {
 	}
 	if got := handled.Load(); got != 2 {
 		t.Fatalf("expected no automatic replay, server handled %d requests", got)
+	}
+}
+
+func TestIPCClientBoundsBase64ExpandedRequestsBeforeConnecting(t *testing.T) {
+	server := startIPCEchoServer(t, func(ipcRequest) interface{} {
+		return float64(13)
+	})
+	data := []byte("bounded bytes")
+	args := []interface{}{uint64(7), data, int64(0)}
+	payload, err := json.Marshal(ipcRequest{
+		ID:   1,
+		Op:   "write",
+		Args: encodeValue(args).([]interface{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exact := newIPCClient(
+		"tcp://"+server.listener.Addr().String(),
+		ipcClientOptions{maxRequestFrameBytes: len(payload)},
+	)
+	defer exact.close()
+	if result, err := exact.request("write", args...); err != nil || result != float64(13) {
+		t.Fatalf("exact-limit request = (%v, %v), want (13, nil)", result, err)
+	}
+
+	undersized := newIPCClient(
+		"tcp://"+server.listener.Addr().String(),
+		ipcClientOptions{maxRequestFrameBytes: len(payload) - 1},
+	)
+	defer undersized.close()
+	if _, err := undersized.request("write", args...); !errors.Is(err, errIPCFrameTooLarge) {
+		t.Fatalf("oversized request returned %v, want errIPCFrameTooLarge", err)
+	}
+	if got := server.accepted.Load(); got != 1 {
+		t.Fatalf("oversized request reached the server; accepted %d connections", got)
+	}
+}
+
+func TestIPCClientBoundsResponsesAndAcceptsExactLimit(t *testing.T) {
+	// Stay above bufio.Reader's internal buffer so the exact boundary also
+	// exercises multi-fragment accumulation.
+	result := map[string]interface{}{"value": strings.Repeat("x", 16*1024)}
+	responseBytes, err := json.Marshal(ipcResponse{
+		ID:     1,
+		OK:     true,
+		Result: result,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startIPCEchoServer(t, func(ipcRequest) interface{} {
+		return result
+	})
+
+	exact := newIPCClient(
+		"tcp://"+server.listener.Addr().String(),
+		ipcClientOptions{maxResponseFrameBytes: len(responseBytes)},
+	)
+	defer exact.close()
+	if _, err := exact.request("getattr", "/exact"); err != nil {
+		t.Fatalf("exact-limit response failed: %v", err)
+	}
+
+	undersized := newIPCClient(
+		"tcp://"+server.listener.Addr().String(),
+		ipcClientOptions{maxResponseFrameBytes: len(responseBytes) - 1},
+	)
+	defer undersized.close()
+	if _, err := undersized.request("getattr", "/oversized"); !errors.Is(err, errIPCFrameTooLarge) {
+		t.Fatalf("oversized response returned %v, want errIPCFrameTooLarge", err)
 	}
 }

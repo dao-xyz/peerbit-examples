@@ -724,6 +724,17 @@ caller's requested access mode or `O_APPEND` during creation, and an ordinary
 `O_CREAT` race may therefore return `EEXIST`. Use the external adapter when
 its platform translation is required.
 
+The JSON-lines adapter transport limits each request and response to 64 MiB by
+default. Limits count encoded UTF-8 JSON bytes before the newline, so base64
+expansion counts toward them. `createSharedFsIpcServer` and
+`createSharedFsIpcClient` accept optional `maxRequestFrameBytes` and
+`maxResponseFrameBytes` overrides. Normal mount I/O is chunked well below this
+ceiling; the bound protects the daemon and adapter from an unterminated or
+unexpectedly large local frame rather than setting a filesystem file-size
+limit. The prebuilt Go v1 adapter uses the fixed 64 MiB default and does not
+negotiate overrides, so a server override must remain compatible with that
+limit or the mount will fail closed.
+
 The portable backend gives `flush` and `fsync` the same bounded file-state
 fence: each captures a synchronous mutation-generation cutoff and persists
 every generation accepted before that call. `release` first closes mutation

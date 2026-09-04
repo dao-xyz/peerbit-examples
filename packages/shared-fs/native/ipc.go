@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,20 @@ import (
 	"sync/atomic"
 )
 
+const defaultIPCMaxFrameBytes = 64 * 1024 * 1024
+
+var errIPCFrameTooLarge = errors.New("IPC frame exceeds configured byte limit")
+
+type ipcClientOptions struct {
+	maxRequestFrameBytes  int
+	maxResponseFrameBytes int
+}
+
 type ipcClient struct {
-	endpoint string
-	nextID   uint64
+	endpoint              string
+	nextID                uint64
+	maxRequestFrameBytes  int
+	maxResponseFrameBytes int
 
 	// cgofuse currently invokes this client from a serialized mount, but keep
 	// requests serialized so a future concurrent mount cannot interleave JSON
@@ -25,8 +37,8 @@ type ipcClient struct {
 	transportMu sync.Mutex
 	conn        net.Conn
 	reader      *bufio.Reader
-	encoder     *json.Encoder
 	closed      bool
+	requestJSON bytes.Buffer
 }
 
 type ipcRequest struct {
@@ -59,8 +71,30 @@ func (e *ipcError) Error() string {
 	return e.Code + ": " + e.Message
 }
 
-func newIPCClient(endpoint string) *ipcClient {
-	return &ipcClient{endpoint: endpoint}
+func newIPCClient(endpoint string, provided ...ipcClientOptions) *ipcClient {
+	if len(provided) > 1 {
+		panic("newIPCClient accepts at most one options value")
+	}
+	options := ipcClientOptions{
+		maxRequestFrameBytes:  defaultIPCMaxFrameBytes,
+		maxResponseFrameBytes: defaultIPCMaxFrameBytes,
+	}
+	if len(provided) == 1 {
+		if provided[0].maxRequestFrameBytes < 0 || provided[0].maxResponseFrameBytes < 0 {
+			panic("IPC frame limits must not be negative")
+		}
+		if provided[0].maxRequestFrameBytes > 0 {
+			options.maxRequestFrameBytes = provided[0].maxRequestFrameBytes
+		}
+		if provided[0].maxResponseFrameBytes > 0 {
+			options.maxResponseFrameBytes = provided[0].maxResponseFrameBytes
+		}
+	}
+	return &ipcClient{
+		endpoint:              endpoint,
+		maxRequestFrameBytes:  options.maxRequestFrameBytes,
+		maxResponseFrameBytes: options.maxResponseFrameBytes,
+	}
 }
 
 func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error) {
@@ -68,22 +102,34 @@ func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error)
 	defer c.requestMu.Unlock()
 
 	id := atomic.AddUint64(&c.nextID, 1)
-	conn, reader, encoder, err := c.connect()
-	if err != nil {
-		return nil, err
-	}
-
 	request := ipcRequest{
 		ID:   id,
 		Op:   op,
 		Args: encodeValue(args).([]interface{}),
 	}
-	if err := encoder.Encode(request); err != nil {
+	c.requestJSON.Reset()
+	if err := json.NewEncoder(&c.requestJSON).Encode(request); err != nil {
+		return nil, err
+	}
+	frame := c.requestJSON.Bytes()
+	if len(frame) == 0 || frame[len(frame)-1] != '\n' {
+		return nil, errors.New("IPC encoder did not terminate its request frame")
+	}
+	payloadBytes := len(frame) - 1
+	if payloadBytes > c.maxRequestFrameBytes {
+		return nil, fmt.Errorf("%w: request is %d bytes, limit is %d", errIPCFrameTooLarge, payloadBytes, c.maxRequestFrameBytes)
+	}
+	conn, reader, err := c.connect()
+	if err != nil {
+		return nil, err
+	}
+	frames := net.Buffers{frame}
+	if _, err := frames.WriteTo(conn); err != nil {
 		c.discard(conn)
 		return nil, err
 	}
 
-	line, err := reader.ReadBytes('\n')
+	line, err := readBoundedJSONLine(reader, c.maxResponseFrameBytes)
 	if err != nil {
 		c.discard(conn)
 		return nil, err
@@ -106,42 +152,40 @@ func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error)
 	return decodeValue(response.Result), nil
 }
 
-func (c *ipcClient) connect() (net.Conn, *bufio.Reader, *json.Encoder, error) {
+func (c *ipcClient) connect() (net.Conn, *bufio.Reader, error) {
 	c.transportMu.Lock()
 	if c.closed {
 		c.transportMu.Unlock()
-		return nil, nil, nil, net.ErrClosed
+		return nil, nil, net.ErrClosed
 	}
 	if c.conn != nil {
-		conn, reader, encoder := c.conn, c.reader, c.encoder
+		conn, reader := c.conn, c.reader
 		c.transportMu.Unlock()
-		return conn, reader, encoder, nil
+		return conn, reader, nil
 	}
 	c.transportMu.Unlock()
 
 	conn, err := dialEndpoint(c.endpoint)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	reader := bufio.NewReader(conn)
-	encoder := json.NewEncoder(conn)
 
 	c.transportMu.Lock()
 	defer c.transportMu.Unlock()
 	if c.closed {
 		_ = conn.Close()
-		return nil, nil, nil, net.ErrClosed
+		return nil, nil, net.ErrClosed
 	}
 	// Requests are serialized, so another connection is not expected here.
 	// Retain the defensive branch in case that invariant changes later.
 	if c.conn != nil {
 		_ = conn.Close()
-		return c.conn, c.reader, c.encoder, nil
+		return c.conn, c.reader, nil
 	}
 	c.conn = conn
 	c.reader = reader
-	c.encoder = encoder
-	return conn, reader, encoder, nil
+	return conn, reader, nil
 }
 
 func (c *ipcClient) discard(conn net.Conn) {
@@ -149,7 +193,6 @@ func (c *ipcClient) discard(conn net.Conn) {
 	if c.conn == conn {
 		c.conn = nil
 		c.reader = nil
-		c.encoder = nil
 	}
 	c.transportMu.Unlock()
 	_ = conn.Close()
@@ -161,10 +204,52 @@ func (c *ipcClient) close() {
 	conn := c.conn
 	c.conn = nil
 	c.reader = nil
-	c.encoder = nil
 	c.transportMu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
+	}
+}
+
+// readBoundedJSONLine reads one JSONL frame without allowing bufio.Reader to
+// accumulate an unbounded unterminated response. The byte limit excludes the
+// trailing newline, matching the TypeScript server.
+func readBoundedJSONLine(reader *bufio.Reader, maxBytes int) ([]byte, error) {
+	var fragments [][]byte
+	totalBytes := 0
+	for {
+		if totalBytes == maxBytes {
+			delimiter, err := reader.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if delimiter == '\n' {
+				return bytes.Join(fragments, nil), nil
+			}
+			return nil, fmt.Errorf("%w: response exceeds %d bytes", errIPCFrameTooLarge, maxBytes)
+		}
+		fragment, err := reader.ReadSlice('\n')
+		complete := err == nil && len(fragment) > 0 && fragment[len(fragment)-1] == '\n'
+		if complete {
+			fragment = fragment[:len(fragment)-1]
+		}
+		if len(fragment) > maxBytes-totalBytes {
+			return nil, fmt.Errorf("%w: response exceeds %d bytes", errIPCFrameTooLarge, maxBytes)
+		}
+		if complete {
+			if len(fragments) == 0 {
+				return fragment, nil
+			}
+			fragments = append(fragments, fragment)
+			return bytes.Join(fragments, nil), nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			fragments = append(fragments, bytes.Clone(fragment))
+			totalBytes += len(fragment)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 }
 
