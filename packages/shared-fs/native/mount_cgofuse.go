@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -38,10 +39,7 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 	// records supplied by Readdir. Other builds keep both this capability and
 	// their IPC listing shape compact.
 	host.SetCapReaddirPlus(requestReaddirStats)
-	options := []string{"-s"}
-	if debug {
-		options = append(options, "-d")
-	}
+	options := nativeMountOptions(runtime.GOOS, debug)
 	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
