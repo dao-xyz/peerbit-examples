@@ -18,6 +18,7 @@ peerbit-fs trust <address> <public-key>
 peerbit-fs install-adapter
 peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs mount <address> <mountpoint>
+peerbit-fs mount <address> <mountpoint> --readable-first
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
@@ -235,6 +236,24 @@ peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 `mount` opens a full replica and waits until the initial namespace has settled
 before exposing a writable filesystem. During that window library mutations and
 writable backend opens return retryable `EAGAIN`; reads remain available.
+`mount --readable-first` opts into exposing the native mount once automatic
+bootstrap has either installed its snapshot overlay or made an explicit
+fallback decision, while retaining that same backend write gate. This exposes
+the current local read view, not a completeness guarantee. In particular,
+`off` (plain-join fallback) and `unverified` views can be partial and continue
+changing; a missing path is not authoritative until write readiness. The CLI
+warns for those fallback phases, prints when the mount is available for reads,
+and prints a second transition when genuine write readiness makes it writable.
+It never enables partial writes and cannot be combined with
+`--allow-partial-writes`.
+
+Readable-first is useful when early reads are more valuable than presenting a
+fully writable mount immediately. It is not a kernel-level read-only mount:
+write-intent opens, creates, truncates, renames, removes, and other mutations
+fail with retryable `EAGAIN` until readiness. Some applications open files for
+write even during an otherwise read-heavy probe or do not retry `EAGAIN`; keep
+the default ready-before-mount behavior for those applications. Both the
+in-process adapter and the external adapter reach the same gated backend.
 `mount --no-replicate` is rejected because an observer cannot establish the
 complete namespace required for safe mounted writes. For now readiness is a
 settled-view heuristic rather than a protocol log-frontier proof, so deployments
@@ -259,9 +278,20 @@ epoch are still needed upstream for protocol-grade revocation.
 newly created empty filesystem can be mounted locally and later prove its empty
 starting view to a connected joiner. `create --no-replicate` is rejected.
 `mount` waits up to 120 seconds by default; tune this with
-`--write-ready-timeout-ms`. A timeout is not permission to write: keep a
-complete replicator for this filesystem connected and retry. An unrelated
-connected Peerbit peer does not count. A fresh no-snapshot join can count
+`--write-ready-timeout-ms`. In readable-first mode one overall countdown starts
+after the filesystem opens: it covers the initial readable-view wait, native
+adapter startup, and the remaining write-readiness wait. If it expires before
+mounting, no mount is exposed; if it expires afterward, the CLI detaches the
+native or external adapter. In both cases it closes any IPC server, stops
+Peerbit, and fails rather than leaving a permanently read-only background
+mount. The signal waiter is installed before the initial view wait and adapter
+startup. Adapter startup is always joined; if it returns after the deadline or
+after Ctrl-C/SIGTERM, the CLI detaches it immediately. Otherwise Ctrl-C or
+SIGTERM aborts and joins the readable/readiness wait before performing the same
+ordered cleanup. A timeout is not
+permission to write: keep a complete replicator for this filesystem connected
+and retry. An unrelated connected Peerbit peer does not count. A fresh
+no-snapshot join can count
 namespace rows materialized during the initial store open only when they are
 paired with the lower log's successful network-commit phase. Local replay has
 no such phase, so a populated store with a missing sidecar cannot certify

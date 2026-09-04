@@ -20,6 +20,10 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { mountExternalNativeAdapter } from "./external-native-adapter.js";
 import {
+    runMountReadinessLifecycle,
+    waitForReadableMountView,
+} from "./mount-readiness.js";
+import {
     installNativeAdapter,
     resolveExternalNativeAdapter,
 } from "./native-adapter.js";
@@ -200,25 +204,33 @@ const isPeerbitIndexCloseError = (error: unknown) => {
     );
 };
 
-const waitForTermination = async (stop: () => Promise<void>) => {
-    await new Promise<void>((resolve, reject) => {
+const waitForTerminationSignal = async (signal?: AbortSignal) => {
+    await new Promise<void>((resolve) => {
         let settled = false;
         const keepAlive = setInterval(() => {}, 1 << 30);
-        const finish = async () => {
+        const cleanup = () => {
+            clearInterval(keepAlive);
+            process.off("SIGINT", finish);
+            process.off("SIGTERM", finish);
+            signal?.removeEventListener("abort", cancel);
+        };
+        const finish = () => {
             if (settled) {
                 return;
             }
             settled = true;
-            clearInterval(keepAlive);
-            try {
-                await stop();
-                resolve();
-            } catch (error) {
-                reject(error);
-            }
+            cleanup();
+            resolve();
+        };
+        const cancel = () => {
+            finish();
         };
         process.once("SIGINT", finish);
         process.once("SIGTERM", finish);
+        signal?.addEventListener("abort", cancel, { once: true });
+        if (signal?.aborted) {
+            cancel();
+        }
     });
 };
 
@@ -835,6 +847,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "Fail the mount if a safe initial write view is not established within this time.",
                     })
+                    .option("readable-first", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "Expose the current, potentially partial read view while write readiness settles; mutations return EAGAIN until the genuine readiness fence completes.",
+                    })
                     .option("allow-partial-writes", {
                         type: "boolean",
                         default: false,
@@ -845,6 +863,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 if (argv.replicate === false) {
                     throw new Error(
                         "mount requires a full replica; --no-replicate is not allowed for a writable mount"
+                    );
+                }
+                if (argv.readableFirst && argv.allowPartialWrites) {
+                    throw new Error(
+                        "--readable-first cannot be combined with --allow-partial-writes; readable-first must keep mutations gated until genuine write readiness"
                     );
                 }
                 const {
@@ -862,6 +885,35 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | Awaited<ReturnType<typeof mountNativeSharedFs>>
                     | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
+                let cleanupPromise: Promise<void> | undefined;
+                const cleanup = () =>
+                    (cleanupPromise ??= (async () => {
+                        const errors: unknown[] = [];
+                        try {
+                            await mounted?.unmount();
+                        } catch (error) {
+                            errors.push(error);
+                        }
+                        try {
+                            await ipc?.close();
+                        } catch (error) {
+                            errors.push(error);
+                        }
+                        try {
+                            await stopPeerbitForCli(peerbit);
+                        } catch (error) {
+                            errors.push(error);
+                        }
+                        if (errors.length === 1) {
+                            throw errors[0];
+                        }
+                        if (errors.length > 1) {
+                            throw new AggregateError(
+                                errors,
+                                "Mount cleanup did not complete"
+                            );
+                        }
+                    })());
                 try {
                     await connectToNetwork(peerbit, argv.peer);
                     const fsHandle = await openCliFs(peerbit, {
@@ -870,76 +922,129 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         replicate: true,
                         allowPartialWrites: argv.allowPartialWrites,
                     });
-                    // A fresh address-open can serve bootstrap-overlay reads
-                    // before its namespace is safe to mutate. Do not expose a
-                    // writable OS mount until the full-replica readiness fence
-                    // has settled (warm reopens resolve immediately).
+                    const mountpoint = normalizeNativeMountpoint(
+                        String(argv.mountpoint)
+                    );
                     try {
-                        await fsHandle.awaitWriteReady({
-                            timeout: argv.writeReadyTimeoutMs,
+                        await runMountReadinessLifecycle({
+                            readableFirst: argv.readableFirst === true,
+                            timeoutMs: argv.writeReadyTimeoutMs,
+                            isWriteReady: () =>
+                                fsHandle.bootstrapStatus().writeReady === true,
+                            awaitWriteReady: (options) =>
+                                fsHandle.awaitWriteReady(options),
+                            awaitReadable: (options) =>
+                                waitForReadableMountView(
+                                    () => fsHandle.bootstrapStatus(),
+                                    options
+                                ),
+                            mount: async () => {
+                                const backend = createSharedFsMountBackend(
+                                    fsHandle,
+                                    {
+                                        // SharedFileSystem treats chunk input
+                                        // as immutable and may retain its
+                                        // views, so the backend transfers a
+                                        // stable COW snapshot instead of
+                                        // copying on release.
+                                        writeFileInput: "immutable-borrowed",
+                                    }
+                                );
+                                const externalAdapter =
+                                    await resolveExternalNativeAdapter(
+                                        argv.nativeAdapter
+                                    );
+                                if (externalAdapter) {
+                                    ipc = await createSharedFsIpcServer(
+                                        backend,
+                                        "tcp://127.0.0.1:0"
+                                    );
+                                    mounted = await mountExternalNativeAdapter(
+                                        externalAdapter,
+                                        ipc.endpoint,
+                                        mountpoint
+                                    );
+                                } else {
+                                    // In-process fuse-native mounts talk to the
+                                    // backend directly; a loopback JSON hop
+                                    // would only add latency and base64 CPU.
+                                    mounted = await mountNativeSharedFs(
+                                        backend,
+                                        { mountpoint }
+                                    );
+                                }
+                            },
+                            waitForShutdown: waitForTerminationSignal,
+                            cleanup,
+                            onMounted: (writeReady) => {
+                                console.log(
+                                    chalk.green(
+                                        `Mounted ${fsHandle.address} at ${mounted!.mountpoint}`
+                                    )
+                                );
+                                if (ipc) {
+                                    console.log(
+                                        `IPC endpoint: ${ipc.endpoint}`
+                                    );
+                                }
+                                const gcSchedule = fsHandle.gcStatus();
+                                console.log(
+                                    gcSchedule.scheduled
+                                        ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
+                                        : "gc schedule: off"
+                                );
+                                if (argv.readableFirst && writeReady) {
+                                    console.log(
+                                        chalk.green(
+                                            "Write readiness was already established; the mount is writable."
+                                        )
+                                    );
+                                } else if (argv.readableFirst) {
+                                    const bootstrap =
+                                        fsHandle.bootstrapStatus();
+                                    if (
+                                        bootstrap.phase === "off" ||
+                                        bootstrap.phase === "unverified"
+                                    ) {
+                                        console.warn(
+                                            chalk.yellow(
+                                                `Bootstrap is ${bootstrap.phase}; this fallback read view can be partial and keep changing. Missing paths are not authoritative until write readiness.`
+                                            )
+                                        );
+                                    }
+                                }
+                            },
+                            onWritePending: () => {
+                                console.log(
+                                    chalk.yellow(
+                                        `Readable-first mount exposes the current local read view, which can still change; missing paths are not authoritative until readiness. Mutations remain blocked with retryable EAGAIN until write readiness completes; a ${argv.writeReadyTimeoutMs} ms timeout safely detaches the mount.`
+                                    )
+                                );
+                            },
+                            onWriteReady: () => {
+                                console.log(
+                                    chalk.green(
+                                        "Write readiness established; the mount is now writable."
+                                    )
+                                );
+                            },
                         });
                     } catch (error: any) {
                         if (error?.code === "ETIMEDOUT") {
+                            const timeoutPrefix = argv.readableFirst
+                                ? mounted
+                                    ? `readable-first mount exceeded its ${argv.writeReadyTimeoutMs} ms readiness deadline and was detached without bypassing the write gate`
+                                    : `readable-first mount did not establish an initial readable view within ${argv.writeReadyTimeoutMs} ms and was not exposed`
+                                : `mount did not establish a safe initial write view within ${argv.writeReadyTimeoutMs} ms`;
                             throw new Error(
-                                `mount did not establish a safe initial write view within ${argv.writeReadyTimeoutMs} ms; keep a complete replicator connected and retry. If status reports legacy promotion eligibility, independently verify this exact local replica and run: peerbit-fs trust-legacy-replica ${argv.address} --assume-local-replica-complete. --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`,
+                                `${timeoutPrefix}; keep a complete replicator connected and retry. If status reports legacy promotion eligibility, independently verify this exact local replica and run: peerbit-fs trust-legacy-replica ${argv.address} --assume-local-replica-complete. --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`,
                                 { cause: error }
                             );
                         }
                         throw error;
                     }
-                    const backend = createSharedFsMountBackend(fsHandle, {
-                        // SharedFileSystem treats chunk input as immutable and
-                        // may retain its views, so the backend transfers a
-                        // stable COW snapshot instead of copying on release.
-                        writeFileInput: "immutable-borrowed",
-                    });
-                    const externalAdapter = await resolveExternalNativeAdapter(
-                        argv.nativeAdapter
-                    );
-                    const mountpoint = normalizeNativeMountpoint(
-                        String(argv.mountpoint)
-                    );
-                    if (externalAdapter) {
-                        ipc = await createSharedFsIpcServer(
-                            backend,
-                            "tcp://127.0.0.1:0"
-                        );
-                        mounted = await mountExternalNativeAdapter(
-                            externalAdapter,
-                            ipc.endpoint,
-                            mountpoint
-                        );
-                    } else {
-                        // In-process fuse-native mounts talk to the backend
-                        // directly; a loopback JSON hop would only add
-                        // latency and base64 CPU.
-                        mounted = await mountNativeSharedFs(backend, {
-                            mountpoint,
-                        });
-                    }
-                    console.log(
-                        chalk.green(
-                            `Mounted ${fsHandle.address} at ${mounted.mountpoint}`
-                        )
-                    );
-                    if (ipc) {
-                        console.log(`IPC endpoint: ${ipc.endpoint}`);
-                    }
-                    const gcSchedule = fsHandle.gcStatus();
-                    console.log(
-                        gcSchedule.scheduled
-                            ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
-                            : "gc schedule: off"
-                    );
-                    await waitForTermination(async () => {
-                        await mounted?.unmount();
-                        await ipc?.close();
-                        await stopPeerbitForCli(peerbit);
-                    });
                 } catch (error) {
-                    await mounted?.unmount().catch(() => {});
-                    await ipc?.close().catch(() => {});
-                    await stopPeerbitForCli(peerbit).catch(() => {});
+                    await cleanup().catch(() => {});
                     if (error instanceof NativeMountUnavailableError) {
                         console.error(chalk.red(error.message));
                         await printNativeRequirements();
