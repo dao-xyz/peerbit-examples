@@ -12,6 +12,11 @@ import {
     type SharedFsMountBackend,
     type SharedFsOpenFlags,
 } from "./mount-backend.js";
+import {
+    BoundedIpcByteReader,
+    IpcFrameTooLargeError,
+    IpcUnexpectedEofError,
+} from "./ipc-byte-reader.js";
 
 export type SharedFsIpcEndpoint = string;
 
@@ -387,8 +392,10 @@ export const createSharedFsIpcClient = (
         }
         return new Promise<unknown>((resolve, reject) => {
             const socket = connectEndpoint(endpoint);
-            let responseChunks: Buffer[] = [];
-            let responseBytes = 0;
+            const reader = new BoundedIpcByteReader(
+                socket,
+                limits.maxResponseFrameBytes
+            );
             let settled = false;
             const fail = (error: Error) => {
                 if (!settled) {
@@ -407,80 +414,92 @@ export const createSharedFsIpcClient = (
                     )
                 );
             });
-            socket.on("connect", () => {
-                void writeFrame(socket, requestFrame).catch((error) => {
-                    fail(
-                        error instanceof Error
-                            ? error
-                            : new Error(String(error))
-                    );
-                });
-            });
-            socket.on("data", (chunk) => {
-                const bytes = Buffer.isBuffer(chunk)
-                    ? chunk
-                    : Buffer.from(chunk);
-                if (settled) {
-                    socket.destroy();
-                    return;
-                }
-                const newline = bytes.indexOf(0x0a);
-                const fragment =
-                    newline === -1 ? bytes : bytes.subarray(0, newline);
-                responseBytes += fragment.byteLength;
-                if (responseBytes > limits.maxResponseFrameBytes) {
-                    fail(
-                        new SharedFsBackendError(
-                            "EIO",
-                            `IPC response exceeds ${limits.maxResponseFrameBytes} byte limit`
-                        )
-                    );
-                    return;
-                }
-                if (fragment.byteLength > 0) {
-                    responseChunks.push(fragment);
-                }
-                if (newline === -1) {
-                    return;
-                }
-                if (newline + 1 !== bytes.byteLength) {
-                    fail(
-                        new SharedFsBackendError(
-                            "EIO",
-                            "IPC server sent trailing bytes after its response"
-                        )
-                    );
-                    return;
-                }
-                const frame =
-                    responseChunks.length === 1
-                        ? responseChunks[0]
-                        : Buffer.concat(responseChunks, responseBytes);
-                responseChunks = [];
-                try {
-                    const response = parseResponse(frame, id);
-                    settled = true;
-                    socket.end();
-                    if (response.ok) {
-                        resolve(decodeBytes(response.result));
-                    } else {
-                        reject(
+            socket.once("connect", () => {
+                void (async () => {
+                    try {
+                        await writeFrame(socket, requestFrame);
+                    } catch (error) {
+                        fail(
+                            error instanceof Error
+                                ? error
+                                : new Error(String(error))
+                        );
+                        return;
+                    }
+
+                    let frame: Buffer | undefined;
+                    try {
+                        frame = await reader.readLine();
+                    } catch (error) {
+                        if (error instanceof IpcFrameTooLargeError) {
+                            fail(
+                                new SharedFsBackendError(
+                                    "EIO",
+                                    `IPC response exceeds ${limits.maxResponseFrameBytes} byte limit`
+                                )
+                            );
+                            return;
+                        }
+                        if (error instanceof IpcUnexpectedEofError) {
+                            fail(
+                                new SharedFsBackendError(
+                                    "EIO",
+                                    `IPC connection closed before a response for ${op}`
+                                )
+                            );
+                            return;
+                        }
+                        fail(
+                            error instanceof Error
+                                ? error
+                                : new Error(String(error))
+                        );
+                        return;
+                    }
+                    if (frame === undefined) {
+                        fail(
                             new SharedFsBackendError(
-                                (response.error.code as any) ?? "EIO",
-                                response.error.message
+                                "EIO",
+                                `IPC connection closed before a response for ${op}`
+                            )
+                        );
+                        return;
+                    }
+                    if (reader.bufferedByteLength > 0) {
+                        fail(
+                            new SharedFsBackendError(
+                                "EIO",
+                                "IPC server sent trailing bytes after its response"
+                            )
+                        );
+                        return;
+                    }
+
+                    try {
+                        const response = parseResponse(frame, id);
+                        settled = true;
+                        socket.end();
+                        if (response.ok) {
+                            resolve(decodeBytes(response.result));
+                        } else {
+                            reject(
+                                new SharedFsBackendError(
+                                    (response.error.code as any) ?? "EIO",
+                                    response.error.message
+                                )
+                            );
+                        }
+                    } catch (error) {
+                        fail(
+                            new SharedFsBackendError(
+                                "EIO",
+                                error instanceof Error
+                                    ? error.message
+                                    : String(error)
                             )
                         );
                     }
-                } catch (error) {
-                    fail(
-                        new SharedFsBackendError(
-                            "EIO",
-                            error instanceof Error
-                                ? error.message
-                                : String(error)
-                        )
-                    );
-                }
+                })();
             });
         });
     };
@@ -511,100 +530,76 @@ const serveSocket = async (
     backend: SharedFsMountBackend,
     limits: ResolvedSharedFsIpcOptions
 ) => {
-    let requestChunks: Buffer[] = [];
-    let requestBytes = 0;
+    const reader = new BoundedIpcByteReader(
+        socket,
+        limits.maxRequestFrameBytes
+    );
 
-    for await (const incoming of socket) {
-        const chunk = Buffer.isBuffer(incoming)
-            ? incoming
-            : Buffer.from(incoming);
-        let offset = 0;
-        while (offset < chunk.byteLength) {
-            const newline = chunk.indexOf(0x0a, offset);
-            const end = newline === -1 ? chunk.byteLength : newline;
-            const fragment = chunk.subarray(offset, end);
-            requestBytes += fragment.byteLength;
-            if (requestBytes > limits.maxRequestFrameBytes) {
-                socket.destroy();
-                return;
-            }
-            if (fragment.byteLength > 0) {
-                requestChunks.push(fragment);
-            }
-            if (newline === -1) {
-                break;
-            }
+    for (;;) {
+        const frame = await reader.readLine();
+        if (frame === undefined) {
+            return;
+        }
+        if (frame.byteLength === 0) {
+            continue;
+        }
 
-            const frame =
-                requestChunks.length === 1
-                    ? requestChunks[0]
-                    : Buffer.concat(requestChunks, requestBytes);
-            requestChunks = [];
-            requestBytes = 0;
-            offset = newline + 1;
-            if (frame.byteLength === 0) {
-                continue;
-            }
+        let request: IpcRequest;
+        try {
+            request = parseRequest(frame);
+        } catch {
+            socket.destroy();
+            return;
+        }
 
-            let request: IpcRequest;
-            try {
-                request = parseRequest(frame);
-            } catch {
-                socket.destroy();
-                return;
-            }
+        let response: IpcResponse;
+        try {
+            const args = decodeBytes(request.args) as unknown[];
+            const method = backend[request.op] as (
+                ...args: unknown[]
+            ) => Promise<unknown>;
+            const result = await method.apply(backend, args);
+            response = {
+                id: request.id,
+                ok: true,
+                result: encodeResult(result),
+            };
+        } catch (error) {
+            response = {
+                id: request.id,
+                ok: false,
+                error: {
+                    code:
+                        error instanceof SharedFsBackendError
+                            ? error.code
+                            : undefined,
+                    message:
+                        error instanceof Error ? error.message : String(error),
+                },
+            };
+        }
 
-            let response: IpcResponse;
-            try {
-                const args = decodeBytes(request.args) as unknown[];
-                const method = backend[request.op] as (
-                    ...args: unknown[]
-                ) => Promise<unknown>;
-                const result = await method.apply(backend, args);
-                response = {
-                    id: request.id,
-                    ok: true,
-                    result: encodeResult(result),
-                };
-            } catch (error) {
-                response = {
+        let responseFrame = serializeJsonFrame(
+            response,
+            limits.maxResponseFrameBytes
+        );
+        if (!responseFrame) {
+            responseFrame = serializeJsonFrame(
+                {
                     id: request.id,
                     ok: false,
                     error: {
-                        code:
-                            error instanceof SharedFsBackendError
-                                ? error.code
-                                : undefined,
-                        message:
-                            error instanceof Error
-                                ? error.message
-                                : String(error),
+                        code: "EIO",
+                        message: `IPC response exceeds ${limits.maxResponseFrameBytes} byte limit`,
                     },
-                };
-            }
-
-            let responseFrame = serializeJsonFrame(
-                response,
+                } satisfies IpcResponse,
                 limits.maxResponseFrameBytes
             );
-            if (!responseFrame) {
-                responseFrame = serializeJsonFrame(
-                    {
-                        id: request.id,
-                        ok: false,
-                        error: {
-                            code: "EIO",
-                            message: `IPC response exceeds ${limits.maxResponseFrameBytes} byte limit`,
-                        },
-                    } satisfies IpcResponse,
-                    limits.maxResponseFrameBytes
-                );
-            }
-            if (!responseFrame) {
-                socket.destroy();
-                return;
-            }
-            await writeFrame(socket, responseFrame);
         }
+        if (!responseFrame) {
+            socket.destroy();
+            return;
+        }
+        await writeFrame(socket, responseFrame);
     }
 };
