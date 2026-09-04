@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+    finalizeNodeGoIPCReport,
     parseNodeGoIPCAdapterWidths,
     parseNodeGoIPCArguments,
     summarizeNodeGoIPCSamples,
@@ -19,6 +20,8 @@ const scope = {
         "distinct paths/handles and complete read/result checks after timers; per-handle write bytes checked by untimed fsync",
     scheduling:
         "work item i uses retained adapter lane i modulo adapterWidth; all lanes negotiate before any warmup or sample",
+    goAllocationMeasurement:
+        "per-batch Go runtime TotalAlloc and Mallocs deltas only; setup, Node, and system allocations are excluded",
     excludes: [
         "FUSE/macFUSE/WinFsp",
         "Peerbit and network replication",
@@ -26,6 +29,27 @@ const scope = {
         "durable acknowledgements",
         "mount syscall overhead",
     ],
+};
+
+const benchmarkInputFiles = [
+    "scripts/shared-fs-node-go-ipc-benchmark.mjs",
+    "packages/shared-fs/native/ipc.go",
+    "packages/shared-fs/native/ipc_v2.go",
+    "packages/shared-fs/native/node_go_ipc_benchmark_test.go",
+    "packages/shared-fs/library/lib/esm/ipc.js",
+    "packages/shared-fs/library/lib/esm/ipc-v2.js",
+    "packages/shared-fs/library/lib/esm/ipc-byte-reader.js",
+    "packages/shared-fs/library/lib/esm/mount-backend.js",
+];
+
+const provenance = {
+    osRelease: "test-release",
+    totalMemoryBytes: 16 * 2 ** 30,
+    sharedFsPackageVersion: "0.13.15",
+    pnpmLockSha256: "a".repeat(64),
+    gitHeadCommit: "b".repeat(40),
+    benchmarkInputFiles,
+    benchmarkInputsSha256: "c".repeat(64),
 };
 
 const definitions = [
@@ -69,6 +93,7 @@ const createValidReport = () => ({
         nodeArch: "test",
         nodeUvThreadpoolSize: "default",
         cpuModel: "test cpu",
+        ...structuredClone(provenance),
     },
     widths: options.adapterWidths.map((adapterWidth) => ({
         adapterWidth,
@@ -178,7 +203,7 @@ test("Node-Go IPC sweep derives nearest-rank batch latency and throughput", () =
 
 test("Node-Go IPC sweep validator binds widths, workload, raw samples, and summaries", () => {
     const report = createValidReport();
-    assert.equal(validateNodeGoIPCReport(report, options), report);
+    assert.equal(validateNodeGoIPCReport(report, options, provenance), report);
 
     const corruptions = [
         (candidate) => candidate.run.adapterWidths.reverse(),
@@ -189,11 +214,67 @@ test("Node-Go IPC sweep validator binds widths, workload, raw samples, and summa
             (candidate.widths[0].scenarios[1].samples[0].durationNs = 0),
         (candidate) => (candidate.widths[0].scenarios[2].summary.p50Ns += 1),
         (candidate) => (candidate.runtime.goMaxProcs = 0),
+        (candidate) => (candidate.runtime.osRelease = ""),
+        (candidate) => (candidate.runtime.totalMemoryBytes = 0),
+        (candidate) => (candidate.runtime.sharedFsPackageVersion = ""),
+        (candidate) => (candidate.runtime.pnpmLockSha256 = "not-a-hash"),
+        (candidate) => (candidate.runtime.gitHeadCommit = "not-a-commit"),
+        (candidate) => candidate.runtime.benchmarkInputFiles.pop(),
+        (candidate) => (candidate.runtime.benchmarkInputsSha256 = "d"),
+        (candidate) => (candidate.runtime.unexpected = true),
         (candidate) => candidate.scope.excludes.pop(),
     ];
     for (const corrupt of corruptions) {
         const candidate = createValidReport();
         corrupt(candidate);
-        assert.throws(() => validateNodeGoIPCReport(candidate, options));
+        assert.throws(() =>
+            validateNodeGoIPCReport(candidate, options, provenance)
+        );
     }
+    const validButWrongComputedValues = [
+        { osRelease: "other-release" },
+        { totalMemoryBytes: 32 * 2 ** 30 },
+        { sharedFsPackageVersion: "0.13.16" },
+        { pnpmLockSha256: "d".repeat(64) },
+        { gitHeadCommit: null },
+        { benchmarkInputsSha256: "e".repeat(64) },
+    ];
+    for (const difference of validButWrongComputedValues) {
+        const mismatched = { ...provenance, ...difference };
+        assert.throws(
+            () => validateNodeGoIPCReport(report, options, mismatched),
+            /does not match the computed value/u
+        );
+    }
+});
+
+test("Node-Go IPC finalizer is pure and its returned report revalidates", () => {
+    const unfinalized = createValidReport();
+    for (const key of Object.keys(provenance)) delete unfinalized.runtime[key];
+    const before = structuredClone(unfinalized);
+
+    const finalized = finalizeNodeGoIPCReport(unfinalized, options, provenance);
+    assert.deepEqual(unfinalized, before);
+    assert.notEqual(finalized, unfinalized);
+    assert.notEqual(finalized.runtime, unfinalized.runtime);
+    assert.deepEqual(
+        finalized.runtime.benchmarkInputFiles,
+        benchmarkInputFiles
+    );
+    assert.equal(
+        validateNodeGoIPCReport(finalized, options, provenance),
+        finalized
+    );
+    const savedRoundTrip = JSON.parse(JSON.stringify(finalized));
+    assert.equal(
+        validateNodeGoIPCReport(savedRoundTrip, options, provenance),
+        savedRoundTrip
+    );
+
+    const incomplete = { ...provenance };
+    delete incomplete.benchmarkInputsSha256;
+    assert.throws(
+        () => finalizeNodeGoIPCReport(unfinalized, options, incomplete),
+        /runtime provenance is invalid/u
+    );
 });

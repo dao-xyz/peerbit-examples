@@ -36,6 +36,8 @@ const EXPECTED_SCOPE = {
         "distinct paths/handles and complete read/result checks after timers; per-handle write bytes checked by untimed fsync",
     scheduling:
         "work item i uses retained adapter lane i modulo adapterWidth; all lanes negotiate before any warmup or sample",
+    goAllocationMeasurement:
+        "per-batch Go runtime TotalAlloc and Mallocs deltas only; setup, Node, and system allocations are excluded",
     excludes: [
         "FUSE/macFUSE/WinFsp",
         "Peerbit and network replication",
@@ -53,6 +55,27 @@ const BENCHMARK_INPUT_FILES = [
     "packages/shared-fs/library/lib/esm/ipc-v2.js",
     "packages/shared-fs/library/lib/esm/ipc-byte-reader.js",
     "packages/shared-fs/library/lib/esm/mount-backend.js",
+];
+const RUNTIME_BASE_KEYS = [
+    "goVersion",
+    "goOs",
+    "goArch",
+    "goMaxProcs",
+    "goLogicalCpus",
+    "nodeVersion",
+    "nodePlatform",
+    "nodeArch",
+    "nodeUvThreadpoolSize",
+    "cpuModel",
+];
+const RUNTIME_PROVENANCE_KEYS = [
+    "osRelease",
+    "totalMemoryBytes",
+    "sharedFsPackageVersion",
+    "pnpmLockSha256",
+    "gitHeadCommit",
+    "benchmarkInputFiles",
+    "benchmarkInputsSha256",
 ];
 
 const readOptional = async (path) => {
@@ -108,6 +131,31 @@ const hashBenchmarkInputs = async () => {
         hash.update("\0");
     }
     return hash.digest("hex");
+};
+
+const collectNodeGoIPCRuntimeProvenance = async () => {
+    const [lockfile, packageJson, gitHeadCommit, benchmarkInputsSha256] =
+        await Promise.all([
+            readFile(join(REPOSITORY_ROOT, "pnpm-lock.yaml")),
+            readFile(
+                join(
+                    REPOSITORY_ROOT,
+                    "packages/shared-fs/library/package.json"
+                ),
+                "utf8"
+            ),
+            readGitCommit(),
+            hashBenchmarkInputs(),
+        ]);
+    return {
+        osRelease: release(),
+        totalMemoryBytes: totalmem(),
+        sharedFsPackageVersion: JSON.parse(packageJson).version,
+        pnpmLockSha256: createHash("sha256").update(lockfile).digest("hex"),
+        gitHeadCommit: gitHeadCommit ?? null,
+        benchmarkInputFiles: [...BENCHMARK_INPUT_FILES],
+        benchmarkInputsSha256,
+    };
 };
 
 export const parseNodeGoIPCAdapterWidths = (value) => {
@@ -411,7 +459,69 @@ export const summarizeNodeGoIPCSamples = (
 const sameJson = (left, right) =>
     JSON.stringify(left) === JSON.stringify(right);
 
-export const validateNodeGoIPCReport = (report, options) => {
+const runtimeProvenanceFrom = (runtime) =>
+    Object.fromEntries(
+        RUNTIME_PROVENANCE_KEYS.map((key) => [key, runtime?.[key]])
+    );
+
+const validateNodeGoIPCRuntimeProvenance = (provenance, exactKeys) => {
+    if (
+        !provenance ||
+        (exactKeys &&
+            !sameJson(
+                Object.keys(provenance).sort(),
+                [...RUNTIME_PROVENANCE_KEYS].sort()
+            )) ||
+        typeof provenance.osRelease !== "string" ||
+        provenance.osRelease.length < 1 ||
+        provenance.osRelease.length > 256 ||
+        !Number.isSafeInteger(provenance.totalMemoryBytes) ||
+        provenance.totalMemoryBytes < 1 ||
+        typeof provenance.sharedFsPackageVersion !== "string" ||
+        provenance.sharedFsPackageVersion.length < 1 ||
+        provenance.sharedFsPackageVersion.length > 128 ||
+        !/^[0-9a-f]{64}$/u.test(provenance.pnpmLockSha256 ?? "") ||
+        !(
+            provenance.gitHeadCommit === null ||
+            /^[0-9a-f]{40}$/u.test(provenance.gitHeadCommit ?? "")
+        ) ||
+        !sameJson(provenance.benchmarkInputFiles, BENCHMARK_INPUT_FILES) ||
+        !/^[0-9a-f]{64}$/u.test(provenance.benchmarkInputsSha256 ?? "")
+    ) {
+        throw new Error("Node-Go IPC runtime provenance is invalid");
+    }
+};
+
+export const validateNodeGoIPCReport = (
+    report,
+    options,
+    expectedProvenance
+) => {
+    if (
+        !options ||
+        !Number.isSafeInteger(options.samples) ||
+        options.samples < 1 ||
+        options.samples > 1000 ||
+        !Number.isSafeInteger(options.warmups) ||
+        options.warmups < 0 ||
+        options.warmups > 100 ||
+        !Number.isSafeInteger(options.parallelism) ||
+        options.parallelism < 1 ||
+        options.parallelism > MAX_PARALLELISM ||
+        !Array.isArray(options.adapterWidths) ||
+        options.adapterWidths.length < 1 ||
+        options.adapterWidths.length > MAX_ADAPTER_WIDTH ||
+        new Set(options.adapterWidths).size !== options.adapterWidths.length ||
+        options.adapterWidths.some(
+            (width) =>
+                !Number.isSafeInteger(width) ||
+                width < 1 ||
+                width > MAX_ADAPTER_WIDTH ||
+                width > options.parallelism
+        )
+    ) {
+        throw new Error("Node-Go IPC expected run options are invalid");
+    }
     if (
         report?.schemaVersion !== 2 ||
         report.benchmark !== "shared-fs-node-go-ipc-concurrency" ||
@@ -428,6 +538,14 @@ export const validateNodeGoIPCReport = (report, options) => {
     ) {
         throw new Error("Go benchmark produced an unexpected report envelope");
     }
+    if (
+        !sameJson(
+            Object.keys(report.runtime ?? {}).sort(),
+            [...RUNTIME_BASE_KEYS, ...RUNTIME_PROVENANCE_KEYS].sort()
+        )
+    ) {
+        throw new Error("Go benchmark runtime fields are invalid");
+    }
     for (const key of [
         "goVersion",
         "goOs",
@@ -440,6 +558,18 @@ export const validateNodeGoIPCReport = (report, options) => {
     ]) {
         if (typeof report.runtime?.[key] !== "string" || !report.runtime[key]) {
             throw new Error(`Go benchmark runtime ${key} is invalid`);
+        }
+    }
+    const recordedProvenance = runtimeProvenanceFrom(report.runtime);
+    validateNodeGoIPCRuntimeProvenance(recordedProvenance, true);
+    if (expectedProvenance !== undefined) {
+        validateNodeGoIPCRuntimeProvenance(expectedProvenance, true);
+        for (const key of RUNTIME_PROVENANCE_KEYS) {
+            if (!sameJson(recordedProvenance[key], expectedProvenance[key])) {
+                throw new Error(
+                    `Node-Go IPC runtime provenance ${key} does not match the computed value`
+                );
+            }
         }
     }
     for (const key of ["goMaxProcs", "goLogicalCpus"]) {
@@ -520,6 +650,19 @@ export const validateNodeGoIPCReport = (report, options) => {
     return report;
 };
 
+export const finalizeNodeGoIPCReport = (report, options, provenance) => {
+    validateNodeGoIPCRuntimeProvenance(provenance, true);
+    const finalized = {
+        ...report,
+        runtime: {
+            ...report?.runtime,
+            ...provenance,
+            benchmarkInputFiles: [...provenance.benchmarkInputFiles],
+        },
+    };
+    return validateNodeGoIPCReport(finalized, options, provenance);
+};
+
 export const runNodeGoIPCBenchmark = async (options) => {
     const scratch = await mkdtemp(join(tmpdir(), "peerbit-node-go-ipc-"));
     const executable = join(
@@ -531,19 +674,7 @@ export const runNodeGoIPCBenchmark = async (options) => {
     const rawReport = join(scratch, "report.json");
     let server;
     try {
-        const [lockfile, packageJson, gitCommit, benchmarkInputsSha256] =
-            await Promise.all([
-                readFile(join(REPOSITORY_ROOT, "pnpm-lock.yaml")),
-                readFile(
-                    join(
-                        REPOSITORY_ROOT,
-                        "packages/shared-fs/library/package.json"
-                    ),
-                    "utf8"
-                ),
-                readGitCommit(),
-                hashBenchmarkInputs(),
-            ]);
+        const provenanceBefore = await collectNodeGoIPCRuntimeProvenance();
         // Compilation and Node server startup happen before all timed samples.
         await runChild("go", ["test", "-c", "-o", executable, "."], {
             cwd: NATIVE_ROOT,
@@ -587,28 +718,18 @@ export const runNodeGoIPCBenchmark = async (options) => {
                 },
             }
         );
-        const report = validateNodeGoIPCReport(
-            JSON.parse(await readFile(rawReport, "utf8")),
-            options
-        );
-        if ((await hashBenchmarkInputs()) !== benchmarkInputsSha256) {
+        const unfinalizedReport = JSON.parse(await readFile(rawReport, "utf8"));
+        const provenanceAfter = await collectNodeGoIPCRuntimeProvenance();
+        if (!sameJson(provenanceAfter, provenanceBefore)) {
             throw new Error(
-                "Benchmark inputs changed while the run was active"
+                "Benchmark runtime provenance changed while the run was active"
             );
         }
-        report.runtime = {
-            ...report.runtime,
-            osRelease: release(),
-            totalMemoryBytes: totalmem(),
-            sharedFsPackageVersion: JSON.parse(packageJson).version,
-            pnpmLockSha256: createHash("sha256").update(lockfile).digest("hex"),
-            gitHeadCommit: gitCommit ?? null,
-            benchmarkInputFiles: BENCHMARK_INPUT_FILES,
-            benchmarkInputsSha256,
-        };
-        report.scope.goAllocationMeasurement =
-            "per-batch Go runtime TotalAlloc and Mallocs deltas only; setup, Node, and system allocations are excluded";
-        return report;
+        return finalizeNodeGoIPCReport(
+            unfinalizedReport,
+            options,
+            provenanceAfter
+        );
     } finally {
         await server?.close();
         await rm(scratch, { recursive: true, force: true });

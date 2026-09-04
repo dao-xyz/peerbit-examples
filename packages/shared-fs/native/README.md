@@ -124,7 +124,9 @@ batch and aggregate logical MiB/s for data operations. Allocation deltas cover
 only the timed Go client batch. The JSON also records both concurrency axes,
 the package version, lockfile SHA-256, Git HEAD when resolvable, host runtime
 details, raw samples, and a hash plus path list for the exact benchmark inputs
-(including dirty worktree content) so comparisons remain attributable.
+(including dirty worktree content) so comparisons remain attributable. The
+harness recomputes that provenance after the run and validates the complete
+final report before returning, printing, or saving it.
 
 This is a reusable negotiated binary-v2 transport baseline, not filesystem
 performance. It excludes FUSE/macFUSE/WinFsp, mount syscalls, Peerbit,

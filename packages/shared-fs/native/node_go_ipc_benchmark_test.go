@@ -71,13 +71,14 @@ type nodeGoIPCWidthReport struct {
 }
 
 type nodeGoIPCScope struct {
-	Boundary     string   `json:"boundary"`
-	Transport    string   `json:"transport"`
-	Backend      string   `json:"backend"`
-	Measurement  string   `json:"measurement"`
-	Verification string   `json:"verification"`
-	Scheduling   string   `json:"scheduling"`
-	Excludes     []string `json:"excludes"`
+	Boundary                string   `json:"boundary"`
+	Transport               string   `json:"transport"`
+	Backend                 string   `json:"backend"`
+	Measurement             string   `json:"measurement"`
+	Verification            string   `json:"verification"`
+	Scheduling              string   `json:"scheduling"`
+	GoAllocationMeasurement string   `json:"goAllocationMeasurement"`
+	Excludes                []string `json:"excludes"`
 }
 
 type nodeGoIPCRun struct {
@@ -416,6 +417,7 @@ func TestNodeGoIPCExternalBenchmark(t *testing.T) {
 	report.Scope.Measurement = "wall-clock concurrent batch: Go scheduling/encode/write/wait/decode plus Node decode/backend/encode/write"
 	report.Scope.Verification = "distinct paths/handles and complete read/result checks after timers; per-handle write bytes checked by untimed fsync"
 	report.Scope.Scheduling = "work item i uses retained adapter lane i modulo adapterWidth; all lanes negotiate before any warmup or sample"
+	report.Scope.GoAllocationMeasurement = "per-batch Go runtime TotalAlloc and Mallocs deltas only; setup, Node, and system allocations are excluded"
 	report.Scope.Excludes = []string{"FUSE/macFUSE/WinFsp", "Peerbit and network replication", "storage and persistence", "durable acknowledgements", "mount syscall overhead"}
 	report.Run.Warmups, report.Run.Samples = warmups, sampleCount
 	report.Run.AdapterWidths, report.Run.WorkloadParallelism = widths, parallelism
