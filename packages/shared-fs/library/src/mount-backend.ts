@@ -1,5 +1,7 @@
 import { sha256Base64Sync } from "@peerbit/crypto";
 import {
+    DEFAULT_FILE_CHUNK_SIZE,
+    SHARED_FS_MOUNT_RANGE_READ_SEMANTICS,
     SHARED_FS_MOUNT_READ_SEMANTICS,
     SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
     SHARED_FS_MOUNT_WRITE_SEMANTICS,
@@ -11,6 +13,8 @@ import {
     type SharedFsEntryInfo,
     type SharedFsMountReadSemantics,
     type SharedFsMountReadSnapshot,
+    type SharedFsMountRangeReadSemantics,
+    type SharedFsMountRangeReadSession,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
     type SharedFsMountNamespaceSemantics,
@@ -49,6 +53,19 @@ export type SharedFsMountBackendTarget = {
         path: string,
         versionId: string
     ): Promise<SharedFsMountReadSnapshot | undefined>;
+    /**
+     * Optional exact-version lazy range session. Undefined from the opener
+     * means this version has no compatible layout and must use the verified
+     * whole-file path. Advertised implementations must authenticate the exact
+     * manifest, validate layout/chunk hashes and lengths, return fresh range
+     * allocations, verify the whole file on materialization, and hold content
+     * lifetime leases through session close and every in-flight operation.
+     */
+    mountRangeReadSemantics?(): SharedFsMountRangeReadSemantics | undefined;
+    openVersionRangeForMount?(
+        path: string,
+        versionId: string
+    ): Promise<SharedFsMountRangeReadSession | undefined>;
     /**
      * Explicit, versioned write handshake. Implementations advertising this
      * value must hash input themselves, honor `noOpIfHeadVersionIds` as a
@@ -230,6 +247,13 @@ type OpenFileState = {
     nodeId?: string | null;
     /** Backing store; may be larger than `length`. */
     buffer: Uint8Array;
+    /** Exact immutable read view used until a writable attach materializes it. */
+    rangeRead?: {
+        session: SharedFsMountRangeReadSession;
+        versionId: string;
+        headVersionIds?: string[];
+        contentHash: string;
+    };
     /** Commit snapshot currently borrowing `buffer` from this state. */
     borrowedCommitSnapshot?: CommitSnapshot;
     /** Logical file length. */
@@ -649,6 +673,76 @@ const requireVerifiedReadSnapshot = (
     return snapshot as SharedFsMountReadSnapshot;
 };
 
+const requireRangeReadSession = (
+    value: unknown,
+    path: string,
+    requestedVersionId: string,
+    candidate: SharedFsEntryInfo,
+    confirmed: SharedFsEntryInfo
+): SharedFsMountRangeReadSession => {
+    const session = value as Partial<SharedFsMountRangeReadSession> | undefined;
+    const valid =
+        session !== undefined &&
+        session !== null &&
+        typeof session.read === "function" &&
+        typeof session.materialize === "function" &&
+        typeof session.close === "function" &&
+        typeof session.versionId === "string" &&
+        typeof session.nodeId === "string" &&
+        typeof session.contentHash === "string" &&
+        session.contentHash.length > 0 &&
+        typeof session.size === "bigint" &&
+        session.size >= 0n &&
+        session.size <= BigInt(Number.MAX_SAFE_INTEGER) &&
+        session.chunkSize === DEFAULT_FILE_CHUNK_SIZE &&
+        session.versionId === requestedVersionId &&
+        session.versionId === candidate.versionId &&
+        session.versionId === confirmed.versionId &&
+        session.nodeId === candidate.nodeId &&
+        session.nodeId === confirmed.nodeId &&
+        session.contentHash === candidate.contentHash &&
+        session.contentHash === confirmed.contentHash &&
+        session.size === candidate.size &&
+        session.size === confirmed.size;
+    if (!valid) {
+        throw new SharedFsBackendError(
+            "EIO",
+            `Mount range capability returned an invalid exact-version session: ${path}`
+        );
+    }
+    return session as SharedFsMountRangeReadSession;
+};
+
+const requireRangeReadBytes = (
+    value: unknown,
+    path: string,
+    expectedLength: number
+): Uint8Array => {
+    if (!(value instanceof Uint8Array) || value.byteLength !== expectedLength) {
+        throw new SharedFsBackendError(
+            "EIO",
+            `Mount range capability returned invalid bytes: ${path}`
+        );
+    }
+    return value;
+};
+
+const requireRangeMaterialization = (
+    value: unknown,
+    path: string,
+    session: SharedFsMountRangeReadSession
+): Uint8Array => {
+    const expectedLength = Number(session.size);
+    const bytes = requireRangeReadBytes(value, path, expectedLength);
+    if (sha256Base64Sync(bytes) !== session.contentHash) {
+        throw new SharedFsBackendError(
+            "EIO",
+            `Mount range capability returned a corrupt materialization: ${path}`
+        );
+    }
+    return bytes;
+};
+
 const resizeState = (state: OpenFileState, size: number) => {
     if (size < 0 || !Number.isFinite(size)) {
         throw new SharedFsBackendError("EINVAL", `Invalid size: ${size}`);
@@ -683,6 +777,9 @@ export const createSharedFsMountBackend = (
     let nextHandle = 1;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
+    const delegatesRangeReads =
+        target.mountRangeReadSemantics?.() ===
+        SHARED_FS_MOUNT_RANGE_READ_SEMANTICS;
     const delegatesNamespaceMutation =
         target.mountNamespaceSemantics?.() ===
         SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
@@ -1172,6 +1269,10 @@ export const createSharedFsMountBackend = (
         }
         clearStateCreateIntent(state);
         state.borrowedCommitSnapshot = undefined;
+        if (state.rangeRead) {
+            void state.rangeRead.session.close().catch(() => {});
+            state.rangeRead = undefined;
+        }
     };
 
     const attachHandle = (
@@ -1792,6 +1893,91 @@ export const createSharedFsMountBackend = (
         );
     };
 
+    const loadRangeSnapshot = async (
+        path: string,
+        initialEntry: SharedFsEntryInfo
+    ): Promise<
+        | {
+              session: SharedFsMountRangeReadSession;
+              entry: SharedFsEntryInfo;
+          }
+        | undefined
+    > => {
+        if (!target.openVersionRangeForMount) {
+            throw new SharedFsBackendError(
+                "EIO",
+                `Mount range capability is missing its session opener: ${path}`
+            );
+        }
+        let entry = initialEntry;
+        const maxSnapshotAttempts = 3;
+        for (let attempt = 0; attempt < maxSnapshotAttempts; attempt++) {
+            const versionId = entry.versionId;
+            if (entry.kind !== "file" || typeof versionId !== "string") {
+                throw new SharedFsBackendError(
+                    "EIO",
+                    `File has no visible version: ${path}`
+                );
+            }
+            let session: SharedFsMountRangeReadSession | undefined;
+            let openError: unknown;
+            try {
+                session = await target.openVersionRangeForMount(
+                    path,
+                    versionId
+                );
+            } catch (error) {
+                openError = error;
+            }
+            let confirmed: SharedFsEntryInfo | undefined;
+            try {
+                confirmed = await findEntry(target, path);
+            } catch (error) {
+                await session?.close().catch(() => {});
+                throw error;
+            }
+            if (
+                !confirmed ||
+                confirmed.kind !== "file" ||
+                confirmed.nodeId !== entry.nodeId
+            ) {
+                await session?.close().catch(() => {});
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `Path changed while it was being opened: ${path}`
+                );
+            }
+            if (!sameFileSnapshot(entry, confirmed)) {
+                await session?.close().catch(() => {});
+                entry = confirmed;
+                continue;
+            }
+            if (openError !== undefined) throw openError;
+            // An explicit undefined is the capability's compatibility signal:
+            // this legacy/custom layout takes the whole-file verified path.
+            if (!session) return undefined;
+            try {
+                return {
+                    session: requireRangeReadSession(
+                        session,
+                        path,
+                        versionId,
+                        entry,
+                        confirmed
+                    ),
+                    entry: confirmed,
+                };
+            } catch (error) {
+                await session.close().catch(() => {});
+                throw error;
+            }
+        }
+        throw new SharedFsBackendError(
+            "EAGAIN",
+            `File changed repeatedly while it was being opened: ${path}`
+        );
+    };
+
     const prepareStateForWrite = async (
         state: OpenFileState,
         entry: SharedFsEntryInfo,
@@ -1810,7 +1996,57 @@ export const createSharedFsMountBackend = (
                 `File identity changed before writable attach: ${path}`
             );
         }
-        const loaded = await loadWritableSnapshot(path, entry, truncate);
+        let loaded: { bytes: Uint8Array; entry: SharedFsEntryInfo };
+        const lazySnapshotStillVisible =
+            state.rangeRead !== undefined &&
+            entry.versionId === state.rangeRead.versionId &&
+            sameHeads(entry.headVersionIds, state.rangeRead.headVersionIds);
+        if (state.rangeRead && !truncate && lazySnapshotStillVisible) {
+            let bytes: Uint8Array;
+            let readError: unknown;
+            try {
+                bytes = requireRangeMaterialization(
+                    await state.rangeRead.session.materialize(),
+                    path,
+                    state.rangeRead.session
+                );
+            } catch (error) {
+                readError = error;
+                bytes = new Uint8Array(0);
+            }
+            const confirmed = await findEntry(target, path);
+            if (
+                !confirmed ||
+                confirmed.kind !== "file" ||
+                confirmed.nodeId !== nodeId
+            ) {
+                throw new SharedFsBackendError(
+                    "EAGAIN",
+                    `Path changed while it was being opened: ${path}`
+                );
+            }
+            if (!sameFileSnapshot(entry, confirmed)) {
+                // A read-only descriptor remains bound to the exact lazy
+                // snapshot, but a newly attached writer must never reuse
+                // those ancestor bytes while claiming the newer visible
+                // version as its causal base. Match the eager mount invariant
+                // by loading and verifying the latest stable snapshot.
+                loaded = await loadWritableSnapshot(path, confirmed, false);
+            } else {
+                if (readError !== undefined) throw readError;
+                loaded = {
+                    bytes,
+                    entry: {
+                        ...confirmed,
+                        contentHash: state.rangeRead.contentHash,
+                    },
+                };
+            }
+        } else {
+            // O_TRUNC intentionally takes this metadata-only branch inside
+            // loadWritableSnapshot and never materializes a lazy base.
+            loaded = await loadWritableSnapshot(path, entry, truncate);
+        }
         if (loaded.entry.nodeId !== nodeId) {
             throw new SharedFsBackendError(
                 "EAGAIN",
@@ -1844,6 +2080,10 @@ export const createSharedFsMountBackend = (
         state.baseVersionIds = prepared.baseVersionIds;
         state.openedHeadVersionIds = prepared.openedHeadVersionIds;
         state.baseContentHash = prepared.baseContentHash;
+        if (state.rangeRead) {
+            void state.rangeRead.session.close().catch(() => {});
+            state.rangeRead = undefined;
+        }
     };
 
     const openPath = async (
@@ -2096,7 +2336,34 @@ export const createSharedFsMountBackend = (
                 }
 
                 let state: OpenFileState;
-                if (parsedFlags.write || delegatesReadVerification) {
+                const ranged =
+                    !parsedFlags.write && delegatesRangeReads
+                        ? await loadRangeSnapshot(normalized, entry)
+                        : undefined;
+                if (ranged) {
+                    state = newFileState(
+                        normalized,
+                        ranged.entry.nodeId,
+                        new Uint8Array(0)
+                    );
+                    state.length = Number(ranged.session.size);
+                    state.baseVersionIds = [ranged.session.versionId];
+                    state.openedHeadVersionIds =
+                        ranged.entry.headVersionIds !== undefined
+                            ? [...ranged.entry.headVersionIds]
+                            : undefined;
+                    state.baseContentHash = ranged.session.contentHash;
+                    state.rangeRead = {
+                        session: ranged.session,
+                        versionId: ranged.session.versionId,
+                        headVersionIds: state.openedHeadVersionIds,
+                        contentHash: ranged.session.contentHash,
+                    };
+                } else if (
+                    parsedFlags.write ||
+                    delegatesReadVerification ||
+                    delegatesRangeReads
+                ) {
                     // An advertised verified reader lets the first descriptor,
                     // including a read-only one, establish the coherent state
                     // later writable siblings can reuse without another load
@@ -2127,25 +2394,36 @@ export const createSharedFsMountBackend = (
                     state = newFileState(normalized, entry.nodeId, existing);
                 }
 
-                assertNoNamespaceTransition(normalized);
-                const raced = statesByNodeId.get(state.nodeId as string);
-                if (raced) {
-                    if (raced.path === normalized) {
-                        return attachExisting(raced);
+                let registered = false;
+                try {
+                    assertNoNamespaceTransition(normalized);
+                    const raced = statesByNodeId.get(state.nodeId as string);
+                    if (raced) {
+                        if (raced.path === normalized) {
+                            return attachExisting(raced);
+                        }
+                        if (raced.committing) {
+                            throw new SharedFsBackendError(
+                                "EAGAIN",
+                                `Open observed a remotely moved node while its old state is committing; retry: ${normalized}`
+                            );
+                        }
+                        detachNamespaceState(raced);
                     }
-                    if (raced.committing) {
-                        throw new SharedFsBackendError(
-                            "EAGAIN",
-                            `Open observed a remotely moved node while its old state is committing; retry: ${normalized}`
-                        );
+                    registerState(state);
+                    registered = true;
+                    if (parsedFlags.truncate) {
+                        resizeState(state, 0);
                     }
-                    detachNamespaceState(raced);
+                    return attachHandle(state, parsedFlags);
+                } finally {
+                    if (registered && state.openHandles === 0) {
+                        unregisterState(state);
+                    } else if (!registered && state.rangeRead) {
+                        await state.rangeRead.session.close().catch(() => {});
+                        state.rangeRead = undefined;
+                    }
                 }
-                registerState(state);
-                if (parsedFlags.truncate) {
-                    resizeState(state, 0);
-                }
-                return attachHandle(state, parsedFlags);
             } catch (error) {
                 if (createIntent) {
                     releaseCreateIntent(normalized, createIntent);
@@ -2346,6 +2624,16 @@ export const createSharedFsMountBackend = (
             const state = openHandle.state;
             if (offset >= state.length || size <= 0) {
                 return new Uint8Array(0);
+            }
+            if (state.rangeRead) {
+                const end = Math.min(state.length, offset + size);
+                return wrap(async () =>
+                    requireRangeReadBytes(
+                        await state.rangeRead!.session.read(offset, size),
+                        state.path,
+                        end - offset
+                    )
+                );
             }
             const end = Math.min(state.length, offset + size);
             // Reads are snapshots. Returning a subarray would expose the live

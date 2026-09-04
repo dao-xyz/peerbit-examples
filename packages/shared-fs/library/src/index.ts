@@ -41,6 +41,7 @@ import {
     CHANGESET_MANIFEST_FORMAT_VERSION,
     ChangesetManifest,
     ChangesetManifestPayload,
+    FIXED_CHUNK_LAYOUT_V1_MARKER_ID,
     FileChunk,
     FileVersion,
     IndexableSharedFsEntry,
@@ -50,6 +51,7 @@ import {
     SnapshotCounts,
     SnapshotManifestPayload,
     SnapshotSegment,
+    hasFixedChunkLayoutV1,
     isFileHead,
     type FileHead,
 } from "./model.js";
@@ -136,10 +138,16 @@ export { Peerbit } from "peerbit";
 
 export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
+// One child-table slot is reserved for the zero-byte fixed-layout marker.
+// Keeping this below the indexer's 8000-distinct-ref ceiling makes the
+// canonical authoring bound deterministic even when every data chunk differs.
+const MAX_FIXED_LAYOUT_DATA_CHUNKS = 7999;
 export const SHARED_FS_MOUNT_WRITE_SEMANTICS =
     "self-hashed-exact-head-noop-v1" as const;
 export const SHARED_FS_MOUNT_READ_SEMANTICS =
     "verified-exact-version-snapshot-v1" as const;
+export const SHARED_FS_MOUNT_RANGE_READ_SEMANTICS =
+    "verified-exact-version-fixed-chunk-range-v1" as const;
 export const SHARED_FS_MOUNT_NAMESPACE_SEMANTICS =
     "node-guarded-namespace-v1" as const;
 
@@ -147,6 +155,8 @@ export type SharedFsMountWriteSemantics =
     typeof SHARED_FS_MOUNT_WRITE_SEMANTICS;
 export type SharedFsMountWriteOutcome = "unchanged" | "created";
 export type SharedFsMountReadSemantics = typeof SHARED_FS_MOUNT_READ_SEMANTICS;
+export type SharedFsMountRangeReadSemantics =
+    typeof SHARED_FS_MOUNT_RANGE_READ_SEMANTICS;
 export type SharedFsMountNamespaceSemantics =
     typeof SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
 export type SharedFsMountOpenDescendant = { path: string; nodeId: string };
@@ -190,11 +200,34 @@ export type SharedFsMountReadSnapshot = {
 };
 
 /**
+ * A lease-backed, exact-version read view for the native mount. The target
+ * keeps the version and every referenced chunk alive until close finishes;
+ * close in turn waits for reads/materialization already in flight. Returned
+ * range bytes are fresh allocations owned by the caller.
+ */
+export type SharedFsMountRangeReadSession = {
+    versionId: string;
+    nodeId: string;
+    contentHash: string;
+    size: bigint;
+    chunkSize: number;
+    read(offset: number, size: number): Promise<Uint8Array>;
+    /** Materialize and whole-file-hash-verify this exact version once. */
+    materialize(): Promise<Uint8Array>;
+    close(): Promise<void>;
+};
+
+/**
  * How many chunk documents are appended / fetched concurrently for one file.
  * Keeps large files from serializing hundreds of sequential round trips while
  * bounding memory and outbound queue pressure.
  */
 const CHUNK_IO_CONCURRENCY = 4;
+
+/** Shared verified range-read cache and de-duplication bounds per open FS. */
+const RANGE_CHUNK_CACHE_MAX_ENTRIES = 128;
+const RANGE_CHUNK_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const RANGE_CHUNK_INFLIGHT_MAX = 16;
 
 /**
  * Bounded wait for a chunk that is not available locally (for example a
@@ -1614,6 +1647,33 @@ const decodesToStringArray = (value: string) => {
     }
 };
 
+/**
+ * A marked layout is trusted only in its one canonical spelling and when its
+ * signed manifest can describe exactly `size` bytes using default chunks.
+ * Chunk byte lengths and hashes are checked as those chunks are fetched.
+ */
+const validFixedChunkLayoutV1 = (version: FileVersion): boolean => {
+    if (!hasFixedChunkLayoutV1(version)) return false;
+    const chunkIds = version.chunkIds.slice(1);
+    const expectedChunks =
+        version.size === 0n
+            ? 1n
+            : (version.size + BigInt(DEFAULT_FILE_CHUNK_SIZE) - 1n) /
+              BigInt(DEFAULT_FILE_CHUNK_SIZE);
+    return (
+        expectedChunks === BigInt(chunkIds.length) &&
+        chunkIds.length > 0 &&
+        chunkIds.length <= MAX_FIXED_LAYOUT_DATA_CHUNKS &&
+        (version.size === 0n
+            ? chunkIds.length === 1 &&
+              chunkIds[0] === FIXED_CHUNK_LAYOUT_V1_MARKER_ID
+            : chunkIds.every((id) => id !== FIXED_CHUNK_LAYOUT_V1_MARKER_ID)) &&
+        chunkIds.every(
+            (id) => id.startsWith("chunk:") && id.length > 6 && id.length <= 128
+        )
+    );
+};
+
 // Enforced at ingest, not just in writeBatch: the cap bounds the indexed
 // scalar column against remote writers, and "" would be a queryable
 // non-value.
@@ -1958,6 +2018,7 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
             value.id.startsWith("version:") &&
             value.nodeId.startsWith("file:") &&
             value.causalDepth >= 1n &&
+            (!hasFixedChunkLayoutV1(value) || validFixedChunkLayoutV1(value)) &&
             validChangesetId(value.changesetId)
         );
     }
@@ -1996,6 +2057,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     skipHorizonMs = DEFAULT_SKIP_HORIZON_MS;
     /** In-process version pins (reads in flight); pinned ids survive GC. */
     private versionPins = new Map<string, number>();
+    /**
+     * Exact range sessions use ref-counted leases, never expiring TTL hints.
+     * GC, purge, and the resurrection guard consult these through the last
+     * descriptor/in-flight read.
+     */
+    private versionLeases = new Map<string, number>();
+    private chunkLeases = new Map<string, number>();
+    private rangeReadSessions = new Set<SharedFsMountRangeReadSession>();
+    private rangeReadAdmissionOpen = false;
+    private rangeReadGeneration = 0;
+    private rangeReadAdmissions = 0;
+    private rangeReadAdmissionWaiters: (() => void)[] = [];
+    /** Verified immutable chunk bytes, LRU by Map insertion order. */
+    private rangeChunkCache = new Map<string, Uint8Array>();
+    private rangeChunkCacheBytes = 0;
+    /** At most RANGE_CHUNK_INFLIGHT_MAX distinct shared fetches at once. */
+    private rangeChunkInflight = new Map<string, Promise<Uint8Array>>();
     /** Ids this process is currently deleting on purpose; Guard D skips them. */
     private gcSuppressed = new Set<string>();
     /** In-memory GC ledger fallback for directory-less (in-memory) peers. */
@@ -2287,6 +2365,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             (this.lifecycleRequestGeneration ?? 0) + 1;
         const requestGeneration = this.lifecycleRequestGeneration;
         this.writeReadinessLifecycleBlocked = true;
+        // Fence new range-session openers synchronously. The serialized
+        // transition joins admissions that already crossed this boundary.
+        this.rangeReadAdmissionOpen = false;
+        this.rangeReadGeneration = (this.rangeReadGeneration ?? 0) + 1;
+        const preserveChangeListenerForRangeDrain =
+            (this.rangeReadSessions?.size ?? 0) > 0 ||
+            (this.rangeReadAdmissions ?? 0) > 0;
+        // Existing operations retain leases, but no operation may start after
+        // this synchronous edge. Their closes settle after active reads.
+        for (const session of this.rangeReadSessions ?? []) {
+            void session.close().catch(() => {});
+        }
 
         const lifecycleError = new SharedFsError(
             "ECLOSED",
@@ -2310,7 +2400,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.clearBootstrapTimers();
 
-        if (this.changeListener) {
+        if (this.changeListener && !preserveChangeListenerForRangeDrain) {
             this.entries.events.removeEventListener(
                 "change",
                 this.changeListener
@@ -2547,9 +2637,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             args?.dedupSkipHorizonMs ?? DEFAULT_SKIP_HORIZON_MS
         );
         this.writeReadinessStartedAtMs = this.clock();
+        // A prior failed lifecycle must not carry descriptor leases or cache
+        // work into this generation. Admission was fenced synchronously by
+        // beginLifecycleRequest; join before replacing the map objects.
+        await this.closeRangeReadSessions();
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        if (this.changeListener) {
+            this.entries.events.removeEventListener(
+                "change",
+                this.changeListener
+            );
+            this.changeListener = undefined;
+        }
         // Borsh deserialization bypasses the constructor, so per-instance
         // state must be (re)initialized here, not in field initializers.
         this.versionPins = new Map();
+        this.versionLeases = new Map();
+        this.chunkLeases = new Map();
+        this.rangeReadSessions = new Set();
+        this.rangeReadAdmissions = 0;
+        this.rangeReadAdmissionWaiters = [];
+        this.rangeChunkCache = new Map();
+        this.rangeChunkCacheBytes = 0;
+        this.rangeChunkInflight = new Map();
         this.gcSuppressed = new Set();
         this.memoryLedger = undefined;
         this.versionRowCache = new Map();
@@ -3095,6 +3205,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.emitWriteReadyOnce(this.writeReadinessSource);
         }
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        this.rangeReadAdmissionOpen = true;
         this.writeReadinessLifecycleBlocked = false;
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
@@ -4760,9 +4871,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // this file or across entirely different files — share one chunk
         // document. Only chunks the store has not seen (or cannot prove
         // fresh) are re-put; see touchChunks for the dedup safety rules.
-        const orderedChunks = chunkBytes(bytes, options.chunkSize).map(
+        const contentChunks = chunkBytes(bytes, options.chunkSize).map(
             (chunk) => new FileChunk({ bytes: chunk })
         );
+        const orderedChunks =
+            (options.chunkSize ?? DEFAULT_FILE_CHUNK_SIZE) ===
+            DEFAULT_FILE_CHUNK_SIZE
+                ? [
+                      new FileChunk({ bytes: new Uint8Array(0) }),
+                      ...contentChunks,
+                  ]
+                : contentChunks;
+        if (
+            orderedChunks[0]?.id === FIXED_CHUNK_LAYOUT_V1_MARKER_ID &&
+            contentChunks.length > MAX_FIXED_LAYOUT_DATA_CHUNKS
+        ) {
+            throw new SharedFsError(
+                "EINVAL",
+                `Canonical fixed-chunk layout exceeds ${MAX_FIXED_LAYOUT_DATA_CHUNKS} data positions; use a larger explicit chunkSize`
+            );
+        }
         const uniqueChunks = [
             ...new Map(
                 orderedChunks.map((chunk) => [chunk.id, chunk])
@@ -5167,9 +5295,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 continue;
             }
-            const orderedChunks = chunkBytes(bytes, entry.chunkSize).map(
+            const contentChunks = chunkBytes(bytes, entry.chunkSize).map(
                 (chunk) => new FileChunk({ bytes: chunk })
             );
+            const orderedChunks =
+                (entry.chunkSize ?? DEFAULT_FILE_CHUNK_SIZE) ===
+                DEFAULT_FILE_CHUNK_SIZE
+                    ? [
+                          new FileChunk({ bytes: new Uint8Array(0) }),
+                          ...contentChunks,
+                      ]
+                    : contentChunks;
+            if (
+                orderedChunks[0]?.id === FIXED_CHUNK_LAYOUT_V1_MARKER_ID &&
+                contentChunks.length > MAX_FIXED_LAYOUT_DATA_CHUNKS
+            ) {
+                throw new SharedFsError(
+                    "EINVAL",
+                    `Canonical fixed-chunk layout exceeds ${MAX_FIXED_LAYOUT_DATA_CHUNKS} data positions; use a larger explicit chunkSize: ${entry.path}`
+                );
+            }
             const uniqueChunkIds = new Set(
                 orderedChunks.map((chunk) => chunk.id)
             );
@@ -5474,27 +5619,420 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         };
     }
 
+    private retainLifetimeLease(map: Map<string, number>, id: string) {
+        map.set(id, (map.get(id) ?? 0) + 1);
+    }
+
+    private releaseLifetimeLease(map: Map<string, number>, id: string) {
+        const remaining = (map.get(id) ?? 0) - 1;
+        if (remaining > 0) map.set(id, remaining);
+        else map.delete(id);
+    }
+
+    private cacheRangeChunk(id: string, bytes: Uint8Array) {
+        if (bytes.byteLength > RANGE_CHUNK_CACHE_MAX_BYTES) return;
+        const previous = this.rangeChunkCache.get(id);
+        if (previous) {
+            this.rangeChunkCacheBytes -= previous.byteLength;
+            this.rangeChunkCache.delete(id);
+        }
+        this.rangeChunkCache.set(id, bytes);
+        this.rangeChunkCacheBytes += bytes.byteLength;
+        while (
+            this.rangeChunkCache.size > RANGE_CHUNK_CACHE_MAX_ENTRIES ||
+            this.rangeChunkCacheBytes > RANGE_CHUNK_CACHE_MAX_BYTES
+        ) {
+            const oldestId = this.rangeChunkCache.keys().next().value as
+                | string
+                | undefined;
+            if (oldestId === undefined) break;
+            const oldest = this.rangeChunkCache.get(oldestId)!;
+            this.rangeChunkCache.delete(oldestId);
+            this.rangeChunkCacheBytes -= oldest.byteLength;
+        }
+    }
+
+    /** Fetch one self-certifying chunk with process-wide bounded de-dup. */
+    private async rangeChunkBytes(
+        id: string,
+        normalizedPath: string
+    ): Promise<Uint8Array> {
+        const cached = this.rangeChunkCache.get(id);
+        if (cached) {
+            // Map insertion order is the LRU order.
+            this.rangeChunkCache.delete(id);
+            this.rangeChunkCache.set(id, cached);
+            return cached;
+        }
+        for (;;) {
+            const shared = this.rangeChunkInflight.get(id);
+            if (shared) return shared;
+            if (this.rangeChunkInflight.size < RANGE_CHUNK_INFLIGHT_MAX) {
+                break;
+            }
+            // Backpressure bounds both the map and actual distinct fetches.
+            await Promise.race(this.rangeChunkInflight.values()).catch(
+                () => undefined
+            );
+            const afterWait = this.rangeChunkCache.get(id);
+            if (afterWait) return afterWait;
+        }
+        let fetch!: Promise<Uint8Array>;
+        fetch = (async () => {
+            // Copy before verification so the exact allocation entering the
+            // shared cache is hashed once and never aliases document storage.
+            const bytes = (await this.fetchChunk(id, normalizedPath, true))
+                .bytes;
+            this.cacheRangeChunk(id, bytes);
+            return bytes;
+        })().finally(() => {
+            if (this.rangeChunkInflight.get(id) === fetch) {
+                this.rangeChunkInflight.delete(id);
+            }
+        });
+        this.rangeChunkInflight.set(id, fetch);
+        return fetch;
+    }
+
+    private expectedRangeChunkLength(version: FileVersion, index: number) {
+        if (version.size === 0n) return 0;
+        const offset = BigInt(index) * BigInt(DEFAULT_FILE_CHUNK_SIZE);
+        const remaining = version.size - offset;
+        return Number(
+            remaining < BigInt(DEFAULT_FILE_CHUNK_SIZE)
+                ? remaining
+                : BigInt(DEFAULT_FILE_CHUNK_SIZE)
+        );
+    }
+
+    private async verifiedRangeChunk(
+        version: FileVersion,
+        index: number,
+        normalizedPath: string
+    ) {
+        // Manifest index zero is the verified zero-byte layout marker.
+        const id = version.chunkIds[index + 1];
+        const bytes = await this.rangeChunkBytes(id, normalizedPath);
+        const expected = this.expectedRangeChunkLength(version, index);
+        if (bytes.byteLength !== expected) {
+            throw new SharedFsError(
+                "EIO",
+                `Chunk length mismatch ${id} for ${normalizedPath}: expected ${expected}, received ${bytes.byteLength}`
+            );
+        }
+        return bytes;
+    }
+
+    /**
+     * Opens an admitted, signed FileVersion as an exact range session when
+     * (and only when) it carries the old-reader-compatible fixed-layout mark.
+     * The signed ordered chunk ids authenticate each lazily returned range;
+     * every fetched chunk is independently re-hashed and length checked.
+     */
+    async openVersionRangeForMount(
+        path: string,
+        versionId: string
+    ): Promise<SharedFsMountRangeReadSession | undefined> {
+        // A partial replica depends on remote holders that its in-process
+        // leases cannot constrain. Keep the strong lifetime capability
+        // full-replica-only; observers use the existing verified fallback.
+        if (!this.isFullReplica() || !this.guardArmed) return undefined;
+        if (!this.rangeReadAdmissionOpen) {
+            throw new SharedFsError(
+                "ECLOSED",
+                "filesystem is not admitting range-read sessions"
+            );
+        }
+        // Normalization may reject a malformed runtime caller. Do it before
+        // incrementing the lifecycle admission counter so close/reopen can
+        // never wait forever on an opener that never reached its finally.
+        const normalized = normalizeFsPath(path);
+        const admissionGeneration = this.rangeReadGeneration;
+        const versionLeases = this.versionLeases;
+        const chunkLeases = this.chunkLeases;
+        const assertAdmission = () => {
+            if (
+                !this.rangeReadAdmissionOpen ||
+                admissionGeneration !== this.rangeReadGeneration ||
+                versionLeases !== this.versionLeases ||
+                chunkLeases !== this.chunkLeases
+            ) {
+                throw new SharedFsError(
+                    "ECLOSED",
+                    "filesystem lifecycle changed while opening a range-read session"
+                );
+            }
+        };
+        this.rangeReadAdmissions++;
+        // Acquire before the first await. A local collector must see either
+        // this intent and skip the version, or win first and make resolution
+        // fail closed; there is no unprotected fetch-to-lease gap.
+        this.retainLifetimeLease(versionLeases, versionId);
+        let versionLeaseOwned = true;
+        let leasedChunkIds: string[] = [];
+        try {
+            const resolved = await this.resolvePath(normalized);
+            assertAdmission();
+            if (!resolved || resolved.kind !== "file") return undefined;
+            const value = await this.getDocument<SharedFsEntry>(versionId);
+            assertAdmission();
+            if (!(value instanceof FileVersion)) return undefined;
+            if (!hasFixedChunkLayoutV1(value)) return undefined;
+            if (!validFixedChunkLayoutV1(value)) {
+                throw new SharedFsError(
+                    "EIO",
+                    `Invalid fixed-chunk manifest for ${normalized}`
+                );
+            }
+            if (value.nodeId !== resolved.nodeId) return undefined;
+            if (value.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+                throw new SharedFsError(
+                    "EIO",
+                    `File is too large for an exact native range session: ${normalized}`
+                );
+            }
+
+            leasedChunkIds = [...new Set(value.chunkIds)];
+            for (const id of leasedChunkIds) {
+                this.retainLifetimeLease(chunkLeases, id);
+            }
+            const marker = await this.rangeChunkBytes(
+                FIXED_CHUNK_LAYOUT_V1_MARKER_ID,
+                normalized
+            );
+            assertAdmission();
+            if (marker.byteLength !== 0) {
+                throw new SharedFsError(
+                    "EIO",
+                    `Invalid fixed-chunk layout marker for ${normalized}`
+                );
+            }
+
+            let active = 0;
+            let closing = false;
+            let released = false;
+            let resolveClosed!: () => void;
+            const closed = new Promise<void>((resolve) => {
+                resolveClosed = resolve;
+            });
+            let materialized: Promise<Uint8Array> | undefined;
+            const finishClose = () => {
+                if (released || !closing || active > 0) return;
+                released = true;
+                this.releaseLifetimeLease(versionLeases, value.id);
+                for (const id of leasedChunkIds) {
+                    this.releaseLifetimeLease(chunkLeases, id);
+                }
+                this.rangeReadSessions.delete(session);
+                resolveClosed();
+            };
+            const run = async <T>(operation: () => Promise<T>): Promise<T> => {
+                if (closing) {
+                    throw new SharedFsError(
+                        "ECLOSED",
+                        `Range session is closed for ${normalized}`
+                    );
+                }
+                active++;
+                try {
+                    return await operation();
+                } finally {
+                    active--;
+                    finishClose();
+                }
+            };
+            const session: SharedFsMountRangeReadSession = {
+                versionId: value.id,
+                nodeId: value.nodeId,
+                contentHash: value.contentHash,
+                size: value.size,
+                chunkSize: DEFAULT_FILE_CHUNK_SIZE,
+                read: (offset, size) =>
+                    run(async () => {
+                        if (
+                            !Number.isSafeInteger(offset) ||
+                            !Number.isSafeInteger(size) ||
+                            offset < 0 ||
+                            size < 0
+                        ) {
+                            throw new SharedFsError(
+                                "EINVAL",
+                                "Range offset and size must be non-negative safe integers"
+                            );
+                        }
+                        const fileSize = Number(value.size);
+                        if (size === 0 || offset >= fileSize) {
+                            return new Uint8Array(0);
+                        }
+                        const end = Math.min(fileSize, offset + size);
+                        if (!Number.isSafeInteger(end)) {
+                            throw new SharedFsError(
+                                "EINVAL",
+                                "Range end exceeds the safe integer limit"
+                            );
+                        }
+                        const first = Math.floor(
+                            offset / DEFAULT_FILE_CHUNK_SIZE
+                        );
+                        const last = Math.floor(
+                            (end - 1) / DEFAULT_FILE_CHUNK_SIZE
+                        );
+                        const indexes = Array.from(
+                            { length: last - first + 1 },
+                            (_, index) => first + index
+                        );
+                        const chunks = await mapWithConcurrency(
+                            indexes,
+                            CHUNK_IO_CONCURRENCY,
+                            (index) =>
+                                this.verifiedRangeChunk(
+                                    value,
+                                    index,
+                                    normalized
+                                )
+                        );
+                        const out = new Uint8Array(end - offset);
+                        for (let i = 0; i < indexes.length; i++) {
+                            const chunkIndex = indexes[i];
+                            const chunkStart =
+                                chunkIndex * DEFAULT_FILE_CHUNK_SIZE;
+                            const sourceStart = Math.max(
+                                0,
+                                offset - chunkStart
+                            );
+                            const sourceEnd = Math.min(
+                                chunks[i].byteLength,
+                                end - chunkStart
+                            );
+                            out.set(
+                                chunks[i].subarray(sourceStart, sourceEnd),
+                                Math.max(0, chunkStart - offset)
+                            );
+                        }
+                        return out;
+                    }),
+                materialize: () =>
+                    run(async () => {
+                        if (!materialized) {
+                            const attempt = (async () => {
+                                const chunks = await mapWithConcurrency(
+                                    value.chunkIds.slice(1),
+                                    CHUNK_IO_CONCURRENCY,
+                                    (_, index) =>
+                                        this.verifiedRangeChunk(
+                                            value,
+                                            index,
+                                            normalized
+                                        )
+                                );
+                                const bytes =
+                                    chunks.length === 0
+                                        ? new Uint8Array(0)
+                                        : concat(chunks);
+                                if (
+                                    bytes.byteLength !== Number(value.size) ||
+                                    sha256Base64Sync(bytes) !==
+                                        value.contentHash
+                                ) {
+                                    throw new SharedFsError(
+                                        "EIO",
+                                        `File hash mismatch for ${normalized}`
+                                    );
+                                }
+                                return bytes;
+                            })();
+                            let shared!: Promise<Uint8Array>;
+                            shared = attempt.catch((error) => {
+                                if (materialized === shared) {
+                                    materialized = undefined;
+                                }
+                                throw error;
+                            });
+                            materialized = shared;
+                        }
+                        return materialized;
+                    }),
+                close: async () => {
+                    closing = true;
+                    finishClose();
+                    return closed;
+                },
+            };
+            assertAdmission();
+            this.rangeReadSessions.add(session);
+            versionLeaseOwned = false;
+            return session;
+        } finally {
+            if (versionLeaseOwned) {
+                this.releaseLifetimeLease(versionLeases, versionId);
+                for (const id of leasedChunkIds) {
+                    this.releaseLifetimeLease(chunkLeases, id);
+                }
+            }
+            this.rangeReadAdmissions--;
+            if (this.rangeReadAdmissions === 0) {
+                for (const resolve of this.rangeReadAdmissionWaiters.splice(
+                    0
+                )) {
+                    resolve();
+                }
+            }
+        }
+    }
+
+    private async closeRangeReadSessions() {
+        this.rangeReadSessions ??= new Set();
+        this.rangeReadAdmissions ??= 0;
+        this.rangeReadAdmissionWaiters ??= [];
+        if (this.rangeReadAdmissions > 0) {
+            await new Promise<void>((resolve) =>
+                this.rangeReadAdmissionWaiters.push(resolve)
+            );
+        }
+        await Promise.allSettled(
+            [...this.rangeReadSessions].map((session) => session.close())
+        );
+        this.rangeReadSessions.clear();
+    }
+
+    mountRangeReadSemantics(): SharedFsMountRangeReadSemantics | undefined {
+        return this.isFullReplica() &&
+            this.openVersionRangeForMount ===
+                SharedFileSystem.prototype.openVersionRangeForMount
+            ? SHARED_FS_MOUNT_RANGE_READ_SEMANTICS
+            : undefined;
+    }
+
     /**
      * Content addressing makes integrity a pure function of the id: served
      * bytes must hash to the id the version asked for.
      */
-    private verifyChunk(chunk: unknown, id: string): FileChunk | undefined {
+    private verifyChunk(
+        chunk: unknown,
+        id: string,
+        ownBytes = false
+    ): FileChunk | undefined {
         if (!(chunk instanceof FileChunk)) {
             return undefined;
         }
-        const hash = sha256Base64Sync(chunk.bytes);
+        // Range cache entries require a non-aliasing allocation. Clone it
+        // before hashing so the bytes certified here are exactly those the
+        // cache receives, without a second SHA pass.
+        const bytes = ownBytes ? new Uint8Array(chunk.bytes) : chunk.bytes;
+        const hash = sha256Base64Sync(bytes);
         if (hash !== chunk.hash || `chunk:${hash}` !== id) {
             return undefined;
         }
-        return chunk;
+        return ownBytes ? new FileChunk({ bytes, hash }) : chunk;
     }
 
     private async fetchChunk(
         id: string,
-        normalizedPath: string
+        normalizedPath: string,
+        ownBytes = false
     ): Promise<FileChunk> {
         const local = await this.getDocument<FileChunk>(id);
-        let verified = this.verifyChunk(local, id);
+        let verified = this.verifyChunk(local, id, ownBytes);
         // Missing locally — or locally corrupt: verification is trustless
         // (any responder either supplies bytes that hash to the id or is
         // rejected), so a remote copy can heal either case. The configured
@@ -5520,7 +6058,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             ),
                         } as any,
                     });
-                    verified = this.verifyChunk(remote ?? undefined, id);
+                    verified = this.verifyChunk(
+                        remote ?? undefined,
+                        id,
+                        ownBytes
+                    );
                 } catch {
                     verified = undefined;
                 }
@@ -5532,7 +6074,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
                 verified = this.verifyChunk(
                     await this.getDocument<FileChunk>(id),
-                    id
+                    id,
+                    ownBytes
                 );
             }
         }
@@ -8307,6 +8850,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         this.bootstrapAbortController = undefined;
+        // Stop admitting range reads and join those already in flight before
+        // listeners or backing stores disappear. Session close releases its
+        // GC leases only after that join.
+        await this.closeRangeReadSessions();
         if (this.changeListener) {
             this.entries.events.removeEventListener(
                 "change",
@@ -11607,6 +12154,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.versionPins.delete(id);
             }
         }
+        for (const id of this.versionLeases.keys()) {
+            active.add(id);
+        }
         return active;
     }
 
@@ -11719,7 +12269,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (!this.guardLifecycleActive(guardGeneration)) break;
                 try {
                     if (value instanceof FileChunk) {
-                        if (this.gcSuppressed.has(value.id)) {
+                        if (this.gcSuppressed.delete(value.id)) {
                             continue;
                         }
                         if (!this.verifyChunk(value, value.id)) {
@@ -11747,7 +12297,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             await (iterator as any).close?.();
                         }
                         if (
-                            referenced &&
+                            (referenced || this.chunkLeases.has(value.id)) &&
                             this.guardLifecycleActive(guardGeneration)
                         ) {
                             await this.putPreferLinked(value, () =>
@@ -11755,7 +12305,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             );
                         }
                     } else if (value instanceof FileVersion) {
-                        if (this.gcSuppressed.has(value.id)) {
+                        if (this.gcSuppressed.delete(value.id)) {
                             continue;
                         }
                         if (!this.guardLifecycleActive(guardGeneration)) break;
@@ -11766,7 +12316,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         this.pendingGuardVersions.set(value.nodeId, bucket);
                         this.scheduleGuardFlush();
                     } else if (value instanceof NamingEvent) {
-                        if (this.gcSuppressed.has(value.id)) {
+                        if (this.gcSuppressed.delete(value.id)) {
                             continue;
                         }
                         if (!this.guardLifecycleActive(guardGeneration)) break;
@@ -11885,6 +12435,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     observed.has(doc.id)
                 );
                 for (const value of values) {
+                    if (this.versionLeases.has(value.id)) {
+                        if (!this.guardLifecycleActive(guardGeneration)) break;
+                        await this.putPreferLinked(value, () =>
+                            this.guardLifecycleActive(guardGeneration)
+                        );
+                        continue;
+                    }
                     const isHead = heads.some((head) => head.id === value.id);
                     if (!isHead) {
                         continue;
@@ -12980,8 +13537,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         context?: MaintenanceContext
     ) {
         if (context) this.throwIfMaintenanceInactive(context);
+        if (this.chunkLeases.has(chunkId)) return;
         const value = await this.getDocument<FileChunk>(chunkId);
         if (context) this.throwIfMaintenanceInactive(context);
+        if (this.chunkLeases.has(chunkId)) return;
         if (!(value instanceof FileChunk)) {
             // The resolved bytes are the only source from which a concurrent
             // head-mismatch CUT can be repaired. Never initiate deletion when
@@ -12996,6 +13555,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // close aborts the surrounding run.
             const result: any = await this.entries.del(chunkId);
             const cutTarget = result?.entry?.meta?.next?.[0];
+            if (this.chunkLeases.has(chunkId)) {
+                // A range session acquired during the awaited CUT. Restore
+                // the verified immutable chunk before reporting reclamation.
+                await this.entries.put(value);
+                report.cutRecoveries++;
+                return;
+            }
             if (expectedHead && cutTarget && cutTarget !== expectedHead) {
                 await this.entries.put(value);
                 report.cutRecoveries++;
@@ -13513,6 +14079,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     continue;
                 }
                 const docs = versionsByNode.get(nodeId) ?? [];
+                // Deleted-node purge is the one version-retirement path that
+                // historically ignored read pins. A live exact-range lease
+                // owns both this manifest and its chunks until session close.
+                if (docs.some((doc) => pins.has(doc.id))) {
+                    continue;
+                }
                 const heads = this.contentHeads(docs);
                 const observed = new Set(
                     (state.winner as NamingEvent).observedContentHeads
@@ -13615,8 +14187,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // ---------------- EXECUTE (metadata, parents before children) -----
         const executeDeletes = async (
             docs: (FileVersion | NamingEvent)[]
-        ): Promise<number> => {
+        ): Promise<{ deleted: number; leaseBlocked: boolean }> => {
             let deleted = 0;
+            let leaseBlocked = false;
             const ordered = [...docs].sort(
                 (a, b) =>
                     compareBigint(a.causalDepth, b.causalDepth) ||
@@ -13626,6 +14199,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (context) this.throwIfMaintenanceInactive(context);
                 try {
                     const executeOne = async () => {
+                        if (
+                            doc instanceof FileVersion &&
+                            this.versionLeases.has(doc.id)
+                        ) {
+                            leaseBlocked = true;
+                            return false;
+                        }
                         const row = (await this.entries.index.get(doc.id, {
                             local: true,
                             remote: false,
@@ -13635,12 +14215,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             return false; // concurrent collector won
                         }
                         if (context) this.throwIfMaintenanceInactive(context);
+                        if (
+                            doc instanceof FileVersion &&
+                            this.versionLeases.has(doc.id)
+                        ) {
+                            leaseBlocked = true;
+                            return false;
+                        }
                         const expectedHead = row.__context?.head;
+                        // Consumed by the corresponding removal event. This
+                        // is deliberately one-shot: if recovery re-puts the
+                        // immutable document, a later remote CUT must reach
+                        // Guard D while a lifetime lease still owns it.
                         this.gcSuppressed.add(doc.id);
                         // From CUT admission through a possible immutable
                         // value recovery, this document is one critical tail.
                         const result: any = await this.entries.del(doc.id);
                         const cutTarget = result?.entry?.meta?.next?.[0];
+                        if (
+                            doc instanceof FileVersion &&
+                            this.versionLeases.has(doc.id)
+                        ) {
+                            // A session acquired while the CUT awaited. Put
+                            // the captured immutable manifest back before the
+                            // collector can advance to its chunks.
+                            this.gcSuppressed.delete(doc.id);
+                            await this.entries.put(doc);
+                            report.cutRecoveries++;
+                            leaseBlocked = true;
+                            return false;
+                        }
                         if (
                             expectedHead &&
                             cutTarget &&
@@ -13649,6 +14253,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             // The CUT landed on a concurrent re-put, not on
                             // the head planned against: restore the immutable
                             // value while still holding naming admission.
+                            this.gcSuppressed.delete(doc.id);
                             await this.entries.put(doc);
                             report.cutRecoveries++;
                             return false;
@@ -13664,21 +14269,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             : await executeOne();
                     if (didDelete) deleted++;
                 } catch (error) {
+                    // A failed CUT may produce no removed-value event to
+                    // consume its one-shot token. Never let that stale token
+                    // blind Guard D to the next real remote removal.
+                    this.gcSuppressed.delete(doc.id);
                     if (!(error instanceof NotFoundError)) {
                         throw error;
                     }
                 }
             }
-            return deleted;
+            return { deleted, leaseBlocked };
         };
 
         if (!config.dryRun) {
-            report.retiredVersions = await executeDeletes([
-                ...retireVersions.values(),
-            ]);
-            report.compactedNamingEvents = await executeDeletes([
-                ...retireNaming.values(),
-            ]);
+            report.retiredVersions = (
+                await executeDeletes([...retireVersions.values()])
+            ).deleted;
+            report.compactedNamingEvents = (
+                await executeDeletes([...retireNaming.values()])
+            ).deleted;
             if (context) this.throwIfMaintenanceInactive(context);
         } else {
             report.retiredVersions = retireVersions.size;
@@ -13703,7 +14312,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             if (!config.dryRun) {
                 const docs = settled.versionsByNode.get(nodeId) ?? [];
-                await executeDeletes(docs);
+                const outcome = await executeDeletes(docs);
+                if (outcome.leaseBlocked) {
+                    // Keep the mature ledger record: the first post-close run
+                    // may revalidate and finish without a fresh barrier hour.
+                    continue;
+                }
                 purgeExecuted.push(nodeId);
             }
             delete ledger.purgeCandidates[nodeId];
@@ -13775,7 +14389,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     await (iterator as any).close?.();
                 }
                 if (context) this.throwIfMaintenanceInactive(context);
-                if (!referenced) {
+                if (!referenced && !this.chunkLeases.has(row.id)) {
                     orphaned.set(row.id, row);
                 }
             }
@@ -14010,6 +14624,35 @@ export class SharedFsHandle {
             : undefined;
     }
 
+    /**
+     * Advertise lazy fixed-chunk reads only when neither this handle nor its
+     * delegated program has overridden any exact-read primitive. Wrappers
+     * therefore fall back instead of accidentally bypassing their semantics.
+     */
+    mountRangeReadSemantics(): SharedFsMountRangeReadSemantics | undefined {
+        const usesDefaultHandleReaders =
+            this.readVersion === SharedFsHandle.prototype.readVersion &&
+            this.readVersionForMount ===
+                SharedFsHandle.prototype.readVersionForMount &&
+            this.openVersionRangeForMount ===
+                SharedFsHandle.prototype.openVersionRangeForMount;
+        const usesDefaultProgramReaders =
+            this.program.readVersion ===
+                SharedFileSystem.prototype.readVersion &&
+            this.program.readVersionForMount ===
+                SharedFileSystem.prototype.readVersionForMount &&
+            this.program.openVersionRangeForMount ===
+                SharedFileSystem.prototype.openVersionRangeForMount &&
+            this.program.mountRangeReadSemantics ===
+                SharedFileSystem.prototype.mountRangeReadSemantics;
+        return usesDefaultHandleReaders &&
+            usesDefaultProgramReaders &&
+            this.program.mountRangeReadSemantics() ===
+                SHARED_FS_MOUNT_RANGE_READ_SEMANTICS
+            ? SHARED_FS_MOUNT_RANGE_READ_SEMANTICS
+            : undefined;
+    }
+
     /** Advertise guarded namespace mutation only when delegation is exact. */
     mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
         const usesDefaultHandleMutations =
@@ -14058,6 +14701,10 @@ export class SharedFsHandle {
 
     readVersionForMount(path: string, versionId: string) {
         return this.program.readVersionForMount(path, versionId);
+    }
+
+    openVersionRangeForMount(path: string, versionId: string) {
+        return this.program.openVersionRangeForMount(path, versionId);
     }
 
     mkdir(path: string) {

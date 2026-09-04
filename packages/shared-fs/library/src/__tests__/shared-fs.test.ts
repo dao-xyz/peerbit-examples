@@ -226,7 +226,8 @@ describe("shared fs library", () => {
         const twoChunks = patternedBytes(DEFAULT_FILE_CHUNK_SIZE * 2);
         await fs.writeFile("/original.bin", twoChunks);
         const afterFirst = await countChunkDocs();
-        expect(afterFirst).toBe(2);
+        // Two data chunks plus the shared zero-byte canonical-layout marker.
+        expect(afterFirst).toBe(3);
 
         // Identical content under a different path shares every chunk.
         await fs.writeFile("/copy.bin", twoChunks);

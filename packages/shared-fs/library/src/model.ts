@@ -272,6 +272,21 @@ export const chunkIdForBytes = (bytes: Uint8Array) =>
     `chunk:${sha256Base64Sync(bytes)}`;
 
 /**
+ * Address/schema-neutral marker for new canonical fixed-chunk versions. A
+ * leading zero-byte content chunk changes neither assembled bytes nor their
+ * whole-file hash, so old peers read marked versions unchanged. Legacy empty
+ * files contain one empty chunk; marked empty files contain marker + content
+ * (two references to this same id), making the layout unambiguous.
+ */
+export const FIXED_CHUNK_LAYOUT_V1_MARKER_ID = chunkIdForBytes(
+    new Uint8Array(0)
+);
+
+export const hasFixedChunkLayoutV1 = (value: { chunkIds: string[] }): boolean =>
+    value.chunkIds.length >= 2 &&
+    value.chunkIds[0] === FIXED_CHUNK_LAYOUT_V1_MARKER_ID;
+
+/**
  * A content-addressed block of file bytes. The id is derived from the bytes
  * (`chunk:<sha256>`), so identical content — across versions of one file or
  * across different files — is stored exactly once and shared by every

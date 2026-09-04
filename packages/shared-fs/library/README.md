@@ -448,6 +448,74 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
   src/__tests__/mount-backend-open-hash.bench.test.ts --reporter=verbose
 ```
 
+## Lazy fixed-chunk mount reads
+
+New or changed files written with the default 512 KiB chunk size carry a
+zero-byte leading layout marker. The marker changes neither the existing Borsh
+schema nor the filesystem address, and older readers concatenate it to the same
+bytes and verify the same whole-file hash. Legacy versions, custom chunk sizes,
+and unchanged pre-marker versions remain readable through the exact verified
+whole-file fallback. They are not silently rewritten during upgrade. An
+operator can intentionally migrate equal content by writing it with
+`chunkSize: DEFAULT_FILE_CHUNK_SIZE`; that creates and replicates a new version.
+At the raw Borsh-model layer, the 50-character marker id adds 53 bytes to each
+`FileVersion`. A non-empty version also adds 54 bytes to its derived index row;
+an empty version adds none there because marker and content are the same
+deduplicated id. The zero-byte `FileChunk` itself serializes to 130 bytes and is
+content-addressed once, not once per version. These figures exclude document
+signatures and log/index storage framing.
+
+Full replicas advertise `SHARED_FS_MOUNT_RANGE_READ_SEMANTICS`
+(`"verified-exact-version-fixed-chunk-range-v1"`). A native read-only open then
+binds one admitted signed `FileVersion` and fetches only the fixed chunks a
+read touches. Session admission succeeds only while the resurrection guard is
+armed; if a backend was created before convergence, each open dynamically
+takes the exact eager fallback until it is armed. The target validates the
+canonical marker and signed ordered chunk layout, re-hashes every fetched
+chunk, and checks its exact position-dependent length. Materialization checks
+the assembled length and whole-file hash, and the mount boundary independently
+checks its type, length, and hash before making it writable. A malformed
+manifest, corrupt/short chunk, or malformed session result fails closed.
+Partial replicas, unmarked versions, and custom layouts explicitly fall back to
+an exact-version whole snapshot. Custom targets advertising only the range
+handshake also fall back through `readVersion`, never the availability-oriented
+`readFile` path.
+
+Descriptors for the same attached file node share one exact session and a
+program-level verified LRU (at most 128 chunks and 32 MiB). Identical in-flight
+chunk fetches coalesce, with at most 16 distinct range fetches admitted at once.
+Reference-counted version and chunk leases remain live through the last
+descriptor and every read already in flight. Local GC, deleted-node purge, and
+the resurrection guard consult those leases, including CUT races, so the old
+60-second read pin is not the lifetime boundary. Rename, replacement, and
+unlink preserve the already-open descriptor's exact bytes.
+
+Attaching a writer materializes and verifies the shared lazy state once only
+when that version is still the visible snapshot. If the visible head advanced,
+the writer loads the newest stable exact version instead of using ancestor
+bytes as its causal base. `O_TRUNC` needs metadata ancestry only and skips lazy
+base materialization entirely. Other writable opens, sequential/full reads,
+and the write path still assemble and hash the whole file.
+
+The manual benchmark compares eager exact opens with cold- and warm-range-cache
+random 4 KiB reads in fresh processes. “Cold” refers only to this feature's
+range cache: each worker has just authored the file, so the process-local store
+and operating-system caches are warm. Timings are descriptive, not budgets,
+and the benchmark does not measure peak RSS. Its byte counters enforce the
+important behavior: eager open fetches the whole file, while each distinct cold
+4 KiB lazy read fetches one 512 KiB chunk. That is 128× cold read amplification
+and is an explicit remaining optimization target.
+
+```bash
+PEERBIT_SHARED_FS_RANGE_READ_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/lazy-range-read.bench.test.ts --reporter=verbose
+```
+
+The default sizes are 16 and 64 MiB. Set
+`PEERBIT_SHARED_FS_RANGE_READ_BENCH_SIZES` to a comma-separated subset of
+`16,64,256` for a shorter or larger run.
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
