@@ -10,8 +10,9 @@ import {
     type WriteBatchResult,
 } from "../index.js";
 
-const WAIT_TIMEOUT_MS = process.env.CI ? 120_000 : 45_000;
-const TEST_TIMEOUT_MS = process.env.CI ? 240_000 : 150_000;
+// Fixed across platforms so the portable job exposes the real durability tail.
+const WAIT_TIMEOUT_MS = 45_000;
+const TEST_TIMEOUT_MS = 150_000;
 
 const bytesEqual = (left: Uint8Array | undefined, right: Uint8Array) =>
     !!left &&
@@ -72,46 +73,26 @@ describe("shared fs persistent multi-writer lifecycle", () => {
         }
     };
 
-    const waitForRemoteReceiptCapability = async (
+    const waitForRemoteReceiptReadiness = async (
         source: SharedFsHandle,
         remote: Peerbit | Peerbit[],
         log: any = source.program.entries.log
     ) => {
         const remotes = Array.isArray(remote) ? remote : [remote];
-        const remoteHashes = remotes.map((peer) =>
-            peer.identity.publicKey.hashcode()
-        );
-        await waitUntil(async () => {
-            // Retry a quiet same-identity reconnect readiness exchange before
-            // any irreversible persisted-delivery commit has been admitted.
-            await Promise.all(
-                remotes.map((peer) =>
-                    log.waitForReplicator(peer.identity.publicKey, {
-                        timeout: Math.min(15_000, WAIT_TIMEOUT_MS),
-                    })
+        const entries = await log.log.toArray();
+        const replicas = log.replicas.min.getValue(log);
+        await Promise.all(
+            remotes.map((peer) =>
+                log.waitForPersistedReceiptPeerReadiness(
+                    peer.identity.publicKey,
+                    {
+                        entries,
+                        replicas,
+                        timeout: WAIT_TIMEOUT_MS,
+                    }
                 )
-            );
-            // Persisted delivery rejects stale capability sessions and plans
-            // leaders afresh for each exact entry. Assert those same facts for
-            // both custodians at once so minAcks:2 cannot pass a split view.
-            for (const remoteHash of remoteHashes) {
-                expect(
-                    log.persistedReceiptPeerSession(remoteHash)
-                ).toBeDefined();
-            }
-            const entries = await log.log.toArray();
-            const replicas = log.replicas.min.getValue(log);
-            for (const entry of entries) {
-                const leaders = await log.findLeadersFromEntry(
-                    entry,
-                    replicas,
-                    { freshLeaderPlan: true }
-                );
-                for (const remoteHash of remoteHashes) {
-                    expect(leaders.has(remoteHash)).toBe(true);
-                }
-            }
-        });
+            )
+        );
     };
 
     const openReplica = (
@@ -167,7 +148,7 @@ describe("shared fs persistent multi-writer lifecycle", () => {
 
     it(
         "keeps three authenticated disk replicas converged through writes, restart, conflict, and disposal",
-        { retry: 1, timeout: TEST_TIMEOUT_MS },
+        { timeout: TEST_TIMEOUT_MS },
         async () => {
             const root = await mkdtemp(
                 join(tmpdir(), "peerbit-shared-fs-persistent-writers-")
@@ -398,11 +379,11 @@ describe("shared fs persistent multi-writer lifecycle", () => {
             // disk-backed writers must each acknowledge every data and trust
             // entry before its state directory is removed.
             await Promise.all([
-                waitForRemoteReceiptCapability(reopenedWriter, [
+                waitForRemoteReceiptReadiness(reopenedWriter, [
                     network[0],
                     network[1],
                 ]),
-                waitForRemoteReceiptCapability(
+                waitForRemoteReceiptReadiness(
                     reopenedWriter,
                     [network[0], network[1]],
                     reopenedWriter.program.trustGraph!.trustGraph.log

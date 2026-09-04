@@ -210,6 +210,10 @@ const fs = await openSharedFs({
         bootstrap(event) {
             console.log(event.type, event.atMs);
         },
+        openProfile(event) {
+            // Enqueue rather than doing slow work in this inline callback.
+            console.log(event.name, event.durationMs, event.details);
+        },
     },
 });
 ```
@@ -225,6 +229,17 @@ behavior. Callbacks run inline and returned promises are not awaited, so keep
 the handler lightweight and hand events to an external queue for slower work.
 When no callback is supplied, Shared FS does not read telemetry clocks or
 allocate telemetry events.
+
+`telemetry.openProfile` forwards Peerbit's advisory
+`sharedLog.open.localState`, `blockStore`, `remoteBlocks`, `lowerLog`,
+`rpcSubscriptions`, optional `fanout`, `providerAndOwnership`, `replication`,
+`synchronizer`, and `total` spans. It also forwards every
+`sharedLog.blocks.resolveProviders` span, so one open can emit several provider
+resolution records. These spans describe setup work; they are not tree-readable,
+write-ready, replication-complete, or durability barriers. Shared FS composes
+this callback with its internal fresh-arrival classifier, isolates callback
+failures, and releases the composite profiler as soon as the Documents open
+settles.
 
 The manual benchmark creates one 500-file donor and 15 sequential fresh
 joiners, then prints p50/p95/max milestones and fast/slow overlay-ready
@@ -363,8 +378,11 @@ hot versions 15 through 100, and payloads 256 bytes through 1 MiB. The special
 `JOINS=1`, `ROUNDS=1`, and `HOT_VERSIONS=5` values are only for validating the
 harness. Every completed join and round is printed immediately as
 `process-long-churn-cold-join:` and `process-long-churn-round:` JSON, followed
-by one `process-long-churn:` aggregate. The campaign is manual, can run for up
-to two hours, and is not enabled in required pull-request CI.
+by one `process-long-churn:` aggregate. Each cold-join record contains the raw
+SharedLog open/provider spans. The aggregate reports event counts per join and
+p50/p95/p99/max durations for every emitted `sharedLog.open.*` name and for all
+repeated `sharedLog.blocks.resolveProviders` spans. The campaign is manual, can
+run for up to two hours, and is not enabled in required pull-request CI.
 
 Each runtime sample includes a parent-assigned process generation, OS PID,
 worker number, Peerbit identity, and online/offline network mode so replacement
@@ -972,15 +990,17 @@ bursts.
 
 Superseded snapshot **segment blocks** can be reclaimed after a grace
 period (`snapshot: { segmentReclaim: { graceMs } }`, default 3 h,
-disable with `segmentReclaim: false`). Physical deletion runs only when the
-open asserts `blockStoreAccess: "store-exclusive"`; `shared` and the default
-`unknown` keep snapshot publication available but disable segment reclamation.
-An explicit reclaim object without that assertion fails with `EINVAL`. The CLI
-leaves access `unknown` because its state directory may contain more than one
-filesystem. Only positively recorded own segments are ever deleted, re-verified
-at deletion time against every locally known live manifest — identical content
-across authors dedups to identical cids, and another author's live manifest
-protects them.
+disable with `segmentReclaim: false`). Physical deletion requires **both** the
+caller's `blockStoreAccess: "store-exclusive"` assertion and
+`peerbit.services.blocks.localStoreSafety.referenceDomain ===
+"caller-exclusive"`. Missing metadata is treated as `unknown`; Peerbit's
+built-in block store reports `block-service`, so neither permits deletion.
+Unsafe metadata silently disables implicit/default reclamation, while an
+explicit reclaim object fails with `EINVAL`. The CLI leaves access `unknown`
+because its state directory may contain more than one filesystem. Only
+positively recorded own segments are ever deleted, re-verified at deletion time
+against every locally known live manifest — identical content across authors
+dedups to identical cids, and another author's live manifest protects them.
 Fleet caveats:
 
 - The grace is floored at the bootstrap staleness cap
@@ -991,15 +1011,18 @@ Fleet caveats:
 - The segment ledger lives beside the store
   (`shared-fs-snapshots/<address>.json`); peers without a directory keep
   it in memory, matching their in-memory block store.
-- `store-exclusive` is a store-wide lifetime assertion: this open must be the
-  sole owner, publisher, and reaper of every snapshot segment it may delete,
-  across every active or inactive program instance and process. Snapshot
-  segment bytes are content-addressed and can deduplicate across filesystems,
-  while one filesystem cannot discover another's live manifests. The local
-  segment-ledger lock therefore cannot establish exclusivity for a physical
-  store shared with another filesystem, directory, host, or process. Leave
-  access `unknown`, declare it `shared`, or set `segmentReclaim: false` unless
-  that exclusivity is guaranteed for the whole open lifetime.
+- `store-exclusive` is a store-wide lifetime assertion, not evidence: this open
+  must be the sole owner, publisher, and reaper of every snapshot segment it
+  may delete, across every active or inactive program instance and process.
+  The blocks service must independently declare a `caller-exclusive` reference
+  domain, normally from a custom factory whose whole physical namespace the
+  caller controls. `enforcedReclamation: "none"` means there is no lease,
+  fence, or atomic delete-if-unreferenced primitive; metadata cannot make a
+  genuinely shared store safe. Snapshot segment bytes are content-addressed
+  and can deduplicate across filesystems, while one filesystem cannot discover
+  another's live manifests. Leave access `unknown`, declare it `shared`, or set
+  `segmentReclaim: false` unless both declarations are truthful for the whole
+  open lifetime.
 - Dead-lock recovery uses local OS PID liveness and therefore assumes one
   host and PID namespace. Do not share a Peerbit state directory between
   hosts or isolated containers through NFS, SMB, or a host-mounted volume.

@@ -1,6 +1,10 @@
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
-import { openSharedFs, type BootstrapTelemetryEvent } from "../index.js";
+import {
+    openSharedFs,
+    type BootstrapTelemetryEvent,
+    type SharedFsOpenProfileEvent,
+} from "../index.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -216,6 +220,7 @@ describe("shared fs bootstrap telemetry", () => {
             await joinerPeer.dial(donor.peer);
             let callbackCalls = 0;
             const events: BootstrapTelemetryEvent[] = [];
+            const openProfileEvents: SharedFsOpenProfileEvent[] = [];
 
             const joiner = await openSharedFs({
                 peerbit: joinerPeer,
@@ -232,6 +237,17 @@ describe("shared fs bootstrap telemetry", () => {
                         }
                         throw new Error("application telemetry failure");
                     },
+                    openProfile: (event) => {
+                        openProfileEvents.push(event);
+                        if (event.name === "sharedLog.open.total") {
+                            return Promise.reject(
+                                new Error(
+                                    "async application open-profile failure"
+                                )
+                            );
+                        }
+                        throw new Error("application open-profile failure");
+                    },
                 },
             });
 
@@ -241,6 +257,12 @@ describe("shared fs bootstrap telemetry", () => {
             ).resolves.toMatchObject({ verified: true });
             await joiner.awaitWriteReady({ timeout: 60_000 });
             expect(callbackCalls).toBeGreaterThan(0);
+            expect(openProfileEvents.length).toBeGreaterThan(0);
+            expect(
+                openProfileEvents.some(
+                    (event) => event.name === "sharedLog.open.total"
+                )
+            ).toBe(true);
             expect(
                 decode(await joiner.readFile("/tree/dir-7/file-47.txt"))
             ).toBe("content 47");
@@ -297,17 +319,44 @@ describe("shared fs bootstrap telemetry", () => {
             };
             await joinerPeer.dial(donorPeer);
             const events: BootstrapTelemetryEvent[] = [];
+            const openProfileEvents: SharedFsOpenProfileEvent[] = [];
             const joiner = await openSharedFs({
                 peerbit: joinerPeer,
                 address: donor.address,
                 machineLabel: "plain-telemetry-joiner",
-                telemetry: { bootstrap: (event) => events.push(event) },
+                telemetry: {
+                    bootstrap: (event) => events.push(event),
+                    openProfile: (event) => openProfileEvents.push(event),
+                },
             });
 
             expect(
                 (joiner.program.entries.log as any)._logProperties?.sync
                     ?.profile
             ).toBeUndefined();
+            for (const name of [
+                "sharedLog.open.localState",
+                "sharedLog.open.blockStore",
+                "sharedLog.open.remoteBlocks",
+                "sharedLog.open.lowerLog",
+                "sharedLog.open.rpcSubscriptions",
+                "sharedLog.open.providerAndOwnership",
+                "sharedLog.open.replication",
+                "sharedLog.open.synchronizer",
+                "sharedLog.open.total",
+            ]) {
+                expect(
+                    openProfileEvents.filter((event) => event.name === name),
+                    name
+                ).toHaveLength(1);
+            }
+            expect(
+                openProfileEvents.every(
+                    (event) =>
+                        event.name.startsWith("sharedLog.open.") ||
+                        event.name === "sharedLog.blocks.resolveProviders"
+                )
+            ).toBe(true);
             await waitUntil(async () => {
                 expect(decode(await joiner.readFile("/plain.txt"))).toBe(
                     "no snapshot here"
