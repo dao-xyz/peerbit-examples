@@ -1,7 +1,14 @@
-import { mkdtemp, rm, writeFile as writeReportFile } from "node:fs/promises";
-import { cpus, tmpdir } from "node:os";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+    mkdtemp,
+    readFile,
+    rm,
+    writeFile as writeReportFile,
+} from "node:fs/promises";
+import { cpus, release, tmpdir, totalmem } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { Peerbit } from "peerbit";
 import { describe, expect, it } from "vitest";
 import {
@@ -32,6 +39,27 @@ const WORKLOADS = [
     "fresh-replace",
     "reused-replace",
 ] as const;
+const HERE = dirname(fileURLToPath(import.meta.url));
+const LIBRARY_ROOT = resolve(HERE, "../..");
+const REPOSITORY_ROOT = resolve(LIBRARY_ROOT, "../../..");
+const BENCHMARK_INPUT_FILES = [
+    "packages/shared-fs/library/src/__tests__/one-chunk-dedup.bench.test.ts",
+    "packages/shared-fs/library/src/__tests__/process-isolated-soak-storage.ts",
+    "packages/shared-fs/library/src/index.ts",
+    "packages/shared-fs/library/src/model.ts",
+    "packages/shared-fs/library/src/mount-backend.ts",
+    "packages/shared-fs/library/package.json",
+] as const;
+const PEERBIT_COHORT_PACKAGES = [
+    "peerbit",
+    "@peerbit/document",
+    "@peerbit/shared-log",
+    "@peerbit/program",
+    "@peerbit/trusted-network",
+    "@peerbit/pubsub",
+    "@peerbit/blocks",
+    "@peerbit/blocks-interface",
+] as const;
 
 type BenchmarkMode = (typeof MODES)[number];
 type BenchmarkPath = (typeof PATHS)[number];
@@ -43,10 +71,10 @@ type OperationCounters = {
     indexIterateCalls: number;
     entriesPutCalls: number;
     uniquePutCalls: number;
-    linkedPutCalls: number;
+    nonUniquePutCalls: number;
     fileChunkPuts: number;
     fileChunkUniquePuts: number;
-    fileChunkLinkedPuts: number;
+    fileChunkNonUniquePuts: number;
     fileVersionPuts: number;
     namingPuts: number;
     otherPuts: number;
@@ -79,10 +107,10 @@ const emptyCounters = (): OperationCounters => ({
     indexIterateCalls: 0,
     entriesPutCalls: 0,
     uniquePutCalls: 0,
-    linkedPutCalls: 0,
+    nonUniquePutCalls: 0,
     fileChunkPuts: 0,
     fileChunkUniquePuts: 0,
-    fileChunkLinkedPuts: 0,
+    fileChunkNonUniquePuts: 0,
     fileVersionPuts: 0,
     namingPuts: 0,
     otherPuts: 0,
@@ -90,6 +118,17 @@ const emptyCounters = (): OperationCounters => ({
 
 const copyCounters = (value: OperationCounters): OperationCounters => ({
     ...value,
+});
+
+const counterCategorySums = (counters: OperationCounters) => ({
+    uniqueness: counters.uniquePutCalls + counters.nonUniquePutCalls,
+    entryKinds:
+        counters.fileChunkPuts +
+        counters.fileVersionPuts +
+        counters.namingPuts +
+        counters.otherPuts,
+    fileChunkUniqueness:
+        counters.fileChunkUniquePuts + counters.fileChunkNonUniquePuts,
 });
 
 const installOperationCounters = (fs: SharedFsHandle) => {
@@ -114,11 +153,11 @@ const installOperationCounters = (fs: SharedFsHandle) => {
     ) {
         counters.entriesPutCalls++;
         if (options?.unique === true) counters.uniquePutCalls++;
-        else counters.linkedPutCalls++;
+        else counters.nonUniquePutCalls++;
         if (value?.kind === "file-chunk") {
             counters.fileChunkPuts++;
             if (options?.unique === true) counters.fileChunkUniquePuts++;
-            else counters.fileChunkLinkedPuts++;
+            else counters.fileChunkNonUniquePuts++;
         } else if (value?.kind === "file-version") {
             counters.fileVersionPuts++;
         } else if (value?.kind === "naming") {
@@ -154,6 +193,50 @@ const installOperationCounters = (fs: SharedFsHandle) => {
 const dedupForMode = (mode: BenchmarkMode): "verify" | "off" =>
     mode === "verify" ? "verify" : "off";
 
+const stopPeer = async (peer: Peerbit) => {
+    try {
+        await peer.stop();
+    } catch (error) {
+        if (
+            !(
+                error instanceof TypeError &&
+                error.message.includes("clearAll") &&
+                error.stack?.includes("DocumentIndex.close")
+            )
+        ) {
+            throw error;
+        }
+    }
+};
+
+const combineFailures = (message: string, failures: unknown[]) => {
+    if (failures.length === 1) return failures[0];
+    return new AggregateError(failures, message);
+};
+
+const cleanupContexts = async (contexts: BenchmarkContext[]) => {
+    const failures: unknown[] = [];
+    for (const context of contexts) {
+        try {
+            context.counters.restore();
+        } catch (error) {
+            failures.push(error);
+        }
+    }
+    const stopped = await Promise.allSettled(
+        contexts.map((context) => stopPeer(context.peer))
+    );
+    for (const result of stopped) {
+        if (result.status === "rejected") failures.push(result.reason);
+    }
+    if (failures.length > 0) {
+        throw combineFailures(
+            "Failed to clean up benchmark contexts",
+            failures
+        );
+    }
+};
+
 const mountTarget = (
     fs: SharedFsHandle,
     mode: BenchmarkMode
@@ -188,21 +271,41 @@ const createContext = async (
     mode: BenchmarkMode
 ): Promise<BenchmarkContext> => {
     const stateDirectory = join(root, `${path}-${workload}-${mode}`);
-    const peer = await Peerbit.create({ directory: stateDirectory });
-    const fs = await openSharedFs({
-        peerbit: peer,
-        machineLabel: `${path}-${workload}-${mode}`,
-        bootstrap: false,
-        gc: false,
-    });
-    const counters = installOperationCounters(fs);
-    const backend =
-        path === "mount-backend"
-            ? createSharedFsMountBackend(mountTarget(fs, mode), {
-                  writeFileInput: "immutable-borrowed",
-              })
-            : undefined;
-    return { mode, stateDirectory, peer, fs, backend, counters };
+    let peer: Peerbit | undefined;
+    let counters: BenchmarkContext["counters"] | undefined;
+    try {
+        peer = await Peerbit.create({ directory: stateDirectory });
+        const fs = await openSharedFs({
+            peerbit: peer,
+            // Only the dedup mode may differ between the paired programs.
+            machineLabel: `${path}-${workload}`,
+            bootstrap: false,
+            gc: false,
+        });
+        counters = installOperationCounters(fs);
+        const backend =
+            path === "mount-backend"
+                ? createSharedFsMountBackend(mountTarget(fs, mode), {
+                      writeFileInput: "immutable-borrowed",
+                  })
+                : undefined;
+        return { mode, stateDirectory, peer, fs, backend, counters };
+    } catch (error) {
+        const failures: unknown[] = [error];
+        try {
+            counters?.restore();
+        } catch (cleanupError) {
+            failures.push(cleanupError);
+        }
+        if (peer) {
+            try {
+                await stopPeer(peer);
+            } catch (cleanupError) {
+                failures.push(cleanupError);
+            }
+        }
+        throw combineFailures("Failed to create benchmark context", failures);
+    }
 };
 
 const patternedBytes = (size: number, seed: number) => {
@@ -211,6 +314,113 @@ const patternedBytes = (size: number, seed: number) => {
         bytes[index] = (index * 17 + seed * 29 + (index >>> 4)) % 251;
     }
     return bytes;
+};
+
+const readOptionalText = async (path: string) => {
+    try {
+        return await readFile(path, "utf8");
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "EISDIR") return undefined;
+        throw error;
+    }
+};
+
+// Resolve HEAD directly so the report does not depend on git being in PATH
+// and provenance collection remains read-only in ordinary and worktree clones.
+const readGitCommit = async () => {
+    const dotGit = join(REPOSITORY_ROOT, ".git");
+    const dotGitContents = await readOptionalText(dotGit);
+    const gitDirectory = dotGitContents?.startsWith("gitdir:")
+        ? resolve(
+              REPOSITORY_ROOT,
+              dotGitContents.slice("gitdir:".length).trim()
+          )
+        : dotGit;
+    const head = (await readOptionalText(join(gitDirectory, "HEAD")))?.trim();
+    if (!head) return undefined;
+    if (/^[0-9a-f]{40}$/iu.test(head)) return head.toLowerCase();
+    if (!head.startsWith("ref: ")) return undefined;
+    const reference = head.slice("ref: ".length);
+    const commonRelative = (
+        await readOptionalText(join(gitDirectory, "commondir"))
+    )?.trim();
+    const commonDirectory = commonRelative
+        ? resolve(gitDirectory, commonRelative)
+        : gitDirectory;
+    for (const root of [gitDirectory, commonDirectory]) {
+        const loose = (await readOptionalText(join(root, reference)))?.trim();
+        if (loose && /^[0-9a-f]{40}$/iu.test(loose)) {
+            return loose.toLowerCase();
+        }
+    }
+    const packed = await readOptionalText(join(commonDirectory, "packed-refs"));
+    const match = packed
+        ?.split(/\r?\n/u)
+        .find((line) => line.endsWith(` ${reference}`));
+    const packedCommit = match?.split(" ", 1)[0];
+    return packedCommit && /^[0-9a-f]{40}$/iu.test(packedCommit)
+        ? packedCommit.toLowerCase()
+        : undefined;
+};
+
+const hashBenchmarkInputs = async () => {
+    const hash = createHash("sha256");
+    for (const relativePath of BENCHMARK_INPUT_FILES) {
+        hash.update(relativePath);
+        hash.update("\0");
+        hash.update(await readFile(join(REPOSITORY_ROOT, relativePath)));
+        hash.update("\0");
+    }
+    return hash.digest("hex");
+};
+
+const readPeerbitCohort = async () => {
+    const entries = await Promise.all(
+        PEERBIT_COHORT_PACKAGES.map(async (packageName) => {
+            const packageJson = JSON.parse(
+                await readFile(
+                    join(
+                        LIBRARY_ROOT,
+                        "node_modules",
+                        ...packageName.split("/"),
+                        "package.json"
+                    ),
+                    "utf8"
+                )
+            ) as { version?: unknown };
+            if (
+                typeof packageJson.version !== "string" ||
+                packageJson.version.length === 0
+            ) {
+                throw new Error(`Missing installed version for ${packageName}`);
+            }
+            return [packageName, packageJson.version] as const;
+        })
+    );
+    return Object.fromEntries(entries) as Record<
+        (typeof PEERBIT_COHORT_PACKAGES)[number],
+        string
+    >;
+};
+
+const collectProvenance = async () => {
+    const [lockfile, gitHeadCommit, benchmarkInputsSha256, peerbitCohort] =
+        await Promise.all([
+            readFile(join(REPOSITORY_ROOT, "pnpm-lock.yaml")),
+            readGitCommit(),
+            hashBenchmarkInputs(),
+            readPeerbitCohort(),
+        ]);
+    return {
+        gitHeadCommit: gitHeadCommit ?? null,
+        pnpmLockSha256: createHash("sha256").update(lockfile).digest("hex"),
+        benchmarkInputFiles: [...BENCHMARK_INPUT_FILES],
+        benchmarkInputsSha256,
+        peerbitCohort,
+        peerbitCohortResolution:
+            "versions read from packages/shared-fs/library/node_modules package manifests used by this run",
+    };
 };
 
 const elapsedNs = (startedAt: bigint) =>
@@ -240,22 +450,47 @@ const mountedWrite = async (
 ): Promise<TimedSample> => {
     const startedAt = process.hrtime.bigint();
     let handle: number | undefined;
-    const openNs = await time(async () => {
-        handle = await backend.open(path, {
-            write: true,
-            create: true,
-            truncate: true,
+    let releaseAttempted = false;
+    let failure: unknown;
+    let openNs = 0;
+    let writeNs = 0;
+    let fsyncNs = 0;
+    let releaseNs = 0;
+    try {
+        openNs = await time(async () => {
+            handle = await backend.open(path, {
+                write: true,
+                create: true,
+                truncate: true,
+            });
         });
-    });
-    const writeNs = await time(async () => {
-        await backend.write(handle!, bytes, 0);
-    });
-    const fsyncNs = await time(async () => {
-        await backend.fsync(handle!);
-    });
-    const releaseNs = await time(async () => {
-        await backend.release(handle!);
-    });
+        writeNs = await time(async () => {
+            await backend.write(handle!, bytes, 0);
+        });
+        fsyncNs = await time(async () => {
+            await backend.fsync(handle!);
+        });
+        releaseAttempted = true;
+        releaseNs = await time(async () => {
+            await backend.release(handle!);
+        });
+    } catch (error) {
+        failure = error;
+    }
+    if (handle !== undefined && !releaseAttempted) {
+        try {
+            await backend.release(handle);
+        } catch (releaseError) {
+            if (failure !== undefined) {
+                throw combineFailures(
+                    "Mounted write and cleanup release both failed",
+                    [failure, releaseError]
+                );
+            }
+            throw releaseError;
+        }
+    }
+    if (failure !== undefined) throw failure;
     return {
         durationNs: elapsedNs(startedAt),
         openNs,
@@ -402,6 +637,64 @@ const workloadInput = (
 const fasterPercent = (baselineNs: number, candidateNs: number) =>
     ((baselineNs - candidateNs) / baselineNs) * 100;
 
+const captureLiveState = async (contexts: BenchmarkContext[]) => {
+    const storageEntries: [BenchmarkMode, ProcessSoakStorageSnapshot][] = [];
+    for (const context of contexts) {
+        storageEntries.push([
+            context.mode,
+            await scanProcessSoakStateDirectory(context.stateDirectory),
+        ]);
+    }
+    const logEntries: [BenchmarkMode, number][] = [];
+    for (const context of contexts) {
+        logEntries.push([context.mode, await logLength(context)]);
+    }
+    return {
+        storage: Object.fromEntries(storageEntries) as Record<
+            BenchmarkMode,
+            ProcessSoakStorageSnapshot
+        >,
+        log: Object.fromEntries(logEntries) as Record<BenchmarkMode, number>,
+    };
+};
+
+const assertMeasuredInvariants = (
+    workload: BenchmarkWorkload,
+    counters: Record<BenchmarkMode, OperationCounters>,
+    logGrowth: Record<BenchmarkMode, number>
+) => {
+    const isCreate = workload.endsWith("create");
+    const isFresh = workload.startsWith("fresh");
+    for (const mode of MODES) {
+        const value = counters[mode];
+        const sums = counterCategorySums(value);
+        expect(sums.uniqueness).toBe(value.entriesPutCalls);
+        expect(sums.entryKinds).toBe(value.entriesPutCalls);
+        expect(sums.fileChunkUniqueness).toBe(value.fileChunkPuts);
+
+        const expectedChunkPuts =
+            mode === "always-touch" || isFresh ? SAMPLES : 0;
+        const expectedChunkUniquePuts =
+            mode === "verify" && isFresh ? SAMPLES : 0;
+        const expectedChunkNonUniquePuts =
+            mode === "always-touch" ? SAMPLES : 0;
+        const expectedNamingPuts = isCreate ? SAMPLES : 0;
+        const expectedEntries =
+            SAMPLES + expectedNamingPuts + expectedChunkPuts;
+        expect(value.hasDocumentCalls).toBe(
+            mode === "verify" ? SAMPLES * 2 : 0
+        );
+        expect(value.fileChunkPuts).toBe(expectedChunkPuts);
+        expect(value.fileChunkUniquePuts).toBe(expectedChunkUniquePuts);
+        expect(value.fileChunkNonUniquePuts).toBe(expectedChunkNonUniquePuts);
+        expect(value.fileVersionPuts).toBe(SAMPLES);
+        expect(value.namingPuts).toBe(expectedNamingPuts);
+        expect(value.otherPuts).toBe(0);
+        expect(value.entriesPutCalls).toBe(expectedEntries);
+        expect(logGrowth[mode]).toBe(expectedEntries);
+    }
+};
+
 const runPair = async (
     root: string,
     path: BenchmarkPath,
@@ -418,16 +711,19 @@ const runPair = async (
         patternedBytes(payloadSize, 10),
         patternedBytes(payloadSize, 20),
     ] as const;
-    const contexts = await Promise.all(
-        MODES.map((mode) => createContext(root, path, workload, mode))
-    );
-    const byMode = Object.fromEntries(
-        contexts.map((context) => [context.mode, context])
-    ) as Record<BenchmarkMode, BenchmarkContext>;
-    try {
-        await Promise.all(
-            contexts.map((context) => setupWorkload(context, workload, reused))
-        );
+    const contexts: BenchmarkContext[] = [];
+    const execute = async () => {
+        // Construct serially so a later failure cannot orphan an already-open
+        // context behind a rejected Promise.all.
+        for (const mode of MODES) {
+            contexts.push(await createContext(root, path, workload, mode));
+        }
+        const byMode = Object.fromEntries(
+            contexts.map((context) => [context.mode, context])
+        ) as Record<BenchmarkMode, BenchmarkContext>;
+        for (const context of contexts) {
+            await setupWorkload(context, workload, reused);
+        }
 
         for (let index = 0; index < WARMUPS; index++) {
             const order = index % 2 === 0 ? MODES : [...MODES].reverse();
@@ -442,25 +738,7 @@ const runPair = async (
             }
         }
 
-        const storageBeforeEntries = await Promise.all(
-            contexts.map(async (context) => [
-                context.mode,
-                await scanProcessSoakStateDirectory(context.stateDirectory),
-            ])
-        );
-        const storageBefore = Object.fromEntries(
-            storageBeforeEntries
-        ) as Record<BenchmarkMode, ProcessSoakStorageSnapshot>;
-        const logBeforeEntries = await Promise.all(
-            contexts.map(async (context) => [
-                context.mode,
-                await logLength(context),
-            ])
-        );
-        const logBefore = Object.fromEntries(logBeforeEntries) as Record<
-            BenchmarkMode,
-            number
-        >;
+        const before = await captureLiveState(contexts);
         for (const context of contexts) context.counters.reset();
 
         const samples: Record<BenchmarkMode, TimedSample[]> = {
@@ -496,34 +774,17 @@ const runPair = async (
                 context.counters.snapshot(),
             ])
         ) as Record<BenchmarkMode, OperationCounters>;
-        const [storageAfterEntries, logAfterEntries] = await Promise.all([
-            Promise.all(
-                contexts.map(async (context) => [
-                    context.mode,
-                    await scanProcessSoakStateDirectory(context.stateDirectory),
-                ])
-            ),
-            Promise.all(
-                contexts.map(async (context) => [
-                    context.mode,
-                    await logLength(context),
-                ])
-            ),
-        ]);
-        const storageAfter = Object.fromEntries(storageAfterEntries) as Record<
-            BenchmarkMode,
-            ProcessSoakStorageSnapshot
-        >;
-        const logAfter = Object.fromEntries(logAfterEntries) as Record<
-            BenchmarkMode,
-            number
-        >;
+        const after = await captureLiveState(contexts);
+        const logGrowth = Object.fromEntries(
+            MODES.map((mode) => [mode, after.log[mode] - before.log[mode]])
+        ) as Record<BenchmarkMode, number>;
 
         for (const context of contexts) {
             expect(await context.fs.readFile(finalInput!.path)).toEqual(
                 finalInput!.bytes
             );
         }
+        assertMeasuredInvariants(workload, counters, logGrowth);
         const summaries = {
             verify: summarizeSamples(samples.verify),
             "always-touch": summarizeSamples(samples["always-touch"]),
@@ -534,6 +795,7 @@ const runPair = async (
             payloadBytes: payloadSize,
             samples: SAMPLES,
             warmups: WARMUPS,
+            machineLabel: `${path}-${workload}`,
             scope:
                 path === "mount-backend"
                     ? "in-process mount backend; no kernel FUSE/WinFsp or IPC boundary"
@@ -544,17 +806,21 @@ const runPair = async (
                     raw: samples.verify,
                     summary: summaries.verify,
                     counters: counters.verify,
+                    counterCategorySums: counterCategorySums(counters.verify),
                     log: {
-                        beforeEntries: logBefore.verify,
-                        afterEntries: logAfter.verify,
-                        growthEntries: logAfter.verify - logBefore.verify,
+                        beforeEntries: before.log.verify,
+                        afterEntries: after.log.verify,
+                        growthEntries: logGrowth.verify,
                     },
                     storage: {
-                        before: storageBefore.verify,
-                        after: storageAfter.verify,
-                        growth: storageDelta(
-                            storageAfter.verify,
-                            storageBefore.verify
+                        lifecycle: "live",
+                        interpretation:
+                            "symmetric live snapshots; allocator, WAL, and checkpoint activity is noisy, so this delta is descriptive only and supports no physical amplification conclusion",
+                        beforeLive: before.storage.verify,
+                        afterLive: after.storage.verify,
+                        observedLiveDelta: storageDelta(
+                            after.storage.verify,
+                            before.storage.verify
                         ),
                     },
                 },
@@ -563,19 +829,23 @@ const runPair = async (
                     raw: samples["always-touch"],
                     summary: summaries["always-touch"],
                     counters: counters["always-touch"],
+                    counterCategorySums: counterCategorySums(
+                        counters["always-touch"]
+                    ),
                     log: {
-                        beforeEntries: logBefore["always-touch"],
-                        afterEntries: logAfter["always-touch"],
-                        growthEntries:
-                            logAfter["always-touch"] -
-                            logBefore["always-touch"],
+                        beforeEntries: before.log["always-touch"],
+                        afterEntries: after.log["always-touch"],
+                        growthEntries: logGrowth["always-touch"],
                     },
                     storage: {
-                        before: storageBefore["always-touch"],
-                        after: storageAfter["always-touch"],
-                        growth: storageDelta(
-                            storageAfter["always-touch"],
-                            storageBefore["always-touch"]
+                        lifecycle: "live",
+                        interpretation:
+                            "symmetric live snapshots; allocator, WAL, and checkpoint activity is noisy, so this delta is descriptive only and supports no physical amplification conclusion",
+                        beforeLive: before.storage["always-touch"],
+                        afterLive: after.storage["always-touch"],
+                        observedLiveDelta: storageDelta(
+                            after.storage["always-touch"],
+                            before.storage["always-touch"]
                         ),
                     },
                 },
@@ -592,12 +862,23 @@ const runPair = async (
                 ),
             },
         };
-    } finally {
-        for (const context of contexts) context.counters.restore();
-        await Promise.all(
-            contexts.map((context) => context.peer.stop().catch(() => {}))
-        );
+    };
+    let result: Awaited<ReturnType<typeof execute>>;
+    try {
+        result = await execute();
+    } catch (error) {
+        try {
+            await cleanupContexts(contexts);
+        } catch (cleanupError) {
+            throw combineFailures("Benchmark and cleanup both failed", [
+                error,
+                cleanupError,
+            ]);
+        }
+        throw error;
     }
+    await cleanupContexts(contexts);
+    return result;
 };
 
 manualDescribe("one-chunk dedup strategy benchmark (manual)", () => {
@@ -605,6 +886,7 @@ manualDescribe("one-chunk dedup strategy benchmark (manual)", () => {
         "compares matched verify and always-touch writes without changing defaults",
         { timeout: 15 * 60_000 },
         async () => {
+            const provenance = await collectProvenance();
             const startedAt = performance.now();
             const root = await mkdtemp(
                 join(tmpdir(), "peerbit-shared-fs-one-chunk-dedup-")
@@ -617,7 +899,7 @@ manualDescribe("one-chunk dedup strategy benchmark (manual)", () => {
                     }
                 }
                 const report = {
-                    benchmark: "shared-fs-one-chunk-dedup-ab-v1",
+                    benchmark: "shared-fs-one-chunk-dedup-ab-v2",
                     reportOnly: true,
                     productionDefaultsChanged: false,
                     run: {
@@ -626,13 +908,19 @@ manualDescribe("one-chunk dedup strategy benchmark (manual)", () => {
                         pairedExecution: true,
                         alternatingModeOrder: true,
                         payloadPreparationTimed: false,
+                        provenanceCollectionTimed: false,
+                        storageSnapshots:
+                            "symmetric live state-directory scans; physical byte deltas are noisy/descriptive and not write-amplification evidence",
                     },
                     runtime: {
                         node: process.version,
                         platform: process.platform,
                         arch: process.arch,
+                        osRelease: release(),
                         cpu: cpus()[0]?.model ?? "unknown",
+                        totalMemoryBytes: totalmem(),
                     },
+                    provenance,
                     durationMs: performance.now() - startedAt,
                     results,
                 };
