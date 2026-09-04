@@ -141,12 +141,16 @@ pnpm shared-fs:benchmark:native-mount -- \
   --mount /path/to/mount \
   --samples 30 \
   --warmups 3 \
+  --parallelism 8 \
   --output native-mount.json
 ```
 
 It records raw monotonic samples and p50/p95 summaries for metadata, 4 KiB and
 1 MiB sequential reads and writes, sequential 1 KiB small-file creation,
 directory listing, and a 4 KiB in-place overwrite of a configurable base file.
+When `--parallelism` is above one, it also measures concurrent stat, 4 KiB read,
+and durable 4 KiB write batches over distinct files. Their elapsed time is the
+batch wall time; their phase values are sums across the independent operations.
 Every timed write uses `open`, complete positional writes, `fsync`, then
 `close`; the report preserves those phase timings. Deterministic contents are
 fully read and checked after each timer. The recorded `counter-mix32-v1` corpus
@@ -158,8 +162,12 @@ microbenchmarks. `--overwrite-base-bytes`,
 These are warm, default-platform-cache timings. The harness neither evicts
 kernel/application caches nor requests direct I/O, and it does not instrument
 adapter callback counts; a cached read or metadata lookup might not reach a
-userspace mount callback. Runs are sequential (`concurrency: 1`) and therefore
-do not measure the adapter's global request-serialization ceiling.
+userspace mount callback. The original scenarios remain sequential. The
+optional concurrent scenarios use the reported bounded `concurrency` (1-16),
+which lets matched runs compare adapter IPC widths without changing the
+workload width. The dispatch workflows set `UV_THREADPOOL_SIZE=16` and record
+it so Node's default four-worker pool does not silently cap an eight- or
+sixteen-operation workload.
 
 The harness creates and normally removes one unique child below the supplied
 path. Its workload timeout is cooperative between filesystem operations. The
@@ -173,10 +181,11 @@ file or directory before and after the run. Directory inputs are traversed
 recursively while `.git` and `node_modules` are excluded, allowing callers to
 fingerprint built runtime trees without hashing dependency stores.
 
-The real-mount wrappers also record the adapter build tags, exact `go version`
-output, and the detected fuse3, macFUSE, or WinFsp runtime version as bounded
-implementation details. A value is recorded as `unknown` when a host cannot
-determine it; the harness does not synthesize a version.
+The real-mount wrappers also record the adapter build tags, exact `go version`,
+configured IPC connection count, and the detected fuse3, macFUSE, or WinFsp
+runtime version as bounded implementation details. A value is recorded as
+`unknown` when a host cannot determine it; the harness does not synthesize a
+version.
 
 The target and its repeated `--mount-option` values are caller-supplied and are
 not independently proven by the harness. Successful local `fsync` completion

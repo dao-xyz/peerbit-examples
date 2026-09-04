@@ -183,6 +183,11 @@ jobs:
               working-directory: packages/shared-fs/native
               run: go test ./...
 
+            - name: Race-test portable native adapter IPC
+              if: runner.os == 'Linux'
+              working-directory: packages/shared-fs/native
+              run: go test -race ./...
+
             - name: Benchmark portable native adapter IPC (report only)
               working-directory: packages/shared-fs/native
               run: go test -run "^$" -bench "^BenchmarkIPCClientRoundTrip$" -benchmem -benchtime=1s -count=5

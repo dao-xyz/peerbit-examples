@@ -8,6 +8,11 @@ $Adapter = Join-Path $TempRoot "peerbit-shared-fs-native.exe"
 $State = Join-Path $TempRoot "pbfs-state"
 $Stdout = Join-Path $TempRoot "pbfs-mount.out.log"
 $Stderr = Join-Path $TempRoot "pbfs-mount.err.log"
+$IpcConcurrencyText = if ($env:PEERBIT_SHARED_FS_NATIVE_IPC_CONCURRENCY) { $env:PEERBIT_SHARED_FS_NATIVE_IPC_CONCURRENCY } else { "1" }
+$IpcConcurrency = 0
+if (-not [int]::TryParse($IpcConcurrencyText, [ref]$IpcConcurrency) -or $IpcConcurrency -lt 1 -or $IpcConcurrency -gt 16) {
+  throw "PEERBIT_SHARED_FS_NATIVE_IPC_CONCURRENCY must be an integer from 1 through 16."
+}
 
 function Get-FreeMountDrive {
   foreach ($Letter in @("P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
@@ -102,6 +107,9 @@ $Args = @(
   "--native-adapter",
   $Adapter
 )
+if ($IpcConcurrency -gt 1) {
+  $Args += @("--native-ipc-concurrency", [string]$IpcConcurrency)
+}
 
 $Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 
@@ -200,18 +208,23 @@ try {
     }
     $BenchmarkSamples = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES } else { "30" }
     $BenchmarkWarmups = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS } else { "3" }
+    $BenchmarkParallelism = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_PARALLELISM) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_PARALLELISM } else { "1" }
     $BenchmarkTimeoutMs = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS } else { "600000" }
     $BenchmarkCommonArgs = @(
       "--samples",
       $BenchmarkSamples,
       "--warmups",
       $BenchmarkWarmups,
+      "--parallelism",
+      $BenchmarkParallelism,
       "--timeout-ms",
       $BenchmarkTimeoutMs,
       "--implementation-detail",
       "adapter.buildTags=$AdapterBuildTags",
       "--implementation-detail",
       "adapter.goVersion=$GoVersion",
+      "--implementation-detail",
+      "adapter.ipcConcurrency=$IpcConcurrency",
       "--implementation-detail",
       "mount.runtime=$MountRuntime",
       "--implementation-input",
@@ -220,6 +233,10 @@ try {
       "packages/shared-fs/cli/lib/esm",
       "--implementation-input",
       "packages/shared-fs/library/lib/esm"
+    )
+    $BenchmarkCommonArgs += @(
+      "--implementation-detail",
+      "node.uvThreadpoolSize=$(if ($env:UV_THREADPOOL_SIZE) { $env:UV_THREADPOOL_SIZE } else { 'default' })"
     )
   }
 
@@ -234,17 +251,21 @@ try {
       "--target-kind",
       "shared-fs-mount",
       "--target-label",
-      "Shared FS mount (external WinFsp)",
-      "--mount-option",
-      "-s",
+      "Shared FS mount (external WinFsp, IPC width $IpcConcurrency)"
+    )
+    if ($IpcConcurrency -eq 1) {
+      $BenchmarkArgs += @("--mount-option", "-s")
+    }
+    $BenchmarkArgs += @(
       "--mount-option",
       "-o",
       "--mount-option",
       "uid=-1,gid=-1"
-    ) + $BenchmarkCommonArgs
+    )
     if ($env:PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG -eq "1") {
       $BenchmarkArgs += @("--mount-option", "-d")
     }
+    $BenchmarkArgs += $BenchmarkCommonArgs
     & node @BenchmarkArgs
     if ($LASTEXITCODE -ne 0) {
       throw "native mounted-path benchmark failed with exit code $LASTEXITCODE"

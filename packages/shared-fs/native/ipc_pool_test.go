@@ -270,7 +270,7 @@ func TestIPCClientPoolLetsIndependentLanesProgress(t *testing.T) {
 
 func TestIPCClientPoolRetainsAffinityAfterReleaseError(t *testing.T) {
 	var releases atomic.Uint64
-	lane := &fakeIPCLane{requestFn: func(op string, _ ...interface{}) (interface{}, error) {
+	ownerLane := &fakeIPCLane{requestFn: func(op string, _ ...interface{}) (interface{}, error) {
 		switch op {
 		case "open":
 			return float64(41), nil
@@ -281,7 +281,10 @@ func TestIPCClientPoolRetainsAffinityAfterReleaseError(t *testing.T) {
 		}
 		return float64(1), nil
 	}}
-	pool := mustTestIPCClientPool(t, lane)
+	otherLane := &fakeIPCLane{requestFn: func(op string, _ ...interface{}) (interface{}, error) {
+		return nil, fmt.Errorf("operation %s was rerouted to the non-owner lane", op)
+	}}
+	pool := mustTestIPCClientPool(t, ownerLane, otherLane)
 	defer pool.close()
 	handle, err := pool.open("/retry", 2)
 	if err != nil {
@@ -292,6 +295,9 @@ func TestIPCClientPoolRetainsAffinityAfterReleaseError(t *testing.T) {
 	}
 	if _, err := pool.requestForHandle(handle, "write", []byte("still-bound"), int64(0)); err != nil {
 		t.Fatalf("failed release dropped handle affinity: %v", err)
+	}
+	if requests := otherLane.snapshot(); len(requests) != 0 {
+		t.Fatalf("failed release rerouted requests to another lane: %#v", requests)
 	}
 	if err := pool.release(handle); err != nil {
 		t.Fatalf("explicit release retry failed: %v", err)

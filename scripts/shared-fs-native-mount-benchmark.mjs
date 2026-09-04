@@ -43,6 +43,7 @@ export const nativeMountBenchmarkCorpus = Object.freeze({
 const integerOptions = {
     "--samples": ["samples", 1, 50],
     "--warmups": ["warmups", 0, 20],
+    "--parallelism": ["parallelism", 1, 16],
     "--small-files": ["smallFiles", 1, 128],
     "--readdir-entries": ["readdirEntries", 1, 5000],
     "--overwrite-base-bytes": ["overwriteBaseBytes", OVERWRITE_BYTES, 32 << 20],
@@ -53,6 +54,7 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
     const options = {
         samples: 5,
         warmups: 1,
+        parallelism: 1,
         smallFiles: 16,
         readdirEntries: 128,
         overwriteBaseBytes: 4 << 20,
@@ -335,6 +337,14 @@ const summarize = (samples, logicalBytes = 0, itemCount = 0) => {
     }
     return summary;
 };
+
+const aggregateParallelHandleSample = (started, operations) => ({
+    durationNs: elapsed(started),
+    openNs: operations.reduce((total, sample) => total + sample.openNs, 0),
+    ioNs: operations.reduce((total, sample) => total + sample.ioNs, 0),
+    fsyncNs: operations.reduce((total, sample) => total + sample.fsyncNs, 0),
+    closeNs: operations.reduce((total, sample) => total + sample.closeNs, 0),
+});
 
 const displayInputPath = (path) => {
     const relativePath = relative(REPOSITORY_ROOT, path);
@@ -670,29 +680,234 @@ const executeWorkload = async (root, options, signal) => {
         summary: summarize(overwriteSamples, OVERWRITE_BYTES),
     });
 
+    if (options.parallelism > 1) {
+        const parallelTargets = [];
+        for (let index = 0; index < options.parallelism; index += 1) {
+            const payload = deterministicPayload(4 << 10, 60_000 + index);
+            const path = join(root, `parallel-read-${index}.bin`);
+            await durableWrite(path, payload);
+            parallelTargets.push({ path, payload });
+        }
+
+        const parallelStatSamples = await collect(options, signal, async () => {
+            const started = now();
+            const results = await Promise.all(
+                parallelTargets.map(({ path }) => stat(path))
+            );
+            const sample = { durationNs: elapsed(started) };
+            if (
+                results.some(
+                    (result) => !result.isFile() || result.size !== 4 << 10
+                )
+            ) {
+                throw new Error("parallel stat returned unexpected metadata");
+            }
+            return sample;
+        });
+        scenarios.push({
+            name: `parallel-stat-4096-x${options.parallelism}`,
+            operation: "parallel-stat",
+            itemCount: options.parallelism,
+            parallelism: options.parallelism,
+            semantics: "concurrent stat on distinct files",
+            samples: parallelStatSamples,
+            summary: summarize(parallelStatSamples, 0, options.parallelism),
+        });
+
+        const parallelReadSamples = await collect(options, signal, async () => {
+            const destinations = parallelTargets.map(() =>
+                Buffer.allocUnsafe(4 << 10)
+            );
+            const started = now();
+            const operations = await Promise.all(
+                parallelTargets.map(({ path }, index) =>
+                    timedRead(path, destinations[index])
+                )
+            );
+            const sample = aggregateParallelHandleSample(started, operations);
+            for (let index = 0; index < parallelTargets.length; index++) {
+                assertBytes(
+                    destinations[index],
+                    parallelTargets[index].payload,
+                    `parallel read ${index}`
+                );
+            }
+            return sample;
+        });
+        scenarios.push({
+            name: `parallel-read-4096-x${options.parallelism}`,
+            operation: "parallel-read",
+            logicalBytes: options.parallelism * (4 << 10),
+            itemCount: options.parallelism,
+            parallelism: options.parallelism,
+            semantics:
+                "concurrent open/read-exactly/close on distinct files; phases are sums across operations",
+            samples: parallelReadSamples,
+            summary: summarize(
+                parallelReadSamples,
+                options.parallelism * (4 << 10),
+                options.parallelism
+            ),
+        });
+
+        const parallelWritePaths = [];
+        for (let index = 0; index < options.parallelism; index += 1) {
+            const path = join(root, `parallel-write-${index}.bin`);
+            await durableWrite(path, deterministicPayload(4 << 10, 70_000));
+            parallelWritePaths.push(path);
+        }
+        const parallelWritePayloads = Array.from(
+            { length: totalRuns },
+            (_, runIndex) =>
+                Array.from({ length: options.parallelism }, (_, fileIndex) =>
+                    deterministicPayload(
+                        4 << 10,
+                        80_000 + runIndex * options.parallelism + fileIndex
+                    )
+                )
+        );
+        const parallelWriteSamples = await collect(
+            options,
+            signal,
+            async (runIndex) => {
+                const started = now();
+                const operations = await Promise.all(
+                    parallelWritePaths.map((path, index) =>
+                        durableWrite(
+                            path,
+                            parallelWritePayloads[runIndex][index]
+                        )
+                    )
+                );
+                const sample = aggregateParallelHandleSample(
+                    started,
+                    operations
+                );
+                throwIfAborted(signal);
+                const written = await Promise.all(
+                    parallelWritePaths.map((path) => readFile(path))
+                );
+                for (let index = 0; index < written.length; index++) {
+                    assertBytes(
+                        written[index],
+                        parallelWritePayloads[runIndex][index],
+                        `parallel write ${index}`
+                    );
+                }
+                return sample;
+            }
+        );
+        scenarios.push({
+            name: `parallel-write-4096-x${options.parallelism}`,
+            operation: "parallel-write",
+            logicalBytes: options.parallelism * (4 << 10),
+            itemCount: options.parallelism,
+            parallelism: options.parallelism,
+            semantics:
+                "concurrent open/truncate/write/fsync/close on distinct files; phases are sums across operations",
+            samples: parallelWriteSamples,
+            summary: summarize(
+                parallelWriteSamples,
+                options.parallelism * (4 << 10),
+                options.parallelism
+            ),
+        });
+    }
+
     return scenarios;
 };
 
-export const expectedNativeMountBenchmarkScenarioNames = (options) => [
-    "stat-1048576",
-    "read-4096",
-    "write-4096",
-    "read-1048576",
-    "write-1048576",
-    `small-files-${options.smallFiles}`,
-    `readdir-${options.readdirEntries}`,
-    `overwrite-4096-in-${options.overwriteBaseBytes}`,
+const expectedNativeMountBenchmarkScenarios = (options) => [
+    { name: "stat-1048576", operation: "stat" },
+    {
+        name: "read-4096",
+        operation: "read",
+        logicalBytes: 4 << 10,
+        semantics: "open/read-exactly/close",
+    },
+    {
+        name: "write-4096",
+        operation: "write",
+        logicalBytes: 4 << 10,
+        semantics: "open/truncate/write/fsync/close",
+    },
+    {
+        name: "read-1048576",
+        operation: "read",
+        logicalBytes: 1 << 20,
+        semantics: "open/read-exactly/close",
+    },
+    {
+        name: "write-1048576",
+        operation: "write",
+        logicalBytes: 1 << 20,
+        semantics: "open/truncate/write/fsync/close",
+    },
+    {
+        name: `small-files-${options.smallFiles}`,
+        operation: "sequential-small-file-write",
+        itemCount: options.smallFiles,
+        logicalBytes: options.smallFiles * 1024,
+        semantics: "per-file open/write/fsync/close",
+    },
+    {
+        name: `readdir-${options.readdirEntries}`,
+        operation: "readdir",
+        itemCount: options.readdirEntries,
+    },
+    {
+        name: `overwrite-4096-in-${options.overwriteBaseBytes}`,
+        operation: "overwrite",
+        logicalBytes: OVERWRITE_BYTES,
+        baseFileBytes: options.overwriteBaseBytes,
+        semantics: "open-r+/positional-write/fsync/close",
+    },
+    ...(options.parallelism > 1
+        ? [
+              {
+                  name: `parallel-stat-4096-x${options.parallelism}`,
+                  operation: "parallel-stat",
+                  itemCount: options.parallelism,
+                  parallelism: options.parallelism,
+                  semantics: "concurrent stat on distinct files",
+              },
+              {
+                  name: `parallel-read-4096-x${options.parallelism}`,
+                  operation: "parallel-read",
+                  logicalBytes: options.parallelism * (4 << 10),
+                  itemCount: options.parallelism,
+                  parallelism: options.parallelism,
+                  semantics:
+                      "concurrent open/read-exactly/close on distinct files; phases are sums across operations",
+              },
+              {
+                  name: `parallel-write-4096-x${options.parallelism}`,
+                  operation: "parallel-write",
+                  logicalBytes: options.parallelism * (4 << 10),
+                  itemCount: options.parallelism,
+                  parallelism: options.parallelism,
+                  semantics:
+                      "concurrent open/truncate/write/fsync/close on distinct files; phases are sums across operations",
+              },
+          ]
+        : []),
 ];
+
+export const expectedNativeMountBenchmarkScenarioNames = (options) =>
+    expectedNativeMountBenchmarkScenarios(options).map(({ name }) => name);
 
 export const validateNativeMountBenchmarkReport = (report, options) => {
     const expectedOptions = options ?? {
         samples: report?.run?.samplesPerScenario,
+        warmups: report?.run?.warmupsPerScenario,
+        parallelism: report?.run?.concurrency,
+        timeoutMs: report?.run?.timeoutMs,
         smallFiles: report?.run?.smallFilesPerSample,
         readdirEntries: report?.run?.readdirEntries,
         overwriteBaseBytes: report?.run?.overwriteBaseBytes,
     };
     if (
-        report?.schemaVersion !== 2 ||
+        report?.schemaVersion !== 3 ||
         report.benchmark !== "shared-fs-native-mount" ||
         JSON.stringify(report.corpus) !==
             JSON.stringify(nativeMountBenchmarkCorpus) ||
@@ -703,6 +918,11 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         !/^[0-9a-f]{64}$/u.test(report.inputs?.combinedSha256 ?? "") ||
         !Array.isArray(report.target?.mountOptions) ||
         !TARGET_KINDS.has(report.target?.kind) ||
+        typeof report.target?.label !== "string" ||
+        report.target.label.length < 1 ||
+        report.target.label.length > 160 ||
+        typeof report.target?.path !== "string" ||
+        report.target.path.length < 1 ||
         (report.target.kind === "local-filesystem-control" &&
             report.target.mountOptions.length > 0) ||
         report.target.mountOptions.some(
@@ -712,7 +932,24 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         typeof report.scope.cacheSemantics.callbackTraversal !== "string" ||
         report.scope?.performanceGate !== false ||
         typeof report.scope?.implementationDetailSemantics !== "string" ||
-        report.run?.concurrency !== 1 ||
+        !Number.isSafeInteger(report.run?.concurrency) ||
+        report.run.concurrency < 1 ||
+        report.run.concurrency > 16 ||
+        !Number.isSafeInteger(report.run?.warmupsPerScenario) ||
+        report.run.warmupsPerScenario < 0 ||
+        report.run.warmupsPerScenario > 20 ||
+        !Number.isSafeInteger(report.run?.timeoutMs) ||
+        report.run.timeoutMs < 1000 ||
+        report.run.timeoutMs > 600_000 ||
+        typeof report.runtime?.nodeVersion !== "string" ||
+        typeof report.runtime?.platform !== "string" ||
+        typeof report.runtime?.architecture !== "string" ||
+        typeof report.runtime?.osRelease !== "string" ||
+        typeof report.runtime?.cpuModel !== "string" ||
+        !Number.isSafeInteger(report.runtime?.totalMemoryBytes) ||
+        report.runtime.totalMemoryBytes <= 0 ||
+        typeof report.runtime?.sharedFsLibraryVersion !== "string" ||
+        typeof report.runtime?.sharedFsCliVersion !== "string" ||
         !Array.isArray(report.implementation?.details)
     ) {
         throw new Error("native-mount benchmark report envelope is invalid");
@@ -764,6 +1001,15 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
             "native-mount target kind does not match the run options"
         );
     }
+    if (
+        options &&
+        (report.target.path !== options.mount ||
+            report.target.label !== options.targetLabel)
+    ) {
+        throw new Error(
+            "native-mount target path or label does not match the run options"
+        );
+    }
     const inputRoots = report.inputs.roots;
     if (
         inputRoots.some((root) => typeof root !== "string") ||
@@ -773,6 +1019,29 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
             JSON.stringify([...IGNORED_IMPLEMENTATION_DIRECTORIES].sort())
     ) {
         throw new Error("native-mount benchmark input roots are invalid");
+    }
+    if (options) {
+        const expectedRoots = [
+            HARNESS_PATH,
+            join(REPOSITORY_ROOT, "pnpm-lock.yaml"),
+            join(REPOSITORY_ROOT, "packages/shared-fs/library/package.json"),
+            join(REPOSITORY_ROOT, "packages/shared-fs/cli/package.json"),
+            ...(options.implementationInputs ?? []),
+        ];
+        const displayedExpectedRoots = [
+            ...new Set(expectedRoots.map((path) => resolve(path))),
+        ]
+            .sort()
+            .map(displayInputPath)
+            .sort();
+        if (
+            JSON.stringify(inputRoots) !==
+            JSON.stringify(displayedExpectedRoots)
+        ) {
+            throw new Error(
+                "native-mount benchmark input roots do not match the run options"
+            );
+        }
     }
     const inputPaths = report.inputs.files.map(({ path }) => path);
     if (
@@ -793,21 +1062,38 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
     const names = report.scenarios.map(({ name }) => name);
     if (
         report.run.samplesPerScenario !== expectedOptions.samples ||
+        report.run.warmupsPerScenario !== expectedOptions.warmups ||
+        report.run.concurrency !== expectedOptions.parallelism ||
+        report.run.timeoutMs !== expectedOptions.timeoutMs ||
         report.run.smallFilesPerSample !== expectedOptions.smallFiles ||
         report.run.readdirEntries !== expectedOptions.readdirEntries ||
         report.run.overwriteBaseBytes !== expectedOptions.overwriteBaseBytes
     ) {
         throw new Error("native-mount benchmark run options are invalid");
     }
+    const expectedScenarios =
+        expectedNativeMountBenchmarkScenarios(expectedOptions);
     if (
         JSON.stringify(names) !==
-        JSON.stringify(
-            expectedNativeMountBenchmarkScenarioNames(expectedOptions)
-        )
+        JSON.stringify(expectedScenarios.map(({ name }) => name))
     ) {
         throw new Error(`unexpected scenario set: ${names.join(", ")}`);
     }
-    for (const scenario of report.scenarios) {
+    for (const [index, scenario] of report.scenarios.entries()) {
+        const expectedScenario = expectedScenarios[index];
+        for (const key of [
+            "name",
+            "operation",
+            "logicalBytes",
+            "itemCount",
+            "baseFileBytes",
+            "parallelism",
+            "semantics",
+        ]) {
+            if (scenario[key] !== expectedScenario[key]) {
+                throw new Error(`${scenario.name} has invalid ${key} metadata`);
+            }
+        }
         if (
             scenario.samples?.length !== expectedOptions.samples ||
             scenario.summary?.count !== expectedOptions.samples ||
@@ -869,6 +1155,8 @@ export const formatNativeMountBenchmarkSummary = (report) => {
         `Target kind: ${report.target.kind}`,
         `Mount options: ${report.target.mountOptions.length > 0 ? report.target.mountOptions.join(" ") : "none reported"}`,
         `Implementation: tags=${implementation["adapter.buildTags"]}; ${implementation["adapter.goVersion"]}; mount=${implementation["mount.runtime"]}`,
+        `Adapter IPC connections: ${implementation["adapter.ipcConcurrency"] ?? "not reported"}`,
+        `Parallel operations per concurrent sample: ${report.run.concurrency}`,
         `Cache: ${report.scope.cacheSemantics.mode}; ${report.scope.cacheSemantics.callbackTraversal}`,
         "",
         "| Scenario | p50 | p95 | p50 logical throughput |",
@@ -957,7 +1245,7 @@ export const runNativeMountBenchmark = async (options) => {
     ]);
     return validateNativeMountBenchmarkReport(
         {
-            schemaVersion: 2,
+            schemaVersion: 3,
             benchmark: "shared-fs-native-mount",
             corpus: nativeMountBenchmarkCorpus,
             target: {
@@ -1006,7 +1294,7 @@ export const runNativeMountBenchmark = async (options) => {
                 percentiles: "nearest-rank",
                 warmupsPerScenario: options.warmups,
                 samplesPerScenario: options.samples,
-                concurrency: 1,
+                concurrency: options.parallelism,
                 timeoutMs: options.timeoutMs,
                 timeoutSemantics:
                     "workload timeout is cooperative at filesystem-operation boundaries after initial provenance hashing; the standalone CLI wall-clock deadline starts before hashing, includes report publication, and exits after timeout plus five seconds if work stalls",
