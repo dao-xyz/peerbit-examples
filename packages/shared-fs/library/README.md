@@ -509,7 +509,7 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
   src/__tests__/mount-backend-open-hash.bench.test.ts --reporter=verbose
 ```
 
-### Experimental Merkle v1 codecs and exact reads
+### Experimental Merkle v1 codecs, exact reads, and path-copy builds
 
 The package exports generation-isolated `MerkleDataBlockV1`,
 `MerkleTreeBlockV1`, and `MerkleFileVersionV1` codecs plus canonical hash,
@@ -558,6 +558,24 @@ The source adapter, root descriptor, and authorization/lifetime proof remain
 the caller's responsibility. This API is not connected to v9 `Documents`,
 `openSharedFs`, filesystem addresses, mounts, leases, GC, repair, writes, or
 durability and must not be presented as a storage-generation upgrade.
+
+`MerklePatchBuilderV1` is a one-shot foundation API over an immutable base root
+and abstract source/sink. Bounded, ascending, non-overlapping patches path-copy
+only changed leaves and ancestors. Sparse growth omits zero payloads,
+truncation drops complete subtrees without fetching them, boundary leaves are
+verified, and unchanged hashes are reused. It returns only after every new
+referenced block reaches the sink; adapter mutation/failure and consumed
+missing/corrupt input fail closed. Failure may leave unreachable blocks because
+the helper does not publish or roll back a version.
+
+Source and sink must share one block domain, with the sink retaining reused
+base references; untouched subtrees are not fetched or copied. Patch bytes,
+changed leaves, cache entries, and canonical cached tree-field bytes have
+configurable and hard bounds. Caller abort and `close()` promptly detach even
+from an adapter that ignores abort, and terminal paths release the one-shot
+cache. `stats()` reports structural work. This remains disconnected from v9
+addresses, `Documents`, mounts, leases, GC, and persisted receipts; it is not a
+production commit API.
 
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is

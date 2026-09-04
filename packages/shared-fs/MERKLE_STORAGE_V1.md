@@ -1,9 +1,10 @@
 # Merkle storage v1 proposal
 
 Status: design proposal with the golden block codecs, strict file-version and
-derived-index wire slice, and an isolated read-only exact-range session
-implemented. Documents integration, the write path, mount integration,
-migration, lifecycle leases, and the upstream capability are not implemented.
+derived-index wire slice, an isolated read-only exact-range session, and an
+isolated immutable path-copy builder implemented. Documents integration,
+version publication, mount integration, migration, lifecycle leases, and the
+upstream capability are not implemented.
 
 This document specifies the next shared-fs content generation needed for
 bounded-memory, block-granular random writes. It follows the fixed-layout lazy
@@ -293,6 +294,46 @@ fetch without allowing one caller's abort to cancel other waiters. The final
 waiter's abort cancels that fetch, and `close()` promptly cancels every pending
 read and prevents late source results from entering either cache.
 
+## Implemented immutable patch builder
+
+`MerklePatchBuilderV1` is the opt-in third foundation slice. One builder binds
+one immutable base descriptor to abstract block source and idempotent sink
+interfaces, admits exactly one build, and returns a new descriptor only after
+all newly referenced blocks have been accepted child-first by the sink. It
+does not publish a file version or establish local or remote durability. A
+failed call can therefore leave unreachable content-addressed blocks for a
+future generation's normal orphan collector, but it cannot expose a partial
+root through this API. Source and sink must be adapters for one logical block
+domain, and the sink must retain reused base references; the builder neither
+copies nor revalidates untouched subtrees.
+
+Input patches must be strictly ascending and non-overlapping. Patch count,
+copied patch bytes, distinct changed leaves, verified-tree cache entries, and
+verified-tree cache bytes all have configurable defaults and non-configurable
+absolute ceilings. Partial leaves load and self-verify at most their exact base
+leaf; full-leaf overwrites avoid that read. Existing tree paths are copied and
+verified only where resolution or rewriting consumes them. Untouched child
+hashes and complete truncated-away subtrees are not fetched.
+
+The builder pads growth with authenticated sparse zeros, extends an old short
+final leaf when necessary, trims a new short final leaf, collapses zero-only
+ancestors, and changes the canonical root height without materializing the
+whole file. A full overwrite whose hash already matches the base is still sent
+to the sink, allowing the caller-provided bytes to repair a missing payload
+instead of silently assuming its availability. Sink mutation, consumed
+missing/corrupt blocks, wrong levels or lengths, and adapter failures fail with
+`EIO`. Caller cancellation and `close()` promptly detach from an adapter that
+ignores abort; late completion cannot produce a root. The one-shot cache and
+dedup tables are released on every terminal path.
+
+`stats()` and the result snapshot expose structural work: verified source
+blocks and bytes, cache behavior, changed/reused leaf hashes, created/written
+data and tree blocks, pruned references, collapsed paths, and duplicate sink
+puts avoided. The differential suite checks patch, growth, shrink, sparse
+collapse, root-height transitions, corruption, adapter failures, and work that
+scales with distinct changed paths. These counters make no claim about a
+future Peerbit transaction, receipt, GC, or mounted-write latency.
+
 This utility is deliberately detached from the current v9 `Documents` store,
 filesystem address, mount, root lease, GC, repair, and write path. Supplying a
 source does not establish authorization, availability, or durability. Those
@@ -545,7 +586,9 @@ the complexity change.
    (implemented, generation-isolated).
 2. Read-only exact tree session and bounded caches (standalone implementation
    complete; store, lease, and lifecycle integration pending).
-3. Direct library patch/truncate commit with work counters and crash tests.
+3. Immutable path-copy patch/truncate builder with work counters (standalone
+   foundation complete; version publication and crash-boundary integration
+   pending).
 4. Sparse mount overlay and generation-bounded `fsync`/release integration.
 5. Mark/reverse-edge Guard D and two-run tree/data GC.
 6. Snapshot/bootstrap and persisted-disposal closure traversal.
