@@ -5,6 +5,7 @@
     "compilerOptions": {
         "noEmit": false,
         "outDir": "lib/esm",
-        "removeComments": true
+        "removeComments": true,
+        "newLine": "lf"
     }
 }
