@@ -44,6 +44,10 @@ session, matching cgofuse's current single-threaded mode. A transport failure
 fails the current filesystem operation and discards that connection; the next
 explicit operation reconnects. Requests are never replayed automatically
 because a lost response does not prove that a mutation was not applied.
+Requests and responses are bounded to 64 MiB of encoded JSON bytes, excluding
+the trailing newline; base64-expanded file bytes count toward that limit. The
+v1 adapter does not negotiate TypeScript-side limit overrides, and fails the
+affected operation if either side emits a frame above its local limit.
 
 The portable IPC microbenchmark exercises the real Go client without requiring
 FUSE or Peerbit networking:
