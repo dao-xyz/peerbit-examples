@@ -52,6 +52,22 @@ once and uses JSONL v1. It never retries a filesystem operation. A server may
 select v1 on the original connection, and very small configured request bounds
 that cannot hold negotiation also remain on v1.
 
+Directory responses may add a compact `stat` object to each entry. It omits
+path and kind because the parent request, name, and entry kind already carry
+them. This keeps representative short-name and maximum-length unescaped
+100,000-entry listings below the 64 MiB response limit. Pathological names
+that expand heavily under JSON escaping can still exceed the fixed bound and
+need future paginated or binary directory framing. The Go adapter reconstructs
+and validates the complete stat before passing it to cgofuse; missing or
+malformed metadata lets the native host use its ordinary lookup/`getattr`
+fallback, so older servers remain compatible. cgofuse enables the actual
+readdir-plus capability on Linux with FUSE 3 when the kernel advertises it, and
+on Windows through WinFsp. Only those builds request rich entries. macOS and
+Linux FUSE 2 request the legacy compact entries because cgofuse cannot consume
+readdir-plus metadata there. The options argument and response field are both
+additive: old adapters receive compact entries from new servers, while a new
+adapter accepts a compact response from an old server.
+
 The portable IPC microbenchmark exercises the real Go client without requiring
 FUSE or Peerbit networking:
 

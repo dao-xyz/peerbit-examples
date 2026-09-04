@@ -11,6 +11,7 @@ import {
     SharedFsBackendError,
     type SharedFsMountBackend,
     type SharedFsOpenFlags,
+    type SharedFsReaddirOptions,
 } from "./mount-backend.js";
 import {
     BoundedIpcByteReader,
@@ -650,7 +651,11 @@ export const createSharedFsIpcClient = (
 
     return {
         getattr: (path) => request("getattr", [path]) as Promise<any>,
-        readdir: (path) => request("readdir", [path]) as Promise<any>,
+        readdir: (path, readdirOptions?: SharedFsReaddirOptions) =>
+            request(
+                "readdir",
+                readdirOptions === undefined ? [path] : [path, readdirOptions]
+            ) as Promise<any>,
         open: (path, flags?: SharedFsOpenFlags) =>
             request("open", [path, flags]) as Promise<number>,
         read: (handle, size, offset) =>

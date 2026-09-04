@@ -145,6 +145,34 @@ const decodeV2Response = async (
 };
 
 describe("shared-fs IPC framing", () => {
+    it("keeps additive readdir options compatible with legacy backends", async () => {
+        const readdir = vi.fn(async (_path: string) => [
+            { name: "legacy.txt", kind: "file" as const },
+        ]);
+        const server = await createSharedFsIpcServer(
+            backendWith({ readdir }),
+            "tcp://127.0.0.1:0"
+        );
+        try {
+            const client = createSharedFsIpcClient(server.endpoint);
+            await expect(client.readdir("/")).resolves.toEqual([
+                { name: "legacy.txt", kind: "file" },
+            ]);
+            await expect(
+                client.readdir("/", { includeStats: true })
+            ).resolves.toEqual([{ name: "legacy.txt", kind: "file" }]);
+
+            expect(readdir.mock.calls[0]).toEqual(["/"]);
+            // JavaScript legacy implementations ignore this extra argument.
+            expect(readdir.mock.calls[1]).toEqual([
+                "/",
+                { includeStats: true },
+            ]);
+        } finally {
+            await server.close();
+        }
+    });
+
     it("reassembles a UTF-8 request split inside a multibyte character", async () => {
         const getattr = vi.fn(async (path: string) => ({ path }));
         const backend = backendWith({ getattr });
