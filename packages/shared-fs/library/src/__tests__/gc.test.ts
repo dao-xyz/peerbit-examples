@@ -2,6 +2,7 @@ import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     DEFAULT_FILE_CHUNK_SIZE,
+    FIXED_CHUNK_LAYOUT_V1_MARKER_ID,
     openSharedFs,
     type SharedFsHandle,
 } from "../index.js";
@@ -298,8 +299,10 @@ describe("shared fs garbage collection", () => {
                 { local: true, remote: false, resolve: false }
             )
             .all()) as any[];
-        expect(chunkRows.length).toBe(1);
-        const chunkId = chunkRows[0].id as string;
+        expect(chunkRows.length).toBe(2);
+        const chunkId = chunkRows.find(
+            (row) => row.id !== FIXED_CHUNK_LAYOUT_V1_MARKER_ID
+        )!.id as string;
 
         // Simulate a misbehaving collector deleting a referenced chunk.
         await fs.program.entries.del(chunkId);
