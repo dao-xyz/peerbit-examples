@@ -1,8 +1,10 @@
 # Peerbit shared-fs IPC protocol v2
 
-Status: protocol definition for a future implementation. The current Node and
-Go adapters continue to use the v1 JSONL protocol. Implementations MUST NOT
-send a v2 binary frame until the negotiation below has succeeded.
+Status: implemented by the Node server and Go native adapter. The Go adapter
+prefers v2 and safely falls back to v1 when an older server rejects or closes
+during the non-mutating negotiation. The Node server continues to accept old
+v1 clients. Implementations MUST NOT send a v2 binary frame until the
+negotiation below has succeeded.
 
 The normative terms MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are
 to be interpreted as described by RFC 2119 and RFC 8174.
@@ -47,6 +49,13 @@ The actual message has one trailing LF byte. `versions` is ordered by client
 preference. The nonce MUST be newly and unpredictably generated for each
 connection and MUST be compared as an opaque string. The literal nonce above
 is only a deterministic golden-vector value.
+
+Each negotiation request and acknowledgement is limited to 65,536 encoded
+UTF-8 bytes, excluding its trailing LF. A server MAY apply its configured v1
+request bound while reading the initial offer. A client whose configured
+request bound cannot hold its negotiation offer MAY begin the untouched
+connection directly in v1. The directional limits in the offer and
+acknowledgement apply to binary frames, not to the handshake itself.
 
 A v2-capable server responds in v1 JSONL and echoes the request ID, protocol,
 and nonce:

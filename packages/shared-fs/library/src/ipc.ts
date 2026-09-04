@@ -17,6 +17,17 @@ import {
     IpcFrameTooLargeError,
     IpcUnexpectedEofError,
 } from "./ipc-byte-reader.js";
+import {
+    encodeIpcV2Frame,
+    IpcV2FrameKind,
+    IpcV2FrameTooLargeError,
+    readIpcV2Frame,
+    SHARED_FS_IPC_NEGOTIATE_OP,
+    SHARED_FS_IPC_NEGOTIATION_MAX_BYTES,
+    SHARED_FS_IPC_PROTOCOL,
+    SHARED_FS_IPC_V2_MAX_METADATA_BYTES,
+    writeIpcV2Frame,
+} from "./ipc-v2.js";
 
 export type SharedFsIpcEndpoint = string;
 
@@ -29,6 +40,24 @@ type IpcRequest = {
     id: number;
     op: keyof SharedFsMountBackend;
     args: unknown[];
+};
+
+type IpcNegotiationOffer = {
+    protocol: string;
+    versions: number[];
+    nonce: string;
+    maxRequestFrameBytes?: number;
+    maxResponseFrameBytes?: number;
+};
+
+type IpcNegotiationRequest = {
+    id: number;
+    op: typeof SHARED_FS_IPC_NEGOTIATE_OP;
+    args: [IpcNegotiationOffer];
+};
+
+type IpcV2Limits = ResolvedSharedFsIpcOptions & {
+    maxMetadataBytes: number;
 };
 
 /**
@@ -118,8 +147,25 @@ const parseJsonFrame = (frame: Buffer): unknown => {
     }
 };
 
+const parseUtf8JsonFrame = (frame: Buffer): unknown => {
+    let json: string;
+    try {
+        json = new TextDecoder("utf-8", { fatal: true }).decode(frame);
+    } catch {
+        throw new IpcProtocolError("IPC frame is not valid UTF-8");
+    }
+    try {
+        return JSON.parse(json);
+    } catch {
+        throw new IpcProtocolError("IPC frame is not valid JSON");
+    }
+};
+
 const parseRequest = (frame: Buffer): IpcRequest => {
-    const value = parseJsonFrame(frame);
+    return parseRequestValue(parseJsonFrame(frame));
+};
+
+const parseRequestValue = (value: unknown): IpcRequest => {
     if (!isRecord(value)) {
         throw new IpcProtocolError("IPC request must be an object");
     }
@@ -133,6 +179,100 @@ const parseRequest = (frame: Buffer): IpcRequest => {
         throw new IpcProtocolError("IPC request envelope is invalid");
     }
     return value as IpcRequest;
+};
+
+const isUint32 = (value: unknown): value is number =>
+    Number.isInteger(value) &&
+    (value as number) >= 1 &&
+    (value as number) <= 0xffff_ffff;
+
+const parseNegotiationRequest = (
+    value: unknown
+): IpcNegotiationRequest | undefined => {
+    if (!isRecord(value) || value.op !== SHARED_FS_IPC_NEGOTIATE_OP) {
+        return undefined;
+    }
+    if (
+        !Number.isSafeInteger(value.id) ||
+        (value.id as number) < 0 ||
+        !Array.isArray(value.args) ||
+        value.args.length !== 1 ||
+        !isRecord(value.args[0])
+    ) {
+        throw new IpcProtocolError("IPC negotiation envelope is invalid");
+    }
+    const offer = value.args[0];
+    if (
+        offer.protocol !== SHARED_FS_IPC_PROTOCOL ||
+        typeof offer.nonce !== "string" ||
+        !Array.isArray(offer.versions) ||
+        offer.versions.length === 0 ||
+        !offer.versions.every(
+            (version) =>
+                Number.isInteger(version) && version >= 1 && version <= 255
+        ) ||
+        new Set(offer.versions).size !== offer.versions.length
+    ) {
+        throw new IpcProtocolError("IPC negotiation offer is invalid");
+    }
+    if (
+        offer.versions.includes(2) &&
+        (!isUint32(offer.maxRequestFrameBytes) ||
+            !isUint32(offer.maxResponseFrameBytes))
+    ) {
+        throw new IpcProtocolError("IPC v2 negotiation limits are invalid");
+    }
+    return value as IpcNegotiationRequest;
+};
+
+const containsBytesMember = (value: unknown): boolean => {
+    if (value instanceof Uint8Array) {
+        return true;
+    }
+    if (Array.isArray(value)) {
+        return value.some(containsBytesMember);
+    }
+    if (isRecord(value)) {
+        return (
+            Object.prototype.hasOwnProperty.call(value, "$bytes") ||
+            Object.values(value).some(containsBytesMember)
+        );
+    }
+    return false;
+};
+
+const isBytesSentinel = (value: unknown) =>
+    isRecord(value) &&
+    Object.keys(value).length === 1 &&
+    Object.prototype.hasOwnProperty.call(value, "$bytes") &&
+    value.$bytes === null;
+
+const parseV2Request = (metadata: Buffer, body: Buffer): IpcRequest => {
+    const value = parseUtf8JsonFrame(metadata);
+    const request = parseRequestValue(value);
+    if (request.op === "write") {
+        if (request.args.length !== 3 || !isBytesSentinel(request.args[1])) {
+            throw new IpcProtocolError(
+                "IPC v2 write request requires the raw-bytes sentinel"
+            );
+        }
+        // Remove the one permitted sentinel before checking the rest of the
+        // decoded envelope for nested or out-of-position byte markers.
+        request.args[1] = null;
+        if (containsBytesMember(value)) {
+            throw new IpcProtocolError(
+                "IPC v2 write request has an unexpected bytes sentinel"
+            );
+        }
+        request.args[1] = body;
+        return request;
+    }
+    if (body.byteLength !== 0 || containsBytesMember(value)) {
+        throw new IpcProtocolError(
+            "IPC v2 request has an unexpected body or bytes sentinel"
+        );
+    }
+    return request;
 };
 
 const parseResponse = (frame: Buffer, requestId: number): IpcResponse => {
@@ -182,16 +322,20 @@ const writeFrame = async (socket: Socket, frame: Buffer) => {
     }
 
     let cleanup = () => {};
+    let settled = false;
     const drained = new Promise<void>((resolve, reject) => {
         const onDrain = () => {
+            settled = true;
             cleanup();
             resolve();
         };
         const onError = (error: Error) => {
+            settled = true;
             cleanup();
             reject(error);
         };
         const onClose = () => {
+            settled = true;
             cleanup();
             reject(new Error("IPC socket closed before draining"));
         };
@@ -212,7 +356,7 @@ const writeFrame = async (socket: Socket, frame: Buffer) => {
         cleanup();
         throw error;
     }
-    if (accepted) {
+    if (accepted && !settled) {
         cleanup();
         return;
     }
@@ -535,48 +679,205 @@ const serveSocket = async (
         limits.maxRequestFrameBytes
     );
 
+    let firstFrame: Buffer | undefined;
     for (;;) {
-        const frame = await reader.readLine();
-        if (frame === undefined) {
+        firstFrame = await reader.readLine();
+        if (firstFrame === undefined) {
             return;
         }
-        if (frame.byteLength === 0) {
-            continue;
+        if (firstFrame.byteLength !== 0) {
+            break;
         }
+    }
 
+    let initialValue: unknown;
+    try {
+        initialValue = parseJsonFrame(firstFrame);
+    } catch {
+        socket.destroy();
+        return;
+    }
+
+    let negotiation: IpcNegotiationRequest | undefined;
+    try {
+        negotiation = parseNegotiationRequest(initialValue);
+    } catch {
+        socket.destroy();
+        return;
+    }
+
+    if (!negotiation) {
+        if (firstFrame.byteLength > limits.maxRequestFrameBytes) {
+            socket.destroy();
+            return;
+        }
         let request: IpcRequest;
         try {
-            request = parseRequest(frame);
+            request = parseRequestValue(initialValue);
         } catch {
             socket.destroy();
             return;
+        }
+        await serveV1Requests(socket, reader, backend, limits, request);
+        return;
+    }
+
+    if (firstFrame.byteLength > SHARED_FS_IPC_NEGOTIATION_MAX_BYTES) {
+        socket.destroy();
+        return;
+    }
+    if (reader.bufferedByteLength !== 0) {
+        // The peer must wait for the selected-version acknowledgement before
+        // writing bytes whose framing depends on that selection.
+        socket.destroy();
+        return;
+    }
+
+    const selectedVersion = negotiation.args[0].versions.find(
+        (version) => version === 2 || version === 1
+    );
+    if (selectedVersion === 2) {
+        const offer = negotiation.args[0];
+        const v2Limits: IpcV2Limits = {
+            maxRequestFrameBytes: Math.min(
+                limits.maxRequestFrameBytes,
+                offer.maxRequestFrameBytes!
+            ),
+            maxResponseFrameBytes: Math.min(
+                limits.maxResponseFrameBytes,
+                offer.maxResponseFrameBytes!
+            ),
+            maxMetadataBytes: 1,
+        };
+        v2Limits.maxMetadataBytes = Math.min(
+            SHARED_FS_IPC_V2_MAX_METADATA_BYTES,
+            v2Limits.maxRequestFrameBytes,
+            v2Limits.maxResponseFrameBytes
+        );
+        const acknowledgement = serializeJsonFrame(
+            {
+                id: negotiation.id,
+                ok: true,
+                result: {
+                    protocol: SHARED_FS_IPC_PROTOCOL,
+                    version: 2,
+                    nonce: offer.nonce,
+                    ...v2Limits,
+                },
+            },
+            SHARED_FS_IPC_NEGOTIATION_MAX_BYTES
+        );
+        if (!acknowledgement) {
+            socket.destroy();
+            return;
+        }
+        await writeFrame(socket, acknowledgement);
+        await serveV2Requests(socket, reader, backend, v2Limits);
+        return;
+    }
+
+    if (selectedVersion === 1) {
+        const acknowledgement = serializeJsonFrame(
+            {
+                id: negotiation.id,
+                ok: true,
+                result: {
+                    protocol: SHARED_FS_IPC_PROTOCOL,
+                    version: 1,
+                    nonce: negotiation.args[0].nonce,
+                },
+            },
+            SHARED_FS_IPC_NEGOTIATION_MAX_BYTES
+        );
+        if (!acknowledgement) {
+            socket.destroy();
+            return;
+        }
+        await writeFrame(socket, acknowledgement);
+        await serveV1Requests(socket, reader, backend, limits);
+        return;
+    }
+
+    const unsupported = serializeJsonFrame(
+        {
+            id: negotiation.id,
+            ok: false,
+            error: {
+                code: "EPROTONOSUPPORT",
+                message: "No offered IPC protocol version is supported",
+            },
+        },
+        SHARED_FS_IPC_NEGOTIATION_MAX_BYTES
+    );
+    if (unsupported) {
+        await writeFrame(socket, unsupported);
+    }
+    socket.end();
+};
+
+const invokeBackend = async (
+    backend: SharedFsMountBackend,
+    request: IpcRequest
+) => {
+    const method = backend[request.op] as (
+        ...args: unknown[]
+    ) => Promise<unknown>;
+    return method.apply(backend, request.args);
+};
+
+const errorResponse = (id: number, error: unknown): IpcResponse => ({
+    id,
+    ok: false,
+    error: {
+        code: error instanceof SharedFsBackendError ? error.code : undefined,
+        message: error instanceof Error ? error.message : String(error),
+    },
+});
+
+const serveV1Requests = async (
+    socket: Socket,
+    reader: BoundedIpcByteReader,
+    backend: SharedFsMountBackend,
+    limits: ResolvedSharedFsIpcOptions,
+    initialRequest?: IpcRequest
+) => {
+    let nextRequest = initialRequest;
+    for (;;) {
+        let request: IpcRequest;
+        if (nextRequest) {
+            request = nextRequest;
+            nextRequest = undefined;
+        } else {
+            const frame = await reader.readLine();
+            if (frame === undefined) {
+                return;
+            }
+            if (frame.byteLength === 0) {
+                continue;
+            }
+            if (frame.byteLength > limits.maxRequestFrameBytes) {
+                socket.destroy();
+                return;
+            }
+            try {
+                request = parseRequest(frame);
+            } catch {
+                socket.destroy();
+                return;
+            }
         }
 
         let response: IpcResponse;
         try {
             const args = decodeBytes(request.args) as unknown[];
-            const method = backend[request.op] as (
-                ...args: unknown[]
-            ) => Promise<unknown>;
-            const result = await method.apply(backend, args);
+            const result = await invokeBackend(backend, { ...request, args });
             response = {
                 id: request.id,
                 ok: true,
                 result: encodeResult(result),
             };
         } catch (error) {
-            response = {
-                id: request.id,
-                ok: false,
-                error: {
-                    code:
-                        error instanceof SharedFsBackendError
-                            ? error.code
-                            : undefined,
-                    message:
-                        error instanceof Error ? error.message : String(error),
-                },
-            };
+            response = errorResponse(request.id, error);
         }
 
         let responseFrame = serializeJsonFrame(
@@ -601,5 +902,102 @@ const serveSocket = async (
             return;
         }
         await writeFrame(socket, responseFrame);
+    }
+};
+
+const serveV2Requests = async (
+    socket: Socket,
+    reader: BoundedIpcByteReader,
+    backend: SharedFsMountBackend,
+    limits: IpcV2Limits
+) => {
+    for (;;) {
+        const frame = await readIpcV2Frame(
+            reader,
+            IpcV2FrameKind.Request,
+            limits.maxRequestFrameBytes,
+            limits.maxMetadataBytes
+        );
+        let request: IpcRequest;
+        try {
+            request = parseV2Request(frame.metadata, frame.body);
+        } catch {
+            socket.destroy();
+            return;
+        }
+
+        let response: IpcResponse;
+        let responseBody: Uint8Array = Buffer.alloc(0);
+        try {
+            const result = await invokeBackend(backend, request);
+            if (request.op === "read") {
+                if (!(result instanceof Uint8Array)) {
+                    throw new Error("IPC read backend did not return bytes");
+                }
+                responseBody = Buffer.isBuffer(result)
+                    ? result
+                    : Buffer.from(
+                          result.buffer,
+                          result.byteOffset,
+                          result.byteLength
+                      );
+                response = {
+                    id: request.id,
+                    ok: true,
+                    result: { $bytes: null },
+                };
+            } else {
+                if (
+                    containsBytesMember(result) ||
+                    result instanceof Uint8Array
+                ) {
+                    throw new Error(
+                        "IPC v2 only permits byte results from read"
+                    );
+                }
+                response = {
+                    id: request.id,
+                    ok: true,
+                    result: result === undefined ? null : result,
+                };
+            }
+        } catch (error) {
+            response = errorResponse(request.id, error);
+            responseBody = Buffer.alloc(0);
+        }
+
+        let responseFrame;
+        try {
+            responseFrame = encodeIpcV2Frame(
+                IpcV2FrameKind.Response,
+                response,
+                responseBody,
+                limits.maxResponseFrameBytes,
+                limits.maxMetadataBytes
+            );
+        } catch (error) {
+            if (!(error instanceof IpcV2FrameTooLargeError)) {
+                throw error;
+            }
+            try {
+                responseFrame = encodeIpcV2Frame(
+                    IpcV2FrameKind.Response,
+                    errorResponse(
+                        request.id,
+                        new SharedFsBackendError(
+                            "EIO",
+                            `IPC response exceeds ${limits.maxResponseFrameBytes} byte limit`
+                        )
+                    ),
+                    Buffer.alloc(0),
+                    limits.maxResponseFrameBytes,
+                    limits.maxMetadataBytes
+                );
+            } catch {
+                socket.destroy();
+                return;
+            }
+        }
+        await writeIpcV2Frame(socket, responseFrame);
     }
 };

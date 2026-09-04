@@ -57,6 +57,12 @@ jobs:
                   cache: pnpm
                   cache-dependency-path: pnpm-lock.yaml
 
+            - name: Setup Go for Node-Go IPC interop
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
             - name: Use Bash for pnpm scripts on Windows
               if: runner.os == 'Windows'
               run: pnpm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"

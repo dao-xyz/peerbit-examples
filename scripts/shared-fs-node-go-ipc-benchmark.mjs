@@ -25,8 +25,11 @@ const CORPUS = "linear-v1:(index*131+size*17+29)%256";
 const BENCHMARK_INPUT_FILES = [
     "scripts/shared-fs-node-go-ipc-benchmark.mjs",
     "packages/shared-fs/native/ipc.go",
+    "packages/shared-fs/native/ipc_v2.go",
     "packages/shared-fs/native/node_go_ipc_benchmark_test.go",
     "packages/shared-fs/library/lib/esm/ipc.js",
+    "packages/shared-fs/library/lib/esm/ipc-v2.js",
+    "packages/shared-fs/library/lib/esm/ipc-byte-reader.js",
     "packages/shared-fs/library/lib/esm/mount-backend.js",
 ];
 
@@ -247,7 +250,7 @@ export const validateNodeGoIPCReport = (report, expectedSamples) => {
     if (
         report?.schemaVersion !== 1 ||
         report.benchmark !== "shared-fs-node-go-ipc" ||
-        report.protocol !== "jsonl-v1-base64" ||
+        report.protocol !== "binary-v2-raw-bytes" ||
         report.corpus !== CORPUS ||
         !Array.isArray(report.scenarios)
     ) {

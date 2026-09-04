@@ -617,7 +617,7 @@ reported for diagnosis only and has no pass/fail budget.
 ## Native Mounts
 
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
-JSON-lines IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
+negotiated IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
 `truncate`, `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`, and
 `unlink`. Numeric open flags are parsed with the host platform's `O_*`
 constants, truncate shrinks and zero-fill grows both open handles and paths,
@@ -724,16 +724,24 @@ caller's requested access mode or `O_APPEND` during creation, and an ordinary
 `O_CREAT` race may therefore return `EEXIST`. Use the external adapter when
 its platform translation is required.
 
-The JSON-lines adapter transport limits each request and response to 64 MiB by
-default. Limits count encoded UTF-8 JSON bytes before the newline, so base64
-expansion counts toward them. `createSharedFsIpcServer` and
-`createSharedFsIpcClient` accept optional `maxRequestFrameBytes` and
-`maxResponseFrameBytes` overrides. Normal mount I/O is chunked well below this
-ceiling; the bound protects the daemon and adapter from an unterminated or
-unexpectedly large local frame rather than setting a filesystem file-size
-limit. The prebuilt Go v1 adapter uses the fixed 64 MiB default and does not
-negotiate overrides, so a server override must remain compatible with that
-limit or the mount will fail closed.
+The adapter transport limits each request and response to 64 MiB by default.
+The Go adapter offers binary v2 through one reserved, non-mutating JSONL
+request on each fresh connection. In v2, metadata plus the raw read/write body
+count toward the bound, avoiding v1 base64 expansion. Old clients may send an
+ordinary JSONL v1 operation first and remain supported; the Go adapter safely
+reconnects once to v1 only when an old server rejects or closes during
+negotiation, before any filesystem operation is sent.
+`createSharedFsIpcServer` and `createSharedFsIpcClient` accept optional
+`maxRequestFrameBytes` and `maxResponseFrameBytes` overrides. Normal mount I/O
+is chunked well below this ceiling; the bound protects the daemon and adapter
+from an unterminated or unexpectedly large local frame rather than setting a
+filesystem file-size limit. Negotiated v2 uses the lower offered/server
+directional limits and caps metadata at 1 MiB. V1 connections retain their
+locally configured JSONL bounds. The complete binary format and failure
+semantics are specified in `packages/shared-fs/IPC_PROTOCOL_V2.md`. Custom
+mount backends transfer ownership of each returned read view to the caller and
+must not later mutate or reuse it; this lets the server retain the view until
+its socket write completes without an additional file-sized copy.
 
 The portable backend gives `flush` and `fsync` the same bounded file-state
 fence: each captures a synchronous mutation-generation cutoff and persists
