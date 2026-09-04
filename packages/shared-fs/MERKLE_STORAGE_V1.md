@@ -1,6 +1,7 @@
 # Merkle storage v1 proposal
 
-Status: design proposal only. This format, API, migration, and upstream
+Status: design proposal with only the golden codec/validation slice
+implemented. The complete storage format, store API, migration, and upstream
 capability are not implemented.
 
 This document specifies the next shared-fs content generation needed for
@@ -55,6 +56,12 @@ All hashes below are SHA-256 over canonical Borsh-encoded fields with the
 literal domain prefix shown. Encoded integer widths and endianness must be
 fixed by golden vectors before implementation. Hashes are stored as 32-byte
 values internally and rendered as unpadded base64url in document ids.
+Domain prefixes are literal UTF-8 bytes without a length prefix. An optional
+root hash is encoded as one `u8` presence byte (`0` or `1`), followed by the
+fixed 32-byte hash only when present.
+
+The language-neutral fixtures live in `merkle-v1-golden-vectors.json` and are
+verified independently by the TypeScript/Borsh and Go test suites.
 
 ### Data blocks
 
@@ -114,7 +121,11 @@ id = "tree2:" + base64url(treeHash)
 ```
 
 `children` contains exactly `popcount(bitmap)` hashes in ascending slot order.
-Level 1 points to data blocks; higher levels point to level-1 tree blocks.
+Slot `i` is bit `(i & 7)` of byte `(i >>> 3)`, least-significant bit first.
+The hash preimage uses Borsh little-endian integers: the child vector carries
+its `u32` element count, while each fixed 32-byte hash carries no length.
+Level 1 points to data blocks; a level-N tree points only to level-(N-1) tree
+blocks.
 Empty nodes, duplicate slots, non-canonical ordering, and unknown levels are
 invalid. Six levels cover the u64 file-size domain at the minimum leaf size.
 
@@ -204,7 +215,7 @@ order:
   canonical child ordering, non-empty tree nodes, allowed layouts, canonical
   root level, version-parent bounds, and changeset bounds;
 - do not require referenced children or parents to be locally present;
-- enforce strict decreasing tree levels during traversal;
+- enforce exact level-N to level-(N-1) tree transitions during traversal;
 - bind snapshot and changeset payloads to the new store generation.
 
 The current outer-entry trust-graph check remains the authorization boundary.
