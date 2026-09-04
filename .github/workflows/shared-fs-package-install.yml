@@ -4,16 +4,20 @@ on:
     pull_request:
         paths:
             - ".github/workflows/shared-fs-package-install.yml"
+            - "LICENSE"
             - "package.json"
             - "pnpm-lock.yaml"
+            - "scripts/verify-shared-fs-package-contents.mjs"
             - "tsconfig.json"
             - "packages/shared-fs/**"
     push:
         branches: [master]
         paths:
             - ".github/workflows/shared-fs-package-install.yml"
+            - "LICENSE"
             - "package.json"
             - "pnpm-lock.yaml"
+            - "scripts/verify-shared-fs-package-contents.mjs"
             - "tsconfig.json"
             - "packages/shared-fs/**"
     workflow_dispatch:
@@ -62,6 +66,9 @@ jobs:
 
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Verify package contents and size budgets
+              run: node scripts/verify-shared-fs-package-contents.mjs
 
             - name: Pack packages
               shell: bash
