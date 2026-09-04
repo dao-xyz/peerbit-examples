@@ -29,7 +29,9 @@ const IGNORED_IMPLEMENTATION_DIRECTORIES = new Set([".git", "node_modules"]);
 const REQUIRED_IMPLEMENTATION_DETAILS = [
     "adapter.buildTags",
     "adapter.goVersion",
+    "adapter.ipcConcurrency",
     "mount.runtime",
+    "node.uvThreadpoolSize",
 ];
 const TARGET_KINDS = new Set(["shared-fs-mount", "local-filesystem-control"]);
 
@@ -753,7 +755,10 @@ const executeWorkload = async (root, options, signal) => {
         const parallelWritePaths = [];
         for (let index = 0; index < options.parallelism; index += 1) {
             const path = join(root, `parallel-write-${index}.bin`);
-            await durableWrite(path, deterministicPayload(4 << 10, 70_000));
+            await durableWrite(
+                path,
+                deterministicPayload(4 << 10, 70_000 + index)
+            );
             parallelWritePaths.push(path);
         }
         const parallelWritePayloads = Array.from(
@@ -956,6 +961,9 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
     }
     const implementationDetails = report.implementation.details;
     const implementationKeys = implementationDetails.map(({ key }) => key);
+    const implementationByKey = new Map(
+        implementationDetails.map(({ key, value }) => [key, value])
+    );
     if (
         implementationDetails.some(
             ({ key, value }) =>
@@ -972,6 +980,27 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         )
     ) {
         throw new Error("native-mount implementation details are invalid");
+    }
+    const ipcConcurrency = implementationByKey.get("adapter.ipcConcurrency");
+    if (
+        ipcConcurrency !== "unknown" &&
+        (!/^(?:[1-9]|1[0-6])$/u.test(ipcConcurrency) ||
+            Number(ipcConcurrency) > 16)
+    ) {
+        throw new Error(
+            "native-mount adapter.ipcConcurrency must be unknown or an integer from 1 through 16"
+        );
+    }
+    const uvThreadpoolSize = implementationByKey.get("node.uvThreadpoolSize");
+    if (
+        uvThreadpoolSize !== "unknown" &&
+        uvThreadpoolSize !== "default" &&
+        (!/^[1-9][0-9]{0,3}$/u.test(uvThreadpoolSize) ||
+            Number(uvThreadpoolSize) > 1024)
+    ) {
+        throw new Error(
+            "native-mount node.uvThreadpoolSize must be unknown, default, or an integer from 1 through 1024"
+        );
     }
     if (
         options &&

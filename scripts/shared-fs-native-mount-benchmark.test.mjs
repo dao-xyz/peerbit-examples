@@ -353,7 +353,11 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         "--implementation-detail",
         "adapter.goVersion=go version go1.24.5 test/amd64",
         "--implementation-detail",
+        "adapter.ipcConcurrency=4",
+        "--implementation-detail",
         "mount.runtime=test-fuse 1.2.3",
+        "--implementation-detail",
+        "node.uvThreadpoolSize=16",
         "--samples",
         "2",
         "--warmups",
@@ -390,7 +394,9 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
                 key: "adapter.goVersion",
                 value: "go version go1.24.5 test/amd64",
             },
+            { key: "adapter.ipcConcurrency", value: "4" },
             { key: "mount.runtime", value: "test-fuse 1.2.3" },
+            { key: "node.uvThreadpoolSize", value: "16" },
         ]);
         assert.equal(report.inputs.files.length, 5);
         assert.deepEqual(report.inputs.roots, [...report.inputs.roots].sort());
@@ -420,6 +426,54 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             () =>
                 validateNativeMountBenchmarkReport(provenanceTampered, options),
             /implementation details do not match/u
+        );
+        for (const required of [
+            "adapter.ipcConcurrency",
+            "node.uvThreadpoolSize",
+        ]) {
+            const missing = structuredClone(report);
+            missing.implementation.details =
+                missing.implementation.details.filter(
+                    ({ key }) => key !== required
+                );
+            assert.throws(
+                () => validateNativeMountBenchmarkReport(missing),
+                /implementation details are invalid/u
+            );
+        }
+        for (const [key, invalid] of [
+            ["adapter.ipcConcurrency", "17"],
+            ["adapter.ipcConcurrency", "04"],
+            ["node.uvThreadpoolSize", "0"],
+            ["node.uvThreadpoolSize", "016"],
+            ["node.uvThreadpoolSize", "1025"],
+        ]) {
+            const invalidDetail = structuredClone(report);
+            invalidDetail.implementation.details.find(
+                (detail) => detail.key === key
+            ).value = invalid;
+            assert.throws(
+                () => validateNativeMountBenchmarkReport(invalidDetail),
+                new RegExp(key.replace(".", "\\."), "u")
+            );
+        }
+        const explicitlyUnknown = structuredClone(report);
+        for (const key of ["adapter.ipcConcurrency", "node.uvThreadpoolSize"]) {
+            explicitlyUnknown.implementation.details.find(
+                (detail) => detail.key === key
+            ).value = "unknown";
+        }
+        assert.equal(
+            validateNativeMountBenchmarkReport(explicitlyUnknown),
+            explicitlyUnknown
+        );
+        const defaultThreadpool = structuredClone(report);
+        defaultThreadpool.implementation.details.find(
+            ({ key }) => key === "node.uvThreadpoolSize"
+        ).value = "default";
+        assert.equal(
+            validateNativeMountBenchmarkReport(defaultThreadpool),
+            defaultThreadpool
         );
         const operationTampered = structuredClone(report);
         operationTampered.scenarios[0].operation = "read";
