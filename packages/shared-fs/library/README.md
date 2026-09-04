@@ -564,9 +564,10 @@ and abstract source/sink. Bounded, ascending, non-overlapping patches path-copy
 only changed leaves and ancestors. Sparse growth omits zero payloads,
 truncation drops complete subtrees without fetching them, boundary leaves are
 verified, and unchanged hashes are reused. It returns only after every new
-referenced block reaches the sink; adapter mutation/failure and consumed
-missing/corrupt input fail closed. Failure may leave unreachable blocks because
-the helper does not publish or roll back a version.
+referenced block reaches the sink; adapter failure, submitted-block mutation
+observable when `put` settles, and consumed missing/corrupt input fail closed.
+Successful retention remains the sink's contract. Failure may leave
+unreachable blocks because the helper does not publish or roll back a version.
 
 Source and sink must share one block domain, with the sink retaining reused
 base references; untouched subtrees are not fetched or copied. Patch bytes,

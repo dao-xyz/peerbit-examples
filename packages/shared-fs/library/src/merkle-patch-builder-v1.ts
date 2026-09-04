@@ -1365,8 +1365,6 @@ export class MerklePatchBuilderV1 {
                             ? reason
                             : abortFailure(controller.signal)
                     );
-                } else if (error instanceof MerklePatchBuilderErrorV1) {
-                    reject(error);
                 } else {
                     reject(
                         new MerklePatchBuilderErrorV1(

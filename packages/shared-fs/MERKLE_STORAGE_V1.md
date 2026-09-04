@@ -320,11 +320,13 @@ final leaf when necessary, trims a new short final leaf, collapses zero-only
 ancestors, and changes the canonical root height without materializing the
 whole file. A full overwrite whose hash already matches the base is still sent
 to the sink, allowing the caller-provided bytes to repair a missing payload
-instead of silently assuming its availability. Sink mutation, consumed
-missing/corrupt blocks, wrong levels or lengths, and adapter failures fail with
-`EIO`. Caller cancellation and `close()` promptly detach from an adapter that
-ignores abort; late completion cannot produce a root. The one-shot cache and
-dedup tables are released on every terminal path.
+instead of silently assuming its availability. Consumed missing/corrupt
+blocks, wrong levels or lengths, adapter failures, and mutation of a submitted
+block observable when `put` settles fail with `EIO`. Successful retention of
+the accepted bytes remains the sink's contract; this helper cannot audit the
+sink after fulfillment. Caller cancellation and `close()` promptly detach from
+an adapter that ignores abort; late completion cannot produce a root. The
+one-shot cache and dedup tables are released on every terminal path.
 
 `stats()` and the result snapshot expose structural work: verified source
 blocks and bytes, cache behavior, changed/reused leaf hashes, created/written

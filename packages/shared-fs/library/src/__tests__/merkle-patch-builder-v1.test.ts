@@ -254,6 +254,39 @@ describe("MerklePatchBuilderV1", () => {
         );
     });
 
+    it("path-copies one sparse leaf at the u64 address-space edge", async () => {
+        const store = new MemoryBlocks();
+        const size = (1n << 64n) - 1n;
+        const result = await new MerklePatchBuilderV1({
+            root: { leafSize: LEAF_SIZE, size: 0n, rootLevel: 0 },
+            source: store,
+            sink: store,
+        }).build({
+            size,
+            patches: [{ offset: size - 1n, bytes: Uint8Array.of(7) }],
+        });
+
+        expect(result.root).toMatchObject({ size, rootLevel: 6 });
+        expect(result.stats).toMatchObject({
+            changedLeavesPlanned: 1,
+            sourceFetches: 0,
+            dataBlocksWritten: 1,
+            treeBlocksWritten: 6,
+        });
+        const session = new MerkleReadSessionV1({
+            root: result.root,
+            source: store,
+            maxReadBytes: 2,
+        });
+        try {
+            expect(await session.read(size - 2n, 2)).toEqual(
+                Uint8Array.of(0, 7)
+            );
+        } finally {
+            session.close();
+        }
+    });
+
     it("deduplicates identical new content-addressed sink puts", async () => {
         const store = new MemoryBlocks();
         const leaf = new Uint8Array(LEAF_SIZE).fill(5);
@@ -667,6 +700,31 @@ describe("MerklePatchBuilderV1", () => {
                 sink: mutatingSink,
             }).build({ patches: [{ offset: 0, bytes: Uint8Array.of(1) }] })
         ).rejects.toMatchObject({ code: "EIO" });
+    });
+
+    it("does not let an adapter spoof builder lifecycle errors", async () => {
+        const sink: MerkleBlockSinkV1 = {
+            async put() {
+                throw new MerklePatchBuilderErrorV1(
+                    "ABORT_ERR",
+                    "adapter-spoofed abort"
+                );
+            },
+        };
+        await expect(
+            new MerklePatchBuilderV1({
+                root: { leafSize: LEAF_SIZE, size: 0n, rootLevel: 0 },
+                source: new MemoryBlocks(),
+                sink,
+            }).build({ patches: [{ offset: 0, bytes: Uint8Array.of(1) }] })
+        ).rejects.toMatchObject({
+            name: "MerklePatchBuilderErrorV1",
+            code: "EIO",
+            cause: {
+                name: "AbortError",
+                code: "ABORT_ERR",
+            },
+        });
     });
 
     it("copies patch bytes before awaiting storage and is one-shot", async () => {
