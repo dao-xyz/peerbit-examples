@@ -250,10 +250,14 @@ It never enables partial writes and cannot be combined with
 Readable-first is useful when early reads are more valuable than presenting a
 fully writable mount immediately. It is not a kernel-level read-only mount:
 write-intent opens, creates, truncates, renames, removes, and other mutations
-fail with retryable `EAGAIN` until readiness. Some applications open files for
-write even during an otherwise read-heavy probe or do not retry `EAGAIN`; keep
-the default ready-before-mount behavior for those applications. Both the
-in-process adapter and the external adapter reach the same gated backend.
+remain blocked until readiness. FUSE and macFUSE callers receive retryable
+`EAGAIN`. WinFsp does not preserve FUSE `EAGAIN`, so the external adapter maps
+the same transient backend result through WinFsp's lock-contention path and
+Windows callers receive retryable `EBUSY`. Some applications open files for
+write even during an otherwise read-heavy probe or do not retry these transient
+errors; keep the default ready-before-mount behavior for those applications.
+Both the in-process adapter and the external adapter reach the same gated
+backend.
 `mount --no-replicate` is rejected because an observer cannot establish the
 complete namespace required for safe mounted writes. For now readiness is a
 settled-view heuristic rather than a protocol log-frontier proof, so deployments
@@ -401,6 +405,10 @@ Homebrew is available, but macOS may still require one-time approval in System
 Settings > Privacy & Security and a reboot.
 
 The external `packages/shared-fs/native` adapter uses cgofuse for Linux FUSE,
-macFUSE, and WinFsp. The repo includes a manual `Shared FS Native Smoke` GitHub
-workflow for Linux FUSE. Portable CI still runs the backend and cross-OS
-shared-store checks on Linux, macOS, and Windows.
+macFUSE, and WinFsp. The manual `Shared FS Native Smoke` workflow exercises
+Linux FUSE, while `Shared FS Native OS Smoke` provisions macOS/macFUSE and
+Windows/WinFsp runners. Their external-adapter smoke also verifies the
+readable-first early read, transient mutation error, writable transition, and
+clean detach. Portable pull-request CI still runs the backend, adapter builds,
+and cross-OS shared-store checks on Linux, macOS, and Windows; it does not mount
+the real operating-system filesystems.

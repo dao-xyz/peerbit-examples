@@ -69,11 +69,12 @@ describe("peerbit-fs lazy runtime loading", () => {
 
     it("documents readable-first mount mode without importing the filesystem runtime", async () => {
         const result = await runProbe(["mount", "--help"]);
+        const normalizedOutput = result.stdout.replace(/\s+/g, " ");
 
         expect(result.exitCode).toBe(0);
-        expect(result.stdout).toContain("--readable-first");
-        expect(result.stdout).toContain(
-            "EAGAIN until the genuine readiness fence"
+        expect(normalizedOutput).toContain("--readable-first");
+        expect(normalizedOutput).toContain(
+            "EAGAIN through FUSE/macFUSE or EBUSY through WinFsp"
         );
         expect(result.stderr).not.toContain(BLOCKED_IMPORT);
     });

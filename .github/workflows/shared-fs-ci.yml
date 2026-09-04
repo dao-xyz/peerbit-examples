@@ -14,6 +14,7 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
+            - "scripts/shared-fs-readable-first-native-smoke.mjs"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
     push:
@@ -30,6 +31,7 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
+            - "scripts/shared-fs-readable-first-native-smoke.mjs"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
     workflow_dispatch:
@@ -143,7 +145,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-readable-first-native-smoke.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})

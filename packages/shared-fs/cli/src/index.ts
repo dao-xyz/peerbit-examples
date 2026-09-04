@@ -851,7 +851,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "boolean",
                         default: false,
                         description:
-                            "Expose the current, potentially partial read view while write readiness settles; mutations return EAGAIN until the genuine readiness fence completes.",
+                            "Expose the current, potentially partial read view while write readiness settles; mutations return retryable EAGAIN through FUSE/macFUSE or EBUSY through WinFsp until the genuine readiness fence completes.",
                     })
                     .option("allow-partial-writes", {
                         type: "boolean",
@@ -1017,7 +1017,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             onWritePending: () => {
                                 console.log(
                                     chalk.yellow(
-                                        `Readable-first mount exposes the current local read view, which can still change; missing paths are not authoritative until readiness. Mutations remain blocked with retryable EAGAIN until write readiness completes; a ${argv.writeReadyTimeoutMs} ms timeout safely detaches the mount.`
+                                        `Readable-first mount exposes the current local read view, which can still change; missing paths are not authoritative until readiness. Mutations remain blocked with retryable EAGAIN through FUSE/macFUSE or EBUSY through WinFsp until write readiness completes; a ${argv.writeReadyTimeoutMs} ms timeout safely detaches the mount.`
                                     )
                                 );
                             },

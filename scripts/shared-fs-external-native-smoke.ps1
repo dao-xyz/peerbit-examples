@@ -8,6 +8,10 @@ $Adapter = Join-Path $TempRoot "peerbit-shared-fs-native.exe"
 $State = Join-Path $TempRoot "pbfs-state"
 $Stdout = Join-Path $TempRoot "pbfs-mount.out.log"
 $Stderr = Join-Path $TempRoot "pbfs-mount.err.log"
+$ReadableFirstStdout = Join-Path $TempRoot "pbfs-readable-first.out.log"
+$ReadableFirstStderr = Join-Path $TempRoot "pbfs-readable-first.err.log"
+$ReadableFirstProcess = $null
+$ReadableFirstMountRoot = $null
 
 function Get-FreeMountDrive {
   foreach ($Letter in @("P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
@@ -37,16 +41,31 @@ function ConvertTo-ImplementationDetailValue {
   return $Text
 }
 
+function ConvertTo-StartProcessArgument {
+  param([string]$Value)
+  if ($Value.Contains('"')) {
+    throw "Cannot safely pass a quoted value to Start-Process: $Value"
+  }
+  if ($Value -match "\s") {
+    return '"' + $Value + '"'
+  }
+  return $Value
+}
+
 $WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($WinFspBin) {
   $env:Path = "$WinFspBin;$env:Path"
 }
 
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr, $ReadableFirstStdout, $ReadableFirstStderr
 New-Item -ItemType Directory -Force -Path $State | Out-Null
 
 function Write-MountLogs {
   Get-Content -ErrorAction SilentlyContinue $Stdout, $Stderr
+}
+
+function Write-ReadableFirstLogs {
+  Get-Content -ErrorAction SilentlyContinue $ReadableFirstStdout, $ReadableFirstStderr
 }
 
 function Stop-MountProcess {
@@ -64,6 +83,27 @@ function Stop-MountProcess {
     Start-Sleep -Milliseconds 250
   }
   throw "WinFsp mount remained attached after process-tree teardown: $MountRoot"
+}
+
+function Stop-ReadableFirstProcess {
+  if ($null -ne $ReadableFirstProcess) {
+    $ReadableFirstProcess.Refresh()
+    if (-not $ReadableFirstProcess.HasExited) {
+      # Keep ownership of the adapter subprocess on timeout or cancellation.
+      & taskkill.exe /PID $($ReadableFirstProcess.Id) /T /F 2>$null | Out-Null
+      Wait-Process -Id $ReadableFirstProcess.Id -Timeout 10 -ErrorAction SilentlyContinue
+    }
+  }
+  if (-not $ReadableFirstMountRoot) {
+    return
+  }
+  for ($i = 0; $i -lt 40; $i++) {
+    if (-not (Test-Path -LiteralPath $ReadableFirstMountRoot)) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "Readable-first WinFsp mount remained attached after process-tree teardown: $ReadableFirstMountRoot"
 }
 
 Push-Location "packages/shared-fs/native"
@@ -101,7 +141,7 @@ $Args = @(
   $State,
   "--native-adapter",
   $Adapter
-)
+) | ForEach-Object { ConvertTo-StartProcessArgument $_ }
 
 $Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 
@@ -116,7 +156,7 @@ function Assert-MountReady {
 }
 
 $PrimaryFailure = $null
-$CleanupFailure = $null
+$CleanupFailures = @()
 try {
   $Mounted = $false
   for ($i = 0; $i -lt 90; $i++) {
@@ -134,6 +174,36 @@ try {
     Write-MountLogs
     throw "mount did not become ready"
   }
+  Assert-MountReady
+
+  $ReadableFirstMountDrive = Get-FreeMountDrive
+  $ReadableFirstMountpoint = "$ReadableFirstMountDrive`:"
+  $ReadableFirstMountRoot = "$ReadableFirstMountDrive`:\"
+  $ReadableFirstArgs = @(
+    "scripts/shared-fs-readable-first-native-smoke.mjs",
+    "--adapter",
+    $Adapter,
+    "--mountpoint",
+    $ReadableFirstMountpoint
+  ) | ForEach-Object { ConvertTo-StartProcessArgument $_ }
+  $ReadableFirstProcess = Start-Process -FilePath "node" -ArgumentList $ReadableFirstArgs -RedirectStandardOutput $ReadableFirstStdout -RedirectStandardError $ReadableFirstStderr -PassThru -WindowStyle Hidden
+  $ReadableFirstCompleted = $false
+  for ($i = 0; $i -lt 360; $i++) {
+    $ReadableFirstProcess.Refresh()
+    if ($ReadableFirstProcess.HasExited) {
+      $ReadableFirstCompleted = $true
+      break
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not $ReadableFirstCompleted) {
+    throw "readable-first native smoke did not exit within 90 seconds"
+  }
+  if ($ReadableFirstProcess.ExitCode -ne 0) {
+    throw "readable-first native smoke failed with exit code $($ReadableFirstProcess.ExitCode)"
+  }
+  Write-ReadableFirstLogs
+  Stop-ReadableFirstProcess
   Assert-MountReady
 
   New-Item -ItemType Directory -Force -Path (Join-Path $MountRoot "docs") | Out-Null
@@ -278,21 +348,30 @@ try {
   $PrimaryFailure = $_
 } finally {
   try {
+    Stop-ReadableFirstProcess
+  } catch {
+    $CleanupFailures += $_
+  }
+  try {
     Stop-MountProcess
   } catch {
-    $CleanupFailure = $_
+    $CleanupFailures += $_
   }
-  if ($null -ne $PrimaryFailure -or $null -ne $CleanupFailure) {
+  if ($null -ne $PrimaryFailure -or $CleanupFailures.Count -gt 0) {
+    Write-ReadableFirstLogs
     Write-MountLogs
   }
 }
 
 if ($null -ne $PrimaryFailure) {
-  if ($null -ne $CleanupFailure) {
+  foreach ($CleanupFailure in $CleanupFailures) {
     Write-Warning "mount cleanup also failed: $($CleanupFailure.Exception.Message)"
   }
   throw $PrimaryFailure
 }
-if ($null -ne $CleanupFailure) {
-  throw $CleanupFailure
+if ($CleanupFailures.Count -gt 0) {
+  for ($i = 1; $i -lt $CleanupFailures.Count; $i++) {
+    Write-Warning "additional mount cleanup failure: $($CleanupFailures[$i].Exception.Message)"
+  }
+  throw $CleanupFailures[0]
 }
