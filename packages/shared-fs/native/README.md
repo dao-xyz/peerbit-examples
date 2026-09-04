@@ -39,11 +39,30 @@ peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shar
 
 The endpoint is provided by the TypeScript Peerbit daemon. TCP loopback is used
 for external adapters so the same IPC transport works on Linux, macOS, and
-Windows. The adapter keeps one serialized connection open for the mount
-session, matching cgofuse's current single-threaded mode. A transport failure
-fails the current filesystem operation and discards that connection; the next
-explicit operation reconnects. Requests are never replayed automatically
-because a lost response does not prove that a mutation was not applied.
+Windows. By default, the adapter keeps one serialized connection open and asks
+cgofuse for single-threaded callbacks, preserving the original behavior. An
+experimental bounded pool can be enabled explicitly:
+
+```bash
+peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 \
+  --mountpoint /mnt/shared --ipc-concurrency 4
+```
+
+The accepted width is 1 through 16. Above one, cgofuse may issue concurrent
+callbacks and independent path operations are distributed round-robin over
+separately negotiated, individually serialized connections. Every operation
+that carries a live file handle stays on the connection that performed its
+`open`; a failed `release` keeps that binding for an explicit retry, while only
+a successful `release` removes it. There is no ordering between independent
+connections. Keep dependent path operations sequential at the caller and
+measure the workload: backend commits and durable replication can remain the
+bottleneck even when local IPC overlaps.
+
+A transport failure fails the current filesystem operation and discards only
+that lane's connection; its next explicit operation reconnects. Requests are
+never replayed automatically or moved to another lane because a lost response
+does not prove that a mutation was not applied. Closing the mount closes every
+lane and interrupts its outstanding request.
 The adapter negotiates binary protocol v2 on a fresh connection. Read and
 write payloads then travel as raw frame bodies instead of base64 JSON, while
 metadata plus body remain bounded to 64 MiB by default. If an older server

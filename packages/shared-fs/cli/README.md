@@ -19,6 +19,7 @@ peerbit-fs install-adapter
 peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
+peerbit-fs mount <address> <mountpoint> --native-ipc-concurrency 4
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs naming-conflicts <address>
@@ -171,6 +172,15 @@ package install also tries this automatically, but the explicit command is safe
 to rerun and is the easiest way to repair a missing adapter. `mount` and
 `status` auto-detect that managed adapter, a `peerbit-shared-fs-native` command
 on `PATH`, or `PEERBIT_SHARED_FS_NATIVE_ADAPTER`.
+
+External-adapter mounts use one serialized IPC connection by default. The
+experimental `--native-ipc-concurrency <1..16>` option enables a bounded pool
+of independent connections and concurrent native callbacks when set above
+one. File-handle operations remain pinned to their opening connection, and
+ambiguous transport failures are never replayed. This can overlap independent
+filesystem calls, but it does not bypass backend commit, storage, network, or
+durable-receipt latency; benchmark the real workload before choosing a width.
+Values above one require the external native adapter.
 
 Native runtime prerequisites are platform-specific:
 

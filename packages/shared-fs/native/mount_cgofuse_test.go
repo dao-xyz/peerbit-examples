@@ -10,6 +10,15 @@ import (
 	"github.com/winfsp/cgofuse/fuse"
 )
 
+func testIPCClientPool(t *testing.T, client *ipcClient) *ipcClientPool {
+	t.Helper()
+	pool, err := newIPCClientPoolWithLanes([]ipcLane{client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
 func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	got := errno(&ipcError{
 		Code:    "EAGAIN",
@@ -49,7 +58,7 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 	})
 	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
-	fs := &peerbitFS{client: client}
+	fs := &peerbitFS{client: testIPCClientPool(t, client)}
 	stats := make(map[string]*fuse.Stat_t)
 	fillCalls := 0
 
@@ -128,7 +137,7 @@ func TestReaddirFallsBackForLegacyAndMalformedStats(t *testing.T) {
 	})
 	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
-	fs := &peerbitFS{client: client}
+	fs := &peerbitFS{client: testIPCClientPool(t, client)}
 	seen := make(map[string]bool)
 
 	got := fs.Readdir("/", func(name string, stat *fuse.Stat_t, _ int64) bool {
@@ -233,7 +242,7 @@ func TestCreateForwardsCgofuseCallbackFlags(t *testing.T) {
 	})
 	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
-	fs := &peerbitFS{client: client}
+	fs := &peerbitFS{client: testIPCClientPool(t, client)}
 	flags := fuse.O_WRONLY | fuse.O_CREAT | fuse.O_EXCL | fuse.O_APPEND
 
 	errno, handle := fs.Create("/exclusive-append.txt", flags, 0o640)
@@ -267,7 +276,7 @@ func TestMknodUsesExclusiveCreateWithoutTruncate(t *testing.T) {
 	})
 	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
-	fs := &peerbitFS{client: client}
+	fs := &peerbitFS{client: testIPCClientPool(t, client)}
 
 	if got := fs.Mknod("/new-node.txt", 0o640, 0); got != 0 {
 		t.Fatalf("expected mknod success, got errno %d", got)
@@ -302,6 +311,7 @@ func TestMknodUsesExclusiveCreateWithoutTruncate(t *testing.T) {
 
 func TestMknodReleaseFailureCanBeRetried(t *testing.T) {
 	failedRelease := false
+	var nextHandle atomic.Uint64
 	server := startIPCResponseServer(t, func(request ipcRequest) ipcResponse {
 		if request.Op == "release" && !failedRelease {
 			failedRelease = true
@@ -314,11 +324,14 @@ func TestMknodReleaseFailureCanBeRetried(t *testing.T) {
 				},
 			}
 		}
-		return ipcResponse{ID: request.ID, OK: true, Result: float64(41)}
+		if request.Op == "open" {
+			return ipcResponse{ID: request.ID, OK: true, Result: float64(40 + nextHandle.Add(1))}
+		}
+		return ipcResponse{ID: request.ID, OK: true}
 	})
 	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
-	fs := &peerbitFS{client: client}
+	fs := &peerbitFS{client: testIPCClientPool(t, client)}
 
 	if got := fs.Mknod("/retry-node.txt", 0o640, 0); got != -fuse.EIO {
 		t.Fatalf("expected first mknod release to fail with EIO, got %d", got)
