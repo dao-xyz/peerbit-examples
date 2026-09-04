@@ -448,7 +448,7 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
   src/__tests__/mount-backend-open-hash.bench.test.ts --reporter=verbose
 ```
 
-### Experimental Merkle v1 codecs
+### Experimental Merkle v1 codecs and exact reads
 
 The package exports generation-isolated `MerkleDataBlockV1` and
 `MerkleTreeBlockV1` codecs plus canonical hash, bitmap, root, and validation
@@ -457,6 +457,28 @@ and Go. These APIs establish the byte contract for a future bounded
 random-write generation only: the current v9 filesystem does not store or
 accept these blocks, and using the helpers does not upgrade an address or make
 patch commits O(delta).
+
+`MerkleReadSessionV1` adds an opt-in, read-only range walker over an abstract
+asynchronous `MerkleBlockSourceV1`. The source receives an expected hash, block
+kind, exact tree level, and cancellation signal and returns a decoded Merkle v1
+block. The session copies and self-verifies every returned value, enforces the
+root's logical EOF and exact leaf lengths, returns only authenticated absent
+children as zeros, and reports missing, corrupt, wrong-type, or wrong-level
+references as `MerkleReadSessionErrorV1` with code `EIO`.
+
+Verified tree and data caches are independently bounded, concurrent reads
+coalesce identical fetches, and `close()` aborts pending work and clears both
+caches. Use `stats()` for structural work counts such as source fetches,
+visited/verified blocks, cache hits, coalesced fetches, and authenticated-zero
+bytes. The default maximum returned range is 64 MiB; configure `maxReadBytes`
+or issue smaller reads. A non-configurable 256 MiB ceiling prevents an
+impossible or unbounded single allocation. These counters make no runtime
+performance claim.
+
+The source adapter, root descriptor, and authorization/lifetime proof remain
+the caller's responsibility. This API is not connected to v9 `Documents`,
+`openSharedFs`, filesystem addresses, mounts, leases, GC, repair, writes, or
+durability and must not be presented as a storage-generation upgrade.
 
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
