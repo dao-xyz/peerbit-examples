@@ -92,6 +92,9 @@ jobs:
             - name: Test mounted-path benchmark harness
               run: node --test scripts/shared-fs-native-mount-benchmark.test.mjs
 
+            - name: Test Node-Go IPC benchmark harness
+              run: node --test scripts/shared-fs-node-go-ipc-benchmark.test.mjs
+
             - name: Validate native smoke wrapper syntax
               if: runner.os != 'Windows'
               shell: bash
