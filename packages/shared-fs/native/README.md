@@ -39,11 +39,36 @@ peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shar
 
 The endpoint is provided by the TypeScript Peerbit daemon. TCP loopback is used
 for external adapters so the same IPC transport works on Linux, macOS, and
-Windows. The adapter keeps one serialized connection open for the mount
-session, matching cgofuse's current single-threaded mode. A transport failure
-fails the current filesystem operation and discards that connection; the next
-explicit operation reconnects. Requests are never replayed automatically
-because a lost response does not prove that a mutation was not applied.
+Windows. By default, the adapter keeps one serialized connection open and asks
+cgofuse for single-threaded callbacks, preserving the original behavior. An
+experimental bounded pool can be enabled explicitly:
+
+```bash
+peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 \
+  --mountpoint /mnt/shared --ipc-concurrency 4
+```
+
+The accepted width is 1 through 16. Above one, cgofuse may issue concurrent
+callbacks and independent path operations are distributed round-robin over
+separately negotiated, individually serialized connections. Every operation
+that carries a live file handle stays on the connection that performed its
+`open`; a failed `release` keeps that binding for an explicit retry, while only
+a successful `release` removes it. There is no ordering between independent
+connections. Keep dependent path operations sequential at the caller and
+measure the workload: backend commits and durable replication can remain the
+bottleneck even when local IPC overlaps.
+
+Hosted measurements are intentionally mixed: wider pools improved concurrent
+durable-write batches on WinFsp, while they regressed Linux FUSE and some
+otherwise serial operations. Width one remains the portable recommendation;
+larger widths are workload- and platform-specific experiments, not a general
+performance tuning knob.
+
+A transport failure fails the current filesystem operation and discards only
+that lane's connection; its next explicit operation reconnects. Requests are
+never replayed automatically or moved to another lane because a lost response
+does not prove that a mutation was not applied. Closing the mount closes every
+lane and interrupts its outstanding request.
 The adapter negotiates binary protocol v2 on a fresh connection. Read and
 write payloads then travel as raw frame bodies instead of base64 JSON, while
 metadata plus body remain bounded to 64 MiB by default. If an older server
@@ -122,12 +147,16 @@ pnpm shared-fs:benchmark:native-mount -- \
   --mount /path/to/mount \
   --samples 30 \
   --warmups 3 \
+  --parallelism 8 \
   --output native-mount.json
 ```
 
 It records raw monotonic samples and p50/p95 summaries for metadata, 4 KiB and
 1 MiB sequential reads and writes, sequential 1 KiB small-file creation,
 directory listing, and a 4 KiB in-place overwrite of a configurable base file.
+When `--parallelism` is above one, it also measures concurrent stat, 4 KiB read,
+and durable 4 KiB write batches over distinct files. Their elapsed time is the
+batch wall time; their phase values are sums across the independent operations.
 Every timed write uses `open`, complete positional writes, `fsync`, then
 `close`; the report preserves those phase timings. Deterministic contents are
 fully read and checked after each timer. The recorded `counter-mix32-v1` corpus
@@ -139,8 +168,12 @@ microbenchmarks. `--overwrite-base-bytes`,
 These are warm, default-platform-cache timings. The harness neither evicts
 kernel/application caches nor requests direct I/O, and it does not instrument
 adapter callback counts; a cached read or metadata lookup might not reach a
-userspace mount callback. Runs are sequential (`concurrency: 1`) and therefore
-do not measure the adapter's global request-serialization ceiling.
+userspace mount callback. The original scenarios remain sequential. The
+optional concurrent scenarios use the reported bounded `concurrency` (1-16),
+which lets matched runs compare adapter IPC widths without changing the
+workload width. The dispatch workflows set `UV_THREADPOOL_SIZE=16` and record
+it so Node's default four-worker pool does not silently cap an eight- or
+sixteen-operation workload.
 
 The harness creates and normally removes one unique child below the supplied
 path. Its workload timeout is cooperative between filesystem operations. The
@@ -154,10 +187,11 @@ file or directory before and after the run. Directory inputs are traversed
 recursively while `.git` and `node_modules` are excluded, allowing callers to
 fingerprint built runtime trees without hashing dependency stores.
 
-The real-mount wrappers also record the adapter build tags, exact `go version`
-output, and the detected fuse3, macFUSE, or WinFsp runtime version as bounded
-implementation details. A value is recorded as `unknown` when a host cannot
-determine it; the harness does not synthesize a version.
+The real-mount wrappers also record the adapter build tags, exact `go version`,
+configured IPC connection count, and the detected fuse3, macFUSE, or WinFsp
+runtime version as bounded implementation details. A value is recorded as
+`unknown` when a host cannot determine it; the harness does not synthesize a
+version.
 
 The target and its repeated `--mount-option` values are caller-supplied and are
 not independently proven by the harness. Successful local `fsync` completion

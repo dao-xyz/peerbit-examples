@@ -33,6 +33,8 @@ test("native-mount benchmark validates bounded CLI arguments", () => {
         "2",
         "--warmups",
         "0",
+        "--parallelism",
+        "4",
         "--small-files",
         "3",
         "--readdir-entries",
@@ -45,6 +47,7 @@ test("native-mount benchmark validates bounded CLI arguments", () => {
         "adapter.buildTags=native_mount test",
     ]);
     assert.equal(options.samples, 2);
+    assert.equal(options.parallelism, 4);
     assert.equal(options.overwriteBaseBytes, 8192);
     assert.equal(options.targetKind, "local-filesystem-control");
     assert.deepEqual(options.mountOptions, []);
@@ -60,6 +63,16 @@ test("native-mount benchmark validates bounded CLI arguments", () => {
                 "0",
             ]),
         /--samples must be an integer/
+    );
+    assert.throws(
+        () =>
+            parseNativeMountBenchmarkArguments([
+                "--mount",
+                ".",
+                "--parallelism",
+                "17",
+            ]),
+        /--parallelism must be an integer/u
     );
     assert.throws(
         () =>
@@ -220,7 +233,9 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
         for (const key of [
             "adapter.buildTags",
             "adapter.goVersion",
+            "adapter.ipcConcurrency",
             "mount.runtime",
+            "node.uvThreadpoolSize",
         ]) {
             assert.match(source, new RegExp(`${key}=`, "u"));
         }
@@ -230,8 +245,12 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
     }
     assert.match(posix, /MOUNT_BENCH_SAMPLES:-30/u);
     assert.match(posix, /MOUNT_BENCH_WARMUPS:-3/u);
+    assert.match(posix, /MOUNT_BENCH_PARALLELISM:-1/u);
+    assert.match(posix, /NATIVE_IPC_CONCURRENCY:-1/u);
     assert.match(powershell, /MOUNT_BENCH_SAMPLES[\s\S]*"30"/u);
     assert.match(powershell, /MOUNT_BENCH_WARMUPS[\s\S]*"3"/u);
+    assert.match(powershell, /MOUNT_BENCH_PARALLELISM[\s\S]*"1"/u);
+    assert.match(powershell, /NATIVE_IPC_CONCURRENCY[\s\S]*"1"/u);
 });
 
 test("native-mount cooperative timeout cleans its owned root", async () => {
@@ -247,6 +266,8 @@ test("native-mount cooperative timeout cleans its owned root", async () => {
         "1",
         "--warmups",
         "0",
+        "--parallelism",
+        "4",
         "--small-files",
         "1",
         "--readdir-entries",
@@ -332,11 +353,17 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         "--implementation-detail",
         "adapter.goVersion=go version go1.24.5 test/amd64",
         "--implementation-detail",
+        "adapter.ipcConcurrency=4",
+        "--implementation-detail",
         "mount.runtime=test-fuse 1.2.3",
+        "--implementation-detail",
+        "node.uvThreadpoolSize=16",
         "--samples",
         "2",
         "--warmups",
         "0",
+        "--parallelism",
+        "4",
         "--small-files",
         "2",
         "--readdir-entries",
@@ -353,7 +380,8 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             expectedNativeMountBenchmarkScenarioNames(options)
         );
         assert.equal(report.scope.performanceGate, false);
-        assert.equal(report.schemaVersion, 2);
+        assert.equal(report.schemaVersion, 3);
+        assert.equal(report.run.concurrency, 4);
         assert.equal(report.target.kind, "shared-fs-mount");
         assert.equal(
             report.scope.cacheSemantics.mode,
@@ -366,7 +394,9 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
                 key: "adapter.goVersion",
                 value: "go version go1.24.5 test/amd64",
             },
+            { key: "adapter.ipcConcurrency", value: "4" },
             { key: "mount.runtime", value: "test-fuse 1.2.3" },
+            { key: "node.uvThreadpoolSize", value: "16" },
         ]);
         assert.equal(report.inputs.files.length, 5);
         assert.deepEqual(report.inputs.roots, [...report.inputs.roots].sort());
@@ -396,6 +426,80 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             () =>
                 validateNativeMountBenchmarkReport(provenanceTampered, options),
             /implementation details do not match/u
+        );
+        for (const required of [
+            "adapter.ipcConcurrency",
+            "node.uvThreadpoolSize",
+        ]) {
+            const missing = structuredClone(report);
+            missing.implementation.details =
+                missing.implementation.details.filter(
+                    ({ key }) => key !== required
+                );
+            assert.throws(
+                () => validateNativeMountBenchmarkReport(missing),
+                /implementation details are invalid/u
+            );
+        }
+        for (const [key, invalid] of [
+            ["adapter.ipcConcurrency", "17"],
+            ["adapter.ipcConcurrency", "04"],
+            ["node.uvThreadpoolSize", "0"],
+            ["node.uvThreadpoolSize", "016"],
+            ["node.uvThreadpoolSize", "1025"],
+        ]) {
+            const invalidDetail = structuredClone(report);
+            invalidDetail.implementation.details.find(
+                (detail) => detail.key === key
+            ).value = invalid;
+            assert.throws(
+                () => validateNativeMountBenchmarkReport(invalidDetail),
+                new RegExp(key.replace(".", "\\."), "u")
+            );
+        }
+        const explicitlyUnknown = structuredClone(report);
+        for (const key of ["adapter.ipcConcurrency", "node.uvThreadpoolSize"]) {
+            explicitlyUnknown.implementation.details.find(
+                (detail) => detail.key === key
+            ).value = "unknown";
+        }
+        assert.equal(
+            validateNativeMountBenchmarkReport(explicitlyUnknown),
+            explicitlyUnknown
+        );
+        const defaultThreadpool = structuredClone(report);
+        defaultThreadpool.implementation.details.find(
+            ({ key }) => key === "node.uvThreadpoolSize"
+        ).value = "default";
+        assert.equal(
+            validateNativeMountBenchmarkReport(defaultThreadpool),
+            defaultThreadpool
+        );
+        const operationTampered = structuredClone(report);
+        operationTampered.scenarios[0].operation = "read";
+        assert.throws(
+            () =>
+                validateNativeMountBenchmarkReport(operationTampered, options),
+            /invalid operation metadata/u
+        );
+        const semanticsTampered = structuredClone(report);
+        semanticsTampered.scenarios[1].semantics = "unverified read";
+        assert.throws(
+            () =>
+                validateNativeMountBenchmarkReport(semanticsTampered, options),
+            /invalid semantics metadata/u
+        );
+        const targetTampered = structuredClone(report);
+        targetTampered.target.label = "a different target";
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(targetTampered, options),
+            /target path or label does not match/u
+        );
+        const runTampered = structuredClone(report);
+        runTampered.run.warmupsPerScenario = 1;
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(runTampered, options),
+            /run options are invalid/u
         );
 
         await writeNativeMountBenchmarkReport(output, report, options);

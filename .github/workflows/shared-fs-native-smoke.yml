@@ -8,6 +8,26 @@ on:
                 required: true
                 default: false
                 type: boolean
+            ipc_concurrency:
+                description: External native adapter IPC connection count.
+                required: true
+                default: "1"
+                type: choice
+                options:
+                    - "1"
+                    - "2"
+                    - "4"
+                    - "8"
+            benchmark_parallelism:
+                description: Independent operations issued per parallel benchmark sample.
+                required: true
+                default: "1"
+                type: choice
+                options:
+                    - "1"
+                    - "4"
+                    - "8"
+                    - "16"
 
 permissions:
     contents: read
@@ -80,6 +100,9 @@ jobs:
             - name: Run external native adapter smoke
               shell: bash
               env:
+                  UV_THREADPOOL_SIZE: "16"
+                  PEERBIT_SHARED_FS_NATIVE_IPC_CONCURRENCY: ${{ inputs.ipc_concurrency }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_PARALLELISM: ${{ inputs.benchmark_parallelism }}
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-linux-fuse-benchmark.json', runner.temp) || '' }}
                   PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-linux-control-benchmark.json', runner.temp) || '' }}
               run: scripts/shared-fs-external-native-smoke.sh

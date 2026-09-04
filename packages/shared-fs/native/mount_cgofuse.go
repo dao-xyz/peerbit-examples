@@ -16,18 +16,22 @@ import (
 
 type peerbitFS struct {
 	fuse.FileSystemBase
-	client *ipcClient
+	client *ipcClientPool
 	debug  bool
 	ready  sync.Once
 }
 
-func runNativeMount(endpoint string, mountpoint string, debug bool) error {
+func runNativeMount(endpoint string, mountpoint string, debug bool, ipcConcurrency int) error {
+	client, err := newIPCClientPool(endpoint, ipcConcurrency)
+	if err != nil {
+		return err
+	}
 	fs := &peerbitFS{
-		client: newIPCClient(endpoint),
+		client: client,
 		debug:  debug,
 	}
 	defer fs.client.close()
-	fs.debugf("starting mount endpoint=%s mountpoint=%s", endpoint, mountpoint)
+	fs.debugf("starting mount endpoint=%s mountpoint=%s ipc-concurrency=%d", endpoint, mountpoint, ipcConcurrency)
 	if debug {
 		if err := fs.preflight(); err != nil {
 			return err
@@ -39,7 +43,7 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 	// records supplied by Readdir. Other builds keep both this capability and
 	// their IPC listing shape compact.
 	host.SetCapReaddirPlus(requestReaddirStats)
-	options := nativeMountOptions(runtime.GOOS, debug)
+	options := nativeMountOptions(runtime.GOOS, debug, ipcConcurrency)
 	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
@@ -111,8 +115,7 @@ func (fs *peerbitFS) Access(path string, mask uint32) int {
 }
 
 func (fs *peerbitFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
-	_ = fh
-	result, err := fs.client.request("getattr", path)
+	result, err := fs.client.requestForOptionalHandle(fh, "getattr", path)
 	if err != nil {
 		return errno(err)
 	}
@@ -186,17 +189,17 @@ func (fs *peerbitFS) Fsyncdir(path string, datasync bool, fh uint64) int {
 }
 
 func (fs *peerbitFS) Open(path string, flags int) (int, uint64) {
-	result, err := fs.client.request("open", path, flags)
+	handle, err := fs.client.open(path, flags)
 	if err != nil {
 		return errno(err), ^uint64(0)
 	}
-	return 0, uint64FromResult(result)
+	return 0, handle
 }
 
 func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) int {
 	_ = mode
 	_ = dev
-	result, err := fs.client.request("open", path, map[string]interface{}{
+	handle, err := fs.client.open(path, map[string]interface{}{
 		"write":          true,
 		"create":         true,
 		"exclusive":      true,
@@ -205,24 +208,24 @@ func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) int {
 	if err != nil {
 		return errno(err)
 	}
-	_, err = fs.client.request("release", uint64FromResult(result))
+	err = fs.client.release(handle)
 	return errno(err)
 }
 
 func (fs *peerbitFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	_ = mode
-	result, err := fs.client.request("open", path, flags)
+	handle, err := fs.client.open(path, flags)
 	if err != nil {
 		return errno(err), ^uint64(0)
 	}
-	return 0, uint64FromResult(result)
+	return 0, handle
 }
 
 func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) int {
 	// cgofuse passes ^uint64(0) when no file handle is associated with the
 	// truncate (path-based SETATTR).
 	if fh != ^uint64(0) {
-		_, err := fs.client.request("truncate", fh, size)
+		_, err := fs.client.requestForHandle(fh, "truncate", size)
 		return errno(err)
 	}
 	_, err := fs.client.request("truncate", path, size)
@@ -231,7 +234,7 @@ func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) int {
 
 func (fs *peerbitFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	_ = path
-	result, err := fs.client.request("read", fh, len(buff), ofst)
+	result, err := fs.client.requestForHandle(fh, "read", len(buff), ofst)
 	if err != nil {
 		return errno(err)
 	}
@@ -244,7 +247,7 @@ func (fs *peerbitFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 
 func (fs *peerbitFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	_ = path
-	result, err := fs.client.request("write", fh, buff, ofst)
+	result, err := fs.client.requestForHandle(fh, "write", buff, ofst)
 	if err != nil {
 		return errno(err)
 	}
@@ -253,20 +256,20 @@ func (fs *peerbitFS) Write(path string, buff []byte, ofst int64, fh uint64) int 
 
 func (fs *peerbitFS) Flush(path string, fh uint64) int {
 	_ = path
-	_, err := fs.client.request("flush", fh)
+	_, err := fs.client.requestForHandle(fh, "flush")
 	return errno(err)
 }
 
 func (fs *peerbitFS) Release(path string, fh uint64) int {
 	_ = path
-	_, err := fs.client.request("release", fh)
+	err := fs.client.release(fh)
 	return errno(err)
 }
 
 func (fs *peerbitFS) Fsync(path string, datasync bool, fh uint64) int {
 	_ = path
 	_ = datasync
-	_, err := fs.client.request("fsync", fh)
+	_, err := fs.client.requestForHandle(fh, "fsync")
 	return errno(err)
 }
 
