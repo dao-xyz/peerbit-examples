@@ -89,6 +89,24 @@ try {
     throw "unexpected file contents: $Value"
   }
 
+  # WinFsp maps Node open("w") replacement of an existing file to
+  # Open(O_WRONLY), followed by a separate handle-based truncate. Use a shorter
+  # replacement so the content assertion also proves that truncation happened.
+  $NodeReplacement = "rewrite"
+  $NodeRewrite = "const fs = require('node:fs'); const fd = fs.openSync(process.argv[1], 'w'); try { fs.writeFileSync(fd, 'rewrite'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }"
+  & node -e $NodeRewrite $MetadataPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Node replacement write failed with exit code $LASTEXITCODE"
+  }
+  $Rewritten = Get-Content -Raw -Path $MetadataPath
+  if ($Rewritten -ne $NodeReplacement) {
+    throw "unexpected rewritten file contents: $Rewritten"
+  }
+  $RewrittenLength = (Get-Item -LiteralPath $MetadataPath).Length
+  if ($RewrittenLength -ne 7) {
+    throw "replacement write did not truncate the file: length is $RewrittenLength"
+  }
+
   $LastWriteBefore = (Get-Item -LiteralPath $MetadataPath).LastWriteTimeUtc
   $TimestampMutationFailed = $false
   try {
@@ -106,7 +124,7 @@ try {
 
   Rename-Item -Path (Join-Path $MountRoot "docs\hello.txt") -NewName "renamed.txt"
   $Renamed = Get-Content -Raw -Path (Join-Path $MountRoot "docs\renamed.txt")
-  if ($Renamed -ne "hello external native") {
+  if ($Renamed -ne $NodeReplacement) {
     throw "unexpected renamed file contents: $Renamed"
   }
   $RenamedPath = Join-Path $MountRoot "docs\renamed.txt"

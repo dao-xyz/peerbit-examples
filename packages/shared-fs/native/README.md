@@ -52,6 +52,13 @@ once and uses JSONL v1. It never retries a filesystem operation. A server may
 select v1 on the original connection, and very small configured request bounds
 that cannot hold negotiation also remain on v1.
 
+On Windows, the adapter reports the mounting account as the synthetic owner.
+Shared FS does not persist portable uid/gid metadata, and WinFsp otherwise
+maps the missing owner to uid/gid 0. Selecting the mounting account preserves
+normal replacement writes such as Node `open("w")`, whose Windows access mask
+includes extended-attribute writes. Peerbit writer authorization remains the
+authority for filesystem mutations; this mount option does not broaden it.
+
 Directory responses may add a compact `stat` object to each entry. It omits
 path and kind because the parent request, name, and entry kind already carry
 them. This keeps representative short-name and maximum-length unescaped
