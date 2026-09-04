@@ -61,6 +61,30 @@ allocations, and connections per operation. Its Go echo peer mirrors the
 JSON/base64 framing so the result isolates Go-client transport and framing
 costs; it does not include the Node daemon, FUSE, or Peerbit replication.
 
+To measure the complete current Node-Go boundary instead of the Go echo peer,
+run this report-only benchmark from the repository root:
+
+```bash
+pnpm shared-fs:benchmark:node-go-ipc -- --samples 30 --output node-go-ipc.json
+```
+
+It compiles the real Go `ipcClient`, starts the real Node
+`createSharedFsIpcServer` on a fresh TCP loopback port, performs untimed
+warmups, and emits raw monotonic samples plus summaries for `getattr` and 4 KiB
+and 1 MiB reads/writes. The backend is deterministic, immediate, and in-memory;
+full result and byte validation happens outside the measured request. Reported
+allocation deltas cover only the Go client process. Logical MiB/s is based on
+the unencoded file-byte count, not the larger base64 JSON frame. The JSON also
+records the package version, lockfile SHA-256, Git HEAD when resolvable, host
+runtime details, and a hash plus path list for the exact benchmark inputs
+(including dirty worktree content) so comparisons remain attributable.
+
+This is a reusable JSONL-v1 transport baseline, not filesystem performance. It
+excludes FUSE/macFUSE/WinFsp, mount syscalls, Peerbit, replication, storage,
+persistence, and durable acknowledgements. It has no pass/fail performance
+threshold. Use `--warmups`, `--samples`, and `--timeout-ms` to tune a bounded
+manual run; omit `--output` to print JSON only.
+
 ## POSIX metadata limits
 
 The shared model currently persists names and file content, not POSIX mode,
