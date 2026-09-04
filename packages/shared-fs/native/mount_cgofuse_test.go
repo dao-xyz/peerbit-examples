@@ -3,6 +3,7 @@
 package main
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,171 @@ func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	})
 	if got != -fuse.EAGAIN {
 		t.Fatalf("expected %d, got %d", -fuse.EAGAIN, got)
+	}
+}
+
+func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
+	var requests atomic.Uint64
+	observedRequests := make(chan ipcRequest, 16)
+	server := startIPCEchoServer(t, func(request ipcRequest) interface{} {
+		requests.Add(1)
+		observedRequests <- request
+		return []interface{}{
+			map[string]interface{}{
+				"name": "child",
+				"kind": "directory",
+				"stat": map[string]interface{}{
+					"size": 0, "mode": 0o040755,
+					"mtimeMs": 1_725_000_000_125, "ctimeMs": 1_725_000_000_250,
+					"nlink": 2,
+				},
+			},
+			map[string]interface{}{
+				"name": "note.txt",
+				"kind": "file",
+				"stat": map[string]interface{}{
+					"size": 12_345, "mode": 0o100644,
+					"mtimeMs": 1_725_000_001_375, "ctimeMs": 1_725_000_001_500,
+					"nlink": 1,
+				},
+			},
+		}
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
+	defer client.close()
+	fs := &peerbitFS{client: client}
+	stats := make(map[string]*fuse.Stat_t)
+	fillCalls := 0
+
+	got := fs.Readdir("/workspace", func(name string, stat *fuse.Stat_t, _ int64) bool {
+		fillCalls++
+		if stat != nil {
+			copy := *stat
+			stats[name] = &copy
+		}
+		return true
+	}, 0, 0)
+
+	if got != 0 {
+		t.Fatalf("expected readdir success, got errno %d", got)
+	}
+	if count := requests.Load(); count != 1 {
+		t.Fatalf("expected exactly one readdir request and no getattr requests, got %d", count)
+	}
+	assertReaddirRequest(t, <-observedRequests, "/workspace")
+	if fillCalls != 4 {
+		t.Fatalf("expected dot entries plus two children, got %d callbacks", fillCalls)
+	}
+	directory := stats["child"]
+	if directory == nil || directory.Mode != nativeStatMode(0o040755) || directory.Size != 0 || directory.Nlink != 2 {
+		t.Fatalf("unexpected directory stat: %#v", directory)
+	}
+	if directory.Mtim != msToTimespec(1_725_000_000_125) || directory.Ctim != msToTimespec(1_725_000_000_250) {
+		t.Fatalf("unexpected directory timestamps: mtime=%#v ctime=%#v", directory.Mtim, directory.Ctim)
+	}
+	file := stats["note.txt"]
+	if file == nil || file.Mode != nativeStatMode(0o100644) || file.Size != 12_345 || file.Nlink != 1 {
+		t.Fatalf("unexpected file stat: %#v", file)
+	}
+	if file.Mtim != msToTimespec(1_725_000_001_375) || file.Ctim != msToTimespec(1_725_000_001_500) {
+		t.Fatalf("unexpected file timestamps: mtime=%#v ctime=%#v", file.Mtim, file.Ctim)
+	}
+}
+
+func TestReaddirFallsBackForLegacyAndMalformedStats(t *testing.T) {
+	valid := map[string]interface{}{
+		"path": "/valid.txt", "kind": "file", "size": 5,
+		"mode": 0o100644, "mtimeMs": 1_725_000_000_000,
+		"ctimeMs": 1_725_000_000_000, "nlink": 1,
+	}
+	entries := []interface{}{
+		map[string]interface{}{"name": "legacy.txt", "kind": "file"},
+		map[string]interface{}{"name": "not-an-object.txt", "kind": "file", "stat": "invalid"},
+		map[string]interface{}{"name": "missing-field.txt", "kind": "file", "stat": map[string]interface{}{
+			"path": "/missing-field.txt", "kind": "file", "size": 1,
+			"mode": 0o100644, "mtimeMs": 1, "ctimeMs": 1,
+		}},
+		map[string]interface{}{"name": "negative-size.txt", "kind": "file", "stat": map[string]interface{}{
+			"path": "/negative-size.txt", "kind": "file", "size": -1,
+			"mode": 0o100644, "mtimeMs": 1, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "wrong-mode.txt", "kind": "file", "stat": map[string]interface{}{
+			"path": "/wrong-mode.txt", "kind": "file", "size": 1,
+			"mode": 0o040755, "mtimeMs": 1, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "wrong-path.txt", "kind": "file", "stat": map[string]interface{}{
+			"path": "/somewhere-else.txt", "kind": "file", "size": 1,
+			"mode": 0o100644, "mtimeMs": 1, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "fractional-time.txt", "kind": "file", "stat": map[string]interface{}{
+			"path": "/fractional-time.txt", "kind": "file", "size": 1,
+			"mode": 0o100644, "mtimeMs": 1.5, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "valid.txt", "kind": "file", "stat": valid},
+	}
+	observedRequests := make(chan ipcRequest, 16)
+	server := startIPCEchoServer(t, func(request ipcRequest) interface{} {
+		observedRequests <- request
+		// Model an older JavaScript server: extra function arguments are
+		// ignored and its compact legacy response remains valid.
+		return entries
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
+	defer client.close()
+	fs := &peerbitFS{client: client}
+	seen := make(map[string]bool)
+
+	got := fs.Readdir("/", func(name string, stat *fuse.Stat_t, _ int64) bool {
+		if name != "." && name != ".." {
+			seen[name] = stat != nil
+		}
+		return true
+	}, 0, 0)
+
+	if got != 0 {
+		t.Fatalf("expected readdir success, got errno %d", got)
+	}
+	assertReaddirRequest(t, <-observedRequests, "/")
+	if got := len(observedRequests); got != 0 {
+		t.Fatalf("readdir made %d unexpected follow-up requests", got)
+	}
+	if len(seen) != len(entries) {
+		t.Fatalf("expected %d child callbacks, got %d", len(entries), len(seen))
+	}
+	for name, hadStat := range seen {
+		if name == "valid.txt" {
+			if !hadStat {
+				t.Fatal("complete metadata did not reach fill")
+			}
+			continue
+		}
+		if hadStat {
+			t.Fatalf("legacy or malformed metadata for %q must fall back to nil", name)
+		}
+	}
+}
+
+func assertReaddirRequest(t *testing.T, request ipcRequest, expectedPath string) {
+	t.Helper()
+	if request.Op != "readdir" {
+		t.Fatalf("expected one readdir request, got %q", request.Op)
+	}
+	expectedArgs := 1
+	if requestReaddirStats {
+		expectedArgs = 2
+	}
+	if len(request.Args) != expectedArgs {
+		t.Fatalf("readdir args = %#v, expected %d for this build", request.Args, expectedArgs)
+	}
+	if path, ok := request.Args[0].(string); !ok || path != expectedPath {
+		t.Fatalf("readdir path = %#v, expected %q", request.Args[0], expectedPath)
+	}
+	if !requestReaddirStats {
+		return
+	}
+	options, ok := request.Args[1].(map[string]interface{})
+	if !ok || len(options) != 1 || options["includeStats"] != true {
+		t.Fatalf("readdir-plus options = %#v, expected includeStats=true", request.Args[1])
 	}
 }
 
