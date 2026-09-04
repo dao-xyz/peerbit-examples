@@ -607,6 +607,34 @@ establish a fresh baseline before comparing performance across this timing
 boundary; an apparent jump at the boundary is not by itself a filesystem
 speedup.
 
+The gated one-chunk dedup benchmark compares the current `dedup: "verify"`
+path with `dedup: "off"` (reported as “always-touch”) without changing the
+production default. It runs matched fresh-content and reused-content creates
+and replacements through both the direct handle and the in-process mount
+backend. The mount-backend half includes open/write/fsync/release semantics but
+does not cross a kernel FUSE/WinFsp or IPC boundary. Each mode gets three
+warmups and 30 measured samples; their order alternates per sample. The JSON
+report retains every timing, p50/p95 summaries, document/index operation
+counters with category sums and asserted workload invariants, and exact
+log-entry growth. It also records the git commit, benchmark-input and lockfile
+SHA-256 hashes, exact installed Peerbit cohort, OS release, and symmetric live
+state-directory snapshots.
+
+```bash
+PEERBIT_SHARED_FS_ONE_CHUNK_DEDUP_BENCH=1 \
+PEERBIT_SHARED_FS_ONE_CHUNK_DEDUP_REPORT=./one-chunk-dedup.json \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/one-chunk-dedup.bench.test.ts --reporter=verbose
+```
+
+The report is descriptive rather than a performance budget. In particular,
+always touching a reused content-addressed chunk adds a log entry that the
+verified fresh-witness path can skip. The log-entry count is the authoritative
+logical-amplification measurement. Peers stay open during both state-directory
+scans, so allocator, WAL, and checkpoint activity makes their physical byte
+deltas noisy; those snapshots support no physical write-amplification
+conclusion.
+
 The manual shared-open benchmark runs with:
 
 ```bash
