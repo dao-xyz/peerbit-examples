@@ -450,7 +450,7 @@ const mountedWrite = async (
 ): Promise<TimedSample> => {
     const startedAt = process.hrtime.bigint();
     let handle: number | undefined;
-    let releaseAttempted = false;
+    let released = false;
     let failure: unknown;
     let openNs = 0;
     let writeNs = 0;
@@ -470,16 +470,17 @@ const mountedWrite = async (
         fsyncNs = await time(async () => {
             await backend.fsync(handle!);
         });
-        releaseAttempted = true;
         releaseNs = await time(async () => {
             await backend.release(handle!);
         });
+        released = true;
     } catch (error) {
         failure = error;
     }
-    if (handle !== undefined && !releaseAttempted) {
+    if (handle !== undefined && !released) {
         try {
             await backend.release(handle);
+            released = true;
         } catch (releaseError) {
             if (failure !== undefined) {
                 throw combineFailures(
@@ -880,6 +881,60 @@ const runPair = async (
     await cleanupContexts(contexts);
     return result;
 };
+
+describe("one-chunk benchmark mounted lifecycle", () => {
+    const backendWithRelease = (
+        releaseHandle: (handle: number) => Promise<void>
+    ) =>
+        ({
+            open: async () => 7,
+            write: async () => 1,
+            fsync: async () => {},
+            release: releaseHandle,
+        }) as unknown as SharedFsMountBackend;
+
+    it("retries a rejected release while preserving its original error", async () => {
+        const original = new Error("injected first release failure");
+        let releaseCalls = 0;
+        const backend = backendWithRelease(async (handle) => {
+            expect(handle).toBe(7);
+            releaseCalls++;
+            if (releaseCalls === 1) throw original;
+        });
+
+        await expect(
+            mountedWrite(backend, "/bench/release.bin", new Uint8Array([1]))
+        ).rejects.toBe(original);
+        expect(releaseCalls).toBe(2);
+    });
+
+    it("reports both failures when the cleanup release also rejects", async () => {
+        const original = new Error("injected first release failure");
+        const cleanup = new Error("injected cleanup release failure");
+        let releaseCalls = 0;
+        const backend = backendWithRelease(async () => {
+            releaseCalls++;
+            throw releaseCalls === 1 ? original : cleanup;
+        });
+
+        let observed: unknown;
+        try {
+            await mountedWrite(
+                backend,
+                "/bench/release.bin",
+                new Uint8Array([1])
+            );
+        } catch (error) {
+            observed = error;
+        }
+        expect(observed).toBeInstanceOf(AggregateError);
+        expect((observed as AggregateError).errors).toEqual([
+            original,
+            cleanup,
+        ]);
+        expect(releaseCalls).toBe(2);
+    });
+});
 
 manualDescribe("one-chunk dedup strategy benchmark (manual)", () => {
     it(
