@@ -182,6 +182,12 @@ filesystem calls, but it does not bypass backend commit, storage, network, or
 durable-receipt latency; benchmark the real workload before choosing a width.
 Values above one require the external native adapter.
 
+Hosted measurements are intentionally mixed: wider pools improved concurrent
+durable-write batches on WinFsp, while they regressed Linux FUSE and some
+otherwise serial operations. Width one remains the portable recommendation;
+larger widths are workload- and platform-specific experiments, not a general
+performance tuning knob.
+
 Native runtime prerequisites are platform-specific:
 
 - Linux: FUSE/libfuse. On Debian or Ubuntu, install `fuse3` and

@@ -58,6 +58,12 @@ connections. Keep dependent path operations sequential at the caller and
 measure the workload: backend commits and durable replication can remain the
 bottleneck even when local IPC overlaps.
 
+Hosted measurements are intentionally mixed: wider pools improved concurrent
+durable-write batches on WinFsp, while they regressed Linux FUSE and some
+otherwise serial operations. Width one remains the portable recommendation;
+larger widths are workload- and platform-specific experiments, not a general
+performance tuning knob.
+
 A transport failure fails the current filesystem operation and discards only
 that lane's connection; its next explicit operation reconnects. Requests are
 never replayed automatically or moved to another lane because a lost response
