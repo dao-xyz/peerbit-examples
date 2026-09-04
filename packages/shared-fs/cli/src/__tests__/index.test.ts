@@ -197,6 +197,31 @@ describe("peerbit-fs cli", () => {
         expect(runCli).toBeTypeOf("function");
     });
 
+    it("accepts and prints a reproducible benchmark seed", async () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        try {
+            await runCli([
+                "benchmark",
+                "--directory",
+                "",
+                "--seed",
+                "cli-benchmark-seed",
+                "--large-size",
+                "8",
+                "--small-files",
+                "1",
+                "--small-size",
+                "4",
+                "--cleanup",
+            ]);
+            expect(log.mock.calls.flat()).toContain(
+                "corpus seed: cli-benchmark-seed"
+            );
+        } finally {
+            log.mockRestore();
+        }
+    });
+
     it("keeps Windows drive mountpoints in WinFsp drive form", () => {
         expect(normalizeNativeMountpoint("P:", "win32")).toBe("P:");
         expect(normalizeNativeMountpoint("p:\\", "win32")).toBe("P:");

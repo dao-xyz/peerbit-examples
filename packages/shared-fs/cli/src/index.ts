@@ -421,18 +421,19 @@ const printBenchmarkResult = (
     result: Awaited<ReturnType<typeof runSharedFsBenchmark>>
 ) => {
     console.log(chalk.bold(`benchmark root: ${result.root}`));
+    console.log(`corpus seed: ${result.seed}`);
     console.log(
-        `large write: ${result.largeFile.writeMs}ms ${result.largeFile.writeMbps.toFixed(2)} Mbps`
+        `large write: ${result.largeFile.writeMs.toFixed(3)}ms ${result.largeFile.writeMbps.toFixed(2)} Mbps`
     );
     console.log(
-        `large read:  ${result.largeFile.readMs}ms ${result.largeFile.readMbps.toFixed(2)} Mbps`
+        `large read:  ${result.largeFile.readMs.toFixed(3)}ms ${result.largeFile.readMbps.toFixed(2)} Mbps`
     );
     console.log(
-        `small write: ${result.smallFiles.writeMs}ms ${result.smallFiles.filesPerSecondWrite.toFixed(2)} files/s`
+        `small write: ${result.smallFiles.writeMs.toFixed(3)}ms ${result.smallFiles.filesPerSecondWrite.toFixed(2)} files/s`
     );
-    console.log(`small list:  ${result.smallFiles.listMs}ms`);
+    console.log(`small list:  ${result.smallFiles.listMs.toFixed(3)}ms`);
     console.log(
-        `small read:  ${result.smallFiles.readMs}ms ${result.smallFiles.filesPerSecondRead.toFixed(2)} files/s`
+        `small read:  ${result.smallFiles.readMs.toFixed(3)}ms ${result.smallFiles.filesPerSecondRead.toFixed(2)} files/s`
     );
 };
 
@@ -1573,6 +1574,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "Benchmark root path inside the shared filesystem.",
                     })
+                    .option("seed", {
+                        type: "string",
+                        description:
+                            "Corpus seed to reproduce the exact benchmark bytes.",
+                    })
                     .option("cleanup", {
                         type: "boolean",
                         default: false,
@@ -1602,6 +1608,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         await loadSharedFsRuntime();
                     const result = await runSharedFsBenchmark(fsHandle, {
                         root: argv.root,
+                        seed: argv.seed,
                         largeFileSize: argv.largeSize,
                         smallFileCount: argv.smallFiles,
                         smallFileSize: argv.smallSize,
