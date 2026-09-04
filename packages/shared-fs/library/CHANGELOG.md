@@ -1,5 +1,15 @@
 # @peerbit/shared-fs
 
+## 0.13.15
+
+### Patch Changes
+
+- ac1ed98: Optionally include snapshot-consistent stat metadata in Shared FS directory
+  entries and publish native adapter binaries that request it only when cgofuse
+  can use readdir-plus on Linux FUSE 3 or WinFsp, avoiding per-entry IPC lookups
+  without bloating compact listings on other mounts.
+- 19e001f: Negotiate binary IPC v2 with the native Go adapter so read and write payloads use bounded raw frame bodies while preserving JSONL v1 compatibility and fail-closed no-replay semantics. Publish matching rebuilt native adapter binaries with the CLI patch.
+
 ## 0.13.14
 
 ### Patch Changes
