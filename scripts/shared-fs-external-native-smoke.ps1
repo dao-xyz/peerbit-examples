@@ -22,6 +22,20 @@ function Get-FreeMountDrive {
 $MountDrive = Get-FreeMountDrive
 $Mountpoint = "$MountDrive`:"
 $MountRoot = "$MountDrive`:\"
+$AdapterBuildTags = "native_mount"
+
+function ConvertTo-ImplementationDetailValue {
+  param([object]$Value)
+  $Text = ([string]$Value) -replace "[\r\n]+", " "
+  $Text = $Text.Trim()
+  if (-not $Text) {
+    return "unknown"
+  }
+  if ($Text.Length -gt 256) {
+    return $Text.Substring(0, 256)
+  }
+  return $Text
+}
 
 $WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($WinFspBin) {
@@ -36,18 +50,46 @@ function Write-MountLogs {
 }
 
 function Stop-MountProcess {
+  $Process.Refresh()
   if (-not $Process.HasExited) {
-    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    # The CLI owns a separately spawned Go adapter. Terminate the whole tree so
+    # a forced Windows fallback cannot orphan the WinFsp mount.
+    & taskkill.exe /PID $($Process.Id) /T /F 2>$null | Out-Null
     Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction SilentlyContinue
   }
+  for ($i = 0; $i -lt 40; $i++) {
+    if (-not (Test-Path -LiteralPath $MountRoot)) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "WinFsp mount remained attached after process-tree teardown: $MountRoot"
 }
 
 Push-Location "packages/shared-fs/native"
 try {
-  go build -tags "native_mount" -o $Adapter .
+  go build -tags $AdapterBuildTags -o $Adapter .
 } finally {
   Pop-Location
 }
+
+$GoVersion = ConvertTo-ImplementationDetailValue ((& go version 2>$null | Out-String).Trim())
+$WinFspVersion = @(
+  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+  "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+) | ForEach-Object {
+  Get-ItemProperty -Path $_ -ErrorAction SilentlyContinue
+} | Where-Object {
+  $_.DisplayName -like "WinFsp*" -and $_.DisplayVersion
+} | Select-Object -ExpandProperty DisplayVersion -First 1
+if (-not $WinFspVersion -and $WinFspBin) {
+  $WinFspDll = Join-Path $WinFspBin "winfsp-x64.dll"
+  if (Test-Path -LiteralPath $WinFspDll) {
+    $WinFspVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($WinFspDll).ProductVersion
+  }
+}
+$WinFspVersion = ConvertTo-ImplementationDetailValue $WinFspVersion
+$MountRuntime = ConvertTo-ImplementationDetailValue "WinFsp $WinFspVersion"
 
 $Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State).Trim()
 $Args = @(
@@ -63,6 +105,18 @@ $Args = @(
 
 $Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 
+function Assert-MountReady {
+  $Process.Refresh()
+  if ($Process.HasExited) {
+    throw "mount process exited before filesystem operations with code $($Process.ExitCode)"
+  }
+  if (-not (Test-Path -LiteralPath $MountRoot)) {
+    throw "expected an active WinFsp mount at $MountRoot"
+  }
+}
+
+$PrimaryFailure = $null
+$CleanupFailure = $null
 try {
   $Mounted = $false
   for ($i = 0; $i -lt 90; $i++) {
@@ -80,6 +134,7 @@ try {
     Write-MountLogs
     throw "mount did not become ready"
   }
+  Assert-MountReady
 
   New-Item -ItemType Directory -Force -Path (Join-Path $MountRoot "docs") | Out-Null
   $MetadataPath = Join-Path $MountRoot "docs\hello.txt"
@@ -106,7 +161,6 @@ try {
   if ($RewrittenLength -ne 7) {
     throw "replacement write did not truncate the file: length is $RewrittenLength"
   }
-
   $LastWriteBefore = (Get-Item -LiteralPath $MetadataPath).LastWriteTimeUtc
   $TimestampMutationFailed = $false
   try {
@@ -137,10 +191,108 @@ try {
   if (Test-Path -LiteralPath $DocsPath) {
     throw "docs directory still exists after removal"
   }
+
+  # Opt-in, report-only filesystem-path benchmarks. Each owns and removes only
+  # a unique child directory below the supplied path.
+  if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT -or $env:PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT) {
+    if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT -and $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT -eq $env:PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT) {
+      throw "mounted and control benchmark outputs must be different files"
+    }
+    $BenchmarkSamples = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES } else { "30" }
+    $BenchmarkWarmups = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS } else { "3" }
+    $BenchmarkTimeoutMs = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS } else { "600000" }
+    $BenchmarkCommonArgs = @(
+      "--samples",
+      $BenchmarkSamples,
+      "--warmups",
+      $BenchmarkWarmups,
+      "--timeout-ms",
+      $BenchmarkTimeoutMs,
+      "--implementation-detail",
+      "adapter.buildTags=$AdapterBuildTags",
+      "--implementation-detail",
+      "adapter.goVersion=$GoVersion",
+      "--implementation-detail",
+      "mount.runtime=$MountRuntime",
+      "--implementation-input",
+      $Adapter,
+      "--implementation-input",
+      "packages/shared-fs/cli/lib/esm",
+      "--implementation-input",
+      "packages/shared-fs/library/lib/esm"
+    )
+  }
+
+  if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT) {
+    Assert-MountReady
+    $BenchmarkArgs = @(
+      "scripts/shared-fs-native-mount-benchmark.mjs",
+      "--mount",
+      $MountRoot,
+      "--output",
+      $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT,
+      "--target-kind",
+      "shared-fs-mount",
+      "--target-label",
+      "Shared FS mount (external WinFsp)",
+      "--mount-option",
+      "-s",
+      "--mount-option",
+      "-o",
+      "--mount-option",
+      "uid=-1,gid=-1"
+    ) + $BenchmarkCommonArgs
+    if ($env:PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG -eq "1") {
+      $BenchmarkArgs += @("--mount-option", "-d")
+    }
+    & node @BenchmarkArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "native mounted-path benchmark failed with exit code $LASTEXITCODE"
+    }
+    Assert-MountReady
+  }
+
+  if ($env:PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT) {
+    Assert-MountReady
+    if (-not (Test-Path -LiteralPath $TempRoot -PathType Container)) {
+      throw "local filesystem control root is not a directory: $TempRoot"
+    }
+    $ControlArgs = @(
+      "scripts/shared-fs-native-mount-benchmark.mjs",
+      "--mount",
+      $TempRoot,
+      "--output",
+      $env:PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT,
+      "--target-kind",
+      "local-filesystem-control",
+      "--target-label",
+      "local filesystem control (Windows)"
+    ) + $BenchmarkCommonArgs
+    & node @ControlArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "local filesystem control benchmark failed with exit code $LASTEXITCODE"
+    }
+    Assert-MountReady
+  }
 } catch {
-  Stop-MountProcess
-  Write-MountLogs
-  throw
+  $PrimaryFailure = $_
 } finally {
-  Stop-MountProcess
+  try {
+    Stop-MountProcess
+  } catch {
+    $CleanupFailure = $_
+  }
+  if ($null -ne $PrimaryFailure -or $null -ne $CleanupFailure) {
+    Write-MountLogs
+  }
+}
+
+if ($null -ne $PrimaryFailure) {
+  if ($null -ne $CleanupFailure) {
+    Write-Warning "mount cleanup also failed: $($CleanupFailure.Exception.Message)"
+  }
+  throw $PrimaryFailure
+}
+if ($null -ne $CleanupFailure) {
+  throw $CleanupFailure
 }
