@@ -21,7 +21,31 @@ const SCENARIOS = [
     "read-1048576",
     "write-1048576",
 ];
-const CORPUS = "linear-v1:(index*131+size*17+29)%256";
+const MAX_ADAPTER_WIDTH = 16;
+const MAX_PARALLELISM = 64;
+const CORPUS = "linear-handle-v2:(index*131+size*17+handle*31+29)%256";
+const EXPECTED_SCOPE = {
+    boundary: "real Go ipcClient pool to real Node createSharedFsIpcServer",
+    transport:
+        "serialized TCP loopback per retained client connection; concurrent across independent lanes",
+    backend:
+        "deterministic immediate in-memory benchmark backend with per-handle write state",
+    measurement:
+        "wall-clock concurrent batch: Go scheduling/encode/write/wait/decode plus Node decode/backend/encode/write",
+    verification:
+        "distinct paths/handles and complete read/result checks after timers; per-handle write bytes checked by untimed fsync",
+    scheduling:
+        "work item i uses retained adapter lane i modulo adapterWidth; all lanes negotiate before any warmup or sample",
+    goAllocationMeasurement:
+        "per-batch Go runtime TotalAlloc and Mallocs deltas only; setup, Node, and system allocations are excluded",
+    excludes: [
+        "FUSE/macFUSE/WinFsp",
+        "Peerbit and network replication",
+        "storage and persistence",
+        "durable acknowledgements",
+        "mount syscall overhead",
+    ],
+};
 const BENCHMARK_INPUT_FILES = [
     "scripts/shared-fs-node-go-ipc-benchmark.mjs",
     "packages/shared-fs/native/ipc.go",
@@ -31,6 +55,27 @@ const BENCHMARK_INPUT_FILES = [
     "packages/shared-fs/library/lib/esm/ipc-v2.js",
     "packages/shared-fs/library/lib/esm/ipc-byte-reader.js",
     "packages/shared-fs/library/lib/esm/mount-backend.js",
+];
+const RUNTIME_BASE_KEYS = [
+    "goVersion",
+    "goOs",
+    "goArch",
+    "goMaxProcs",
+    "goLogicalCpus",
+    "nodeVersion",
+    "nodePlatform",
+    "nodeArch",
+    "nodeUvThreadpoolSize",
+    "cpuModel",
+];
+const RUNTIME_PROVENANCE_KEYS = [
+    "osRelease",
+    "totalMemoryBytes",
+    "sharedFsPackageVersion",
+    "pnpmLockSha256",
+    "gitHeadCommit",
+    "benchmarkInputFiles",
+    "benchmarkInputsSha256",
 ];
 
 const readOptional = async (path) => {
@@ -88,21 +133,86 @@ const hashBenchmarkInputs = async () => {
     return hash.digest("hex");
 };
 
+const collectNodeGoIPCRuntimeProvenance = async () => {
+    const [lockfile, packageJson, gitHeadCommit, benchmarkInputsSha256] =
+        await Promise.all([
+            readFile(join(REPOSITORY_ROOT, "pnpm-lock.yaml")),
+            readFile(
+                join(
+                    REPOSITORY_ROOT,
+                    "packages/shared-fs/library/package.json"
+                ),
+                "utf8"
+            ),
+            readGitCommit(),
+            hashBenchmarkInputs(),
+        ]);
+    return {
+        osRelease: release(),
+        totalMemoryBytes: totalmem(),
+        sharedFsPackageVersion: JSON.parse(packageJson).version,
+        pnpmLockSha256: createHash("sha256").update(lockfile).digest("hex"),
+        gitHeadCommit: gitHeadCommit ?? null,
+        benchmarkInputFiles: [...BENCHMARK_INPUT_FILES],
+        benchmarkInputsSha256,
+    };
+};
+
+export const parseNodeGoIPCAdapterWidths = (value) => {
+    if (typeof value !== "string" || value.length === 0) {
+        throw new Error("--adapter-widths requires a comma-separated list");
+    }
+    const parts = value.split(",");
+    if (parts.length > MAX_ADAPTER_WIDTH) {
+        throw new Error(
+            `--adapter-widths accepts at most ${MAX_ADAPTER_WIDTH} widths`
+        );
+    }
+    const widths = parts.map((part) => {
+        if (!/^(?:[1-9]|1[0-6])$/u.test(part)) {
+            throw new Error(
+                `--adapter-widths entries must be integers from 1 through ${MAX_ADAPTER_WIDTH}`
+            );
+        }
+        return Number(part);
+    });
+    if (new Set(widths).size !== widths.length) {
+        throw new Error("--adapter-widths cannot contain duplicates");
+    }
+    return widths;
+};
+
 export const parseNodeGoIPCArguments = (argv) => {
-    const options = { samples: 30, warmups: 2, timeoutMs: 120_000 };
+    const options = {
+        samples: 30,
+        warmups: 2,
+        timeoutMs: 120_000,
+        adapterWidths: [1],
+        parallelism: 1,
+    };
+    const seen = new Set();
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index];
         if (argument === "--") continue;
+        if (seen.has(argument)) {
+            throw new Error(`${argument} cannot be specified more than once`);
+        }
+        seen.add(argument);
         if (argument === "--output") {
             const value = argv[++index];
             if (!value) throw new Error("--output requires a path");
             options.output = resolve(value);
             continue;
         }
+        if (argument === "--adapter-widths") {
+            options.adapterWidths = parseNodeGoIPCAdapterWidths(argv[++index]);
+            continue;
+        }
         const definitions = {
             "--samples": ["samples", 1, 1000],
             "--warmups": ["warmups", 0, 100],
             "--timeout-ms": ["timeoutMs", 1, 600_000],
+            "--parallelism": ["parallelism", 1, MAX_PARALLELISM],
         };
         const definition = definitions[argument];
         if (!definition) throw new Error(`Unknown argument: ${argument}`);
@@ -120,30 +230,54 @@ export const parseNodeGoIPCArguments = (argv) => {
         }
         options[key] = parsed;
     }
+    if (Math.max(...options.adapterWidths) > options.parallelism) {
+        throw new Error(
+            "each --adapter-widths entry must be no greater than --parallelism"
+        );
+    }
     return options;
 };
 
-const expectedByte = (size, index) => (index * 131 + size * 17 + 29) % 256;
+const expectedByte = (size, handle, index) =>
+    (index * 131 + size * 17 + handle * 31 + 29) % 256;
 
-const deterministicPayload = (size) => {
+const deterministicPayload = (size, handle) => {
     const payload = Buffer.allocUnsafe(size);
     for (let index = 0; index < size; index += 1) {
-        payload[index] = expectedByte(size, index);
+        payload[index] = expectedByte(size, handle, index);
     }
     return payload;
 };
 
-const createImmediateBackend = () => {
-    const payloads = new Map(
-        [4096, 1 << 20].map((size) => [size, deterministicPayload(size)])
-    );
-    let pendingWrite;
+const createImmediateBackend = (parallelism) => {
+    const sizes = new Set([4096, 1 << 20]);
+    const payloads = new Map();
+    for (let handle = 1; handle <= parallelism; handle += 1) {
+        for (const size of sizes) {
+            payloads.set(
+                `${handle}:${size}`,
+                deterministicPayload(size, handle)
+            );
+        }
+    }
+    const pendingWrites = new Map();
+    const validateHandle = (handle) => {
+        if (
+            !Number.isSafeInteger(handle) ||
+            handle < 1 ||
+            handle > parallelism
+        ) {
+            throw new Error("unexpected logical file handle");
+        }
+    };
     const unsupported = async () => {
         throw new Error("operation is outside the Node-Go IPC benchmark");
     };
     return {
         async getattr(path) {
-            if (path !== "/bench/file.bin") throw new Error("unexpected path");
+            const match = /^\/bench\/file-([1-9][0-9]*)\.bin$/u.exec(path);
+            const handle = Number(match?.[1]);
+            validateHandle(handle);
             return {
                 path,
                 kind: "file",
@@ -157,29 +291,36 @@ const createImmediateBackend = () => {
         readdir: unsupported,
         open: unsupported,
         async read(handle, size, offset) {
-            if (handle !== 1 || offset !== 0 || !payloads.has(size)) {
+            validateHandle(handle);
+            const payload = payloads.get(`${handle}:${size}`);
+            if (offset !== 0 || !payload) {
                 throw new Error("unexpected read request");
             }
-            return payloads.get(size);
+            return payload;
         },
         async write(handle, data, offset) {
+            validateHandle(handle);
             if (
-                handle !== 1 ||
                 offset !== 0 ||
-                !payloads.has(data.byteLength)
+                !payloads.has(`${handle}:${data.byteLength}`) ||
+                pendingWrites.has(handle)
             ) {
                 throw new Error("unexpected write request");
             }
-            pendingWrite = data;
+            pendingWrites.set(handle, data);
             return data.byteLength;
         },
         truncate: unsupported,
         flush: unsupported,
         async fsync(handle) {
-            if (handle !== 1 || !pendingWrite) {
+            validateHandle(handle);
+            const pendingWrite = pendingWrites.get(handle);
+            if (!pendingWrite) {
                 throw new Error("write verification requested without bytes");
             }
-            const expected = payloads.get(pendingWrite.byteLength);
+            const expected = payloads.get(
+                `${handle}:${pendingWrite.byteLength}`
+            );
             const actual = Buffer.isBuffer(pendingWrite)
                 ? pendingWrite
                 : Buffer.from(
@@ -192,7 +333,7 @@ const createImmediateBackend = () => {
                     "write payload did not match deterministic corpus"
                 );
             }
-            pendingWrite = undefined;
+            pendingWrites.delete(handle);
         },
         release: unsupported,
         mkdir: unsupported,
@@ -246,40 +387,280 @@ const runChild = (command, args, { cwd, env, timeoutMs }) =>
         timer.unref();
     });
 
-export const validateNodeGoIPCReport = (report, expectedSamples) => {
+const nodeGoIPCScenarioDefinitions = [
+    {
+        name: "getattr",
+        operation: "getattr",
+        direction: "metadata-response",
+        logicalBytesPerItem: 0,
+    },
+    {
+        name: "read-4096",
+        operation: "read",
+        direction: "node-to-go",
+        logicalBytesPerItem: 4096,
+    },
+    {
+        name: "write-4096",
+        operation: "write",
+        direction: "go-to-node",
+        logicalBytesPerItem: 4096,
+    },
+    {
+        name: "read-1048576",
+        operation: "read",
+        direction: "node-to-go",
+        logicalBytesPerItem: 1 << 20,
+    },
+    {
+        name: "write-1048576",
+        operation: "write",
+        direction: "go-to-node",
+        logicalBytesPerItem: 1 << 20,
+    },
+];
+
+const percentile = (sorted, fraction) =>
+    sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
+
+export const summarizeNodeGoIPCSamples = (
+    samples,
+    batchItems,
+    batchLogicalBytes
+) => {
+    const durations = samples
+        .map(({ durationNs }) => durationNs)
+        .sort((left, right) => left - right);
+    const p50Ns = percentile(durations, 0.5);
+    const summary = {
+        count: samples.length,
+        minNs: durations[0],
+        p50Ns,
+        p95Ns: percentile(durations, 0.95),
+        maxNs: durations.at(-1),
+        meanNs:
+            durations.reduce((total, duration) => total + duration, 0) /
+            durations.length,
+        meanGoAllocBytes:
+            samples.reduce((total, sample) => total + sample.goAllocBytes, 0) /
+            samples.length,
+        meanGoMallocs:
+            samples.reduce((total, sample) => total + sample.goMallocs, 0) /
+            samples.length,
+        p50AggregateItemsPerSecond: batchItems / (p50Ns / 1e9),
+    };
+    if (batchLogicalBytes > 0) {
+        summary.p50AggregateLogicalMiBPerSecond =
+            batchLogicalBytes / (1024 * 1024) / (p50Ns / 1e9);
+    }
+    return summary;
+};
+
+const sameJson = (left, right) =>
+    JSON.stringify(left) === JSON.stringify(right);
+
+const runtimeProvenanceFrom = (runtime) =>
+    Object.fromEntries(
+        RUNTIME_PROVENANCE_KEYS.map((key) => [key, runtime?.[key]])
+    );
+
+const validateNodeGoIPCRuntimeProvenance = (provenance, exactKeys) => {
     if (
-        report?.schemaVersion !== 1 ||
-        report.benchmark !== "shared-fs-node-go-ipc" ||
+        !provenance ||
+        (exactKeys &&
+            !sameJson(
+                Object.keys(provenance).sort(),
+                [...RUNTIME_PROVENANCE_KEYS].sort()
+            )) ||
+        typeof provenance.osRelease !== "string" ||
+        provenance.osRelease.length < 1 ||
+        provenance.osRelease.length > 256 ||
+        !Number.isSafeInteger(provenance.totalMemoryBytes) ||
+        provenance.totalMemoryBytes < 1 ||
+        typeof provenance.sharedFsPackageVersion !== "string" ||
+        provenance.sharedFsPackageVersion.length < 1 ||
+        provenance.sharedFsPackageVersion.length > 128 ||
+        !/^[0-9a-f]{64}$/u.test(provenance.pnpmLockSha256 ?? "") ||
+        !(
+            provenance.gitHeadCommit === null ||
+            /^[0-9a-f]{40}$/u.test(provenance.gitHeadCommit ?? "")
+        ) ||
+        !sameJson(provenance.benchmarkInputFiles, BENCHMARK_INPUT_FILES) ||
+        !/^[0-9a-f]{64}$/u.test(provenance.benchmarkInputsSha256 ?? "")
+    ) {
+        throw new Error("Node-Go IPC runtime provenance is invalid");
+    }
+};
+
+export const validateNodeGoIPCReport = (
+    report,
+    options,
+    expectedProvenance
+) => {
+    if (
+        !options ||
+        !Number.isSafeInteger(options.samples) ||
+        options.samples < 1 ||
+        options.samples > 1000 ||
+        !Number.isSafeInteger(options.warmups) ||
+        options.warmups < 0 ||
+        options.warmups > 100 ||
+        !Number.isSafeInteger(options.parallelism) ||
+        options.parallelism < 1 ||
+        options.parallelism > MAX_PARALLELISM ||
+        !Array.isArray(options.adapterWidths) ||
+        options.adapterWidths.length < 1 ||
+        options.adapterWidths.length > MAX_ADAPTER_WIDTH ||
+        new Set(options.adapterWidths).size !== options.adapterWidths.length ||
+        options.adapterWidths.some(
+            (width) =>
+                !Number.isSafeInteger(width) ||
+                width < 1 ||
+                width > MAX_ADAPTER_WIDTH ||
+                width > options.parallelism
+        )
+    ) {
+        throw new Error("Node-Go IPC expected run options are invalid");
+    }
+    if (
+        report?.schemaVersion !== 2 ||
+        report.benchmark !== "shared-fs-node-go-ipc-concurrency" ||
         report.protocol !== "binary-v2-raw-bytes" ||
         report.corpus !== CORPUS ||
-        !Array.isArray(report.scenarios)
+        !sameJson(report.scope, EXPECTED_SCOPE) ||
+        !Array.isArray(report.widths) ||
+        !sameJson(report.run?.adapterWidths, options.adapterWidths) ||
+        report.run?.workloadParallelism !== options.parallelism ||
+        report.run?.samplesPerScenario !== options.samples ||
+        report.run?.warmupsPerScenario !== options.warmups ||
+        report.run?.clock !== "Go monotonic time.Now/time.Since" ||
+        report.run?.percentiles !== "nearest-rank"
     ) {
         throw new Error("Go benchmark produced an unexpected report envelope");
     }
-    const names = report.scenarios.map(({ name }) => name);
-    if (JSON.stringify(names) !== JSON.stringify(SCENARIOS)) {
-        throw new Error(`Unexpected benchmark scenarios: ${names.join(", ")}`);
+    if (
+        !sameJson(
+            Object.keys(report.runtime ?? {}).sort(),
+            [...RUNTIME_BASE_KEYS, ...RUNTIME_PROVENANCE_KEYS].sort()
+        )
+    ) {
+        throw new Error("Go benchmark runtime fields are invalid");
     }
-    for (const scenario of report.scenarios) {
-        if (
-            !Array.isArray(scenario.samples) ||
-            scenario.samples.length !== expectedSamples ||
-            scenario.summary?.count !== expectedSamples
-        ) {
-            throw new Error(`${scenario.name} has an incomplete sample set`);
+    for (const key of [
+        "goVersion",
+        "goOs",
+        "goArch",
+        "nodeVersion",
+        "nodePlatform",
+        "nodeArch",
+        "nodeUvThreadpoolSize",
+        "cpuModel",
+    ]) {
+        if (typeof report.runtime?.[key] !== "string" || !report.runtime[key]) {
+            throw new Error(`Go benchmark runtime ${key} is invalid`);
         }
-        for (const sample of scenario.samples) {
+    }
+    const recordedProvenance = runtimeProvenanceFrom(report.runtime);
+    validateNodeGoIPCRuntimeProvenance(recordedProvenance, true);
+    if (expectedProvenance !== undefined) {
+        validateNodeGoIPCRuntimeProvenance(expectedProvenance, true);
+        for (const key of RUNTIME_PROVENANCE_KEYS) {
+            if (!sameJson(recordedProvenance[key], expectedProvenance[key])) {
+                throw new Error(
+                    `Node-Go IPC runtime provenance ${key} does not match the computed value`
+                );
+            }
+        }
+    }
+    for (const key of ["goMaxProcs", "goLogicalCpus"]) {
+        if (
+            !Number.isSafeInteger(report.runtime?.[key]) ||
+            report.runtime[key] < 1
+        ) {
+            throw new Error(`Go benchmark runtime ${key} is invalid`);
+        }
+    }
+    if (report.widths.length !== options.adapterWidths.length) {
+        throw new Error("Go benchmark produced an incomplete adapter sweep");
+    }
+    for (
+        let widthIndex = 0;
+        widthIndex < report.widths.length;
+        widthIndex += 1
+    ) {
+        const width = report.widths[widthIndex];
+        const expectedWidth = options.adapterWidths[widthIndex];
+        if (
+            width?.adapterWidth !== expectedWidth ||
+            width.workloadParallelism !== options.parallelism ||
+            !Array.isArray(width.scenarios) ||
+            !sameJson(
+                width.scenarios.map(({ name }) => name),
+                SCENARIOS
+            )
+        ) {
+            throw new Error(`adapter width ${expectedWidth} report is invalid`);
+        }
+        for (let index = 0; index < width.scenarios.length; index += 1) {
+            const scenario = width.scenarios[index];
+            const expected = nodeGoIPCScenarioDefinitions[index];
+            const batchLogicalBytes =
+                expected.logicalBytesPerItem * options.parallelism;
             if (
-                !Number.isSafeInteger(sample.durationNs) ||
-                sample.durationNs <= 0 ||
-                !Number.isSafeInteger(sample.goAllocBytes) ||
-                !Number.isSafeInteger(sample.goMallocs)
+                scenario.name !== expected.name ||
+                scenario.operation !== expected.operation ||
+                scenario.direction !== expected.direction ||
+                (scenario.logicalBytesPerItem ?? 0) !==
+                    expected.logicalBytesPerItem ||
+                scenario.batchItems !== options.parallelism ||
+                (scenario.batchLogicalBytes ?? 0) !== batchLogicalBytes ||
+                !Array.isArray(scenario.samples) ||
+                scenario.samples.length !== options.samples
             ) {
-                throw new Error(`${scenario.name} has an invalid raw sample`);
+                throw new Error(
+                    `adapter width ${expectedWidth} ${expected.name} scenario is invalid`
+                );
+            }
+            for (const sample of scenario.samples) {
+                if (
+                    !Number.isSafeInteger(sample.durationNs) ||
+                    sample.durationNs <= 0 ||
+                    !Number.isSafeInteger(sample.goAllocBytes) ||
+                    sample.goAllocBytes < 0 ||
+                    !Number.isSafeInteger(sample.goMallocs) ||
+                    sample.goMallocs < 0
+                ) {
+                    throw new Error(
+                        `adapter width ${expectedWidth} ${scenario.name} has an invalid raw sample`
+                    );
+                }
+            }
+            const expectedSummary = summarizeNodeGoIPCSamples(
+                scenario.samples,
+                options.parallelism,
+                batchLogicalBytes
+            );
+            if (!sameJson(scenario.summary, expectedSummary)) {
+                throw new Error(
+                    `adapter width ${expectedWidth} ${scenario.name} has an invalid summary`
+                );
             }
         }
     }
     return report;
+};
+
+export const finalizeNodeGoIPCReport = (report, options, provenance) => {
+    validateNodeGoIPCRuntimeProvenance(provenance, true);
+    const finalized = {
+        ...report,
+        runtime: {
+            ...report?.runtime,
+            ...provenance,
+            benchmarkInputFiles: [...provenance.benchmarkInputFiles],
+        },
+    };
+    return validateNodeGoIPCReport(finalized, options, provenance);
 };
 
 export const runNodeGoIPCBenchmark = async (options) => {
@@ -293,19 +674,7 @@ export const runNodeGoIPCBenchmark = async (options) => {
     const rawReport = join(scratch, "report.json");
     let server;
     try {
-        const [lockfile, packageJson, gitCommit, benchmarkInputsSha256] =
-            await Promise.all([
-                readFile(join(REPOSITORY_ROOT, "pnpm-lock.yaml")),
-                readFile(
-                    join(
-                        REPOSITORY_ROOT,
-                        "packages/shared-fs/library/package.json"
-                    ),
-                    "utf8"
-                ),
-                readGitCommit(),
-                hashBenchmarkInputs(),
-            ]);
+        const provenanceBefore = await collectNodeGoIPCRuntimeProvenance();
         // Compilation and Node server startup happen before all timed samples.
         await runChild("go", ["test", "-c", "-o", executable, "."], {
             cwd: NATIVE_ROOT,
@@ -316,7 +685,7 @@ export const runNodeGoIPCBenchmark = async (options) => {
             pathToFileURL(IPC_MODULE)
         );
         server = await createSharedFsIpcServer(
-            createImmediateBackend(),
+            createImmediateBackend(options.parallelism),
             "tcp://127.0.0.1:0"
         );
         await runChild(
@@ -335,35 +704,32 @@ export const runNodeGoIPCBenchmark = async (options) => {
                     PEERBIT_SHARED_FS_NODE_GO_IPC_WARMUPS: String(
                         options.warmups
                     ),
+                    PEERBIT_SHARED_FS_NODE_GO_IPC_ADAPTER_WIDTHS:
+                        options.adapterWidths.join(","),
+                    PEERBIT_SHARED_FS_NODE_GO_IPC_PARALLELISM: String(
+                        options.parallelism
+                    ),
                     PEERBIT_SHARED_FS_NODE_VERSION: process.version,
                     PEERBIT_SHARED_FS_NODE_PLATFORM: platform(),
                     PEERBIT_SHARED_FS_NODE_ARCH: arch(),
+                    PEERBIT_SHARED_FS_NODE_UV_THREADPOOL_SIZE:
+                        process.env.UV_THREADPOOL_SIZE ?? "default",
                     PEERBIT_SHARED_FS_CPU_MODEL: cpus()[0]?.model ?? "unknown",
                 },
             }
         );
-        const report = validateNodeGoIPCReport(
-            JSON.parse(await readFile(rawReport, "utf8")),
-            options.samples
-        );
-        if ((await hashBenchmarkInputs()) !== benchmarkInputsSha256) {
+        const unfinalizedReport = JSON.parse(await readFile(rawReport, "utf8"));
+        const provenanceAfter = await collectNodeGoIPCRuntimeProvenance();
+        if (!sameJson(provenanceAfter, provenanceBefore)) {
             throw new Error(
-                "Benchmark inputs changed while the run was active"
+                "Benchmark runtime provenance changed while the run was active"
             );
         }
-        report.runtime = {
-            ...report.runtime,
-            osRelease: release(),
-            totalMemoryBytes: totalmem(),
-            sharedFsPackageVersion: JSON.parse(packageJson).version,
-            pnpmLockSha256: createHash("sha256").update(lockfile).digest("hex"),
-            gitHeadCommit: gitCommit ?? null,
-            benchmarkInputFiles: BENCHMARK_INPUT_FILES,
-            benchmarkInputsSha256,
-        };
-        report.scope.goAllocationMeasurement =
-            "per-request Go runtime TotalAlloc and Mallocs deltas only; Node and system allocations are excluded";
-        return report;
+        return finalizeNodeGoIPCReport(
+            unfinalizedReport,
+            options,
+            provenanceAfter
+        );
     } finally {
         await server?.close();
         await rm(scratch, { recursive: true, force: true });

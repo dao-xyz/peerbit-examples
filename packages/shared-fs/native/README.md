@@ -95,22 +95,46 @@ run this report-only benchmark from the repository root:
 pnpm shared-fs:benchmark:node-go-ipc -- --samples 30 --output node-go-ipc.json
 ```
 
+To isolate retained-connection concurrency on one host, hold the eight-item
+workload constant while sweeping one, two, four, and eight adapter lanes:
+
+```bash
+pnpm shared-fs:benchmark:node-go-ipc -- \
+  --adapter-widths 1,2,4,8 \
+  --parallelism 8 \
+  --samples 100 \
+  --output node-go-ipc-width-sweep.json
+```
+
 It compiles the real Go `ipcClient`, starts the real Node
 `createSharedFsIpcServer` on a fresh TCP loopback port, performs untimed
-warmups, and emits raw monotonic samples plus summaries for `getattr` and 4 KiB
-and 1 MiB reads/writes. The backend is deterministic, immediate, and in-memory;
-full result and byte validation happens outside the measured request. Reported
-allocation deltas cover only the Go client process. Logical MiB/s is based on
-the logical file-byte count. The JSON also records the package version,
-lockfile SHA-256, Git HEAD when resolvable, host runtime details, and a hash
-plus path list for the exact benchmark inputs (including dirty worktree
-content) so comparisons remain attributable.
+warmups, and emits raw monotonic wall-clock batch samples plus p50/p95 summaries
+for `getattr` and 4 KiB and 1 MiB reads/writes. Widths execute sequentially in
+the requested order against the same Node process and host. Every retained lane
+negotiates binary v2 before any warmup or sample. Work item `i` uses lane
+`i % adapterWidth`, so widths below the explicit workload parallelism preserve
+per-connection serialization while allowing concurrency across lanes.
+
+The backend is deterministic, immediate, and in-memory. Concurrent work uses
+distinct logical paths and handles, with handle-specific payloads. Full result
+and read-byte validation happens outside the timer; each write is subsequently
+verified and cleared through its own handle so concurrent writes cannot share a
+racy global verification slot. Summaries report aggregate items/s for the whole
+batch and aggregate logical MiB/s for data operations. Allocation deltas cover
+only the timed Go client batch. The JSON also records both concurrency axes,
+the package version, lockfile SHA-256, Git HEAD when resolvable, host runtime
+details, raw samples, and a hash plus path list for the exact benchmark inputs
+(including dirty worktree content) so comparisons remain attributable. The
+harness recomputes that provenance after the run and validates the complete
+final report before returning, printing, or saving it.
 
 This is a reusable negotiated binary-v2 transport baseline, not filesystem
 performance. It excludes FUSE/macFUSE/WinFsp, mount syscalls, Peerbit,
 replication, storage, persistence, and durable acknowledgements. It has no
 pass/fail performance threshold. Use `--warmups`, `--samples`, and
-`--timeout-ms` to tune a bounded manual run; omit `--output` to print JSON only.
+`--timeout-ms` to tune a bounded manual run. Adapter widths are unique integers
+from 1 through 16; workload parallelism is from 1 through 64 and must be at
+least the largest width. Omit `--output` to print JSON only.
 
 ### Mounted filesystem benchmark
 
