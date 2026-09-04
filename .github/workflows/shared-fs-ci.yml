@@ -4,22 +4,32 @@ on:
     pull_request:
         paths:
             - ".github/workflows/shared-fs-ci.yml"
+            - ".github/workflows/shared-fs-native-os-smoke.yml"
+            - ".github/workflows/shared-fs-native-smoke.yml"
             - "package.json"
             - "pnpm-lock.yaml"
             - "tsconfig.json"
             - "vitest.config.ts"
             - "vitest.setup.ts"
             - "packages/shared-fs/**"
+            - "scripts/shared-fs-native-mount-benchmark*.mjs"
+            - "scripts/shared-fs-external-native-smoke.ps1"
+            - "scripts/shared-fs-external-native-smoke.sh"
     push:
         branches: [master]
         paths:
             - ".github/workflows/shared-fs-ci.yml"
+            - ".github/workflows/shared-fs-native-os-smoke.yml"
+            - ".github/workflows/shared-fs-native-smoke.yml"
             - "package.json"
             - "pnpm-lock.yaml"
             - "tsconfig.json"
             - "vitest.config.ts"
             - "vitest.setup.ts"
             - "packages/shared-fs/**"
+            - "scripts/shared-fs-native-mount-benchmark*.mjs"
+            - "scripts/shared-fs-external-native-smoke.ps1"
+            - "scripts/shared-fs-external-native-smoke.sh"
     workflow_dispatch:
 
 permissions:
@@ -79,6 +89,30 @@ jobs:
             - name: Test shared-fs CLI
               run: pnpm --filter @peerbit/shared-fs-cli run test
 
+            - name: Test mounted-path benchmark harness
+              run: node --test scripts/shared-fs-native-mount-benchmark.test.mjs
+
+            - name: Validate native smoke wrapper syntax
+              if: runner.os != 'Windows'
+              shell: bash
+              run: bash -n scripts/shared-fs-external-native-smoke.sh
+
+            - name: Validate native PowerShell smoke wrapper syntax
+              if: runner.os == 'Windows'
+              shell: powershell
+              run: |
+                  $Tokens = $null
+                  $Errors = $null
+                  [System.Management.Automation.Language.Parser]::ParseFile(
+                    (Resolve-Path "scripts/shared-fs-external-native-smoke.ps1"),
+                    [ref] $Tokens,
+                    [ref] $Errors
+                  ) | Out-Null
+                  if ($Errors.Count -gt 0) {
+                    $Errors | ForEach-Object { Write-Error $_.Message }
+                    throw "PowerShell smoke wrapper has parser errors"
+                  }
+
     format:
         name: Shared-fs formatting
         runs-on: ubuntu-latest
@@ -104,7 +138,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})

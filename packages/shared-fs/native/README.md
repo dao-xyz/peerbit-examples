@@ -112,6 +112,78 @@ replication, storage, persistence, and durable acknowledgements. It has no
 pass/fail performance threshold. Use `--warmups`, `--samples`, and
 `--timeout-ms` to tune a bounded manual run; omit `--output` to print JSON only.
 
+### Mounted filesystem benchmark
+
+The next report tier uses normal Node filesystem APIs against a path that is
+already mounted:
+
+```bash
+pnpm shared-fs:benchmark:native-mount -- \
+  --mount /path/to/mount \
+  --samples 30 \
+  --warmups 3 \
+  --output native-mount.json
+```
+
+It records raw monotonic samples and p50/p95 summaries for metadata, 4 KiB and
+1 MiB sequential reads and writes, sequential 1 KiB small-file creation,
+directory listing, and a 4 KiB in-place overwrite of a configurable base file.
+Every timed write uses `open`, complete positional writes, `fsync`, then
+`close`; the report preserves those phase timings. Deterministic contents are
+fully read and checked after each timer. The recorded `counter-mix32-v1` corpus
+uses a fixed seed and produces distinct 512 KiB regions so content-addressed
+chunk deduplication does not turn ordinary binary cases into duplicate-block
+microbenchmarks. `--overwrite-base-bytes`,
+`--small-files`, and `--readdir-entries` have conservative bounded ranges.
+
+These are warm, default-platform-cache timings. The harness neither evicts
+kernel/application caches nor requests direct I/O, and it does not instrument
+adapter callback counts; a cached read or metadata lookup might not reach a
+userspace mount callback. Runs are sequential (`concurrency: 1`) and therefore
+do not measure the adapter's global request-serialization ceiling.
+
+The harness creates and normally removes one unique child below the supplied
+path. Its workload timeout is cooperative between filesystem operations. The
+standalone command also has a hard wall-clock deadline of that timeout plus five
+seconds; it starts before provenance hashing and includes owned-directory
+cleanup, report publication, and stdout flushing. A syscall that stalls until
+that deadline causes exit status 124, and cleanup is only best-effort. Reports
+are written through an adjacent temporary file and atomically renamed. The
+harness hashes itself, the lockfile, and each repeated `--implementation-input`
+file or directory before and after the run. Directory inputs are traversed
+recursively while `.git` and `node_modules` are excluded, allowing callers to
+fingerprint built runtime trees without hashing dependency stores.
+
+The real-mount wrappers also record the adapter build tags, exact `go version`
+output, and the detected fuse3, macFUSE, or WinFsp runtime version as bounded
+implementation details. A value is recorded as `unknown` when a host cannot
+determine it; the harness does not synthesize a version.
+
+The target and its repeated `--mount-option` values are caller-supplied and are
+not independently proven by the harness. Successful local `fsync` completion
+does not prove parent-directory crash durability, remote Peerbit replication,
+or persisted delivery.
+
+The external native smoke scripts collect this report while their real mount
+is active when `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT` names an output
+file. When `PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT` is also set, the
+wrapper runs the identical workload against the runner's local temporary
+filesystem and records it as a separately labelled control. Adapter and mount
+details in that control identify its paired Shared FS comparison and are
+explicitly marked as outside the timed control path. The reports do not
+calculate or gate on performance ratios.
+
+Those real-mount and control runs default to 30 measured samples, three
+warmups, a ten-minute cooperative workload timeout, and a ten-minute-plus-five-
+second hard command deadline. The
+`PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES`,
+`PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS`, and
+`PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS` environment variables can
+select other harness-validated values. The integration is opt-in and has no
+performance threshold. The Linux native smoke workflow can collect its FUSE
+report and same-runner control directly; the native-OS workflow can collect
+paired macFUSE and WinFsp reports from its real provisioned mounts.
+
 ## POSIX metadata limits
 
 The shared model currently persists names and file content, not POSIX mode,
