@@ -1,0 +1,46 @@
+{
+    "format": "peerbit-shared-fs-merkle-v1-golden-v1",
+    "integerEncoding": "borsh-little-endian",
+    "bitmapBitOrder": "slot i is least-significant bit (i & 7) of byte (i >>> 3)",
+    "idEncoding": "unpadded-base64url",
+    "data": {
+        "bytesHex": "68656c6c6f",
+        "hashInputHex": "706565726269742d7368617265642d66732f646174612f76310500000068656c6c6f",
+        "hashHex": "87690d6812d1ed1392730bddf27f0d2423277365dccedc46a45d2a2c9ccdbf53",
+        "id": "data2:h2kNaBLR7ROScwvd8n8NJCMnc2XcztxGpF0qLJzNv1M"
+    },
+    "tree": {
+        "level": 1,
+        "slots": [0, 1],
+        "children": [
+            {
+                "fillByte": 97,
+                "length": 65536,
+                "hashHex": "afc52f48509377cfa5ccdb3bc2d4b361001e4560e2020651527cc86aa20034b1"
+            },
+            {
+                "fillByte": 98,
+                "length": 1,
+                "hashHex": "0d17109a74f19a1c70c16aa924331c49d914bda781d7cea4f2816d422612e355"
+            }
+        ],
+        "hashInputHex": "706565726269742d7368617265642d66732f747265652f763101030000000000000000000000000000000000000000000000000000000000000002000000afc52f48509377cfa5ccdb3bc2d4b361001e4560e2020651527cc86aa20034b10d17109a74f19a1c70c16aa924331c49d914bda781d7cea4f2816d422612e355",
+        "hashHex": "f82bd7a98d4bc1427715291e13d2033d5607daee06ddd60ec0c33d450da637ad",
+        "id": "tree2:-CvXqY1LwUJ3FSkeE9IDPVYH2u4G3dYOwMM9RQ2mN60"
+    },
+    "presentRoot": {
+        "leafSize": 65536,
+        "size": "65537",
+        "rootLevel": 1,
+        "rootHashHex": "f82bd7a98d4bc1427715291e13d2033d5607daee06ddd60ec0c33d450da637ad",
+        "hashInputHex": "706565726269742d7368617265642d66732f66696c652f76310000010001000100000000000101f82bd7a98d4bc1427715291e13d2033d5607daee06ddd60ec0c33d450da637ad",
+        "hashHex": "9a132d11a3dd776ac23c7a5aa16ad3941a92bad382e9253247292f0c80cd6334"
+    },
+    "sparseRoot": {
+        "leafSize": 65536,
+        "size": "1048577",
+        "rootLevel": 1,
+        "hashInputHex": "706565726269742d7368617265642d66732f66696c652f76310000010001001000000000000100",
+        "hashHex": "f2aed494b8472af50c5ae32dc19ec7b4b2ef215c293760af0b4189be89586723"
+    }
+}

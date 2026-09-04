@@ -448,6 +448,16 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
   src/__tests__/mount-backend-open-hash.bench.test.ts --reporter=verbose
 ```
 
+### Experimental Merkle v1 codecs
+
+The package exports generation-isolated `MerkleDataBlockV1` and
+`MerkleTreeBlockV1` codecs plus canonical hash, bitmap, root, and validation
+helpers. Their language-neutral vectors are checked by both TypeScript/Borsh
+and Go. These APIs establish the byte contract for a future bounded
+random-write generation only: the current v9 filesystem does not store or
+accept these blocks, and using the helpers does not upgrade an address or make
+patch commits O(delta).
+
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
