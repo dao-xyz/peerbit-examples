@@ -586,7 +586,16 @@ peerbit-fs status
 `runSharedFsBenchmark(fs)` and `peerbit-fs benchmark` run a simple baseline
 workload: one large file upload/download plus a many-small-files write/list/read
 pass. This is meant to track regressions and guide future agent/code workspace
-work; v0 does not optimize the small-file workload yet.
+work; v0 does not optimize the small-file workload yet. Every run uses a fresh
+collision-resistant corpus seed, printed in human output and included as `seed`
+in JSON results, so repeated runs do not silently benchmark content-addressed
+deduplication. Pass that value back with `--seed <seed>` or the library's `seed`
+option to reproduce the exact bytes. Payload generation and byte verification
+remain outside the high-resolution I/O timings; every returned byte is still
+verified. Because older benchmark versions included some of that harness work,
+establish a fresh baseline before comparing performance across this timing
+boundary; an apparent jump at the boundary is not by itself a filesystem
+speedup.
 
 The manual shared-open benchmark runs with:
 

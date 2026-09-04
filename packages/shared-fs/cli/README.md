@@ -31,7 +31,12 @@ peerbit-fs prepare-disposal <address>
 
 `benchmark` writes and reads one large file plus a configurable many-small-files
 workload. It is a baseline for tracking regressions, not a claim that v0 is
-optimized for code workspaces.
+optimized for code workspaces. It generates a fresh byte corpus by default and
+prints its seed; use `--seed <seed>` to reproduce those exact bytes. This avoids
+silently measuring content-addressed deduplication on repeated runs. JSON output
+also includes the seed. Establish a fresh baseline when adopting these I/O-only
+timings: older results included corpus generation or verification work and are
+not directly comparable.
 
 `status` prints the current native mount adapter, whether its prerequisites are
 available on the host, and any missing pieces before optionally opening an

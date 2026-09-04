@@ -1258,6 +1258,7 @@ describe("shared fs library", () => {
     it("runs the baseline benchmark workload", async () => {
         const result = await runSharedFsBenchmark(fs, {
             root: "/benchmark",
+            seed: "shared-fs-integration-test",
             largeFileSize: 1024,
             smallFileCount: 3,
             smallFileSize: 16,
@@ -1265,8 +1266,10 @@ describe("shared fs library", () => {
         });
 
         expect(result.largeFile.bytes).toBe(1024);
+        expect(result.seed).toBe("shared-fs-integration-test");
         expect(result.smallFiles.count).toBe(3);
         expect(result.smallFiles.bytesPerFile).toBe(16);
+        expect(await fs.stat("/benchmark")).toBeUndefined();
     });
 
     it("keeps filesystem metadata reads local-only", async () => {
