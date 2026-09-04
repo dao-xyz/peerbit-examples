@@ -5,11 +5,12 @@ coordinator in the v9 mount backend yet.
 
 ## Goal
 
-Small independent mounted writes currently cross the document/log persistence
-path once per file. A coordinator could collect already-fenced snapshots from
-different file states and use one bounded lower-level batch append. The target
-is lower aggregate `fsync`/`flush` latency without changing what a successful
-fence means.
+Small independent mounted writes currently commit each file separately. For a
+novel one-chunk file, each commit makes separate chunk and version document
+calls. A coordinator could collect already-fenced snapshots from different file
+states and use one bounded lower-level batch append. The target is lower
+aggregate `fsync`/`flush` latency without changing what a successful fence
+means.
 
 The coordinator must remain opt-in until native Ubuntu, macOS, and Windows
 crash tests and mounted benchmarks justify enabling it. Suggested initial
@@ -76,7 +77,13 @@ type MountWriteBatchOutcome =
           nodeId: string;
           contentHash: string;
       }
-    | { type: "rejected"; error: unknown; definitelyCommitted: false };
+    | { type: "rejected"; error: unknown; definitelyCommitted: false }
+    | {
+          type: "unknown";
+          error: unknown;
+          operationId: string;
+          definitelyCommitted: "unknown";
+      };
 ```
 
 The actual API should separate prepare from commit, or otherwise guarantee
@@ -95,9 +102,9 @@ The target must:
    publication;
 7. batch only the surviving version documents through the existing document
    batch append;
-8. return a definite per-operation outcome, using stable prepared ids to
-   reconcile or replay the exact document after an ambiguous lower-layer
-   error; and
+8. return a definite per-operation outcome when commit evidence permits, or
+   an explicit `unknown` outcome that retains the stable prepared id for
+   reconciliation or exact replay after an ambiguous lower-layer error; and
 9. enter the existing foreground-mutation critical tail before publication so
    close/reopen joins the entire batch.
 
@@ -168,6 +175,9 @@ ceiling. It reports document `put`/`putMany` calls, completion-signal shape,
 node/base guard coverage, version growth, conflicts, and wall time. The ceiling
 is evidence about possible append amortization only; it is not a candidate
 implementation and must never be reported as equivalent filesystem semantics.
+The exact timer covers concurrent `fsync` calls after untimed in-memory mount
+writes; the ceiling timer covers the complete direct `writeBatch` call because
+that API has no separate prepare/fence boundary.
 
 For novel one-chunk files, the structural report is especially important:
 today's exact path issues two document `put` calls per file (chunk, then

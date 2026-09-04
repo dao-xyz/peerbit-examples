@@ -458,7 +458,10 @@ snapshot, per-fence completion, or localized failure contract and is not a
 candidate mount implementation. The harness uses a fresh directory-backed
 Peerbit store per mode, but excludes FUSE/macFUSE/WinFsp, the native adapter,
 network replication, and persisted remote receipts. There are no timing
-assertions. The safety requirements for a future opt-in coordinator are recorded in
+assertions. For the exact mode, timing begins after open and in-memory write and
+covers concurrent `fsync` calls; for the ceiling mode, it covers the complete
+direct `writeBatch` call because that API has no separate prepare/fence
+boundary. The safety requirements for a future opt-in coordinator are recorded in
 [`FSYNC_COMMIT_COORDINATOR.md`](https://github.com/dao-xyz/peerbit-examples/blob/master/packages/shared-fs/FSYNC_COMMIT_COORDINATOR.md).
 
 ```bash

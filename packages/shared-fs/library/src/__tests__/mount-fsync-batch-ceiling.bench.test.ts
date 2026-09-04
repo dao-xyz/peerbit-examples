@@ -32,6 +32,8 @@ type Sample = {
     durationMs: number;
     writeFileCalls: number;
     writeBatchCalls: number;
+    exactExpectedNodeGuards: number;
+    explicitOpenedBaseBindings: number;
     document: DocumentCounters;
     newVersions: number;
     conflictHeads: number;
@@ -74,7 +76,9 @@ const payload = (turn: number, index: number) => {
 
 const targetFor = (
     fs: SharedFsHandle,
-    onWriteFile: () => void
+    onWriteFile: (
+        options: Parameters<SharedFsMountBackendTarget["writeFile"]>[2]
+    ) => void
 ): SharedFsMountBackendTarget => ({
     mountWriteSemantics: () => fs.mountWriteSemantics(),
     mountReadSemantics: () => fs.mountReadSemantics(),
@@ -83,7 +87,7 @@ const targetFor = (
     readFile: (path) => fs.readFile(path),
     readVersion: (path, versionId) => fs.readVersion(path, versionId),
     writeFile: (path, source, options) => {
-        onWriteFile();
+        onWriteFile(options);
         return fs.writeFile(path, source, options);
     },
     mkdir: (path) => fs.mkdir(path),
@@ -173,8 +177,21 @@ const runMode = async (
     const instrumentation = instrumentDocuments(fs);
     let writeFileCalls = 0;
     let writeBatchCalls = 0;
+    let exactExpectedNodeGuards = 0;
+    let explicitOpenedBaseBindings = 0;
     const backend = createSharedFsMountBackend(
-        targetFor(fs, () => writeFileCalls++),
+        targetFor(fs, (options) => {
+            writeFileCalls++;
+            if (typeof options?.expectedNodeId === "string") {
+                exactExpectedNodeGuards++;
+            }
+            if (
+                options?.baseVersionIds?.length === 1 &&
+                typeof options.baseVersionIds[0] === "string"
+            ) {
+                explicitOpenedBaseBindings++;
+            }
+        }),
         { writeFileInput: "immutable-borrowed" }
     );
     const samples: Sample[] = [];
@@ -186,6 +203,8 @@ const runMode = async (
             );
             writeFileCalls = 0;
             writeBatchCalls = 0;
+            exactExpectedNodeGuards = 0;
+            explicitOpenedBaseBindings = 0;
             instrumentation.reset();
 
             let started: bigint;
@@ -238,6 +257,8 @@ const runMode = async (
                 durationMs,
                 writeFileCalls,
                 writeBatchCalls,
+                exactExpectedNodeGuards,
+                explicitOpenedBaseBindings,
                 document: { ...instrumentation.counters },
                 ...verified,
             };
@@ -246,10 +267,14 @@ const runMode = async (
             if (mode === "exact-mounted-fences") {
                 expect(sample.writeFileCalls).toBe(itemCount);
                 expect(sample.writeBatchCalls).toBe(0);
+                expect(sample.exactExpectedNodeGuards).toBe(itemCount);
+                expect(sample.explicitOpenedBaseBindings).toBe(itemCount);
                 expect(sample.document.putManyCalls).toBe(0);
             } else {
                 expect(sample.writeFileCalls).toBe(0);
                 expect(sample.writeBatchCalls).toBe(1);
+                expect(sample.exactExpectedNodeGuards).toBe(0);
+                expect(sample.explicitOpenedBaseBindings).toBe(0);
                 expect(sample.document.putManyCalls).toBe(1);
                 expect(sample.document.putManyItems).toBe(itemCount);
             }
@@ -264,6 +289,9 @@ const runMode = async (
     }
     const durations = samples.map((sample) => sample.durationMs);
     const p50Ms = percentile(durations, 0.5);
+    const minimumObserved = (
+        field: "exactExpectedNodeGuards" | "explicitOpenedBaseBindings"
+    ) => Math.min(...samples.map((sample) => Number(sample[field])));
     return {
         mode,
         itemCount,
@@ -277,10 +305,10 @@ const runMode = async (
         semantics: {
             independentCompletionSignals:
                 mode === "exact-mounted-fences" ? itemCount : 1,
-            exactExpectedNodeGuards:
-                mode === "exact-mounted-fences" ? itemCount : 0,
-            explicitOpenedBaseBindings:
-                mode === "exact-mounted-fences" ? itemCount : 0,
+            exactExpectedNodeGuards: minimumObserved("exactExpectedNodeGuards"),
+            explicitOpenedBaseBindings: minimumObserved(
+                "explicitOpenedBaseBindings"
+            ),
             equivalentToMountedFsync: mode === "exact-mounted-fences",
         },
     };
@@ -353,6 +381,12 @@ manualDescribe("mounted fsync batch ceiling benchmark (manual)", () => {
                 scope: {
                     includes:
                         "mount-backend exact fence logic, SharedFS hashing/chunk work, and a directory-backed Peerbit local store",
+                    timedOperations: {
+                        exactMountedFences:
+                            "concurrent fsync calls after untimed open and in-memory mount writes",
+                        unsafeWriteBatchCeiling:
+                            "the complete direct writeBatch call, which has no separate prepare/fence boundary",
+                    },
                     excludes: [
                         "FUSE, macFUSE, WinFsp, and native adapter syscalls",
                         "network replication and persisted remote receipts",
