@@ -448,6 +448,25 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
   src/__tests__/mount-backend-open-hash.bench.test.ts --reporter=verbose
 ```
 
+The mounted-fsync batch-ceiling benchmark measures the current exact,
+independent mount fences beside direct `writeBatch` over the same existing
+4 KiB files. It reports document `put`/`putMany` structure, version and conflict
+counts, independent completion signals, expected-node/base guard coverage, and
+wall time for 2, 8, and 32 files. The `writeBatch` side is deliberately labeled
+an **unsafe performance ceiling**: it does not preserve the opened node/base
+snapshot, per-fence completion, or localized failure contract and is not a
+candidate mount implementation. The harness uses a fresh directory-backed
+Peerbit store per mode, but excludes FUSE/macFUSE/WinFsp, the native adapter,
+network replication, and persisted remote receipts. There are no timing
+assertions. The safety requirements for a future opt-in coordinator are recorded in
+[`FSYNC_COMMIT_COORDINATOR.md`](https://github.com/dao-xyz/peerbit-examples/blob/master/packages/shared-fs/FSYNC_COMMIT_COORDINATOR.md).
+
+```bash
+PEERBIT_SHARED_FS_FSYNC_BATCH_CEILING_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/mount-fsync-batch-ceiling.bench.test.ts --reporter=verbose
+```
+
 ### Experimental Merkle v1 codecs and exact reads
 
 The package exports generation-isolated `MerkleDataBlockV1` and
