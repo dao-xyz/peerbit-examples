@@ -30,7 +30,7 @@
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
-        "build": "pnpm run clean && tsc -p tsconfig.json",
+        "build": "pnpm run clean && tsc -p tsconfig.json --removeComments true && tsc -p tsconfig.json --emitDeclarationOnly true --removeComments false",
         "test": "vitest run",
         "test:watch": "vitest"
     },
