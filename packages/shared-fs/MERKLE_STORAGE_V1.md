@@ -1,8 +1,9 @@
 # Merkle storage v1 proposal
 
-Status: design proposal with only the golden codec/validation slice
-implemented. The complete storage format, store API, migration, and upstream
-capability are not implemented.
+Status: design proposal with the golden codec/validation slice and an isolated
+read-only exact-range session implemented. The complete storage format,
+Documents integration, write path, mount integration, migration, lifecycle
+leases, and upstream capability are not implemented.
 
 This document specifies the next shared-fs content generation needed for
 bounded-memory, block-granular random writes. It follows the fixed-layout lazy
@@ -238,6 +239,30 @@ Security posture:
 - A trusted writer can still consume its authorized share of storage. Merkle
   validation is not a quota system; deployment quotas remain an operational
   requirement.
+
+## Implemented read-only session
+
+`MerkleReadSessionV1` is the opt-in second implementation slice. It accepts a
+copied root descriptor and an abstract asynchronous source of decoded data and
+tree blocks. `read(offset, length, { signal })` walks only the intersecting
+authenticated tree paths, clips at the signed logical EOF, and returns absent
+authenticated children as zeros. The single-read allocation, verified tree
+LRU, and verified data LRU all have explicit bounds. The configurable 64 MiB
+single-read default is also subject to a fixed 256 MiB ceiling. `stats()`
+exposes structural fetch, verification, traversal, cache, coalescing, and
+authenticated zero counters; it is not a runtime performance measurement.
+
+Every loader result is copied before validation or caching. A referenced block
+that is absent, corrupt, the wrong type or level, outside logical EOF, or the
+wrong leaf length fails with `EIO`. Concurrent reads coalesce the same source
+fetch without allowing one caller's abort to cancel other waiters. The final
+waiter's abort cancels that fetch, and `close()` promptly cancels every pending
+read and prevents late source results from entering either cache.
+
+This utility is deliberately detached from the current v9 `Documents` store,
+filesystem address, mount, root lease, GC, repair, and write path. Supplying a
+source does not establish authorization, availability, or durability. Those
+remain requirements for the future generation-specific integration.
 
 ## Patch publication
 
@@ -482,8 +507,10 @@ the complexity change.
 
 ## Suggested implementation slices
 
-1. Golden-vector codecs, self-certifying blocks, and root verification.
-2. Read-only exact tree session and bounded caches.
+1. Golden-vector codecs, self-certifying blocks, and root verification
+   (implemented, generation-isolated).
+2. Read-only exact tree session and bounded caches (standalone implementation
+   complete; store, lease, and lifecycle integration pending).
 3. Direct library patch/truncate commit with work counters and crash tests.
 4. Sparse mount overlay and generation-bounded `fsync`/release integration.
 5. Mark/reverse-edge Guard D and two-run tree/data GC.
