@@ -158,6 +158,11 @@ export type SharedFsMountBackend = {
     getattr(path: string): Promise<SharedFsStat>;
     readdir(path: string): Promise<SharedFsDirent[]>;
     open(path: string, flags?: SharedFsOpenFlags): Promise<number>;
+    /**
+     * Returned bytes transfer to the caller. A backend must not later mutate
+     * or reuse that view; binary IPC may retain it until the socket write
+     * completes rather than adding a file-sized copy.
+     */
     read(handle: number, size: number, offset: number): Promise<Uint8Array>;
     write(handle: number, data: Uint8Array, offset: number): Promise<number>;
     /**

@@ -66,17 +66,91 @@ func (s *ipcEchoServer) serveConnection(conn net.Conn) {
 	defer s.connections.Delete(conn)
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
+	firstLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		return
+	}
+	var firstRequest ipcRequest
+	if err := json.Unmarshal(firstLine, &firstRequest); err != nil {
+		return
+	}
+	if firstRequest.Op == ipcNegotiateOperation {
+		var negotiation ipcNegotiationRequest
+		if err := json.Unmarshal(firstLine, &negotiation); err != nil || len(negotiation.Args) != 1 {
+			return
+		}
+		offer := negotiation.Args[0]
+		limits := ipcV2Limits{
+			maxRequestFrameBytes:  offer.MaxRequestFrameBytes,
+			maxResponseFrameBytes: offer.MaxResponseFrameBytes,
+			maxMetadataBytes:      defaultIPCMaxMetadataBytes,
+		}
+		if limits.maxMetadataBytes > limits.maxRequestFrameBytes {
+			limits.maxMetadataBytes = limits.maxRequestFrameBytes
+		}
+		if limits.maxMetadataBytes > limits.maxResponseFrameBytes {
+			limits.maxMetadataBytes = limits.maxResponseFrameBytes
+		}
+		if err := json.NewEncoder(conn).Encode(map[string]interface{}{
+			"id": negotiation.ID, "ok": true,
+			"result": map[string]interface{}{
+				"protocol": ipcProtocolName, "version": 2, "nonce": offer.Nonce,
+				"maxRequestFrameBytes": limits.maxRequestFrameBytes, "maxResponseFrameBytes": limits.maxResponseFrameBytes,
+				"maxMetadataBytes": limits.maxMetadataBytes,
+			},
+		}); err != nil {
+			return
+		}
+		for {
+			frame, err := readIPCV2Frame(reader, ipcV2RequestKind, limits.maxRequestFrameBytes, limits.maxMetadataBytes)
+			if err != nil {
+				return
+			}
+			var request ipcRequest
+			if err := json.Unmarshal(frame.metadata, &request); err != nil {
+				return
+			}
+			if request.Op == "write" {
+				if len(request.Args) != 3 {
+					return
+				}
+				request.Args[1] = frame.body
+			} else if len(frame.body) != 0 {
+				return
+			}
+			response := s.response(request)
+			responseBody := []byte(nil)
+			if response.OK && request.Op == "read" {
+				decoded, ok := response.Result.([]byte)
+				if !ok {
+					decoded, ok = decodeValue(response.Result).([]byte)
+					if !ok {
+						return
+					}
+				}
+				response.Result = map[string]interface{}{"$bytes": nil}
+				responseBody = decoded
+			}
+			// Encode against the protocol maxima so limit tests can deliberately
+			// exercise a peer that violates the smaller negotiated response cap.
+			encoded, err := encodeIPCV2Frame(ipcV2ResponseKind, response, responseBody, defaultIPCMaxFrameBytes, defaultIPCMaxMetadataBytes)
+			if err != nil || writeIPCV2Frame(conn, encoded) != nil {
+				return
+			}
+		}
+	}
+
 	encoder := json.NewEncoder(conn)
+	request := firstRequest
 	for {
+		if err := encoder.Encode(s.response(request)); err != nil {
+			return
+		}
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			return
 		}
-		var request ipcRequest
 		if err := json.Unmarshal(line, &request); err != nil {
-			return
-		}
-		if err := encoder.Encode(s.response(request)); err != nil {
 			return
 		}
 	}
@@ -94,35 +168,43 @@ func (s *ipcEchoServer) close() {
 	})
 }
 
-func TestIPCClientRoundTrip(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+func acknowledgeTestIPCV2(conn net.Conn) (*bufio.Reader, ipcV2Limits, error) {
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
 	if err != nil {
-		t.Fatal(err)
+		return nil, ipcV2Limits{}, err
 	}
-	defer listener.Close()
+	var negotiation ipcNegotiationRequest
+	if err := json.Unmarshal(line, &negotiation); err != nil || len(negotiation.Args) != 1 || negotiation.Op != ipcNegotiateOperation {
+		return nil, ipcV2Limits{}, errors.New("expected IPC v2 negotiation")
+	}
+	offer := negotiation.Args[0]
+	limits := ipcV2Limits{
+		maxRequestFrameBytes: offer.MaxRequestFrameBytes, maxResponseFrameBytes: offer.MaxResponseFrameBytes,
+		maxMetadataBytes: defaultIPCMaxMetadataBytes,
+	}
+	if limits.maxMetadataBytes > limits.maxRequestFrameBytes {
+		limits.maxMetadataBytes = limits.maxRequestFrameBytes
+	}
+	if limits.maxMetadataBytes > limits.maxResponseFrameBytes {
+		limits.maxMetadataBytes = limits.maxResponseFrameBytes
+	}
+	err = json.NewEncoder(conn).Encode(map[string]interface{}{
+		"id": negotiation.ID, "ok": true,
+		"result": map[string]interface{}{
+			"protocol": ipcProtocolName, "version": 2, "nonce": offer.Nonce,
+			"maxRequestFrameBytes": limits.maxRequestFrameBytes, "maxResponseFrameBytes": limits.maxResponseFrameBytes,
+			"maxMetadataBytes": limits.maxMetadataBytes,
+		},
+	})
+	return reader, limits, err
+}
 
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		line, err := bufio.NewReader(conn).ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var request ipcRequest
-		if err := json.Unmarshal(line, &request); err != nil {
-			return
-		}
-		_ = json.NewEncoder(conn).Encode(ipcResponse{
-			ID:     request.ID,
-			OK:     true,
-			Result: map[string]interface{}{"$bytes": "aGVsbG8="},
-		})
-	}()
-
-	client := newIPCClient("tcp://" + listener.Addr().String())
+func TestIPCClientRoundTrip(t *testing.T) {
+	server := startIPCEchoServer(t, func(ipcRequest) interface{} {
+		return encodeValue([]byte("hello"))
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
 	result, err := client.request("read", uint64(1), 5, 0)
 	if err != nil {
@@ -138,39 +220,19 @@ func TestIPCClientRoundTrip(t *testing.T) {
 }
 
 func TestIPCClientPreservesRetryableErrorCode(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		line, err := bufio.NewReader(conn).ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var request ipcRequest
-		if err := json.Unmarshal(line, &request); err != nil {
-			return
-		}
-		_ = json.NewEncoder(conn).Encode(ipcResponse{
+	server := startIPCResponseServer(t, func(request ipcRequest) ipcResponse {
+		return ipcResponse{
 			ID: request.ID,
 			OK: false,
 			Error: &ipcErrorObject{
 				Code:    "EAGAIN",
 				Message: "initial view is still settling",
 			},
-		})
-	}()
-
-	client := newIPCClient("tcp://" + listener.Addr().String())
+		}
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
 	defer client.close()
-	_, err = client.request("open", "/file.txt", 2)
+	_, err := client.request("open", "/file.txt", 2)
 	if err == nil {
 		t.Fatal("expected IPC request to fail")
 	}
@@ -305,7 +367,11 @@ func TestIPCClientCloseInterruptsStalledRequest(t *testing.T) {
 	serverDone := make(chan struct{})
 	go func() {
 		defer close(serverDone)
-		if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
+		reader, limits, err := acknowledgeTestIPCV2(conn)
+		if err != nil {
+			return
+		}
+		if _, err := readIPCV2Frame(reader, ipcV2RequestKind, limits.maxRequestFrameBytes, limits.maxMetadataBytes); err != nil {
 			return
 		}
 		close(requestReceived)
@@ -364,24 +430,31 @@ func TestIPCClientReconnectsOnlyAfterFailedRequest(t *testing.T) {
 				return
 			}
 			accepted.Add(1)
-			line, err := bufio.NewReader(conn).ReadBytes('\n')
+			reader, limits, err := acknowledgeTestIPCV2(conn)
+			if err != nil {
+				_ = conn.Close()
+				serverDone <- err
+				return
+			}
+			frame, err := readIPCV2Frame(reader, ipcV2RequestKind, limits.maxRequestFrameBytes, limits.maxMetadataBytes)
 			if err != nil {
 				_ = conn.Close()
 				serverDone <- err
 				return
 			}
 			var request ipcRequest
-			if err := json.Unmarshal(line, &request); err != nil {
+			if err := json.Unmarshal(frame.metadata, &request); err != nil {
 				_ = conn.Close()
 				serverDone <- err
 				return
 			}
 			handled.Add(1)
-			if err := json.NewEncoder(conn).Encode(ipcResponse{
+			response, err := encodeIPCV2Frame(ipcV2ResponseKind, ipcResponse{
 				ID:     request.ID,
 				OK:     true,
 				Result: float64(connectionIndex + 1),
-			}); err != nil {
+			}, nil, limits.maxResponseFrameBytes, limits.maxMetadataBytes)
+			if err != nil || writeIPCV2Frame(conn, response) != nil {
 				_ = conn.Close()
 				serverDone <- err
 				return
@@ -423,24 +496,24 @@ func TestIPCClientReconnectsOnlyAfterFailedRequest(t *testing.T) {
 	}
 }
 
-func TestIPCClientBoundsBase64ExpandedRequestsBeforeConnecting(t *testing.T) {
+func TestIPCClientBoundsV2RawRequests(t *testing.T) {
 	server := startIPCEchoServer(t, func(ipcRequest) interface{} {
 		return float64(13)
 	})
-	data := []byte("bounded bytes")
+	data := make([]byte, 1024)
 	args := []interface{}{uint64(7), data, int64(0)}
-	payload, err := json.Marshal(ipcRequest{
-		ID:   1,
-		Op:   "write",
-		Args: encodeValue(args).([]interface{}),
-	})
+	frame, err := encodeIPCV2Request(
+		ipcRequest{ID: 1, Op: "write"}, args,
+		defaultIPCMaxFrameBytes, defaultIPCMaxMetadataBytes,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	frameBytes := len(frame.metadata) + len(frame.body)
 
 	exact := newIPCClient(
 		"tcp://"+server.listener.Addr().String(),
-		ipcClientOptions{maxRequestFrameBytes: len(payload)},
+		ipcClientOptions{maxRequestFrameBytes: frameBytes},
 	)
 	defer exact.close()
 	if result, err := exact.request("write", args...); err != nil || result != float64(13) {
@@ -449,14 +522,14 @@ func TestIPCClientBoundsBase64ExpandedRequestsBeforeConnecting(t *testing.T) {
 
 	undersized := newIPCClient(
 		"tcp://"+server.listener.Addr().String(),
-		ipcClientOptions{maxRequestFrameBytes: len(payload) - 1},
+		ipcClientOptions{maxRequestFrameBytes: frameBytes - 1},
 	)
 	defer undersized.close()
 	if _, err := undersized.request("write", args...); !errors.Is(err, errIPCFrameTooLarge) {
 		t.Fatalf("oversized request returned %v, want errIPCFrameTooLarge", err)
 	}
-	if got := server.accepted.Load(); got != 1 {
-		t.Fatalf("oversized request reached the server; accepted %d connections", got)
+	if got := server.accepted.Load(); got != 2 {
+		t.Fatalf("expected one negotiated connection per client, accepted %d", got)
 	}
 }
 

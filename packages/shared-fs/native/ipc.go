@@ -30,13 +30,15 @@ type ipcClient struct {
 	maxResponseFrameBytes int
 
 	// cgofuse currently invokes this client from a serialized mount, but keep
-	// requests serialized so a future concurrent mount cannot interleave JSON
+	// requests serialized so a future concurrent mount cannot interleave wire
 	// frames. Transport state has a separate lock: close must be able to close
 	// the socket and interrupt a request blocked waiting for its response.
 	requestMu   sync.Mutex
 	transportMu sync.Mutex
 	conn        net.Conn
 	reader      *bufio.Reader
+	protocol    ipcWireProtocol
+	v2Limits    ipcV2Limits
 	closed      bool
 	requestJSON bytes.Buffer
 }
@@ -101,12 +103,38 @@ func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error)
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
 
-	id := atomic.AddUint64(&c.nextID, 1)
-	request := ipcRequest{
-		ID:   id,
-		Op:   op,
-		Args: encodeValue(args).([]interface{}),
+	conn, reader, protocol, v2Limits, err := c.connect()
+	if err != nil {
+		return nil, err
 	}
+
+	id := c.nextRequestID()
+	request := ipcRequest{ID: id, Op: op, Args: args}
+	if protocol == ipcWireProtocolV2 {
+		frame, err := encodeIPCV2Request(request, args, v2Limits.maxRequestFrameBytes, v2Limits.maxMetadataBytes)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeIPCV2Frame(conn, frame); err != nil {
+			c.discard(conn)
+			return nil, err
+		}
+		responseFrame, err := readIPCV2Frame(reader, ipcV2ResponseKind, v2Limits.maxResponseFrameBytes, v2Limits.maxMetadataBytes)
+		if err != nil {
+			c.discard(conn)
+			return nil, err
+		}
+		result, err := parseIPCV2Response(responseFrame, id, op)
+		if err != nil {
+			if _, backendError := err.(*ipcError); !backendError {
+				c.discard(conn)
+			}
+			return nil, err
+		}
+		return result, nil
+	}
+
+	request.Args = encodeValue(args).([]interface{})
 	c.requestJSON.Reset()
 	if err := json.NewEncoder(&c.requestJSON).Encode(request); err != nil {
 		return nil, err
@@ -119,16 +147,11 @@ func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error)
 	if payloadBytes > c.maxRequestFrameBytes {
 		return nil, fmt.Errorf("%w: request is %d bytes, limit is %d", errIPCFrameTooLarge, payloadBytes, c.maxRequestFrameBytes)
 	}
-	conn, reader, err := c.connect()
-	if err != nil {
-		return nil, err
-	}
 	frames := net.Buffers{frame}
 	if _, err := frames.WriteTo(conn); err != nil {
 		c.discard(conn)
 		return nil, err
 	}
-
 	line, err := readBoundedJSONLine(reader, c.maxResponseFrameBytes)
 	if err != nil {
 		c.discard(conn)
@@ -152,40 +175,114 @@ func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error)
 	return decodeValue(response.Result), nil
 }
 
-func (c *ipcClient) connect() (net.Conn, *bufio.Reader, error) {
+func (c *ipcClient) nextRequestID() uint64 {
+	if atomic.LoadUint64(&c.nextID) >= maxIPCJSONSafeInteger {
+		atomic.StoreUint64(&c.nextID, 0)
+	}
+	return atomic.AddUint64(&c.nextID, 1)
+}
+
+func (c *ipcClient) connect() (net.Conn, *bufio.Reader, ipcWireProtocol, ipcV2Limits, error) {
 	c.transportMu.Lock()
 	if c.closed {
 		c.transportMu.Unlock()
-		return nil, nil, net.ErrClosed
+		return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, net.ErrClosed
 	}
 	if c.conn != nil {
-		conn, reader := c.conn, c.reader
+		conn, reader, protocol, limits := c.conn, c.reader, c.protocol, c.v2Limits
 		c.transportMu.Unlock()
-		return conn, reader, nil
+		return conn, reader, protocol, limits, nil
 	}
 	c.transportMu.Unlock()
 
 	conn, err := dialEndpoint(c.endpoint)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, err
 	}
 	reader := bufio.NewReader(conn)
+	if err := c.installConnection(conn, reader); err != nil {
+		return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, err
+	}
+	offerLimits := ipcV2Limits{
+		maxRequestFrameBytes: c.maxRequestFrameBytes, maxResponseFrameBytes: c.maxResponseFrameBytes,
+		maxMetadataBytes: defaultIPCMaxMetadataBytes,
+	}
+	maxV2FrameBytes := uint64(^uint32(0))
+	if uint64(offerLimits.maxRequestFrameBytes) > maxV2FrameBytes {
+		offerLimits.maxRequestFrameBytes = int(maxV2FrameBytes)
+	}
+	if uint64(offerLimits.maxResponseFrameBytes) > maxV2FrameBytes {
+		offerLimits.maxResponseFrameBytes = int(maxV2FrameBytes)
+	}
+	protocol, negotiated, fallback, negotiationErr := negotiateIPCV2(conn, reader, offerLimits)
+	if fallback {
+		c.discard(conn)
+		if c.isClosed() {
+			return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, net.ErrClosed
+		}
+		fallbackConn, err := dialEndpoint(c.endpoint)
+		if err != nil {
+			return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, err
+		}
+		fallbackReader := bufio.NewReader(fallbackConn)
+		if err := c.installConnection(fallbackConn, fallbackReader); err != nil {
+			return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, err
+		}
+		if err := c.setConnectionProtocol(fallbackConn, ipcWireProtocolV1, ipcV2Limits{}); err != nil {
+			c.discard(fallbackConn)
+			return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, err
+		}
+		return fallbackConn, fallbackReader, ipcWireProtocolV1, ipcV2Limits{}, nil
+	}
+	if negotiationErr != nil {
+		c.discard(conn)
+		return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, negotiationErr
+	}
+	if err := c.setConnectionProtocol(conn, protocol, negotiated); err != nil {
+		c.discard(conn)
+		return nil, nil, ipcWireProtocolUnset, ipcV2Limits{}, err
+	}
+	return conn, reader, protocol, negotiated, nil
+}
 
+func (c *ipcClient) isClosed() bool {
+	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
+	return c.closed
+}
+
+func (c *ipcClient) installConnection(conn net.Conn, reader *bufio.Reader) error {
 	c.transportMu.Lock()
 	defer c.transportMu.Unlock()
 	if c.closed {
 		_ = conn.Close()
-		return nil, nil, net.ErrClosed
+		return net.ErrClosed
 	}
 	// Requests are serialized, so another connection is not expected here.
 	// Retain the defensive branch in case that invariant changes later.
 	if c.conn != nil {
 		_ = conn.Close()
-		return c.conn, c.reader, nil
+		return errors.New("IPC connection was installed concurrently")
 	}
 	c.conn = conn
 	c.reader = reader
-	return conn, reader, nil
+	c.protocol = ipcWireProtocolUnset
+	c.v2Limits = ipcV2Limits{}
+	return nil
+}
+
+func (c *ipcClient) setConnectionProtocol(conn net.Conn, protocol ipcWireProtocol, limits ipcV2Limits) error {
+	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
+	if c.closed {
+		return net.ErrClosed
+	}
+	if c.conn != conn {
+		return errors.New("IPC connection changed during negotiation")
+	}
+	c.protocol = protocol
+	c.v2Limits = limits
+	return nil
 }
 
 func (c *ipcClient) discard(conn net.Conn) {
@@ -193,6 +290,8 @@ func (c *ipcClient) discard(conn net.Conn) {
 	if c.conn == conn {
 		c.conn = nil
 		c.reader = nil
+		c.protocol = ipcWireProtocolUnset
+		c.v2Limits = ipcV2Limits{}
 	}
 	c.transportMu.Unlock()
 	_ = conn.Close()
@@ -204,6 +303,8 @@ func (c *ipcClient) close() {
 	conn := c.conn
 	c.conn = nil
 	c.reader = nil
+	c.protocol = ipcWireProtocolUnset
+	c.v2Limits = ipcV2Limits{}
 	c.transportMu.Unlock()
 	if conn != nil {
 		_ = conn.Close()

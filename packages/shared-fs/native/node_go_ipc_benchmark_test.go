@@ -283,8 +283,17 @@ func TestNodeGoIPCExternalBenchmark(t *testing.T) {
 	warmups := nodeGoIPCEnvInt(t, nodeGoIPCWarmupsEnv, 2, 100)
 	client := newIPCClient(endpoint)
 	defer client.close()
+	// Keep negotiation outside every measured sample, including a manual run
+	// with zero warmups, and fail rather than mislabel a v1 fallback as v2.
+	_, _, protocol, _, err := client.connect()
+	if err != nil {
+		t.Fatalf("IPC v2 benchmark negotiation: %v", err)
+	}
+	if protocol != ipcWireProtocolV2 {
+		t.Fatalf("IPC benchmark negotiated protocol %d, want binary v2", protocol)
+	}
 
-	report := nodeGoIPCReport{SchemaVersion: 1, Benchmark: "shared-fs-node-go-ipc", Protocol: "jsonl-v1-base64", Corpus: nodeGoIPCCorpus}
+	report := nodeGoIPCReport{SchemaVersion: 1, Benchmark: "shared-fs-node-go-ipc", Protocol: "binary-v2-raw-bytes", Corpus: nodeGoIPCCorpus}
 	report.Scope.Boundary = "real Go ipcClient to real Node createSharedFsIpcServer"
 	report.Scope.Transport = "serialized TCP loopback over one retained client connection"
 	report.Scope.Backend = "deterministic immediate in-memory benchmark backend"
