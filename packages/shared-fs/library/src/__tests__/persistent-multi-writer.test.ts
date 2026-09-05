@@ -57,20 +57,8 @@ describe("shared fs persistent multi-writer lifecycle", () => {
 
     const stopPeer = async (peer: Peerbit) => {
         peers.delete(peer);
-        try {
-            await peer.stop();
-        } catch (error) {
-            // Existing integration tests treat this document-index close race
-            // as benign once every asserted operation has completed.
-            if (
-                !(
-                    error instanceof TypeError &&
-                    error.message.includes("clearAll")
-                )
-            ) {
-                throw error;
-            }
-        }
+        // Successful lifecycle validation includes an error-free peer shutdown.
+        await peer.stop();
     };
 
     const waitForRemoteReceiptReadiness = async (

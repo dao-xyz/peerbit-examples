@@ -39,13 +39,13 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/blocks-interface": "2.1.8",
+        "@dao-xyz/borsh": "6.0.1",
+        "@peerbit/blocks-interface": "2.2.1",
         "@peerbit/crypto": "3.1.6",
-        "@peerbit/document": "15.0.27",
-        "@peerbit/program": "6.0.58",
-        "@peerbit/trusted-network": "6.0.124",
-        "peerbit": "5.3.38",
+        "@peerbit/document": "15.1.0",
+        "@peerbit/program": "6.0.60",
+        "@peerbit/trusted-network": "6.0.131",
+        "peerbit": "5.4.2",
         "uint8arrays": "^5.1.0"
     }
 }

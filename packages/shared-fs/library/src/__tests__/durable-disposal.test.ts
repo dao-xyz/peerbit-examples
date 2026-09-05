@@ -48,20 +48,8 @@ describe("shared fs durable machine disposal", () => {
 
     const stopPeer = async (peer: Peerbit) => {
         peers.delete(peer);
-        try {
-            await peer.stop();
-        } catch (error) {
-            // Keep parity with the existing shared-fs integration cleanup:
-            // this close race is benign after all asserted work completed.
-            if (
-                !(
-                    error instanceof TypeError &&
-                    error.message.includes("clearAll")
-                )
-            ) {
-                throw error;
-            }
-        }
+        // Successful disposal validation includes an error-free peer shutdown.
+        await peer.stop();
     };
 
     const waitForRemoteReceiptReadiness = async (
