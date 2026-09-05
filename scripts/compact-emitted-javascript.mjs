@@ -196,6 +196,40 @@ const appendSourceMapLinks = async (candidate, javascript) => {
     }
 };
 
+const assertFreshTypeScriptOutput = async (outputDirectory, javascript) => {
+    for (const relativePath of javascript) {
+        const javascriptPath = path.join(outputDirectory, relativePath);
+        const contents = await readFile(javascriptPath, "utf8");
+        SOURCE_MAP_COMMENT_PATTERN.lastIndex = 0;
+        const comments = [...contents.matchAll(SOURCE_MAP_COMMENT_PATTERN)];
+        const expectedReference = `${path.basename(relativePath)}.map`;
+        if (comments.length !== 1 || comments[0][1] !== expectedReference) {
+            fail(
+                `${relativePath} is not fresh TypeScript output with one local source-map link`
+            );
+        }
+
+        let sourceMap;
+        try {
+            sourceMap = JSON.parse(
+                await readFile(
+                    path.join(path.dirname(javascriptPath), expectedReference),
+                    "utf8"
+                )
+            );
+        } catch (error) {
+            fail(
+                `${relativePath} does not have a readable TypeScript source map: ${error instanceof Error ? error.message : error}`
+            );
+        }
+        if (sourceMap.file !== path.basename(relativePath)) {
+            fail(
+                `${relativePath} source map is not fresh TypeScript output; run the package build from its clean step`
+            );
+        }
+    }
+};
+
 const buildCandidate = async ({
     source,
     destination,
@@ -506,6 +540,7 @@ export const compactEmittedJavaScript = async ({
     if (javascript.length === 0) {
         fail(`${absoluteOutput} contains no emitted JavaScript`);
     }
+    await assertFreshTypeScriptOutput(absoluteOutput, javascript);
     const originalSnapshot = await snapshotFiles(absoluteOutput, files);
     const originalSurfaces = await inspectEsmSurfaces(absoluteOutput);
     const originalShebangs = await readShebangs(absoluteOutput, files);

@@ -240,6 +240,12 @@ test("compacts deterministically without changing declarations or ESM shape", as
             outputDirectory: first,
             expectedShebangs: { "bin.js": "#!/usr/bin/env node" },
         });
+        const compactedSnapshot = await snapshot(first);
+        await assert.rejects(
+            compactEmittedJavaScript({ outputDirectory: first }),
+            /source map is not fresh TypeScript output/u
+        );
+        assert.deepEqual(await snapshot(first), compactedSnapshot);
         await assertNoStaleCompactionDirectories(first);
     } finally {
         await rm(temporary, { recursive: true, force: true });
