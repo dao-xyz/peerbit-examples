@@ -34,7 +34,7 @@ jobs:
                   run_install: false
 
             - name: Install workspace dependencies
-              run: pnpm install --frozen-lockfile
+              run: node scripts/install-hosting-workspace.mjs
 
             - name: Install locked Wrangler toolchain
               run: |
