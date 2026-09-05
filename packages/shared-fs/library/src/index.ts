@@ -5359,11 +5359,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     })
                 );
             }
-            const referenced = new Set(version.parentVersionIds);
-            results[i] = this.versionInfo(versionRowOf(version), entry.path, [
-                versionRowOf(version),
-                ...currentHeads.filter((head) => !referenced.has(head.id)),
-            ]);
+            // A batch version supersedes every head captured above; there is
+            // no explicit-base override that could leave an old head here.
+            results[i] = this.versionInfo(version, entry.path, [version]);
         }
 
         const namingEvents = [
