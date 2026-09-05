@@ -50,6 +50,36 @@ class FakeChild extends EventEmitter {
 }
 
 describe("external native adapter lifecycle", () => {
+    it("passes the opt-in profile flag to the adapter", async () => {
+        const child = new FakeChild();
+        const spawnAdapter = vi.fn(
+            () => child as unknown as ChildProcess
+        ) as unknown as typeof spawn;
+        queueMicrotask(() => {
+            child.stdout.write("peerbit-shared-fs-native ready\n");
+        });
+
+        const mounted = await mountExternalNativeAdapter(
+            "profiled-adapter",
+            "tcp://127.0.0.1:1",
+            "/unused",
+            { exitTimeoutMs: 100, profile: true, spawnAdapter }
+        );
+        await mounted.unmount();
+
+        expect(spawnAdapter).toHaveBeenCalledWith(
+            "profiled-adapter",
+            [
+                "--endpoint",
+                "tcp://127.0.0.1:1",
+                "--mountpoint",
+                "/unused",
+                "--profile",
+            ],
+            { stdio: ["ignore", "pipe", "pipe"] }
+        );
+    });
+
     it("stops and reaps a ready child during unmount", async () => {
         const child = new FakeChild();
         const spawnAdapter = vi.fn(

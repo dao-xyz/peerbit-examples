@@ -869,6 +869,46 @@ detaching it. Mutations admitted later through sibling descriptors remain
 buffered for a later fence. The current target interface still has no
 backend-independent hardware cache or power-loss barrier.
 
+### Opt-in mounted-path profiling
+
+`createSharedFsMountBackend`, `createSharedFsIpcServer`, and
+`mountNativeSharedFs` accept a `profile` callback. It receives
+`peerbit.shared-fs.mount-profile.v1` events with a monotonic `durationNs`.
+Profiling is disabled by default. The disabled hot path only checks the absent
+callback: it does not read a clock or construct an event. Profile callback
+exceptions are ignored because the sink is report-only.
+When `mountNativeSharedFs` receives an already-created backend, pass the same
+sink to `createSharedFsMountBackend` to receive its inner commit events. Keep a
+custom sink cheap: its own execution is excluded from that event's duration but
+can perturb an enclosing measured phase in a nested call.
+
+The phases are deliberately narrow:
+
+- `native.callback` spans userspace entry through handing the result back to
+  `fuse-native`. The external Go adapter emits the same phase around each
+  cgofuse callback.
+- `ipc.queue` is time waiting for the Go adapter's request serialization
+  mutex. `ipc.roundTrip` then covers connection/negotiation when needed,
+  request framing, loopback transport, the Node response, and response decode.
+- `ipc.service` covers only the Node server's backend method. Parsing and
+  response framing/socket delivery are outside it. Its request id matches the
+  Go queue/round-trip event for an external-adapter call.
+- `mount.fsync.localCommit` covers the backend's bounded local generation
+  fence. `requiredCommit` says whether that call entered with unpersisted
+  generations; it can still wait for a commit already in flight.
+- `mount.target.writeFile` covers the exact target `writeFile` promise used to
+  publish mounted bytes. It includes whatever local work that target performs,
+  but does not assert a separate storage-engine, hardware, remote-readability,
+  replication, or persisted-receipt phase.
+
+These events cannot measure time spent in the kernel before a userspace mount
+callback, kernel cache hits that never call userspace, or time after the
+callback returns. The current APIs also expose no truthful sub-boundaries for
+chunk hashing, block persistence, document append, or remote replication, so
+the profiler does not invent them. The in-process `fuse-native` path has no IPC
+events. Count events and aggregate `durationNs` by source, phase, and operation;
+do not add overlapping nested phases as if they were disjoint.
+
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
 shared filesystem address and read each other's files. The native Linux FUSE

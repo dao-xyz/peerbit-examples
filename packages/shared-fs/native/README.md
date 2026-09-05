@@ -208,6 +208,25 @@ performance threshold. The Linux native smoke workflow can collect its FUSE
 report and same-runner control directly; the native-OS workflow can collect
 paired macFUSE and WinFsp reports from its real provisioned mounts.
 
+### Live callback and IPC profiling
+
+Pass `--profile` to the adapter (or `--mount-profile` to `peerbit-fs mount`) to
+emit one `peerbit.shared-fs.mount-profile.v1` NDJSON event per measured phase on
+stderr. `native.callback` measures cgofuse userspace callback entry through
+return, `ipc.queue` measures the wait for the adapter's serialized request
+mutex, and `ipc.roundTrip` measures the retained client path through response
+decode. Queue and round-trip records carry the wire request id so they can be
+matched with the Node daemon's `ipc.service` event.
+
+Profiling is off by default; the adapter does not read a clock or encode a
+record when the profiler is absent. Event output and its synchronization cost
+are intentionally inside diagnostic runs only. Kernel time before callback
+entry, cached operations that never enter userspace, and time after callback
+return are not observable here. Round-trip time also combines framing,
+loopback, Node service, and response decode; use the Node service event as the
+measured inner boundary rather than treating the components as independently
+additive.
+
 ## POSIX metadata limits
 
 The shared model currently persists names and file content, not POSIX mode,

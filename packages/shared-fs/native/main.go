@@ -10,6 +10,7 @@ func main() {
 	endpoint := flag.String("endpoint", "", "shared-fs IPC endpoint")
 	mountpoint := flag.String("mountpoint", "", "native mountpoint")
 	debug := flag.Bool("debug", false, "enable native adapter debug output")
+	profile := flag.Bool("profile", false, "emit mount-path profile events as NDJSON on stderr")
 	flag.Parse()
 
 	if *endpoint == "" || *mountpoint == "" {
@@ -17,7 +18,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := runNativeMount(*endpoint, *mountpoint, *debug); err != nil {
+	var profiler *mountProfiler
+	if *profile {
+		profiler = newMountProfiler(os.Stderr)
+	}
+	if err := runNativeMount(*endpoint, *mountpoint, *debug, profiler); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
