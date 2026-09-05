@@ -59,6 +59,11 @@ Peerbit 5.3.35, Documents 15.0.16, shared-log 16.0.15, crypto 3.1.6, Borsh 6.0.1
 Lock SHA-256: `4a4a8df381f6abb29fa12d604a6c8a1b7c5487ed3df6273b7e069422dc475f57`.
 Worker SHA-256: `a7e5d8a2f08b06f4e49edc9808e0536b4071a76d936766bbe060893fb568fdf3`.
 Raw campaign SHA-256: `2c8bb8d2d76e944f70e8321cf8afeb2b7408363caaaccbfd8e9ca48d7147712b`.
+The worker hash identifies the measured snapshot before a subsequent reporting
+hardening: successful test output now preserves the complete report, and input
+hashes are captured before fixture creation and verified unchanged after stop.
+That hardening does not change the measured phase algorithms; these values are
+still attributed only to the recorded snapshot, not an unperformed new campaign.
 
 These are descriptive scale observations, not a before/after speedup or a
 reliable tail distribution. Stat has 20 samples; listing has only three.

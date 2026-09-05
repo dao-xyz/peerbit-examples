@@ -23,6 +23,14 @@ const hash = (value: string | Buffer) =>
     createHash("sha256").update(value).digest("hex");
 const fileHash = async (relative: string) =>
     hash(await readFile(new URL(relative, import.meta.url)));
+const sourceHashes = async () => ({
+    lock: await fileHash("../../../../../pnpm-lock.yaml"),
+    source: await fileHash("../index.ts"),
+    cache: await fileHash("../slot-candidate-cache.ts"),
+    worker: await fileHash("./slot-candidate-cache.bench.worker.ts"),
+});
+// Capture provenance before creating fixtures, and reject a mixed-source run.
+const inputHashes = await sourceHashes();
 const provenance = async (name: string) => {
     const url = import.meta.resolve(name);
     const entry = await realpath(fileURLToPath(url));
@@ -579,12 +587,7 @@ try {
         osRelease: release(),
         cpu: cpus()[0]?.model,
         modules,
-        hashes: {
-            lock: await fileHash("../../../../../pnpm-lock.yaml"),
-            source: await fileHash("../index.ts"),
-            cache: await fileHash("../slot-candidate-cache.ts"),
-            worker: await fileHash("./slot-candidate-cache.bench.worker.ts"),
-        },
+        hashes: inputHashes,
         phases,
         counts,
         memoryBefore,
@@ -622,6 +625,11 @@ try {
 }
 if (failure) throw failure;
 assert(report);
+assert.deepEqual(
+    await sourceHashes(),
+    inputHashes,
+    "benchmark inputs changed during execution"
+);
 console.log(
     "namespace-workload: " +
         JSON.stringify({ ...report, memoryAfterClose: memory() })

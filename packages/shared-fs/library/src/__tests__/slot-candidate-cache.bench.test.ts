@@ -148,14 +148,9 @@ describe("shared fs public namespace benchmark controls", () => {
                     60
                 );
             }
-            console.log(
-                JSON.stringify({
-                    shape,
-                    size,
-                    phases: report.phases,
-                    counts: report.counts,
-                })
-            );
+            // Successful CI evidence needs the same provenance and caveats as
+            // a direct worker invocation, not only the timing subset.
+            console.log("namespace-workload: " + JSON.stringify(report));
         },
         95_000
     );
