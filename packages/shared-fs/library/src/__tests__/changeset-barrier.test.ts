@@ -186,6 +186,30 @@ describe("shared fs changeset barrier", () => {
         expect(run2.manifest!.memberCount).toBe(run1.manifest!.memberCount);
     });
 
+    it("a repeated manifested delete adopts its young tombstone", async () => {
+        const fs = await open();
+        await fs.writeFile("/delete-retry.txt", "gone");
+        const run1 = await fs.writeBatch(
+            [{ path: "/delete-retry.txt", delete: true }],
+            { changesetId: "delete-retry", manifest: true }
+        );
+        expect(run1.manifest!.memberCount).toBe(1);
+
+        // The path is already absent, so this exercises youngTombstoneAt's
+        // exact-slot history lookup instead of publishing another deletion.
+        const run2 = await fs.writeBatch(
+            [{ path: "/delete-retry.txt", delete: true }],
+            { changesetId: "delete-retry", manifest: true }
+        );
+        expect(run2.manifest!.memberCount).toBe(run1.manifest!.memberCount);
+        const scoped = await fs.awaitChangeset("delete-retry", {
+            manifestId: run2.manifest!.manifestId,
+        });
+        expect(scoped.complete).toBe(true);
+        expect(scoped.expected).toBe(1);
+        expect(await fs.stat("/delete-retry.txt")).toBeUndefined();
+    });
+
     it("an unknown changeset times out honestly with status attached (B5-wedge)", async () => {
         const fs = await open();
         const start = Date.now();

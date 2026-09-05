@@ -732,6 +732,24 @@ one-descriptor delta plus 10% and a small fixed allocator allowance; after the
 last release both cases must return close to their baseline. Open time is
 reported for diagnosis only and has no pass/fail budget.
 
+The exact-slot cache benchmark compares repeated point metadata lookups in
+100-entry and 10,000-entry directories:
+
+```bash
+PEERBIT_SHARED_FS_SLOT_CACHE_BENCH=1 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/slot-candidate-cache.bench.test.ts --reporter=verbose
+```
+
+It reports p50/p95 latency and structurally requires each lookup to examine
+only the requested slot histories. It also reports deterministic exact-name and
+reverse-index entry counts: a typical uniquely named cached row now occupies
+one entry in each map instead of one entry in the former id-keyed map. This is
+cardinality accounting, not a byte-level heap claim; row objects are shared and
+same-name histories share one exact-name entry. Timings are descriptive. It
+does not measure or claim faster full-directory listing, document-index
+persistence, native mount IPC, or replication.
+
 ## Native Mounts
 
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
