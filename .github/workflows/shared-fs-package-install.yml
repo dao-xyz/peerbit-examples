@@ -8,6 +8,8 @@ on:
             - "package.json"
             - "pnpm-lock.yaml"
             - "scripts/verify-shared-fs-package-contents.mjs"
+            - "scripts/compact-emitted-javascript.mjs"
+            - "scripts/compact-emitted-javascript.test.mjs"
             - "tsconfig.json"
             - "packages/shared-fs/**"
     push:
@@ -18,6 +20,8 @@ on:
             - "package.json"
             - "pnpm-lock.yaml"
             - "scripts/verify-shared-fs-package-contents.mjs"
+            - "scripts/compact-emitted-javascript.mjs"
+            - "scripts/compact-emitted-javascript.test.mjs"
             - "tsconfig.json"
             - "packages/shared-fs/**"
     workflow_dispatch:
@@ -66,6 +70,9 @@ jobs:
 
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Test emitted-JavaScript compaction
+              run: pnpm run test:shared-fs-build-output
 
             - name: Verify package contents and size budgets
               run: node scripts/verify-shared-fs-package-contents.mjs

@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyCompactedOutput } from "./compact-emitted-javascript.mjs";
 
 const repositoryRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -27,6 +28,7 @@ const packages = [
             "lib/esm/index.js",
             "src/index.ts",
         ],
+        expectedShebangs: {},
     },
     {
         directory: "packages/shared-fs/cli",
@@ -52,6 +54,11 @@ const packages = [
             "./src/bin.ts",
             "./src/install-native-adapter.ts",
         ],
+        expectedShebangs: {
+            "bin.js": "#!/usr/bin/env node",
+            "cross-os-interop.js": "#!/usr/bin/env node",
+            "install-native-adapter.js": "#!/usr/bin/env node",
+        },
     },
 ];
 
@@ -173,6 +180,11 @@ for (const specification of packages) {
             `manifest name is ${JSON.stringify(packageJson.name)}`
         );
     }
+
+    await verifyCompactedOutput({
+        outputDirectory: path.join(packageRoot, "lib", "esm"),
+        expectedShebangs: specification.expectedShebangs,
+    });
 
     const packageLicense = await readFile(
         path.join(packageRoot, "LICENSE"),
