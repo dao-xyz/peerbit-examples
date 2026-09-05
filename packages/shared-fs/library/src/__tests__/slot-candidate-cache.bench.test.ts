@@ -1,10 +1,15 @@
+import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { Peerbit } from "peerbit";
 import { describe, expect, it } from "vitest";
 import { openSharedFs } from "../index.js";
 
 const enabled = process.env.PEERBIT_SHARED_FS_SLOT_CACHE_BENCH === "1";
 const manualDescribe = enabled ? describe : describe.skip;
+const workerPath = fileURLToPath(
+    new URL("./slot-candidate-cache.bench.worker.ts", import.meta.url)
+);
 
 const percentile = (samples: number[], fraction: number) => {
     const sorted = [...samples].sort((a, b) => a - b);
@@ -78,4 +83,80 @@ manualDescribe("shared fs exact slot-candidate benchmark", () => {
         expect(report.wide.rowsByNameEntries).toBe(2);
         expect(report.wide.reverseIndexEntries).toBe(2);
     }, 120_000);
+});
+
+describe("shared fs public namespace benchmark controls", () => {
+    it.each([
+        ["wide", enabled ? 10_000 : 8],
+        ["versions", enabled ? 1_000 : 8],
+        ["churn", enabled ? 100 : 4],
+        ["claims", 3],
+    ] as const)(
+        "validates %s in an isolated process",
+        (shape, size) => {
+            const result = spawnSync(
+                process.execPath,
+                ["--import", "tsx", workerPath, shape, String(size)],
+                { encoding: "utf8", timeout: 90_000, maxBuffer: 1024 * 1024 }
+            );
+            if (result.status !== 0) console.log(result.stdout);
+            if (result.stderr) console.error(result.stderr);
+            expect(result.error).toBeUndefined();
+            expect(result.status).toBe(0);
+            const lines = result.stdout
+                .split("\n")
+                .filter((line) => line.startsWith("namespace-workload: "));
+            expect(lines).toHaveLength(1);
+            const report = JSON.parse(
+                lines[0].slice("namespace-workload: ".length)
+            );
+            expect(report).toMatchObject({
+                schema: "shared-fs-public-namespace-v1",
+                shape,
+                size,
+                samples: 20,
+            });
+            expect(report.phases.warmStat.samples).toBe(20);
+            for (const phase of Object.values(report.phases) as any[]) {
+                expect(phase.totalMs).toBeGreaterThanOrEqual(0);
+                expect(phase.indexOnlyRowQueries).toBeGreaterThanOrEqual(0);
+                expect(phase.pointCandidateRowsExamined).toBeGreaterThanOrEqual(
+                    0
+                );
+            }
+            if (shape === "wide") {
+                expect(report.phases.warmStat.pointCandidateRowsExamined).toBe(
+                    40
+                );
+                expect(report.phases.warmStat.indexOnlyRowQueries).toBe(0);
+                expect(report.counts.afterPoints.rows).toBe(2);
+            } else if (shape === "versions") {
+                expect(report.counts.namingAfter).toBe(
+                    report.counts.namingBefore
+                );
+                expect(report.counts.contentVersions).toBe(size + 1);
+                expect(report.phases.warmStat.pointCandidateRowsExamined).toBe(
+                    40
+                );
+            } else if (shape === "churn") {
+                expect(report.counts.namingAfter).toBe(
+                    report.counts.namingBefore + 4 * size
+                );
+            } else {
+                expect(report.counts.claimants).toBe(3);
+                expect(report.phases.warmStat.pointCandidateRowsExamined).toBe(
+                    60
+                );
+            }
+            console.log(
+                JSON.stringify({
+                    shape,
+                    size,
+                    phases: report.phases,
+                    counts: report.counts,
+                })
+            );
+        },
+        95_000
+    );
 });
