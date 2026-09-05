@@ -331,7 +331,10 @@ one-shot cache and dedup tables are released on every terminal path.
 `stats()` and the result snapshot expose structural work: verified source
 blocks and bytes, cache behavior, changed/reused leaf hashes, created/written
 data and tree blocks, pruned references, collapsed paths, and duplicate sink
-puts avoided. The differential suite checks patch, growth, shrink, sparse
+puts avoided. A nonzero changed leaf is hashed once while constructing its
+canonical block and once after the sink accepts it; a partial overwrite also
+authenticates the old leaf. `dataBlocksCreated` includes nonzero candidates
+whose unchanged hash avoids a sink put. The differential suite checks patch, growth, shrink, sparse
 collapse, root-height transitions, corruption, adapter failures, and work that
 scales with distinct changed paths. These counters make no claim about a
 future Peerbit transaction, receipt, GC, or mounted-write latency.

@@ -340,7 +340,7 @@ describe("MerklePatchBuilderV1", () => {
             treeBlocksVerified: 2,
             dataBlocksVerified: 1,
             sourceDataBytesVerified: LEAF_SIZE,
-            newDataBytesHashed: 3 * LEAF_SIZE,
+            newDataBytesHashed: 2 * LEAF_SIZE,
             dataBlocksWritten: 1,
             treeBlocksWritten: 2,
         });
@@ -747,6 +747,123 @@ describe("MerklePatchBuilderV1", () => {
                 sink: mutatingSink,
             }).build({ patches: [{ offset: 0, bytes: Uint8Array.of(1) }] })
         ).rejects.toMatchObject({ code: "EIO" });
+    });
+
+    it("authenticates accessor-backed and shared-memory sink replacements", async () => {
+        for (const replacement of ["id", "getter", "shared"] as const) {
+            const store = new MemoryBlocks();
+            let bytesReads = 0;
+            const sink: MerkleBlockSinkV1 = {
+                async put(block) {
+                    if (!(block instanceof MerkleDataBlockV1)) return;
+                    if (replacement === "id") {
+                        block.id = new MerkleDataBlockV1({
+                            bytes: Uint8Array.of(9, 9, 9),
+                        }).id;
+                        return;
+                    }
+                    const changed =
+                        replacement === "shared"
+                            ? new Uint8Array(new SharedArrayBuffer(3))
+                            : Uint8Array.of(9, 9, 9);
+                    changed.set([9, 9, 9]);
+                    if (replacement === "shared") block.bytes = changed;
+                    else {
+                        const original = block.bytes;
+                        Object.defineProperty(block, "bytes", {
+                            get() {
+                                bytesReads++;
+                                return bytesReads === 1 ? changed : original;
+                            },
+                        });
+                    }
+                },
+            };
+            const builder = new MerklePatchBuilderV1({
+                root: { leafSize: LEAF_SIZE, size: 0n, rootLevel: 0 },
+                source: store,
+                sink,
+            });
+            await expect(
+                builder.build({
+                    patches: [{ offset: 0, bytes: Uint8Array.of(1, 2, 3) }],
+                })
+            ).rejects.toMatchObject({ code: "EIO" });
+            expect(builder.stats()).toMatchObject({
+                phase: "failed",
+                dataBlocksWritten: 0,
+            });
+            if (replacement === "getter") expect(bytesReads).toBe(1);
+        }
+    });
+
+    it("uses one source snapshot even when the sink mutates its shared bytes", async () => {
+        const shared = new Uint8Array(new SharedArrayBuffer(3));
+        shared.set([1, 2, 3]);
+        const fixture = buildFixture(shared);
+        const sourceBlock = new MerkleDataBlockV1({ bytes: shared });
+        const id = sourceBlock.id;
+        const reads = { id: 0, bytes: 0 };
+        Object.defineProperties(sourceBlock, {
+            id: {
+                get() {
+                    reads.id++;
+                    return reads.id === 1 ? id : "data2:changed";
+                },
+            },
+            bytes: {
+                get() {
+                    reads.bytes++;
+                    return reads.bytes === 1 ? shared : Uint8Array.of(9);
+                },
+            },
+        });
+        const result = await new MerklePatchBuilderV1({
+            root: fixture.root,
+            source: {
+                async load() {
+                    return sourceBlock;
+                },
+            },
+            sink: {
+                async put(block) {
+                    shared.fill(9);
+                    await fixture.store.put(block);
+                },
+            },
+        }).build({ patches: [{ offset: 1, bytes: Uint8Array.of(8) }] });
+        expect(reads).toEqual({ id: 1, bytes: 1 });
+        expectBytes(
+            await readAll(result.root, fixture.store),
+            Uint8Array.of(1, 8, 3)
+        );
+        expect(result.stats).toMatchObject({
+            sourceDataBytesVerified: 3,
+            newDataBytesHashed: 6,
+        });
+    });
+
+    it("hashes unchanged candidates once without writing a partial overwrite", async () => {
+        const fixture = buildFixture(Uint8Array.of(1, 2, 3));
+        const result = await new MerklePatchBuilderV1({
+            root: fixture.root,
+            source: fixture.store,
+            sink: fixture.store,
+        }).build({ patches: [{ offset: 1, bytes: Uint8Array.of(2) }] });
+        expect(result.root).toMatchObject({
+            leafSize: fixture.root.leafSize,
+            size: fixture.root.size,
+            rootLevel: fixture.root.rootLevel,
+        });
+        expectBytes(result.root.rootHash!, fixture.root.rootHash!);
+        expect(result.stats).toMatchObject({
+            sourceDataBytesVerified: 3,
+            newDataBytesHashed: 3,
+            dataBlocksCreated: 1,
+            dataBlocksWritten: 0,
+            sinkPuts: 0,
+            leafHashesReused: 1,
+        });
     });
 
     it("does not let an adapter spoof builder lifecycle errors", async () => {

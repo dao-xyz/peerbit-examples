@@ -196,6 +196,33 @@ describe("Merkle v1 canonical codecs", () => {
         );
         expect(hex(merkleDataHashV1(bytes))).toBe(vectors.data.hashHex);
         expect(merkleDataIdV1(bytes)).toBe(vectors.data.id);
+        const created = MerkleDataBlockV1.createWithHash(bytes);
+        expect(hex(created.hash)).toBe(vectors.data.hashHex);
+        expect(created.block.id).toBe(vectors.data.id);
+        expect(serialize(created.block)).toEqual(
+            serialize(new MerkleDataBlockV1({ bytes }))
+        );
+    });
+
+    it("constructs a block and hash from one owned shared-memory snapshot", () => {
+        const bytes = new Uint8Array(new SharedArrayBuffer(5));
+        bytes.set(encode("hello"));
+        const created = MerkleDataBlockV1.createWithHash(bytes);
+        bytes.fill(0);
+        expect(hex(created.hash)).toBe(vectors.data.hashHex);
+        expect(hex(created.block.bytes)).toBe(vectors.data.bytesHex);
+        expect(created.block.id).toBe(vectors.data.id);
+        expect(created.block.bytes.buffer).not.toBe(bytes.buffer);
+        created.hash.fill(0);
+        expect(assertMerkleDataBlockV1(created.block)).toBe(created.block);
+
+        for (const invalid of [
+            new Uint8Array(),
+            new Uint8Array(3),
+            new Uint8Array(MERKLE_V1_MAX_DATA_BYTES + 1).fill(1),
+        ]) {
+            expect(() => MerkleDataBlockV1.createWithHash(invalid)).toThrow();
+        }
     });
 
     it("encodes every hashed field exactly as Borsh", () => {
