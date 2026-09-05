@@ -1,5 +1,9 @@
 # Adaptive content custody: design and bounded experiment
 
+Newer-cohort follow-up: [the 5.4.1 rebaseline](ADAPTIVE_SHARDING_REBASELINE.md)
+passed both unchanged live modes through offline recovery. The old-cohort
+failures below remain historical evidence, not the latest campaign status.
+
 ## Status and scope
 
 This is a **test-only split metadata/content-plane experiment**, not a production
