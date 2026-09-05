@@ -30,6 +30,67 @@ The model is commit-on-close for mounted writes, local-first, and conflict
 preserving. Concurrent versions are never overwritten silently; they are exposed
 through `conflicts()` and can be resolved with `resolveConflict()`.
 
+## Production scope and threat model
+
+Shared FS remains experimental. Its current security and storage boundaries are
+important for any deployment with more than one writer:
+
+- **Writer trust is broad, not a per-file ACL.** An authenticated filesystem
+  accepts an entry when at least one outer Peerbit log signer is trusted through
+  the rooted, transitive writer graph. Treat every trusted writer as authorized
+  to modify or delete every path and to extend that graph. The `authorKey` and
+  `machineLabel` stored on naming and version rows are advisory provenance, not
+  a cryptographic binding to that outer signer: repair and resurrection can
+  legitimately re-append another writer's immutable row. This is therefore not
+  a Byzantine-safe audit log.
+- **Writer authorization does not provide reader confidentiality.** The
+  filesystem layer has no reader ACL and does not encrypt names or file bytes.
+  Do not treat `rootKey` or the trusted-writer graph as a read boundary; protect
+  access to replicated data at deployment level or encrypt sensitive content in
+  the application. Content-addressed chunk ids also reveal equality with known
+  content.
+- **Revocation is eventually convergent.** It removes only the trust edge owned
+  by the revoking identity; another live trust path keeps the writer trusted.
+  Entries carry no authorization epoch, and entries admitted by a lagging
+  replica are not retroactively rejected. Quiesce and isolate a compromised key
+  and follow the revocation procedure under
+  [Write readiness on joins](#write-readiness-on-joins).
+- **Mount durability is local-first.** For an attached writable file, successful
+  `flush`, `fsync`, and `release` drain the locally accepted mutation generations
+  through the Peerbit commit path. They neither wait for a remote persisted
+  receipt nor promise survival of a kernel, host, or storage-controller power
+  failure.
+  `prepareForDisposal()` is the separate, quiesced remote-persistence fence: its
+  receipt applies to each exact captured entry at that instant, can be satisfied
+  by different peers per entry, and is neither permanent custody nor a Byzantine
+  proof.
+- **There is no distributed file lock.** Shared FS does not implement cross-peer
+  `flock`, `fcntl`, or mandatory locking. `O_APPEND` allocates non-overlapping
+  ranges only among sibling descriptors sharing one backend-process state;
+  another backend or peer can publish a conflict head instead of extending one
+  global byte stream.
+- **Library and mounted reads deliberately differ during partial replication.**
+  `readFile()` first tries the visible head, then may return the newest complete,
+  hash-verified ancestor when that head or one of its chunks is unavailable. It
+  returns bytes without identifying the substituted version. The native mount
+  uses the exact `readVersionForMount()` path and fails with `EIO` rather than
+  substituting an ancestor when the stable visible version cannot be verified.
+- **Garbage collection does not guarantee disk-space reclamation.**
+  Normal GC retires version, naming, and chunk entries from Peerbit Documents;
+  `reclaimedChunkBytes` accounts for logically retired chunk payloads, not
+  measured filesystem bytes. The current interface does not promise that the
+  underlying block store compacts or physically releases those bytes. Snapshot
+  segment reclamation is a separate raw-block operation and runs only under the
+  explicit `store-exclusive` lifetime assertion described below.
+- **Filename portability is currently the caller's policy.** Library paths are
+  compared as case-sensitive JavaScript strings after backslashes become path
+  separators, empty and `.` components are removed, and `..` is resolved. Shared
+  FS does not define cross-platform case folding, Unicode normalization, or
+  Windows reserved-name mapping/rejection. A name accepted by the library can
+  therefore alias, display differently, or fail through another platform's
+  native mount; mixed-platform applications must enforce their own common naming
+  subset.
+
 Naming (placement and deletion) is a per-node causal event DAG, mirroring the
 content version DAG: renames and deletes append immutable events, content
 writes never touch naming, and every visible choice is a pure clock-free
@@ -342,8 +403,8 @@ is aged past the default 30-day retention window with a fleet-wide injected
 clock. The campaign overrides `keepVersions` to 3, `settleMs` to 0, and the
 orphan span to 60 seconds. The first explicit ledger GC must retire metadata
 and record chunk candidates without deleting chunk entries. After the orphan
-span, the second pass must reclaim chunks while preserving both conflict heads
-and every visible file.
+span, the second pass must retire those chunk documents while preserving both
+conflict heads and every visible file.
 
 Between those GC passes, the retained writer publishes a temporary editor file
 through `fsync` and is immediately killed before release or rename. Its same
@@ -492,22 +553,28 @@ address can confirm whether known content exists in it.
 
 When `rootKey` is provided while creating a filesystem, writes are
 access-controlled by a trusted-writer graph rooted at that key. Entries must be
-signed by a trusted Peerbit identity, and the stored `authorKey` must match the
-entry signer. Use `authorizeWriter(publicKey)` to trust another writer.
+signed by a trusted Peerbit identity. The stored `authorKey` and `machineLabel`
+on naming and version rows are advisory attribution and do not have to match the
+outer entry signer: repair and resurrection can re-append another writer's
+immutable document. Use `authorizeWriter(publicKey)` to trust another writer.
 
-Storage is bounded by explicit garbage collection: `collectGarbage()` /
-`peerbit-fs gc` retires superseded versions (keeping the newest K, everything
-recent, all conflict heads, and anything a delete-vs-edit conflict may need),
-compacts settled naming histories, and deletes chunks no surviving version
-references. Safety over speed: winners never change (depths are stored, not
-recomputed), a two-run ledger barrier keeps a freshly-synced replica from
-collecting anything, every replica resurrects removed documents it still
-needs, and writers re-verify chunk presence after every save. Version and
-naming GC reclaim index rows and per-operation CPU; chunk GC reclaims real
-bytes (metadata deletions each leave a small permanent log tombstone). Purges
-and chunk-byte reclamation always take effect on a later run — the first run
-records candidates; `--immediate-sweep` waives only the time span between
-runs, never the second run itself.
+Explicit garbage collection retires eligible logical history:
+`collectGarbage()` / `peerbit-fs gc` retires superseded versions (keeping the
+newest K, everything recent, all conflict heads, and anything a delete-vs-edit
+conflict may need), compacts settled naming histories, and deletes chunks no
+surviving version references. Safety over speed: winners never change (depths
+are stored, not recomputed), a two-run ledger barrier keeps a freshly-synced
+replica from collecting anything, every replica resurrects removed documents it
+still needs, and writers re-verify chunk presence after every save. Version and
+naming GC retire index rows and reduce per-operation CPU. Chunk GC retires
+unreferenced chunk documents, and `reclaimedChunkBytes` reports their logical
+payload size; neither is a measurement or guarantee of physical block-store or
+filesystem-byte reclamation. Purges and chunk retirement always take effect on
+a later run — the first run records candidates; `--immediate-sweep` waives only
+the time span between runs, never the second run itself. The separately gated
+snapshot segment reclaimer described under
+[Unattended lifecycle](#unattended-lifecycle) can delete positively owned raw
+segment blocks.
 
 ## CLI
 
@@ -535,6 +602,7 @@ peerbit-fs create
 peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
+peerbit-fs revoke <address> <public-key>
 peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs install-adapter
 peerbit-fs mount <address> <mountpoint>

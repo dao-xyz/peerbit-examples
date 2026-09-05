@@ -15,6 +15,7 @@ peerbit-fs create
 peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
+peerbit-fs revoke <address> <public-key>
 peerbit-fs install-adapter
 peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs mount <address> <mountpoint>
@@ -90,7 +91,8 @@ permits `--no-replicate` for an existing local store, but its
 `fullReplica: false` view does not prove completeness. Resolution writes a new
 version that references the selected bytes and causally supersedes the heads
 visible when it executes; the other immutable versions remain readable until
-normal retention/GC policy eventually permits reclaiming them.
+normal retention/GC policy eventually permits retiring them from logical
+history.
 
 Namespace conflicts are inspected and acted on separately:
 
@@ -190,6 +192,11 @@ authorization boundary. The external adapter checks only path existence in its
 OS access callback, so `access(2)` and `test -w` are advisory. Use the Shared FS
 trusted-writer model for write authorization.
 
+Path names have no portable cross-platform policy yet. The library compares
+case-sensitive strings without Unicode normalization or Windows reserved-name
+mapping/rejection, so mixed-platform deployments must enforce a common naming
+subset before exposing names through native mounts.
+
 Create and mount an authenticated shared filesystem:
 
 ```bash
@@ -209,7 +216,9 @@ peerbit-fs mount $address "$env:USERPROFILE\PeerbitShared"
 ```
 
 Authentication is on by default. Use `peerbit-fs create --no-auth` only for
-explicitly unauthenticated tests or demos.
+explicitly unauthenticated tests or demos. Authentication controls writer
+admission only: Shared FS has no reader ACL and does not encrypt names or file
+bytes.
 
 ## Share With Another Machine
 
@@ -224,6 +233,17 @@ On a machine that already owns or can write the filesystem, authorize that key:
 ```bash
 peerbit-fs trust "$ADDRESS" <public-key>
 ```
+
+To remove the trust edge owned by that same authorizing identity, run:
+
+```bash
+peerbit-fs revoke "$ADDRESS" <public-key>
+```
+
+Revocation is directional and eventually convergent. Another live trust path
+keeps the key trusted, so inspect the command result, quiesce and isolate the
+revoked machine, and use the serving-replica checks described below before
+treating the revocation as enforced.
 
 The joining machine can then mount the same address:
 
