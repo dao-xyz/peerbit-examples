@@ -1,5 +1,11 @@
-import { field, fixedArray, variant, vec } from "@dao-xyz/borsh";
+import { field, variant } from "@dao-xyz/borsh";
 import { sha256Sync, toBase64URL } from "@peerbit/crypto";
+import {
+    boundedBytesFieldV1,
+    boundedUtf8FieldV1,
+    fixedBytesArrayFieldV1,
+    fixedBytesFieldV1,
+} from "./merkle-wire-v1.js";
 
 /**
  * Experimental codecs for the next Shared FS content generation.
@@ -17,6 +23,18 @@ export const MERKLE_V1_ALLOWED_LEAF_SIZES: readonly [65_536, 262_144, 524_288] =
     Object.freeze([65_536, 262_144, 524_288] as const);
 export const MERKLE_V1_MAX_DATA_BYTES =
     MERKLE_V1_ALLOWED_LEAF_SIZES[MERKLE_V1_ALLOWED_LEAF_SIZES.length - 1];
+export const MERKLE_V1_MAX_BLOCK_ID_UTF8_BYTES = 64;
+export const MERKLE_V1_MAX_VARIANT_UTF8_BYTES = 64;
+export const MERKLE_V1_MAX_WIRE_BYTES = 2 * 1024 * 1024;
+export const MERKLE_DATA_BLOCK_V1_VARIANT =
+    "shared_fs_merkle_data_block_v1" as const;
+export const MERKLE_TREE_BLOCK_V1_VARIANT =
+    "shared_fs_merkle_tree_block_v1" as const;
+
+/** Common Borsh dispatch root for every supported Merkle content variant. */
+export abstract class MerkleContentEntryV1 {
+    abstract id: string;
+}
 
 const DATA_DOMAIN = new TextEncoder().encode("peerbit-shared-fs/data/v1");
 const TREE_DOMAIN = new TextEncoder().encode("peerbit-shared-fs/tree/v1");
@@ -112,6 +130,22 @@ const equalBytes = (left: Uint8Array, right: Uint8Array) => {
 // canonical unpadded base64url form so one hash has only one textual id.
 const toUnpaddedBase64URL = (value: Uint8Array) =>
     toBase64URL(value).replace(/=+$/u, "");
+
+const merkleBlockIdFromHashV1 = (
+    kind: "data" | "tree",
+    hashValue: Uint8Array
+) => {
+    const hash = copyHash(hashValue, `${kind} hash`);
+    return `${kind === "data" ? "data2" : "tree2"}:${toUnpaddedBase64URL(hash)}`;
+};
+
+/** Canonical document id for an already-authenticated data-block hash. */
+export const merkleDataIdFromHashV1 = (hash: Uint8Array) =>
+    merkleBlockIdFromHashV1("data", hash);
+
+/** Canonical document id for an already-authenticated tree-block hash. */
+export const merkleTreeIdFromHashV1 = (hash: Uint8Array) =>
+    merkleBlockIdFromHashV1("tree", hash);
 
 const assertLeafSize = (leafSize: number): MerkleV1LeafSize => {
     if (leafSize !== 65_536 && leafSize !== 262_144 && leafSize !== 524_288) {
@@ -231,7 +265,7 @@ const normalizedDataHashV1 = (bytes: Uint8Array) =>
     sha256Sync(encodeNormalizedDataHashInputV1(bytes));
 
 const normalizedDataIdV1 = (bytes: Uint8Array) =>
-    `data2:${toUnpaddedBase64URL(normalizedDataHashV1(bytes))}`;
+    merkleDataIdFromHashV1(normalizedDataHashV1(bytes));
 
 /** Canonical Borsh field bytes hashed for a data block (without a variant). */
 export const encodeMerkleDataHashInputV1 = (bytesValue: Uint8Array) =>
@@ -241,17 +275,24 @@ export const merkleDataHashV1 = (bytes: Uint8Array) =>
     sha256Sync(encodeMerkleDataHashInputV1(bytes));
 
 export const merkleDataIdV1 = (bytes: Uint8Array) =>
-    `data2:${toUnpaddedBase64URL(merkleDataHashV1(bytes))}`;
+    merkleDataIdFromHashV1(merkleDataHashV1(bytes));
 
-@variant("shared_fs_merkle_data_block_v1")
-export class MerkleDataBlockV1 {
-    @field({ type: "string" })
+@variant(MERKLE_DATA_BLOCK_V1_VARIANT)
+export class MerkleDataBlockV1 extends MerkleContentEntryV1 {
+    @field(
+        boundedUtf8FieldV1({
+            name: "data block id",
+            maxUtf8Bytes: MERKLE_V1_MAX_BLOCK_ID_UTF8_BYTES,
+            prefix: "data2:",
+        })
+    )
     id: string;
 
-    @field({ type: Uint8Array })
+    @field(boundedBytesFieldV1(1, MERKLE_V1_MAX_DATA_BYTES, "data block bytes"))
     bytes: Uint8Array;
 
     constructor(properties?: { bytes: Uint8Array }) {
+        super();
         if (properties) {
             this.bytes = normalizeData(properties.bytes);
             this.id = normalizedDataIdV1(this.bytes);
@@ -294,20 +335,26 @@ export const merkleTreeIdV1 = (
     level: number,
     bitmap: Uint8Array,
     children: readonly Uint8Array[]
-) => `tree2:${toUnpaddedBase64URL(merkleTreeHashV1(level, bitmap, children))}`;
+) => merkleTreeIdFromHashV1(merkleTreeHashV1(level, bitmap, children));
 
-@variant("shared_fs_merkle_tree_block_v1")
-export class MerkleTreeBlockV1 {
-    @field({ type: "string" })
+@variant(MERKLE_TREE_BLOCK_V1_VARIANT)
+export class MerkleTreeBlockV1 extends MerkleContentEntryV1 {
+    @field(
+        boundedUtf8FieldV1({
+            name: "tree block id",
+            maxUtf8Bytes: MERKLE_V1_MAX_BLOCK_ID_UTF8_BYTES,
+            prefix: "tree2:",
+        })
+    )
     id: string;
 
     @field({ type: "u8" })
     level: number;
 
-    @field({ type: fixedArray("u8", MERKLE_V1_BITMAP_BYTES) })
+    @field(fixedBytesFieldV1(MERKLE_V1_BITMAP_BYTES, "tree bitmap"))
     bitmap: Uint8Array;
 
-    @field({ type: vec(fixedArray("u8", 32)) })
+    @field(fixedBytesArrayFieldV1(32, MERKLE_V1_FANOUT, "tree children"))
     children: Uint8Array[];
 
     constructor(properties?: {
@@ -315,6 +362,7 @@ export class MerkleTreeBlockV1 {
         bitmap: Uint8Array;
         children: readonly Uint8Array[];
     }) {
+        super();
         if (properties) {
             const normalized = normalizeTree(
                 properties.level,

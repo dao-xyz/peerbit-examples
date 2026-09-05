@@ -1,11 +1,4 @@
-import {
-    deserialize,
-    field,
-    fixedArray,
-    option,
-    serialize,
-    vec,
-} from "@dao-xyz/borsh";
+import { field, fixedArray, option, serialize, vec } from "@dao-xyz/borsh";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -33,9 +26,29 @@ import {
     merkleV1BitmapHasSlot,
     merkleV1BitmapSlots,
 } from "../merkle-v1.js";
+import { decodeMerkleContentEntryV1 } from "../merkle-file-version-v1.js";
 
 const encode = (value: string) => new TextEncoder().encode(value);
 const hex = (value: Uint8Array) => Buffer.from(value).toString("hex");
+
+const readU32 = (wire: Uint8Array, offset: number) =>
+    new DataView(wire.buffer, wire.byteOffset, wire.byteLength).getUint32(
+        offset,
+        true
+    );
+
+const afterBorshString = (wire: Uint8Array, offset: number) =>
+    offset + 4 + readU32(wire, offset);
+
+const withU32 = (wire: Uint8Array, offset: number, value: number) => {
+    const changed = new Uint8Array(wire);
+    new DataView(
+        changed.buffer,
+        changed.byteOffset,
+        changed.byteLength
+    ).setUint32(offset, value, true);
+    return changed;
+};
 
 class DataHashFields {
     @field({ type: Uint8Array })
@@ -313,9 +326,10 @@ describe("Merkle v1 canonical codecs", () => {
         source[0] ^= 0xff;
         expect(new TextDecoder().decode(data.bytes)).toBe("immutable payload");
 
-        const decodedData = deserialize(serialize(data), MerkleDataBlockV1);
+        const decodedData = decodeMerkleContentEntryV1(serialize(data));
         expect(decodedData).toBeInstanceOf(MerkleDataBlockV1);
         expect(assertMerkleDataBlockV1(decodedData).id).toBe(data.id);
+        expect(hex(serialize(decodedData))).toBe(hex(serialize(data)));
 
         const child = merkleDataHashV1(data.bytes);
         const bitmap = merkleV1BitmapFromSlots([31]);
@@ -328,9 +342,46 @@ describe("Merkle v1 canonical codecs", () => {
         child.fill(0);
         expect(merkleV1BitmapSlots(tree.bitmap)).toEqual([31]);
 
-        const decodedTree = deserialize(serialize(tree), MerkleTreeBlockV1);
+        const decodedTree = decodeMerkleContentEntryV1(serialize(tree));
         expect(decodedTree).toBeInstanceOf(MerkleTreeBlockV1);
         expect(assertMerkleTreeBlockV1(decodedTree).id).toBe(tree.id);
+        expect(hex(serialize(decodedTree))).toBe(hex(serialize(tree)));
+    });
+
+    it("bounds data and tree vectors before decoding", () => {
+        const data = new MerkleDataBlockV1({ bytes: encode("bounded leaf") });
+        const dataWire = serialize(data);
+        const dataIdOffset = afterBorshString(dataWire, 0);
+        const dataBytesOffset = afterBorshString(dataWire, dataIdOffset);
+        expect(() =>
+            decodeMerkleContentEntryV1(
+                withU32(dataWire, dataBytesOffset, MERKLE_V1_MAX_DATA_BYTES + 1)
+            )
+        ).toThrow(/data block bytes length must be from/);
+
+        const malformedId = new Uint8Array(dataWire);
+        const malformedOffset = dataIdOffset + 4 + encode("data2:").byteLength;
+        malformedId[malformedOffset] = 0xc0;
+        malformedId[malformedOffset + 1] = 0xaf;
+        expect(() => decodeMerkleContentEntryV1(malformedId)).toThrow(
+            /data block id is not canonical UTF-8/
+        );
+
+        const child = merkleDataHashV1(data.bytes);
+        const tree = new MerkleTreeBlockV1({
+            level: 1,
+            bitmap: merkleV1BitmapFromSlots([0]),
+            children: [child],
+        });
+        const treeWire = serialize(tree);
+        const treeIdOffset = afterBorshString(treeWire, 0);
+        const childCountOffset =
+            afterBorshString(treeWire, treeIdOffset) + 1 + 32;
+        expect(() =>
+            decodeMerkleContentEntryV1(
+                withU32(treeWire, childCountOffset, 0xffff_ffff)
+            )
+        ).toThrow(/tree children exceeds 256 entries/);
     });
 
     it("rejects non-canonical or corrupted blocks", () => {

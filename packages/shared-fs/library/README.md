@@ -511,13 +511,31 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
 
 ### Experimental Merkle v1 codecs and exact reads
 
-The package exports generation-isolated `MerkleDataBlockV1` and
-`MerkleTreeBlockV1` codecs plus canonical hash, bitmap, root, and validation
-helpers. Their language-neutral vectors are checked by both TypeScript/Borsh
-and Go. These APIs establish the byte contract for a future bounded
-random-write generation only: the current v9 filesystem does not store or
-accept these blocks, and using the helpers does not upgrade an address or make
-patch commits O(delta).
+The package exports generation-isolated `MerkleDataBlockV1`,
+`MerkleTreeBlockV1`, and `MerkleFileVersionV1` codecs plus canonical hash,
+bitmap, root, document-id, and validation helpers. `IndexableMerkleEntryV1`
+projects local index rows from strictly validated values and derives every
+root/child `blockRef`; an author-supplied reference mirror is never accepted.
+Every version has at most one direct content edge regardless of logical file
+size. Exact file-version/index Borsh bytes and the block/root hash vectors are
+checked independently by TypeScript and Go.
+
+Decode complete content wire values with `decodeMerkleContentEntryV1()` and
+persisted local index rows with `decodeIndexableMerkleEntryV1()`. These entry
+points require an exact registered discriminator, reject non-canonical UTF-8,
+bound every string/byte/vector field before allocating its payload, validate
+the decoded semantic shape, and require an exact byte-for-byte reserialization.
+Calling Borsh `deserialize()` with a concrete decorated class is unsupported:
+the Borsh concrete-variant path consumes a string discriminator without
+checking that it names that class. A decoded index row only proves canonical
+row shape; reconstruct it from authenticated content before treating derived
+`blockRefs` as trust evidence.
+
+These APIs establish the wire contract for a future bounded random-write
+generation only: the current v9 filesystem does not store or accept these
+values, and using the helpers does not upgrade an address or make patch commits
+O(delta). The index projection is not connected to the current `Documents`
+collection, authorization, replication, GC, snapshot, or disposal paths.
 
 `MerkleReadSessionV1` adds an opt-in, read-only range walker over an abstract
 asynchronous `MerkleBlockSourceV1`. The source receives an expected hash, block

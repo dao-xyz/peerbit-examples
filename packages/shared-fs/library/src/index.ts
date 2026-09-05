@@ -103,6 +103,7 @@ export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
 export * from "./merkle-v1.js";
+export * from "./merkle-file-version-v1.js";
 export * from "./merkle-read-session-v1.js";
 
 const directorySyncUnsupported = (error: unknown) => {
