@@ -2030,6 +2030,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private changeListener: ((event: any) => void) | undefined;
     /** Memoized isTrusted verdicts; see canPerformEntry. */
     private trustVerdicts = new Map<string, { ok: boolean; at: number }>();
+    /** Invalidates verdicts still being computed when the trust graph changes. */
+    private trustVerdictEpoch = 0;
     private trustChangeListener: (() => void) | undefined;
     /** Serializes writeBatch calls; see the writeBatch docstring. */
     private writeBatchChain: Promise<unknown> = Promise.resolve();
@@ -2285,6 +2287,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await super.beforeOpen(node, options);
     }
 
+    private detachTrustChangeListener() {
+        if (this.trustChangeListener && this.trustGraph) {
+            this.trustGraph.trustGraph.events.removeEventListener(
+                "change",
+                this.trustChangeListener
+            );
+            this.trustChangeListener = undefined;
+        }
+    }
+
     private beginLifecycleRequest(kind: "open" | "close"): number {
         this.lifecycleRequestGeneration =
             (this.lifecycleRequestGeneration ?? 0) + 1;
@@ -2320,13 +2332,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
-        if (this.trustChangeListener && this.trustGraph) {
-            this.trustGraph.trustGraph.events.removeEventListener(
-                "change",
-                this.trustChangeListener
-            );
-            this.trustChangeListener = undefined;
-        }
+        // Trust invalidation remains active while admitted appends drain.
+        // Detach it only when the owning open generation actually retires.
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
@@ -2463,6 +2470,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // existing address must never inherit a stale ready bit from a prior
         // open generation. No caller can race a mutation through this gate.
         const openGeneration = (this.openGeneration || 0) + 1;
+        this.detachTrustChangeListener();
         this.openGeneration = openGeneration;
         this.maintenanceAbortController = new AbortController();
         this.bootstrapTelemetry = internalArgs?.bootstrapTelemetry;
@@ -2577,6 +2585,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.disposalPreparationRunning = false;
         this.disposalPreparationRunningGeneration = undefined;
         this.trustVerdicts = new Map();
+        this.trustVerdictEpoch = (this.trustVerdictEpoch ?? 0) + 1;
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
         this.guardIngestTasks = new Set();
@@ -2656,28 +2665,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
         }
-        // ANY trust-graph change flushes every memoized verdict, so
-        // revocations apply with zero added latency and newly trusted
-        // writers stop paying the negative-verdict TTL. Deduped like the
-        // entries change listener below.
+        // ANY current-generation trust-graph change invalidates cached AND
+        // pending verdicts, including during entries.open replay. This adds
+        // no stale-cache window to revocation; it is not a globally atomic
+        // revocation barrier. Deduped like the entries change listener below.
         if (this.trustGraph) {
-            if (this.trustChangeListener) {
-                this.trustGraph.trustGraph.events.removeEventListener(
-                    "change",
-                    this.trustChangeListener
-                );
-            }
-            const trustLifecycleRequestGeneration =
-                this.lifecycleRequestGeneration;
+            this.detachTrustChangeListener();
+            const trustOpenGeneration = this.openGeneration;
             const trustChangeListener = () => {
                 if (
                     this.trustChangeListener !== trustChangeListener ||
-                    trustLifecycleRequestGeneration !==
-                        this.lifecycleRequestGeneration ||
-                    this.writeReadinessLifecycleBlocked
+                    trustOpenGeneration !== this.openGeneration
                 ) {
                     return;
                 }
+                this.trustVerdictEpoch++;
                 this.trustVerdicts.clear();
                 if (this.disposalPreparationRunning) {
                     this.disposalContentGeneration++;
@@ -3360,6 +3362,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async canPerformEntry(operation: any) {
+        const trustGraph = this.trustGraph;
+        const trustCache = this.trustVerdicts;
+        const trustEpoch = this.trustVerdictEpoch;
+        const trustListener = this.trustChangeListener;
+        const openGeneration = this.openGeneration;
+        // Close stops public admission but still drains owned appends. Fence
+        // pending trust checks at actual open retirement, not the request.
+        const trustCheckCurrent = () =>
+            this.trustGraph === trustGraph &&
+            this.trustVerdicts === trustCache &&
+            this.trustVerdictEpoch === trustEpoch &&
+            (!trustGraph ||
+                (trustListener !== undefined &&
+                    this.trustChangeListener === trustListener)) &&
+            this.openGeneration === openGeneration &&
+            this.lifecycleRequestedState !== "closed";
         // Structural, state-independent validation — acceptance must never
         // depend on replication order or local history.
         if (operation?.type === "put") {
@@ -3478,17 +3496,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
         }
-        if (!this.trustGraph) {
+        if (!trustCheckCurrent()) {
+            return false;
+        }
+        if (!trustGraph) {
             return true;
         }
         const keys = await operation.entry.getPublicKeys();
+        if (!trustCheckCurrent()) {
+            return false;
+        }
         const now = this.clock();
         for (const key of keys) {
             // Memoized trust verdicts: the trust-graph BFS runs per entry
             // on the replication ingest path, so a cold join pays it tens
             // of thousands of times for a handful of signers. Positive
             // verdicts live until ANY trust-graph change flushes the cache
-            // (revocations apply immediately); negatives expire quickly so
+            // (pending checks are also invalidated); negatives expire quickly so
             // a writer whose trust relation is still replicating gets
             // retried by the sender's retry schedule.
             const id = key.hashcode();
@@ -3502,7 +3526,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 continue;
             }
-            const ok = await this.trustGraph.isTrusted(key);
+            const ok = await trustGraph.isTrusted(key);
+            // A clear during the await must not be undone by its old result,
+            // nor may that result approve this admission. Fail closed once;
+            // a later admission evaluates fresh state without a retry loop.
+            if (!trustCheckCurrent()) {
+                return false;
+            }
             if (this.trustVerdicts.size > 10_000) {
                 this.trustVerdicts.clear();
             }
@@ -8352,6 +8382,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapTelemetryNow = undefined;
         // A later reopen creates a fresh generation only after all old state
         // writes have drained, so it cannot race a stale marker onto disk.
+        this.detachTrustChangeListener();
         this.openGeneration = (this.openGeneration || 0) + 1;
         this.writesReady = false;
         this.writeReadinessRequired = false;
