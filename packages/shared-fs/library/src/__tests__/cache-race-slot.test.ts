@@ -43,11 +43,14 @@ describe("shared fs cache fill/event race (directory slots)", () => {
     it("never installs a stale name index over a racing create", async () => {
         await fs.writeFile("/stable.txt", "stable");
         const program: any = fs.program;
-        program.slotSweepCache.clear();
+        program.slotCandidateCache.clear();
 
         const mutationEpoch = program.slotMutationEpoch;
         const { release, parkedReached } = parkNextRowQuery(program);
-        const fill = program.slotRows(ROOT_NODE_ID, "raced.txt");
+        // Park a full sweep: a concurrent writer to this exact absent slot
+        // intentionally shares a point query, so parking that same point
+        // query would make the artificial test barrier wait on itself.
+        const fill = program.sweepRows(ROOT_NODE_ID);
         await parkedReached;
         await fs.writeFile("/raced.txt", "new");
         await waitForSlotMutation(program, mutationEpoch);
@@ -64,8 +67,7 @@ describe("shared fs cache fill/event race (directory slots)", () => {
         const program: any = fs.program;
         const nodeId = (await fs.stat("/removed.txt"))!.nodeId;
         const naming = (await program.namingStateForNode(nodeId)).winner;
-        program.slotSweepCache.clear();
-        program.slotPlacementById.clear();
+        program.slotCandidateCache.clear();
 
         const mutationEpoch = program.slotMutationEpoch;
         const { release, parkedReached } = parkNextRowQuery(program);
@@ -83,7 +85,9 @@ describe("shared fs cache fill/event race (directory slots)", () => {
 
         release();
         await fill;
-        expect(program.slotSweepCache.has(ROOT_NODE_ID)).toBe(false);
+        expect(
+            program.slotCandidateCache.getSlot(ROOT_NODE_ID, "removed.txt")
+        ).toBeUndefined();
         expect(await fs.stat("/removed.txt")).toBeUndefined();
         expect(await program.slotRows(ROOT_NODE_ID, "removed.txt")).toEqual([]);
     });
@@ -113,13 +117,13 @@ describe("shared fs cache fill/event race (directory slots)", () => {
 
         await program.close();
         await reopen();
-        const currentCache = program.slotSweepCache;
-        expect(currentCache.size).toBe(0);
+        const currentCache = program.slotCandidateCache;
+        expect(currentCache.snapshot().parents).toBe(0);
 
         release();
         await staleFill;
-        expect(program.slotSweepCache).toBe(currentCache);
-        expect(currentCache.size).toBe(0);
+        expect(program.slotCandidateCache).toBe(currentCache);
+        expect(currentCache.snapshot().parents).toBe(0);
         expect(decode(await fs.readFile("/persisted.txt"))).toBe("persisted");
     });
 

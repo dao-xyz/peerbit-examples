@@ -31,6 +31,9 @@ manualDescribe("shared fs exact slot-candidate benchmark", () => {
                     Math.floor(width / 2)
                 ).padStart(5, "0")}.txt`;
                 const program: any = fs.program;
+                // Isolate this path's cache footprint from create-stream
+                // admission and eviction during the fixture setup.
+                program.slotCandidateCache.clear();
                 program.slotCandidateRowsExamined = 0;
                 const samples: number[] = [];
                 for (let index = 0; index < 100; index++) {
@@ -38,20 +41,14 @@ manualDescribe("shared fs exact slot-candidate benchmark", () => {
                     expect(await fs.stat(target)).toBeDefined();
                     samples.push(performance.now() - started);
                 }
-                const rowsByNameEntries = [
-                    ...program.slotSweepCache.values(),
-                ].reduce(
-                    (total: number, bucket: Map<string, unknown>) =>
-                        total + bucket.size,
-                    0
-                );
+                const retained = program.slotCandidateCache.snapshot();
                 return {
                     width,
                     p50Ms: percentile(samples, 0.5),
                     p95Ms: percentile(samples, 0.95),
                     examined: program.slotCandidateRowsExamined,
-                    rowsByNameEntries,
-                    reverseIndexEntries: program.slotPlacementById.size,
+                    rowsByNameEntries: retained.slots,
+                    reverseIndexEntries: retained.reverse,
                 };
             } finally {
                 await peer.stop().catch(() => {});
@@ -74,12 +71,11 @@ manualDescribe("shared fs exact slot-candidate benchmark", () => {
         // descriptive because CI runners are heterogeneous.
         expect(report.small.examined).toBe(200);
         expect(report.wide.examined).toBe(200);
-        // The /wide row plus one row per uniquely named child: the exact-name
-        // index and its cross-parent replacement reverse index each hold one
-        // entry per typical cached row. The previous id-keyed bucket held one.
-        expect(report.small.rowsByNameEntries).toBe(101);
-        expect(report.small.reverseIndexEntries).toBe(101);
-        expect(report.wide.rowsByNameEntries).toBe(10_001);
-        expect(report.wide.reverseIndexEntries).toBe(10_001);
+        // A cold point path retains only /wide and the requested child;
+        // neither directory width nor unrelated histories are admitted.
+        expect(report.small.rowsByNameEntries).toBe(2);
+        expect(report.small.reverseIndexEntries).toBe(2);
+        expect(report.wide.rowsByNameEntries).toBe(2);
+        expect(report.wide.reverseIndexEntries).toBe(2);
     }, 120_000);
 });

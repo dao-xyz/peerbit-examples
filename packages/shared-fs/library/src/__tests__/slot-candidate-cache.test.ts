@@ -189,10 +189,11 @@ describe("shared fs exact slot-candidate cache", () => {
             ...repeatedRow,
             id: `naming:large-history-${index}`,
         }));
-        program.slotSweepCache.set(
+        program.overlaySweep.set(
             ROOT_NODE_ID,
             new Map([[repeatedRow.name, history]])
         );
+        program.bootstrapPhase = "overlay-active";
 
         expect(await program.sweepRows(ROOT_NODE_ID)).toHaveLength(
             history.length
@@ -270,7 +271,7 @@ describe("shared fs exact slot-candidate cache", () => {
 
         program.retireOverlay(true, program.openGeneration);
         expect(program.overlaySweep.size).toBe(0);
-        expect(program.slotSweepCache.size).toBe(0);
+        expect(program.slotCandidateCache.snapshot().parents).toBe(0);
         expect(
             await program.slotResolution(ROOT_NODE_ID, "overlay-only")
         ).toBeUndefined();
@@ -296,7 +297,7 @@ describe("shared fs exact slot-candidate cache", () => {
         program.retireOverlay(false, program.openGeneration);
         program.clearBootstrapTimers();
         expect(program.overlaySweep.size).toBe(0);
-        expect(program.slotSweepCache.size).toBe(0);
+        expect(program.slotCandidateCache.snapshot().parents).toBe(0);
         expect(await fs.stat("/overlay-timeout")).toBeUndefined();
     });
 
@@ -304,10 +305,9 @@ describe("shared fs exact slot-candidate cache", () => {
         await fs.writeFile("/persisted.txt", "persisted");
         expect(await fs.stat("/persisted.txt")).toBeDefined();
         const program: any = fs.program;
-        const previousCache = program.slotSweepCache;
-        const previousPlacements = program.slotPlacementById;
-        expect(previousCache.size).toBeGreaterThan(0);
-        expect(previousPlacements.size).toBeGreaterThan(0);
+        const previousCache = program.slotCandidateCache;
+        expect(previousCache.snapshot().parents).toBeGreaterThan(0);
+        expect(previousCache.snapshot().reverse).toBeGreaterThan(0);
 
         await program.close();
         const reopened = await (peer as any).open(program, {
@@ -322,10 +322,9 @@ describe("shared fs exact slot-candidate cache", () => {
         });
 
         expect(reopened).toBe(program);
-        expect(program.slotSweepCache).not.toBe(previousCache);
-        expect(program.slotPlacementById).not.toBe(previousPlacements);
-        expect(program.slotSweepCache.size).toBe(0);
-        expect(program.slotPlacementById.size).toBe(0);
+        expect(program.slotCandidateCache).not.toBe(previousCache);
+        expect(program.slotCandidateCache.snapshot().parents).toBe(0);
+        expect(program.slotCandidateCache.snapshot().reverse).toBe(0);
         expect(decode(await fs.readFile("/persisted.txt"))).toBe("persisted");
     });
 });
