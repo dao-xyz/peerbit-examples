@@ -4,6 +4,7 @@ type ExternalNativeAdapterOptions = {
     readinessTimeoutMs?: number;
     exitTimeoutMs?: number;
     spawnAdapter?: typeof spawn;
+    profile?: boolean;
 };
 
 const childExited = (child: ChildProcess) =>
@@ -27,7 +28,6 @@ const signalAndWaitForChildExit = async (
     }
 
     return new Promise<SignalResult>((resolve) => {
-        let timeout: NodeJS.Timeout | undefined;
         let settled = false;
         let rejectedSignal: Error | undefined;
         const finish = (result: SignalResult) => {
@@ -35,9 +35,7 @@ const signalAndWaitForChildExit = async (
                 return;
             }
             settled = true;
-            if (timeout != null) {
-                clearTimeout(timeout);
-            }
+            clearTimeout(timeout);
             child.off("exit", onExit);
             child.off("error", onError);
             resolve(result);
@@ -48,15 +46,7 @@ const signalAndWaitForChildExit = async (
         const onError = (error: Error) => {
             finish({ status: "error", error });
         };
-        child.once("exit", onExit);
-        child.once("error", onError);
-
-        if (childExited(child)) {
-            finish({ status: "exited" });
-            return;
-        }
-
-        timeout = setTimeout(
+        const timeout = setTimeout(
             () =>
                 finish(
                     rejectedSignal == null
@@ -65,6 +55,14 @@ const signalAndWaitForChildExit = async (
                 ),
             timeoutMs
         );
+        child.once("exit", onExit);
+        child.once("error", onError);
+
+        if (childExited(child)) {
+            finish({ status: "exited" });
+            return;
+        }
+
         try {
             if (!child.kill(signal)) {
                 rejectedSignal = new Error(
@@ -116,6 +114,9 @@ export const mountExternalNativeAdapter = async (
     const args = ["--endpoint", endpoint, "--mountpoint", mountpoint];
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
+    }
+    if (options.profile) {
+        args.push("--profile");
     }
     const child = (options.spawnAdapter ?? spawn)(command, args, {
         stdio: ["ignore", "pipe", "pipe"],

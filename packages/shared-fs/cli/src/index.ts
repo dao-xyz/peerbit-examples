@@ -4,6 +4,7 @@ import type {
     PrepareForDisposalResult,
     ResolveNamingAction,
     SharedFsConflict,
+    SharedFsMountProfileEvent,
     SharedFsNamingConflict,
     SharedFsVersionInfo,
     Peerbit,
@@ -840,6 +841,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         default: false,
                         description:
                             "UNSAFE session-only recovery override: expose namespace writes without a proven settled full-replica view.",
+                    })
+                    .option("mount-profile", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "Emit opt-in mounted-path timing events as NDJSON on stderr.",
                     }),
             async (argv) => {
                 if (argv.replicate === false) {
@@ -887,11 +894,19 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         }
                         throw error;
                     }
+                    const profile = argv.mountProfile
+                        ? (event: SharedFsMountProfileEvent) => {
+                              process.stderr.write(
+                                  `${JSON.stringify(event)}\n`
+                              );
+                          }
+                        : undefined;
                     const backend = createSharedFsMountBackend(fsHandle, {
                         // SharedFileSystem treats chunk input as immutable and
                         // may retain its views, so the backend transfers a
                         // stable COW snapshot instead of copying on release.
                         writeFileInput: "immutable-borrowed",
+                        profile,
                     });
                     const externalAdapter = await resolveExternalNativeAdapter(
                         argv.nativeAdapter
@@ -902,12 +917,14 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     if (externalAdapter) {
                         ipc = await createSharedFsIpcServer(
                             backend,
-                            "tcp://127.0.0.1:0"
+                            "tcp://127.0.0.1:0",
+                            { profile }
                         );
                         mounted = await mountExternalNativeAdapter(
                             externalAdapter,
                             ipc.endpoint,
-                            mountpoint
+                            mountpoint,
+                            { profile: argv.mountProfile }
                         );
                     } else {
                         // In-process fuse-native mounts talk to the backend
@@ -915,6 +932,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         // latency and base64 CPU.
                         mounted = await mountNativeSharedFs(backend, {
                             mountpoint,
+                            profile,
                         });
                     }
                     console.log(

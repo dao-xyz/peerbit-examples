@@ -152,6 +152,52 @@ describe("shared fs mount backend", () => {
         expect(decode(await fs.readFile("/docs/file.txt"))).toBe("hello");
     });
 
+    it("profiles the fsync fence and exact target write without inventing remote phases", async () => {
+        const events: Array<{
+            phase: string;
+            operation: string;
+            ok: boolean;
+            detail?: Readonly<Record<string, string | number | boolean>>;
+        }> = [];
+        const backend = createSharedFsMountBackend(fs, {
+            profile: (event) => events.push(event),
+        });
+        const handle = await backend.open("/profiled.txt", {
+            write: true,
+            create: true,
+        });
+        await backend.write(handle, encode("hello"), 0);
+        await backend.fsync(handle);
+
+        expect(events.map((event) => event.phase)).toEqual([
+            "mount.target.writeFile",
+            "mount.fsync.localCommit",
+        ]);
+        expect(events[0]).toMatchObject({
+            operation: "writeFile",
+            ok: true,
+            detail: { bytes: 5, mutationGeneration: 2 },
+        });
+        expect(events[1]).toMatchObject({
+            operation: "fsync",
+            ok: true,
+            detail: {
+                requiredCommit: true,
+                cutoffGeneration: 2,
+                persistedGenerationBefore: 0,
+            },
+        });
+
+        events.length = 0;
+        await backend.fsync(handle);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+            phase: "mount.fsync.localCommit",
+            detail: { requiredCommit: false },
+        });
+        await backend.release(handle);
+    });
+
     it("keeps default directory entries compact without per-entry lookups", async () => {
         await fs.mkdir("/docs");
         await fs.writeFile("/note.txt", "hello");

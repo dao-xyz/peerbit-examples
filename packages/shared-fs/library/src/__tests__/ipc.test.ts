@@ -145,6 +145,36 @@ const decodeV2Response = async (
 };
 
 describe("shared-fs IPC framing", () => {
+    it("profiles only the backend service boundary", async () => {
+        const events: Array<{
+            phase: string;
+            operation: string;
+            ok: boolean;
+            detail?: Readonly<Record<string, string | number | boolean>>;
+        }> = [];
+        const server = await createSharedFsIpcServer(
+            backendWith({ getattr: async (path) => ({ path }) as any }),
+            "tcp://127.0.0.1:0",
+            { profile: (event) => events.push(event) }
+        );
+        try {
+            const client = createSharedFsIpcClient(server.endpoint);
+            await expect(client.getattr("/profiled")).resolves.toEqual({
+                path: "/profiled",
+            });
+            expect(events).toHaveLength(1);
+            expect(events[0]).toMatchObject({
+                phase: "ipc.service",
+                operation: "getattr",
+                ok: true,
+                detail: { requestId: 1, protocol: "v1" },
+            });
+            expect(events[0].detail).not.toHaveProperty("framingNs");
+        } finally {
+            await server.close();
+        }
+    });
+
     it("keeps additive readdir options compatible with legacy backends", async () => {
         const readdir = vi.fn(async (_path: string) => [
             { name: "legacy.txt", kind: "file" as const },
@@ -455,6 +485,50 @@ describe("shared-fs IPC framing", () => {
 });
 
 describe("shared-fs negotiated IPC v2", () => {
+    it("profiles the v2 backend service with its wire request id", async () => {
+        const events: Array<{
+            phase: string;
+            operation: string;
+            ok: boolean;
+            detail?: Readonly<Record<string, string | number | boolean>>;
+        }> = [];
+        const server = await createSharedFsIpcServer(
+            backendWith({ getattr: async (path) => ({ path }) as any }),
+            "tcp://127.0.0.1:0",
+            { profile: (event) => events.push(event) }
+        );
+        const socket = await connect(server.endpoint);
+        try {
+            const { reader, limits } = await negotiateV2(socket);
+            const request = encodeIpcV2Frame(
+                IpcV2FrameKind.Request,
+                { id: 37, op: "getattr", args: ["/profiled-v2"] },
+                Buffer.alloc(0),
+                limits.maxRequestFrameBytes,
+                limits.maxMetadataBytes
+            );
+            await writeIpcV2Frame(socket, request);
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: {
+                    id: 37,
+                    ok: true,
+                    result: { path: "/profiled-v2" },
+                },
+                body: Buffer.alloc(0),
+            });
+            expect(events).toHaveLength(1);
+            expect(events[0]).toMatchObject({
+                phase: "ipc.service",
+                operation: "getattr",
+                ok: true,
+                detail: { requestId: 37, protocol: "v2" },
+            });
+        } finally {
+            socket.destroy();
+            await server.close();
+        }
+    });
+
     it("retains zero-copy frame bytes until the final socket write completes", async () => {
         const callbacks: Array<(error?: Error | null) => void> = [];
         const socket = Object.assign(new EventEmitter(), {

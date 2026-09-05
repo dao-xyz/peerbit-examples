@@ -206,6 +206,21 @@ mkdir -p "$HOME/PeerbitShared"
 peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 ```
 
+For a diagnostic run, add `--mount-profile`. The CLI writes one
+`peerbit.shared-fs.mount-profile.v1` JSON object per observed userspace phase to
+stderr. The external adapter reports native callback, serialized-queue, and IPC
+round-trip time; the Node daemon reports IPC backend service, the local `fsync`
+generation fence, and the exact Peerbit-facing `writeFile` call. Group lines by
+`source`, `phase`, and `operation` to obtain callback counts and summed/max
+time. This is opt-in and does not change mount semantics.
+
+The phases overlap. In particular, IPC round trip contains Node service, and a
+native callback can contain the whole round trip. Kernel scheduling/cache time,
+remote readability, replication, and persisted acknowledgements are not
+reported. Normal stderr notices may appear between JSON lines, so consumers
+should select objects whose `schema` is
+`peerbit.shared-fs.mount-profile.v1`.
+
 On Windows PowerShell:
 
 ```powershell

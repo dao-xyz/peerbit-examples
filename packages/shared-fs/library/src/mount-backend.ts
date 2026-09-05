@@ -30,6 +30,10 @@ import {
     normalizeFsPath,
     pathSegments,
 } from "./path.js";
+import {
+    profileSharedFsMountOperation,
+    type SharedFsMountProfileSink,
+} from "./mount-profile.js";
 
 export type SharedFsMountBackendTarget = {
     /** Exact node-bound remove/rename capability used by native mounts. */
@@ -120,6 +124,11 @@ export type SharedFsMountBackendOptions = {
      * compatibility.
      */
     writeFileInput?: "immutable-borrowed";
+    /**
+     * Opt-in mount-path timing sink. The default path does not read a clock;
+     * sink failures are ignored and cannot change filesystem results.
+     */
+    profile?: SharedFsMountProfileSink;
 };
 
 export type SharedFsOpenFlags =
@@ -681,6 +690,7 @@ export const createSharedFsMountBackend = (
     const namespaceTransitions = new Map<symbol, readonly string[]>();
     const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
+    const profile = options.profile;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
     const delegatesNamespaceMutation =
@@ -1473,11 +1483,23 @@ export const createSharedFsMountBackend = (
                 ReturnType<SharedFsMountBackendTarget["writeFile"]>
             >;
             try {
-                result = await target.writeFile(
-                    state.path,
-                    bytes,
-                    writeOptions
-                );
+                result = profile
+                    ? await profileSharedFsMountOperation(
+                          profile,
+                          {
+                              source: "node-daemon",
+                              phase: "mount.target.writeFile",
+                              operation: "writeFile",
+                              detail: {
+                                  bytes: snapshot.length,
+                                  mutationGeneration:
+                                      snapshot.mutationGeneration,
+                              },
+                          },
+                          () =>
+                              target.writeFile(state.path, bytes, writeOptions)
+                      )
+                    : await target.writeFile(state.path, bytes, writeOptions);
             } catch (error) {
                 const expectedMismatch =
                     error instanceof SharedFsExpectedNodeMismatchError &&
@@ -2450,7 +2472,25 @@ export const createSharedFsMountBackend = (
         async fsync(handle: number) {
             const openHandle = requireHandle(handle);
             const cutoff = openHandle.state.mutationGeneration;
-            return wrap(() => commitThrough(openHandle.state, cutoff));
+            const persistedBefore = openHandle.state.persistedGeneration;
+            return wrap(() =>
+                profile
+                    ? profileSharedFsMountOperation(
+                          profile,
+                          {
+                              source: "node-daemon",
+                              phase: "mount.fsync.localCommit",
+                              operation: "fsync",
+                              detail: {
+                                  requiredCommit: persistedBefore < cutoff,
+                                  cutoffGeneration: cutoff,
+                                  persistedGenerationBefore: persistedBefore,
+                              },
+                          },
+                          () => commitThrough(openHandle.state, cutoff)
+                      )
+                    : commitThrough(openHandle.state, cutoff)
+            );
         },
 
         async release(handle: number) {
