@@ -1,4 +1,4 @@
-import { deserialize, serialize } from "@dao-xyz/borsh";
+import { serialize } from "@dao-xyz/borsh";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -7,12 +7,16 @@ import {
     MerkleFileVersionV1,
     assertMerkleContentEntryV1,
     assertMerkleFileVersionV1,
+    decodeIndexableMerkleEntryV1,
+    decodeMerkleContentEntryV1,
     merkleRootBlockRefsV1,
     merkleRootDescriptorFromVersionV1,
     merkleTreeBlockRefsV1,
     type MerkleFileVersionV1Properties,
 } from "../merkle-file-version-v1.js";
 import {
+    MERKLE_V1_MAX_DATA_BYTES,
+    MERKLE_V1_MAX_WIRE_BYTES,
     MerkleDataBlockV1,
     MerkleTreeBlockV1,
     merkleContentRootV1,
@@ -151,6 +155,79 @@ const accessorBackedData = (source: MerkleDataBlockV1) => {
     return { value, reads };
 };
 
+const readU32 = (wire: Uint8Array, offset: number) =>
+    new DataView(wire.buffer, wire.byteOffset, wire.byteLength).getUint32(
+        offset,
+        true
+    );
+
+const withU32 = (wire: Uint8Array, offset: number, value: number) => {
+    const changed = new Uint8Array(wire);
+    new DataView(
+        changed.buffer,
+        changed.byteOffset,
+        changed.byteLength
+    ).setUint32(offset, value, true);
+    return changed;
+};
+
+const encodeU32 = (value: number) => {
+    const encoded = new Uint8Array(4);
+    new DataView(encoded.buffer).setUint32(0, value, true);
+    return encoded;
+};
+
+const concatBytes = (parts: readonly Uint8Array[]) => {
+    const result = new Uint8Array(
+        parts.reduce((total, part) => total + part.byteLength, 0)
+    );
+    let offset = 0;
+    for (const part of parts) {
+        result.set(part, offset);
+        offset += part.byteLength;
+    }
+    return result;
+};
+
+const encodeBorshString = (value: string) => {
+    const bytes = encode(value);
+    return concatBytes([encodeU32(bytes.byteLength), bytes]);
+};
+
+const afterBorshString = (wire: Uint8Array, offset: number) =>
+    offset + 4 + readU32(wire, offset);
+
+const replaceBorshString = (
+    wire: Uint8Array,
+    offset: number,
+    replacement: string
+) => {
+    const changed = new Uint8Array(wire);
+    const encoded = encode(replacement);
+    const length = readU32(changed, offset);
+    if (encoded.byteLength !== length) {
+        throw new Error("replacement must preserve the Borsh string length");
+    }
+    changed.set(encoded, offset + 4);
+    return changed;
+};
+
+const versionWireOffsets = (wire: Uint8Array) => {
+    const id = afterBorshString(wire, 0);
+    const nodeId = afterBorshString(wire, id);
+    const parentVersionIds = afterBorshString(wire, nodeId);
+    return { id, nodeId, parentVersionIds };
+};
+
+const indexWireOffsets = (wire: Uint8Array) => {
+    const id = afterBorshString(wire, 0);
+    const kind = afterBorshString(wire, id);
+    const nodePresence = afterBorshString(wire, kind);
+    if (wire[nodePresence] !== 1) throw new Error("golden nodeId is absent");
+    const blockRefs = afterBorshString(wire, nodePresence + 1);
+    return { id, kind, blockRefs };
+};
+
 describe("Merkle file-version v1 wire contract", () => {
     it("matches the language-neutral Borsh golden vector", () => {
         const value = validVersion();
@@ -160,22 +237,27 @@ describe("Merkle file-version v1 wire contract", () => {
             vectors.fileVersion.rootBlockRefs
         );
 
-        const decoded = deserialize(
-            fromHex(vectors.fileVersion.borshHex),
-            MerkleFileVersionV1
+        const decoded = decodeMerkleContentEntryV1(
+            fromHex(vectors.fileVersion.borshHex)
         );
         expect(decoded).toBeInstanceOf(MerkleFileVersionV1);
-        expect(assertMerkleFileVersionV1(decoded)).toBe(decoded);
-        expect(decoded.id).toBe(vectors.fileVersion.id);
-        expect(decoded.parentVersionIds).toEqual(
+        const decodedVersion = assertMerkleFileVersionV1(decoded);
+        expect(decodedVersion).toBe(decoded);
+        expect(decodedVersion.id).toBe(vectors.fileVersion.id);
+        expect(decodedVersion.parentVersionIds).toEqual(
             vectors.fileVersion.parentVersionIds
         );
-        expect(decoded.causalDepth).toBe(
+        expect(decodedVersion.causalDepth).toBe(
             BigInt(vectors.fileVersion.causalDepth)
         );
-        expect(decoded.createdAt).toBe(BigInt(vectors.fileVersion.createdAt));
-        expect(hex(decoded.legacyWholeSha256!)).toBe(
+        expect(decodedVersion.createdAt).toBe(
+            BigInt(vectors.fileVersion.createdAt)
+        );
+        expect(hex(decodedVersion.legacyWholeSha256!)).toBe(
             vectors.fileVersion.legacyWholeSha256Hex
+        );
+        expect(hex(serialize(decodedVersion))).toBe(
+            vectors.fileVersion.borshHex
         );
     });
 
@@ -221,6 +303,31 @@ describe("Merkle file-version v1 wire contract", () => {
         const descriptor = merkleRootDescriptorFromVersionV1(value);
         descriptor.rootHash!.fill(0);
         expect(hex(value.rootHash!)).toBe(vectors.presentRoot.rootHashHex);
+    });
+
+    it("snapshots bounded string arrays without repeated accessor reads", () => {
+        const value = validVersion();
+        const source = [...value.parentVersionIds];
+        const reads = { length: 0, entries: new Array(source.length).fill(0) };
+        value.parentVersionIds = new Proxy(source, {
+            get(target, property, receiver) {
+                if (property === "length") {
+                    reads.length++;
+                    return reads.length === 1 ? target.length : 0xffff_ffff;
+                }
+                if (typeof property === "string" && /^\d+$/u.test(property)) {
+                    const index = Number(property);
+                    reads.entries[index]++;
+                    return reads.entries[index] === 1
+                        ? target[index]
+                        : "version:changed-after-check";
+                }
+                return Reflect.get(target, property, receiver);
+            },
+        });
+
+        expect(hex(serialize(value))).toBe(vectors.fileVersion.borshHex);
+        expect(reads).toEqual({ length: 1, entries: [1, 1] });
     });
 
     it("validates bounded identifiers, parents, clocks, and attribution", () => {
@@ -481,12 +588,157 @@ describe("Merkle file-version v1 wire contract", () => {
                 )
         ).toThrow(/unknown type/);
 
-        const decodedRow = deserialize(
-            serialize(versionRow),
-            IndexableMerkleEntryV1
-        );
+        const decodedRow = decodeIndexableMerkleEntryV1(serialize(versionRow));
         expect(decodedRow.blockRefs).toEqual(vectors.fileVersion.rootBlockRefs);
         expect(hex(decodedRow.contentRoot!)).toBe(vectors.presentRoot.hashHex);
+        expect(hex(serialize(decodedRow))).toBe(
+            vectors.fileVersionIndex.borshHex
+        );
+    });
+
+    it("rejects unknown and non-canonical wire discriminators", () => {
+        const versionWire = fromHex(vectors.fileVersion.borshHex);
+        expect(encode("shared_fs_merkle_file_version_v2").byteLength).toBe(
+            readU32(versionWire, 0)
+        );
+        expect(() =>
+            decodeMerkleContentEntryV1(
+                replaceBorshString(
+                    versionWire,
+                    0,
+                    "shared_fs_merkle_file_version_v2"
+                )
+            )
+        ).toThrow(/unsupported content variant/);
+
+        const indexWire = fromHex(vectors.fileVersionIndex.borshHex);
+        expect(encode("shared_fs_merkle_indexable_entry_v2").byteLength).toBe(
+            readU32(indexWire, 0)
+        );
+        expect(() =>
+            decodeIndexableMerkleEntryV1(
+                replaceBorshString(
+                    indexWire,
+                    0,
+                    "shared_fs_merkle_indexable_entry_v2"
+                )
+            )
+        ).toThrow(/unsupported index variant/);
+
+        expect(() =>
+            decodeMerkleContentEntryV1(withU32(versionWire, 0, 0xffff_ffff))
+        ).toThrow(/variant exceeds|variant length exceeds/);
+
+        const malformedVariant = new Uint8Array(versionWire);
+        malformedVariant[4] = 0x80;
+        expect(() => decodeMerkleContentEntryV1(malformedVariant)).toThrow(
+            /variant is not canonical UTF-8/
+        );
+        expect(() =>
+            decodeMerkleContentEntryV1(
+                new Uint8Array(MERKLE_V1_MAX_WIRE_BYTES + 1)
+            )
+        ).toThrow(/encoded value exceeds/);
+    });
+
+    it("bounds file-version and index allocation before decoding", () => {
+        const versionWire = fromHex(vectors.fileVersion.borshHex);
+        const versionOffsets = versionWireOffsets(versionWire);
+        expect(() =>
+            decodeMerkleContentEntryV1(
+                withU32(
+                    versionWire,
+                    versionOffsets.id,
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxVersionIdUtf8Bytes + 1
+                )
+            )
+        ).toThrow(/id exceeds 256 UTF-8 bytes/);
+        expect(() =>
+            decodeMerkleContentEntryV1(
+                withU32(
+                    versionWire,
+                    versionOffsets.parentVersionIds,
+                    0xffff_ffff
+                )
+            )
+        ).toThrow(/parentVersionIds exceeds 8000 entries/);
+
+        let afterParents = versionOffsets.parentVersionIds + 4;
+        const originalParentCount = readU32(
+            versionWire,
+            versionOffsets.parentVersionIds
+        );
+        for (let index = 0; index < originalParentCount; index++) {
+            afterParents = afterBorshString(versionWire, afterParents);
+        }
+        const aggregateOverflowParents = Array.from(
+            { length: 4097 },
+            (_, index) =>
+                encodeBorshString(
+                    `version:${index.toString().padStart(8, "0")}${"p".repeat(240)}`
+                )
+        );
+        const aggregateOverflowWire = concatBytes([
+            versionWire.subarray(0, versionOffsets.parentVersionIds),
+            encodeU32(aggregateOverflowParents.length),
+            ...aggregateOverflowParents,
+            versionWire.subarray(afterParents),
+        ]);
+        expect(aggregateOverflowWire.byteLength).toBeLessThan(
+            MERKLE_V1_MAX_WIRE_BYTES
+        );
+        expect(() => decodeMerkleContentEntryV1(aggregateOverflowWire)).toThrow(
+            /parentVersionIds.*aggregate UTF-8 byte/
+        );
+
+        const malformedId = new Uint8Array(versionWire);
+        const malformedOffset =
+            versionOffsets.id + 4 + encode("version:").byteLength;
+        malformedId[malformedOffset] = 0xc0;
+        malformedId[malformedOffset + 1] = 0xaf;
+        expect(() => decodeMerkleContentEntryV1(malformedId)).toThrow(
+            /id is not canonical UTF-8/
+        );
+
+        const indexWire = fromHex(vectors.fileVersionIndex.borshHex);
+        const indexOffsets = indexWireOffsets(indexWire);
+        expect(() =>
+            decodeIndexableMerkleEntryV1(
+                withU32(indexWire, indexOffsets.blockRefs, 0xffff_ffff)
+            )
+        ).toThrow(/index blockRefs exceeds 256 entries/);
+        expect(() =>
+            decodeIndexableMerkleEntryV1(
+                withU32(
+                    indexWire,
+                    indexOffsets.kind,
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxIndexKindUtf8Bytes + 1
+                )
+            )
+        ).toThrow(/index kind exceeds 16 UTF-8 bytes/);
+    });
+
+    it("validates decoded index semantics after bounded field decoding", () => {
+        const versionRow = new IndexableMerkleEntryV1(validVersion());
+        versionRow.changesetId = "🙂".repeat(129);
+        expect(() =>
+            decodeIndexableMerkleEntryV1(serialize(versionRow))
+        ).toThrow(/changesetId exceeds 256 UTF-16 code units/);
+
+        const mismatchedRoot = new IndexableMerkleEntryV1(validVersion());
+        mismatchedRoot.blockRefs = [
+            merkleTreeIdFromHashV1(new Uint8Array(32).fill(0x5a)),
+        ];
+        expect(() =>
+            decodeIndexableMerkleEntryV1(serialize(mismatchedRoot))
+        ).toThrow(/contentRoot does not match/);
+
+        const data = new MerkleDataBlockV1({ bytes: encode("index shape") });
+        const dataRow = new IndexableMerkleEntryV1(data);
+        dataRow.nodeId = "file:not-allowed";
+        expect(() => decodeIndexableMerkleEntryV1(serialize(dataRow))).toThrow(
+            /non-version index rows must contain only zero metadata/
+        );
     });
 
     it("snapshots accessor-backed blocks before deriving ids or refs", () => {

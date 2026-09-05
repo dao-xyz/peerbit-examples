@@ -1,5 +1,12 @@
-import { field, fixedArray, option, variant, vec } from "@dao-xyz/borsh";
+import { deserialize, field, option, serialize, variant } from "@dao-xyz/borsh";
 import {
+    MERKLE_DATA_BLOCK_V1_VARIANT,
+    MERKLE_TREE_BLOCK_V1_VARIANT,
+    MERKLE_V1_MAX_BLOCK_ID_UTF8_BYTES,
+    MERKLE_V1_MAX_LEVEL,
+    MERKLE_V1_MAX_VARIANT_UTF8_BYTES,
+    MERKLE_V1_MAX_WIRE_BYTES,
+    MerkleContentEntryV1,
     MerkleDataBlockV1,
     MerkleTreeBlockV1,
     assertMerkleDataBlockV1,
@@ -11,6 +18,14 @@ import {
     type MerkleRootDescriptorV1,
     type MerkleV1LeafSize,
 } from "./merkle-v1.js";
+import {
+    assertExactWireRoundTripV1,
+    boundedUtf8ArrayFieldV1,
+    boundedUtf8FieldV1,
+    copyWireAndReadVariantV1,
+    fixedBytesFieldV1,
+    merkleWireFailV1,
+} from "./merkle-wire-v1.js";
 
 /** Wire/resource bounds for one immutable Merkle file-version document. */
 export const MERKLE_FILE_VERSION_V1_LIMITS = Object.freeze({
@@ -23,7 +38,16 @@ export const MERKLE_FILE_VERSION_V1_LIMITS = Object.freeze({
     maxMachineLabelUtf8Bytes: 4 * 1024,
     maxChangesetIdCodeUnits: 256,
     maxChangesetIdUtf8Bytes: 1024,
+    maxIndexKindUtf8Bytes: 16,
+    maxBlockRefs: 256,
+    maxBlockRefUtf8Bytes: MERKLE_V1_MAX_BLOCK_ID_UTF8_BYTES,
+    maxBlockRefsUtf8Bytes: 256 * MERKLE_V1_MAX_BLOCK_ID_UTF8_BYTES,
 });
+
+export const MERKLE_FILE_VERSION_V1_VARIANT =
+    "shared_fs_merkle_file_version_v1" as const;
+export const MERKLE_INDEXABLE_ENTRY_V1_VARIANT =
+    "shared_fs_merkle_indexable_entry_v1" as const;
 
 export type MerkleFileVersionV1Properties = Readonly<{
     id: string;
@@ -42,7 +66,7 @@ export type MerkleFileVersionV1Properties = Readonly<{
     legacyWholeSha256?: Uint8Array;
 }>;
 
-export type MerkleContentEntryV1 =
+export type MerkleContentValueV1 =
     | MerkleFileVersionV1
     | MerkleTreeBlockV1
     | MerkleDataBlockV1;
@@ -181,10 +205,8 @@ const normalizeCommonFields = (value: {
     if (!Array.isArray(value.parentVersionIds)) {
         return fail("parentVersionIds must be an array");
     }
-    if (
-        value.parentVersionIds.length >
-        MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIds
-    ) {
+    const parentCount = value.parentVersionIds.length;
+    if (parentCount > MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIds) {
         return fail(
             `parentVersionIds exceeds ${MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIds} entries`
         );
@@ -192,9 +214,10 @@ const normalizeCommonFields = (value: {
     const parentVersionIds: string[] = [];
     const seenParents = new Set<string>();
     let parentBytes = 0;
-    for (let index = 0; index < value.parentVersionIds.length; index++) {
+    for (let index = 0; index < parentCount; index++) {
+        const source = value.parentVersionIds[index];
         const parent = boundedString(
-            value.parentVersionIds[index],
+            source,
             `parentVersionIds[${index}]`,
             MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdUtf8Bytes,
             { prefix: "version:" }
@@ -372,15 +395,38 @@ const snapshotVersion = (
     };
 };
 
-@variant("shared_fs_merkle_file_version_v1")
-export class MerkleFileVersionV1 {
-    @field({ type: "string" })
+@variant(MERKLE_FILE_VERSION_V1_VARIANT)
+export class MerkleFileVersionV1 extends MerkleContentEntryV1 {
+    @field(
+        boundedUtf8FieldV1({
+            name: "id",
+            maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxVersionIdUtf8Bytes,
+            prefix: "version:",
+        })
+    )
     id: string;
 
-    @field({ type: "string" })
+    @field(
+        boundedUtf8FieldV1({
+            name: "nodeId",
+            maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxNodeIdUtf8Bytes,
+            prefix: "file:",
+        })
+    )
     nodeId: string;
 
-    @field({ type: vec("string") })
+    @field(
+        boundedUtf8ArrayFieldV1({
+            name: "parentVersionIds",
+            maxCount: MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIds,
+            maxUtf8Bytes:
+                MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdUtf8Bytes,
+            maxAggregateUtf8Bytes:
+                MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdsUtf8Bytes,
+            prefix: "version:",
+            unique: true,
+        })
+    )
     parentVersionIds: string[];
 
     @field({ type: "u64" })
@@ -395,31 +441,51 @@ export class MerkleFileVersionV1 {
     @field({ type: "u8" })
     rootLevel: number;
 
-    @field({ type: option(fixedArray("u8", 32)) })
+    @field({ type: option(fixedBytesFieldV1(32, "rootHash")) })
     rootHash?: Uint8Array;
 
-    @field({ type: fixedArray("u8", 32) })
+    @field(fixedBytesFieldV1(32, "contentRoot"))
     contentRoot: Uint8Array;
 
     @field({ type: "u64" })
     createdAt: bigint;
 
-    @field({ type: "string" })
+    @field(
+        boundedUtf8FieldV1({
+            name: "authorKey",
+            maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxAuthorKeyUtf8Bytes,
+        })
+    )
     authorKey: string;
 
-    @field({ type: "string" })
+    @field(
+        boundedUtf8FieldV1({
+            name: "machineLabel",
+            maxUtf8Bytes:
+                MERKLE_FILE_VERSION_V1_LIMITS.maxMachineLabelUtf8Bytes,
+        })
+    )
     machineLabel: string;
 
     @field({ type: "bool" })
     conflictResolution: boolean;
 
-    @field({ type: option("string") })
+    @field({
+        type: option(
+            boundedUtf8FieldV1({
+                name: "changesetId",
+                maxUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxChangesetIdUtf8Bytes,
+            })
+        ),
+    })
     changesetId?: string;
 
-    @field({ type: option(fixedArray("u8", 32)) })
+    @field({ type: option(fixedBytesFieldV1(32, "legacyWholeSha256")) })
     legacyWholeSha256?: Uint8Array;
 
     constructor(properties?: MerkleFileVersionV1Properties) {
+        super();
         if (properties === undefined) return;
         if (!properties || typeof properties !== "object") {
             return fail("properties must be an object");
@@ -510,7 +576,7 @@ export const merkleTreeBlockRefsV1 = (
 /** Strict generation entry guard: unknown variants fail closed. */
 export const assertMerkleContentEntryV1 = (
     value: unknown
-): MerkleContentEntryV1 => {
+): MerkleContentValueV1 => {
     if (value instanceof MerkleFileVersionV1) {
         return assertMerkleFileVersionV1(value);
     }
@@ -523,26 +589,99 @@ export const assertMerkleContentEntryV1 = (
     return fail("entry has an unknown type");
 };
 
+const MERKLE_CONTENT_VARIANTS_V1 = new Set<string>([
+    MERKLE_DATA_BLOCK_V1_VARIANT,
+    MERKLE_TREE_BLOCK_V1_VARIANT,
+    MERKLE_FILE_VERSION_V1_VARIANT,
+]);
+
+/**
+ * Safely dispatch and validate one complete Merkle content wire value.
+ *
+ * Do not deserialize a concrete `@variant` class directly: Borsh consumes a
+ * concrete string discriminator without comparing it. This entry point first
+ * bounds and strictly decodes the tag, dispatches through the common abstract
+ * union, validates the self-certifying payload, and requires an exact
+ * byte-for-byte canonical reserialization.
+ */
+export const decodeMerkleContentEntryV1 = (
+    encoded: Uint8Array
+): MerkleContentValueV1 => {
+    const { wire, variant } = copyWireAndReadVariantV1(
+        encoded,
+        MERKLE_V1_MAX_WIRE_BYTES,
+        MERKLE_V1_MAX_VARIANT_UTF8_BYTES
+    );
+    if (!MERKLE_CONTENT_VARIANTS_V1.has(variant)) {
+        return merkleWireFailV1(`unsupported content variant ${variant}`);
+    }
+    const decoded = deserialize(
+        wire,
+        MerkleContentEntryV1
+    ) as MerkleContentValueV1;
+    const validated = assertMerkleContentEntryV1(decoded);
+    assertExactWireRoundTripV1(wire, serialize(validated));
+    return validated;
+};
+
 /**
  * Generation-specific local index projection. `blockRefs` is accepted from no
  * public input: it is derived after structural validation from the signed
  * version root or self-certifying tree children.
  */
-@variant("shared_fs_merkle_indexable_entry_v1")
+@variant(MERKLE_INDEXABLE_ENTRY_V1_VARIANT)
 export class IndexableMerkleEntryV1 {
-    @field({ type: "string" })
+    @field(
+        boundedUtf8FieldV1({
+            name: "index id",
+            maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxVersionIdUtf8Bytes,
+        })
+    )
     id: string;
 
-    @field({ type: "string" })
+    @field(
+        boundedUtf8FieldV1({
+            name: "index kind",
+            maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxIndexKindUtf8Bytes,
+        })
+    )
     kind: MerkleIndexEntryKindV1 | "";
 
-    @field({ type: option("string") })
+    @field({
+        type: option(
+            boundedUtf8FieldV1({
+                name: "index nodeId",
+                maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxNodeIdUtf8Bytes,
+                prefix: "file:",
+            })
+        ),
+    })
     nodeId?: string;
 
-    @field({ type: vec("string") })
+    @field(
+        boundedUtf8ArrayFieldV1({
+            name: "index blockRefs",
+            maxCount: MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefs,
+            maxUtf8Bytes: MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefUtf8Bytes,
+            maxAggregateUtf8Bytes:
+                MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefsUtf8Bytes,
+            unique: true,
+        })
+    )
     blockRefs: string[];
 
-    @field({ type: vec("string") })
+    @field(
+        boundedUtf8ArrayFieldV1({
+            name: "index causalRefs",
+            maxCount: MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIds,
+            maxUtf8Bytes:
+                MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdUtf8Bytes,
+            maxAggregateUtf8Bytes:
+                MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdsUtf8Bytes,
+            prefix: "version:",
+            unique: true,
+        })
+    )
     causalRefs: string[];
 
     @field({ type: "u64" })
@@ -560,22 +699,46 @@ export class IndexableMerkleEntryV1 {
     @field({ type: "u8" })
     treeLevel: number;
 
-    @field({ type: option(fixedArray("u8", 32)) })
+    @field({ type: option(fixedBytesFieldV1(32, "index contentRoot")) })
     contentRoot?: Uint8Array;
 
     @field({ type: "u64" })
     createdAt: bigint;
 
-    @field({ type: option("string") })
+    @field({
+        type: option(
+            boundedUtf8FieldV1({
+                name: "index authorKey",
+                maxUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxAuthorKeyUtf8Bytes,
+            })
+        ),
+    })
     authorKey?: string;
 
-    @field({ type: option("string") })
+    @field({
+        type: option(
+            boundedUtf8FieldV1({
+                name: "index machineLabel",
+                maxUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxMachineLabelUtf8Bytes,
+            })
+        ),
+    })
     machineLabel?: string;
 
     @field({ type: "bool" })
     conflictResolution: boolean;
 
-    @field({ type: option("string") })
+    @field({
+        type: option(
+            boundedUtf8FieldV1({
+                name: "index changesetId",
+                maxUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxChangesetIdUtf8Bytes,
+            })
+        ),
+    })
     changesetId?: string;
 
     constructor(value?: MerkleContentEntryV1) {
@@ -640,3 +803,259 @@ export class IndexableMerkleEntryV1 {
         fail("index source has an unknown type");
     }
 }
+
+const BASE64URL_ALPHABET =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+const hashFromCanonicalBlockId = (
+    id: unknown,
+    kind: "data" | "tree",
+    name: string
+) => {
+    const prefix = kind === "data" ? "data2:" : "tree2:";
+    const value = boundedString(
+        id,
+        name,
+        MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefUtf8Bytes,
+        { prefix }
+    ).value;
+    const suffix = value.slice(prefix.length);
+    if (suffix.length !== 43) {
+        return fail(`${name} must contain one canonical 32-byte hash`);
+    }
+    const bytes: number[] = [];
+    let accumulator = 0;
+    let bits = 0;
+    for (const character of suffix) {
+        const digit = BASE64URL_ALPHABET.indexOf(character);
+        if (digit < 0) {
+            return fail(`${name} must use canonical unpadded base64url`);
+        }
+        accumulator = (accumulator << 6) | digit;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            bytes.push((accumulator >>> bits) & 0xff);
+            accumulator &= (1 << bits) - 1;
+        }
+    }
+    if (bytes.length !== 32 || bits !== 2 || accumulator !== 0) {
+        return fail(`${name} must use canonical unpadded base64url`);
+    }
+    return Uint8Array.from(bytes);
+};
+
+const snapshotIndexStringArray = (
+    value: unknown,
+    name: string,
+    options: {
+        maxCount: number;
+        maxItemUtf8Bytes: number;
+        maxAggregateUtf8Bytes: number;
+        prefix?: string;
+    }
+) => {
+    if (!Array.isArray(value)) return fail(`${name} must be an array`);
+    const count = value.length;
+    if (count > options.maxCount) {
+        return fail(`${name} exceeds ${options.maxCount} entries`);
+    }
+    const result: string[] = [];
+    const seen = new Set<string>();
+    let aggregate = 0;
+    for (let index = 0; index < count; index++) {
+        const source = value[index];
+        const item = boundedString(
+            source,
+            `${name}[${index}]`,
+            options.maxItemUtf8Bytes,
+            { prefix: options.prefix }
+        );
+        aggregate += item.bytes;
+        if (aggregate > options.maxAggregateUtf8Bytes) {
+            return fail(
+                `${name} exceeds ${options.maxAggregateUtf8Bytes} aggregate UTF-8 bytes`
+            );
+        }
+        if (seen.has(item.value)) return fail(`${name} must be unique`);
+        seen.add(item.value);
+        result.push(item.value);
+    }
+    return result;
+};
+
+const assertZeroIndexMetadata = (value: {
+    nodeId?: unknown;
+    causalRefs: readonly string[];
+    causalDepth?: unknown;
+    size?: unknown;
+    leafSize?: unknown;
+    rootLevel?: unknown;
+    contentRoot?: unknown;
+    createdAt?: unknown;
+    authorKey?: unknown;
+    machineLabel?: unknown;
+    conflictResolution?: unknown;
+    changesetId?: unknown;
+}) => {
+    if (
+        value.nodeId !== undefined ||
+        value.causalRefs.length !== 0 ||
+        asU64(value.causalDepth, "index causalDepth") !== 0n ||
+        asU64(value.size, "index size") !== 0n ||
+        value.leafSize !== 0 ||
+        value.rootLevel !== 0 ||
+        value.contentRoot !== undefined ||
+        asU64(value.createdAt, "index createdAt") !== 0n ||
+        value.authorKey !== undefined ||
+        value.machineLabel !== undefined ||
+        value.conflictResolution !== false ||
+        value.changesetId !== undefined
+    ) {
+        return fail("non-version index rows must contain only zero metadata");
+    }
+};
+
+/**
+ * Validate a decoded local index row. This checks its canonical wire shape;
+ * only constructing a fresh row from authenticated content proves that its
+ * reverse edges were derived rather than author supplied.
+ */
+export const assertIndexableMerkleEntryV1 = (
+    value: unknown
+): IndexableMerkleEntryV1 => {
+    if (!(value instanceof IndexableMerkleEntryV1)) {
+        return fail("index row has an unknown type");
+    }
+    const snapshot = {
+        id: value.id,
+        kind: value.kind,
+        nodeId: value.nodeId,
+        blockRefs: snapshotIndexStringArray(
+            value.blockRefs,
+            "index blockRefs",
+            {
+                maxCount: MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefs,
+                maxItemUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefUtf8Bytes,
+                maxAggregateUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxBlockRefsUtf8Bytes,
+            }
+        ),
+        causalRefs: snapshotIndexStringArray(
+            value.causalRefs,
+            "index causalRefs",
+            {
+                maxCount: MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIds,
+                maxItemUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdUtf8Bytes,
+                maxAggregateUtf8Bytes:
+                    MERKLE_FILE_VERSION_V1_LIMITS.maxParentVersionIdsUtf8Bytes,
+                prefix: "version:",
+            }
+        ),
+        causalDepth: value.causalDepth,
+        size: value.size,
+        leafSize: value.leafSize,
+        rootLevel: value.rootLevel,
+        treeLevel: value.treeLevel,
+        contentRoot: value.contentRoot,
+        createdAt: value.createdAt,
+        authorKey: value.authorKey,
+        machineLabel: value.machineLabel,
+        conflictResolution: value.conflictResolution,
+        changesetId: value.changesetId,
+    };
+
+    if (snapshot.kind === "file-version") {
+        if (snapshot.treeLevel !== 0) {
+            return fail("a file-version index row must have treeLevel 0");
+        }
+        if (snapshot.blockRefs.length > 1) {
+            return fail("a file-version index row has at most one blockRef");
+        }
+        const rootHash = snapshot.blockRefs.length
+            ? hashFromCanonicalBlockId(
+                  snapshot.blockRefs[0],
+                  snapshot.rootLevel === 0 ? "data" : "tree",
+                  "index blockRefs[0]"
+              )
+            : undefined;
+        const normalized = normalizeCommonFields({
+            id: snapshot.id,
+            nodeId: snapshot.nodeId,
+            parentVersionIds: snapshot.causalRefs,
+            causalDepth: snapshot.causalDepth,
+            size: snapshot.size,
+            leafSize: snapshot.leafSize,
+            rootLevel: snapshot.rootLevel,
+            rootHash,
+            createdAt: snapshot.createdAt,
+            authorKey: snapshot.authorKey,
+            machineLabel: snapshot.machineLabel,
+            conflictResolution: snapshot.conflictResolution,
+            changesetId: snapshot.changesetId,
+            legacyWholeSha256: undefined,
+        });
+        const contentRoot = copyHash(snapshot.contentRoot, "index contentRoot");
+        if (!equalBytes(contentRoot, merkleContentRootV1(normalized.root))) {
+            return fail("index contentRoot does not match its root descriptor");
+        }
+        return value;
+    }
+
+    if (snapshot.kind === "merkle-tree") {
+        hashFromCanonicalBlockId(snapshot.id, "tree", "index id");
+        if (
+            !Number.isInteger(snapshot.treeLevel) ||
+            snapshot.treeLevel < 1 ||
+            snapshot.treeLevel > MERKLE_V1_MAX_LEVEL
+        ) {
+            return fail(
+                `index treeLevel must be from 1 through ${MERKLE_V1_MAX_LEVEL}`
+            );
+        }
+        for (let index = 0; index < snapshot.blockRefs.length; index++) {
+            hashFromCanonicalBlockId(
+                snapshot.blockRefs[index],
+                snapshot.treeLevel === 1 ? "data" : "tree",
+                `index blockRefs[${index}]`
+            );
+        }
+        assertZeroIndexMetadata(snapshot);
+        return value;
+    }
+
+    if (snapshot.kind === "merkle-data") {
+        hashFromCanonicalBlockId(snapshot.id, "data", "index id");
+        if (snapshot.blockRefs.length !== 0 || snapshot.treeLevel !== 0) {
+            return fail("a data index row must not contain block references");
+        }
+        assertZeroIndexMetadata(snapshot);
+        return value;
+    }
+
+    return fail("index kind is unsupported");
+};
+
+/**
+ * Safely decode a locally persisted index row with an exact discriminator,
+ * bounded fields, semantic shape checks, and canonical round-trip bytes.
+ * Reconstruct the row from content before using `blockRefs` as trust evidence.
+ */
+export const decodeIndexableMerkleEntryV1 = (
+    encoded: Uint8Array
+): IndexableMerkleEntryV1 => {
+    const { wire, variant } = copyWireAndReadVariantV1(
+        encoded,
+        MERKLE_V1_MAX_WIRE_BYTES,
+        MERKLE_V1_MAX_VARIANT_UTF8_BYTES
+    );
+    if (variant !== MERKLE_INDEXABLE_ENTRY_V1_VARIANT) {
+        return merkleWireFailV1(`unsupported index variant ${variant}`);
+    }
+    const decoded = deserialize(wire, IndexableMerkleEntryV1);
+    assertIndexableMerkleEntryV1(decoded);
+    assertExactWireRoundTripV1(wire, serialize(decoded));
+    return decoded;
+};

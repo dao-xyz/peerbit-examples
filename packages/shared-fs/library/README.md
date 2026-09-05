@@ -520,6 +520,17 @@ Every version has at most one direct content edge regardless of logical file
 size. Exact file-version/index Borsh bytes and the block/root hash vectors are
 checked independently by TypeScript and Go.
 
+Decode complete content wire values with `decodeMerkleContentEntryV1()` and
+persisted local index rows with `decodeIndexableMerkleEntryV1()`. These entry
+points require an exact registered discriminator, reject non-canonical UTF-8,
+bound every string/byte/vector field before allocating its payload, validate
+the decoded semantic shape, and require an exact byte-for-byte reserialization.
+Calling Borsh `deserialize()` with a concrete decorated class is unsupported:
+the Borsh concrete-variant path consumes a string discriminator without
+checking that it names that class. A decoded index row only proves canonical
+row shape; reconstruct it from authenticated content before treating derived
+`blockRefs` as trust evidence.
+
 These APIs establish the wire contract for a future bounded random-write
 generation only: the current v9 filesystem does not store or accept these
 values, and using the helpers does not upgrade an address or make patch commits
