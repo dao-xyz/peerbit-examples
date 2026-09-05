@@ -4,6 +4,7 @@ import type {
     BootstrapTelemetryEvent,
     SharedFsHandle,
     SharedFsMountBackend,
+    SharedFsOpenProfileEvent,
 } from "../index.js";
 import type {
     ProcessSoakBatchResult,
@@ -338,6 +339,7 @@ const main = async () => {
             if (fs) throw new Error("Shared FS is already open in this worker");
             const deadline = Date.now() + command.timeoutMs;
             const bootstrapTelemetry: BootstrapTelemetryEvent[] = [];
+            const openProfile: SharedFsOpenProfileEvent[] = [];
             const bootstrap =
                 command.bootstrap === "require"
                     ? ({ mode: "require" } as const)
@@ -354,11 +356,24 @@ const main = async () => {
                 bootstrap,
                 remoteChunkFetch: command.remoteChunkFetch ?? false,
                 gc: command.gcSchedule === false ? false : { schedule: true },
-                ...(command.captureBootstrapTelemetry
+                ...(command.captureBootstrapTelemetry ||
+                command.captureOpenProfile
                     ? {
                           telemetry: {
-                              bootstrap: (event: BootstrapTelemetryEvent) =>
-                                  bootstrapTelemetry.push(event),
+                              ...(command.captureBootstrapTelemetry
+                                  ? {
+                                        bootstrap: (
+                                            event: BootstrapTelemetryEvent
+                                        ) => bootstrapTelemetry.push(event),
+                                    }
+                                  : {}),
+                              ...(command.captureOpenProfile
+                                  ? {
+                                        openProfile: (
+                                            event: SharedFsOpenProfileEvent
+                                        ) => openProfile.push(event),
+                                    }
+                                  : {}),
                           },
                       }
                     : {}),
@@ -416,6 +431,7 @@ const main = async () => {
                 bootstrapConvergence,
                 bootstrapTelemetry,
                 memoryCalibration: memoryCalibration(),
+                openProfile,
             } satisfies ProcessSoakOpenResult;
         }
         if (command.type === "authorize") {

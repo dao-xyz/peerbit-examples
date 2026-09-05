@@ -1,7 +1,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { FileVersion, Peerbit, openSharedFs } from "@peerbit/shared-fs";
+import {
+    FileVersion,
+    Peerbit,
+    PrepareForDisposalError,
+    SharedFsHandle,
+    openSharedFs,
+} from "@peerbit/shared-fs";
 import { describe, expect, it, vi } from "vitest";
 import {
     conflictScanIsPartial,
@@ -14,7 +20,8 @@ const stopPeer = async (peer: Peerbit) => {
     await peer.services.blocks.stop();
 };
 
-const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+const decode = (bytes: Uint8Array | undefined) =>
+    bytes ? new TextDecoder().decode(bytes) : undefined;
 
 const expectedNativeMetadata = {
     modes: {
@@ -83,7 +90,7 @@ const seedConflicts = async () => {
         const deletedBase = (await shared.program.entries.index.get(
             deletedBaseInfo.id,
             { local: true, remote: false, resolve: true }
-        )) as FileVersion;
+        )) as unknown as FileVersion;
         await shared.rm("/delete-race.txt");
         const concurrentDeleteVersion = new FileVersion({
             id: "version:cli-delete-vs-edit",
@@ -449,71 +456,191 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("does not print disposal success when peer shutdown fails", async () => {
-        const directory = await fs.mkdtemp(
-            path.join(os.tmpdir(), "peerbit-shared-fs-cli-disposal-")
-        );
-        const createPeerbit = Peerbit.create.bind(Peerbit);
-        let seedPeer: Peerbit | undefined;
-        let cliPeer: Peerbit | undefined;
-        let restoreCliStop: (() => void) | undefined;
-        const log = vi.spyOn(console, "log").mockImplementation(() => {});
-        let createSpy: ReturnType<typeof vi.spyOn> | undefined;
+    it.each([
+        {
+            label: "success after shutdown",
+            preparation: "none",
+            shutdown: "none",
+        },
+        { label: "shutdown only", preparation: "none", shutdown: "error" },
+        { label: "preparation only", preparation: "error", shutdown: "none" },
+        {
+            label: "preparation and shutdown",
+            preparation: "error",
+            shutdown: "error",
+        },
+        {
+            label: "undefined rejection and shutdown",
+            preparation: "undefined",
+            shutdown: "error",
+        },
+        {
+            label: "preparation and undefined shutdown",
+            preparation: "error",
+            shutdown: "undefined",
+        },
+        {
+            label: "unprintable preparation and shutdown",
+            preparation: "unprintable",
+            shutdown: "error",
+        },
+    ] as const)(
+        "reports disposal correctly for $label",
+        async ({ preparation, shutdown }) => {
+            const directory = await fs.mkdtemp(
+                path.join(os.tmpdir(), "peerbit-shared-fs-cli-disposal-")
+            );
+            const createPeerbit = Peerbit.create.bind(Peerbit);
+            let seedPeer: Peerbit | undefined;
+            let cliPeer: Peerbit | undefined;
+            let restoreCliStop: (() => void) | undefined;
+            const log = vi.spyOn(console, "log").mockImplementation(() => {});
+            let createSpy: ReturnType<typeof vi.spyOn> | undefined;
+            let prepareSpy: ReturnType<typeof vi.spyOn> | undefined;
 
-        try {
-            seedPeer = await createPeerbit({ directory });
-            const seeded = await openSharedFs({
-                peerbit: seedPeer,
-                machineLabel: "cli-disposal-seed",
-                replicate: { factor: 1 },
-                bootstrap: false,
-                gc: false,
-            });
-            const address = seeded.address;
-            await stopPeer(seedPeer);
-            seedPeer = undefined;
-
-            const shutdownFailure = new Error("simulated shutdown failure");
-            createSpy = vi
-                .spyOn(Peerbit, "create")
-                .mockImplementation(async (options) => {
-                    const peer = await createPeerbit(options);
-                    cliPeer = peer;
-                    vi.spyOn(peer, "bootstrap").mockResolvedValue({
-                        connectedPeerIds: [],
-                        failures: [],
-                    });
-                    const stop = vi
-                        .spyOn(peer, "stop")
-                        .mockRejectedValueOnce(shutdownFailure);
-                    restoreCliStop = () => stop.mockRestore();
-                    return peer;
+            try {
+                seedPeer = await createPeerbit({ directory });
+                const seeded = await openSharedFs({
+                    peerbit: seedPeer,
+                    machineLabel: "cli-disposal-seed",
+                    replicate: { factor: 1 },
+                    bootstrap: false,
+                    gc: false,
                 });
+                const address = seeded.address;
+                await stopPeer(seedPeer);
+                seedPeer = undefined;
 
-            await expect(
-                runCli([
+                const shutdownFailure =
+                    shutdown === "undefined"
+                        ? undefined
+                        : new Error("simulated shutdown failure");
+                // Fault injection tests CLI reporting, not actual remote durability.
+                // Library disposal tests separately exercise real receipt failure.
+                const receiptFailure = Object.assign(
+                    new Error("simulated persisted receipt timeout"),
+                    {
+                        name: "PersistedDeliveryError",
+                        localCommitSucceeded: true,
+                        retrySafe: false,
+                        committedHashes: ["exact-failed-entry-evidence"],
+                    }
+                );
+                const preparationFailure =
+                    preparation === "undefined"
+                        ? undefined
+                        : new PrepareForDisposalError(receiptFailure, 1);
+                const preparationStack = preparationFailure?.stack;
+                if (preparation === "unprintable") {
+                    Object.defineProperty(preparationFailure, "message", {
+                        get() {
+                            throw new Error("message getter failed");
+                        },
+                    });
+                }
+                if (preparation !== "none") {
+                    prepareSpy = vi
+                        .spyOn(SharedFsHandle.prototype, "prepareForDisposal")
+                        .mockRejectedValueOnce(preparationFailure);
+                }
+                createSpy = vi
+                    .spyOn(Peerbit, "create")
+                    .mockImplementation(async (options) => {
+                        const peer = await createPeerbit(options);
+                        cliPeer = peer;
+                        vi.spyOn(peer, "bootstrap").mockResolvedValue({
+                            connectedPeerIds: [],
+                            failures: [],
+                        });
+                        const originalStop = peer.stop.bind(peer);
+                        const stop = vi.spyOn(peer, "stop");
+                        if (shutdown !== "none")
+                            stop.mockRejectedValueOnce(shutdownFailure);
+                        else
+                            stop.mockImplementation(async () => {
+                                await originalStop();
+                                expect(log).not.toHaveBeenCalled();
+                            });
+                        restoreCliStop = () => stop.mockRestore();
+                        return peer;
+                    });
+
+                const result = await runCli([
                     "prepare-disposal",
                     address,
                     "--directory",
                     directory,
                     "--json",
-                ])
-            ).rejects.toBe(shutdownFailure);
-            expect(cliPeer?.stop).toHaveBeenCalledTimes(1);
-            expect(log).not.toHaveBeenCalled();
-        } finally {
-            createSpy?.mockRestore();
-            restoreCliStop?.();
-            log.mockRestore();
-            if (cliPeer) {
-                await stopPeer(cliPeer);
+                ]).then(
+                    () => ({ ok: true as const }),
+                    (error) => ({ ok: false as const, error })
+                );
+                expect(cliPeer?.stop).toHaveBeenCalledTimes(1);
+                if (prepareSpy) expect(prepareSpy).toHaveBeenCalledTimes(1);
+                expect((await fs.stat(directory)).isDirectory()).toBe(true);
+                if (preparation === "none" && shutdown === "none") {
+                    expect(result.ok).toBe(true);
+                    expect(log).toHaveBeenCalledTimes(1);
+                    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
+                        safeToDispose: true,
+                        empty: true,
+                    });
+                    return;
+                }
+                expect(result.ok).toBe(false);
+                if (result.ok)
+                    throw new Error("failed disposal unexpectedly succeeded");
+                if (preparation !== "none" && shutdown !== "none") {
+                    expect(result.error).toBeInstanceOf(AggregateError);
+                    const combined = result.error as AggregateError;
+                    expect(combined.errors).toHaveLength(2);
+                    expect(combined.errors[0]).toBe(preparationFailure);
+                    expect(combined.errors[1]).toBe(shutdownFailure);
+                    expect(combined.cause).toBe(preparationFailure);
+                    expect(combined.message).toContain(
+                        "keep the source machine"
+                    );
+                    expect(combined.message).toContain(
+                        shutdownFailure?.message ?? "undefined"
+                    );
+                    if (preparation === "unprintable") {
+                        expect(combined.message).toContain(
+                            "unprintable rejection"
+                        );
+                    } else if (preparationFailure) {
+                        expect(combined.message).toContain(
+                            preparationFailure.message
+                        );
+                        expect(preparationFailure.stack).toBe(preparationStack);
+                        expect(preparationFailure.cause).toBe(receiptFailure);
+                        expect(receiptFailure.committedHashes).toEqual([
+                            "exact-failed-entry-evidence",
+                        ]);
+                        expect(receiptFailure.retrySafe).toBe(false);
+                    }
+                } else {
+                    expect(result.error).toBe(
+                        shutdown !== "none"
+                            ? shutdownFailure
+                            : preparationFailure
+                    );
+                }
+                expect(log).not.toHaveBeenCalled();
+            } finally {
+                createSpy?.mockRestore();
+                prepareSpy?.mockRestore();
+                restoreCliStop?.();
+                log.mockRestore();
+                if (cliPeer) {
+                    await stopPeer(cliPeer);
+                }
+                if (seedPeer) {
+                    await stopPeer(seedPeer);
+                }
+                await fs.rm(directory, { recursive: true, force: true });
             }
-            if (seedPeer) {
-                await stopPeer(seedPeer);
-            }
-            await fs.rm(directory, { recursive: true, force: true });
         }
-    });
+    );
 
     it("validates conflict resolution safety options before opening a peer", async () => {
         const createSpy = vi.spyOn(Peerbit, "create");

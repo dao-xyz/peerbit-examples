@@ -1,7 +1,11 @@
 import { performance } from "node:perf_hooks";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
-import { openSharedFs, type BootstrapTelemetryEvent } from "../index.js";
+import {
+    openSharedFs,
+    type BootstrapTelemetryEvent,
+    type SharedFsOpenProfileEvent,
+} from "../index.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -13,10 +17,25 @@ type RunSample = {
     run: number;
     overlayReadyMs: number;
     treeReadableMs: number;
+    writeReadyMs: number;
+    pendingDrainMs: number;
     retirementTailMs?: number;
     milestonesMs: Record<string, number>;
     durationsMs: Record<string, number>;
+    openProfile: SharedFsOpenProfileEvent[];
 };
+
+const requiredSharedLogOpenProfileNames = [
+    "sharedLog.open.localState",
+    "sharedLog.open.blockStore",
+    "sharedLog.open.remoteBlocks",
+    "sharedLog.open.lowerLog",
+    "sharedLog.open.rpcSubscriptions",
+    "sharedLog.open.providerAndOwnership",
+    "sharedLog.open.replication",
+    "sharedLog.open.synchronizer",
+    "sharedLog.open.total",
+] as const;
 
 const percentile = (values: number[], ratio: number) => {
     const sorted = [...values].sort((a, b) => a - b);
@@ -92,6 +111,8 @@ manualDescribe("bootstrap benchmark (manual)", () => {
             const durationSamples = new Map<string, number[]>();
             const overlayReadySamples: number[] = [];
             const treeReadableSamples: number[] = [];
+            const writeReadySamples: number[] = [];
+            const pendingDrainSamples: number[] = [];
             const retirementTailSamples: number[] = [];
             const runSamples: RunSample[] = [];
 
@@ -101,6 +122,7 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                 try {
                     await joinPeer.dial(donorPeer);
                     const events: BootstrapTelemetryEvent[] = [];
+                    const openProfile: SharedFsOpenProfileEvent[] = [];
                     const startedAt = performance.now();
                     const joiner = await openSharedFs({
                         peerbit: joinPeer,
@@ -108,6 +130,7 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                         machineLabel: `benchmark-joiner-${run}`,
                         telemetry: {
                             bootstrap: (event) => events.push(event),
+                            openProfile: (event) => openProfile.push(event),
                         },
                     });
 
@@ -174,10 +197,36 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                     const overlayRetired = events.find(
                         (event) => event.type === "overlay-retired"
                     );
+                    const pendingDrained = events.find(
+                        (event) => event.type === "pending-drained"
+                    );
+                    const writeReady = events.find(
+                        (event) => event.type === "write-ready"
+                    );
                     expect(overlayReady?.atMs).toBeTypeOf("number");
                     expect(overlayRetired?.verified).toBe(true);
+                    expect(pendingDrained?.durationMs).toBeTypeOf("number");
+                    expect(writeReady?.atMs).toBeTypeOf("number");
+                    for (const name of requiredSharedLogOpenProfileNames) {
+                        expect(
+                            openProfile.filter((event) => event.name === name),
+                            `${name} must emit exactly once during Documents.open`
+                        ).toHaveLength(1);
+                    }
+                    for (const event of openProfile) {
+                        expect(
+                            event.name.startsWith("sharedLog.open.") ||
+                                event.name ===
+                                    "sharedLog.blocks.resolveProviders"
+                        ).toBe(true);
+                        expect(event.component).toBe("shared-log");
+                        expect(event.durationMs).toBeTypeOf("number");
+                        expect(event.durationMs!).toBeGreaterThanOrEqual(0);
+                    }
                     overlayReadySamples.push(overlayReady!.atMs);
                     treeReadableSamples.push(treeReadableMs);
+                    writeReadySamples.push(writeReady!.atMs);
+                    pendingDrainSamples.push(pendingDrained!.durationMs);
                     let retirementTailMs: number | undefined;
                     if (
                         overlayRetired?.type === "overlay-retired" &&
@@ -190,9 +239,12 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                         run: run + 1,
                         overlayReadyMs: overlayReady!.atMs,
                         treeReadableMs,
+                        writeReadyMs: writeReady!.atMs,
+                        pendingDrainMs: pendingDrained!.durationMs,
                         retirementTailMs,
                         milestonesMs: runMilestones,
                         durationsMs: runDurations,
+                        openProfile,
                     };
                     runSamples.push(runSample);
                     // Preserve every completed sample even if a later cold
@@ -253,6 +305,12 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                 treeReadableMs: distribution(
                     samples.map((sample) => sample.treeReadableMs)
                 ),
+                writeReadyMs: distribution(
+                    samples.map((sample) => sample.writeReadyMs)
+                ),
+                pendingDrainMs: distribution(
+                    samples.map((sample) => sample.pendingDrainMs)
+                ),
                 retirementTailMs: distribution(
                     samples.flatMap((sample) =>
                         sample.retirementTailMs === undefined
@@ -263,6 +321,48 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                 milestonesMs: summarizeRunMap(samples, "milestonesMs"),
                 durationsMs: summarizeRunMap(samples, "durationsMs"),
             });
+            const openProfileNames = [
+                ...new Set([
+                    ...requiredSharedLogOpenProfileNames,
+                    "sharedLog.open.fanout",
+                    "sharedLog.blocks.resolveProviders",
+                    ...runSamples.flatMap((sample) =>
+                        sample.openProfile.map((event) => event.name)
+                    ),
+                ]),
+            ].sort();
+            const sharedLogOpenProfile = Object.fromEntries(
+                openProfileNames.map((name) => {
+                    const events = runSamples.flatMap((sample) =>
+                        sample.openProfile.filter(
+                            (event) => event.name === name
+                        )
+                    );
+                    const eventsPerRun = runSamples.map(
+                        (sample) =>
+                            sample.openProfile.filter(
+                                (event) => event.name === name
+                            ).length
+                    );
+                    return [
+                        name,
+                        {
+                            emitted: events.length,
+                            runsWithEvent: eventsPerRun.filter(
+                                (count) => count > 0
+                            ).length,
+                            eventsPerRun: distribution(eventsPerRun),
+                            durationMs: distribution(
+                                events.flatMap((event) =>
+                                    event.durationMs === undefined
+                                        ? []
+                                        : [event.durationMs]
+                                )
+                            ),
+                        },
+                    ];
+                })
+            );
             console.log(
                 "bootstrap-bench:",
                 JSON.stringify(
@@ -276,10 +376,17 @@ manualDescribe("bootstrap benchmark (manual)", () => {
                         milestonesMs: summarize(milestoneSamples),
                         durationsMs: summarize(durationSamples),
                         treeReadableMs: distribution(treeReadableSamples),
+                        writeReadyMs: distribution(writeReadySamples),
+                        pendingDrainMs: distribution(pendingDrainSamples),
                         retirementTailMs: distribution(retirementTailSamples),
+                        sharedLogOpenProfile,
                         samples: runSamples,
                         overlayReadyClusters: {
                             thresholdMs: slowThresholdMs,
+                            modeCounts: {
+                                fast: fast.length,
+                                slow: slow.length,
+                            },
                             fast: summarizeCluster(fast),
                             slow: summarizeCluster(slow),
                         },

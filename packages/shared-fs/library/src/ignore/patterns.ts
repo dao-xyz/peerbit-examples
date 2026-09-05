@@ -80,6 +80,7 @@ type CompiledPattern = {
     anchored: boolean;
     segments: string[];
     segmentRegexes: (RegExp | null)[]; // null for "**"
+    hasDoubleStar: boolean;
 };
 
 const SEGMENT_SPECIALS = /[.+^${}()|[\]\\]/g;
@@ -172,6 +173,7 @@ const validatePattern = (
         raw,
         anchored,
         segments,
+        hasDoubleStar: segments.includes("**"),
         segmentRegexes: segments.map((segment) =>
             compileSegment(fold(segment))
         ),
@@ -185,14 +187,27 @@ const validatePattern = (
  */
 const matchesSegments = (
     pattern: CompiledPattern,
-    segments: string[]
+    segments: string[],
+    length: number
 ): boolean => {
+    if (!pattern.hasDoubleStar) {
+        // Without "**", an exact match has one possible starting offset.
+        // Floating rules end at this prefix's boundary; anchored ones must
+        // also start at the root. No backtracking/memo allocation is needed.
+        const start = length - pattern.segments.length;
+        if (start < 0 || (pattern.anchored && start !== 0)) return false;
+        for (let index = 0; index < pattern.segmentRegexes.length; index++) {
+            if (!pattern.segmentRegexes[index]!.test(segments[start + index]))
+                return false;
+        }
+        return true;
+    }
     // Failed (pi, si) states are memoized per call: naive "**"
     // backtracking is exponential, and a cap-compliant adversarial
     // pattern from the replicated rules file could otherwise pin every
     // policy-enabled peer's CPU. With the memo, work is O(k·n) states.
     const failed = new Set<number>();
-    const width = segments.length + 2;
+    const width = length + 2;
     const match = (pi: number, si: number): boolean => {
         const key = pi * width + si;
         if (failed.has(key)) {
@@ -208,13 +223,13 @@ const matchesSegments = (
                 // and 0..n when more pattern follows ("a/**/b" matches
                 // "a/b").
                 if (p === pattern.segments.length - 1) {
-                    if (s2 < segments.length) {
+                    if (s2 < length) {
                         return true;
                     }
                     failed.add(key);
                     return false;
                 }
-                for (let skip = s2; skip <= segments.length; skip++) {
+                for (let skip = s2; skip <= length; skip++) {
                     if (match(p + 1, skip)) {
                         return true;
                     }
@@ -222,14 +237,14 @@ const matchesSegments = (
                 failed.add(key);
                 return false;
             }
-            if (s2 >= segments.length || !regex.test(segments[s2])) {
+            if (s2 >= length || !regex.test(segments[s2])) {
                 failed.add(key);
                 return false;
             }
             p++;
             s2++;
         }
-        if (s2 === segments.length) {
+        if (s2 === length) {
             return true;
         }
         failed.add(key);
@@ -239,7 +254,7 @@ const matchesSegments = (
         return match(0, 0);
     }
     // Floating: implicit "**/" prefix — try every start offset.
-    for (let start = 0; start <= segments.length; start++) {
+    for (let start = 0; start <= length; start++) {
         if (match(0, start)) {
             return true;
         }
@@ -305,12 +320,11 @@ export const compileIgnoreRules = (
         let verdict: IgnoreVerdict = { ignored: false };
         // Prefix closure: test every prefix, shallowest boundary wins.
         outer: for (let depth = 1; depth <= segments.length; depth++) {
-            const prefix = segments.slice(0, depth);
             for (const pattern of compiled) {
-                if (matchesSegments(pattern, prefix)) {
+                if (matchesSegments(pattern, segments, depth)) {
                     verdict = {
                         ignored: true,
-                        boundary: `/${prefix.join("/")}`,
+                        boundary: `/${segments.slice(0, depth).join("/")}`,
                         rule: pattern.raw,
                     };
                     break outer;

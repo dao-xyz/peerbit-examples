@@ -186,6 +186,22 @@ const distribution = (values: number[]) => ({
     max: Math.max(...values),
 });
 
+const requiredSharedLogOpenProfileNames = [
+    "sharedLog.open.localState",
+    "sharedLog.open.blockStore",
+    "sharedLog.open.remoteBlocks",
+    "sharedLog.open.lowerLog",
+    "sharedLog.open.rpcSubscriptions",
+    "sharedLog.open.providerAndOwnership",
+    "sharedLog.open.replication",
+    "sharedLog.open.synchronizer",
+    "sharedLog.open.total",
+] as const;
+
+const isReportedSharedLogOpenProfile = (name: string) =>
+    name.startsWith("sharedLog.open.") ||
+    name === "sharedLog.blocks.resolveProviders";
+
 const withTimeout = <T>(
     promise: Promise<T>,
     timeoutMs: number,
@@ -2056,6 +2072,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 localTreeAuditMs: number;
                 bootstrapEvents: ProcessSoakOpenResult["bootstrapTelemetry"];
                 memoryCalibration: ProcessSoakMemoryCalibration;
+                openProfile: ProcessSoakOpenResult["openProfile"];
             }> = [];
             let writer!: RunningWorker;
             let writerReady!: ProcessSoakReadyMessage;
@@ -2078,6 +2095,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     remoteChunkFetch: false,
                     gcSchedule: false,
                     captureBootstrapTelemetry: true,
+                    captureOpenProfile: true,
                     awaitBootstrapConverged: true,
                 });
                 expect(opened.gcScheduled).toBe(false);
@@ -2115,6 +2133,24 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         (event) => event.type === "overlay-retired"
                     )
                 ).toMatchObject({ verified: true });
+                expect(
+                    opened.openProfile.every((event) =>
+                        isReportedSharedLogOpenProfile(event.name)
+                    )
+                ).toBe(true);
+                for (const name of requiredSharedLogOpenProfileNames) {
+                    expect(
+                        opened.openProfile.filter(
+                            (event) => event.name === name
+                        ),
+                        `${name} must emit exactly once during Documents.open`
+                    ).toHaveLength(1);
+                }
+                for (const event of opened.openProfile) {
+                    expect(event.component).toBe("shared-log");
+                    expect(event.durationMs).toEqual(expect.any(Number));
+                    expect(event.durationMs).toBeGreaterThanOrEqual(0);
+                }
                 const auditStartedAt = performance.now();
                 await joiner.request<ProcessSoakVerifyResult>({
                     type: "verify",
@@ -2131,6 +2167,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     localTreeAuditMs: performance.now() - auditStartedAt,
                     bootstrapEvents,
                     memoryCalibration: opened.memoryCalibration,
+                    openProfile: opened.openProfile,
                 };
                 coldJoinSamples.push(sample);
                 console.log(
@@ -2935,6 +2972,48 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                         : [];
                 })
             );
+            const openProfileNames = [
+                ...new Set([
+                    ...requiredSharedLogOpenProfileNames,
+                    "sharedLog.open.fanout",
+                    "sharedLog.blocks.resolveProviders",
+                    ...coldJoinSamples.flatMap((sample) =>
+                        sample.openProfile.map((event) => event.name)
+                    ),
+                ]),
+            ].sort();
+            const openProfileAggregates = Object.fromEntries(
+                openProfileNames.map((name) => {
+                    const matching = coldJoinSamples.flatMap((sample) =>
+                        sample.openProfile.filter(
+                            (event) => event.name === name
+                        )
+                    );
+                    const durations = matching.flatMap((event) =>
+                        event.durationMs === undefined ? [] : [event.durationMs]
+                    );
+                    const eventsPerJoin = coldJoinSamples.map(
+                        (sample) =>
+                            sample.openProfile.filter(
+                                (event) => event.name === name
+                            ).length
+                    );
+                    return [
+                        name,
+                        {
+                            emitted: matching.length,
+                            joinsWithEvent: eventsPerJoin.filter(
+                                (count) => count > 0
+                            ).length,
+                            eventsPerJoin: distribution(eventsPerJoin),
+                            durationMs:
+                                durations.length > 0
+                                    ? distribution(durations)
+                                    : null,
+                        },
+                    ];
+                })
+            );
             const baselineFleetMemory = aggregateFleetMemory(
                 baselineMetrics.map(withoutStorage)
             );
@@ -2979,6 +3058,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     ),
                     milestonesMs: bootstrapMilestonesMs,
                     durationsMs: bootstrapDurationsMs,
+                    sharedLogOpenProfile: openProfileAggregates,
                     samples: coldJoinSamples,
                 },
                 multiWriter: {
