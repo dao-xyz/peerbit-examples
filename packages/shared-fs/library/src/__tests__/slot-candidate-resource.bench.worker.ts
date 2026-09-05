@@ -174,8 +174,8 @@ try {
         );
         samplePeak();
         if (mutateDuringQuery) {
-            // Snapshot has been read. Model an unrelated durable naming
-            // arrival before the awaiting sweep can publish that snapshot.
+            // Snapshot has been read. Complete an unrelated index write
+            // before the awaiting sweep can publish that snapshot.
             const arrival = event(mutationIndex++, { parent: "dir:unrelated" });
             await index.put(new IndexableSharedFsEntry(arrival));
             program.applyCacheChanges([arrival], []);
