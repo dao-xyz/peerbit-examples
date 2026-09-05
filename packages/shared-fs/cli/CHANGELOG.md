@@ -1,5 +1,18 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.17
+
+### Patch Changes
+
+- 475d60f: Compact emitted JavaScript whitespace while preserving declarations, source maps, module surfaces, and the CLI shebang.
+- Updated dependencies [475d60f]
+- Updated dependencies [dd79d42]
+- Updated dependencies [a7eb210]
+- Updated dependencies [630ac12]
+- Updated dependencies [e30a8d4]
+- Updated dependencies [fde5d3f]
+    - @peerbit/shared-fs@0.13.16
+
 ## 0.13.16
 
 ### Patch Changes

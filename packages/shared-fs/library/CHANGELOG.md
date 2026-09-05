@@ -1,5 +1,24 @@
 # @peerbit/shared-fs
 
+## 0.13.16
+
+### Patch Changes
+
+- 475d60f: Compact emitted JavaScript whitespace while preserving declarations, source maps, module surfaces, and the CLI shebang.
+- dd79d42: Trim implementation comments from the published JavaScript and source maps while preserving API documentation in the declaration files.
+- a7eb210: Release watcher and changeset lifecycle state promptly on close, detach abort
+  listeners, and cancel superseded retry timers.
+- 630ac12: Add experimental, generation-isolated Merkle v1 block and content-root codecs,
+  codec-local structural verification, bitmap helpers, and cross-runtime golden
+  vectors as the first bounded random-write storage slice.
+- e30a8d4: Define the generation-isolated Merkle v1 file-version wire model and its
+  strict, derived reverse-index projection, bounded canonical decode APIs, and
+  cross-runtime golden vectors.
+- fde5d3f: Add an opt-in, generation-isolated Merkle v1 exact-range read session with
+  fail-closed block verification, authenticated sparse holes, bounded verified
+  LRU caches, cancellation-safe concurrent fetch coalescing, and structural work
+  counters.
+
 ## 0.13.15
 
 ### Patch Changes
