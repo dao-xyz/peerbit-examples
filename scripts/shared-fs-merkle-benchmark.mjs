@@ -207,6 +207,8 @@ async function loadRuntime() {
                 import(pathToFileURL(join(LIBRARY, `lib/esm/${name}.js`)).href)
         )
     );
+    const crypto = await import(resolved["@peerbit/crypto"]);
+    await crypto.ready;
     const borsh = await import(resolved["@dao-xyz/borsh"]);
     const files = [
         "scripts/shared-fs-merkle-benchmark.mjs",

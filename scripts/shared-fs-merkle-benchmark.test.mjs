@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { test } from "node:test";
+import { promisify } from "node:util";
 import {
     merkleBenchmarkBytes,
     parseMerkleBenchmarkArguments,
@@ -7,6 +9,60 @@ import {
     summarizeMerkleBenchmark,
     verifyMerkleBenchmarkFile,
 } from "./shared-fs-merkle-benchmark.mjs";
+
+test("awaits crypto initialization before constructing the first fixture", async () => {
+    // A separate process guarantees crypto has not already initialized in a
+    // preceding test. Hold Wasm until the event loop becomes idle: this makes
+    // readiness necessary without relying on a wall-clock delay.
+    const script = `
+        import assert from "node:assert/strict";
+        const instantiate = WebAssembly.instantiate;
+        let release;
+        let keepAlive;
+        let blockedCalls = 0;
+        let releasedOnIdle = false;
+        const gate = new Promise(resolve => { release = resolve; });
+        const onIdle = () => {
+            releasedOnIdle = true;
+            // Wasm compilation alone does not keep Node's event loop alive.
+            keepAlive = setInterval(() => {}, 100);
+            release();
+        };
+        process.once("beforeExit", onIdle);
+        WebAssembly.instantiate = async (...args) => {
+            blockedCalls++;
+            await gate;
+            return instantiate(...args);
+        };
+        try {
+            const { runMerkleBenchmark, parseMerkleBenchmarkArguments } =
+                await import(${JSON.stringify(new URL("./shared-fs-merkle-benchmark.mjs", import.meta.url).href)});
+            const events = [];
+            await runMerkleBenchmark(parseMerkleBenchmarkArguments([
+                "--sizes-mib", "1", "--leaves-kib", "64",
+                "--cases", "random-overwrite-4096",
+                "--samples", "1", "--warmups", "0"
+            ]), event => events.push(event));
+            assert(blockedCalls > 0);
+            assert.equal(releasedOnIdle, true);
+            assert.equal(events[0].type, "header");
+            assert.equal(events.at(-1).type, "complete");
+            assert.equal(events.at(-1).measuredSamples, 1);
+            process.stdout.write("ready\\n");
+        } finally {
+            release();
+            clearInterval(keepAlive);
+            WebAssembly.instantiate = instantiate;
+            process.removeListener("beforeExit", onIdle);
+        }
+    `;
+    const { stdout } = await promisify(execFile)(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        { timeout: 15_000, maxBuffer: 1024 * 1024 }
+    );
+    assert.equal(stdout, "ready\n");
+});
 
 test("bounds large Map fixtures and rejects ambiguous matrix options", () => {
     assert.throws(
