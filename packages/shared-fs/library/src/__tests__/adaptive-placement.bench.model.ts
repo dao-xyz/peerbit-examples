@@ -83,10 +83,43 @@ export const verifyChunk = (chunk: PlacementChunk) =>
 export const storeId = (run: string, plane: "metadata" | "chunks") =>
     new Uint8Array(createHash("sha256").update(`${run}:${plane}`).digest());
 
+// Keep one spare custodian after the planned loss, for both supported targets.
+// These are same-host test topologies, not independent failure domains.
+export const placementPlan = (
+    copies: string | undefined,
+    projectedBytes: number
+) => {
+    assert(
+        copies === undefined || copies === "2" || copies === "3",
+        "copies must be 2 or 3"
+    );
+    assert(Number.isSafeInteger(projectedBytes) && projectedBytes > 0);
+    const minCopies: 2 | 3 = copies === "3" ? 3 : 2;
+    const initialCustodians = minCopies + 1;
+    const joiningPeer = minCopies + 2;
+    const budgets = [
+        null,
+        ...[0.35, 0.6, 0.85, 1.2, 1.5]
+            .slice(0, joiningPeer)
+            .map((weight) => Math.ceil(projectedBytes * weight)),
+    ];
+    assert(
+        budgets.every((value) => value === null || Number.isSafeInteger(value))
+    );
+    return {
+        minCopies,
+        initialCustodians,
+        joiningPeer,
+        survivors: Array.from({ length: initialCustodians }, (_, i) => i + 2),
+        budgets,
+    };
+};
+
 export type PlacementCommand =
     | { type: "dial"; addresses: string[][] }
     | { type: "write"; files: number[]; chunkBytes: number }
     | { type: "snapshot"; verify?: boolean }
+    | { type: "profile" }
     | { type: "read"; files: number[]; chunkBytes: number; remote: boolean }
     | { type: "budget"; bytes: number }
     | { type: "barrier" }
@@ -99,5 +132,7 @@ export type PlacementConfig = {
     mode: "full" | "adaptive";
     capacityBytes: number | null;
     offline: boolean;
-    minCopies: number;
+    minCopies: 2 | 3;
+    generation: number;
+    profile: boolean;
 };

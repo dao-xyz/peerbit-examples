@@ -1,5 +1,11 @@
 # Split-plane placement: released-cohort rebaseline, 2026-09-05
 
+Follow-up: the [N=3 profiling campaign](ADAPTIVE_SHARDING_N3_PROFILE.md) passed
+full replication but failed adaptive join stability and cleanup. The N=2
+results below remain valid; they must not be generalized to a completed N=3
+adaptive or production-filesystem result. Upstream has now received these
+findings directly through its Codex task.
+
 ## Outcome
 
 **Both unchanged live scenarios passed on their first attempt** after upgrading

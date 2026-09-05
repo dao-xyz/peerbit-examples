@@ -13,9 +13,11 @@ import {
 import {
     digest,
     fixtureFile,
+    placementPlan,
     type PlacementCommand,
     type PlacementConfig,
 } from "./adaptive-placement.bench.model.js";
+import { errorInfo } from "./adaptive-placement-telemetry.js";
 
 const enabled = process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT === "1";
 const selected =
@@ -39,16 +41,13 @@ const projectedLogBytes = expected.reduce(
     (sum, manifest) => sum + manifest.bytes + manifest.chunkIds.length * 1_024,
     0
 );
-const budgets = [
-    null,
-    ...[0.35, 0.6, 0.85, 1.2].map((weight) =>
-        Math.ceil(projectedLogBytes * weight)
-    ),
-];
-const errorInfo = (error: any) => ({
-    message: String(error?.message ?? error),
-    stack: String(error?.stack ?? error),
-});
+const plan = placementPlan(
+    process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_COPIES,
+    projectedLogBytes
+);
+const { minCopies, budgets, initialCustodians, joiningPeer, survivors } = plan;
+const profiled =
+    process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_PROFILE === "1";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class PlacementWorker {
@@ -67,6 +66,7 @@ class PlacementWorker {
     exited = false;
     diagnostics = "";
     omittedDiagnosticChars = 0;
+    firstFailure: unknown;
     constructor(readonly config: PlacementConfig) {
         this.child = fork(workerPath, [JSON.stringify(config)], {
             execArgv: ["--import", "tsx"],
@@ -119,13 +119,30 @@ class PlacementWorker {
                     resolve(message);
                 }
                 if (message.fatal)
-                    fail(new Error(JSON.stringify(message.fatal)));
+                    fail(
+                        new Error("worker boot failed", {
+                            cause: message.fatal,
+                        })
+                    );
+                // Preserve a late failure even after its caller's deadline expired.
+                if (message.ok === false)
+                    this.firstFailure ??= {
+                        error: message.error,
+                        context: message.context,
+                        profile: message.profile,
+                    };
                 const pending = this.pending.get(message.request);
                 if (!pending) return;
                 clearTimeout(pending.timer);
                 this.pending.delete(message.request);
                 if (message.ok) pending.resolve(message.value);
-                else pending.reject(new Error(JSON.stringify(message.error)));
+                else {
+                    pending.reject(
+                        new Error(`peer ${config.peer} command failed`, {
+                            cause: message.error,
+                        })
+                    );
+                }
             });
         });
     }
@@ -192,6 +209,7 @@ const sourceHashes = async () =>
                 "adaptive-placement.bench.worker.ts",
                 "adaptive-placement.bench.model.ts",
                 "adaptive-placement-analysis.ts",
+                "adaptive-placement-telemetry.ts",
                 "process-isolated-soak-storage.ts",
                 "../../../../../pnpm-lock.yaml",
             ].map(async (name) => [
@@ -241,7 +259,9 @@ manual(
                         mode,
                         capacityBytes: budgets[peer],
                         offline,
-                        minCopies: 2,
+                        minCopies,
+                        generation: all.length + 1,
+                        profile: profiled,
                     });
                     all.push(worker);
                     active.set(peer, worker);
@@ -267,7 +287,7 @@ manual(
                         );
                         onlineIdentities.set(peer, ready.hash);
                     }
-                    identities.push({ generation: all.length, ...ready });
+                    identities.push({ ...ready });
                     log({ type: "ready", peer, pid: ready.pid, offline });
                     return worker;
                 };
@@ -296,6 +316,22 @@ manual(
                         )
                     );
                     ensureActive();
+                    if (profiled)
+                        for (const snapshot of snapshots) {
+                            const profile = (
+                                snapshot as PlacementSnapshot & {
+                                    profile: {
+                                        metadata: { total: number };
+                                        chunks: { total: number };
+                                    };
+                                }
+                            ).profile;
+                            assert(
+                                profile?.metadata.total > 0 &&
+                                    profile?.chunks.total > 0,
+                                "enabled profiler emitted no events for a plane"
+                            );
+                        }
                     for (const [index, worker] of [
                         ...active.values(),
                     ].entries())
@@ -312,7 +348,7 @@ manual(
                     const analysis = analyzePlacement(
                         snapshots,
                         expected.slice(0, count),
-                        { minCopies: 2 }
+                        { minCopies }
                     );
                     const movement = previous
                         ? comparePlacement(previous, snapshots)
@@ -369,25 +405,28 @@ manual(
                     }
                 };
                 const run = async () => {
-                    for (let peer = 0; peer < 4; peer++) {
+                    for (let peer = 0; peer <= initialCustodians; peer++) {
                         const worker = await start(peer);
                         await connect(worker);
                     }
                     await write(0, 8);
-                    await settle("three-custodians", 8);
-                    // The producer continues while a fourth, independently backed peer joins.
+                    await settle("initial-custodians", 8);
+                    // The producer continues while another independently backed peer joins.
                     const [, joining] = await Promise.all([
                         write(8, 12),
-                        start(4),
+                        start(joiningPeer),
                     ]);
-                    log({ type: "join-connect-start", peer: 4 });
+                    log({ type: "join-connect-start", peer: joiningPeer });
                     await Promise.all([
                         write(12, 16),
                         connect(joining).then(() =>
-                            log({ type: "join-connect-complete", peer: 4 })
+                            log({
+                                type: "join-connect-complete",
+                                peer: joiningPeer,
+                            })
                         ),
                     ]);
-                    const joined = await settle("four-custodians", 16);
+                    const joined = await settle("joined-custodians", 16);
                     if (mode === "full")
                         for (const peer of joined.snapshots.filter(
                             (peer) => peer.role === "custodian"
@@ -468,7 +507,7 @@ manual(
                             ...remoteRead,
                         });
                     }
-                    const read = await active.get(4)!.request({
+                    const read = await active.get(joiningPeer)!.request({
                         type: "read",
                         files: [0, 1, 0, 2, 0, 3, 0, 4],
                         chunkBytes,
@@ -493,7 +532,7 @@ manual(
                     );
                     log({ type: "planned-all-custodian-crash" });
                     active.clear();
-                    for (const peer of [2, 3, 4]) await start(peer, true);
+                    for (const peer of survivors) await start(peer, true);
                     const offline = await sample("offline-reopen", files, true);
                     assert.equal(
                         offline.analysis.belowMinCopies.length,
@@ -528,13 +567,39 @@ manual(
                     const snapshots = await Promise.allSettled(
                         [...active.values()]
                             .filter((worker) => !worker.exited)
-                            .map(async (worker) => ({
-                                peer: worker.config.peer,
-                                snapshot: await worker.request(
-                                    { type: "snapshot" },
-                                    5_000
-                                ),
-                            }))
+                            .map(async (worker) => {
+                                const [inventory, profile] =
+                                    await Promise.allSettled([
+                                        worker.request(
+                                            { type: "snapshot" },
+                                            5_000
+                                        ),
+                                        worker.request(
+                                            { type: "profile" },
+                                            1_000
+                                        ),
+                                    ]);
+                                return {
+                                    peer: worker.config.peer,
+                                    generation: worker.config.generation,
+                                    snapshot:
+                                        inventory.status === "fulfilled"
+                                            ? inventory.value
+                                            : {
+                                                  error: errorInfo(
+                                                      inventory.reason
+                                                  ),
+                                              },
+                                    profile:
+                                        profile.status === "fulfilled"
+                                            ? profile.value
+                                            : {
+                                                  error: errorInfo(
+                                                      profile.reason
+                                                  ),
+                                              },
+                                };
+                            })
                     );
                     log({
                         type: "failure-inventories",
@@ -586,12 +651,14 @@ manual(
                     );
                 }
                 const report = {
-                    schema: "shared-fs-split-plane-probe-v1",
+                    schema: "shared-fs-split-plane-probe-v2",
                     mode,
                     directory,
                     files,
                     chunkBytes,
-                    minCopies: 2,
+                    minCopies,
+                    topology: plan,
+                    profiled,
                     ok: !failure,
                     hashes,
                     identities,
@@ -602,6 +669,7 @@ manual(
                         pid: worker.child.pid,
                         tail: worker.diagnostics,
                         omittedChars: worker.omittedDiagnosticChars,
+                        firstFailure: worker.firstFailure ?? null,
                     })),
                     caveats: [
                         "test-only Documents model, not a working sharded filesystem",
@@ -612,6 +680,7 @@ manual(
                         "receipt failure can follow local commit; no write retries are performed",
                         "retained directories are evidence; no physical reclamation tested",
                         "small sample, not reliable p95/p99 or throughput scaling evidence",
+                        "profile durations can overlap or nest; sums are not CPU time or wall-clock critical paths",
                     ],
                 };
                 console.log("placement-report: " + JSON.stringify(report));

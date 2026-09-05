@@ -16,24 +16,26 @@ import {
     type PlacementConfig,
 } from "./adaptive-placement.bench.model.js";
 import { scanProcessSoakStateDirectory } from "./process-isolated-soak-storage.js";
+import {
+    createPlacementProfile,
+    errorInfo,
+} from "./adaptive-placement-telemetry.js";
 
 const config: PlacementConfig = JSON.parse(process.argv[2]);
-assert(Number.isInteger(config.peer) && config.peer >= 0 && config.peer <= 4);
-assert(config.mode === "full" || config.mode === "adaptive");
 assert(
-    config.minCopies === 2,
-    "probe fixes N=2; this is not production's default"
+    Number.isInteger(config.peer) &&
+        config.peer >= 0 &&
+        config.peer <= config.minCopies + 2
 );
+assert(config.mode === "full" || config.mode === "adaptive");
+assert(config.minCopies === 2 || config.minCopies === 3);
+assert(Number.isSafeInteger(config.generation) && config.generation > 0);
+assert(typeof config.profile === "boolean");
 const send = (message: unknown) =>
     new Promise<void>((resolve, reject) => {
         assert(process.send);
         process.send(message, (error) => (error ? reject(error) : resolve()));
     });
-const errorInfo = (error: any) => ({
-    name: String(error?.name ?? "Error"),
-    message: String(error?.message ?? error).slice(0, 16_384),
-    stack: String(error?.stack ?? error).slice(0, 16_384),
-});
 const provenance = async (name: string) => {
     const entry = await realpath(fileURLToPath(import.meta.resolve(name)));
     for (let dir = dirname(entry); ; dir = dirname(dir)) {
@@ -95,6 +97,12 @@ const main = async () => {
     });
     const localPeer = peer;
     const role = config.peer === 0 ? "publisher" : "custodian";
+    const profiles = config.profile
+        ? {
+              metadata: createPlacementProfile(),
+              chunks: createPlacementProfile(),
+          }
+        : undefined;
     const metadata = await localPeer.open(
         new Documents<PlacementManifest>({
             id: storeId(config.run, "metadata"),
@@ -105,6 +113,9 @@ const main = async () => {
                 type: PlacementManifest,
                 replicate: config.offline ? false : { factor: 1 },
                 replicas: { min: config.minCopies },
+                ...(profiles
+                    ? { sync: { profile: profiles.metadata.sink } }
+                    : {}),
             },
         }
     );
@@ -124,6 +135,9 @@ const main = async () => {
                 type: PlacementChunk,
                 replicate: replication,
                 replicas: { min: config.minCopies },
+                ...(profiles
+                    ? { sync: { profile: profiles.chunks.sink } }
+                    : {}),
                 // Publisher retains its authored source until the explicit stop phase.
                 // It is excluded from all custodian coverage/placement statistics.
                 ...(role === "publisher" ? { keep: "self" as const } : {}),
@@ -140,6 +154,21 @@ const main = async () => {
     let capacityBytes = config.capacityBytes;
     const chunkEntries: any[] = [];
     const metadataEntries: any[] = [];
+    const metadataLogAddress = metadata.log.address;
+    const chunksLogAddress = chunks.log.address;
+    const profileSnapshot = () =>
+        profiles
+            ? {
+                  metadata: {
+                      logAddress: metadataLogAddress,
+                      ...profiles.metadata.snapshot(),
+                  },
+                  chunks: {
+                      logAddress: chunksLogAddress,
+                      ...profiles.chunks.snapshot(),
+                  },
+              }
+            : null;
     const snapshot = async (verify = false) => {
         const [chunkRows, manifests, participation, localLogBytes] =
             await Promise.all([
@@ -163,6 +192,8 @@ const main = async () => {
             }
         return {
             peer: config.peer,
+            generation: config.generation,
+            identity: localPeer.identity.publicKey.hashcode(),
             role,
             capacityBytes,
             participation,
@@ -179,6 +210,7 @@ const main = async () => {
             memory: process.memoryUsage(),
             resources: process.resourceUsage(),
             connections: localPeer.libp2p.getConnections().length,
+            profile: profileSnapshot(),
         };
     };
     const execute = async (command: PlacementCommand) => {
@@ -346,6 +378,18 @@ const main = async () => {
     process.on(
         "message",
         (message: { request: number; command: PlacementCommand }) => {
+            // Only reads detached counters: do not queue behind a stalled store call.
+            if (message.command.type === "profile") {
+                void send({
+                    request: message.request,
+                    ok: true,
+                    value: profileSnapshot(),
+                }).catch((error) => {
+                    console.error(error);
+                    process.exitCode = 1;
+                });
+                return;
+            }
             queue = queue
                 .then(async () => {
                     try {
@@ -364,6 +408,18 @@ const main = async () => {
                             request: message.request,
                             ok: false,
                             error: errorInfo(error),
+                            profile: profileSnapshot(),
+                            context: {
+                                peer: config.peer,
+                                generation: config.generation,
+                                identity:
+                                    localPeer.identity.publicKey.hashcode(),
+                                offline: config.offline,
+                                command: message.command.type,
+                                minCopies: config.minCopies,
+                                metadataLog: metadataLogAddress,
+                                chunksLog: chunksLogAddress,
+                            },
                         });
                     }
                 })
@@ -382,6 +438,7 @@ const main = async () => {
     await send({
         ready: true,
         peer: config.peer,
+        generation: config.generation,
         pid: process.pid,
         hash: localPeer.identity.publicKey.hashcode(),
         addresses: localPeer.getMultiaddrs().map(String),
