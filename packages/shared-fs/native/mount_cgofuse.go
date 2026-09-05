@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,10 +35,11 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 	}
 	host := fuse.NewFileSystemHost(fs)
 	host.SetCapOpenTrunc(true)
-	options := []string{"-s"}
-	if debug {
-		options = append(options, "-d")
-	}
+	// On FUSE 3/Linux and WinFsp, ask the kernel to consume the complete stat
+	// records supplied by Readdir. Other builds keep both this capability and
+	// their IPC listing shape compact.
+	host.SetCapReaddirPlus(requestReaddirStats)
+	options := nativeMountOptions(runtime.GOOS, debug)
 	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
@@ -139,7 +142,11 @@ func (fs *peerbitFS) Opendir(path string) (int, uint64) {
 func (fs *peerbitFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
 	_ = ofst
 	_ = fh
-	result, err := fs.client.request("readdir", path)
+	args := []interface{}{path}
+	if requestReaddirStats {
+		args = append(args, map[string]interface{}{"includeStats": true})
+	}
+	result, err := fs.client.request("readdir", args...)
 	if err != nil {
 		return errno(err)
 	}
@@ -158,7 +165,7 @@ func (fs *peerbitFS) Readdir(path string, fill func(name string, stat *fuse.Stat
 		if name == "" {
 			continue
 		}
-		if !fill(name, nil, 0) {
+		if !fill(name, validatedDirentStat(path, name, mapped), 0) {
 			break
 		}
 	}
@@ -321,6 +328,120 @@ func statFromResult(result map[string]interface{}) fuse.Stat_t {
 		Blksize: 4096,
 		Blocks:  int64(math.Ceil(float64(uint64Field(result, "size")) / 512)),
 	}
+}
+
+const maxSafeJSONInteger = uint64(1<<53 - 1)
+
+func childPath(parent string, name string) string {
+	if parent == "/" {
+		return "/" + name
+	}
+	return strings.TrimSuffix(parent, "/") + "/" + name
+}
+
+// validatedDirentStat accepts only a complete, internally consistent stat
+// record. Missing or malformed metadata returns nil so the native host can use
+// its ordinary lookup/getattr behavior.
+func validatedDirentStat(parent string, name string, entry map[string]interface{}) *fuse.Stat_t {
+	raw, exists := entry["stat"]
+	if !exists || raw == nil {
+		return nil
+	}
+	result, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	kind, ok := entry["kind"].(string)
+	if !ok || (kind != "directory" && kind != "file") {
+		return nil
+	}
+	expectedPath := childPath(parent, name)
+	if statKind, exists := result["kind"]; exists && statKind != kind {
+		return nil
+	}
+	if statPath, exists := result["path"]; exists {
+		path, ok := statPath.(string)
+		if !ok || path != expectedPath {
+			return nil
+		}
+	}
+
+	mode, ok := boundedUint64Field(result, "mode", uint64(^uint32(0)))
+	if !ok {
+		return nil
+	}
+	expectedType := uint32(statModeRegular)
+	if kind == "directory" {
+		expectedType = uint32(statModeDirectory)
+	}
+	if uint32(mode)&statModeTypeMask != expectedType {
+		return nil
+	}
+
+	size, ok := boundedUint64Field(result, "size", maxSafeJSONInteger)
+	if !ok || (kind == "directory" && size != 0) {
+		return nil
+	}
+	if _, ok := boundedUint64Field(result, "mtimeMs", maxSafeJSONInteger); !ok {
+		return nil
+	}
+	if _, ok := boundedUint64Field(result, "ctimeMs", maxSafeJSONInteger); !ok {
+		return nil
+	}
+	nlink, ok := boundedUint64Field(result, "nlink", uint64(^uint32(0)))
+	if !ok || nlink == 0 {
+		return nil
+	}
+	for _, field := range []string{"uid", "gid"} {
+		if _, exists := result[field]; exists {
+			if _, ok := boundedUint64Field(result, field, uint64(^uint32(0))); !ok {
+				return nil
+			}
+		}
+	}
+
+	// statFromResult consumes only the validated numeric fields and applies the
+	// same platform mode policy as ordinary getattr.
+	stat := statFromResult(result)
+	return &stat
+}
+
+func boundedUint64Field(result map[string]interface{}, key string, max uint64) (uint64, bool) {
+	value, exists := result[key]
+	if !exists {
+		return 0, false
+	}
+	return boundedUint64(value, max)
+}
+
+func boundedUint64(value interface{}, max uint64) (uint64, bool) {
+	var parsed uint64
+	switch typed := value.(type) {
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed < 0 || math.Trunc(typed) != typed || typed > float64(max) {
+			return 0, false
+		}
+		parsed = uint64(typed)
+	case int:
+		if typed < 0 {
+			return 0, false
+		}
+		parsed = uint64(typed)
+	case int64:
+		if typed < 0 {
+			return 0, false
+		}
+		parsed = uint64(typed)
+	case uint64:
+		parsed = typed
+	default:
+		return 0, false
+	}
+	if parsed > max {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func msToTimespec(ms uint64) fuse.Timespec {

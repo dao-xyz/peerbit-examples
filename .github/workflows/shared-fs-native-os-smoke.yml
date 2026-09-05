@@ -20,6 +20,11 @@ on:
                     - all
                     - macos
                     - windows
+            mounted_benchmark:
+                description: Collect report-only mounted and local-control filesystem benchmarks during smoke runs.
+                required: true
+                default: false
+                type: boolean
     schedule:
         - cron: "17 */6 * * *"
 
@@ -165,7 +170,46 @@ jobs:
 
             - name: Run external native adapter smoke
               shell: bash
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-macos-macfuse-benchmark.json', runner.temp) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-macos-control-benchmark.json', runner.temp) || '' }}
               run: scripts/shared-fs-external-native-smoke.sh
+
+            - name: Add filesystem benchmark summaries
+              if: ${{ always() && inputs.mounted_benchmark }}
+              shell: bash
+              env:
+                  MOUNT_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-macos-macfuse-benchmark.json
+                  CONTROL_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-macos-control-benchmark.json
+              run: |
+                  for report in "$MOUNT_BENCHMARK_REPORT" "$CONTROL_BENCHMARK_REPORT"; do
+                    if [ ! -f "$report" ]; then
+                      echo "## Shared FS filesystem-path benchmark" >> "$GITHUB_STEP_SUMMARY"
+                      echo >> "$GITHUB_STEP_SUMMARY"
+                      echo "A requested macOS benchmark report was not produced: $report" >> "$GITHUB_STEP_SUMMARY"
+                      exit 1
+                    fi
+                  done
+                  node --input-type=module -e '
+                    import { appendFile, readFile } from "node:fs/promises";
+                    import { formatNativeMountBenchmarkSummary, validateNativeMountBenchmarkReport } from "./scripts/shared-fs-native-mount-benchmark.mjs";
+                    for (const path of [process.env.MOUNT_BENCHMARK_REPORT, process.env.CONTROL_BENCHMARK_REPORT]) {
+                      const report = JSON.parse(await readFile(path, "utf8"));
+                      validateNativeMountBenchmarkReport(report);
+                      await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkSummary(report));
+                    }
+                  '
+
+            - name: Upload filesystem benchmark reports
+              if: ${{ always() && inputs.mounted_benchmark }}
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: shared-fs-macos-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: |
+                      ${{ runner.temp }}/shared-fs-macos-macfuse-benchmark.json
+                      ${{ runner.temp }}/shared-fs-macos-control-benchmark.json
+                  if-no-files-found: error
+                  retention-days: 14
 
     cleanup-macos:
         name: Cleanup macOS runner
@@ -358,8 +402,50 @@ jobs:
             - name: Run external native adapter smoke
               shell: powershell
               env:
-                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: "1"
+                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: ${{ inputs.mounted_benchmark && '0' || '1' }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-windows-winfsp-benchmark.json', runner.temp) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-windows-control-benchmark.json', runner.temp) || '' }}
               run: scripts/shared-fs-external-native-smoke.ps1
+
+            - name: Add filesystem benchmark summaries
+              if: ${{ always() && inputs.mounted_benchmark }}
+              shell: powershell
+              env:
+                  MOUNT_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-windows-winfsp-benchmark.json
+                  CONTROL_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-windows-control-benchmark.json
+              run: |
+                  foreach ($Report in @($env:MOUNT_BENCHMARK_REPORT, $env:CONTROL_BENCHMARK_REPORT)) {
+                    if (-not (Test-Path -LiteralPath $Report)) {
+                      "## Shared FS filesystem-path benchmark" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+                      "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+                      "A requested Windows benchmark report was not produced: $Report" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+                      throw "requested benchmark report was not produced"
+                    }
+                  }
+                  $SummaryScript = @'
+                  import { appendFile, readFile } from "node:fs/promises";
+                  import { formatNativeMountBenchmarkSummary, validateNativeMountBenchmarkReport } from "./scripts/shared-fs-native-mount-benchmark.mjs";
+                  for (const path of [process.env.MOUNT_BENCHMARK_REPORT, process.env.CONTROL_BENCHMARK_REPORT]) {
+                    const report = JSON.parse(await readFile(path, "utf8"));
+                    validateNativeMountBenchmarkReport(report);
+                    await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkSummary(report));
+                  }
+                  '@
+                  $SummaryScript | node --input-type=module
+                  if ($LASTEXITCODE -ne 0) {
+                    throw "mounted benchmark report validation failed with exit code $LASTEXITCODE"
+                  }
+
+            - name: Upload filesystem benchmark reports
+              if: ${{ always() && inputs.mounted_benchmark }}
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: shared-fs-windows-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: |
+                      ${{ runner.temp }}/shared-fs-windows-winfsp-benchmark.json
+                      ${{ runner.temp }}/shared-fs-windows-control-benchmark.json
+                  if-no-files-found: error
+                  retention-days: 14
 
     cleanup-windows:
         name: Cleanup Windows runner

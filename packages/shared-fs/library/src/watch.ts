@@ -160,7 +160,6 @@ type QuarantineEntry = {
     nodeId: string;
     /** Pre-image retained in the view until confirmed or restored. */
     preImage: ViewEntry;
-    since: number;
     timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -253,13 +252,13 @@ class WatchSubscription implements FsWatcher {
 
     private opts: Required<Omit<FsWatchOptions, "signal">>;
     private signal?: AbortSignal;
+    private signalCleanup?: () => void;
     private readyResolve!: () => void;
     private readyReject!: (err: Error) => void;
     private readySettled = false;
 
     /** nodeId -> served entry. The watch root itself is NOT an entry. */
     private view = new Map<string, ViewEntry>();
-    private byPath = new Map<string, string>();
     /** Naming-visible files with no content head yet: nodeId -> placement. */
     private latent = new Map<string, { parentId: string; name: string }>();
     private spineParents = new Set<string>();
@@ -282,6 +281,7 @@ class WatchSubscription implements FsWatcher {
 
     private settleTimer?: ReturnType<typeof setTimeout>;
     private maxSettleTimer?: ReturnType<typeof setTimeout>;
+    private retryTimer?: ReturnType<typeof setTimeout>;
     private flushChain: Promise<void> = Promise.resolve();
     private flushRetries = 0;
 
@@ -322,13 +322,17 @@ class WatchSubscription implements FsWatcher {
     /* ---------------- lifecycle ---------------- */
 
     start(): void {
-        if (this.signal?.aborted) {
+        const signal = this.signal;
+        if (signal?.aborted) {
             this.close(); // close settles ready with a rejection
             return;
         }
-        this.signal?.addEventListener("abort", () => this.close(), {
-            once: true,
-        });
+        if (signal) {
+            const onAbort = () => this.close();
+            signal.addEventListener("abort", onAbort, { once: true });
+            this.signalCleanup = () =>
+                signal.removeEventListener("abort", onAbort);
+        }
         void this.build();
     }
 
@@ -342,21 +346,52 @@ class WatchSubscription implements FsWatcher {
             );
         }
         this.hub.detach(this);
+        this.signalCleanup?.();
+        this.signalCleanup = undefined;
+        this.signal = undefined;
+        this.releaseRetainedState();
+        const iteratorWake = this.iteratorWake;
+        this.iteratorWake = null;
+        iteratorWake?.();
+        for (const cb of [...this.closeCbs]) {
+            try {
+                cb();
+            } catch {
+                /* subscriber errors are theirs */
+            }
+        }
+        this.changeCbs.clear();
+        this.errorCbs.clear();
+        this.closeCbs.clear();
+    }
+
+    /** Drop all potentially large state, including anything recreated by
+     *  an asynchronous diff that observed close while it was awaiting I/O. */
+    private releaseRetainedState(): void {
         if (this.settleTimer) clearTimeout(this.settleTimer);
         if (this.maxSettleTimer) clearTimeout(this.maxSettleTimer);
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.settleTimer = undefined;
+        this.maxSettleTimer = undefined;
+        this.retryTimer = undefined;
         for (const q of this.quarantine.values()) {
             if (q.timer) clearTimeout(q.timer);
         }
         this.quarantine.clear();
         this.view.clear();
-        this.byPath.clear();
         this.latent.clear();
+        this.spineParents.clear();
+        this.spineNodes.clear();
+        this.pathSegmentNames.clear();
+        this.dirtyDirs.clear();
+        this.dirtyFiles.clear();
+        this.removalTouched.clear();
+        this.attachBuffer = null;
+        this.rootNodeId = null;
+        this.dirtyRoot = false;
+        this.windowHadAdds = false;
+        this.flushRetries = 0;
         this.pending = null;
-        this.iteratorWake?.();
-        for (const cb of this.closeCbs) cb();
-        this.changeCbs.clear();
-        this.errorCbs.clear();
-        this.closeCbs.clear();
     }
 
     on(type: any, cb: any): () => void {
@@ -549,8 +584,11 @@ class WatchSubscription implements FsWatcher {
     private fireFlush(): void {
         if (this.settleTimer) clearTimeout(this.settleTimer);
         if (this.maxSettleTimer) clearTimeout(this.maxSettleTimer);
+        if (this.retryTimer) clearTimeout(this.retryTimer);
         this.settleTimer = undefined;
         this.maxSettleTimer = undefined;
+        this.retryTimer = undefined;
+        if (this.closed) return;
         this.flushChain = this.flushChain.then(() => this.runFlush());
     }
 
@@ -609,6 +647,7 @@ class WatchSubscription implements FsWatcher {
     private async buildFileRoot(resolved: WatchHostResolved): Promise<void> {
         const seg = resolved.spine[resolved.spine.length - 1];
         const children = await this.host.listByParentId(seg.parentId);
+        if (this.closed) return;
         const child = children.find(
             (c) => c.nodeId === resolved.resolved.nodeId
         );
@@ -673,7 +712,6 @@ class WatchSubscription implements FsWatcher {
         };
         this.latent.delete(child.nodeId);
         this.view.set(entry.nodeId, entry);
-        this.byPath.set(entry.path, entry.nodeId);
         return entry;
     }
 
@@ -692,6 +730,11 @@ class WatchSubscription implements FsWatcher {
     /* ---------------- flush ---------------- */
 
     private async runFlush(): Promise<void> {
+        // A flush may already be queued behind an in-flight attempt without
+        // passing through fireFlush(). That real attempt supersedes any retry
+        // the preceding attempt scheduled before this continuation ran.
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = undefined;
         if (this.closed) return;
         // Swap the window out atomically.
         const dirtyDirs = this.dirtyDirs;
@@ -710,10 +753,16 @@ class WatchSubscription implements FsWatcher {
                 ? await this.fullDiff(rootCause, removalTouched)
                 : await this.partialDiff(dirtyDirs, dirtyFiles, removalTouched);
             this.flushRetries = 0;
-            if (this.closed) return;
+            if (this.closed) {
+                this.releaseRetainedState();
+                return;
+            }
             if (batch.length > 0) this.deliver(batch);
         } catch (error: any) {
-            if (this.closed) return;
+            if (this.closed) {
+                this.releaseRetainedState();
+                return;
+            }
             // Retain the marks and retry with backoff.
             for (const d of dirtyDirs) this.dirtyDirs.add(d);
             for (const f of dirtyFiles) this.dirtyFiles.add(f);
@@ -733,7 +782,9 @@ class WatchSubscription implements FsWatcher {
             if (this.flushRetries < FLUSH_RETRY_MAX) {
                 const delay = FLUSH_RETRY_BASE_MS * 2 ** this.flushRetries;
                 this.flushRetries += 1;
-                setTimeout(() => this.fireFlush(), delay);
+                if (this.retryTimer) clearTimeout(this.retryTimer);
+                this.retryTimer = setTimeout(() => this.fireFlush(), delay);
+                (this.retryTimer as any)?.unref?.();
             } else {
                 this.flushRetries = 0;
                 this.emitError(error);
@@ -1189,9 +1240,6 @@ class WatchSubscription implements FsWatcher {
             if (!target.has(q.nodeId)) target.set(q.nodeId, q.preImage);
         }
         this.view = target;
-        this.byPath = new Map(
-            [...target.values()].map((entry) => [entry.path, entry.nodeId])
-        );
         if (targetLatent) this.latent = targetLatent;
         this.checkMaxNodes();
         return scheduleEvents(events);
@@ -1207,7 +1255,6 @@ class WatchSubscription implements FsWatcher {
         const entry: QuarantineEntry = {
             nodeId: loss.nodeId,
             preImage: loss,
-            since: this.host.clock(),
         };
         this.quarantine.set(loss.nodeId, entry);
         target.set(loss.nodeId, loss);
@@ -1257,8 +1304,6 @@ class WatchSubscription implements FsWatcher {
                 this.pathThroughView(entry.preImage) ?? entry.preImage.path;
             if (live === entry.preImage) {
                 this.view.delete(entry.nodeId);
-                this.byPath.delete(emitPath);
-                this.byPath.delete(entry.preImage.path);
             }
             this.deliver([
                 {

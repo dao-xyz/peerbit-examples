@@ -1,5 +1,42 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.16
+
+### Patch Changes
+
+- ac1ed98: Optionally include snapshot-consistent stat metadata in Shared FS directory
+  entries and publish native adapter binaries that request it only when cgofuse
+  can use readdir-plus on Linux FUSE 3 or WinFsp, avoiding per-entry IPC lookups
+  without bloating compact listings on other mounts.
+- 2ca5ab1: Report the mounting account as the synthetic WinFsp owner so Windows
+  replacement writes, including Node open with truncation, receive the extended
+  attribute access required by CreateFileW.
+- 19e001f: Negotiate binary IPC v2 with the native Go adapter so read and write payloads use bounded raw frame bodies while preserving JSONL v1 compatibility and fail-closed no-replay semantics. Publish matching rebuilt native adapter binaries with the CLI patch.
+- Updated dependencies [ac1ed98]
+- Updated dependencies [19e001f]
+    - @peerbit/shared-fs@0.13.15
+
+## 0.13.15
+
+### Patch Changes
+
+- e987ba9: Bound native-mount JSONL request and response frames, process each adapter
+  connection serially with write backpressure, and isolate malformed clients.
+  The CLI patch publishes matching rebuilt native adapter binaries.
+- c73663e: Make baseline benchmark runs use reproducible unique byte corpora, measure only
+  filesystem I/O with high-resolution timers, and clean up only owned benchmark
+  paths.
+- 3d4f389: Lazily load the Shared FS runtime so CLI help, parser errors, and native adapter
+  installation avoid initializing the full Peerbit stack.
+- 69f62f9: Ship a self-contained Apache-2.0 license with both Shared FS packages. Exclude
+  the CLI's internal cross-OS CI driver from its tarball and accurately declare
+  the executable modules that have import-time side effects.
+- Updated dependencies [2672fa4]
+- Updated dependencies [e987ba9]
+- Updated dependencies [c73663e]
+- Updated dependencies [69f62f9]
+    - @peerbit/shared-fs@0.13.14
+
 ## 0.13.14
 
 ### Patch Changes

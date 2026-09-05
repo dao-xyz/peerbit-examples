@@ -44,6 +44,7 @@ export class IgnoreFilteredWatcher implements FsWatcher {
     private iteratorWake: (() => void) | null = null;
     private unsubscribeRules: () => void;
     private unsubscribeInner: (() => void)[] = [];
+    private didClose = false;
 
     constructor(
         private inner: FsWatcher,
@@ -93,16 +94,29 @@ export class IgnoreFilteredWatcher implements FsWatcher {
     }
 
     get closed(): boolean {
-        return this.inner.closed;
+        return this.didClose || this.inner.closed;
     }
 
     close(): void {
+        if (this.didClose) return;
+        // Set the guard first: inner.close() synchronously calls the inner
+        // close listener below, which otherwise re-enters this method.
+        this.didClose = true;
         if (!this.inner.closed) this.inner.close();
         this.unsubscribeRules();
         for (const un of this.unsubscribeInner.splice(0)) un();
+        this.emittedVisible.clear();
         this.pending = null;
-        this.iteratorWake?.();
-        for (const cb of [...this.closeCbs]) cb();
+        const iteratorWake = this.iteratorWake;
+        this.iteratorWake = null;
+        iteratorWake?.();
+        for (const cb of [...this.closeCbs]) {
+            try {
+                cb();
+            } catch {
+                /* subscriber errors are theirs */
+            }
+        }
         this.changeCbs.clear();
         this.errorCbs.clear();
         this.closeCbs.clear();

@@ -62,8 +62,7 @@ func BenchmarkIPCClientRoundTrip(b *testing.B) {
 				"write",
 				[]interface{}{uint64(1), payload, 0},
 				func(request ipcRequest) interface{} {
-					decoded := decodeValue(request.Args).([]interface{})
-					return float64(len(decoded[1].([]byte)))
+					return float64(len(request.Args[1].([]byte)))
 				},
 				int64(size),
 			)
@@ -74,7 +73,7 @@ func BenchmarkIPCClientRoundTrip(b *testing.B) {
 				b,
 				"read",
 				[]interface{}{uint64(1), size, 0},
-				func(ipcRequest) interface{} { return encodeValue(payload) },
+				func(ipcRequest) interface{} { return payload },
 				int64(size),
 			)
 		})

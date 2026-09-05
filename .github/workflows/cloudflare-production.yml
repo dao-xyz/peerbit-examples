@@ -54,7 +54,7 @@ jobs:
               env:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
-                  pnpm install --frozen-lockfile
+                  node scripts/install-hosting-workspace.mjs
                   npm ci --no-audit --no-fund --prefix tools/wrangler
                   node scripts/validate-wrangler-toolchain.mjs
                   node scripts/validate-production-bootstrap.mjs
@@ -110,7 +110,7 @@ jobs:
               env:
                   COMMIT_HASH: ${{ github.sha }}
               run: |
-                  pnpm install --frozen-lockfile
+                  node scripts/install-hosting-workspace.mjs
                   npm ci --no-audit --no-fund --prefix tools/wrangler
                   node scripts/validate-wrangler-toolchain.mjs
                   node scripts/validate-production-bootstrap.mjs

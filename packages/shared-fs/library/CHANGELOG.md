@@ -1,5 +1,32 @@
 # @peerbit/shared-fs
 
+## 0.13.15
+
+### Patch Changes
+
+- ac1ed98: Optionally include snapshot-consistent stat metadata in Shared FS directory
+  entries and publish native adapter binaries that request it only when cgofuse
+  can use readdir-plus on Linux FUSE 3 or WinFsp, avoiding per-entry IPC lookups
+  without bloating compact listings on other mounts.
+- 19e001f: Negotiate binary IPC v2 with the native Go adapter so read and write payloads use bounded raw frame bodies while preserving JSONL v1 compatibility and fail-closed no-replay semantics. Publish matching rebuilt native adapter binaries with the CLI patch.
+
+## 0.13.14
+
+### Patch Changes
+
+- 2672fa4: Bound IPC frame buffering under adversarial stream fragmentation while preserving
+  the existing JSONL wire protocol, and document the negotiated binary v2 protocol
+  planned for native adapters.
+- e987ba9: Bound native-mount JSONL request and response frames, process each adapter
+  connection serially with write backpressure, and isolate malformed clients.
+  The CLI patch publishes matching rebuilt native adapter binaries.
+- c73663e: Make baseline benchmark runs use reproducible unique byte corpora, measure only
+  filesystem I/O with high-resolution timers, and clean up only owned benchmark
+  paths.
+- 69f62f9: Ship a self-contained Apache-2.0 license with both Shared FS packages. Exclude
+  the CLI's internal cross-OS CI driver from its tarball and accurately declare
+  the executable modules that have import-time side effects.
+
 ## 0.13.13
 
 ### Patch Changes

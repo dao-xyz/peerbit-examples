@@ -149,15 +149,38 @@ export type SharedFsStat = {
     nlink: number;
 };
 
+export type SharedFsDirentStat = Omit<SharedFsStat, "path" | "kind">;
+
 export type SharedFsDirent = {
     name: string;
     kind: "directory" | "file";
+    /**
+     * Metadata captured from the same namespace snapshot as this entry. Path
+     * and kind are omitted because the parent path, name, and entry kind
+     * already carry them. Native adapters may pass the reconstructed complete
+     * stat to a readdir-plus callback and avoid a follow-up getattr. Older
+     * adapters safely ignore this additive field.
+     */
+    stat?: SharedFsDirentStat;
+};
+
+export type SharedFsReaddirOptions = {
+    /** Include compact per-entry metadata for a readdir-plus consumer. */
+    includeStats?: boolean;
 };
 
 export type SharedFsMountBackend = {
     getattr(path: string): Promise<SharedFsStat>;
-    readdir(path: string): Promise<SharedFsDirent[]>;
+    readdir(
+        path: string,
+        options?: SharedFsReaddirOptions
+    ): Promise<SharedFsDirent[]>;
     open(path: string, flags?: SharedFsOpenFlags): Promise<number>;
+    /**
+     * Returned bytes transfer to the caller. A backend must not later mutate
+     * or reuse that view; binary IPC may retain it until the socket write
+     * completes rather than adding a file-sized copy.
+     */
     read(handle: number, size: number, offset: number): Promise<Uint8Array>;
     write(handle: number, data: Uint8Array, offset: number): Promise<number>;
     /**
@@ -337,14 +360,29 @@ const bigintToSize = (value: bigint) => {
 
 const nowMs = () => Date.now();
 
-const directoryStat = (path: string, mtimeMs = nowMs()): SharedFsStat => ({
-    path,
-    kind: "directory",
+const directoryDirentStat = (mtimeMs = nowMs()): SharedFsDirentStat => ({
     size: 0,
     mode: S_IFDIR | 0o755,
     mtimeMs,
     ctimeMs: mtimeMs,
     nlink: 2,
+});
+
+const directoryStat = (path: string, mtimeMs = nowMs()): SharedFsStat => ({
+    path,
+    kind: "directory",
+    ...directoryDirentStat(mtimeMs),
+});
+
+const fileDirentStat = (
+    size: number,
+    mtimeMs = nowMs()
+): SharedFsDirentStat => ({
+    size,
+    mode: S_IFREG | 0o644,
+    mtimeMs,
+    ctimeMs: mtimeMs,
+    nlink: 1,
 });
 
 const fileStat = (
@@ -354,11 +392,7 @@ const fileStat = (
 ): SharedFsStat => ({
     path,
     kind: "file",
-    size,
-    mode: S_IFREG | 0o644,
-    mtimeMs,
-    ctimeMs: mtimeMs,
-    nlink: 1,
+    ...fileDirentStat(size, mtimeMs),
 });
 
 type ParsedSharedFsOpenFlags = {
@@ -2165,9 +2199,10 @@ export const createSharedFsMountBackend = (
             });
         },
 
-        async readdir(path: string) {
+        async readdir(path: string, options?: SharedFsReaddirOptions) {
             return wrap(async () => {
                 const normalized = normalizeFsPath(path);
+                const includeStats = options?.includeStats === true;
                 if (isConflictPath(normalized)) {
                     const parsed = parseConflictPath(normalized);
                     if (
@@ -2187,10 +2222,20 @@ export const createSharedFsMountBackend = (
                             await target.conflicts(undefined, {
                                 allowPartial: true,
                             })
-                        ).map((conflict) => ({
-                            name: encodeConflictPathName(conflict.path),
-                            kind: "directory" as const,
-                        }));
+                        ).map((conflict) => {
+                            const name = encodeConflictPathName(conflict.path);
+                            if (!includeStats) {
+                                return {
+                                    name,
+                                    kind: "directory" as const,
+                                };
+                            }
+                            return {
+                                name,
+                                kind: "directory" as const,
+                                stat: directoryDirentStat(),
+                            };
+                        });
                     }
                     const conflict = await conflictForPath(parsed.filePath);
                     if (!conflict) {
@@ -2198,19 +2243,51 @@ export const createSharedFsMountBackend = (
                     }
                     return conflict.versions
                         .filter((version) => !version.deleted)
-                        .map((version) => ({
-                            name: version.id,
-                            kind: "file" as const,
-                        }));
+                        .map((version) => {
+                            if (!includeStats) {
+                                return {
+                                    name: version.id,
+                                    kind: "file" as const,
+                                };
+                            }
+                            return {
+                                name: version.id,
+                                kind: "file" as const,
+                                stat: fileDirentStat(
+                                    bigintToSize(version.size),
+                                    Number(version.createdAt)
+                                ),
+                            };
+                        });
                 }
-                const byName = new Map(
-                    (await target.list(normalized)).map((entry) => [
-                        entry.name,
-                        {
-                            name: entry.name,
-                            kind: entry.kind,
-                        },
-                    ])
+                const byName = new Map<string, SharedFsDirent>(
+                    (await target.list(normalized)).map((entry) => {
+                        if (!includeStats) {
+                            return [
+                                entry.name,
+                                {
+                                    name: entry.name,
+                                    kind: entry.kind,
+                                },
+                            ] as const;
+                        }
+                        return [
+                            entry.name,
+                            {
+                                name: entry.name,
+                                kind: entry.kind,
+                                stat:
+                                    entry.kind === "directory"
+                                        ? directoryDirentStat(
+                                              Number(entry.updatedAt)
+                                          )
+                                        : fileDirentStat(
+                                              bigintToSize(entry.size),
+                                              Number(entry.updatedAt)
+                                          ),
+                            },
+                        ] as const;
+                    })
                 );
                 for (const state of activeStates) {
                     if (
@@ -2220,15 +2297,33 @@ export const createSharedFsMountBackend = (
                         state.dirty &&
                         dirname(state.path) === normalized
                     ) {
-                        byName.set(basename(state.path), {
-                            name: basename(state.path),
-                            kind: "file" as const,
-                        });
+                        const name = basename(state.path);
+                        byName.set(
+                            name,
+                            includeStats
+                                ? {
+                                      name,
+                                      kind: "file" as const,
+                                      stat: fileDirentStat(state.length),
+                                  }
+                                : { name, kind: "file" as const }
+                        );
                     }
                 }
                 const entries = [...byName.values()];
                 if (normalized === "/") {
-                    entries.push({ name: CONFLICTS_DIR, kind: "directory" });
+                    entries.push(
+                        includeStats
+                            ? {
+                                  name: CONFLICTS_DIR,
+                                  kind: "directory",
+                                  stat: directoryDirentStat(),
+                              }
+                            : {
+                                  name: CONFLICTS_DIR,
+                                  kind: "directory",
+                              }
+                    );
                 }
                 return entries;
             });

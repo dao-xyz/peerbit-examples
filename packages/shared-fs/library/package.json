@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/shared-fs",
-    "version": "0.13.13",
+    "version": "0.13.15",
     "author": "Peerbit contributors",
     "repository": "https://github.com/dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -30,7 +30,7 @@
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
-        "build": "pnpm run clean && tsc -p tsconfig.json",
+        "build": "pnpm run clean && tsc -p tsconfig.json && node ../../../scripts/compact-emitted-javascript.mjs lib/esm",
         "test": "vitest run",
         "test:watch": "vitest"
     },

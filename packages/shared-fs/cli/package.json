@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/shared-fs-cli",
-    "version": "0.13.14",
+    "version": "0.13.16",
     "author": "Peerbit contributors",
     "repository": "https://github.com/dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -9,7 +9,13 @@
     "publishConfig": {
         "access": "public"
     },
-    "sideEffects": false,
+    "sideEffects": [
+        "./lib/esm/bin.js",
+        "./lib/esm/install-native-adapter.js",
+        "./scripts/postinstall.mjs",
+        "./src/bin.ts",
+        "./src/install-native-adapter.ts"
+    ],
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
     "exports": {
@@ -27,6 +33,8 @@
         "scripts",
         "!src/**/__tests__",
         "!lib/**/__tests__",
+        "!src/cross-os-interop.ts",
+        "!lib/esm/cross-os-interop.*",
         "LICENSE"
     ],
     "engines": {
@@ -34,7 +42,7 @@
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
-        "build": "pnpm run clean && tsc -p tsconfig.json",
+        "build": "pnpm run clean && tsc -p tsconfig.json && node ../../../scripts/compact-emitted-javascript.mjs lib/esm",
         "install-native-adapter": "node lib/esm/install-native-adapter.js",
         "postinstall": "node scripts/postinstall.mjs",
         "test": "vitest run",

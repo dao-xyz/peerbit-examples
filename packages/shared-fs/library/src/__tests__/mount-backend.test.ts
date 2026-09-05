@@ -13,6 +13,7 @@ import {
     SharedFsError,
     SharedFsExpectedNodeMismatchError,
     SharedFsHandle,
+    type SharedFsEntryInfo,
     type SharedFsMountBackendTarget,
     type WriteFileOptions,
 } from "../index.js";
@@ -149,6 +150,200 @@ describe("shared fs mount backend", () => {
 
         await backend.release(handle);
         expect(decode(await fs.readFile("/docs/file.txt"))).toBe("hello");
+    });
+
+    it("keeps default directory entries compact without per-entry lookups", async () => {
+        await fs.mkdir("/docs");
+        await fs.writeFile("/note.txt", "hello");
+        const list = vi.fn((path?: string) => fs.list(path));
+        const stat = vi.fn((path: string) => fs.stat(path));
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { list, stat })
+        );
+
+        const entries = await backend.readdir("/");
+
+        expect(entries).toEqual([
+            { name: "docs", kind: "directory" },
+            { name: "note.txt", kind: "file" },
+            { name: CONFLICTS_DIR, kind: "directory" },
+        ]);
+        expect(entries.every((entry) => !("stat" in entry))).toBe(true);
+        expect(list).toHaveBeenCalledOnce();
+        expect(list).toHaveBeenCalledWith("/");
+        expect(stat).not.toHaveBeenCalled();
+    });
+
+    it("keeps wide default listings on the compact wire shape", async () => {
+        const wideEntries: SharedFsEntryInfo[] = Array.from(
+            { length: 10_000 },
+            (_, index) => {
+                const name = `file-${index.toString().padStart(5, "0")}.txt`;
+                return {
+                    path: `/${name}`,
+                    nodeId: `node-${index}`,
+                    name,
+                    kind: "file",
+                    size: 1n,
+                    updatedAt: 1_725_000_000_000n,
+                    authorKey: "author",
+                    machineLabel: "machine",
+                    conflict: false,
+                };
+            }
+        );
+        const list = vi.fn(async () => wideEntries);
+        const stat = vi.fn((path: string) => fs.stat(path));
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { list, stat })
+        );
+
+        const entries = await backend.readdir("/");
+        const encodedBytes = Buffer.byteLength(JSON.stringify(entries));
+
+        expect(entries).toHaveLength(10_001);
+        expect(entries.every((entry) => !("stat" in entry))).toBe(true);
+        expect(encodedBytes).toBeLessThan(600_000);
+        expect(list).toHaveBeenCalledOnce();
+        expect(stat).not.toHaveBeenCalled();
+    });
+
+    it("keeps rich unescaped maximum-name listings within the 64 MiB IPC bound", async () => {
+        const wideEntries: SharedFsEntryInfo[] = Array.from(
+            { length: 10_000 },
+            (_, index) => {
+                const suffix = index.toString().padStart(5, "0");
+                const name = `${"x".repeat(250)}${suffix}`;
+                return {
+                    path: `/${name}`,
+                    nodeId: `node-${index}`,
+                    name,
+                    kind: "file",
+                    size: 1n,
+                    updatedAt: 1_725_000_000_000n,
+                    authorKey: "author",
+                    machineLabel: "machine",
+                    conflict: false,
+                };
+            }
+        );
+        const list = vi.fn(async () => wideEntries);
+        const stat = vi.fn((path: string) => fs.stat(path));
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { list, stat })
+        );
+
+        const entries = await backend.readdir("/", { includeStats: true });
+        const encodedBytes = Buffer.byteLength(JSON.stringify(entries));
+
+        expect(entries).toHaveLength(10_001);
+        expect(
+            entries.every(
+                (entry) =>
+                    entry.stat !== undefined &&
+                    !("path" in entry.stat) &&
+                    !("kind" in entry.stat)
+            )
+        ).toBe(true);
+        // Multiplying this representative 10k response slightly overestimates
+        // 100k because it repeats the fixed conflicts entry ten times.
+        expect(encodedBytes * 10).toBeLessThan(64 * 1024 * 1024);
+        expect(list).toHaveBeenCalledOnce();
+        expect(stat).not.toHaveBeenCalled();
+    });
+
+    it("returns requested directory-entry stats without per-entry lookups", async () => {
+        await fs.mkdir("/docs");
+        await fs.writeFile("/note.txt", "hello");
+        const sourceEntries = new Map(
+            (await fs.list("/")).map((entry) => [entry.name, entry])
+        );
+        const list = vi.fn((path?: string) => fs.list(path));
+        const stat = vi.fn((path: string) => fs.stat(path));
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { list, stat })
+        );
+
+        const entries = await backend.readdir("/", { includeStats: true });
+
+        expect(list).toHaveBeenCalledOnce();
+        expect(list).toHaveBeenCalledWith("/");
+        expect(stat).not.toHaveBeenCalled();
+
+        const docs = entries.find((entry) => entry.name === "docs");
+        expect(docs).toEqual({
+            name: "docs",
+            kind: "directory",
+            stat: {
+                size: 0,
+                mode: 0o040755,
+                mtimeMs: Number(sourceEntries.get("docs")!.updatedAt),
+                ctimeMs: Number(sourceEntries.get("docs")!.updatedAt),
+                nlink: 2,
+            },
+        });
+        const note = entries.find((entry) => entry.name === "note.txt");
+        expect(note).toEqual({
+            name: "note.txt",
+            kind: "file",
+            stat: {
+                size: 5,
+                mode: 0o100644,
+                mtimeMs: Number(sourceEntries.get("note.txt")!.updatedAt),
+                ctimeMs: Number(sourceEntries.get("note.txt")!.updatedAt),
+                nlink: 1,
+            },
+        });
+        expect(
+            entries.find((entry) => entry.name === CONFLICTS_DIR)
+        ).toMatchObject({
+            kind: "directory",
+            stat: {
+                size: 0,
+                mode: 0o040755,
+                nlink: 2,
+            },
+        });
+    });
+
+    it("reports the dirty open-handle size in directory-entry stats", async () => {
+        const list = vi.fn((path?: string) => fs.list(path));
+        const stat = vi.fn((path: string) => fs.stat(path));
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { list, stat })
+        );
+        const handle = await backend.open("/pending.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("not committed"), 0);
+        list.mockClear();
+        stat.mockClear();
+
+        const before = Date.now();
+        const pending = (
+            await backend.readdir("/", { includeStats: true })
+        ).find((entry) => entry.name === "pending.txt");
+        const after = Date.now();
+
+        expect(list).toHaveBeenCalledOnce();
+        expect(stat).not.toHaveBeenCalled();
+        expect(pending).toMatchObject({
+            name: "pending.txt",
+            kind: "file",
+            stat: {
+                size: "not committed".length,
+                mode: 0o100644,
+                nlink: 1,
+            },
+        });
+        expect(pending!.stat!.mtimeMs).toBeGreaterThanOrEqual(before);
+        expect(pending!.stat!.mtimeMs).toBeLessThanOrEqual(after);
+        expect(pending!.stat!.ctimeMs).toBe(pending!.stat!.mtimeMs);
+        expect(await fs.readFile("/pending.txt")).toBeUndefined();
+
+        await backend.release(handle);
     });
 
     it("requires O_CREAT for missing writable opens and enforces handle access", async () => {
@@ -2844,16 +3039,55 @@ describe("shared fs mount backend", () => {
             (await backend.readdir("/")).map((entry) => entry.name)
         ).toContain(CONFLICTS_DIR);
         const conflictName = encodeConflictPathName("/note.txt");
+        expect(await backend.readdir(`/${CONFLICTS_DIR}`)).toEqual([
+            { name: conflictName, kind: "directory" },
+        ]);
         expect(
-            (await backend.readdir(`/${CONFLICTS_DIR}`)).map(
-                (entry) => entry.name
+            (await backend.readdir(`/${CONFLICTS_DIR}/${conflictName}`)).sort(
+                (a, b) => a.name.localeCompare(b.name)
             )
-        ).toEqual([conflictName]);
-        expect(
-            (await backend.readdir(`/${CONFLICTS_DIR}/${conflictName}`))
-                .map((entry) => entry.name)
-                .sort()
-        ).toEqual([left.id, right.id].sort());
+        ).toEqual(
+            [left.id, right.id]
+                .sort((a, b) => a.localeCompare(b))
+                .map((name) => ({ name, kind: "file" }))
+        );
+        const conflictEntries = await backend.readdir(`/${CONFLICTS_DIR}`, {
+            includeStats: true,
+        });
+        expect(conflictEntries.map((entry) => entry.name)).toEqual([
+            conflictName,
+        ]);
+        expect(conflictEntries[0]).toMatchObject({
+            kind: "directory",
+            stat: {
+                size: 0,
+                mode: 0o040755,
+                nlink: 2,
+            },
+        });
+        const versionEntries = await backend.readdir(
+            `/${CONFLICTS_DIR}/${conflictName}`,
+            { includeStats: true }
+        );
+        expect(versionEntries.map((entry) => entry.name).sort()).toEqual(
+            [left.id, right.id].sort()
+        );
+        const versionsById = new Map(
+            (await fs.versions("/note.txt")).map((version) => [
+                version.id,
+                version,
+            ])
+        );
+        for (const entry of versionEntries) {
+            const version = versionsById.get(entry.name)!;
+            expect(entry.stat).toEqual({
+                size: Number(version.size),
+                mode: 0o100644,
+                mtimeMs: Number(version.createdAt),
+                ctimeMs: Number(version.createdAt),
+                nlink: 1,
+            });
+        }
 
         const handle = await backend.open(
             `/${CONFLICTS_DIR}/${conflictName}/${right.id}`
@@ -2917,6 +3151,21 @@ describe("shared fs mount backend", () => {
             const stat = await client.getattr("/ipc/file.txt");
             expect(stat.kind).toBe("file");
             expect(stat.size).toBe("over ipc".length);
+            expect(await client.readdir("/ipc")).toEqual([
+                { name: "file.txt", kind: "file" },
+            ]);
+            const [dirent] = await client.readdir("/ipc", {
+                includeStats: true,
+            });
+            expect(dirent).toMatchObject({
+                name: "file.txt",
+                kind: "file",
+                stat: {
+                    size: "over ipc".length,
+                    mode: 0o100644,
+                    nlink: 1,
+                },
+            });
             expect(decode(await fs.readFile("/ipc/file.txt"))).toBe("over ipc");
 
             // Decoded Buffers may use a pooled backing allocation. Re-encoding

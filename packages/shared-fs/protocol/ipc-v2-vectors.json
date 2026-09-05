@@ -1,0 +1,85 @@
+{
+    "schema": "peerbit-shared-fs-ipc-v2-golden/1",
+    "protocol": "peerbit-shared-fs-ipc",
+    "constants": {
+        "magicAscii": "PBFS",
+        "version": 2,
+        "headerBytes": 16,
+        "maxFrameBytes": 67108864,
+        "maxMetadataBytes": 1048576
+    },
+    "negotiation": [
+        {
+            "name": "version-offer",
+            "jsonLineUtf8": "{\"id\":1,\"op\":\"$peerbit.shared-fs.ipc.negotiate\",\"args\":[{\"protocol\":\"peerbit-shared-fs-ipc\",\"versions\":[2,1],\"nonce\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"maxRequestFrameBytes\":67108864,\"maxResponseFrameBytes\":67108864}]}\n",
+            "jsonLineHex": "7b226964223a312c226f70223a2224706565726269742e7368617265642d66732e6970632e6e65676f7469617465222c2261726773223a5b7b2270726f746f636f6c223a22706565726269742d7368617265642d66732d697063222c2276657273696f6e73223a5b322c315d2c226e6f6e6365223a2241414141414141414141414141414141414141414141222c226d6178526571756573744672616d654279746573223a36373130383836342c226d6178526573706f6e73654672616d654279746573223a36373130383836347d5d7d0a"
+        },
+        {
+            "name": "version-acknowledgement",
+            "jsonLineUtf8": "{\"id\":1,\"ok\":true,\"result\":{\"protocol\":\"peerbit-shared-fs-ipc\",\"version\":2,\"nonce\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"maxRequestFrameBytes\":67108864,\"maxResponseFrameBytes\":67108864,\"maxMetadataBytes\":1048576}}\n",
+            "jsonLineHex": "7b226964223a312c226f6b223a747275652c22726573756c74223a7b2270726f746f636f6c223a22706565726269742d7368617265642d66732d697063222c2276657273696f6e223a322c226e6f6e6365223a2241414141414141414141414141414141414141414141222c226d6178526571756573744672616d654279746573223a36373130383836342c226d6178526573706f6e73654672616d654279746573223a36373130383836342c226d61784d657461646174614279746573223a313034383537367d7d0a"
+        }
+    ],
+    "frames": [
+        {
+            "name": "getattr-request",
+            "kind": "request",
+            "kindCode": 1,
+            "metadataUtf8": "{\"id\":1,\"op\":\"getattr\",\"args\":[\"/\"]}",
+            "metadata": {
+                "id": 1,
+                "op": "getattr",
+                "args": ["/"]
+            },
+            "metadataBytes": 36,
+            "bodyHex": "",
+            "bodyBytes": 0,
+            "frameHex": "504246530201000000000024000000007b226964223a312c226f70223a2267657461747472222c2261726773223a5b222f225d7d"
+        },
+        {
+            "name": "write-request",
+            "kind": "request",
+            "kindCode": 1,
+            "metadataUtf8": "{\"id\":2,\"op\":\"write\",\"args\":[7,{\"$bytes\":null},0]}",
+            "metadata": {
+                "id": 2,
+                "op": "write",
+                "args": [7, { "$bytes": null }, 0]
+            },
+            "metadataBytes": 50,
+            "bodyHex": "000aff",
+            "bodyBytes": 3,
+            "frameHex": "504246530201000000000032000000037b226964223a322c226f70223a227772697465222c2261726773223a5b372c7b22246279746573223a6e756c6c7d2c305d7d000aff"
+        },
+        {
+            "name": "read-success-response",
+            "kind": "response",
+            "kindCode": 2,
+            "metadataUtf8": "{\"id\":3,\"ok\":true,\"result\":{\"$bytes\":null}}",
+            "metadata": {
+                "id": 3,
+                "ok": true,
+                "result": { "$bytes": null }
+            },
+            "metadataBytes": 43,
+            "bodyHex": "68656c6c6f0a",
+            "bodyBytes": 6,
+            "frameHex": "50424653020200000000002b000000067b226964223a332c226f6b223a747275652c22726573756c74223a7b22246279746573223a6e756c6c7d7d68656c6c6f0a"
+        },
+        {
+            "name": "enoent-error-response",
+            "kind": "response",
+            "kindCode": 2,
+            "metadataUtf8": "{\"id\":4,\"ok\":false,\"error\":{\"code\":\"ENOENT\",\"message\":\"missing\"}}",
+            "metadata": {
+                "id": 4,
+                "ok": false,
+                "error": { "code": "ENOENT", "message": "missing" }
+            },
+            "metadataBytes": 65,
+            "bodyHex": "",
+            "bodyBytes": 0,
+            "frameHex": "504246530202000000000041000000007b226964223a342c226f6b223a66616c73652c226572726f72223a7b22636f6465223a22454e4f454e54222c226d657373616765223a226d697373696e67227d7d"
+        }
+    ]
+}
