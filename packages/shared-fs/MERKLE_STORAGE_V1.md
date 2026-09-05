@@ -586,6 +586,11 @@ Use the same machine, exact lockfile, sequential ten-run p50/p95 reporting:
 Structural counters are the primary acceptance gate; timing alone cannot prove
 the complexity change.
 
+The report-only [Merkle algorithm harness](MERKLE_BENCHMARK.md) exercises the
+standalone builder and reader with bounded Map or buffered-disk block stores.
+Its raw samples and exact output checks are inputs to this promotion campaign;
+they do not satisfy the mounted/runtime comparison gates above.
+
 ## Suggested implementation slices
 
 1. Golden-vector codecs, self-certifying blocks, and root verification

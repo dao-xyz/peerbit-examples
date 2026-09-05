@@ -14,6 +14,7 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
+            - "scripts/shared-fs-merkle-benchmark*.mjs"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
     push:
@@ -30,6 +31,7 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
+            - "scripts/shared-fs-merkle-benchmark*.mjs"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
     workflow_dispatch:
@@ -84,6 +86,9 @@ jobs:
 
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Test Merkle algorithm benchmark harness
+              run: node --test scripts/shared-fs-merkle-benchmark.test.mjs
 
             - name: Test shared-fs library
               run: pnpm --filter @peerbit/shared-fs run test
@@ -143,7 +148,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-merkle-benchmark*.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})

@@ -53,6 +53,7 @@
         "shared-fs:install:macos": "scripts/install-shared-fs-macos.sh",
         "shared-fs:benchmark:node-go-ipc": "pnpm --filter @peerbit/shared-fs run build && node scripts/shared-fs-node-go-ipc-benchmark.mjs",
         "shared-fs:benchmark:native-mount": "node scripts/shared-fs-native-mount-benchmark.mjs",
+        "shared-fs:benchmark:merkle": "pnpm --filter @peerbit/shared-fs run build && node scripts/shared-fs-merkle-benchmark.mjs",
         "scaleway:start": "node scripts/github-scaleway-runner.mjs start",
         "scaleway:bootstrap": "node scripts/github-scaleway-runner.mjs bootstrap",
         "scaleway:stop": "node scripts/github-scaleway-runner.mjs stop",
