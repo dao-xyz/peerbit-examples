@@ -484,6 +484,53 @@ describe("MerklePatchBuilderV1", () => {
         expectBytes(await readAll(grown.root, fixture.store), grownExpected);
     });
 
+    it("does not resurrect a truncated tail when regrowing across two radix levels", async () => {
+        const initial = new Uint8Array(257 * LEAF_SIZE + 11);
+        initial.set(Uint8Array.of(11, 12, 13), 0);
+        initial[initial.length - 1] = 99;
+        const fixture = buildFixture(initial);
+        expect(fixture.root.rootLevel).toBe(2);
+
+        const truncated = await new MerklePatchBuilderV1({
+            root: fixture.root,
+            source: fixture.store,
+            sink: fixture.store,
+        }).build({ size: 3 });
+        expect(truncated.root.rootLevel).toBe(0);
+        expectBytes(
+            await readAll(truncated.root, fixture.store),
+            Uint8Array.of(11, 12, 13)
+        );
+
+        fixture.store.puts.length = 0;
+        const regrown = await new MerklePatchBuilderV1({
+            root: truncated.root,
+            source: fixture.store,
+            sink: fixture.store,
+        }).build({
+            size: initial.length,
+            patches: [
+                {
+                    offset: initial.length - 1,
+                    bytes: Uint8Array.of(77),
+                },
+            ],
+        });
+        const expected = new Uint8Array(initial.length);
+        expected.set(Uint8Array.of(11, 12, 13), 0);
+        expected[expected.length - 1] = 77;
+
+        expect(regrown.root.rootLevel).toBe(2);
+        expectBytes(await readAll(regrown.root, fixture.store), expected);
+        expect(fixture.store.puts).toEqual([
+            { kind: "data", level: 0 },
+            { kind: "data", level: 0 },
+            { kind: "tree", level: 1 },
+            { kind: "tree", level: 1 },
+            { kind: "tree", level: 2 },
+        ]);
+    });
+
     it("matches a deterministic randomized byte-buffer oracle", async () => {
         let state = 0x243f_6a88;
         const random = () => {
@@ -828,6 +875,38 @@ describe("MerklePatchBuilderV1", () => {
             phase: "failed",
             dataBlocksWritten: 0,
         });
+    });
+
+    it("rejects a pre-aborted build before admitting work", async () => {
+        const store = new MemoryBlocks();
+        const builder = new MerklePatchBuilderV1({
+            root: { leafSize: LEAF_SIZE, size: 0n, rootLevel: 0 },
+            source: store,
+            sink: store,
+        });
+        const controller = new AbortController();
+        controller.abort("cancelled before admission");
+
+        await expect(
+            builder.build({
+                patches: [{ offset: 0, bytes: Uint8Array.of(1) }],
+                signal: controller.signal,
+            })
+        ).rejects.toMatchObject({
+            name: "AbortError",
+            code: "ABORT_ERR",
+        });
+        expect(builder.stats()).toMatchObject({
+            phase: "idle",
+            buildCalls: 0,
+            sinkPuts: 0,
+            sourceFetches: 0,
+        });
+
+        const result = await builder.build({
+            patches: [{ offset: 0, bytes: Uint8Array.of(1) }],
+        });
+        expect(result.root.size).toBe(1n);
     });
 
     it("enforces patch, leaf, cache, range, and lifecycle bounds", async () => {

@@ -1,4 +1,3 @@
-import { toBase64URL } from "@peerbit/crypto";
 import {
     MERKLE_V1_BITMAP_BYTES,
     MERKLE_V1_FANOUT,
@@ -7,8 +6,10 @@ import {
     MerkleTreeBlockV1,
     assertMerkleRootDescriptorV1,
     merkleDataHashV1,
+    merkleDataIdFromHashV1,
     merkleRootLevelV1,
     merkleTreeHashV1,
+    merkleTreeIdFromHashV1,
     merkleV1BitmapFromSlots,
     merkleV1BitmapSlots,
     type MerkleRootDescriptorV1,
@@ -262,9 +263,6 @@ const hashKey = (hash: Uint8Array) => {
     for (const byte of hash) value += byte.toString(16).padStart(2, "0");
     return value;
 };
-
-const blockId = (kind: "data" | "tree", hash: Uint8Array) =>
-    `${kind === "data" ? "data2" : "tree2"}:${toBase64URL(hash).replace(/=+$/u, "")}`;
 
 const isAllZero = (bytes: Uint8Array) => {
     let nonzero = 0;
@@ -1129,7 +1127,7 @@ export class MerklePatchBuilderV1 {
                 copyHash(child, `Merkle tree child ${index}`)
             );
             const actualHash = merkleTreeHashV1(level, bitmap, children);
-            if (id !== blockId("tree", actualHash)) {
+            if (id !== merkleTreeIdFromHashV1(actualHash)) {
                 return ioFailure("Merkle tree id does not match its fields");
             }
             if (!equalBytes(actualHash, hash)) {
@@ -1184,7 +1182,7 @@ export class MerklePatchBuilderV1 {
             }
             const bytes = new Uint8Array(bytesValue);
             const actualHash = merkleDataHashV1(bytes);
-            if (id !== blockId("data", actualHash)) {
+            if (id !== merkleDataIdFromHashV1(actualHash)) {
                 return ioFailure("Merkle data id does not match its bytes");
             }
             if (!equalBytes(actualHash, hash)) {
@@ -1219,7 +1217,7 @@ export class MerklePatchBuilderV1 {
         const bytes = new Uint8Array(bytesValue);
         this.counters.newDataBytesHashed += bytes.byteLength;
         const block = new MerkleDataBlockV1({ bytes });
-        if (block.id !== blockId("data", expectedHash)) {
+        if (block.id !== merkleDataIdFromHashV1(expectedHash)) {
             return ioFailure("internal Merkle data hash mismatch");
         }
         this.counters.dataBlocksCreated++;
@@ -1233,7 +1231,7 @@ export class MerklePatchBuilderV1 {
         expectedHash: Uint8Array
     ) {
         const block = new MerkleTreeBlockV1({ level, bitmap, children });
-        if (block.id !== blockId("tree", expectedHash)) {
+        if (block.id !== merkleTreeIdFromHashV1(expectedHash)) {
             return ioFailure("internal Merkle tree hash mismatch");
         }
         this.counters.treeBlocksCreated++;
@@ -1297,7 +1295,10 @@ export class MerklePatchBuilderV1 {
                 );
                 actualHash = merkleTreeHashV1(blockLevel, bitmap, children);
             }
-            const actualId = blockId(kind, actualHash);
+            const actualId =
+                kind === "data"
+                    ? merkleDataIdFromHashV1(actualHash)
+                    : merkleTreeIdFromHashV1(actualHash);
             if (!equalBytes(actualHash, expectedHash) || id !== actualId) {
                 return ioFailure(
                     "Merkle block sink mutated the submitted block"

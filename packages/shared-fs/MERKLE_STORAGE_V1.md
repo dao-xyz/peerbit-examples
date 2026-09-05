@@ -336,10 +336,11 @@ collapse, root-height transitions, corruption, adapter failures, and work that
 scales with distinct changed paths. These counters make no claim about a
 future Peerbit transaction, receipt, GC, or mounted-write latency.
 
-This utility is deliberately detached from the current v9 `Documents` store,
-filesystem address, mount, root lease, GC, repair, and write path. Supplying a
-source does not establish authorization, availability, or durability. Those
-remain requirements for the future generation-specific integration.
+Both standalone utilities are deliberately detached from the current v9
+`Documents` store, filesystem address, mount, root lease, GC, repair, and write
+path. Supplying a source or sink does not establish authorization,
+availability, or durability. Those remain requirements for the future
+generation-specific integration.
 
 ## Patch publication
 
