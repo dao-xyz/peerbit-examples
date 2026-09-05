@@ -123,6 +123,257 @@ describe("bounded placement profile", () => {
             Number.MAX_SAFE_INTEGER
         );
     });
+
+    it("captures only whitelisted slow join-plan primitives and detaches them", () => {
+        const profile = createPlacementProfile();
+        const event = {
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 20_000,
+            entries: 4,
+            count: 3,
+            peer: "private-peer",
+            details: {
+                immediateReplicatingLeaderPlanHits: 0,
+                immediateReplicatingLeaderPlans: 2,
+                nativeSynchronousJoinPlan: false,
+                nativeAllKeptJoinPlan: true,
+                payload: { secret: "private-payload" },
+            },
+        };
+        profile.sink(event);
+        const first = profile.snapshot();
+        expect(first.slowJoinPlan).toEqual({
+            thresholdMs: 1_000,
+            maxSamples: 8,
+            observed: 1,
+            dropped: 0,
+            invalidFields: 0,
+            samples: [
+                {
+                    durationMs: 20_000,
+                    entries: 4,
+                    count: 3,
+                    details: {
+                        immediateReplicatingLeaderPlanHits: 0,
+                        immediateReplicatingLeaderPlans: 2,
+                        nativeSynchronousJoinPlan: false,
+                        nativeAllKeptJoinPlan: true,
+                    },
+                },
+            ],
+        });
+        expect(first.events[0].count).toBe(1);
+        event.details.immediateReplicatingLeaderPlans = 999;
+        first.slowJoinPlan.samples[0].details!.nativeAllKeptJoinPlan = false;
+        first.slowJoinPlan.samples[0].entries = 999;
+        first.slowJoinPlan.samples.push({ durationMs: 9_999 });
+        expect(profile.snapshot().slowJoinPlan.samples).toHaveLength(1);
+        expect(profile.snapshot().slowJoinPlan.samples[0]).toMatchObject({
+            entries: 4,
+            details: {
+                immediateReplicatingLeaderPlans: 2,
+                nativeAllKeptJoinPlan: true,
+            },
+        });
+        expect(JSON.stringify(profile.snapshot())).not.toMatch(
+            /private|payload|secret|peer/
+        );
+    });
+
+    it("retains missing join-plan fields as unknown instead of zero or false", () => {
+        const profile = createPlacementProfile();
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_000,
+        });
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_001,
+            entries: 2,
+            count: 0,
+            details: { nativeFastDrop: true },
+        });
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_002,
+            details: Object.create({ nativeSynchronousJoinPlan: false }),
+        });
+        expect(profile.snapshot().slowJoinPlan).toMatchObject({
+            observed: 3,
+            invalidFields: 0,
+            samples: [
+                { durationMs: 1_002 },
+                { durationMs: 1_001, entries: 2, count: 0 },
+                { durationMs: 1_000 },
+            ],
+        });
+        for (const sample of profile.snapshot().slowJoinPlan.samples)
+            expect(sample).not.toHaveProperty("details");
+        expect(profile.snapshot().slowJoinPlan.samples[0]).not.toHaveProperty(
+            "entries"
+        );
+    });
+
+    it("bounds slow samples while continuing exact named aggregates", () => {
+        const profile = createPlacementProfile();
+        for (let i = 0; i < 10_000; i++)
+            profile.sink({
+                name: "sharedLog.receive.joinPlan",
+                durationMs: 1_000 + i,
+                entries: i,
+                details: { payload: "x".repeat(1_000) },
+            });
+        const snapshot = profile.snapshot();
+        expect(snapshot.slowJoinPlan).toMatchObject({
+            observed: 10_000,
+            dropped: 9_992,
+            invalidFields: 0,
+        });
+        expect(
+            snapshot.slowJoinPlan.samples.map((sample) => sample.entries)
+        ).toEqual([9_999, 9_998, 9_997, 9_996, 9_995, 9_994, 9_993, 9_992]);
+        expect(snapshot.events[0]).toMatchObject({
+            count: 10_000,
+            timedCount: 10_000,
+            sumMs: 59_995_000,
+            maxMs: 10_999,
+        });
+        expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(4_096);
+    });
+
+    it("retains a later slowest span and keeps earlier samples on tied durations", () => {
+        const profile = createPlacementProfile();
+        for (let entries = 0; entries < 10; entries++)
+            profile.sink({
+                name: "sharedLog.receive.joinPlan",
+                durationMs: 1_000,
+                entries,
+            });
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 20_000,
+            entries: 10,
+            details: { immediateReplicatingLeaderPlanHits: 0 },
+        });
+        expect(profile.snapshot().slowJoinPlan).toMatchObject({
+            observed: 11,
+            dropped: 3,
+        });
+        expect(
+            profile
+                .snapshot()
+                .slowJoinPlan.samples.map((sample) => sample.entries)
+        ).toEqual([10, 0, 1, 2, 3, 4, 5, 6]);
+        expect(profile.snapshot().slowJoinPlan.samples[0]).toMatchObject({
+            durationMs: 20_000,
+            details: { immediateReplicatingLeaderPlanHits: 0 },
+        });
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_000,
+            entries: Infinity,
+        });
+        expect(profile.snapshot().slowJoinPlan).toMatchObject({
+            observed: 12,
+            dropped: 4,
+            invalidFields: 1,
+        });
+    });
+
+    it("requires an admitted matching name and valid slow duration", () => {
+        const profile = createPlacementProfile();
+        profile.sink({ name: "other", durationMs: 10_000 });
+        for (const durationMs of [
+            999.999,
+            undefined,
+            -1,
+            Infinity,
+            NaN,
+            "1000",
+        ])
+            profile.sink({ name: "sharedLog.receive.joinPlan", durationMs });
+        expect(profile.snapshot().slowJoinPlan).toMatchObject({
+            observed: 0,
+            samples: [],
+        });
+        const noNames = createPlacementProfile({ maxEvents: 0 });
+        noNames.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_000,
+        });
+        expect(noNames.snapshot()).toMatchObject({
+            dropped: 1,
+            slowJoinPlan: { observed: 0, samples: [] },
+        });
+    });
+
+    it("omits malformed slow fields and never invokes their accessors", () => {
+        const profile = createPlacementProfile();
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_000,
+            entries: -1,
+            count: NaN,
+            details: {
+                immediateReplicatingLeaderPlanHits: 1.5,
+                immediateReplicatingLeaderPlans: 2n,
+                nativeSynchronousJoinPlan: "false",
+                nativeAllKeptJoinPlan: 0,
+            },
+        });
+        let called = 0;
+        const getter = () => {
+            called++;
+            throw new Error("must not call");
+        };
+        profile.sink(
+            Object.defineProperties(
+                { name: "sharedLog.receive.joinPlan", durationMs: 1_001 },
+                {
+                    entries: { get: getter },
+                    count: { get: getter },
+                    details: { get: getter },
+                }
+            )
+        );
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_002,
+            details: Object.defineProperty({}, "nativeAllKeptJoinPlan", {
+                get: getter,
+            }),
+        });
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        expect(() =>
+            profile.sink({
+                name: "sharedLog.receive.joinPlan",
+                durationMs: 1_003,
+                details: proxy,
+            })
+        ).not.toThrow();
+        profile.sink({
+            name: "sharedLog.receive.joinPlan",
+            durationMs: 1_004,
+            details: null,
+        });
+        expect(called).toBe(0);
+        expect(profile.snapshot()).toMatchObject({
+            invalid: 0,
+            slowJoinPlan: {
+                observed: 5,
+                invalidFields: 15,
+                samples: [
+                    { durationMs: 1_004 },
+                    { durationMs: 1_003 },
+                    { durationMs: 1_002 },
+                    { durationMs: 1_001 },
+                    { durationMs: 1_000 },
+                ],
+            },
+        });
+        expect(() => JSON.stringify(profile.snapshot())).not.toThrow();
+    });
 });
 
 describe("bounded placement error evidence", () => {

@@ -1,5 +1,11 @@
 # Split-plane N=3 placement and profiling — 2026-09-05
 
+These historical runs used commit `15f40b98d0c054a11e768837c95bbc5f201d007c`.
+A later [bounded-diagnostics follow-up](ADAPTIVE_SHARDING_DIAGNOSTICS.md)
+captures selected slow-span details and separates stop-command phases. It has
+not rerun or cleared the failures below; the original timeout is not yet
+localized to `Peerbit.stop()` itself.
+
 ## Outcome
 
 **Full replication passed; adaptive placement failed its joined-peer stability

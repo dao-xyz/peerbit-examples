@@ -2,6 +2,8 @@
 const MAX_NAMES = 128;
 const MAX_NAME_LENGTH = 96;
 const MAX_COUNTER = Number.MAX_SAFE_INTEGER;
+const SLOW_JOIN_PLAN_MS = 1_000;
+const MAX_SLOW_JOIN_PLAN_SAMPLES = 8;
 // Recent Node versions expose lazy Error.stack through one native getter.
 // Recognize that exact function, not arbitrary accessors or source strings.
 const nativeStackGetter = Object.getOwnPropertyDescriptor(
@@ -46,6 +48,18 @@ export type PlacementProfileEvent = {
     maxMs: number;
 };
 
+export type PlacementSlowJoinPlan = {
+    durationMs: number;
+    entries?: number;
+    count?: number;
+    details?: {
+        immediateReplicatingLeaderPlanHits?: number;
+        immediateReplicatingLeaderPlans?: number;
+        nativeSynchronousJoinPlan?: boolean;
+        nativeAllKeptJoinPlan?: boolean;
+    };
+};
+
 /** maxEvents bounds distinct event names, not the number of observations. */
 export const createPlacementProfile = (options?: { maxEvents?: number }) => {
     const requested = dataField(options, "maxEvents").value;
@@ -60,12 +74,82 @@ export const createPlacementProfile = (options?: { maxEvents?: number }) => {
     let invalid = 0;
     let dropped = 0;
     let saturated = false;
+    const slowJoinPlans: PlacementSlowJoinPlan[] = [];
+    let slowJoinPlansObserved = 0;
+    let slowJoinPlansDropped = 0;
+    let slowJoinPlanInvalidFields = 0;
     const add = (left: number, right = 1) => {
         if (left > MAX_COUNTER - right) {
             saturated = true;
             return MAX_COUNTER;
         }
         return left + right;
+    };
+    // The eight slowest qualifying spans are evidence, not a latency histogram.
+    // These fields are emitted by shared-log's receive.joinPlan. Other paths
+    // omit them; absence is unknown and must not become a false/zero value.
+    const captureSlowJoinPlan = (event: unknown, durationMs: number) => {
+        slowJoinPlansObserved = add(slowJoinPlansObserved);
+        const sample: PlacementSlowJoinPlan = { durationMs };
+        const readPrimitive = (
+            input: unknown,
+            key: string,
+            kind: "count" | "boolean"
+        ) => {
+            const field = dataField(input, key);
+            const value = field.value;
+            const valid =
+                kind === "count"
+                    ? typeof value === "number" &&
+                      Number.isSafeInteger(value) &&
+                      value >= 0
+                    : typeof value === "boolean";
+            if (valid) return value as number | boolean;
+            if (field.unreadable || value !== undefined)
+                slowJoinPlanInvalidFields = add(slowJoinPlanInvalidFields);
+            return undefined;
+        };
+        for (const key of ["entries", "count"] as const) {
+            const value = readPrimitive(event, key, "count");
+            if (typeof value === "number") sample[key] = value;
+        }
+        const details = dataField(event, "details");
+        if (
+            details.unreadable ||
+            (details.value !== undefined &&
+                (details.value === null || typeof details.value !== "object"))
+        ) {
+            slowJoinPlanInvalidFields = add(slowJoinPlanInvalidFields);
+        } else if (details.value !== undefined) {
+            const selected: NonNullable<PlacementSlowJoinPlan["details"]> = {};
+            for (const key of [
+                "immediateReplicatingLeaderPlanHits",
+                "immediateReplicatingLeaderPlans",
+            ] as const) {
+                const value = readPrimitive(details.value, key, "count");
+                if (typeof value === "number") selected[key] = value;
+            }
+            for (const key of [
+                "nativeSynchronousJoinPlan",
+                "nativeAllKeptJoinPlan",
+            ] as const) {
+                const value = readPrimitive(details.value, key, "boolean");
+                if (typeof value === "boolean") selected[key] = value;
+            }
+            if (Object.keys(selected).length) sample.details = selected;
+        }
+        if (slowJoinPlans.length >= MAX_SLOW_JOIN_PLAN_SAMPLES) {
+            slowJoinPlansDropped = add(slowJoinPlansDropped);
+            if (
+                durationMs <= slowJoinPlans[slowJoinPlans.length - 1].durationMs
+            )
+                return;
+        }
+        slowJoinPlans.push(sample);
+        // Stable sorting retains earlier observations on equal durations.
+        slowJoinPlans.sort((left, right) => right.durationMs - left.durationMs);
+        if (slowJoinPlans.length > MAX_SLOW_JOIN_PLAN_SAMPLES)
+            slowJoinPlans.pop();
     };
     return {
         sink(event: unknown): void {
@@ -114,6 +198,11 @@ export const createPlacementProfile = (options?: { maxEvents?: number }) => {
                     bucket.timedCount = add(bucket.timedCount);
                     bucket.sumMs = add(bucket.sumMs, ms);
                     bucket.maxMs = Math.max(bucket.maxMs, ms);
+                    if (
+                        name === "sharedLog.receive.joinPlan" &&
+                        ms >= SLOW_JOIN_PLAN_MS
+                    )
+                        captureSlowJoinPlan(event, ms);
                 }
             } catch {
                 // Instrumentation must never interfere with the operation.
@@ -128,6 +217,19 @@ export const createPlacementProfile = (options?: { maxEvents?: number }) => {
                 maxEvents,
                 saturated,
                 events: [...events.values()].map((event) => ({ ...event })),
+                slowJoinPlan: {
+                    thresholdMs: SLOW_JOIN_PLAN_MS,
+                    maxSamples: MAX_SLOW_JOIN_PLAN_SAMPLES,
+                    observed: slowJoinPlansObserved,
+                    dropped: slowJoinPlansDropped,
+                    invalidFields: slowJoinPlanInvalidFields,
+                    samples: slowJoinPlans.map((sample) => ({
+                        ...sample,
+                        ...(sample.details
+                            ? { details: { ...sample.details } }
+                            : {}),
+                    })),
+                },
             };
         },
     };

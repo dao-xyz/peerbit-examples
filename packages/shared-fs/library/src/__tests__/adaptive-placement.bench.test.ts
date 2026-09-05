@@ -49,6 +49,12 @@ const { minCopies, budgets, initialCustodians, joiningPeer, survivors } = plan;
 const profiled =
     process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_PROFILE === "1";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+type StopAttempt = {
+    attempt: number;
+    request: number;
+    startedAt: number;
+    replyReceived: boolean;
+};
 
 class PlacementWorker {
     child: ChildProcess;
@@ -67,7 +73,19 @@ class PlacementWorker {
     diagnostics = "";
     omittedDiagnosticChars = 0;
     firstFailure: unknown;
-    constructor(readonly config: PlacementConfig) {
+    shutdownEvents: Record<string, unknown>[] = [];
+    omittedShutdownEvents = 0;
+    private observedStopPending = new Map<
+        string,
+        { request: number; label: string; count: number }
+    >();
+    private stopAttempts = 0;
+    constructor(
+        readonly config: PlacementConfig,
+        private readonly reportDiagnostic?: (
+            event: Record<string, unknown>
+        ) => void
+    ) {
         this.child = fork(workerPath, [JSON.stringify(config)], {
             execArgv: ["--import", "tsx"],
             silent: true,
@@ -84,6 +102,7 @@ class PlacementWorker {
         this.closed = new Promise((resolve) =>
             this.child.once("exit", (code, signal) => {
                 this.exited = true;
+                this.recordShutdown({ kind: "os-exit", code, signal });
                 for (const pending of this.pending.values()) {
                     clearTimeout(pending.timer);
                     pending.reject(
@@ -114,6 +133,56 @@ class PlacementWorker {
                 )
             );
             this.child.on("message", (message: any) => {
+                const marker = message.stopTrace;
+                if (
+                    this.config.profile &&
+                    marker &&
+                    typeof marker.label === "string" &&
+                    marker.label.length <= 64 &&
+                    ["point", "enter", "fulfilled", "rejected"].includes(
+                        marker.state
+                    ) &&
+                    Number.isFinite(marker.atMs) &&
+                    marker.atMs >= 0 &&
+                    Number.isSafeInteger(message.stopTraceRequest) &&
+                    message.stopTraceRequest > 0
+                ) {
+                    if (this.shutdownEvents.length >= 96) {
+                        this.omittedShutdownEvents++;
+                        return;
+                    }
+                    const event = {
+                        label: marker.label as string,
+                        state: marker.state as string,
+                        atMs: marker.atMs as number,
+                    };
+                    const key = `${message.stopTraceRequest}:${event.label}`;
+                    if (event.state === "enter") {
+                        this.observedStopPending.set(key, {
+                            request: message.stopTraceRequest,
+                            label: event.label,
+                            count:
+                                (this.observedStopPending.get(key)?.count ??
+                                    0) + 1,
+                        });
+                    } else if (
+                        event.state === "fulfilled" ||
+                        event.state === "rejected"
+                    ) {
+                        const pending = this.observedStopPending.get(key);
+                        if (pending && pending.count > 1)
+                            this.observedStopPending.set(key, {
+                                ...pending,
+                                count: pending.count - 1,
+                            });
+                        else this.observedStopPending.delete(key);
+                    }
+                    this.recordShutdown({
+                        kind: "worker-marker",
+                        request: message.stopTraceRequest,
+                        event,
+                    });
+                }
                 if (message.ready) {
                     clearTimeout(timer);
                     resolve(message);
@@ -145,6 +214,83 @@ class PlacementWorker {
                 }
             });
         });
+    }
+    private recordShutdown(event: Record<string, unknown>) {
+        if (!this.config.profile) return;
+        if (this.shutdownEvents.length >= 96) {
+            this.omittedShutdownEvents++;
+            return;
+        }
+        const entry = {
+            peer: this.config.peer,
+            generation: this.config.generation,
+            pid: this.child.pid,
+            parentObservedAtMs: performance.now(),
+            ...event,
+        };
+        this.shutdownEvents.push(entry);
+        // Evidence is emitted before a worker might stall or be killed.
+        try {
+            this.reportDiagnostic?.(entry);
+        } catch {
+            // Observation cannot turn a completed stop into an operation error.
+        }
+    }
+    private shutdownCheckpoint(scheduledAtMs: number, stop: StopAttempt) {
+        const elapsedMs = performance.now() - stop.startedAt;
+        this.recordShutdown({
+            kind: "checkpoint",
+            attempt: stop.attempt,
+            request: stop.request,
+            scheduledAtMs,
+            elapsedMs,
+            stopReplyReceived: stop.replyReceived,
+            exited: this.exited,
+            pendingSource: "last worker markers received by parent",
+            pending: [...this.observedStopPending.values()].map((item) => ({
+                ...item,
+            })),
+        });
+        if (this.exited || !this.child.connected) return;
+        // The worker handles this outside its command queue. Do not await it
+        // on the stop path or extend the original stop/exit deadlines.
+        void this.request<any>({ type: "profile" }, 750).then(
+            (profile) => {
+                const trace = profile?.shutdown;
+                this.recordShutdown({
+                    kind: "checkpoint-response",
+                    attempt: stop.attempt,
+                    request: stop.request,
+                    workerTraceRequest: trace?.request ?? null,
+                    scheduledAtMs,
+                    elapsedMs: performance.now() - stop.startedAt,
+                    pendingSource: "worker trace snapshot",
+                    pending: Array.isArray(trace?.pending)
+                        ? trace.pending.slice(0, 8).map((item: any) => ({
+                              label:
+                                  typeof item.label === "string"
+                                      ? item.label.slice(0, 64)
+                                      : null,
+                              count:
+                                  Number.isSafeInteger(item.count) &&
+                                  item.count >= 0
+                                      ? item.count
+                                      : null,
+                          }))
+                        : null,
+                    omittedWorkerEvents: trace?.omittedEvents ?? null,
+                });
+            },
+            (error) =>
+                this.recordShutdown({
+                    kind: "checkpoint-unavailable",
+                    attempt: stop.attempt,
+                    request: stop.request,
+                    scheduledAtMs,
+                    elapsedMs: performance.now() - stop.startedAt,
+                    error: errorInfo(error),
+                })
+        );
     }
     request<T = any>(command: PlacementCommand, timeout = 35_000): Promise<T> {
         assert(!this.exited && this.child.connected, "worker is not connected");
@@ -189,9 +335,35 @@ class PlacementWorker {
         }
     }
     async stop() {
-        const result = await this.request({ type: "stop" }, 20_000);
-        assert.deepEqual(await this.waitExit(), { code: 0, signal: null });
-        return result;
+        const stop: StopAttempt = {
+            attempt: ++this.stopAttempts,
+            request: this.sequence + 1,
+            startedAt: performance.now(),
+            replyReceived: false,
+        };
+        this.recordShutdown({
+            kind: "command-sent",
+            attempt: stop.attempt,
+            request: stop.request,
+        });
+        const checkpoints = this.config.profile
+            ? [5_000, 19_000].map((ms) =>
+                  setTimeout(() => this.shutdownCheckpoint(ms, stop), ms)
+              )
+            : [];
+        try {
+            const result = await this.request({ type: "stop" }, 20_000);
+            stop.replyReceived = true;
+            this.recordShutdown({
+                kind: "reply-received",
+                attempt: stop.attempt,
+                request: stop.request,
+            });
+            assert.deepEqual(await this.waitExit(), { code: 0, signal: null });
+            return result;
+        } finally {
+            for (const timer of checkpoints) clearTimeout(timer);
+        }
     }
     async crash() {
         assert(this.child.kill("SIGKILL"));
@@ -210,6 +382,7 @@ const sourceHashes = async () =>
                 "adaptive-placement.bench.model.ts",
                 "adaptive-placement-analysis.ts",
                 "adaptive-placement-telemetry.ts",
+                "adaptive-placement-stop-trace.ts",
                 "process-isolated-soak-storage.ts",
                 "../../../../../pnpm-lock.yaml",
             ].map(async (name) => [
@@ -252,17 +425,21 @@ manual(
                 const started = performance.now();
                 const start = async (peer: number, offline = false) => {
                     ensureActive();
-                    const worker = new PlacementWorker({
-                        peer,
-                        directory: join(directory, String(peer)),
-                        run: directory,
-                        mode,
-                        capacityBytes: budgets[peer],
-                        offline,
-                        minCopies,
-                        generation: all.length + 1,
-                        profile: profiled,
-                    });
+                    const worker = new PlacementWorker(
+                        {
+                            peer,
+                            directory: join(directory, String(peer)),
+                            run: directory,
+                            mode,
+                            capacityBytes: budgets[peer],
+                            offline,
+                            minCopies,
+                            generation: all.length + 1,
+                            profile: profiled,
+                        },
+                        (event) =>
+                            log({ type: "shutdown-diagnostic", ...event })
+                    );
                     all.push(worker);
                     active.set(peer, worker);
                     const ready = await worker.ready;
@@ -651,7 +828,7 @@ manual(
                     );
                 }
                 const report = {
-                    schema: "shared-fs-split-plane-probe-v2",
+                    schema: "shared-fs-split-plane-probe-v3",
                     mode,
                     directory,
                     files,
@@ -670,6 +847,8 @@ manual(
                         tail: worker.diagnostics,
                         omittedChars: worker.omittedDiagnosticChars,
                         firstFailure: worker.firstFailure ?? null,
+                        shutdown: worker.shutdownEvents,
+                        omittedShutdownEvents: worker.omittedShutdownEvents,
                     })),
                     caveats: [
                         "test-only Documents model, not a working sharded filesystem",
@@ -681,6 +860,7 @@ manual(
                         "retained directories are evidence; no physical reclamation tested",
                         "small sample, not reliable p95/p99 or throughput scaling evidence",
                         "profile durations can overlap or nest; sums are not CPU time or wall-clock critical paths",
+                        "shutdown command includes queue wait, peer stop, disk scan and IPC; command timeout alone does not identify the pending phase",
                     ],
                 };
                 console.log("placement-report: " + JSON.stringify(report));

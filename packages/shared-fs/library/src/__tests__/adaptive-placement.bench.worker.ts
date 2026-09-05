@@ -20,6 +20,10 @@ import {
     createPlacementProfile,
     errorInfo,
 } from "./adaptive-placement-telemetry.js";
+import {
+    createPlacementStopTrace,
+    observePlacementStopMethods,
+} from "./adaptive-placement-stop-trace.js";
 
 const config: PlacementConfig = JSON.parse(process.argv[2]);
 assert(
@@ -156,6 +160,10 @@ const main = async () => {
     const metadataEntries: any[] = [];
     const metadataLogAddress = metadata.log.address;
     const chunksLogAddress = chunks.log.address;
+    type StopTrace = ReturnType<typeof createPlacementStopTrace>;
+    let tracedStopRequests = 0;
+    let activeStopTrace: { request: number; trace: StopTrace } | undefined;
+    let lastReceivedStopTrace: typeof activeStopTrace;
     const profileSnapshot = () =>
         profiles
             ? {
@@ -167,6 +175,15 @@ const main = async () => {
                       logAddress: chunksLogAddress,
                       ...profiles.chunks.snapshot(),
                   },
+                  shutdown: (() => {
+                      const current = activeStopTrace ?? lastReceivedStopTrace;
+                      return current
+                          ? {
+                                request: current.request,
+                                ...current.trace.snapshot(),
+                            }
+                          : null;
+                  })(),
               }
             : null;
     const snapshot = async (verify = false) => {
@@ -213,7 +230,10 @@ const main = async () => {
             profile: profileSnapshot(),
         };
     };
-    const execute = async (command: PlacementCommand) => {
+    const execute = async (
+        command: PlacementCommand,
+        stopTrace?: StopTrace
+    ) => {
         if (command.type === "dial") {
             assert(!config.offline);
             for (const addresses of command.addresses) {
@@ -367,60 +387,145 @@ const main = async () => {
             return { timings, localMisses, remoteReturns };
         }
         assert.equal(command.type, "stop");
-        await localPeer.stop();
+        if (stopTrace) {
+            // Instance-only observation; do not patch upstream modules/prototypes.
+            // A fulfilled phase means its original call settled, not that all
+            // nested cleanup was error-free or that placement is complete.
+            const restore = observePlacementStopMethods(stopTrace, [
+                {
+                    target: localPeer,
+                    key: "transitionBootstrapRecovery",
+                    phase: "peer.bootstrapRecovery",
+                },
+                {
+                    target: localPeer.handler,
+                    key: "stop",
+                    phase: "peer.handler.stop",
+                },
+                {
+                    target: localPeer.storage,
+                    key: "close",
+                    phase: "peer.storage.close",
+                },
+                {
+                    target: localPeer.indexer,
+                    key: "stop",
+                    phase: "peer.indexer.stop",
+                },
+                {
+                    target: localPeer.libp2p,
+                    key: "stop",
+                    phase: "peer.libp2p.stop",
+                },
+            ]);
+            try {
+                await stopTrace.observe("peer.stop", () => localPeer.stop());
+            } finally {
+                restore();
+            }
+        } else {
+            await localPeer.stop();
+        }
         stopped = true;
         return {
             stopped: true,
-            storage: await scanProcessSoakStateDirectory(config.directory),
+            storage: await (stopTrace
+                ? stopTrace.observe("disk.scan", () =>
+                      scanProcessSoakStateDirectory(config.directory)
+                  )
+                : scanProcessSoakStateDirectory(config.directory)),
         };
+    };
+    const reply = async (message: unknown, stopTrace?: StopTrace) => {
+        stopTrace?.point("ipc.reply.begin");
+        try {
+            await send(message);
+        } catch (error) {
+            stopTrace?.point("ipc.reply.error");
+            throw error;
+        }
+        stopTrace?.point("ipc.reply.end");
     };
     let queue = Promise.resolve();
     process.on(
         "message",
         (message: { request: number; command: PlacementCommand }) => {
+            const stopping = message.command.type === "stop";
+            // One normal stop plus one error-cleanup stop can be traced. Keep
+            // closures request-local so a queued cleanup cannot relabel old spans.
+            const stopTrace =
+                config.profile && stopping && tracedStopRequests < 2
+                    ? createPlacementStopTrace({
+                          emit: (event) => {
+                              // No diagnostic acknowledgement is awaited. IPC
+                              // still adds some work; this is not zero-overhead.
+                              void send({
+                                  stopTrace: event,
+                                  stopTraceRequest: message.request,
+                              }).catch(() => {});
+                          },
+                      })
+                    : undefined;
+            if (stopTrace) {
+                tracedStopRequests++;
+                lastReceivedStopTrace = {
+                    request: message.request,
+                    trace: stopTrace,
+                };
+                stopTrace.point("command.received");
+            }
             // Only reads detached counters: do not queue behind a stalled store call.
             if (message.command.type === "profile") {
                 void send({
                     request: message.request,
                     ok: true,
                     value: profileSnapshot(),
-                }).catch((error) => {
-                    console.error(error);
-                    process.exitCode = 1;
-                });
+                }).catch(() => {}); // Optional checkpoint IPC never changes exit status.
                 return;
             }
             queue = queue
                 .then(async () => {
-                    try {
-                        const value = await execute(message.command);
-                        await send({
+                    if (stopTrace) {
+                        activeStopTrace = {
                             request: message.request,
-                            ok: true,
-                            value,
-                        });
+                            trace: stopTrace,
+                        };
+                        stopTrace.point("command.dequeued");
+                    }
+                    try {
+                        const value = await execute(message.command, stopTrace);
+                        await reply(
+                            { request: message.request, ok: true, value },
+                            stopTrace
+                        );
                         if (message.command.type === "stop") {
                             process.removeAllListeners("message");
                             process.disconnect(); // natural exit is independently required by the parent
                         }
                     } catch (error) {
-                        await send({
-                            request: message.request,
-                            ok: false,
-                            error: errorInfo(error),
-                            profile: profileSnapshot(),
-                            context: {
-                                peer: config.peer,
-                                generation: config.generation,
-                                identity:
-                                    localPeer.identity.publicKey.hashcode(),
-                                offline: config.offline,
-                                command: message.command.type,
-                                minCopies: config.minCopies,
-                                metadataLog: metadataLogAddress,
-                                chunksLog: chunksLogAddress,
+                        await reply(
+                            {
+                                request: message.request,
+                                ok: false,
+                                error: errorInfo(error),
+                                profile: profileSnapshot(),
+                                context: {
+                                    peer: config.peer,
+                                    generation: config.generation,
+                                    identity:
+                                        localPeer.identity.publicKey.hashcode(),
+                                    offline: config.offline,
+                                    command: message.command.type,
+                                    minCopies: config.minCopies,
+                                    metadataLog: metadataLogAddress,
+                                    chunksLog: chunksLogAddress,
+                                },
                             },
-                        });
+                            stopTrace
+                        );
+                    } finally {
+                        if (activeStopTrace?.request === message.request)
+                            activeStopTrace = undefined;
                     }
                 })
                 .catch((error) => {
