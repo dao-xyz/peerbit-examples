@@ -42,7 +42,7 @@
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
-        "build": "pnpm run clean && tsc -p tsconfig.json",
+        "build": "pnpm run clean && tsc -p tsconfig.json && node ../../../scripts/compact-emitted-javascript.mjs lib/esm",
         "install-native-adapter": "node lib/esm/install-native-adapter.js",
         "postinstall": "node scripts/postinstall.mjs",
         "test": "vitest run",
