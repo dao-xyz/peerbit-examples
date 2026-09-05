@@ -241,6 +241,11 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
         powershell,
         /process tree remained alive after forced teardown/u
     );
+    assert.match(
+        powershell,
+        /\.WaitForExit\(90000\)[\s\S]*\.WaitForExit\(\)[\s\S]*Write-ReadableFirstLogs[\s\S]*\.ExitCode/u,
+        "the bounded readable-first wait drains redirected output before reading ExitCode"
+    );
 });
 
 test("native-mount cooperative timeout cleans its owned root", async () => {

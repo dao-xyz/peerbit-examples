@@ -199,12 +199,20 @@ try {
   if (-not $ReadableFirstCompleted) {
     throw "readable-first native smoke did not exit within 90 seconds"
   }
+  # After the bounded wait proves process exit, the parameterless overload
+  # drains redirected-output handlers before ExitCode is observed. Windows
+  # PowerShell can otherwise expose a null ExitCode even though the child has
+  # already printed its success line.
+  $ReadableFirstProcess.WaitForExit()
   $ReadableFirstProcess.Refresh()
+  if (-not $ReadableFirstProcess.HasExited) {
+    throw "readable-first native smoke reported completion without process exit"
+  }
+  Write-ReadableFirstLogs
   $ReadableFirstExitCode = $ReadableFirstProcess.ExitCode
   if ($ReadableFirstExitCode -ne 0) {
     throw "readable-first native smoke failed with exit code $ReadableFirstExitCode"
   }
-  Write-ReadableFirstLogs
   Stop-ReadableFirstProcess
   Assert-MountReady
 
