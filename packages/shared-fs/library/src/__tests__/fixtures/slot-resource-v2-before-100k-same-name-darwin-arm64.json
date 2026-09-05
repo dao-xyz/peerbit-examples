@@ -1,0 +1,400 @@
+{
+    "schema": "shared-fs-slot-resource-v2",
+    "scope": "real disk-backed SQLite index plus actual candidate cache; no Documents, public fs.stat/list/writeFile, authentication, replication, mounts, or OS page-cache eviction",
+    "caveats": [
+        "first cold query includes lazy SQLite planning/index creation; subsequent queries may reuse it",
+        "timings include light SQL/row-count instrumentation; EXPLAIN runs outside all timers",
+        "same-name oversized histories remain complete but may be uncached; repeated hits need not be warm",
+        "create stream writes naming index rows, not files or persisted delivery receipts",
+        "memory endpoints and sampled peaks are not absolute peaks; RSS can remain after GC",
+        "small-bound control overrides cache limits; other measurements use defaults",
+        "candidate parent/name/identity/uniqueness validation runs after each timer; full enumeration checks the exact fixture and created set, excluding unrelated arrivals",
+        "resolved module entries describe executed dependencies; the lockfile hash does not prove that the installed graph matches it"
+    ],
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.13.1",
+    "osRelease": "25.6.0",
+    "cpu": "Apple M3 Pro",
+    "logicalCpus": 12,
+    "totalMemoryBytes": 38654705664,
+    "versions": {
+        "peerbit": "5.3.35",
+        "@peerbit/document": "15.0.16",
+        "@peerbit/shared-log": "16.0.15",
+        "@peerbit/indexer-sqlite3": "3.0.19",
+        "@dao-xyz/borsh": "6.0.1",
+        "@peerbit/crypto": "3.1.6"
+    },
+    "resolvedModules": {
+        "source": {
+            "peerbit": {
+                "name": "peerbit",
+                "version": "5.3.35",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/peerbit/dist/src/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/peerbit/dist/src/index.js",
+                "entrySha256": "036017a11d1ca1fb87c5cbc6da3cc8a87c9638942284a538884cfcdb0c4123ce",
+                "packageJsonSha256": "98677904a9e40febe271c5089c6aa7dc1c9c6b47519b0145b4fea59dbb90edb2"
+            },
+            "@peerbit/document": {
+                "name": "@peerbit/document",
+                "version": "15.0.16",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/document/dist/src/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/document/dist/src/index.js",
+                "entrySha256": "4216ca3ae1340d38e489a3e4a5868ffd8384dbecc2fd680edc6bbae76ebceb32",
+                "packageJsonSha256": "1b53bc355be577d6f1b81883e6926f0d00c05d0166d6b17b6840d54672036d7d"
+            },
+            "@peerbit/shared-log": {
+                "name": "@peerbit/shared-log",
+                "version": "16.0.15",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/shared-log/dist/src/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/shared-log/dist/src/index.js",
+                "entrySha256": "07b404596b4f16f7eccff0ab59534e68d8c29910d27175e0b947618760f8cb28",
+                "packageJsonSha256": "dc733c60d9b8800e570028c2a63fb25d5fbc208e5ae47f57f3c04cd76a363208"
+            },
+            "@peerbit/indexer-sqlite3": {
+                "name": "@peerbit/indexer-sqlite3",
+                "version": "3.0.19",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/indexer-sqlite3/dist/src/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/indexer-sqlite3/dist/src/index.js",
+                "entrySha256": "51e17e990091fca763fe5ff4e3c7ab60f95bbf90f5078b39fdeb3f9fd6297a85",
+                "packageJsonSha256": "b002ee95f312485c84a3ccb90045f7fe058196369062518815a148de90c4a0c1"
+            },
+            "@dao-xyz/borsh": {
+                "name": "@dao-xyz/borsh",
+                "version": "6.0.1",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/node_modules/@dao-xyz/borsh/lib/esm/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/node_modules/@dao-xyz/borsh/lib/esm/index.js",
+                "entrySha256": "9f10dee11c13b08e8112c694b5ab3d5f08430dc22b796ff5f9207c2157ba70f1",
+                "packageJsonSha256": "3f49bf81d78989a467a3dee5fffa7f5c2b8adf59d09f90192fd1ae31ea2c2bb0"
+            },
+            "@peerbit/crypto": {
+                "name": "@peerbit/crypto",
+                "version": "3.1.6",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/crypto/dist/src/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/crypto/dist/src/index.js",
+                "entrySha256": "e07fe60c0cdc53b2d982cdd38a4b3d407b9b13a8e11ffc5155908ddb71560420",
+                "packageJsonSha256": "57139fad34a30d8acaff65fdac7432e7ecff09240bf975352603bf567d06c87f"
+            }
+        },
+        "indexer": {
+            "@dao-xyz/borsh": {
+                "name": "@dao-xyz/borsh",
+                "version": "6.0.1",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/node_modules/@dao-xyz/borsh/lib/esm/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/node_modules/@dao-xyz/borsh/lib/esm/index.js",
+                "entrySha256": "9f10dee11c13b08e8112c694b5ab3d5f08430dc22b796ff5f9207c2157ba70f1",
+                "packageJsonSha256": "3f49bf81d78989a467a3dee5fffa7f5c2b8adf59d09f90192fd1ae31ea2c2bb0"
+            },
+            "@peerbit/crypto": {
+                "name": "@peerbit/crypto",
+                "version": "3.1.6",
+                "moduleUrl": "file:///private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/crypto/dist/src/index.js",
+                "entry": "/private/tmp/peerbit-slot-candidate-cache-20260905/packages/shared-fs/library/node_modules/@peerbit/crypto/dist/src/index.js",
+                "entrySha256": "e07fe60c0cdc53b2d982cdd38a4b3d407b9b13a8e11ffc5155908ddb71560420",
+                "packageJsonSha256": "57139fad34a30d8acaff65fdac7432e7ecff09240bf975352603bf567d06c87f"
+            }
+        }
+    },
+    "inputHashes": {
+        "lockfile": "4a4a8df381f6abb29fa12d604a6c8a1b7c5487ed3df6273b7e069422dc475f57",
+        "worker": "d342e21fcc09c5bdd8fe3f3782dcc3dc3ce5fe94543685ee12a9af77e8941c29",
+        "cacheIntegration": "0728db212addf91187ae54d5943fd23e0fdf07255e4b35df0f3be750f4d69348"
+    },
+    "width": 100000,
+    "case": "same-name",
+    "implementation": "legacy-parent-sweep",
+    "setupMs": 10114.283000000001,
+    "diskBytes": 31335856,
+    "timings": {
+        "firstColdHitMs": 1760.2309590000004,
+        "firstColdMissMs": 1046.6614580000005,
+        "repeatedSameHit": {
+            "count": 3,
+            "p50Ms": 0.10174999999981083,
+            "p95Ms": 0.1967079999994894,
+            "p99Ms": 0.1967079999994894
+        },
+        "repeatedSameMiss": {
+            "count": 100,
+            "p50Ms": 0.0003749999996216502,
+            "p95Ms": 0.0005839999994350364,
+            "p99Ms": 0.002749999999650754
+        },
+        "unrelatedMutationMs": [
+            900.6367919999993, 906.484457999999, 869.6038750000007
+        ],
+        "createIndexStream": {
+            "count": 100,
+            "p50Ms": 0.06999999999970896,
+            "p95Ms": 0.11958299999969313,
+            "p99Ms": 0.14533299999675364
+        },
+        "fullSweepMs": 0.9044160000012198
+    },
+    "queries": {
+        "firstColdHit": {
+            "queries": 1,
+            "returnedRows": 100000,
+            "maxRows": 100000
+        },
+        "firstColdMiss": {
+            "queries": 1,
+            "returnedRows": 100000,
+            "maxRows": 100000
+        },
+        "unrelatedMutation": {
+            "queries": 3,
+            "returnedRows": 300000,
+            "maxRows": 100000
+        },
+        "createIndexStream": {
+            "queries": 1,
+            "returnedRows": 100000,
+            "maxRows": 100000
+        }
+    },
+    "queryPlans": [
+        {
+            "sql": " select v_shared_fs_indexable_entry.\"id\" as 'v_shared_fs_indexable_entry#id', v_shared_fs_indexable_entry.\"kind\" as 'v_shared_fs_indexable_entry#kind', v_shared_fs_indexable_entry.\"nodeId\" as 'v_shared_fs_indexable_entry#nodeId', v_shared_fs_indexable_entry.\"parentId\" as 'v_shared_fs_indexable_entry#parentId', v_shared_fs_indexable_entry.\"name\" as 'v_shared_fs_indexable_entry#name', v_shared_fs_indexable_entry.\"deleted\" as 'v_shared_fs_indexable_entry#deleted', v_shared_fs_indexable_entry.\"createdAt\" as 'v_shared_fs_indexable_entry#createdAt', v_shared_fs_indexable_entry.\"causalDepth\" as 'v_shared_fs_indexable_entry#causalDepth', v_shared_fs_indexable_entry.\"size\" as 'v_shared_fs_indexable_entry#size', v_shared_fs_indexable_entry.\"contentHash\" as 'v_shared_fs_indexable_entry#contentHash', v_shared_fs_indexable_entry.\"authorKey\" as 'v_shared_fs_indexable_entry#authorKey', v_shared_fs_indexable_entry.\"machineLabel\" as 'v_shared_fs_indexable_entry#machineLabel', v_shared_fs_indexable_entry.\"changesetId\" as 'v_shared_fs_indexable_entry#changesetId', json_group_array(distinct json_object('__id', v_shared_fs_indexable_entry__chunkRefs__v_wrapped.\"__id\", '__index', v_shared_fs_indexable_entry__chunkRefs__v_wrapped.\"__index\", 'value', v_shared_fs_indexable_entry__chunkRefs__v_wrapped.\"value\"))   as v_shared_fs_indexable_entry__chunkRefs__v_wrapped, json_group_array(distinct json_object('__id', v_shared_fs_indexable_entry__causalRefs__v_wrapped.\"__id\", '__index', v_shared_fs_indexable_entry__causalRefs__v_wrapped.\"__index\", 'value', v_shared_fs_indexable_entry__causalRefs__v_wrapped.\"value\"))   as v_shared_fs_indexable_entry__causalRefs__v_wrapped FROM v_shared_fs_indexable_entry  INDEXED BY v_shared_fs_indexable_entry_index_kind_parentId  LEFT JOIN v_shared_fs_indexable_entry__chunkRefs__v_wrapped AS v_shared_fs_indexable_entry__chunkRefs__v_wrapped  INDEXED BY v_shared_fs_indexable_entry__chunkRefs__v_wrapped_index___parent_id  ON v_shared_fs_indexable_entry.id = v_shared_fs_indexable_entry__chunkRefs__v_wrapped.__parent_id  LEFT JOIN v_shared_fs_indexable_entry__causalRefs__v_wrapped AS v_shared_fs_indexable_entry__causalRefs__v_wrapped  INDEXED BY v_shared_fs_indexable_entry__causalRefs__v_wrapped_index___parent_id  ON v_shared_fs_indexable_entry.id = v_shared_fs_indexable_entry__causalRefs__v_wrapped.__parent_id  where (v_shared_fs_indexable_entry.\"kind\" = ?) AND (v_shared_fs_indexable_entry.\"parentId\" = ?) GROUP BY v_shared_fs_indexable_entry.\"id\"  ",
+            "bindings": ["naming", "dir:resource-wide"],
+            "plan": [
+                {
+                    "id": "11",
+                    "parent": "0",
+                    "notused": "133",
+                    "detail": "SEARCH v_shared_fs_indexable_entry USING INDEX v_shared_fs_indexable_entry_index_kind_parentId (kind=? AND parentId=?)"
+                },
+                {
+                    "id": "21",
+                    "parent": "0",
+                    "notused": "62",
+                    "detail": "SEARCH v_shared_fs_indexable_entry__chunkRefs__v_wrapped USING INDEX v_shared_fs_indexable_entry__chunkRefs__v_wrapped_index___parent_id (__parent_id=?) LEFT-JOIN"
+                },
+                {
+                    "id": "28",
+                    "parent": "0",
+                    "notused": "62",
+                    "detail": "SEARCH v_shared_fs_indexable_entry__causalRefs__v_wrapped USING INDEX v_shared_fs_indexable_entry__causalRefs__v_wrapped_index___parent_id (__parent_id=?) LEFT-JOIN"
+                },
+                {
+                    "id": "98",
+                    "parent": "0",
+                    "notused": "0",
+                    "detail": "USE TEMP B-TREE FOR json_group_array(DISTINCT)"
+                },
+                {
+                    "id": "100",
+                    "parent": "0",
+                    "notused": "0",
+                    "detail": "USE TEMP B-TREE FOR json_group_array(DISTINCT)"
+                }
+            ]
+        },
+        {
+            "sql": " select v_shared_fs_indexable_entry.\"id\" as 'v_shared_fs_indexable_entry#id', v_shared_fs_indexable_entry.\"kind\" as 'v_shared_fs_indexable_entry#kind', v_shared_fs_indexable_entry.\"nodeId\" as 'v_shared_fs_indexable_entry#nodeId', v_shared_fs_indexable_entry.\"parentId\" as 'v_shared_fs_indexable_entry#parentId', v_shared_fs_indexable_entry.\"name\" as 'v_shared_fs_indexable_entry#name', v_shared_fs_indexable_entry.\"deleted\" as 'v_shared_fs_indexable_entry#deleted', v_shared_fs_indexable_entry.\"createdAt\" as 'v_shared_fs_indexable_entry#createdAt', v_shared_fs_indexable_entry.\"causalDepth\" as 'v_shared_fs_indexable_entry#causalDepth', v_shared_fs_indexable_entry.\"size\" as 'v_shared_fs_indexable_entry#size', v_shared_fs_indexable_entry.\"contentHash\" as 'v_shared_fs_indexable_entry#contentHash', v_shared_fs_indexable_entry.\"authorKey\" as 'v_shared_fs_indexable_entry#authorKey', v_shared_fs_indexable_entry.\"machineLabel\" as 'v_shared_fs_indexable_entry#machineLabel', v_shared_fs_indexable_entry.\"changesetId\" as 'v_shared_fs_indexable_entry#changesetId', json_group_array(distinct json_object('__id', v_shared_fs_indexable_entry__chunkRefs__v_wrapped.\"__id\", '__index', v_shared_fs_indexable_entry__chunkRefs__v_wrapped.\"__index\", 'value', v_shared_fs_indexable_entry__chunkRefs__v_wrapped.\"value\"))   as v_shared_fs_indexable_entry__chunkRefs__v_wrapped, json_group_array(distinct json_object('__id', v_shared_fs_indexable_entry__causalRefs__v_wrapped.\"__id\", '__index', v_shared_fs_indexable_entry__causalRefs__v_wrapped.\"__index\", 'value', v_shared_fs_indexable_entry__causalRefs__v_wrapped.\"value\"))   as v_shared_fs_indexable_entry__causalRefs__v_wrapped FROM v_shared_fs_indexable_entry  INDEXED BY v_shared_fs_indexable_entry_index_parentId_kind  LEFT JOIN v_shared_fs_indexable_entry__chunkRefs__v_wrapped AS v_shared_fs_indexable_entry__chunkRefs__v_wrapped  INDEXED BY v_shared_fs_indexable_entry__chunkRefs__v_wrapped_index___parent_id  ON v_shared_fs_indexable_entry.id = v_shared_fs_indexable_entry__chunkRefs__v_wrapped.__parent_id  LEFT JOIN v_shared_fs_indexable_entry__causalRefs__v_wrapped AS v_shared_fs_indexable_entry__causalRefs__v_wrapped  INDEXED BY v_shared_fs_indexable_entry__causalRefs__v_wrapped_index___parent_id  ON v_shared_fs_indexable_entry.id = v_shared_fs_indexable_entry__causalRefs__v_wrapped.__parent_id  where (v_shared_fs_indexable_entry.\"kind\" = ?) AND (v_shared_fs_indexable_entry.\"parentId\" = ?) GROUP BY v_shared_fs_indexable_entry.\"id\"  ",
+            "bindings": ["naming", "dir:resource-wide"],
+            "plan": [
+                {
+                    "id": "11",
+                    "parent": "0",
+                    "notused": "133",
+                    "detail": "SEARCH v_shared_fs_indexable_entry USING INDEX v_shared_fs_indexable_entry_index_parentId_kind (parentId=? AND kind=?)"
+                },
+                {
+                    "id": "21",
+                    "parent": "0",
+                    "notused": "62",
+                    "detail": "SEARCH v_shared_fs_indexable_entry__chunkRefs__v_wrapped USING INDEX v_shared_fs_indexable_entry__chunkRefs__v_wrapped_index___parent_id (__parent_id=?) LEFT-JOIN"
+                },
+                {
+                    "id": "28",
+                    "parent": "0",
+                    "notused": "62",
+                    "detail": "SEARCH v_shared_fs_indexable_entry__causalRefs__v_wrapped USING INDEX v_shared_fs_indexable_entry__causalRefs__v_wrapped_index___parent_id (__parent_id=?) LEFT-JOIN"
+                },
+                {
+                    "id": "98",
+                    "parent": "0",
+                    "notused": "0",
+                    "detail": "USE TEMP B-TREE FOR json_group_array(DISTINCT)"
+                },
+                {
+                    "id": "100",
+                    "parent": "0",
+                    "notused": "0",
+                    "detail": "USE TEMP B-TREE FOR json_group_array(DISTINCT)"
+                }
+            ]
+        }
+    ],
+    "cacheStates": {
+        "afterFirstHit": {
+            "parents": 1,
+            "completeParents": 1,
+            "slots": 1,
+            "rows": 100000,
+            "estimatedBytes": null,
+            "reverse": 100000,
+            "inFlight": 0
+        },
+        "afterNegative": {
+            "parents": 1,
+            "completeParents": 1,
+            "slots": 1,
+            "rows": 100000,
+            "estimatedBytes": null,
+            "reverse": 100000,
+            "inFlight": 0
+        },
+        "afterCreates": {
+            "parents": 1,
+            "completeParents": 1,
+            "slots": 101,
+            "rows": 100100,
+            "estimatedBytes": null,
+            "reverse": 100100,
+            "inFlight": 0
+        },
+        "afterFullSweep": {
+            "parents": 1,
+            "completeParents": 1,
+            "slots": 101,
+            "rows": 100100,
+            "estimatedBytes": null,
+            "reverse": 100100,
+            "inFlight": 0
+        },
+        "final": {
+            "parents": 0,
+            "completeParents": 0,
+            "slots": 0,
+            "rows": 0,
+            "estimatedBytes": null,
+            "reverse": 0,
+            "inFlight": 0
+        }
+    },
+    "smallBoundControl": null,
+    "checkpoints": {
+        "empty": {
+            "beforeGc": {
+                "heapUsed": 91463296,
+                "heapTotal": 142999552,
+                "rss": 398884864,
+                "external": 13900509,
+                "arrayBuffers": 3505531
+            },
+            "afterGc": {
+                "heapUsed": 67031200,
+                "heapTotal": 137232384,
+                "rss": 396738560,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "firstColdHit": {
+            "beforeGc": {
+                "heapUsed": 509948664,
+                "heapTotal": 585564160,
+                "rss": 895713280,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 116615568,
+                "heapTotal": 325222400,
+                "rss": 877641728,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "cleared": {
+            "beforeGc": {
+                "heapUsed": 159054136,
+                "heapTotal": 339361792,
+                "rss": 892485632,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 67362912,
+                "heapTotal": 204603392,
+                "rss": 861061120,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "discardedFills": {
+            "beforeGc": {
+                "heapUsed": 845200912,
+                "heapTotal": 971669504,
+                "rss": 1362149376,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 67506616,
+                "heapTotal": 204865536,
+                "rss": 1336688640,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "createStream": {
+            "beforeGc": {
+                "heapUsed": 499380360,
+                "heapTotal": 591151104,
+                "rss": 1369915392,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 115855560,
+                "heapTotal": 330465280,
+                "rss": 1340948480,
+                "external": 12704185,
+                "arrayBuffers": 2313372
+            }
+        },
+        "fullSweep": {
+            "beforeGc": {
+                "heapUsed": 184910432,
+                "heapTotal": 338051072,
+                "rss": 1348534272,
+                "external": 12704185,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 115856112,
+                "heapTotal": 255229952,
+                "rss": 1340948480,
+                "external": 12704185,
+                "arrayBuffers": 2313372
+            }
+        },
+        "finalReleased": {
+            "beforeGc": {
+                "heapUsed": 130294464,
+                "heapTotal": 261423104,
+                "rss": 1346879488,
+                "external": 12704185,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 66563240,
+                "heapTotal": 204079104,
+                "rss": 1336459264,
+                "external": 12704185,
+                "arrayBuffers": 2313372
+            }
+        }
+    },
+    "observedPeaks": {
+        "heapUsed": 858878552,
+        "heapTotal": 971669504,
+        "rss": 1369915392,
+        "external": 13900549,
+        "arrayBuffers": 3505531
+    }
+}
