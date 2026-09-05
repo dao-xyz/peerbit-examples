@@ -14,6 +14,7 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
+            - "scripts/shared-fs-strict-tests/**"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
     push:
@@ -30,6 +31,7 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
+            - "scripts/shared-fs-strict-tests/**"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
     workflow_dispatch:
@@ -83,13 +85,19 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Build shared-fs packages
+              id: build
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
-            - name: Test shared-fs library
-              run: pnpm --filter @peerbit/shared-fs run test
+            - name: Test first-attempt diagnostics and strict retry gate
+              id: diagnostics
+              run: node --test scripts/shared-fs-strict-tests/regression.test.mjs
 
-            - name: Test shared-fs CLI
-              run: pnpm --filter @peerbit/shared-fs-cli run test
+            - name: Test shared-fs library (strict first-attempt gate)
+              run: pnpm --filter @peerbit/shared-fs exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
+
+            - name: Test shared-fs CLI (strict first-attempt gate)
+              if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.diagnostics.outcome == 'success' }}
+              run: pnpm --filter @peerbit/shared-fs-cli exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
 
             - name: Test mounted-path benchmark harness
               run: node --test scripts/shared-fs-native-mount-benchmark.test.mjs
@@ -143,7 +151,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-strict-tests .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})
