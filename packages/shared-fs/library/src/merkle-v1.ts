@@ -113,6 +113,22 @@ const equalBytes = (left: Uint8Array, right: Uint8Array) => {
 const toUnpaddedBase64URL = (value: Uint8Array) =>
     toBase64URL(value).replace(/=+$/u, "");
 
+const merkleBlockIdFromHashV1 = (
+    kind: "data" | "tree",
+    hashValue: Uint8Array
+) => {
+    const hash = copyHash(hashValue, `${kind} hash`);
+    return `${kind === "data" ? "data2" : "tree2"}:${toUnpaddedBase64URL(hash)}`;
+};
+
+/** Canonical document id for an already-authenticated data-block hash. */
+export const merkleDataIdFromHashV1 = (hash: Uint8Array) =>
+    merkleBlockIdFromHashV1("data", hash);
+
+/** Canonical document id for an already-authenticated tree-block hash. */
+export const merkleTreeIdFromHashV1 = (hash: Uint8Array) =>
+    merkleBlockIdFromHashV1("tree", hash);
+
 const assertLeafSize = (leafSize: number): MerkleV1LeafSize => {
     if (leafSize !== 65_536 && leafSize !== 262_144 && leafSize !== 524_288) {
         fail(
@@ -231,7 +247,7 @@ const normalizedDataHashV1 = (bytes: Uint8Array) =>
     sha256Sync(encodeNormalizedDataHashInputV1(bytes));
 
 const normalizedDataIdV1 = (bytes: Uint8Array) =>
-    `data2:${toUnpaddedBase64URL(normalizedDataHashV1(bytes))}`;
+    merkleDataIdFromHashV1(normalizedDataHashV1(bytes));
 
 /** Canonical Borsh field bytes hashed for a data block (without a variant). */
 export const encodeMerkleDataHashInputV1 = (bytesValue: Uint8Array) =>
@@ -241,7 +257,7 @@ export const merkleDataHashV1 = (bytes: Uint8Array) =>
     sha256Sync(encodeMerkleDataHashInputV1(bytes));
 
 export const merkleDataIdV1 = (bytes: Uint8Array) =>
-    `data2:${toUnpaddedBase64URL(merkleDataHashV1(bytes))}`;
+    merkleDataIdFromHashV1(merkleDataHashV1(bytes));
 
 @variant("shared_fs_merkle_data_block_v1")
 export class MerkleDataBlockV1 {
@@ -294,7 +310,7 @@ export const merkleTreeIdV1 = (
     level: number,
     bitmap: Uint8Array,
     children: readonly Uint8Array[]
-) => `tree2:${toUnpaddedBase64URL(merkleTreeHashV1(level, bitmap, children))}`;
+) => merkleTreeIdFromHashV1(merkleTreeHashV1(level, bitmap, children));
 
 @variant("shared_fs_merkle_tree_block_v1")
 export class MerkleTreeBlockV1 {

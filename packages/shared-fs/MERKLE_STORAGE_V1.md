@@ -1,9 +1,9 @@
 # Merkle storage v1 proposal
 
-Status: design proposal with the golden codec/validation slice and an isolated
-read-only exact-range session implemented. The complete storage format,
-Documents integration, write path, mount integration, migration, lifecycle
-leases, and upstream capability are not implemented.
+Status: design proposal with the golden block codecs, strict file-version and
+derived-index wire slice, and an isolated read-only exact-range session
+implemented. Documents integration, the write path, mount integration,
+migration, lifecycle leases, and the upstream capability are not implemented.
 
 This document specifies the next shared-fs content generation needed for
 bounded-memory, block-granular random writes. It follows the fixed-layout lazy
@@ -205,6 +205,27 @@ Keep data and tree blocks in the entries `Documents` collection for the first
 generation. Direct raw-block storage is a later optimization only after it can
 provide equivalent authorization, replication, receipt, and reclamation
 semantics.
+
+### Implemented file-version/index wire slice
+
+The library now exports `MerkleFileVersionV1` and
+`IndexableMerkleEntryV1`. The file-version validator bounds every string and
+parent vector, rejects malformed Unicode and inconsistent causal shapes,
+requires a canonical root descriptor, and recomputes `contentRoot`; optional
+legacy whole-file SHA-256 remains metadata only. Canonical
+`merkleDataIdFromHashV1()` and `merkleTreeIdFromHashV1()` helpers map a verified
+32-byte hash to its generation-specific document id.
+
+Index rows can only be constructed from a known Merkle v1 class. Root and
+child `blockRefs` are derived from one copied, structurally verified snapshot;
+callers cannot supply or race an independent reference list. A version has at
+most one direct block edge, a tree has at most 256 distinct direct edges, and a
+data block has none. The TypeScript/Borsh and independent Go tests share exact
+file-version and index wire fixtures as well as the block/root hash fixtures.
+
+This is a wire boundary, not a live storage generation. Nothing in this slice
+changes the current v9 program variant, address salt, `Documents` schema,
+authorization hook, GC, snapshots, disposal, read/write path, or mount.
 
 ## Validation and authorization
 
