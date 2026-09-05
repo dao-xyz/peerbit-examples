@@ -1389,15 +1389,16 @@ const maxDepth = (parents: { causalDepth: bigint }[]): bigint => {
 };
 
 /**
- * Heads and depths of a causal DAG restricted to the locally present
- * document set. References to absent ids are ignored, and reference cycles
- * (malformed documents) are treated as absent edges — both keep the result a
- * pure, order-independent function of the replicated set.
+ * Heads restricted to the locally present document set. References to absent
+ * ids are ignored. Preserve the existing head rule even for malformed cycles:
+ * a locally referenced document is not a head. Winner ordering uses stored
+ * causalDepth; computing local depths is unnecessary and would recurse over
+ * arbitrarily deep histories.
  */
-const computeDag = <T extends { id: string }>(
+const computeHeads = <T extends { id: string }>(
     docs: T[],
     parentsOf: (doc: T) => string[]
-): { heads: T[]; depths: Map<string, number> } => {
+): T[] => {
     const byId = new Map(docs.map((doc) => [doc.id, doc]));
     const referenced = new Set<string>();
     for (const doc of docs) {
@@ -1407,34 +1408,7 @@ const computeDag = <T extends { id: string }>(
             }
         }
     }
-    const heads = docs.filter((doc) => !referenced.has(doc.id));
-    const depths = new Map<string, number>();
-    const visiting = new Set<string>();
-    const depthOf = (doc: T): number => {
-        const memo = depths.get(doc.id);
-        if (memo !== undefined) {
-            return memo;
-        }
-        if (visiting.has(doc.id)) {
-            // Back-edge from a malformed reference; treat as absent.
-            return 0;
-        }
-        visiting.add(doc.id);
-        let depth = 1;
-        for (const parentId of parentsOf(doc)) {
-            const parent = byId.get(parentId);
-            if (parent) {
-                depth = Math.max(depth, 1 + depthOf(parent));
-            }
-        }
-        visiting.delete(doc.id);
-        depths.set(doc.id, depth);
-        return depth;
-    };
-    for (const doc of docs) {
-        depthOf(doc);
-    }
-    return { heads, depths };
+    return docs.filter((doc) => !referenced.has(doc.id));
 };
 
 /**
@@ -1504,7 +1478,6 @@ type NodeNamingState = {
     events: NamingLike[];
     heads: NamingLike[];
     winner: NamingLike;
-    depths: Map<string, number>;
     /** Multiple heads with genuinely different payloads. */
     conflicted: boolean;
 };
@@ -1536,10 +1509,7 @@ const computeNamingState = (
     if (events.length === 0) {
         return undefined;
     }
-    const { heads, depths } = computeDag(
-        events,
-        (event) => event.parentNamingIds
-    );
+    const heads = computeHeads(events, (event) => event.parentNamingIds);
     // Winner order reads the STORED causalDepth (author-asserted, validated
     // ≥1 at ingest), not the locally computed depth: deleting (compacting)
     // ancestors must never change winners on any peer.
@@ -1557,7 +1527,7 @@ const computeNamingState = (
     const winner = sorted[0];
     const conflicted =
         sorted.length > 1 && !sorted.every((head) => samePayload(head, winner));
-    return { nodeId, events, heads: sorted, winner, depths, conflicted };
+    return { nodeId, events, heads: sorted, winner, conflicted };
 };
 
 const mapWithConcurrency = async <T, R>(
@@ -4335,7 +4305,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private contentHeads<T extends VersionLike>(documents: T[]): T[] {
-        const { heads } = computeDag(documents, (doc) => doc.parentVersionIds);
+        const heads = computeHeads(documents, (doc) => doc.parentVersionIds);
         // Stored depth, same rationale as naming winners: retiring ancestors
         // must never change the visible head.
         return [...heads].sort((a, b) => {
