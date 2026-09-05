@@ -232,6 +232,20 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
     assert.match(posix, /MOUNT_BENCH_WARMUPS:-3/u);
     assert.match(powershell, /MOUNT_BENCH_SAMPLES[\s\S]*"30"/u);
     assert.match(powershell, /MOUNT_BENCH_WARMUPS[\s\S]*"3"/u);
+    assert.equal(
+        powershell.match(/\.WaitForExit\(10000\)/gu)?.length,
+        2,
+        "both Windows cleanup paths bound and verify process-tree exit"
+    );
+    assert.match(
+        powershell,
+        /process tree remained alive after forced teardown/u
+    );
+    assert.match(
+        powershell,
+        /System\.Diagnostics\.ProcessStartInfo[\s\S]*RedirectStandardOutput = \$true[\s\S]*RedirectStandardError = \$true[\s\S]*ReadToEndAsync\(\)[\s\S]*ReadToEndAsync\(\)[\s\S]*\.WaitForExit\(90000\)[\s\S]*Complete-ReadableFirstCapture[\s\S]*Write-ReadableFirstLogs[\s\S]*\.ExitCode/u,
+        "the bounded readable-first process drains direct .NET output before reading ExitCode"
+    );
 });
 
 test("native-mount cooperative timeout cleans its owned root", async () => {

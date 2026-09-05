@@ -8,6 +8,13 @@ $Adapter = Join-Path $TempRoot "peerbit-shared-fs-native.exe"
 $State = Join-Path $TempRoot "pbfs-state"
 $Stdout = Join-Path $TempRoot "pbfs-mount.out.log"
 $Stderr = Join-Path $TempRoot "pbfs-mount.err.log"
+$ReadableFirstStdout = Join-Path $TempRoot "pbfs-readable-first.out.log"
+$ReadableFirstStderr = Join-Path $TempRoot "pbfs-readable-first.err.log"
+$ReadableFirstProcess = $null
+$ReadableFirstStdoutTask = $null
+$ReadableFirstStderrTask = $null
+$ReadableFirstCaptureComplete = $false
+$ReadableFirstMountRoot = $null
 
 function Get-FreeMountDrive {
   foreach ($Letter in @("P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
@@ -37,16 +44,51 @@ function ConvertTo-ImplementationDetailValue {
   return $Text
 }
 
+function ConvertTo-StartProcessArgument {
+  param([string]$Value)
+  if ($Value.Contains('"')) {
+    throw "Cannot safely pass a quoted value to Start-Process: $Value"
+  }
+  if ($Value -match "\s") {
+    return '"' + $Value + '"'
+  }
+  return $Value
+}
+
 $WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($WinFspBin) {
   $env:Path = "$WinFspBin;$env:Path"
 }
 
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr, $ReadableFirstStdout, $ReadableFirstStderr
 New-Item -ItemType Directory -Force -Path $State | Out-Null
 
 function Write-MountLogs {
   Get-Content -ErrorAction SilentlyContinue $Stdout, $Stderr
+}
+
+function Write-ReadableFirstLogs {
+  Get-Content -ErrorAction SilentlyContinue $ReadableFirstStdout, $ReadableFirstStderr
+}
+
+function Complete-ReadableFirstCapture {
+  if ($null -eq $ReadableFirstProcess -or $ReadableFirstCaptureComplete) {
+    return
+  }
+  $ReadableFirstProcess.Refresh()
+  if (-not $ReadableFirstProcess.HasExited) {
+    throw "cannot complete readable-first output capture before process exit"
+  }
+  # The parameterless wait drains the asynchronous stdout/stderr readers. The
+  # process is created directly instead of through Start-Process because
+  # Windows PowerShell 5.1 can return a process proxy whose ExitCode stays null
+  # after redirected execution has completed.
+  $ReadableFirstProcess.WaitForExit()
+  $CapturedStdout = $ReadableFirstStdoutTask.GetAwaiter().GetResult()
+  $CapturedStderr = $ReadableFirstStderrTask.GetAwaiter().GetResult()
+  [System.IO.File]::WriteAllText($ReadableFirstStdout, $CapturedStdout)
+  [System.IO.File]::WriteAllText($ReadableFirstStderr, $CapturedStderr)
+  $script:ReadableFirstCaptureComplete = $true
 }
 
 function Stop-MountProcess {
@@ -55,7 +97,11 @@ function Stop-MountProcess {
     # The CLI owns a separately spawned Go adapter. Terminate the whole tree so
     # a forced Windows fallback cannot orphan the WinFsp mount.
     & taskkill.exe /PID $($Process.Id) /T /F 2>$null | Out-Null
-    Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction SilentlyContinue
+    $Process.WaitForExit(10000) | Out-Null
+    $Process.Refresh()
+    if (-not $Process.HasExited) {
+      throw "mount process tree remained alive after forced teardown: $($Process.Id)"
+    }
   }
   for ($i = 0; $i -lt 40; $i++) {
     if (-not (Test-Path -LiteralPath $MountRoot)) {
@@ -64,6 +110,32 @@ function Stop-MountProcess {
     Start-Sleep -Milliseconds 250
   }
   throw "WinFsp mount remained attached after process-tree teardown: $MountRoot"
+}
+
+function Stop-ReadableFirstProcess {
+  if ($null -ne $ReadableFirstProcess) {
+    $ReadableFirstProcess.Refresh()
+    if (-not $ReadableFirstProcess.HasExited) {
+      # Keep ownership of the adapter subprocess on timeout or cancellation.
+      & taskkill.exe /PID $($ReadableFirstProcess.Id) /T /F 2>$null | Out-Null
+      $ReadableFirstProcess.WaitForExit(10000) | Out-Null
+      $ReadableFirstProcess.Refresh()
+      if (-not $ReadableFirstProcess.HasExited) {
+        throw "readable-first process tree remained alive after forced teardown: $($ReadableFirstProcess.Id)"
+      }
+    }
+    Complete-ReadableFirstCapture
+  }
+  if (-not $ReadableFirstMountRoot) {
+    return
+  }
+  for ($i = 0; $i -lt 40; $i++) {
+    if (-not (Test-Path -LiteralPath $ReadableFirstMountRoot)) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "Readable-first WinFsp mount remained attached after process-tree teardown: $ReadableFirstMountRoot"
 }
 
 Push-Location "packages/shared-fs/native"
@@ -101,7 +173,7 @@ $Args = @(
   $State,
   "--native-adapter",
   $Adapter
-)
+) | ForEach-Object { ConvertTo-StartProcessArgument $_ }
 
 $Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 
@@ -116,7 +188,7 @@ function Assert-MountReady {
 }
 
 $PrimaryFailure = $null
-$CleanupFailure = $null
+$CleanupFailures = @()
 try {
   $Mounted = $false
   for ($i = 0; $i -lt 90; $i++) {
@@ -134,6 +206,53 @@ try {
     Write-MountLogs
     throw "mount did not become ready"
   }
+  Assert-MountReady
+
+  $ReadableFirstMountDrive = Get-FreeMountDrive
+  $ReadableFirstMountpoint = "$ReadableFirstMountDrive`:"
+  $ReadableFirstMountRoot = "$ReadableFirstMountDrive`:\"
+  $ReadableFirstArgs = @(
+    "scripts/shared-fs-readable-first-native-smoke.mjs",
+    "--adapter",
+    $Adapter,
+    "--mountpoint",
+    $ReadableFirstMountpoint
+  ) | ForEach-Object { ConvertTo-StartProcessArgument $_ }
+  $ReadableFirstStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $ReadableFirstStartInfo.FileName = "node"
+  $ReadableFirstStartInfo.Arguments = $ReadableFirstArgs -join " "
+  $ReadableFirstStartInfo.WorkingDirectory = [string]$RepoRoot
+  $ReadableFirstStartInfo.UseShellExecute = $false
+  $ReadableFirstStartInfo.CreateNoWindow = $true
+  $ReadableFirstStartInfo.RedirectStandardOutput = $true
+  $ReadableFirstStartInfo.RedirectStandardError = $true
+  $ReadableFirstProcess = New-Object System.Diagnostics.Process
+  $ReadableFirstProcess.StartInfo = $ReadableFirstStartInfo
+  if (-not $ReadableFirstProcess.Start()) {
+    throw "could not start readable-first native smoke"
+  }
+  # Start both asynchronous drains before waiting so a full pipe cannot
+  # deadlock the bounded process wait.
+  $ReadableFirstStdoutTask = $ReadableFirstProcess.StandardOutput.ReadToEndAsync()
+  $ReadableFirstStderrTask = $ReadableFirstProcess.StandardError.ReadToEndAsync()
+  $ReadableFirstCompleted = $ReadableFirstProcess.WaitForExit(90000)
+  if (-not $ReadableFirstCompleted) {
+    throw "readable-first native smoke did not exit within 90 seconds"
+  }
+  Complete-ReadableFirstCapture
+  $ReadableFirstProcess.Refresh()
+  if (-not $ReadableFirstProcess.HasExited) {
+    throw "readable-first native smoke reported completion without process exit"
+  }
+  Write-ReadableFirstLogs
+  $ReadableFirstExitCode = $ReadableFirstProcess.ExitCode
+  if ($null -eq $ReadableFirstExitCode) {
+    throw "readable-first native smoke exposed no process exit code"
+  }
+  if ($ReadableFirstExitCode -ne 0) {
+    throw "readable-first native smoke failed with exit code $ReadableFirstExitCode"
+  }
+  Stop-ReadableFirstProcess
   Assert-MountReady
 
   New-Item -ItemType Directory -Force -Path (Join-Path $MountRoot "docs") | Out-Null
@@ -278,21 +397,30 @@ try {
   $PrimaryFailure = $_
 } finally {
   try {
+    Stop-ReadableFirstProcess
+  } catch {
+    $CleanupFailures += $_
+  }
+  try {
     Stop-MountProcess
   } catch {
-    $CleanupFailure = $_
+    $CleanupFailures += $_
   }
-  if ($null -ne $PrimaryFailure -or $null -ne $CleanupFailure) {
+  if ($null -ne $PrimaryFailure -or $CleanupFailures.Count -gt 0) {
+    Write-ReadableFirstLogs
     Write-MountLogs
   }
 }
 
 if ($null -ne $PrimaryFailure) {
-  if ($null -ne $CleanupFailure) {
+  foreach ($CleanupFailure in $CleanupFailures) {
     Write-Warning "mount cleanup also failed: $($CleanupFailure.Exception.Message)"
   }
   throw $PrimaryFailure
 }
-if ($null -ne $CleanupFailure) {
-  throw $CleanupFailure
+if ($CleanupFailures.Count -gt 0) {
+  for ($i = 1; $i -lt $CleanupFailures.Count; $i++) {
+    Write-Warning "additional mount cleanup failure: $($CleanupFailures[$i].Exception.Message)"
+  }
+  throw $CleanupFailures[0]
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,13 +11,17 @@ import (
 	"github.com/winfsp/cgofuse/fuse"
 )
 
-func TestErrnoMapsRetryableReadiness(t *testing.T) {
+func TestErrnoMapsRetryableTransientForThisRuntime(t *testing.T) {
 	got := errno(&ipcError{
 		Code:    "EAGAIN",
 		Message: "initial view is still settling",
 	})
-	if got != -fuse.EAGAIN {
-		t.Fatalf("expected %d, got %d", -fuse.EAGAIN, got)
+	want := -fuse.EAGAIN
+	if runtime.GOOS == "windows" {
+		want = -fuse.ENOLCK
+	}
+	if got != want {
+		t.Fatalf("expected %d, got %d", want, got)
 	}
 }
 

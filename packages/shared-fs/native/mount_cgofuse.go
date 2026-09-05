@@ -467,6 +467,16 @@ func uint64FromResult(value interface{}) uint64 {
 	}
 }
 
+func transientErrno() int {
+	if runtime.GOOS == "windows" {
+		// WinFsp does not map FUSE EAGAIN and falls back to access denied.
+		// ENOLCK maps through STATUS_LOCK_NOT_GRANTED; Node/libuv exposes the
+		// resulting lock violation as retryable EBUSY.
+		return -fuse.ENOLCK
+	}
+	return -fuse.EAGAIN
+}
+
 func errno(err error) int {
 	if err == nil {
 		return 0
@@ -476,7 +486,7 @@ func errno(err error) int {
 		case "ENOENT":
 			return -fuse.ENOENT
 		case "EAGAIN":
-			return -fuse.EAGAIN
+			return transientErrno()
 		case "EEXIST":
 			return -fuse.EEXIST
 		case "EISDIR":

@@ -1,9 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { access } from "node:fs/promises";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 type ExternalNativeAdapterOptions = {
     readinessTimeoutMs?: number;
     exitTimeoutMs?: number;
+    signal?: AbortSignal;
     spawnAdapter?: typeof spawn;
+    probe?: (mountpoint: string) => Promise<boolean>;
 };
 
 const childExited = (child: ChildProcess) =>
@@ -16,6 +21,15 @@ type SignalResult =
 
 const asError = (error: unknown) =>
     error instanceof Error ? error : new Error(String(error));
+
+const probeMount = (mountpoint: string) =>
+    access(join(mountpoint, ".peerbit-conflicts")).then(
+        () => true,
+        (error: any) => {
+            if (error?.code === "ENOENT") return false;
+            throw error;
+        }
+    );
 
 const signalAndWaitForChildExit = async (
     child: ChildProcess,
@@ -113,6 +127,44 @@ export const mountExternalNativeAdapter = async (
     mountpoint: string,
     options: ExternalNativeAdapterOptions = {}
 ) => {
+    const timeoutMs = options.readinessTimeoutMs ?? 15_000;
+    const deadline = Date.now() + timeoutMs;
+    const probe = options.probe ?? probeMount;
+    let abortPreflight!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+        abortPreflight = () =>
+            reject(
+                asError(options.signal?.reason ?? new Error("Mount aborted"))
+            );
+        options.signal?.aborted
+            ? abortPreflight()
+            : options.signal?.addEventListener("abort", abortPreflight, {
+                  once: true,
+              });
+    });
+    let preflightTimer = 0;
+    const preflight = await Promise.race([
+        probe(mountpoint),
+        aborted,
+        new Promise<undefined>((resolve) => {
+            preflightTimer = setTimeout(
+                resolve,
+                Math.max(0, deadline - Date.now())
+            );
+        }),
+    ]).finally(() => {
+        clearTimeout(preflightTimer);
+        options.signal?.removeEventListener("abort", abortPreflight);
+    });
+    if (preflight == null) {
+        throw new Error(`Mount preflight timeout: ${mountpoint}`);
+    }
+    if (preflight) {
+        throw new Error(`Mount sentinel exists: ${mountpoint}`);
+    }
+    if (options.signal?.aborted) {
+        throw asError(options.signal.reason);
+    }
     const args = ["--endpoint", endpoint, "--mountpoint", mountpoint];
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
@@ -125,47 +177,60 @@ export const mountExternalNativeAdapter = async (
     try {
         await new Promise<void>((resolve, reject) => {
             let output = "";
-            const readinessTimeoutMs = options.readinessTimeoutMs ?? 15_000;
-            const timeout = setTimeout(() => {
-                cleanup();
-                reject(
-                    new Error(
-                        `Native adapter did not report readiness within ${readinessTimeoutMs} ms: ${command}`
-                    )
-                );
-            }, readinessTimeoutMs);
-            const cleanup = () => {
+            let settled = false;
+            const timeout = setTimeout(
+                () => {
+                    finish(new Error(`Mount readiness timeout: ${mountpoint}`));
+                },
+                Math.max(0, deadline - Date.now())
+            );
+            const finish = (error?: Error) => {
+                if (settled) return;
+                settled = true;
                 clearTimeout(timeout);
                 child.stdout.off("data", onStdout);
-                child.off("error", onError);
+                child.off("error", finish);
                 child.off("exit", onExit);
+                options.signal?.removeEventListener("abort", onAbort);
+                error == null ? resolve() : reject(error);
             };
+            const onAbort = () =>
+                finish(
+                    asError(
+                        options.signal?.reason ?? new Error("Mount aborted")
+                    )
+                );
             const onStdout = (chunk: Buffer) => {
                 output += chunk.toString("utf8");
                 process.stdout.write(chunk);
                 if (output.includes("peerbit-shared-fs-native ready")) {
-                    cleanup();
-                    resolve();
+                    child.stdout.off("data", onStdout);
+                    void (async () => {
+                        while (!settled && !(await probe(mountpoint))) {
+                            await delay(25);
+                        }
+                        finish();
+                    })().catch(finish);
                 }
-            };
-            const onError = (error: Error) => {
-                cleanup();
-                reject(error);
             };
             const onExit = (
                 code: number | null,
                 signal: NodeJS.Signals | null
             ) => {
-                cleanup();
-                reject(
+                finish(
                     new Error(
                         `Native adapter exited before mount readiness: code=${code} signal=${signal}`
                     )
                 );
             };
             child.stdout.on("data", onStdout);
-            child.once("error", onError);
+            child.once("error", finish);
             child.once("exit", onExit);
+            if (options.signal?.aborted) onAbort();
+            else
+                options.signal?.addEventListener("abort", onAbort, {
+                    once: true,
+                });
         });
     } catch (startError) {
         try {
@@ -179,9 +244,33 @@ export const mountExternalNativeAdapter = async (
         throw startError;
     }
 
+    let rejectFailure!: (error: Error) => void;
+    const failure = new Promise<never>((_, reject) => {
+        rejectFailure = reject;
+    });
+    void failure.catch(() => {});
+    const onFailure = (error: unknown) => rejectFailure(asError(error));
+    const onUnexpectedExit = (
+        code: number | null,
+        signal: NodeJS.Signals | null
+    ) =>
+        onFailure(
+            new Error(
+                `Native adapter exited after mount readiness: code=${code} signal=${signal}`
+            )
+        );
+    child.once("error", onFailure);
+    child.once("exit", onUnexpectedExit);
+    if (childExited(child)) {
+        onUnexpectedExit(child.exitCode, child.signalCode);
+    }
+
     return {
+        failure,
         mountpoint,
         async unmount() {
+            child.off("error", onFailure);
+            child.off("exit", onUnexpectedExit);
             await stopChild(child, options.exitTimeoutMs ?? 5_000);
         },
     };

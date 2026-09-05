@@ -393,6 +393,28 @@ describe("peerbit-fs cli", () => {
         );
     });
 
+    it("keeps readable-first incompatible with the partial-write bypass", async () => {
+        const createSpy = vi.spyOn(Peerbit, "create");
+        try {
+            await expect(
+                runCli([
+                    "mount",
+                    "zb2rh-not-opened",
+                    "/tmp/peerbit-shared-fs-not-mounted",
+                    "--readable-first",
+                    "--allow-partial-writes",
+                    "--directory",
+                    "",
+                ])
+            ).rejects.toThrow(
+                "--readable-first cannot be combined with --allow-partial-writes"
+            );
+            expect(createSpy).not.toHaveBeenCalled();
+        } finally {
+            createSpy.mockRestore();
+        }
+    });
+
     it("persists an explicit legacy-replica trust assertion", async () => {
         const directory = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-legacy-")

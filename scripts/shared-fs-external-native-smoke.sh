@@ -8,6 +8,8 @@ adapter="${RUNNER_TEMP:-/tmp}/peerbit-shared-fs-native"
 state="${RUNNER_TEMP:-/tmp}/pbfs-state"
 mountpoint="${RUNNER_TEMP:-/tmp}/pbfs-mount"
 log="${RUNNER_TEMP:-/tmp}/pbfs-mount.log"
+readiness_mountpoint=""
+readiness_pid=""
 
 is_mountpoint() {
   local target="$1"
@@ -138,26 +140,79 @@ wait_for_mount_exit() {
   return 1
 }
 
+signal_child_processes() {
+  local parent_pid="$1"
+  local signal="$2"
+  local child_pid
+  if ! command -v pgrep >/dev/null 2>&1; then
+    return 0
+  fi
+  while IFS= read -r child_pid; do
+    if [ -n "$child_pid" ]; then
+      kill "-$signal" "$child_pid" >/dev/null 2>&1 || true
+    fi
+  done < <(pgrep -P "$parent_pid" 2>/dev/null || true)
+}
+
+stop_readiness_process() {
+  if [ -z "$readiness_pid" ]; then
+    return 0
+  fi
+  if ! kill -0 "$readiness_pid" >/dev/null 2>&1; then
+    wait "$readiness_pid" >/dev/null 2>&1 || true
+    readiness_pid=""
+    return 0
+  fi
+  # The Node smoke owns signal-aware graceful cleanup. Give it time to detach
+  # its adapter before falling back to killing the still-attached process tree.
+  kill -TERM "$readiness_pid" >/dev/null 2>&1 || true
+  for _ in {1..80}; do
+    if ! kill -0 "$readiness_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$readiness_pid" >/dev/null 2>&1; then
+    signal_child_processes "$readiness_pid" KILL
+    kill -KILL "$readiness_pid" >/dev/null 2>&1 || true
+  fi
+  wait "$readiness_pid" >/dev/null 2>&1 || true
+  readiness_pid=""
+}
+
 cleanup() {
+  local cleanup_status=0
+  stop_readiness_process
   if kill -0 "$mount_pid" >/dev/null 2>&1; then
     kill -INT "$mount_pid" >/dev/null 2>&1 || true
     if ! wait_for_mount_exit 10; then
       unmount_path "$mountpoint" || true
+      signal_child_processes "$mount_pid" TERM
       kill -TERM "$mount_pid" >/dev/null 2>&1 || true
       if ! wait_for_mount_exit 5; then
+        signal_child_processes "$mount_pid" KILL
         kill -KILL "$mount_pid" >/dev/null 2>&1 || true
       fi
     fi
   fi
   wait "$mount_pid" >/dev/null 2>&1 || true
+  if [ -n "$readiness_mountpoint" ]; then
+    if ! unmount_path "$readiness_mountpoint" || is_mountpoint "$readiness_mountpoint"; then
+      echo "Readable-first mountpoint remained attached after cleanup: $readiness_mountpoint" >&2
+      cleanup_status=1
+    elif [ -d "$readiness_mountpoint" ] && ! rmdir "$readiness_mountpoint" >/dev/null 2>&1; then
+      echo "Readable-first mountpoint was not empty after unmount; leaving it untouched: $readiness_mountpoint" >&2
+      cleanup_status=1
+    fi
+  fi
   if ! unmount_path "$mountpoint" || is_mountpoint "$mountpoint"; then
     echo "Mountpoint remained attached after cleanup: $mountpoint" >&2
-    return 1
-  fi
-  if [ -d "$mountpoint" ] && ! rmdir "$mountpoint" >/dev/null 2>&1; then
+    cleanup_status=1
+  elif [ -d "$mountpoint" ] && ! rmdir "$mountpoint" >/dev/null 2>&1; then
     echo "Owned mountpoint was not empty after unmount; leaving it untouched: $mountpoint" >&2
-    return 1
+    cleanup_status=1
   fi
+  return "$cleanup_status"
 }
 
 finish() {
@@ -197,6 +252,37 @@ assert_mount_ready() {
 }
 
 assert_mount_ready
+
+readiness_mountpoint="$(mktemp -d "${RUNNER_TEMP:-/tmp}/pbfs-readable-first.XXXXXX")"
+node scripts/shared-fs-readable-first-native-smoke.mjs \
+  --adapter "$adapter" \
+  --mountpoint "$readiness_mountpoint" &
+readiness_pid="$!"
+readiness_finished=0
+for _ in {1..360}; do
+  if ! kill -0 "$readiness_pid" >/dev/null 2>&1; then
+    readiness_finished=1
+    break
+  fi
+  sleep 0.25
+done
+if [ "$readiness_finished" -ne 1 ]; then
+  echo "Readable-first native smoke did not exit within 90 seconds" >&2
+  exit 1
+fi
+readiness_status=0
+wait "$readiness_pid" || readiness_status="$?"
+readiness_pid=""
+if [ "$readiness_status" -ne 0 ]; then
+  echo "Readable-first native smoke failed with exit code $readiness_status" >&2
+  exit "$readiness_status"
+fi
+if is_mountpoint "$readiness_mountpoint"; then
+  echo "Readable-first smoke mount remained attached: $readiness_mountpoint" >&2
+  exit 1
+fi
+rmdir "$readiness_mountpoint"
+readiness_mountpoint=""
 
 mkdir "$mountpoint/docs"
 printf "hello external native" > "$mountpoint/docs/hello.txt"

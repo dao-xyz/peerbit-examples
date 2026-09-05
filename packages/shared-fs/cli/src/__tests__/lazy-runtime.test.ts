@@ -67,6 +67,18 @@ describe("peerbit-fs lazy runtime loading", () => {
         expect(result.stderr).not.toContain(BLOCKED_IMPORT);
     });
 
+    it("documents readable-first mount mode without importing the filesystem runtime", async () => {
+        const result = await runProbe(["mount", "--help"]);
+        const normalizedOutput = result.stdout.replace(/\s+/g, " ");
+
+        expect(result.exitCode).toBe(0);
+        expect(normalizedOutput).toContain("--readable-first");
+        expect(normalizedOutput).toContain(
+            "EAGAIN through FUSE/macFUSE or EBUSY through WinFsp"
+        );
+        expect(result.stderr).not.toContain(BLOCKED_IMPORT);
+    });
+
     it("reports parser errors without importing the filesystem runtime", async () => {
         const result = await runProbe(["install-adapter", "--unknown-option"]);
 
