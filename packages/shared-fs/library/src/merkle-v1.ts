@@ -264,8 +264,11 @@ const encodeNormalizedDataHashInputV1 = (bytes: Uint8Array) =>
 const normalizedDataHashV1 = (bytes: Uint8Array) =>
     sha256Sync(encodeNormalizedDataHashInputV1(bytes));
 
-const normalizedDataIdV1 = (bytes: Uint8Array) =>
-    merkleDataIdFromHashV1(normalizedDataHashV1(bytes));
+const snapshotDataWithHashV1 = (bytesValue: Uint8Array) => {
+    const bytes = normalizeData(bytesValue);
+    const hash = normalizedDataHashV1(bytes);
+    return { bytes, hash, id: merkleDataIdFromHashV1(hash) };
+};
 
 /** Canonical Borsh field bytes hashed for a data block (without a variant). */
 export const encodeMerkleDataHashInputV1 = (bytesValue: Uint8Array) =>
@@ -294,9 +297,25 @@ export class MerkleDataBlockV1 extends MerkleContentEntryV1 {
     constructor(properties?: { bytes: Uint8Array }) {
         super();
         if (properties) {
-            this.bytes = normalizeData(properties.bytes);
-            this.id = normalizedDataIdV1(this.bytes);
+            const snapshot = snapshotDataWithHashV1(properties.bytes);
+            this.bytes = snapshot.bytes;
+            this.id = snapshot.id;
         }
+    }
+
+    /**
+     * Construct an owned, canonical snapshot and return the hash computed for
+     * those exact bytes. The hash does not authenticate later block mutations.
+     */
+    static createWithHash(bytesValue: Uint8Array): Readonly<{
+        block: MerkleDataBlockV1;
+        hash: Uint8Array;
+    }> {
+        const snapshot = snapshotDataWithHashV1(bytesValue);
+        const block = new MerkleDataBlockV1();
+        block.bytes = snapshot.bytes;
+        block.id = snapshot.id;
+        return { block, hash: snapshot.hash };
     }
 }
 

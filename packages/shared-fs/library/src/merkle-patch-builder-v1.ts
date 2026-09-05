@@ -127,8 +127,9 @@ export type MerklePatchBuilderWorkCountersV1 = Readonly<{
     dataBlocksVerified: number;
     /** Payload bytes hashed while verifying fetched base data. */
     sourceDataBytesVerified: number;
-    /** Payload bytes hashed for new ids, codec ids, and post-sink checks. */
+    /** Payload bytes hashed for new blocks and post-sink checks. */
     newDataBytesHashed: number;
+    /** Nonzero candidate blocks, including candidates whose hash is reused. */
     dataBlocksCreated: number;
     treeBlocksCreated: number;
     dataBlocksWritten: number;
@@ -737,9 +738,13 @@ export class MerklePatchBuilderV1 {
             }
 
             let newHash: Uint8Array | undefined;
+            let newBlock: MerkleDataBlockV1 | undefined;
             if (!isAllZero(bytes)) {
                 this.counters.newDataBytesHashed += bytes.byteLength;
-                newHash = merkleDataHashV1(bytes);
+                const created = MerkleDataBlockV1.createWithHash(bytes);
+                newHash = created.hash;
+                newBlock = created.block;
+                this.counters.dataBlocksCreated++;
             }
             const sameHash = equalBytes(oldHash, newHash);
             if (sameHash) this.counters.leafHashesReused++;
@@ -754,8 +759,8 @@ export class MerklePatchBuilderV1 {
             // A full overwrite need not fetch the old data block. When its
             // content hash is unchanged, put the caller-provided bytes anyway
             // so a missing base payload is repaired instead of silently reused.
-            if (newHash && (!sameHash || fullyCovered)) {
-                await this.writeData(bytes, newHash);
+            if (newHash && newBlock && (!sameHash || fullyCovered)) {
+                await this.putBlock(newBlock, "data", 0, newHash);
             }
         }
 
@@ -1213,17 +1218,6 @@ export class MerklePatchBuilderV1 {
         );
     }
 
-    private async writeData(bytesValue: Uint8Array, expectedHash: Uint8Array) {
-        const bytes = new Uint8Array(bytesValue);
-        this.counters.newDataBytesHashed += bytes.byteLength;
-        const block = new MerkleDataBlockV1({ bytes });
-        if (block.id !== merkleDataIdFromHashV1(expectedHash)) {
-            return ioFailure("internal Merkle data hash mismatch");
-        }
-        this.counters.dataBlocksCreated++;
-        await this.putBlock(block, "data", 0, expectedHash);
-    }
-
     private async writeTree(
         level: number,
         bitmap: Uint8Array,
@@ -1269,9 +1263,10 @@ export class MerklePatchBuilderV1 {
                         "Merkle block sink mutated the submitted data block"
                     );
                 }
-                const bytes = new Uint8Array(bytesValue);
-                this.counters.newDataBytesHashed += bytes.byteLength;
-                actualHash = merkleDataHashV1(bytes);
+                this.counters.newDataBytesHashed += bytesValue.byteLength;
+                // The codec snapshots before validating and hashing. No
+                // mutable sink-owned payload is used after this check.
+                actualHash = merkleDataHashV1(bytesValue);
             } else {
                 id = block.id;
                 const blockLevel = block.level;
