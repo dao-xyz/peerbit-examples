@@ -13,7 +13,10 @@ export type MountReadinessLifecycleOptions = {
     isWriteReady: () => boolean;
     awaitWriteReady: (options: MountReadinessWaitOptions) => Promise<void>;
     awaitReadable?: (options: MountReadinessWaitOptions) => Promise<void>;
-    mount: () => Promise<void>;
+    /** Abort and join startup before rejecting so it cannot attach later. */
+    mount: (
+        options: MountReadinessWaitOptions
+    ) => Promise<void | { failure?: Promise<never> }>;
     waitForShutdown: (signal: AbortSignal) => Promise<void>;
     cleanup: () => Promise<void>;
     onMounted?: (writeReady: boolean) => void;
@@ -21,10 +24,12 @@ export type MountReadinessLifecycleOptions = {
     onWriteReady?: () => void;
 };
 
+type LifecycleSource = "mount" | "readable" | "ready" | "shutdown";
+
 type LifecycleOutcome =
-    | { source: "readable" | "ready" | "shutdown"; ok: true }
+    | { source: LifecycleSource; ok: true }
     | {
-          source: "readable" | "ready" | "shutdown";
+          source: LifecycleSource;
           ok: false;
           error: unknown;
       };
@@ -107,14 +112,19 @@ export const runMountReadinessLifecycle = async (
     let shutdownFailed = false;
     let shutdownFailure: unknown;
     let failure: unknown;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let adapterFailure: Promise<LifecycleOutcome> | undefined;
+
+    const deadlineFailure = () =>
+        codedError(
+            "ETIMEDOUT",
+            "timed out awaiting shared filesystem write readiness"
+        );
 
     const remainingTimeout = () => {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
-            throw codedError(
-                "ETIMEDOUT",
-                "timed out awaiting shared filesystem write readiness"
-            );
+            throw deadlineFailure();
         }
         return remaining;
     };
@@ -187,12 +197,31 @@ export const runMountReadinessLifecycle = async (
         return result.source;
     };
 
+    const mount = async (wait: MountReadinessWaitOptions) => {
+        const session = await options.mount(wait);
+        if (session?.failure) {
+            adapterFailure = session.failure.catch(
+                (error): LifecycleOutcome => ({
+                    source: "mount",
+                    ok: false,
+                    error,
+                })
+            );
+        }
+    };
+
+    const raceAdapterFailure = (outcomes: Promise<LifecycleOutcome>[]) =>
+        Promise.race(adapterFailure ? [...outcomes, adapterFailure] : outcomes);
+
     try {
         if (!options.readableFirst) {
             await requireSuccess(startReadinessWait());
-            await options.mount();
+            await mount({
+                timeout: options.timeoutMs,
+                signal: readinessAbort.signal,
+            });
             options.onMounted?.(true);
-            await requireSuccess(startShutdownWait());
+            await requireSuccess(raceAdapterFailure([startShutdownWait()]));
         } else {
             if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
                 throw codedError(
@@ -200,6 +229,10 @@ export const runMountReadinessLifecycle = async (
                     "readable-first mount timeout must be a positive finite number"
                 );
             }
+            deadlineTimer = setTimeout(
+                () => readinessAbort.abort(deadlineFailure()),
+                remainingTimeout()
+            );
             const shutdown = startShutdownWait();
             let continueLifecycle = true;
             const initial = await Promise.race([startReadableWait(), shutdown]);
@@ -218,13 +251,21 @@ export const runMountReadinessLifecycle = async (
             }
 
             if (continueLifecycle && !shutdownSettled) {
-                // Startup may be unabortable: join it, then honor shutdown.
-                await options.mount();
-                if (shutdownSettled) {
-                    if (shutdownFailed) {
-                        throw shutdownFailure;
+                try {
+                    await mount({
+                        timeout: remainingTimeout(),
+                        signal: readinessAbort.signal,
+                    });
+                    if (shutdownSettled) {
+                        if (shutdownFailed) throw shutdownFailure;
+                        continueLifecycle = false;
                     }
-                    continueLifecycle = false;
+                } catch (error) {
+                    if (shutdownSettled && !shutdownFailed) {
+                        continueLifecycle = false;
+                    } else {
+                        throw error;
+                    }
                 }
             }
 
@@ -234,10 +275,10 @@ export const runMountReadinessLifecycle = async (
                 const readyAtMount = options.isWriteReady();
                 options.onMounted?.(readyAtMount);
                 if (readyAtMount) {
-                    await requireSuccess(shutdown);
+                    await requireSuccess(raceAdapterFailure([shutdown]));
                 } else {
                     options.onWritePending?.();
-                    const first = await Promise.race([
+                    const first = await raceAdapterFailure([
                         startReadinessWait(),
                         shutdown,
                     ]);
@@ -253,7 +294,7 @@ export const runMountReadinessLifecycle = async (
                         }
                     } else if (first.source === "ready" && !shutdownSettled) {
                         options.onWriteReady?.();
-                        await requireSuccess(shutdown);
+                        await requireSuccess(raceAdapterFailure([shutdown]));
                     }
                 }
             }
@@ -261,6 +302,7 @@ export const runMountReadinessLifecycle = async (
     } catch (error) {
         failure = error;
     }
+    clearTimeout(deadlineTimer);
 
     // Join caught background outcomes before releasing their owners.
     shutdownAbort.abort();

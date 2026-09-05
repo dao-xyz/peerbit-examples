@@ -30,35 +30,17 @@ peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
 
-`benchmark` writes and reads one large file plus a configurable many-small-files
-workload. It is a baseline for tracking regressions, not a claim that v0 is
-optimized for code workspaces. It generates a fresh byte corpus by default and
-prints its seed; use `--seed <seed>` to reproduce those exact bytes. This avoids
-silently measuring content-addressed deduplication on repeated runs. JSON output
-also includes the seed. Establish a fresh baseline when adopting these I/O-only
-timings: older results included corpus generation or verification work and are
-not directly comparable.
+`benchmark` measures one large file and a configurable small-file workload. It
+uses a fresh corpus and reports a reproducible `--seed`, avoiding accidental
+content-addressed deduplication. Treat it as a regression baseline, not an
+optimization claim; older results included extra work and are not comparable.
 
-`status` prints the current native mount adapter, whether its prerequisites are
-available on the host, and any missing pieces before optionally opening an
-address. Address status also reports write readiness, its durable source, and
-whether the local directory is eligible for one-time legacy promotion. Add
-`--json` for one JSON document containing `nativeMount` and either a
-`filesystem` object or `null`. `nativeMount.metadata` reports the synthetic
-fixed file/directory modes, non-persisted creation mode, synthetic ownership,
-existence-only OS access checks, logical timestamps, and unsupported
-chmod/chown/utimens mutations. Routine status does not scan retained conflict
-metadata; add `--include-conflicts` to include the current local content and
-naming records plus separate `contentCount` and `namingCount` fields. Those
-whole-store scans are deliberately opt-in because they can dominate status
-latency and memory on a large/history-heavy workspace. During bootstrap the
-diagnostic records may be partial; check their `partial` flag and the adjacent
-bootstrap phase before treating them as an operator fence. `partial: false`
-requires a stable, write-ready full replica whose accepted snapshot coverage
-was verified for the entire scan. Observer, off/plain-join, fetching,
-overlay-active, unverified, and changing bootstrap views remain partial. The
-records also report their local-replica scope and before/after phases; even a
-verified local scan is not a global network frontier.
+`status` reports adapter prerequisites, write readiness, durable source, and
+legacy-promotion eligibility. Use `--json`; add `--include-conflicts` only when
+the cost of a whole-store conflict scan is acceptable. During bootstrap, honor
+the reported `partial` flag. See the
+[operator guide](https://github.com/dao-xyz/peerbit-examples/blob/master/packages/shared-fs/cli/OPERATOR_GUIDE.md)
+for field semantics and safety limits.
 
 `create` creates an access-controlled filesystem rooted at the local Peerbit
 identity. Use `create --no-auth` only for explicitly unauthenticated test/demo
@@ -79,20 +61,6 @@ peerbit-fs resolve-conflict \
   "$ADDRESS" /docs/report.md <version-id> --json
 ```
 
-The JSON document includes address, path filter, view metadata, and a
-`conflicts` array. Each record contains the file's `nodeId`,
-`visibleVersionId`, and every head in the converged local view: immutable
-version id, content hash, parent ids, author, machine, size, and creation time.
-Size and time are decimal strings so the output is safe to parse in JavaScript.
-`snapshotCoverageVerified` means only that every id in the accepted signed
-snapshot was covered before overlay retirement; it is not a global/log-frontier
-claim and remains false for bootstrap-off/plain-join views. Inspection still
-permits `--no-replicate` for an existing local store, but its
-`fullReplica: false` view does not prove completeness. Resolution writes a new
-version that references the selected bytes and causally supersedes the heads
-visible when it executes; the other immutable versions remain readable until
-normal retention/GC policy eventually permits reclaiming them.
-
 Namespace conflicts are inspected and acted on separately:
 
 ```bash
@@ -105,53 +73,12 @@ peerbit-fs resolve-naming-conflict \
   "$ADDRESS" <shadowed-directory-node-id> merge-directory --json
 ```
 
-The optional naming `--path` is an output filter; naming conflict discovery
-still rebuilds the local namespace state before filtering.
-
-Use the conflict type and listed ids deliberately:
-
-- `multi-head`: `keep` normally asserts the deterministic visible placement.
-- `duplicate-name`: move or delete one of the listed `shadowedNodeIds` (keeping
-  the visible winner alone normally leaves the collision unresolved). When
-  both claimants are directories, `merge-directory` moves every observed live
-  direct child of one shadowed claimant into the visible directory without
-  changing node ids; nested subtrees follow their directory node, while child
-  name collisions remain explicit duplicate-name conflicts. Resolve any
-  source, target, or direct-child node with multiple naming heads first; the
-  merge fails before publishing a partial repair.
-- `delete-vs-edit`: `restore` recovers surviving edited content; `delete`
-  acknowledges the currently visible content heads.
-- `unreachable`: move the node below a reachable directory, or delete it.
-
-`move` can itself target an occupied slot and create another duplicate-name
-conflict, so inspect again after every action. The resolution JSON returns the
-conflicts observed before the action and any still involving that node
-afterwards. A successful directory merge additionally reports its source and
-target node ids, moved direct-child ids, and naming-event ids.
-
-Resolution commands reject `--no-replicate`, wait for write readiness, require
-the local identity to be trusted on authenticated filesystems, and reject ids
-that are not part of the currently visible conflict. Naming actions pass the
-complete listed conflict records into the library. The library rechecks their
-exact local topology—including other duplicate-name claimants and recoverable
-delete-vs-edit versions—and fails retryably if it changed before execution.
-Delete/restore also publish only against content heads snapshotted before that
-final check, so later content stays recoverable or concurrent. This is a local
-observed-view fence, not a global transaction: an event arriving after that read
-can reintroduce a conflict later. Directory merge is likewise bounded and
-observed-view-only: its child moves and source tombstone are submitted in one
-local batch with the tombstone last, but replicas may ingest those independent
-events in another order; there is no cross-node causal edge or remote
-atomicity. Reinspect before retrying after a reported publication error. A
-child first seen later beneath the deleted source is surfaced as an
-`unreachable` conflict and can be moved into the merged tree. The event format
-is unchanged, so older replicas converge during a rolling upgrade even though
-only upgraded libraries/CLIs expose this action.
-Content resolution reports both the heads
-observed during CLI preflight and the heads actually superseded so automation
-can detect its corresponding race. Neither command waits for persisted remote
-acknowledgements; run `prepare-disposal` separately before retiring the
-resolving machine.
+Resolution requires a trusted, write-ready full replica and remains a local
+observed-view fence, not a global transaction. Reinspect after every action;
+`move` and directory merging can expose further conflicts. Resolution does not
+wait for persisted remote acknowledgements. The
+[operator guide](https://github.com/dao-xyz/peerbit-examples/blob/master/packages/shared-fs/cli/OPERATOR_GUIDE.md)
+documents record fields, naming actions, race behavior, and disposal safety.
 
 ## Install
 
@@ -181,15 +108,9 @@ Native runtime prerequisites are platform-specific:
   macFUSE in System Settings and reboot if macOS requires it.
 - Windows: WinFsp runtime must be installed before mounting.
 
-Native metadata is intentionally limited while the shared model persists only
-names and file content. Linux/macOS stat reports synthetic `0755` directories
-and `0644` files; Windows normalizes them to `0777` and `0666`. Creation modes
-are not persisted, ownership is adapter-synthetic, and atime mirrors the
-logical/synthetic mtime. chmod, chown, and explicit timestamp updates are
-unsupported and fail instead of claiming success. These fields are not an
-authorization boundary. The external adapter checks only path existence in its
-OS access callback, so `access(2)` and `test -w` are advisory. Use the Shared FS
-trusted-writer model for write authorization.
+Native modes, ownership, and timestamps are synthetic; chmod, chown, and
+explicit timestamp updates are unsupported. OS access checks are advisory, not
+an authorization boundary. Use the Shared FS trusted-writer model.
 
 Create and mount an authenticated shared filesystem:
 
@@ -233,95 +154,25 @@ mkdir -p "$HOME/PeerbitShared"
 peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 ```
 
-`mount` opens a full replica and waits until the initial namespace has settled
-before exposing a writable filesystem. During that window library mutations and
-writable backend opens return retryable `EAGAIN`; reads remain available.
-`mount --readable-first` opts into exposing the native mount once automatic
-bootstrap has either installed its snapshot overlay or made an explicit
-fallback decision, while retaining that same backend write gate. This exposes
-the current local read view, not a completeness guarantee. In particular,
-`off` (plain-join fallback) and `unverified` views can be partial and continue
-changing; a missing path is not authoritative until write readiness. The CLI
-warns for those fallback phases, prints when the mount is available for reads,
-and prints a second transition when genuine write readiness makes it writable.
-It never enables partial writes and cannot be combined with
-`--allow-partial-writes`.
+`mount` waits for a settled full replica before exposure. `--readable-first`
+instead exposes the current local read view while mutations remain gated:
+POSIX callers receive retryable `EAGAIN` and Windows callers `EBUSY`. Missing
+paths are not authoritative until write readiness. Use the default mode for
+applications that do not retry transient write errors. Observer mounts and the
+partial-write bypass are rejected.
 
-Readable-first is useful when early reads are more valuable than presenting a
-fully writable mount immediately. It is not a kernel-level read-only mount:
-write-intent opens, creates, truncates, renames, removes, and other mutations
-remain blocked until readiness. FUSE and macFUSE callers receive retryable
-`EAGAIN`. WinFsp does not preserve FUSE `EAGAIN`, so the external adapter maps
-the same transient backend result through WinFsp's lock-contention path and
-Windows callers receive retryable `EBUSY`. Some applications open files for
-write even during an otherwise read-heavy probe or do not retry these transient
-errors; keep the default ready-before-mount behavior for those applications.
-Both the in-process adapter and the external adapter reach the same gated
-backend.
-`mount --no-replicate` is rejected because an observer cannot establish the
-complete namespace required for safe mounted writes. For now readiness is a
-settled-view heuristic rather than a protocol log-frontier proof, so deployments
-requiring a strict frontier should keep writers stopped until Peerbit exposes
-that upstream barrier.
+`flush`, `fsync`, and close fence accepted local mutations but do not prove a
+remote persisted quorum. Write readiness is not a global revocation proof; see
+the operator guide before revoking a writer or retiring a machine.
 
-Mounted `flush` publishes one frozen buffer generation. `fsync` and close drain
-every mutation accepted before their fence, while mutations racing a closing
-handle fail instead of disappearing. These calls do not wait for a remote
-persisted quorum; use the quiesced `prepare-disposal` workflow for machine
-retirement. CI verifies the default disk-backed store after forced process
-termination, not arbitrary custom targets or a host/controller power failure.
+`--write-ready-timeout-ms` bounds the readable view, abortable adapter startup,
+and write readiness under one deadline. Timeout or Ctrl-C/SIGTERM joins startup
+and ordered cleanup; it never grants permission to write. Keep a complete
+replicator connected and retry.
 
-For access-controlled filesystems, write readiness is not a global revocation
-proof. The trusted-writer graph converges separately and entries do not carry
-an authorization epoch, so quiesce and isolate a revoked machine/key, wait for
-every serving replica to report it untrusted, and keep an already-converged
-durable replica online. A signed trust frontier and entry-bound authorization
-epoch are still needed upstream for protocol-grade revocation.
-
-`create` requires a full replica and publishes a signed empty snapshot, so a
-newly created empty filesystem can be mounted locally and later prove its empty
-starting view to a connected joiner. `create --no-replicate` is rejected.
-`mount` waits up to 120 seconds by default; tune this with
-`--write-ready-timeout-ms`. In readable-first mode one overall countdown starts
-after the filesystem opens: it covers the initial readable-view wait, native
-adapter startup, and the remaining write-readiness wait. If it expires before
-mounting, no mount is exposed; if it expires afterward, the CLI detaches the
-native or external adapter. In both cases it closes any IPC server, stops
-Peerbit, and fails rather than leaving a permanently read-only background
-mount. The signal waiter is installed before the initial view wait and adapter
-startup. Adapter startup is always joined; if it returns after the deadline or
-after Ctrl-C/SIGTERM, the CLI detaches it immediately. Otherwise Ctrl-C or
-SIGTERM aborts and joins the readable/readiness wait before performing the same
-ordered cleanup. A timeout is not
-permission to write: keep a complete replicator for this filesystem connected
-and retry. An unrelated connected Peerbit peer does not count. A fresh
-no-snapshot join can count
-namespace rows materialized during the initial store open only when they are
-paired with the lower log's successful network-commit phase. Local replay has
-no such phase, so a populated store with a missing sidecar cannot certify
-itself; when it is already identical to its donor, one later donor mutation or
-a verified snapshot is still required.
-
-Pre-marker stores have no persisted readiness proof. Connection alone is
-insufficient when local and remote states are already identical, because no new
-metadata event may arrive. The normal path is to open the legacy handle, keep a
-complete replicator connected, and make one normal namespace mutation on that
-replicator. If `peerbit-fs status "$ADDRESS"` reports
-`legacy promotion eligible: yes`, and only after independently verifying that
-this exact directory was a cleanly shut down, complete full replica that was
-never copied mid-bootstrap, run:
-
-```bash
-peerbit-fs trust-legacy-replica "$ADDRESS" \
-  --assume-local-replica-complete
-```
-
-This is an operator assertion, not a network proof. It persists a marker for
-this directory/address before enabling writes and is safe to repeat after
-success; never copy the marker to another machine. The `--allow-partial-writes`
-mount escape hatch is instead a session-only recovery bypass. It can manufacture
-duplicate paths or overwrite from stale state, does not persist proof, and keeps
-snapshot, GC, ACL, and disposal operations blocked.
+Legacy promotion is an operator assertion, not a network proof. Follow the
+operator guide exactly and never copy its marker. The partial-write option is a
+session-only recovery bypass that can create conflicts or overwrite stale data.
 
 Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can
@@ -344,46 +195,15 @@ stop a separately running `peerbit-fs mount` process. If manual unmounting is
 needed, still terminate that original process and wait for it to exit before
 opening the same Peerbit state directory for the barrier.
 
-`--min-acks <number>` defaults to `1`, `--timeout-ms <number>` bounds the
-barrier after the filesystem has opened, and `--json` emits a machine-readable
-result. Network connection, filesystem open, and shutdown are outside that
-flag's deadline. A timeout, abort, error, or nonzero exit never indicates safe
-disposal. Keep the source machine and its state available, correct connectivity
-or storage capacity, and retry the barrier. Run it against the existing full
-local replica; `--no-replicate` is rejected. A pending bootstrap decision is
-awaited; a bootstrapping or unverified view is rejected. Any filesystem-content
-or trusted-writer-graph arrival during the fence also fails the attempt. A
-deferred resurrection-guard decision for removed live metadata fails closed
-until it settles, so let replication and guard recovery settle before retrying.
-Avoid tight retry loops after a timeout: already-started local index/log reads
-cannot be cancelled and finish in the background.
+`--min-acks` defaults to one and `--timeout-ms` bounds only the barrier after
+open. Timeout, abort, error, or nonzero exit is never disposal safety. Keep the
+source state, correct the problem, and retry from a settled full replica.
 
-The captured recoverable head closure contains every current naming head
-(including tombstones and conflicts), every current file-version head, and
-every distinct chunk those versions reference, plus every surviving
-trusted-writer-log entry (live grants and revocation tombstones). It does not
-preserve already superseded filesystem history or control manifests.
-
-The reported guarantee is persisted **per entry**: every exact entry in that
-closure independently reached the requested number of capable remote leaders
-backed by supported durable storage. It does not prove that one common
-custodian, or the same group of custodians, holds all entries. The command does
-not raise the replication degree, and older, incapable, in-memory, and local
-peers do not count.
-
-Receipts describe the instant they were issued and assume cooperative remotes;
-they are not permanent-custody guarantees or Byzantine proofs. A successful
-empty result is vacuous: it acknowledges no data and provides no evidence that
-a remote peer was present. The command does not revoke the local writer key;
-perform any intended revocation first. If a cold receipt target cannot validate
-a revocation tombstone because it never admitted the original grant, the
-barrier fails closed instead of claiming disposal safety.
-
-The portable process-crash campaign kills all three authenticated replica
-instances without graceful shutdown after `minAcks: 2`, deletes the source, and
-reopens each custodian alone. That verifies the application-crash path on the
-tested disk backend. A literal power-cut claim still requires a VM or hardware
-fault campaign with explicit filesystem and controller-cache semantics.
+The receipt covers each current recoverable naming, content, chunk, and trust
+entry independently on the requested number of capable durable leaders. It
+does not raise replication, identify one common custodian, preserve superseded
+history, revoke the local writer, prove permanent custody, or constitute a
+Byzantine or literal power-cut proof. See the operator guide for full semantics.
 
 ## macOS from this repo
 
@@ -404,11 +224,13 @@ macFUSE is required. The installer tries `brew install --cask macfuse` when
 Homebrew is available, but macOS may still require one-time approval in System
 Settings > Privacy & Security and a reboot.
 
-The external `packages/shared-fs/native` adapter uses cgofuse for Linux FUSE,
-macFUSE, and WinFsp. The manual `Shared FS Native Smoke` workflow exercises
-Linux FUSE, while `Shared FS Native OS Smoke` provisions macOS/macFUSE and
-Windows/WinFsp runners. Their external-adapter smoke also verifies the
-readable-first early read, transient mutation error, writable transition, and
-clean detach. Portable pull-request CI still runs the backend, adapter builds,
-and cross-OS shared-store checks on Linux, macOS, and Windows; it does not mount
-the real operating-system filesystems.
+The external adapter uses cgofuse. Because its `Init` can precede attachment,
+`ready` signals initialization only. With exclusive mountpoint ownership, the
+CLI proves attachment when reserved `.peerbit-conflicts` is absent before spawn
+and accessible afterward. Manual native
+workflows mount Linux FUSE, macFUSE, and WinFsp, checking the early read,
+transient mutation error, writable transition, and detach. Portable PR CI still
+does not mount the real operating-system filesystems.
+
+Readable-first requires this abortable external adapter; fuse-native startup
+cannot safely guarantee that a timed-out in-process mount will not attach later.

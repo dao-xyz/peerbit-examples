@@ -190,7 +190,7 @@ const lifecycle = runMountReadinessLifecycle({
     awaitWriteReady: (options) =>
         waitForGate(readiness.promise, options, "write readiness"),
     awaitReadable: async () => {},
-    mount: async () => {
+    mount: async ({ timeout, signal }) => {
         const backend = createSharedFsMountBackend(target);
         server = await createSharedFsIpcServer(backend, "tcp://127.0.0.1:0");
         mounted = await mountExternalNativeAdapter(
@@ -198,12 +198,15 @@ const lifecycle = runMountReadinessLifecycle({
             server.endpoint,
             mountpoint,
             {
+                readinessTimeoutMs: timeout,
+                signal,
                 spawnAdapter: (...args) => {
                     adapterChild = spawn(...args);
                     return adapterChild;
                 },
             }
         );
+        return mounted;
     },
     waitForShutdown: (signal) =>
         waitForGate(shutdown.promise, { timeout: 60_000, signal }, "shutdown"),

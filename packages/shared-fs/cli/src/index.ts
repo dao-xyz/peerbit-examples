@@ -851,7 +851,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "boolean",
                         default: false,
                         description:
-                            "Expose the current, potentially partial read view while write readiness settles; mutations return retryable EAGAIN through FUSE/macFUSE or EBUSY through WinFsp until the genuine readiness fence completes.",
+                            "Expose the current, potentially partial read view while write readiness settles; mutations return retryable EAGAIN through FUSE/macFUSE or EBUSY through WinFsp until the genuine readiness fence completes. Requires the abortable external adapter.",
                     })
                     .option("allow-partial-writes", {
                         type: "boolean",
@@ -938,7 +938,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                     () => fsHandle.bootstrapStatus(),
                                     options
                                 ),
-                            mount: async () => {
+                            mount: async ({ timeout, signal }) => {
                                 const backend = createSharedFsMountBackend(
                                     fsHandle,
                                     {
@@ -959,12 +959,24 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                         backend,
                                         "tcp://127.0.0.1:0"
                                     );
-                                    mounted = await mountExternalNativeAdapter(
-                                        externalAdapter,
-                                        ipc.endpoint,
-                                        mountpoint
-                                    );
+                                    const externalMount =
+                                        await mountExternalNativeAdapter(
+                                            externalAdapter,
+                                            ipc.endpoint,
+                                            mountpoint,
+                                            {
+                                                readinessTimeoutMs: timeout,
+                                                signal,
+                                            }
+                                        );
+                                    mounted = externalMount;
+                                    return externalMount;
                                 } else {
+                                    if (argv.readableFirst) {
+                                        throw new NativeMountUnavailableError(
+                                            "Readable-first requires the abortable external native adapter."
+                                        );
+                                    }
                                     // In-process fuse-native mounts talk to the
                                     // backend directly; a loopback JSON hop
                                     // would only add latency and base64 CPU.

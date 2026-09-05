@@ -74,7 +74,11 @@ function Stop-MountProcess {
     # The CLI owns a separately spawned Go adapter. Terminate the whole tree so
     # a forced Windows fallback cannot orphan the WinFsp mount.
     & taskkill.exe /PID $($Process.Id) /T /F 2>$null | Out-Null
-    Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction SilentlyContinue
+    $Process.WaitForExit(10000) | Out-Null
+    $Process.Refresh()
+    if (-not $Process.HasExited) {
+      throw "mount process tree remained alive after forced teardown: $($Process.Id)"
+    }
   }
   for ($i = 0; $i -lt 40; $i++) {
     if (-not (Test-Path -LiteralPath $MountRoot)) {
@@ -91,7 +95,11 @@ function Stop-ReadableFirstProcess {
     if (-not $ReadableFirstProcess.HasExited) {
       # Keep ownership of the adapter subprocess on timeout or cancellation.
       & taskkill.exe /PID $($ReadableFirstProcess.Id) /T /F 2>$null | Out-Null
-      Wait-Process -Id $ReadableFirstProcess.Id -Timeout 10 -ErrorAction SilentlyContinue
+      $ReadableFirstProcess.WaitForExit(10000) | Out-Null
+      $ReadableFirstProcess.Refresh()
+      if (-not $ReadableFirstProcess.HasExited) {
+        throw "readable-first process tree remained alive after forced teardown: $($ReadableFirstProcess.Id)"
+      }
     }
   }
   if (-not $ReadableFirstMountRoot) {
@@ -187,20 +195,14 @@ try {
     $ReadableFirstMountpoint
   ) | ForEach-Object { ConvertTo-StartProcessArgument $_ }
   $ReadableFirstProcess = Start-Process -FilePath "node" -ArgumentList $ReadableFirstArgs -RedirectStandardOutput $ReadableFirstStdout -RedirectStandardError $ReadableFirstStderr -PassThru -WindowStyle Hidden
-  $ReadableFirstCompleted = $false
-  for ($i = 0; $i -lt 360; $i++) {
-    $ReadableFirstProcess.Refresh()
-    if ($ReadableFirstProcess.HasExited) {
-      $ReadableFirstCompleted = $true
-      break
-    }
-    Start-Sleep -Milliseconds 250
-  }
+  $ReadableFirstCompleted = $ReadableFirstProcess.WaitForExit(90000)
   if (-not $ReadableFirstCompleted) {
     throw "readable-first native smoke did not exit within 90 seconds"
   }
-  if ($ReadableFirstProcess.ExitCode -ne 0) {
-    throw "readable-first native smoke failed with exit code $($ReadableFirstProcess.ExitCode)"
+  $ReadableFirstProcess.Refresh()
+  $ReadableFirstExitCode = $ReadableFirstProcess.ExitCode
+  if ($ReadableFirstExitCode -ne 0) {
+    throw "readable-first native smoke failed with exit code $ReadableFirstExitCode"
   }
   Write-ReadableFirstLogs
   Stop-ReadableFirstProcess

@@ -421,9 +421,8 @@ describe("CLI mount readiness lifecycle", () => {
         expect(cleanup).toHaveBeenCalledTimes(1);
     });
 
-    it("joins adapter startup after shutdown and then cleans without exposing it", async () => {
+    it("aborts and joins adapter startup after shutdown", async () => {
         const adapterStarted = deferred();
-        const adapterFinished = deferred();
         const shutdown = deferred();
         const awaitWriteReady = vi.fn(async () => {});
         const onMounted = vi.fn();
@@ -436,11 +435,19 @@ describe("CLI mount readiness lifecycle", () => {
             isWriteReady: () => false,
             awaitReadable: async () => {},
             awaitWriteReady,
-            mount: async () => {
+            mount: ({ signal }) => {
                 events.push("adapter-started");
                 adapterStarted.resolve();
-                await adapterFinished.promise;
-                events.push("adapter-finished");
+                return new Promise((_, reject) => {
+                    signal.addEventListener(
+                        "abort",
+                        () => {
+                            events.push("adapter-aborted");
+                            reject(signal.reason);
+                        },
+                        { once: true }
+                    );
+                });
             },
             waitForShutdown: async () => {
                 events.push("await-shutdown");
@@ -457,15 +464,13 @@ describe("CLI mount readiness lifecycle", () => {
         await adapterStarted.promise;
         shutdown.resolve();
         await waitFor(() => expect(events).toContain("shutdown"));
-        expect(events).not.toContain("cleanup");
-        adapterFinished.resolve();
         await running;
 
         expect(events).toEqual([
             "await-shutdown",
             "adapter-started",
             "shutdown",
-            "adapter-finished",
+            "adapter-aborted",
             "cleanup",
         ]);
         expect(onMounted).not.toHaveBeenCalled();
@@ -473,26 +478,33 @@ describe("CLI mount readiness lifecycle", () => {
         expect(awaitWriteReady).not.toHaveBeenCalled();
     });
 
-    it("applies the overall readable-first timeout to adapter startup", async () => {
+    it("bounds and aborts a never-settling adapter startup", async () => {
         const awaitWriteReady = vi.fn(async () => {});
         const onMounted = vi.fn();
         const cleanup = vi.fn(async () => {});
 
+        const startedAt = Date.now();
         await expect(
             runMountReadinessLifecycle({
                 readableFirst: true,
-                timeoutMs: 5,
+                timeoutMs: 20,
                 isWriteReady: () => true,
                 awaitReadable: async () => {},
                 awaitWriteReady,
-                mount: async () => {
-                    await new Promise((resolve) => setTimeout(resolve, 25));
-                },
+                mount: ({ signal }) =>
+                    new Promise((_, reject) => {
+                        signal.addEventListener(
+                            "abort",
+                            () => reject(signal.reason),
+                            { once: true }
+                        );
+                    }),
                 waitForShutdown: waitForAbort,
                 cleanup,
                 onMounted,
             })
         ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+        expect(Date.now() - startedAt).toBeLessThan(500);
 
         expect(onMounted).not.toHaveBeenCalled();
         expect(awaitWriteReady).not.toHaveBeenCalled();
@@ -521,6 +533,54 @@ describe("CLI mount readiness lifecycle", () => {
         expect(awaitWriteReady).not.toHaveBeenCalled();
         expect(waitForShutdown).toHaveBeenCalledTimes(1);
         expect(cleanup).toHaveBeenCalledTimes(1);
+    });
+
+    it("cleans up when a mounted adapter exits unexpectedly", async () => {
+        const adapterFailure = deferred<never>();
+        const failure = new Error("adapter exited");
+        const cleanup = vi.fn(async () => {});
+        const onMounted = vi.fn();
+        const running = runMountReadinessLifecycle({
+            readableFirst: true,
+            timeoutMs: 1_000,
+            isWriteReady: () => true,
+            awaitReadable: async () => {},
+            awaitWriteReady: async () => {},
+            mount: async () => ({ failure: adapterFailure.promise }),
+            waitForShutdown: waitForAbort,
+            cleanup,
+            onMounted,
+        });
+
+        await waitFor(() => expect(onMounted).toHaveBeenCalledOnce());
+        adapterFailure.reject(failure);
+        await expect(running).rejects.toBe(failure);
+        expect(cleanup).toHaveBeenCalledOnce();
+    });
+
+    it("keeps observing adapter failure after write readiness", async () => {
+        const adapterFailure = deferred<never>();
+        const readiness = deferred();
+        const writable = deferred();
+        const failure = new Error("adapter exited after writable");
+        const cleanup = vi.fn(async () => {});
+        const running = runMountReadinessLifecycle({
+            readableFirst: true,
+            timeoutMs: 1_000,
+            isWriteReady: () => false,
+            awaitReadable: async () => {},
+            awaitWriteReady: async () => readiness.promise,
+            mount: async () => ({ failure: adapterFailure.promise }),
+            waitForShutdown: waitForAbort,
+            cleanup,
+            onWriteReady: () => writable.resolve(),
+        });
+
+        readiness.resolve();
+        await writable.promise;
+        adapterFailure.reject(failure);
+        await expect(running).rejects.toBe(failure);
+        expect(cleanup).toHaveBeenCalledOnce();
     });
 });
 
