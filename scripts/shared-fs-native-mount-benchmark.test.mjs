@@ -243,8 +243,8 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
     );
     assert.match(
         powershell,
-        /\.WaitForExit\(90000\)[\s\S]*\.WaitForExit\(\)[\s\S]*Write-ReadableFirstLogs[\s\S]*\.ExitCode/u,
-        "the bounded readable-first wait drains redirected output before reading ExitCode"
+        /System\.Diagnostics\.ProcessStartInfo[\s\S]*RedirectStandardOutput = \$true[\s\S]*RedirectStandardError = \$true[\s\S]*ReadToEndAsync\(\)[\s\S]*ReadToEndAsync\(\)[\s\S]*\.WaitForExit\(90000\)[\s\S]*Complete-ReadableFirstCapture[\s\S]*Write-ReadableFirstLogs[\s\S]*\.ExitCode/u,
+        "the bounded readable-first process drains direct .NET output before reading ExitCode"
     );
 });
 

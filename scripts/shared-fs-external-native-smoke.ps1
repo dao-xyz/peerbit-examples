@@ -11,6 +11,9 @@ $Stderr = Join-Path $TempRoot "pbfs-mount.err.log"
 $ReadableFirstStdout = Join-Path $TempRoot "pbfs-readable-first.out.log"
 $ReadableFirstStderr = Join-Path $TempRoot "pbfs-readable-first.err.log"
 $ReadableFirstProcess = $null
+$ReadableFirstStdoutTask = $null
+$ReadableFirstStderrTask = $null
+$ReadableFirstCaptureComplete = $false
 $ReadableFirstMountRoot = $null
 
 function Get-FreeMountDrive {
@@ -68,6 +71,26 @@ function Write-ReadableFirstLogs {
   Get-Content -ErrorAction SilentlyContinue $ReadableFirstStdout, $ReadableFirstStderr
 }
 
+function Complete-ReadableFirstCapture {
+  if ($null -eq $ReadableFirstProcess -or $ReadableFirstCaptureComplete) {
+    return
+  }
+  $ReadableFirstProcess.Refresh()
+  if (-not $ReadableFirstProcess.HasExited) {
+    throw "cannot complete readable-first output capture before process exit"
+  }
+  # The parameterless wait drains the asynchronous stdout/stderr readers. The
+  # process is created directly instead of through Start-Process because
+  # Windows PowerShell 5.1 can return a process proxy whose ExitCode stays null
+  # after redirected execution has completed.
+  $ReadableFirstProcess.WaitForExit()
+  $CapturedStdout = $ReadableFirstStdoutTask.GetAwaiter().GetResult()
+  $CapturedStderr = $ReadableFirstStderrTask.GetAwaiter().GetResult()
+  [System.IO.File]::WriteAllText($ReadableFirstStdout, $CapturedStdout)
+  [System.IO.File]::WriteAllText($ReadableFirstStderr, $CapturedStderr)
+  $script:ReadableFirstCaptureComplete = $true
+}
+
 function Stop-MountProcess {
   $Process.Refresh()
   if (-not $Process.HasExited) {
@@ -101,6 +124,7 @@ function Stop-ReadableFirstProcess {
         throw "readable-first process tree remained alive after forced teardown: $($ReadableFirstProcess.Id)"
       }
     }
+    Complete-ReadableFirstCapture
   }
   if (-not $ReadableFirstMountRoot) {
     return
@@ -194,22 +218,37 @@ try {
     "--mountpoint",
     $ReadableFirstMountpoint
   ) | ForEach-Object { ConvertTo-StartProcessArgument $_ }
-  $ReadableFirstProcess = Start-Process -FilePath "node" -ArgumentList $ReadableFirstArgs -RedirectStandardOutput $ReadableFirstStdout -RedirectStandardError $ReadableFirstStderr -PassThru -WindowStyle Hidden
+  $ReadableFirstStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $ReadableFirstStartInfo.FileName = "node"
+  $ReadableFirstStartInfo.Arguments = $ReadableFirstArgs -join " "
+  $ReadableFirstStartInfo.WorkingDirectory = [string]$RepoRoot
+  $ReadableFirstStartInfo.UseShellExecute = $false
+  $ReadableFirstStartInfo.CreateNoWindow = $true
+  $ReadableFirstStartInfo.RedirectStandardOutput = $true
+  $ReadableFirstStartInfo.RedirectStandardError = $true
+  $ReadableFirstProcess = New-Object System.Diagnostics.Process
+  $ReadableFirstProcess.StartInfo = $ReadableFirstStartInfo
+  if (-not $ReadableFirstProcess.Start()) {
+    throw "could not start readable-first native smoke"
+  }
+  # Start both asynchronous drains before waiting so a full pipe cannot
+  # deadlock the bounded process wait.
+  $ReadableFirstStdoutTask = $ReadableFirstProcess.StandardOutput.ReadToEndAsync()
+  $ReadableFirstStderrTask = $ReadableFirstProcess.StandardError.ReadToEndAsync()
   $ReadableFirstCompleted = $ReadableFirstProcess.WaitForExit(90000)
   if (-not $ReadableFirstCompleted) {
     throw "readable-first native smoke did not exit within 90 seconds"
   }
-  # After the bounded wait proves process exit, the parameterless overload
-  # drains redirected-output handlers before ExitCode is observed. Windows
-  # PowerShell can otherwise expose a null ExitCode even though the child has
-  # already printed its success line.
-  $ReadableFirstProcess.WaitForExit()
+  Complete-ReadableFirstCapture
   $ReadableFirstProcess.Refresh()
   if (-not $ReadableFirstProcess.HasExited) {
     throw "readable-first native smoke reported completion without process exit"
   }
   Write-ReadableFirstLogs
   $ReadableFirstExitCode = $ReadableFirstProcess.ExitCode
+  if ($null -eq $ReadableFirstExitCode) {
+    throw "readable-first native smoke exposed no process exit code"
+  }
   if ($ReadableFirstExitCode -ne 0) {
     throw "readable-first native smoke failed with exit code $ReadableFirstExitCode"
   }
