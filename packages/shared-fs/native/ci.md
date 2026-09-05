@@ -6,28 +6,33 @@ macOS, and Windows, and runs a real Linux FUSE mount smoke test.
 Real macOS and Windows native mount tests are opt-in because they need host
 filesystem drivers:
 
-- macOS requires a Scaleway Apple Silicon runner with kernel extensions enabled
-  and macFUSE installed/loadable.
-- Windows requires a Scaleway Windows runner with WinFsp installed/loadable.
+- macOS requires a physical Scaleway Apple Silicon host with kernel extensions
+  enabled and macFUSE installed/loadable.
+- Windows requires a physical Scaleway Windows host with WinFsp
+  installed/loadable.
 
-The `Shared FS Native OS Smoke` workflow provisions Scaleway runners, registers
-GitHub Actions ephemeral self-hosted runners, runs one native mount smoke job,
-then attempts cleanup.
+The `Shared FS Native OS Smoke` workflow provisions or resumes Scaleway hosts,
+registers a fresh ephemeral GitHub Actions self-hosted runner on each selected
+host, runs one native mount smoke job, then attempts cleanup.
 
 The `Shared FS Native Cross-OS Interop` workflow starts a Linux FUSE seed and
 can join either `windows`, `macos`, or `all` native peers. The `all` mode waits
 for Linux, macOS, and Windows to each write a file through its native mount, read
 the other platforms' files, then write and observe ack files.
 
-The macOS path reuses a warm Scaleway Apple Silicon host by default because
-those machines have a minimum allocation period. It still creates a fresh
-ephemeral GitHub runner registration, token, and unique label for each workflow
-run. The Windows path creates and deletes a fresh instance by default.
+The macOS path reuses a warm physical Scaleway Apple Silicon host by default
+because those machines have a minimum allocation period. It still creates a
+fresh ephemeral GitHub runner registration, token, and unique label for each
+workflow run. The Windows workflows likewise reuse a pooled physical instance,
+but power it off between runs; their GitHub runner registration is also fresh
+and ephemeral for every run.
 
-The reusable macOS host must have macFUSE installed and approved once in macOS
-System Settings. Scaleway's kernel-extension flag allows the host to load kernel
-extensions, but macFUSE still needs the one-time Privacy & Security approval and
-a reboot after first installation.
+A pristine macOS host requires a one-time manual bootstrap before it can run the
+native smoke test. The check script can attempt the Homebrew cask installation
+and reports its bounded install log on failure, but an operator must approve
+macFUSE in macOS System Settings > Privacy & Security and reboot after the first
+installation. Scaleway's kernel-extension flag only allows the approved host to
+load kernel extensions; it cannot perform that interactive approval.
 
 The macOS and Windows native smoke jobs use the external Go adapter path. The
 optional Node `fuse-native` adapter is not part of the required cross-platform
@@ -83,21 +88,25 @@ runner after it accepts one job.
 
 The native smoke and cross-OS interop workflows share one concurrency group so
 only one Scaleway native run provisions or reconfigures runners at a time.
-Both workflows also run a resource sanity check after cleanup. The check fails
-if more than one matching reusable macOS pool host exists or if any matching
-ephemeral Windows runner remains.
+Both workflows also run a resource sanity check after cleanup. The check allows
+at most one matching pooled physical host per platform; ephemeral GitHub runner
+registrations are still expected to be removed after their one job.
 
 For macOS, cleanup releases the runner registration but keeps the reusable
-Scaleway host warm. The scheduled janitor deletes stale macOS pool hosts after
-the configured age threshold.
+physical Scaleway host warm. The scheduled janitor runs every six hours and
+deletes pool hosts once they are at least 26 hours old by default. A healthy
+schedule therefore normally reclaims a host about 26–32 hours after creation.
 
-For Windows, cleanup deletes the Scaleway machine in an `always()` cleanup job.
+For Windows, the current workflows release the ephemeral runner registration,
+power off the reusable physical instance in an `always()` cleanup job, and keep
+it in the pool for a later run. The janitor eventually deletes stale Windows
+pool hosts.
 
 There is also a scheduled janitor in the same workflow:
 
-- Windows runners older than 2 hours are deleted.
-- macOS runners older than 26 hours are deleted by default, because Scaleway
-  Apple Silicon servers can have a minimum allocation period.
+- Windows physical pool hosts at least 2 hours old are deleted.
+- macOS physical pool hosts at least 26 hours old are deleted by default,
+  because Scaleway Apple Silicon servers can have a minimum allocation period.
 
 If cleanup cannot delete a server, the local state is intentionally kept so
 `pnpm scaleway:stop` can be retried later.
@@ -105,5 +114,5 @@ If cleanup cannot delete a server, the local state is intentionally kept so
 To inspect the current native runner resources locally:
 
 ```bash
-pnpm scaleway:resources -- --mac-max 1 --windows-max 0
+pnpm scaleway:resources -- --mac-max 1 --windows-max 1
 ```
