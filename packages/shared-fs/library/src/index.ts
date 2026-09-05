@@ -1543,11 +1543,53 @@ const upsertSlotRow = (
 };
 
 const indexSlotRows = (rows: NamingLike[]): SlotSweepBucket => {
-    const bucket: SlotSweepBucket = new Map();
+    // Bulk fills can contain arbitrarily long same-name histories. Index
+    // those by id during construction: calling the dynamic array upsert
+    // for every row scans the growing history and makes a fill quadratic.
+    // Keep singletons inline, as in the retained cache, to avoid allocating
+    // a second Map for every name in the usual unique-name directory.
+    const grouped = new Map<string, NamingLike | Map<string, NamingLike>>();
     const namesById = new Map<string, string>();
     for (const row of rows) {
-        upsertSlotRow(bucket, row, namesById.get(row.id));
-        namesById.set(row.id, row.name);
+        const id = row.id;
+        const previousName = namesById.get(id);
+        if (previousName !== undefined && previousName !== row.name) {
+            const previous = grouped.get(previousName);
+            if (previous instanceof Map) {
+                previous.delete(id);
+                if (previous.size === 0) grouped.delete(previousName);
+            } else if (previous?.id === id) {
+                grouped.delete(previousName);
+            }
+        }
+        const value = grouped.get(row.name);
+        if (value === undefined) {
+            grouped.set(row.name, row);
+        } else if (value instanceof Map) {
+            // Map.set replaces in place: same-name replacements retain
+            // their position, while a move away/back appends at the end.
+            value.set(id, row);
+        } else if (value.id === id) {
+            grouped.set(row.name, row);
+        } else {
+            grouped.set(
+                row.name,
+                new Map([
+                    [value.id, value],
+                    [id, row],
+                ])
+            );
+        }
+        namesById.set(id, row.name);
+    }
+    const bucket: SlotSweepBucket = new Map();
+    for (const [name, value] of grouped) {
+        if (value instanceof Map) {
+            const history = [...value.values()];
+            bucket.set(name, history.length === 1 ? history[0] : history);
+        } else {
+            bucket.set(name, value);
+        }
     }
     return bucket;
 };
