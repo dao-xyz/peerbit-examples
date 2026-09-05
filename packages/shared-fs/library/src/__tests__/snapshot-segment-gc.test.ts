@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BlockStoreSafety } from "@peerbit/blocks-interface";
 import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -11,6 +12,46 @@ import {
 } from "../index.js";
 
 const HOUR_MS = 60 * 60 * 1000;
+
+const CALLER_EXCLUSIVE_BLOCK_STORE_SAFETY = Object.freeze({
+    referenceDomain: "caller-exclusive",
+    enforcedReclamation: "none",
+}) satisfies BlockStoreSafety;
+
+/**
+ * Peerbit deliberately exposes immutable safety metadata. These reclamation
+ * tests wrap the real block service so every operation still targets the real
+ * store while the fixture models a caller-exclusive factory declaration.
+ */
+const overrideBlockStoreSafety = (
+    peer: Peerbit,
+    safety: BlockStoreSafety | undefined
+) => {
+    const blocks = peer.services.blocks as any;
+    (peer.services as any).blocks = new Proxy(Object.create(null), {
+        get(overrides, property) {
+            if (property === "localStoreSafety") return safety;
+            if (Reflect.has(overrides, property)) {
+                return Reflect.get(overrides, property, overrides);
+            }
+            const value = Reflect.get(blocks, property, blocks);
+            return typeof value === "function" ? value.bind(blocks) : value;
+        },
+        set(overrides, property, value) {
+            return Reflect.set(overrides, property, value, overrides);
+        },
+        has(overrides, property) {
+            return Reflect.has(overrides, property) || property in blocks;
+        },
+        getPrototypeOf() {
+            return Object.getPrototypeOf(blocks);
+        },
+    });
+    return peer;
+};
+
+const declareCallerExclusiveBlockStore = (peer: Peerbit) =>
+    overrideBlockStoreSafety(peer, CALLER_EXCLUSIVE_BLOCK_STORE_SAFETY);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -65,7 +106,7 @@ describe("snapshot segment reclamation", () => {
 
     beforeEach(async () => {
         fakeNow = Date.now();
-        peer = await Peerbit.create();
+        peer = declareCallerExclusiveBlockStore(await Peerbit.create());
         fs = await openSharedFs({
             peerbit: peer,
             machineLabel: "segment-gc",
@@ -902,6 +943,67 @@ describe("snapshot segment reclamation", () => {
         expect(reopened).toBe(program);
     });
 
+    it("requires caller-exclusive service metadata in addition to store-exclusive access", async () => {
+        await peer.stop();
+        peer = await Peerbit.create();
+        expect(peer.services.blocks.localStoreSafety).toMatchObject({
+            referenceDomain: "block-service",
+            enforcedReclamation: "none",
+        });
+
+        await expect(
+            openSharedFs({
+                peerbit: peer,
+                machineLabel: "segment-reclaim-block-service-explicit",
+                blockStoreAccess: "store-exclusive",
+                snapshot: { segmentReclaim: {} },
+            })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+
+        // An implicit/default reclaim request stays usable but has no physical
+        // deletion plane when the service namespace is merely block-service.
+        fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "segment-reclaim-block-service-implicit",
+            blockStoreAccess: "store-exclusive",
+            snapshot: { disabled: true },
+            bootstrap: false,
+            gc: false,
+        });
+        const program: any = fs.program;
+        const blocksAny: any = program.node.services.blocks;
+        const loadSpy = vi.spyOn(program, "loadSegmentLedger");
+        const hasSpy = vi.spyOn(blocksAny, "has");
+        const rmSpy = vi.spyOn(blocksAny, "rm");
+        const rmManySpy =
+            typeof blocksAny.rmMany === "function"
+                ? vi.spyOn(blocksAny, "rmMany")
+                : undefined;
+        expect(await reap(fakeNow + 24 * HOUR_MS)).toEqual({
+            deleted: 0,
+            bytes: 0n,
+        });
+        expect(loadSpy).not.toHaveBeenCalled();
+        expect(hasSpy).not.toHaveBeenCalled();
+        expect(rmSpy).not.toHaveBeenCalled();
+        expect(rmManySpy?.mock.calls ?? []).toHaveLength(0);
+    });
+
+    it("treats missing service safety metadata as unknown", async () => {
+        await peer.stop();
+        peer = await Peerbit.create();
+        overrideBlockStoreSafety(peer, undefined);
+
+        await expect(
+            openSharedFs({
+                peerbit: peer,
+                machineLabel: "segment-reclaim-metadata-absent",
+                blockStoreAccess: "store-exclusive",
+                snapshot: { segmentReclaim: {} },
+            })
+        ).rejects.toThrow(/received "unknown"/);
+    });
+
     it("preflights unsafe reclaim before helper reuse or address registration", async () => {
         const program: any = fs.program;
         const address = program.address.toString();
@@ -979,7 +1081,7 @@ describe("snapshot segment reclamation", () => {
 
     it("never reaps a shared store while a publisher is paused after block put", async () => {
         await peer.stop();
-        peer = await Peerbit.create();
+        peer = declareCallerExclusiveBlockStore(await Peerbit.create());
         fs = await openSharedFs({
             peerbit: peer,
             machineLabel: "segment-reclaim-shared-race",
@@ -1062,7 +1164,7 @@ describe("snapshot segment reclamation", () => {
     it("clamps a sub-floor grace with a warning", async () => {
         const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
         await peer.stop();
-        peer = await Peerbit.create();
+        peer = declareCallerExclusiveBlockStore(await Peerbit.create());
         fs = await openSharedFs({
             peerbit: peer,
             machineLabel: "segment-gc-floor",
