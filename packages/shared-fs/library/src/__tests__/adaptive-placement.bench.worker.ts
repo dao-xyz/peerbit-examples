@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deserialize } from "@dao-xyz/borsh";
+import { PublicSignKey } from "@peerbit/crypto";
 import { Documents } from "@peerbit/document";
 import { Peerbit } from "peerbit";
 import {
@@ -24,6 +26,7 @@ import {
     createPlacementStopTrace,
     observePlacementStopMethods,
 } from "./adaptive-placement-stop-trace.js";
+import { capturePlacementPeerReadiness } from "./adaptive-placement-peer-readiness.js";
 
 const config: PlacementConfig = JSON.parse(process.argv[2]);
 assert(
@@ -35,6 +38,7 @@ assert(config.mode === "full" || config.mode === "adaptive");
 assert(config.minCopies === 2 || config.minCopies === 3);
 assert(Number.isSafeInteger(config.generation) && config.generation > 0);
 assert(typeof config.profile === "boolean");
+assert(typeof config.peerReadinessDiagnostics === "boolean");
 const send = (message: unknown) =>
     new Promise<void>((resolve, reject) => {
         assert(process.send);
@@ -160,6 +164,11 @@ const main = async () => {
     const metadataEntries: any[] = [];
     const metadataLogAddress = metadata.log.address;
     const chunksLogAddress = chunks.log.address;
+    let currentWritePlane: "chunks" | "metadata" | undefined;
+    let failedWrite:
+        | { plane: "chunks" | "metadata"; committedEntryHash?: string }
+        | undefined;
+    let peerReadinessCaptured = false;
     type StopTrace = ReturnType<typeof createPlacementStopTrace>;
     let tracedStopRequests = 0;
     let activeStopTrace: { request: number; trace: StopTrace } | undefined;
@@ -247,6 +256,79 @@ const main = async () => {
             return { connected: localPeer.libp2p.getConnections().length };
         }
         if (command.type === "snapshot") return snapshot(command.verify);
+        if (command.type === "peer-readiness") {
+            assert(config.peerReadinessDiagnostics && role === "publisher");
+            assert(
+                !peerReadinessCaptured,
+                "peer-only capture is once per worker"
+            );
+            peerReadinessCaptured = true;
+            assert(
+                Array.isArray(command.candidates) &&
+                    command.candidates.length <= 5
+            );
+            const candidates = command.candidates.map((candidate) => {
+                assert(
+                    Number.isSafeInteger(candidate.generation) &&
+                        candidate.generation > 0
+                );
+                assert(
+                    typeof candidate.hash === "string" &&
+                        candidate.hash.length > 0 &&
+                        candidate.hash.length <= 512
+                );
+                assert(
+                    typeof candidate.publicKey === "string" &&
+                        candidate.publicKey.length > 0 &&
+                        candidate.publicKey.length <= 512
+                );
+                const bytes = Buffer.from(candidate.publicKey, "base64");
+                assert.equal(bytes.toString("base64"), candidate.publicKey);
+                const key = deserialize(bytes, PublicSignKey);
+                assert.equal(key.hashcode(), candidate.hash);
+                return { peer: candidate.peer, key };
+            });
+            // This command stays in the normal owned queue. A parent IPC
+            // timeout does not detach it: stop remains queued behind all probes
+            // and retains the original stop/exit failure deadlines.
+            const records = await capturePlacementPeerReadiness({
+                observerHash: localPeer.identity.publicKey.hashcode(),
+                candidates,
+                logs: [
+                    {
+                        plane: "chunks",
+                        log: chunks.log,
+                        ...(failedWrite?.plane === "chunks"
+                            ? {
+                                  committedEntryHash:
+                                      failedWrite.committedEntryHash,
+                              }
+                            : {}),
+                    },
+                    {
+                        plane: "metadata",
+                        log: metadata.log,
+                        ...(failedWrite?.plane === "metadata"
+                            ? {
+                                  committedEntryHash:
+                                      failedWrite.committedEntryHash,
+                              }
+                            : {}),
+                    },
+                ],
+            });
+            return {
+                clock: "writer-process.performance.now",
+                semantics: "peer-only-non-atomic-advisory",
+                failedWrite: failedWrite ?? null,
+                records: records.map((record) => ({
+                    ...record,
+                    remoteGeneration: command.candidates.find(
+                        (candidate) => candidate.peer === record.peer
+                    )!.generation,
+                })),
+            };
+        }
         if (command.type === "budget") {
             assert(
                 config.mode === "adaptive" &&
@@ -259,6 +341,8 @@ const main = async () => {
             return snapshot();
         }
         if (command.type === "write") {
+            currentWritePlane = "chunks";
+            failedWrite = undefined;
             assert(role === "publisher" && !config.offline);
             assert(
                 command.files.length === 1,
@@ -286,6 +370,7 @@ const main = async () => {
                 const before = performance.now();
                 // No metadata publication until every referenced chunk has
                 // returned its actual persisted receipt, not just readiness.
+                currentWritePlane = "metadata";
                 const result = await metadata.put(fixture.manifest, {
                     delivery: {
                         reliability: "persisted",
@@ -303,6 +388,7 @@ const main = async () => {
                     totalMs: performance.now() - started,
                 });
             }
+            currentWritePlane = undefined;
             return { timings };
         }
         if (command.type === "barrier") {
@@ -503,11 +589,26 @@ const main = async () => {
                             process.disconnect(); // natural exit is independently required by the parent
                         }
                     } catch (error) {
+                        const evidence = errorInfo(error);
+                        if (
+                            message.command.type === "write" &&
+                            currentWritePlane
+                        ) {
+                            failedWrite = {
+                                plane: currentWritePlane,
+                                ...(evidence.committedHashes?.length === 1
+                                    ? {
+                                          committedEntryHash:
+                                              evidence.committedHashes[0],
+                                      }
+                                    : {}),
+                            };
+                        }
                         await reply(
                             {
                                 request: message.request,
                                 ok: false,
-                                error: errorInfo(error),
+                                error: evidence,
                                 profile: profileSnapshot(),
                                 context: {
                                     peer: config.peer,
@@ -546,6 +647,13 @@ const main = async () => {
         generation: config.generation,
         pid: process.pid,
         hash: localPeer.identity.publicKey.hashcode(),
+        ...(config.peerReadinessDiagnostics
+            ? {
+                  publicKey: Buffer.from(
+                      localPeer.identity.publicKey.bytes
+                  ).toString("base64"),
+              }
+            : {}),
         addresses: localPeer.getMultiaddrs().map(String),
         modules,
         node: process.version,

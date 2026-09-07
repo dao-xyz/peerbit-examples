@@ -108,10 +108,18 @@ Full state directory: `/var/folders/72/dk60kcw10b52qqc0bj_yz2tm0000gn/T/peerbit-
 Adaptive state directory: `/var/folders/72/dk60kcw10b52qqc0bj_yz2tm0000gn/T/peerbit-placement-adaptive-uUqNZO`.
 Both remain retained. No source disposal or physical reclamation was performed.
 
-The next diagnostic must be a separately labeled revision, never a replacement
-for these failures: bind explicit observer/candidate keys and log planes to a
-bounded public readiness snapshot for the exact committed entry, without a
-recovery waiter, unsafe write replay or extension of the acceptance deadline.
-The current public getter has no signal/timeout option; any asynchronous
-entry-planning probe must keep ownership through cleanup rather than leave
-unobserved work behind. Readiness cannot substitute for persisted receipts.
+The next diagnostic is a separately labeled revision, never a replacement for
+these failures: inspect each explicit candidate's actual public key on the
+writer's chunk log and separately on its metadata log, passing only
+`{ diagnostics: true }`. Record the exact committed entry as contextual evidence
+on the matching plane, not as a getter argument. Keep every inspection owned
+through cleanup, without a recovery waiter, write replay or deadline extension.
+
+Upstream corrected the earlier exact-entry proposal: supplying `entries` invokes
+fresh leader planning that can query providers, warm subscriber caches and do
+index/planner work. It is **not** strictly passive. A future exact-entry probe
+must be labeled active planning, use the corresponding log's actual entry and
+total leader-plan degree, and never reuse a chunk entry for another log. The
+public getter has no signal/timeout option. Peer-only inspection can memoize an
+opaque generation; its status and attached diagnostics are not atomic.
+Readiness cannot substitute for persisted receipts.

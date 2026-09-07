@@ -120,6 +120,15 @@ export type PlacementCommand =
     | { type: "write"; files: number[]; chunkBytes: number }
     | { type: "snapshot"; verify?: boolean }
     | { type: "profile" }
+    | {
+          type: "peer-readiness";
+          candidates: {
+              peer: number;
+              generation: number;
+              hash: string;
+              publicKey: string;
+          }[];
+      }
     | { type: "read"; files: number[]; chunkBytes: number; remote: boolean }
     | { type: "budget"; bytes: number }
     | { type: "barrier" }
@@ -135,4 +144,5 @@ export type PlacementConfig = {
     minCopies: 2 | 3;
     generation: number;
     profile: boolean;
+    peerReadinessDiagnostics: boolean;
 };

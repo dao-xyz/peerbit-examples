@@ -48,6 +48,8 @@ const plan = placementPlan(
 const { minCopies, budgets, initialCustodians, joiningPeer, survivors } = plan;
 const profiled =
     process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_PROFILE === "1";
+const peerReadinessDiagnostics =
+    process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_PEER_READINESS === "1";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type StopAttempt = {
     attempt: number;
@@ -383,6 +385,7 @@ const sourceHashes = async () =>
                 "adaptive-placement-analysis.ts",
                 "adaptive-placement-telemetry.ts",
                 "adaptive-placement-stop-trace.ts",
+                "adaptive-placement-peer-readiness.ts",
                 "process-isolated-soak-storage.ts",
                 "../../../../../pnpm-lock.yaml",
             ].map(async (name) => [
@@ -436,6 +439,7 @@ manual(
                             minCopies,
                             generation: all.length + 1,
                             profile: profiled,
+                            peerReadinessDiagnostics,
                         },
                         (event) =>
                             log({ type: "shutdown-diagnostic", ...event })
@@ -741,6 +745,56 @@ manual(
                     aborted = true;
                     failure = error;
                     log({ type: "failure", error: errorInfo(error) });
+                    // Use only ready records already received for the current
+                    // processes. Never await an unfinished boot during failure
+                    // capture. Issue before the writer's inventory command so
+                    // both share the existing five-second checkpoint window.
+                    const writer = active.get(0);
+                    const peerOnlyCapture =
+                        peerReadinessDiagnostics && writer && !writer.exited
+                            ? (async () => {
+                                  try {
+                                      const candidates = identities
+                                          .filter((identity) => {
+                                              const worker = active.get(
+                                                  identity.peer
+                                              );
+                                              return (
+                                                  identity.peer !== 0 &&
+                                                  worker &&
+                                                  !worker.exited &&
+                                                  !worker.config.offline &&
+                                                  worker.config.generation ===
+                                                      identity.generation
+                                              );
+                                          })
+                                          .map((identity) => ({
+                                              peer: identity.peer,
+                                              generation: identity.generation,
+                                              hash: identity.hash,
+                                              publicKey: identity.publicKey,
+                                          }));
+                                      const result = await writer.request(
+                                          {
+                                              type: "peer-readiness",
+                                              candidates,
+                                          },
+                                          5_000
+                                      );
+                                      log({
+                                          type: "failure-peer-readiness",
+                                          result,
+                                      });
+                                  } catch (diagnosticError) {
+                                      // IPC timeout can include queue delay; it
+                                      // is not a getter failure or readiness state.
+                                      log({
+                                          type: "failure-peer-readiness-unavailable",
+                                          error: errorInfo(diagnosticError),
+                                      });
+                                  }
+                              })()
+                            : undefined;
                     const snapshots = await Promise.allSettled(
                         [...active.values()]
                             .filter((worker) => !worker.exited)
@@ -786,6 +840,7 @@ manual(
                                 : { error: errorInfo(result.reason) }
                         ),
                     });
+                    await peerOnlyCapture;
                 } finally {
                     aborted = true;
                     if (timeout) clearTimeout(timeout);
@@ -836,6 +891,7 @@ manual(
                     minCopies,
                     topology: plan,
                     profiled,
+                    peerReadinessDiagnostics,
                     ok: !failure,
                     hashes,
                     identities,
@@ -860,6 +916,7 @@ manual(
                         "retained directories are evidence; no physical reclamation tested",
                         "small sample, not reliable p95/p99 or throughput scaling evidence",
                         "profile durations can overlap or nest; sums are not CPU time or wall-clock critical paths",
+                        "peer-only readiness snapshots are non-atomic and advisory; no entry planning, recovery or durability proof",
                         "shutdown command includes queue wait, peer stop, disk scan and IPC; command timeout alone does not identify the pending phase",
                     ],
                 };
