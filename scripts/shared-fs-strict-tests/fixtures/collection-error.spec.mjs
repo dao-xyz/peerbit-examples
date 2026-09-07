@@ -1,0 +1,1 @@
+throw new Error("ORIGINAL_COLLECTION_ERROR_STACK");

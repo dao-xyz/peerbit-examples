@@ -29,6 +29,10 @@ import {
     type Query,
 } from "@peerbit/document";
 import {
+    UNKNOWN_BLOCK_STORE_SAFETY,
+    type BlockStoreSafety,
+} from "@peerbit/blocks-interface";
+import {
     Program,
     type ProgramClient,
     type ProgramInitializationOptions,
@@ -539,7 +543,57 @@ export type BootstrapTelemetryEvent =
       }
     | { type: "aborted"; atMs: number; reason: string };
 
-/** Caller-supplied physical block-store ownership contract for reclamation. */
+/**
+ * Advisory SharedLog diagnostics emitted while the filesystem's Documents
+ * program opens. Shared FS forwards only `sharedLog.open.*` phase spans and
+ * `sharedLog.blocks.resolveProviders` spans. The latter may occur more than
+ * once during one open.
+ */
+export type SharedFsOpenProfileEvent = Readonly<{
+    name: `sharedLog.open.${string}` | "sharedLog.blocks.resolveProviders";
+    component?: string;
+    durationMs?: number;
+    count?: number;
+    entries?: number;
+    symbols?: number;
+    messages?: number;
+    bytes?: number;
+    targets?: number;
+    cacheHit?: boolean;
+    peer?: string;
+    traceId?: string;
+    syncId?: string;
+    details?: Readonly<Record<string, string | number | boolean | undefined>>;
+}>;
+
+type SharedFsSyncProfileEvent = Omit<SharedFsOpenProfileEvent, "name"> & {
+    name: string;
+};
+
+const isSharedFsOpenProfileEvent = (
+    event: SharedFsSyncProfileEvent
+): event is SharedFsOpenProfileEvent =>
+    event.name.startsWith("sharedLog.open.") ||
+    event.name === "sharedLog.blocks.resolveProviders";
+
+const emitSharedFsOpenProfile = (
+    callback: ((event: SharedFsOpenProfileEvent) => void) | undefined,
+    event: SharedFsOpenProfileEvent
+) => {
+    try {
+        const result = callback?.(event) as unknown;
+        if (
+            result &&
+            typeof (result as PromiseLike<unknown>).then === "function"
+        ) {
+            void Promise.resolve(result).catch(() => {});
+        }
+    } catch {
+        // Diagnostics must never influence open, replication, or safety.
+    }
+};
+
+/** Caller assertion paired with blocks-service safety metadata for reclamation. */
 export type BlockStoreAccess = "store-exclusive" | "shared" | "unknown";
 
 export type SharedFsOpenArgs = {
@@ -592,12 +646,11 @@ export type SharedFsOpenArgs = {
      */
     allowPartialWrites?: boolean;
     /**
-     * Concurrency contract for the physical block store. Snapshot segment
-     * deletion is enabled only when this open is the sole owner, publisher,
-     * and reaper of every snapshot segment it may delete, across every active
-     * or inactive program instance and process for its full lifetime. `shared`
-     * and the default `unknown` keep snapshot publication available but
-     * disable physical segment reclamation.
+     * Caller assertion for the physical block store. Snapshot segment deletion
+     * additionally requires the blocks service to report
+     * `localStoreSafety.referenceDomain: "caller-exclusive"`; this option alone
+     * never authorizes deletion. `shared` and the default `unknown` keep
+     * snapshot publication available but disable physical reclamation.
      */
     blockStoreAccess?: BlockStoreAccess;
     /** Snapshot publication policy for trusted full replicas. */
@@ -612,6 +665,8 @@ type SharedFsInternalOpenArgs = SharedFsOpenArgs & {
     writeReadinessSettleMs?: number;
     /** openSharedFs-only callback; never serialized into the program. */
     bootstrapTelemetry?: (event: BootstrapTelemetryEvent) => void;
+    /** openSharedFs-only callback; never serialized into the program. */
+    openProfileTelemetry?: (event: SharedFsOpenProfileEvent) => void;
 };
 
 export type BootstrapOptions = {
@@ -641,10 +696,11 @@ export type SnapshotPublishOptions = {
      * joiner may still be fetching a manifest up to that old — the cap must
      * be fleet-consistent or a joiner with a larger one can select a
      * manifest whose segments were already reaped and fall back to log
-     * replication). Physical deletion additionally requires
-     * `blockStoreAccess: "store-exclusive"`; shared and unknown stores are
-     * disabled, and an explicit reclaim object then fails. `false` disables
-     * reclamation entirely.
+     * replication). Physical deletion additionally requires both
+     * `blockStoreAccess: "store-exclusive"` and blocks-service metadata with
+     * `referenceDomain: "caller-exclusive"`. Unsafe or absent metadata disables
+     * implicit reclamation and makes an explicit reclaim object fail. `false`
+     * disables reclamation entirely.
      */
     segmentReclaim?: false | { graceMs?: number };
 };
@@ -847,6 +903,12 @@ export type OpenSharedFsOptions = SharedFsOpenArgs & {
     /** Optional inline, non-awaited cold-join timing and phase diagnostics. */
     telemetry?: {
         bootstrap?: (event: BootstrapTelemetryEvent) => void;
+        /**
+         * SharedLog open spans and provider-resolution spans. The callback is
+         * released when Documents.open settles and is never retained for
+         * steady-state synchronization.
+         */
+        openProfile?: (event: SharedFsOpenProfileEvent) => void;
     };
 };
 
@@ -1095,8 +1157,16 @@ export class SharedFsError extends Error {
     }
 }
 
+const localBlockStoreSafety = (node: unknown): BlockStoreSafety =>
+    (
+        node as {
+            services?: { blocks?: { localStoreSafety?: BlockStoreSafety } };
+        }
+    )?.services?.blocks?.localStoreSafety ?? UNKNOWN_BLOCK_STORE_SAFETY;
+
 const validateBlockStoreAccess = (
-    args?: SharedFsOpenArgs
+    args: SharedFsOpenArgs | undefined,
+    safety: BlockStoreSafety
 ): BlockStoreAccess => {
     const access = args?.blockStoreAccess ?? "unknown";
     if (
@@ -1117,6 +1187,16 @@ const validateBlockStoreAccess = (
         throw new SharedFsError(
             "EINVAL",
             'snapshot.segmentReclaim requires blockStoreAccess: "store-exclusive"; shared or unknown block stores cannot safely delete snapshot segments. Use snapshot.segmentReclaim: false or assert that this open is the sole owner, publisher, and reaper of every snapshot segment it may delete across all active or inactive program instances and processes for its full lifetime.'
+        );
+    }
+    if (
+        args?.snapshot?.segmentReclaim !== undefined &&
+        args.snapshot.segmentReclaim !== false &&
+        safety.referenceDomain !== "caller-exclusive"
+    ) {
+        throw new SharedFsError(
+            "EINVAL",
+            `snapshot.segmentReclaim requires peer.services.blocks.localStoreSafety.referenceDomain: "caller-exclusive"; received ${JSON.stringify(safety.referenceDomain)}. blockStoreAccess: "store-exclusive" is only a caller assertion and cannot make a shared, block-service, or unknown physical namespace safe to delete from.`
         );
     }
     return access;
@@ -2030,6 +2110,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private changeListener: ((event: any) => void) | undefined;
     /** Memoized isTrusted verdicts; see canPerformEntry. */
     private trustVerdicts = new Map<string, { ok: boolean; at: number }>();
+    /** Invalidates verdicts still being computed when the trust graph changes. */
+    private trustVerdictEpoch = 0;
     private trustChangeListener: (() => void) | undefined;
     /** Serializes writeBatch calls; see the writeBatch docstring. */
     private writeBatchChain: Promise<unknown> = Promise.resolve();
@@ -2157,8 +2239,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private gcRng: () => number = Math.random;
     /**
      * Serializes every snapshot block-store mutation on this program. The
-     * store-exclusive contract excludes other program instances; this chain
-     * closes the remaining same-instance publish-versus-reap race.
+     * caller assertion plus caller-exclusive service metadata excludes other
+     * program instances; this chain closes the remaining same-instance
+     * publish-versus-reap race.
      */
     private snapshotBlockStoreChain: Promise<unknown> = Promise.resolve();
     private segmentLedgerChain: Promise<unknown> = Promise.resolve();
@@ -2281,8 +2364,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // ProgramHandler registers a program during super.beforeOpen(). Reject
         // unsafe reclaim first so an address-loaded instance never poisons
         // the handler cache or enters partially initialized cleanup.
-        validateBlockStoreAccess(options?.args);
+        validateBlockStoreAccess(options?.args, localBlockStoreSafety(node));
         await super.beforeOpen(node, options);
+    }
+
+    private detachTrustChangeListener() {
+        if (this.trustChangeListener && this.trustGraph) {
+            this.trustGraph.trustGraph.events.removeEventListener(
+                "change",
+                this.trustChangeListener
+            );
+            this.trustChangeListener = undefined;
+        }
     }
 
     private beginLifecycleRequest(kind: "open" | "close"): number {
@@ -2320,13 +2413,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
-        if (this.trustChangeListener && this.trustGraph) {
-            this.trustGraph.trustGraph.events.removeEventListener(
-                "change",
-                this.trustChangeListener
-            );
-            this.trustChangeListener = undefined;
-        }
+        // Trust invalidation remains active while admitted appends drain.
+        // Detach it only when the owning open generation actually retires.
         if (this.guardFlushTimer) {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
@@ -2381,7 +2469,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         // Validate before beginning a lifecycle request. A rejected unsafe
         // reclaim configuration must leave this program immediately reusable.
-        validateBlockStoreAccess(args);
+        validateBlockStoreAccess(args, localBlockStoreSafety(this.node));
         const requestGeneration = this.beginLifecycleRequest("open");
         this.lifecycleRequestedState = "opening";
         try {
@@ -2463,6 +2551,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // existing address must never inherit a stale ready bit from a prior
         // open generation. No caller can race a mutation through this gate.
         const openGeneration = (this.openGeneration || 0) + 1;
+        this.detachTrustChangeListener();
         this.openGeneration = openGeneration;
         this.maintenanceAbortController = new AbortController();
         this.bootstrapTelemetry = internalArgs?.bootstrapTelemetry;
@@ -2577,6 +2666,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.disposalPreparationRunning = false;
         this.disposalPreparationRunningGeneration = undefined;
         this.trustVerdicts = new Map();
+        this.trustVerdictEpoch = (this.trustVerdictEpoch ?? 0) + 1;
         this.pendingGuardVersions = new Map();
         this.pendingGuardNaming = new Map();
         this.guardIngestTasks = new Set();
@@ -2656,28 +2746,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearTimeout(this.guardFlushTimer);
             this.guardFlushTimer = undefined;
         }
-        // ANY trust-graph change flushes every memoized verdict, so
-        // revocations apply with zero added latency and newly trusted
-        // writers stop paying the negative-verdict TTL. Deduped like the
-        // entries change listener below.
+        // ANY current-generation trust-graph change invalidates cached AND
+        // pending verdicts, including during entries.open replay. This adds
+        // no stale-cache window to revocation; it is not a globally atomic
+        // revocation barrier. Deduped like the entries change listener below.
         if (this.trustGraph) {
-            if (this.trustChangeListener) {
-                this.trustGraph.trustGraph.events.removeEventListener(
-                    "change",
-                    this.trustChangeListener
-                );
-            }
-            const trustLifecycleRequestGeneration =
-                this.lifecycleRequestGeneration;
+            this.detachTrustChangeListener();
+            const trustOpenGeneration = this.openGeneration;
             const trustChangeListener = () => {
                 if (
                     this.trustChangeListener !== trustChangeListener ||
-                    trustLifecycleRequestGeneration !==
-                        this.lifecycleRequestGeneration ||
-                    this.writeReadinessLifecycleBlocked
+                    trustOpenGeneration !== this.openGeneration
                 ) {
                     return;
                 }
+                this.trustVerdictEpoch++;
                 this.trustVerdicts.clear();
                 if (this.disposalPreparationRunning) {
                     this.disposalContentGeneration++;
@@ -2803,7 +2886,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
               }
             : undefined;
         const freshOpenSyncProfile = captureFreshOpenEvidence
-            ? (event: { name: string }) => {
+            ? (event: SharedFsSyncProfileEvent) => {
                   if (
                       event.name !== "log.joinPreparedFacts.change" &&
                       event.name !== "log.joinIndependent.change"
@@ -2819,13 +2902,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   duringOpenChangeHadMetadata = false;
               }
             : undefined;
+        const openProfileTelemetry = internalArgs?.openProfileTelemetry;
+        const entrySyncProfile =
+            freshOpenSyncProfile || openProfileTelemetry
+                ? (event: SharedFsSyncProfileEvent) => {
+                      // Readiness evidence is correctness-critical; classify it
+                      // before invoking the independently isolated diagnostic.
+                      freshOpenSyncProfile?.(event);
+                      if (
+                          openProfileTelemetry &&
+                          isSharedFsOpenProfileEvent(event)
+                      ) {
+                          emitSharedFsOpenProfile(openProfileTelemetry, event);
+                      }
+                  }
+                : undefined;
         // SharedLog retains this exact public SyncOptions object. Delete the
-        // temporary sink as soon as open resolves so steady-state replication
-        // pays no diagnostic timing/callback overhead.
+        // temporary composite sink as soon as open resolves so steady-state
+        // replication pays no diagnostic timing/callback overhead.
         const entrySyncOptions: {
             rawExchangeHeads: true;
-            profile?: (event: { name: string }) => void;
-        } = { rawExchangeHeads: true, profile: freshOpenSyncProfile };
+            profile?: (event: SharedFsSyncProfileEvent) => void;
+        } = { rawExchangeHeads: true, profile: entrySyncProfile };
         if (freshOpenListener) {
             this.entries.events.addEventListener("change", freshOpenListener);
         }
@@ -2877,9 +2975,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // never erase a future/user-owned replacement.
             const retainedSync = (this.entries.log as any)?._logProperties
                 ?.sync as
-                | { profile?: (event: { name: string }) => void }
+                | {
+                      profile?: (event: SharedFsSyncProfileEvent) => void;
+                  }
                 | undefined;
-            if (retainedSync && retainedSync.profile === freshOpenSyncProfile) {
+            if (retainedSync && retainedSync.profile === entrySyncProfile) {
                 delete retainedSync.profile;
             }
             duringOpenChangeHadMetadata = false;
@@ -3360,6 +3460,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async canPerformEntry(operation: any) {
+        const trustGraph = this.trustGraph;
+        const trustCache = this.trustVerdicts;
+        const trustEpoch = this.trustVerdictEpoch;
+        const trustListener = this.trustChangeListener;
+        const openGeneration = this.openGeneration;
+        // Close stops public admission but still drains owned appends. Fence
+        // pending trust checks at actual open retirement, not the request.
+        const trustCheckCurrent = () =>
+            this.trustGraph === trustGraph &&
+            this.trustVerdicts === trustCache &&
+            this.trustVerdictEpoch === trustEpoch &&
+            (!trustGraph ||
+                (trustListener !== undefined &&
+                    this.trustChangeListener === trustListener)) &&
+            this.openGeneration === openGeneration &&
+            this.lifecycleRequestedState !== "closed";
         // Structural, state-independent validation — acceptance must never
         // depend on replication order or local history.
         if (operation?.type === "put") {
@@ -3478,17 +3594,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
         }
-        if (!this.trustGraph) {
+        if (!trustCheckCurrent()) {
+            return false;
+        }
+        if (!trustGraph) {
             return true;
         }
         const keys = await operation.entry.getPublicKeys();
+        if (!trustCheckCurrent()) {
+            return false;
+        }
         const now = this.clock();
         for (const key of keys) {
             // Memoized trust verdicts: the trust-graph BFS runs per entry
             // on the replication ingest path, so a cold join pays it tens
             // of thousands of times for a handful of signers. Positive
             // verdicts live until ANY trust-graph change flushes the cache
-            // (revocations apply immediately); negatives expire quickly so
+            // (pending checks are also invalidated); negatives expire quickly so
             // a writer whose trust relation is still replicating gets
             // retried by the sender's retry schedule.
             const id = key.hashcode();
@@ -3502,7 +3624,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 continue;
             }
-            const ok = await this.trustGraph.isTrusted(key);
+            const ok = await trustGraph.isTrusted(key);
+            // A clear during the await must not be undone by its old result,
+            // nor may that result approve this admission. Fail closed once;
+            // a later admission evaluates fresh state without a retry loop.
+            if (!trustCheckCurrent()) {
+                return false;
+            }
             if (this.trustVerdicts.size > 10_000) {
                 this.trustVerdicts.clear();
             }
@@ -5231,11 +5359,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     })
                 );
             }
-            const referenced = new Set(version.parentVersionIds);
-            results[i] = this.versionInfo(versionRowOf(version), entry.path, [
-                versionRowOf(version),
-                ...currentHeads.filter((head) => !referenced.has(head.id)),
-            ]);
+            // A batch version supersedes every head captured above; there is
+            // no explicit-base override that could leave an old head here.
+            results[i] = this.versionInfo(version, entry.path, [version]);
         }
 
         const namingEvents = [
@@ -8352,6 +8478,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapTelemetryNow = undefined;
         // A later reopen creates a fresh generation only after all old state
         // writes have drained, so it cannot race a stale marker onto disk.
+        this.detachTrustChangeListener();
         this.openGeneration = (this.openGeneration || 0) + 1;
         this.writesReady = false;
         this.writeReadinessRequired = false;
@@ -12037,7 +12164,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             | false
             | { graceMs?: number }
             | undefined;
-        if (raw === false || this.blockStoreAccess !== "store-exclusive") {
+        if (
+            raw === false ||
+            this.blockStoreAccess !== "store-exclusive" ||
+            localBlockStoreSafety(this.node).referenceDomain !==
+                "caller-exclusive"
+        ) {
             return { enabled: false, graceMs: 0 };
         }
         const requested = raw?.graceMs ?? SEGMENT_RECLAIM_DEFAULT_GRACE_MS;
@@ -12691,6 +12823,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return Promise.resolve({ deleted: 0, bytes: 0n });
         }
         // Disabled/shared/unknown stores have no deletion plane to fence.
+        // A caller's store-exclusive assertion is insufficient unless the
+        // actual blocks service also declares a caller-exclusive namespace.
         // Return synchronously instead of waiting behind a publisher.
         if (!this.segmentReclaimSettings().enabled || !this.isFullReplica()) {
             return Promise.resolve({ deleted: 0, bytes: 0n });
@@ -14207,7 +14341,7 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
     }
     // Reject before loading/saving a program or entering ProgramHandler.
     // beforeOpen repeats this for callers that use Peerbit/Program directly.
-    validateBlockStoreAccess(options);
+    validateBlockStoreAccess(options, localBlockStoreSafety(options.peerbit));
     const args: SharedFsOpenArgs = {
         machineLabel: options.machineLabel,
         replicate: options.replicate,
@@ -14235,6 +14369,8 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
     ).writeReadinessSettleMs;
     (args as SharedFsInternalOpenArgs).bootstrapTelemetry =
         options.telemetry?.bootstrap;
+    (args as SharedFsInternalOpenArgs).openProfileTelemetry =
+        options.telemetry?.openProfile;
     // Test-only jitter rng rides along undocumented.
     (args as any).gcRng = (options as any).gcRng;
     const program = options.address

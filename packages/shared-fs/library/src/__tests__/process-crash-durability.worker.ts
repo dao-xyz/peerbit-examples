@@ -15,8 +15,9 @@ import {
     type ProcessCrashWorkerMessage,
 } from "./process-crash-durability.protocol.js";
 
-const WAIT_TIMEOUT_MS = process.env.CI ? 180_000 : 60_000;
-const PERSISTED_ENTRY_RECEIPTS_CAPABILITY = 1 << 5;
+// Deliberately fixed across local and CI runs; readiness regressions must fail
+// with their raw upstream status instead of receiving a platform multiplier.
+const WAIT_TIMEOUT_MS = 60_000;
 
 const scenario = process.argv[2];
 const root = process.argv[3];
@@ -136,25 +137,35 @@ const runFsyncScenario = async () => {
     await parkForParentKill();
 };
 
-const waitForRemoteReceiptCapability = async (
+const waitForRemoteReceiptReadiness = async (
     source: SharedFsHandle,
     remote: Peerbit,
-    log: any = source.program.entries.log
+    log: any = source.program.entries.log,
+    context: string = "entries"
 ) => {
-    await log.waitForReplicator(remote.identity.publicKey, {
-        roleAge: 0,
-        timeout: WAIT_TIMEOUT_MS,
-    });
-    const remoteHash = remote.identity.publicKey.hashcode();
-    await waitUntil(() => {
-        const capabilities = (
-            log as { _peerSyncCapabilities: Map<string, number> }
-        )._peerSyncCapabilities.get(remoteHash);
-        assert.equal(
-            (capabilities ?? 0) & PERSISTED_ENTRY_RECEIPTS_CAPABILITY,
-            PERSISTED_ENTRY_RECEIPTS_CAPABILITY
+    const entries = await log.log.toArray();
+    const replicas = log.replicas.min.getValue(log);
+    try {
+        await log.waitForPersistedReceiptPeerReadiness(
+            remote.identity.publicKey,
+            {
+                entries,
+                replicas,
+                timeout: WAIT_TIMEOUT_MS,
+            }
         );
-    });
+    } catch (error) {
+        const causeText =
+            error instanceof Error
+                ? (error.stack ?? `${error.name}: ${error.message}`)
+                : String(error);
+        throw new Error(
+            `Persisted-receipt readiness failed for ${context} remote ${remote.identity.publicKey.hashcode()}: ${
+                error instanceof Error ? error.message : String(error)
+            }\nOriginal upstream failure:\n${causeText}`,
+            { cause: error }
+        );
+    }
 };
 
 const expectManifestComplete = async (
@@ -343,12 +354,18 @@ const runMultiWriterDisposalScenario = async () => {
     });
 
     await Promise.all(
-        [peers[0], peers[1]].flatMap((remote) => [
-            waitForRemoteReceiptCapability(disposableWriter, remote),
-            waitForRemoteReceiptCapability(
+        [peers[0], peers[1]].flatMap((remote, remoteIndex) => [
+            waitForRemoteReceiptReadiness(
                 disposableWriter,
                 remote,
-                disposableWriter.program.trustGraph!.trustGraph.log
+                disposableWriter.program.entries.log,
+                `${remoteIndex === 0 ? "owner" : "writer-two"}/entries`
+            ),
+            waitForRemoteReceiptReadiness(
+                disposableWriter,
+                remote,
+                disposableWriter.program.trustGraph!.trustGraph.log,
+                `${remoteIndex === 0 ? "owner" : "writer-two"}/trust`
             ),
         ])
     );
