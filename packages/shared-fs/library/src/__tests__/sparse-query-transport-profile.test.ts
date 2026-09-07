@@ -621,6 +621,67 @@ describe("test-only sparse query transport profile", () => {
         expect(() => test.profile.stop()).not.toThrow();
     });
 
+    it("drains detached bounded windows while preserving listeners, clocks and lifetime counters", () => {
+        const test = fixture({ maxEvents: 1, maxIds: 1 });
+        expect(() => test.profile.takeWindow()).toThrow("armed");
+        test.source.pubsub.emit("data", {});
+        test.arm();
+        test.observer.pubsub.emit("publish", transport(id(1)));
+        test.observer.pubsub.emit("publish", transport(id(1)));
+        test.source.pubsub.emit("data", transport(id(2)));
+        const first = test.profile.takeWindow();
+        expect(first.events).toHaveLength(1);
+        expect(first.counters).toMatchObject({
+            preArmIgnored: 1,
+            duplicates: 1,
+            eventsDropped: 1,
+        });
+        expect(test.profile.snapshot().events).toEqual([]);
+        expect(test.source.pubsub.listenerCount()).toBe(2);
+        expect(test.sourceRpc.events.listenerCount()).toBe(2);
+        // The same ID after a drain is a new window-local boundary, not a
+        // duplicate. No chain is inferred between the returned windows.
+        test.observer.pubsub.emit("publish", transport(id(1)));
+        const second = test.profile.takeWindow();
+        expect(second.clockOriginMs).toBe(first.clockOriginMs);
+        expect(second.events).toHaveLength(1);
+        expect(second.events[0].atMs).toBeGreaterThanOrEqual(
+            first.events[0].atMs
+        );
+        expect(second.counters).toEqual(first.counters);
+        first.events[0].outerId = "mutated";
+        first.counters.duplicates = 999;
+        expect(second.events[0].outerId).not.toBe("mutated");
+        expect(test.profile.snapshot().counters.duplicates).toBe(1);
+        test.observer.pubsub.emit("publish", transport(id(3)));
+        expect(test.profile.takeWindow().events[0].outerId).toBe(
+            Buffer.from(id(3)).toString("base64")
+        );
+        test.profile.stop();
+        const stopped = test.profile.snapshot();
+        expect(() => test.profile.takeWindow()).toThrow("armed");
+        expect(test.profile.snapshot()).toEqual(stopped);
+    });
+
+    it("reports partial same-ID chains when a drain divides their boundaries", () => {
+        const test = fixture();
+        test.arm();
+        test.observer.pubsub.emit("publish", transport(id(1)));
+        const first = test.profile.takeWindow();
+        test.source.pubsub.emit("data", transport(id(1)));
+        test.sourceRpc.events.emit("request", decodedRequest(id(1)));
+        const second = test.profile.takeWindow();
+        expect(first.events.map((event) => event.phase)).toEqual([
+            "pubsub.publish",
+        ]);
+        expect(second.events.map((event) => event.phase)).toEqual([
+            "pubsub.data",
+            "rpc.request",
+        ]);
+        expect(second.counters.duplicates).toBe(0);
+        test.profile.stop();
+    });
+
     it("drops malformed optional metadata but never inspects IDs on unknown request classes", () => {
         const test = fixture({ maxIds: 1 });
         test.arm();

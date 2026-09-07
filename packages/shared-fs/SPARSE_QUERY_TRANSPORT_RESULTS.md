@@ -85,3 +85,5 @@ Artifact prefix: `/private/tmp/peerbit-sparse-transport-20260907-`.
 The upstream task **Investigate bounded shared-log state** supplied the public-hook guidance, confirmed the missing request/response correlation field, and received the exact first-sample evidence. Its advice to omit the optional object-identity bridge was followed.
 
 The next useful downstream diagnostic is a bounded slow-query summary during the later scan, with matched one-way transport chains retained only for a bounded window. More source-handler attribution would require a separately reviewed public correlation addition. These findings do not justify changing cache/custody policy or removing readiness. Release adoption and unchanged N=3/three-OS acceptance remain separate work; the sparse observer still provides no independent metadata-authorization proof.
+
+Follow-up: [the bounded scan report](SPARSE_QUERY_SCAN_RESULTS.md) covers every scan query, a test-profiler async-context cleanup, and two distinct slow-open regions. It preserves pre-cleanup evidence and makes no production speedup claim.

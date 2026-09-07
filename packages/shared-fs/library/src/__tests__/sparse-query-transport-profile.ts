@@ -282,6 +282,20 @@ export class SparseQueryTransportProfile {
             );
     }
 
+    /** Drain one bounded temporal window, never restart a stopped recorder.
+     * Clock and lifetime counters remain continuous. Duplicate detection is
+     * window-local; a message crossing a drain may have an incomplete chain.
+     */
+    takeWindow() {
+        if (!this.armed || this.stopped)
+            throw new Error("Passive profile must be armed to drain a window");
+        const window = this.snapshot();
+        this.events.length = 0;
+        this.ids.clear();
+        this.boundaries.clear();
+        return window;
+    }
+
     snapshot() {
         return {
             clockOriginMs: this.clockOriginMs,

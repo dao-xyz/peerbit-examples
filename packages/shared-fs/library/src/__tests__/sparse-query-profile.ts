@@ -121,6 +121,7 @@ export class SparseQueryProfile {
     }
 
     async measure<T>(label: string, fn: () => Promise<T>): Promise<T> {
+        if (this.stopped) return fn();
         const operation = { operationId: ++this.operationId, label };
         return this.operations.run(operation, async () => {
             const start = performance.now();
@@ -274,7 +275,11 @@ export class SparseQueryProfile {
     }
 
     stop(): void {
+        if (this.stopped) return;
         this.stopped = true;
+        // Each scan window owns an instance. Release it when finished rather
+        // than keeping retired instances registered with Node's async context.
+        this.operations.disable();
     }
 
     snapshot(): {

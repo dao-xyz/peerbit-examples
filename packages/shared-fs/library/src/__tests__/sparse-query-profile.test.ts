@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { StringMatch } from "@peerbit/document";
 import { describe, expect, it, vi } from "vitest";
 import { SparseQueryProfile } from "./sparse-query-profile.js";
@@ -92,6 +93,37 @@ const deferred = () => {
 };
 
 describe("test-only sparse query phase profile", () => {
+    it("releases async context once and never reactivates it after stop", async () => {
+        const disable = vi.spyOn(AsyncLocalStorage.prototype, "disable");
+        const run = vi.spyOn(AsyncLocalStorage.prototype, "run");
+        try {
+            const profile = new SparseQueryProfile({ source });
+            const value = {};
+            expect(await profile.measure("active", async () => value)).toBe(
+                value
+            );
+            expect(run).toHaveBeenCalledTimes(1);
+            profile.stop();
+            profile.stop();
+            expect(disable).toHaveBeenCalledTimes(1);
+            const snapshot = profile.snapshot();
+            expect(await profile.measure("stopped", async () => value)).toBe(
+                value
+            );
+            const original = new Error("Original failure");
+            await expect(
+                profile.measure("stopped-error", async () => {
+                    throw original;
+                })
+            ).rejects.toBe(original);
+            expect(run).toHaveBeenCalledTimes(1);
+            expect(profile.snapshot()).toEqual(snapshot);
+        } finally {
+            disable.mockRestore();
+            run.mockRestore();
+        }
+    });
+
     it("forwards options, values, receivers and other iterator methods without mutating the originals", async () => {
         const fake = fixture();
         const profile = new SparseQueryProfile({ source });

@@ -4,11 +4,14 @@ import { afterEach, expect, it } from "vitest";
 import { openSharedFs, type SharedFsHandle } from "../index.js";
 import { SparseQueryClient } from "./sparse-query-client.js";
 import { SparseQueryProfile } from "./sparse-query-profile.js";
+import { SparseQueryScanProfile } from "./sparse-query-scan-profile.js";
 import { SparseQueryTransportProfile } from "./sparse-query-transport-profile.js";
 
 const peers: Peerbit[] = [];
 let firstOperationProfile: SparseQueryProfile | undefined;
 let firstTransportProfile: SparseQueryTransportProfile | undefined;
+let lateScanProfile: SparseQueryScanProfile | undefined;
+let lateScanTransport: SparseQueryTransportProfile | undefined;
 let profileContext: Record<string, unknown> | undefined;
 afterEach(async () => {
     const errors: unknown[] = [];
@@ -32,6 +35,16 @@ afterEach(async () => {
             firstTransportProfile,
             "same-process public boundaries; exact one-way outer-ID chains only; no request-response pairing or wire/handler-time proof",
         ],
+        [
+            "shared-fs.sparse-query-scan-profile",
+            lateScanProfile,
+            "all scan queries summarized; top eight temporal file windows plus first failure retained; no request-response pairing or causal file attribution",
+        ],
+        [
+            "shared-fs.sparse-query-scan-transport-tail",
+            lateScanTransport,
+            "unassigned boundaries after last drained window; counters are lifetime cumulative; not another set of query timings",
+        ],
     ] as const) {
         if (!profile) continue;
         attempt(() => profile.stop());
@@ -48,6 +61,8 @@ afterEach(async () => {
     }
     firstOperationProfile = undefined;
     firstTransportProfile = undefined;
+    lateScanProfile = undefined;
+    lateScanTransport = undefined;
     profileContext = undefined;
     const results = await Promise.allSettled(
         peers.splice(0).map(async (peer) => peer.stop())
@@ -94,6 +109,10 @@ it(
             throw new Error("Sparse fixture files must be 32..10000");
         const transportEnabled =
             process.env.PEERBIT_SHARED_FS_SPARSE_TRANSPORT_PROFILE === "1";
+        const scanEnabled =
+            process.env.PEERBIT_SHARED_FS_SPARSE_SCAN_PROFILE === "1";
+        if (scanEnabled && !transportEnabled)
+            throw new Error("Scan profile requires transport profile");
         if (
             transportEnabled &&
             process.env.PEERBIT_SHARED_FS_SPARSE_PROFILE !== "1"
@@ -106,6 +125,18 @@ it(
             : undefined;
         firstTransportProfile = transportProfile;
         transportProfile?.attachPeer(sourcePeer, "source");
+        const scanTransport = scanEnabled
+            ? new SparseQueryTransportProfile({ maxEvents: 128, maxIds: 64 })
+            : undefined;
+        lateScanTransport = scanTransport;
+        scanTransport?.attachPeer(sourcePeer, "source");
+        const scanProfile = scanEnabled
+            ? new SparseQueryScanProfile({
+                  source: sourcePeer.identity.publicKey.hashcode(),
+                  transport: scanTransport,
+              })
+            : undefined;
+        lateScanProfile = scanProfile;
         const profile =
             process.env.PEERBIT_SHARED_FS_SPARSE_PROFILE === "1"
                 ? new SparseQueryProfile({
@@ -159,6 +190,7 @@ it(
         const observerPeer = await Peerbit.create();
         peers.push(observerPeer);
         transportProfile?.attachPeer(observerPeer, "observer");
+        scanTransport?.attachPeer(observerPeer, "observer");
         if (profileContext) {
             profileContext.observer =
                 observerPeer.identity.publicKey.hashcode();
@@ -220,6 +252,7 @@ it(
         );
         const openMs = performance.now() - openStart;
         transportProfile?.arm(source.program.entries, observer.program.entries);
+        scanTransport?.arm(source.program.entries, observer.program.entries);
         await measure("post-open-readiness", () =>
             observer.program.entries.waitFor(sourcePeer.identity.publicKey, {
                 timeout: 5_000,
@@ -233,10 +266,13 @@ it(
             logEntries: 0,
             ranges: 0,
         });
+        const initialEntries = profile
+            ? profile.wrap(observer.program.entries)
+            : observer.program.entries;
         const reader = new SparseQueryClient(
-            profile
-                ? profile.wrap(observer.program.entries)
-                : observer.program.entries,
+            scanProfile
+                ? scanProfile.wrap(observer.program.entries, initialEntries)
+                : initialEntries,
             sourcePeer.identity.publicKey.hashcode()
         );
         const firstStart = performance.now();
@@ -267,16 +303,69 @@ it(
         expect(reader.counters.cacheHits).toBe(1);
 
         const scan = Math.min(files, 128);
+        scanProfile?.begin();
         const scanStart = performance.now();
-        for (let i = 1; i < scan; i++) {
+        const scanFile = async (i: number) => {
             const slot = await reader.lookup(cold.nodeId!, `f-${i}.bin`);
             expect((await reader.readNode(slot.nodeId!)).bytes).toEqual(
                 payload(i)
             );
             expect(reader.cache.stats().bytes).toBeLessThanOrEqual(16 * 1024);
             expect(reader.cache.stats().entries).toBeLessThanOrEqual(4);
+        };
+        for (let i = 1; i < scan; i++) {
+            if (scanProfile) await scanProfile.measure(i, () => scanFile(i));
+            else await scanFile(i);
         }
         const scanMs = performance.now() - scanStart;
+        scanProfile?.stop();
+        scanTransport?.stop();
+        if (scanProfile) {
+            const report = scanProfile.snapshot();
+            expect(report.counters).toEqual({
+                completedWindows: scan - 1,
+                failedWindows: 0,
+                diagnosticErrors: 0,
+                phaseDropped: 0,
+                phaseObserverErrors: 0,
+            });
+            expect(report.windows).toHaveLength(8);
+            expect(report.firstFailure).toBeUndefined();
+            const perFile = {
+                "naming-slot": 1,
+                "naming-node": 2,
+                "versions-node": 1,
+                "chunk-id": 1,
+                unknown: 0,
+            };
+            for (const [kind, count] of Object.entries(perFile)) {
+                const aggregate =
+                    report.aggregates[kind as keyof typeof perFile];
+                expect(aggregate).toMatchObject({
+                    queries: count * (scan - 1),
+                    nextCalls: count * (scan - 1),
+                    nextRejected: 0,
+                    closeCalls: count * (scan - 1),
+                    closeRejected: 0,
+                });
+                expect(
+                    aggregate.nextBuckets.reduce((sum, value) => sum + value, 0)
+                ).toBe(count * (scan - 1));
+            }
+            // Also check the final stopped recorder: a late boundary between
+            // the last drain and stop belongs to the unassigned tail.
+            for (const counters of [
+                report.transportCounters,
+                scanTransport?.snapshot().counters,
+            ])
+                expect(counters).toMatchObject({
+                    eventsDropped: 0,
+                    idsDropped: 0,
+                    malformed: 0,
+                    duplicates: 0,
+                    captureErrors: 0,
+                });
+        }
         expect(reader.cache.stats().evictions).toBe(scan - 4);
         const scanCache = reader.cache.stats();
         expect(await residency(observerPeer, observer)).toEqual(before);
