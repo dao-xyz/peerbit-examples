@@ -3,9 +3,25 @@ import { Peerbit } from "peerbit";
 import { afterEach, expect, it } from "vitest";
 import { openSharedFs, type SharedFsHandle } from "../index.js";
 import { SparseQueryClient } from "./sparse-query-client.js";
+import { SparseQueryProfile } from "./sparse-query-profile.js";
 
 const peers: Peerbit[] = [];
+let firstOperationProfile: SparseQueryProfile | undefined;
+let profileContext: Record<string, unknown> | undefined;
 afterEach(async () => {
+    if (firstOperationProfile) {
+        firstOperationProfile.stop();
+        console.log(
+            JSON.stringify({
+                event: "shared-fs.sparse-query-profile",
+                context: profileContext,
+                profile: firstOperationProfile.snapshot(),
+                scope: "initial connection only; emitted before shutdown; no wire-arrival/server-time/remote-session attribution",
+            })
+        );
+        firstOperationProfile = undefined;
+        profileContext = undefined;
+    }
     const results = await Promise.allSettled(
         peers.splice(0).map((peer) => peer.stop())
     );
@@ -56,6 +72,41 @@ it(
             throw new Error("Sparse fixture files must be 32..10000");
         const sourcePeer = await Peerbit.create();
         peers.push(sourcePeer);
+        const profile =
+            process.env.PEERBIT_SHARED_FS_SPARSE_PROFILE === "1"
+                ? new SparseQueryProfile({
+                      source: sourcePeer.identity.publicKey.hashcode(),
+                      maxEvents: 512,
+                  })
+                : undefined;
+        firstOperationProfile = profile;
+        profileContext = profile
+            ? {
+                  schema: 1,
+                  files,
+                  source: sourcePeer.identity.publicKey.hashcode(),
+                  applicationGeneration: 0,
+                  platform: process.platform,
+                  arch: process.arch,
+                  node: process.version,
+                  readinessAPI:
+                      "entries.waitFor (unchanged from original probe)",
+                  queryOptions: {
+                      local: false,
+                      replicate: false,
+                      timeout: 5000,
+                      retries: false,
+                  },
+              }
+            : undefined;
+        const measure = <T>(label: string, fn: () => Promise<T>) =>
+            profile ? profile.measure(label, fn) : fn();
+        const openProfile = {
+            events: [] as Array<Record<string, unknown>>,
+            dropped: 0,
+            callbackErrors: 0,
+        };
+        if (profileContext) profileContext.openProfile = openProfile;
         const source = await openSharedFs({
             peerbit: sourcePeer,
             machineLabel: "sparse-source",
@@ -73,36 +124,99 @@ it(
 
         const observerPeer = await Peerbit.create();
         peers.push(observerPeer);
-        await observerPeer.dial(sourcePeer);
+        if (profileContext) {
+            profileContext.observer =
+                observerPeer.identity.publicKey.hashcode();
+            profileContext.address = source.address;
+        }
+        await measure("observer-dial", () => observerPeer.dial(sourcePeer));
         const openStart = performance.now();
-        const observer = await openSharedFs({
-            peerbit: observerPeer,
-            address: source.address,
-            machineLabel: "sparse-observer",
-            replicate: false,
-            bootstrap: false,
-        });
+        const observer = await measure("observer-open", () =>
+            openSharedFs({
+                peerbit: observerPeer,
+                address: source.address,
+                machineLabel: "sparse-observer",
+                replicate: false,
+                bootstrap: false,
+                ...(profile
+                    ? {
+                          telemetry: {
+                              openProfile: (event) => {
+                                  try {
+                                      if (openProfile.events.length >= 64) {
+                                          openProfile.dropped++;
+                                          return;
+                                      }
+                                      openProfile.events.push({
+                                          name: event.name.slice(0, 128),
+                                          durationMs: event.durationMs,
+                                          count: event.count,
+                                          entries: event.entries,
+                                          targets: event.targets,
+                                          cacheHit: event.cacheHit,
+                                          traceId: event.traceId?.slice(0, 128),
+                                          details: event.details
+                                              ? Object.fromEntries(
+                                                    Object.entries(
+                                                        event.details
+                                                    )
+                                                        .slice(0, 16)
+                                                        .map(([key, value]) => [
+                                                            key.slice(0, 128),
+                                                            typeof value ===
+                                                            "string"
+                                                                ? value.slice(
+                                                                      0,
+                                                                      128
+                                                                  )
+                                                                : value,
+                                                        ])
+                                                )
+                                              : undefined,
+                                      });
+                                  } catch {
+                                      openProfile.callbackErrors++;
+                                  }
+                              },
+                          },
+                      }
+                    : {}),
+            })
+        );
         const openMs = performance.now() - openStart;
-        await observer.program.entries.waitFor(sourcePeer.identity.publicKey, {
-            timeout: 5_000,
-        });
-        const before = await residency(observerPeer, observer);
+        await measure("post-open-readiness", () =>
+            observer.program.entries.waitFor(sourcePeer.identity.publicKey, {
+                timeout: 5_000,
+            })
+        );
+        const before = await measure("initial-residency", () =>
+            residency(observerPeer, observer)
+        );
         expect(before).toMatchObject({
             documents: 0,
             logEntries: 0,
             ranges: 0,
         });
         const reader = new SparseQueryClient(
-            observer.program.entries,
+            profile
+                ? profile.wrap(observer.program.entries)
+                : observer.program.entries,
             sourcePeer.identity.publicKey.hashcode()
         );
         const firstStart = performance.now();
-        const cold = await reader.lookup("root", "cold");
+        const cold = await measure("lookup-root-cold", () =>
+            reader.lookup("root", "cold")
+        );
         expect(cold.status).toBe("observed");
-        const selected = await reader.lookup(cold.nodeId!, "f-0.bin");
+        const selected = await measure("lookup-selected-slot", () =>
+            reader.lookup(cold.nodeId!, "f-0.bin")
+        );
         expect(selected.status).toBe("observed");
         const nodeId = selected.nodeId!;
-        const first = await reader.readNode(nodeId);
+        const first = await measure("read-selected-node", () =>
+            reader.readNode(nodeId)
+        );
+        profile?.stop();
         expect(first.status).toBe("observed");
         expect(first.bytes).toEqual(payload(0));
         expect(reader.counters.chunkFetches).toBe(1);

@@ -1,5 +1,7 @@
 # Sparse query client: read-only feasibility probe
 
+Follow-up: [2026-09-07 phase profiles](SPARSE_QUERY_PROFILE_RESULTS.md) captured one slow naming query before decoded response observation. Upstream messaging subsequently succeeded; the original delivery failure recorded below is historical.
+
 This is a **test-only prototype**, based on held integration `52386c31072931dc42f7b12b683734f59020ace1`. It does not change production mounts, writable readiness, replication defaults, the wire schema, authorization, dependency pins, or release gates.
 
 ## Outcome
@@ -54,6 +56,7 @@ Use the existing coherent installation. Do not install/dedupe or change dependen
 
 ```sh
 source /Users/marcuspousette/git/peerbit-examples/.envrc
+cd /private/tmp/peerbit-sparse-client-20260906
 pnpm exec vitest run --config scripts/shared-fs-strict-tests/vitest.config.mjs \
   packages/shared-fs/library/src/__tests__/sparse-query-cache.test.ts \
   packages/shared-fs/library/src/__tests__/sparse-query-client.test.ts \
