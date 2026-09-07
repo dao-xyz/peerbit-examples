@@ -4,36 +4,58 @@ import { afterEach, expect, it } from "vitest";
 import { openSharedFs, type SharedFsHandle } from "../index.js";
 import { SparseQueryClient } from "./sparse-query-client.js";
 import { SparseQueryProfile } from "./sparse-query-profile.js";
+import { SparseQueryTransportProfile } from "./sparse-query-transport-profile.js";
 
 const peers: Peerbit[] = [];
 let firstOperationProfile: SparseQueryProfile | undefined;
+let firstTransportProfile: SparseQueryTransportProfile | undefined;
 let profileContext: Record<string, unknown> | undefined;
 afterEach(async () => {
-    if (firstOperationProfile) {
-        firstOperationProfile.stop();
-        console.log(
-            JSON.stringify({
-                event: "shared-fs.sparse-query-profile",
-                context: profileContext,
-                profile: firstOperationProfile.snapshot(),
-                scope: "initial connection only; emitted before shutdown; no wire-arrival/server-time/remote-session attribution",
-            })
+    const errors: unknown[] = [];
+    const attempt = (fn: () => void) => {
+        try {
+            fn();
+        } catch (error) {
+            errors.push(error);
+        }
+    };
+    // A diagnostic cleanup/output failure must not skip another diagnostic or
+    // real peer shutdown. Preserve every failure, including `undefined`.
+    for (const [event, profile, scope] of [
+        [
+            "shared-fs.sparse-query-profile",
+            firstOperationProfile,
+            "initial connection only; no wire-arrival/server-time/remote-session attribution",
+        ],
+        [
+            "shared-fs.sparse-query-transport-profile",
+            firstTransportProfile,
+            "same-process public boundaries; exact one-way outer-ID chains only; no request-response pairing or wire/handler-time proof",
+        ],
+    ] as const) {
+        if (!profile) continue;
+        attempt(() => profile.stop());
+        attempt(() =>
+            console.log(
+                JSON.stringify({
+                    event,
+                    context: profileContext,
+                    profile: profile.snapshot(),
+                    scope,
+                })
+            )
         );
-        firstOperationProfile = undefined;
-        profileContext = undefined;
     }
+    firstOperationProfile = undefined;
+    firstTransportProfile = undefined;
+    profileContext = undefined;
     const results = await Promise.allSettled(
-        peers.splice(0).map((peer) => peer.stop())
+        peers.splice(0).map(async (peer) => peer.stop())
     );
-    const errors = results.filter(
-        (result): result is PromiseRejectedResult =>
-            result.status === "rejected"
-    );
+    for (const result of results)
+        if (result.status === "rejected") errors.push(result.reason);
     if (errors.length)
-        throw new AggregateError(
-            errors.map((result) => result.reason),
-            "Sparse probe shutdown failed"
-        );
+        throw new AggregateError(errors, "Sparse probe cleanup failed");
 });
 
 const payload = (seed: number) => {
@@ -70,8 +92,20 @@ it(
         const files = Number(process.env.PEERBIT_SHARED_FS_SPARSE_FILES ?? 64);
         if (!Number.isSafeInteger(files) || files < 32 || files > 10_000)
             throw new Error("Sparse fixture files must be 32..10000");
+        const transportEnabled =
+            process.env.PEERBIT_SHARED_FS_SPARSE_TRANSPORT_PROFILE === "1";
+        if (
+            transportEnabled &&
+            process.env.PEERBIT_SHARED_FS_SPARSE_PROFILE !== "1"
+        )
+            throw new Error("Transport profile requires phase profile");
         const sourcePeer = await Peerbit.create();
         peers.push(sourcePeer);
+        const transportProfile = transportEnabled
+            ? new SparseQueryTransportProfile()
+            : undefined;
+        firstTransportProfile = transportProfile;
+        transportProfile?.attachPeer(sourcePeer, "source");
         const profile =
             process.env.PEERBIT_SHARED_FS_SPARSE_PROFILE === "1"
                 ? new SparseQueryProfile({
@@ -124,6 +158,7 @@ it(
 
         const observerPeer = await Peerbit.create();
         peers.push(observerPeer);
+        transportProfile?.attachPeer(observerPeer, "observer");
         if (profileContext) {
             profileContext.observer =
                 observerPeer.identity.publicKey.hashcode();
@@ -184,6 +219,7 @@ it(
             })
         );
         const openMs = performance.now() - openStart;
+        transportProfile?.arm(source.program.entries, observer.program.entries);
         await measure("post-open-readiness", () =>
             observer.program.entries.waitFor(sourcePeer.identity.publicKey, {
                 timeout: 5_000,
@@ -217,6 +253,7 @@ it(
             reader.readNode(nodeId)
         );
         profile?.stop();
+        transportProfile?.stop();
         expect(first.status).toBe("observed");
         expect(first.bytes).toEqual(payload(0));
         expect(reader.counters.chunkFetches).toBe(1);

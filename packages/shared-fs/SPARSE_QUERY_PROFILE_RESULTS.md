@@ -114,3 +114,5 @@ Upstream confirms no independent demand-pin lease exists: adaptive targeted unre
 The newly verified release keeps Peerbit 5.4.2 and updates Documents to 15.1.1, SharedLog to 16.0.31 and Trusted Network to 6.0.132. It was **not adopted in these measurements**. Release adoption and unchanged N=3/three-OS gates must remain a separate branch/run. The release also does not remove the metadata-authorization gate discussed upstream; source identity and content hashes do not independently authorize remote metadata.
 
 Next useful diagnostic: bounded slow-query summaries for the later scan, paired with supported source-side request timing. The captured gap is not a reason to change cache policy, remove readiness, relax budgets, or claim the cold path fixed.
+
+Follow-up: [the passive transport-boundary report](SPARSE_QUERY_TRANSPORT_RESULTS.md) records a 149 ms exact-ID response-direction gap on this same cohort. It preserves separate request/response chains and does not claim server-handler attribution or explain the later scan tail.

@@ -278,11 +278,13 @@ export class SparseQueryProfile {
     }
 
     snapshot(): {
+        clockOriginMs: number;
         events: ProfileEvent[];
         dropped: number;
         observerErrors: number;
     } {
         return {
+            clockOriginMs: this.start,
             events: this.events.map((event) => ({ ...event })),
             dropped: this.dropped,
             observerErrors: this.observerErrors,
