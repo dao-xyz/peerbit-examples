@@ -1,4 +1,5 @@
 import { writeSync } from "node:fs";
+import { stopTestPeers } from "../../../packages/shared-fs/library/src/__tests__/stop-test-peers.ts";
 import {
     afterEach,
     beforeAll,
@@ -30,6 +31,42 @@ describe("strict CI fixture", () => {
         if (attempts++ === 0) throw new Error("ORIGINAL_FIRST_FAILURE_STACK");
         writeSync(2, "SECOND_ATTEMPT_STARTED\n");
         expect(attempts).toBe(2);
+    });
+
+    let nestedAttempts = 0;
+    test("nested receipt eventually succeeds", { retry: 1 }, () => {
+        if (nestedAttempts++ === 0) {
+            const cause = Object.assign(
+                new Error("ORIGINAL_RECEIPT_CAUSE_STACK"),
+                {
+                    localCommitSucceeded: true,
+                    retrySafe: false,
+                    nativeCommitApplied: true,
+                }
+            );
+            throw new Error("ORIGINAL_RECEIPT_WRAPPER_STACK", { cause });
+        }
+        writeSync(2, "NESTED_SECOND_ATTEMPT_STARTED\n");
+    });
+
+    describe("body and peer cleanup", () => {
+        let attempts = 0;
+        afterEach(async () => {
+            if (attempts !== 1) return;
+            await stopTestPeers([
+                {
+                    stop: () => {
+                        throw new Error("ORIGINAL_PEER_STOP_STACK");
+                    },
+                },
+                { stop: () => Promise.reject(undefined) },
+                { stop: () => writeSync(2, "FINAL_PEER_STOP_ATTEMPTED\n") },
+            ]);
+        });
+        test("retry after body and cleanup failure", { retry: 1 }, () => {
+            if (attempts++ === 0) throw new Error("ORIGINAL_BODY_STACK");
+            writeSync(2, "CLEANUP_SECOND_ATTEMPT_STARTED\n");
+        });
     });
 
     let skippedAttempts = 0;

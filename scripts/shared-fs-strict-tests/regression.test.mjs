@@ -83,6 +83,42 @@ test("a successful retry retains the first stack before the next attempt and fai
     ]);
 });
 
+test("nested receipt evidence survives an eventual pass and flushes before retry", () => {
+    const result = run("nested receipt eventually succeeds");
+    assert.equal(result.status, 1, result.stderr);
+    const [failure] = result.find("shared-fs.first-attempt-failure");
+    assert.match(failure.errors[0].stack, /ORIGINAL_RECEIPT_WRAPPER_STACK/);
+    const cause = failure.errors[0].cause;
+    assert.match(cause.stack, /ORIGINAL_RECEIPT_CAUSE_STACK/);
+    assert.equal(cause.localCommitSucceeded, true);
+    assert.equal(cause.retrySafe, false);
+    assert.equal(cause.nativeCommitApplied, true);
+    assert.ok(
+        result.stderr.indexOf("ORIGINAL_RECEIPT_CAUSE_STACK") <
+            result.stderr.indexOf("NESTED_SECOND_ATTEMPT_STARTED")
+    );
+    assert.equal(result.find("shared-fs.strict-retry")[0].outcome, "passed");
+});
+
+test("body and all peer-cleanup failures remain visible after a successful retry", () => {
+    const result = run("retry after body and cleanup failure");
+    assert.equal(result.status, 1, result.stderr);
+    const [failure] = result.find("shared-fs.first-attempt-failure");
+    assert.match(failure.errors[0].stack, /ORIGINAL_BODY_STACK/);
+    const cleanup = failure.errors.find(
+        (error) => error.name === "AggregateError"
+    );
+    assert.ok(cleanup, JSON.stringify(failure));
+    assert.match(cleanup.errors[0].stack, /ORIGINAL_PEER_STOP_STACK/);
+    assert.equal(cleanup.errors[1].valueType, "undefined");
+    assert.match(result.stderr, /FINAL_PEER_STOP_ATTEMPTED/);
+    assert.ok(
+        result.stderr.indexOf("ORIGINAL_PEER_STOP_STACK") <
+            result.stderr.indexOf("CLEANUP_SECOND_ATTEMPT_STARTED")
+    );
+    assert.equal(result.find("shared-fs.strict-retry")[0].outcome, "passed");
+});
+
 test("clean passes, expected failures and unused retry budgets remain successful", () => {
     const result = run("clean pass$|expected failure$|unused retry budget$");
     assert.equal(result.status, 0, result.stderr);
