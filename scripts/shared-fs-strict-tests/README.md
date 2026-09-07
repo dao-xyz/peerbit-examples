@@ -30,12 +30,23 @@ included, with an explicit omitted-error count. This bounds added diagnostics,
 not Vitest's own captured logs or memory. No error objects or stacks are retained
 in the worker metadata after emission.
 
+Nested `cause` and `AggregateError.errors` evidence is also retained, including
+serialized error records and explicit undefined rejection values. Only the
+boolean `localCommitSucceeded`, `retrySafe`, and `nativeCommitApplied` fields are
+copied beyond name/message/stack; arbitrary payload properties are not inspected.
+Nested expansion has a four-level depth limit, 16 expanded nodes, four children
+per aggregate, and a shared 32,768-character text budget. Explicit markers and
+`errorEvidence` counters expose truncation or unreadable fields. These additional
+bounds do not reduce the existing top-level text limits. Hostile getters or
+cycles cannot throw through the diagnostic serializer or replace readable
+original fields. The ordinary reporter remains unchanged.
+
 Run the same gate locally from the repository root:
 
 ```sh
 pnpm --filter @peerbit/shared-fs exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
 pnpm --filter @peerbit/shared-fs-cli exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
-node --test scripts/shared-fs-strict-tests/regression.test.mjs
+node --test scripts/shared-fs-strict-tests/regression.test.mjs scripts/shared-fs-strict-tests/error-evidence.test.mjs
 ```
 
 Append a test-file filter to either Vitest command for a targeted diagnostic run.

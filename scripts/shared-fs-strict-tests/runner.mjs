@@ -1,6 +1,6 @@
 import { VitestTestRunner } from "vitest/runners";
+import { firstFailureEvidence } from "./error-evidence.mjs";
 
-const MAX_ERRORS = 4;
 const MAX_TEXT = 16_384;
 
 function bounded(value) {
@@ -56,12 +56,7 @@ export default class SharedFsStrictRunner extends VitestTestRunner {
             ...identity(task),
             attempt: options.retry + 1,
             repeat: options.repeats,
-            errors: errors.slice(0, MAX_ERRORS).map((error) => ({
-                name: bounded(error.name),
-                message: bounded(error.message),
-                stack: bounded(error.stack),
-            })),
-            omittedErrors: Math.max(0, errors.length - MAX_ERRORS),
+            ...firstFailureEvidence(errors),
         };
         // Bypass Vitest's captured console. Wait for the entire stderr write:
         // synchronous writes to a pipe can be partial for a large stack. The

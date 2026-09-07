@@ -1,13 +1,14 @@
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import { openSharedFs, type FsWatchEvent } from "../index.js";
+import { stopTestPeers } from "./stop-test-peers.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("shared fs watch: write batches", () => {
     const peers: Peerbit[] = [];
     afterEach(async () => {
-        await Promise.allSettled(peers.splice(0).map((peer) => peer.stop()));
+        await stopTestPeers(peers);
     });
 
     const open = async () => {

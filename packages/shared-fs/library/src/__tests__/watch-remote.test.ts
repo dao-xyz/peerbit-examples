@@ -1,6 +1,7 @@
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import { openSharedFs, type FsWatchEvent } from "../index.js";
+import { stopTestPeers } from "./stop-test-peers.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -27,7 +28,7 @@ const waitForEvent = async (
 describe("shared fs watch: multi-party", () => {
     const peers: Peerbit[] = [];
     afterEach(async () => {
-        await Promise.allSettled(peers.splice(0).map((peer) => peer.stop()));
+        await stopTestPeers(peers);
     });
 
     it("delivers remote edits with remote origin and correct transitions", async () => {

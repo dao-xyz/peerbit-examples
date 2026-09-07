@@ -90,7 +90,7 @@ jobs:
 
             - name: Test first-attempt diagnostics and strict retry gate
               id: diagnostics
-              run: node --test scripts/shared-fs-strict-tests/regression.test.mjs
+              run: node --test scripts/shared-fs-strict-tests/regression.test.mjs scripts/shared-fs-strict-tests/error-evidence.test.mjs
 
             - name: Test shared-fs library (strict first-attempt gate)
               run: pnpm --filter @peerbit/shared-fs exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
