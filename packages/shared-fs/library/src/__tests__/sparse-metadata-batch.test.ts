@@ -421,6 +421,23 @@ describe("bounded test-only independent metadata batching", () => {
         );
     });
 
+    it("releases the operation guard after an invalid signal so a valid call can follow", async () => {
+        const a = naming("a");
+        const f = fixture([rows(a), rows(a)]);
+        // A JavaScript caller can evade the signature; this must not wedge busy.
+        await expect(
+            f.client.lookupMany([slots[0]], {} as AbortSignal)
+        ).rejects.toBeInstanceOf(TypeError);
+        expect(f.iterate).not.toHaveBeenCalled();
+        expect(f.client.counters).toEqual({ queries: 0, rows: 0 });
+        const valid = new AbortController();
+        expect(await f.client.lookupMany([slots[0]], valid.signal)).toEqual([
+            { status: "observed", nodeId: a.nodeId, coverage },
+        ]);
+        expect(f.client.counters).toEqual({ queries: 2, rows: 2 });
+        f.closed();
+    });
+
     it("rejects invalid construction and allows an empty bounded request without a query", async () => {
         const f = fixture([]);
         expect(() => new SparseMetadataBatchClient(f.entries, " ")).toThrow(

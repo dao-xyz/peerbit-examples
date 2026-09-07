@@ -164,13 +164,15 @@ export class SparseMetadataBatchClient {
             name,
         }));
         this.busy = true;
-        const active = AbortSignal.any([
-            this.session.signal,
-            AbortSignal.timeout(this.limits.timeout),
-            ...(signal ? [signal] : []),
-        ]);
         const coverage = "single-source-non-atomic" as const;
         try {
+            // Untyped callers can pass a non-signal; construction may throw,
+            // but the operation guard must still be released for a later call.
+            const active = AbortSignal.any([
+                this.session.signal,
+                AbortSignal.timeout(this.limits.timeout),
+                ...(signal ? [signal] : []),
+            ]);
             active.throwIfAborted();
             if (!requested.length) return [];
             const budget = { rows: 0 };
