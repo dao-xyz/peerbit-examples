@@ -1,5 +1,11 @@
 # Bounded persisted-delivery settlement diagnostics
 
+This document preserves the preparation checkpoints below. The subsequent
+published-cohort upgrade and first live result are recorded separately in the
+[5.4.5 rebaseline](./COHORT_5_4_5_REBASELINE.md) and
+[settlement capture](./N3_SETTLEMENT_CAPTURE_2026_09_08.md); those later results
+do not rewrite the earlier unpublished/no-workload state.
+
 This prepares a test-only downstream collector, not a receipt fix, dependency
 upgrade or new performance result. The exact source contract is upstream
 [PR #1457 at `0e9e351`](https://github.com/dao-xyz/peerbit/pull/1457/commits/0e9e351b4a9aee4128ff11ad363e0958774d544c),
