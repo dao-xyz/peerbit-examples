@@ -28,6 +28,10 @@ import {
 } from "./adaptive-placement-stop-trace.js";
 import { capturePlacementPeerReadiness } from "./adaptive-placement-peer-readiness.js";
 import { createPlacementEntryTimeline } from "./adaptive-placement-entry-timeline.js";
+import {
+    createPlacementSettlementProfile,
+    type PlacementSettlementOperation,
+} from "./adaptive-placement-settlement-profile.js";
 
 const config: PlacementConfig = JSON.parse(process.argv[2]);
 assert(
@@ -41,9 +45,14 @@ assert(Number.isSafeInteger(config.generation) && config.generation > 0);
 assert(typeof config.profile === "boolean");
 assert(typeof config.peerReadinessDiagnostics === "boolean");
 assert(typeof config.entryTimeline === "boolean");
+assert(typeof config.settlementProfile === "boolean");
 assert(
     !config.entryTimeline || config.profile,
     "entry timeline needs profile checkpoints"
+);
+assert(
+    !config.settlementProfile || config.profile,
+    "settlement profile needs profile checkpoints"
 );
 const send = (message: unknown) =>
     new Promise<void>((resolve, reject) => {
@@ -111,12 +120,45 @@ const main = async () => {
     });
     const localPeer = peer;
     const role = config.peer === 0 ? "publisher" : "custodian";
+    const observerHash = localPeer.identity.publicKey.hashcode();
     const profiles = config.profile
         ? {
               metadata: createPlacementProfile(),
               chunks: createPlacementProfile(),
           }
         : undefined;
+    // Callback-observed context: the audited emitter closes synchronously before
+    // the owned awaited operation settles. Recheck that contract on upgrade.
+    let currentSettlementOperation: PlacementSettlementOperation | undefined;
+    const settlementProfiles =
+        config.settlementProfile && role === "publisher"
+            ? {
+                  metadata: createPlacementSettlementProfile({
+                      runId: digest(config.run),
+                      peer: config.peer,
+                      generation: config.generation,
+                      plane: "metadata",
+                      observerHash,
+                  }),
+                  chunks: createPlacementSettlementProfile({
+                      runId: digest(config.run),
+                      peer: config.peer,
+                      generation: config.generation,
+                      plane: "chunks",
+                      observerHash,
+                  }),
+              }
+            : undefined;
+    const profileSink = (plane: "metadata" | "chunks") =>
+        settlementProfiles
+            ? (event: unknown) => {
+                  profiles![plane].sink(event);
+                  settlementProfiles[plane].sink(
+                      event,
+                      currentSettlementOperation
+                  );
+              }
+            : profiles![plane].sink;
     const metadata = await localPeer.open(
         new Documents<PlacementManifest>({
             id: storeId(config.run, "metadata"),
@@ -128,11 +170,13 @@ const main = async () => {
                 replicate: config.offline ? false : { factor: 1 },
                 replicas: { min: config.minCopies },
                 ...(profiles
-                    ? { sync: { profile: profiles.metadata.sink } }
+                    ? { sync: { profile: profileSink("metadata") } }
                     : {}),
             },
         }
     );
+    const metadataLogAddress = metadata.log.address;
+    settlementProfiles?.metadata.bindLog(metadataLogAddress);
     const replication =
         config.offline || role === "publisher"
             ? false
@@ -150,7 +194,7 @@ const main = async () => {
                 replicate: replication,
                 replicas: { min: config.minCopies },
                 ...(profiles
-                    ? { sync: { profile: profiles.chunks.sink } }
+                    ? { sync: { profile: profileSink("chunks") } }
                     : {}),
                 // Publisher retains its authored source until the explicit stop phase.
                 // It is excluded from all custodian coverage/placement statistics.
@@ -168,8 +212,8 @@ const main = async () => {
     let capacityBytes = config.capacityBytes;
     const chunkEntries: any[] = [];
     const metadataEntries: any[] = [];
-    const metadataLogAddress = metadata.log.address;
     const chunksLogAddress = chunks.log.address;
+    settlementProfiles?.chunks.bindLog(chunksLogAddress);
     const entryTimeline =
         config.entryTimeline && role === "publisher"
             ? createPlacementEntryTimeline()
@@ -189,10 +233,22 @@ const main = async () => {
                   metadata: {
                       logAddress: metadataLogAddress,
                       ...profiles.metadata.snapshot(),
+                      ...(settlementProfiles
+                          ? {
+                                persistedDelivery:
+                                    settlementProfiles.metadata.snapshot(),
+                            }
+                          : {}),
                   },
                   chunks: {
                       logAddress: chunksLogAddress,
                       ...profiles.chunks.snapshot(),
+                      ...(settlementProfiles
+                          ? {
+                                persistedDelivery:
+                                    settlementProfiles.chunks.snapshot(),
+                            }
+                          : {}),
                   },
                   ...(entryTimeline
                       ? { entryTimeline: entryTimeline.snapshot() }
@@ -208,6 +264,29 @@ const main = async () => {
                   })(),
               }
             : null;
+    const settlementRequestSnapshot = (request: number) =>
+        settlementProfiles
+            ? {
+                  settlementProfiles: Object.fromEntries(
+                      (["chunks", "metadata"] as const).map((plane) => {
+                          const snapshot = settlementProfiles[plane].snapshot();
+                          return [
+                              plane,
+                              {
+                                  ...snapshot,
+                                  // Counters remain worker/log-lifetime totals;
+                                  // only the retained traces are request-filtered.
+                                  traceFilter: { request },
+                                  traces: snapshot.traces.filter(
+                                      (trace) =>
+                                          trace.operation?.request === request
+                                  ),
+                              },
+                          ];
+                      })
+                  ),
+              }
+            : {};
     const snapshot = async (verify = false) => {
         const [chunkRows, manifests, participation, localLogBytes] =
             await Promise.all([
@@ -232,7 +311,7 @@ const main = async () => {
         return {
             peer: config.peer,
             generation: config.generation,
-            identity: localPeer.identity.publicKey.hashcode(),
+            identity: observerHash,
             role,
             capacityBytes,
             participation,
@@ -306,7 +385,7 @@ const main = async () => {
             // timeout does not detach it: stop remains queued behind all probes
             // and retains the original stop/exit failure deadlines.
             const records = await capturePlacementPeerReadiness({
-                observerHash: localPeer.identity.publicKey.hashcode(),
+                observerHash,
                 candidates,
                 logs: [
                     {
@@ -382,6 +461,13 @@ const main = async () => {
                         logAddress: chunksLogAddress,
                         requestedMinAcks: config.minCopies,
                     });
+                    if (settlementProfiles)
+                        currentSettlementOperation = {
+                            request,
+                            kind: "put",
+                            file,
+                            part,
+                        };
                     const result = await chunks.put(chunk, {
                         delivery: {
                             reliability: "persisted",
@@ -390,6 +476,7 @@ const main = async () => {
                             signal,
                         },
                     });
+                    currentSettlementOperation = undefined;
                     const captureHash = entryTimeline?.fulfilled();
                     const entry = result.entry;
                     captureHash?.(() => entry.hash);
@@ -409,6 +496,8 @@ const main = async () => {
                     logAddress: metadataLogAddress,
                     requestedMinAcks: config.minCopies,
                 });
+                if (settlementProfiles)
+                    currentSettlementOperation = { request, kind: "put", file };
                 const result = await metadata.put(fixture.manifest, {
                     delivery: {
                         reliability: "persisted",
@@ -417,6 +506,7 @@ const main = async () => {
                         signal,
                     },
                 });
+                currentSettlementOperation = undefined;
                 const captureHash = entryTimeline?.fulfilled();
                 const entry = result.entry;
                 captureHash?.(() => entry.hash);
@@ -433,6 +523,7 @@ const main = async () => {
             const timeline = entryTimeline?.snapshot();
             return {
                 timings,
+                ...settlementRequestSnapshot(request),
                 // Reply only the current command's bounded records. Full detached
                 // history (including a pending put) remains in profile checkpoints.
                 ...(timeline
@@ -455,6 +546,8 @@ const main = async () => {
                 [chunks, chunkEntries],
                 [metadata, metadataEntries],
             ] as const) {
+                if (settlementProfiles)
+                    currentSettlementOperation = { request, kind: "barrier" };
                 await documents.log.deliverPersistedEntries(entries, {
                     target: "replicators",
                     delivery: {
@@ -464,12 +557,14 @@ const main = async () => {
                         signal,
                     },
                 });
+                currentSettlementOperation = undefined;
             }
             return {
                 chunkEntries: chunkEntries.length,
                 metadataEntries: metadataEntries.length,
                 persistedRemoteAcksPerEntry: config.minCopies,
                 totalMs: performance.now() - started,
+                ...settlementRequestSnapshot(request),
             };
         }
         if (command.type === "read") {
@@ -677,8 +772,7 @@ const main = async () => {
                                 context: {
                                     peer: config.peer,
                                     generation: config.generation,
-                                    identity:
-                                        localPeer.identity.publicKey.hashcode(),
+                                    identity: observerHash,
                                     offline: config.offline,
                                     command: message.command.type,
                                     minCopies: config.minCopies,
@@ -689,6 +783,11 @@ const main = async () => {
                             stopTrace
                         );
                     } finally {
+                        if (
+                            currentSettlementOperation?.request ===
+                            message.request
+                        )
+                            currentSettlementOperation = undefined;
                         if (activeStopTrace?.request === message.request)
                             activeStopTrace = undefined;
                     }
@@ -710,7 +809,7 @@ const main = async () => {
         peer: config.peer,
         generation: config.generation,
         pid: process.pid,
-        hash: localPeer.identity.publicKey.hashcode(),
+        hash: observerHash,
         ...(config.peerReadinessDiagnostics
             ? {
                   publicKey: Buffer.from(

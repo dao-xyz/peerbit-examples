@@ -53,6 +53,12 @@ const peerReadinessDiagnostics =
 const entryTimeline =
     process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_ENTRY_TIMELINE === "1";
 assert(!entryTimeline || profiled, "entry timeline needs profile checkpoints");
+const settlementProfile =
+    process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_SETTLEMENT_PROFILE === "1";
+assert(
+    !settlementProfile || profiled,
+    "settlement profile needs profile checkpoints"
+);
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type StopAttempt = {
     attempt: number;
@@ -390,6 +396,7 @@ const sourceHashes = async () =>
                 "adaptive-placement-stop-trace.ts",
                 "adaptive-placement-peer-readiness.ts",
                 "adaptive-placement-entry-timeline.ts",
+                "adaptive-placement-settlement-profile.ts",
                 "process-isolated-soak-storage.ts",
                 "../../../../../pnpm-lock.yaml",
             ].map(async (name) => [
@@ -445,6 +452,7 @@ manual(
                             profile: profiled,
                             peerReadinessDiagnostics,
                             entryTimeline,
+                            settlementProfile,
                         },
                         (event) =>
                             log({ type: "shutdown-diagnostic", ...event })
@@ -592,6 +600,12 @@ manual(
                             ...result.timings[0],
                             ...(result.entryTimeline
                                 ? { entryTimeline: result.entryTimeline }
+                                : {}),
+                            ...(result.settlementProfiles
+                                ? {
+                                      settlementProfiles:
+                                          result.settlementProfiles,
+                                  }
                                 : {}),
                         });
                     }
@@ -904,6 +918,7 @@ manual(
                     profiled,
                     peerReadinessDiagnostics,
                     entryTimeline,
+                    settlementProfile,
                     ok: !failure,
                     hashes,
                     identities,
@@ -929,6 +944,8 @@ manual(
                         "small sample, not reliable p95/p99 or throughput scaling evidence",
                         "profile durations can overlap or nest; sums are not CPU time or wall-clock critical paths",
                         "entry timeline measures end-to-end put spans, not isolated receipt waits; requestedMinAcks is not an observed ack count",
+                        "settlement profiles are bounded publisher-only progress diagnostics, not durability proof; absent traces or terminal events mean unobserved, not zero work or success",
+                        "settlement trace IDs are scoped by run, worker generation and log; entryIndex is a sampled batch ordinal, not a CID; provisional carried acknowledgements may decrease",
                         "peer-only readiness snapshots are non-atomic and advisory; no entry planning, recovery or durability proof",
                         "shutdown command includes queue wait, peer stop, disk scan and IPC; command timeout alone does not identify the pending phase",
                     ],

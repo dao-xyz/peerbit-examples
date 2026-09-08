@@ -40,6 +40,9 @@ const dataField = (
     return {};
 };
 
+// Share the existing own-data descriptor reader with bounded event collectors.
+export { dataField as readPlacementDataField };
+
 export type PlacementProfileEvent = {
     name: string;
     count: number;

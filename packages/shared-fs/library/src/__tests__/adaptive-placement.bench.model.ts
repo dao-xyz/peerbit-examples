@@ -146,4 +146,5 @@ export type PlacementConfig = {
     profile: boolean;
     peerReadinessDiagnostics: boolean;
     entryTimeline: boolean;
+    settlementProfile: boolean;
 };
