@@ -140,3 +140,29 @@ contract, then pin that cohort with one plain install, run the existing strict
 gates and perform a separately labelled first-attempt targeted capture. Preserve
 every original failure and stop at the first failure; no adaptive follow-up or
 broader release clearance is implied. The downstream release gate remains held.
+
+## Integrated checkout prepared for the release handoff
+
+The next user-authorized upgrade/capture has an isolated checkout at
+`/private/tmp/peerbit-profiled-cohort-20260908`, branch
+`upgrade/shared-fs-profiled-cohort-20260908`. Bot-authored merge
+`968b589d083958932edcd98cce25e9fc5a070871` combines the held cohort/strict-gate
+head `8610b1a043667dfda9573914723c1620bbd55972` with collector head
+`c65f5eab07ce0f01e480c5a551cd24d664bddb0f`; neither original branch was changed.
+
+The only overlapping paths were the library manifest and lockfile, already
+byte-identical at both heads. The merge required no conflict resolution. All ten
+placement workload/helper sources and the lockfile remain identical to the
+collector head. Production library/CLI entry sources, strict runner/reporter and
+portable workflow remain identical to the held cohort head. This matters because
+the separate collector checkout did not itself contain the strict CI harness.
+
+The new checkout has not installed dependencies or run any workload. Run its own
+`scripts/shared-fs-strict-tests/vitest.config.mjs`, not a cross-worktree wrapper,
+for the full library/CLI gates after the verified pins arrive. Historical test
+counts are expectations only until those gates execute. The exact upstream
+version candidate is merged as `32c8889257dfcc01b94eafb06c030591719fd895`, but
+[publisher run 34210235918](https://github.com/dao-xyz/peerbit/actions/runs/34210235918)
+is still pending at this preparation checkpoint. Upstream explicitly requires
+publisher success followed by registry/tag/consumer verification before handing
+off the cohort; no proposed package versions have been adopted.
