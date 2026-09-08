@@ -50,6 +50,9 @@ const profiled =
     process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_PROFILE === "1";
 const peerReadinessDiagnostics =
     process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_PEER_READINESS === "1";
+const entryTimeline =
+    process.env.PEERBIT_SHARED_FS_ADAPTIVE_PLACEMENT_ENTRY_TIMELINE === "1";
+assert(!entryTimeline || profiled, "entry timeline needs profile checkpoints");
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type StopAttempt = {
     attempt: number;
@@ -386,6 +389,7 @@ const sourceHashes = async () =>
                 "adaptive-placement-telemetry.ts",
                 "adaptive-placement-stop-trace.ts",
                 "adaptive-placement-peer-readiness.ts",
+                "adaptive-placement-entry-timeline.ts",
                 "process-isolated-soak-storage.ts",
                 "../../../../../pnpm-lock.yaml",
             ].map(async (name) => [
@@ -440,6 +444,7 @@ manual(
                             generation: all.length + 1,
                             profile: profiled,
                             peerReadinessDiagnostics,
+                            entryTimeline,
                         },
                         (event) =>
                             log({ type: "shutdown-diagnostic", ...event })
@@ -582,7 +587,13 @@ manual(
                         });
                         ensureActive();
                         writeTimings.push(...result.timings);
-                        log({ type: "write-receipt", ...result.timings[0] });
+                        log({
+                            type: "write-receipt",
+                            ...result.timings[0],
+                            ...(result.entryTimeline
+                                ? { entryTimeline: result.entryTimeline }
+                                : {}),
+                        });
                     }
                 };
                 const run = async () => {
@@ -892,6 +903,7 @@ manual(
                     topology: plan,
                     profiled,
                     peerReadinessDiagnostics,
+                    entryTimeline,
                     ok: !failure,
                     hashes,
                     identities,
@@ -916,6 +928,7 @@ manual(
                         "retained directories are evidence; no physical reclamation tested",
                         "small sample, not reliable p95/p99 or throughput scaling evidence",
                         "profile durations can overlap or nest; sums are not CPU time or wall-clock critical paths",
+                        "entry timeline measures end-to-end put spans, not isolated receipt waits; requestedMinAcks is not an observed ack count",
                         "peer-only readiness snapshots are non-atomic and advisory; no entry planning, recovery or durability proof",
                         "shutdown command includes queue wait, peer stop, disk scan and IPC; command timeout alone does not identify the pending phase",
                     ],

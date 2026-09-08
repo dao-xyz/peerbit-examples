@@ -27,6 +27,7 @@ import {
     observePlacementStopMethods,
 } from "./adaptive-placement-stop-trace.js";
 import { capturePlacementPeerReadiness } from "./adaptive-placement-peer-readiness.js";
+import { createPlacementEntryTimeline } from "./adaptive-placement-entry-timeline.js";
 
 const config: PlacementConfig = JSON.parse(process.argv[2]);
 assert(
@@ -39,6 +40,11 @@ assert(config.minCopies === 2 || config.minCopies === 3);
 assert(Number.isSafeInteger(config.generation) && config.generation > 0);
 assert(typeof config.profile === "boolean");
 assert(typeof config.peerReadinessDiagnostics === "boolean");
+assert(typeof config.entryTimeline === "boolean");
+assert(
+    !config.entryTimeline || config.profile,
+    "entry timeline needs profile checkpoints"
+);
 const send = (message: unknown) =>
     new Promise<void>((resolve, reject) => {
         assert(process.send);
@@ -164,6 +170,10 @@ const main = async () => {
     const metadataEntries: any[] = [];
     const metadataLogAddress = metadata.log.address;
     const chunksLogAddress = chunks.log.address;
+    const entryTimeline =
+        config.entryTimeline && role === "publisher"
+            ? createPlacementEntryTimeline()
+            : undefined;
     let currentWritePlane: "chunks" | "metadata" | undefined;
     let failedWrite:
         | { plane: "chunks" | "metadata"; committedEntryHash?: string }
@@ -184,6 +194,9 @@ const main = async () => {
                       logAddress: chunksLogAddress,
                       ...profiles.chunks.snapshot(),
                   },
+                  ...(entryTimeline
+                      ? { entryTimeline: entryTimeline.snapshot() }
+                      : {}),
                   shutdown: (() => {
                       const current = activeStopTrace ?? lastReceivedStopTrace;
                       return current
@@ -241,6 +254,7 @@ const main = async () => {
     };
     const execute = async (
         command: PlacementCommand,
+        request: number,
         stopTrace?: StopTrace
     ) => {
         if (command.type === "dial") {
@@ -354,8 +368,20 @@ const main = async () => {
                 const fixture = fixtureFile(file, command.chunkBytes);
                 const started = performance.now();
                 let chunkReceiptMs = 0;
-                for (const chunk of fixture.chunks) {
+                for (const [part, chunk] of fixture.chunks.entries()) {
                     const before = performance.now();
+                    // Synchronous bookkeeping around the original awaited put:
+                    // no listeners, extra delivery call, waiter or IPC on this path.
+                    entryTimeline?.begin({
+                        request,
+                        plane: "chunks",
+                        file,
+                        part,
+                        documentId: chunk.id,
+                        bytes: chunk.data.length,
+                        logAddress: chunksLogAddress,
+                        requestedMinAcks: config.minCopies,
+                    });
                     const result = await chunks.put(chunk, {
                         delivery: {
                             reliability: "persisted",
@@ -364,13 +390,25 @@ const main = async () => {
                             signal,
                         },
                     });
-                    chunkEntries.push(result.entry);
+                    const captureHash = entryTimeline?.fulfilled();
+                    const entry = result.entry;
+                    captureHash?.(() => entry.hash);
+                    chunkEntries.push(entry);
                     chunkReceiptMs += performance.now() - before;
                 }
                 const before = performance.now();
                 // No metadata publication until every referenced chunk has
                 // returned its actual persisted receipt, not just readiness.
                 currentWritePlane = "metadata";
+                entryTimeline?.begin({
+                    request,
+                    plane: "metadata",
+                    file,
+                    documentId: fixture.manifest.id,
+                    bytes: fixture.manifest.bytes,
+                    logAddress: metadataLogAddress,
+                    requestedMinAcks: config.minCopies,
+                });
                 const result = await metadata.put(fixture.manifest, {
                     delivery: {
                         reliability: "persisted",
@@ -379,7 +417,10 @@ const main = async () => {
                         signal,
                     },
                 });
-                metadataEntries.push(result.entry);
+                const captureHash = entryTimeline?.fulfilled();
+                const entry = result.entry;
+                captureHash?.(() => entry.hash);
+                metadataEntries.push(entry);
                 timings.push({
                     file,
                     bytes: fixture.manifest.bytes,
@@ -389,7 +430,22 @@ const main = async () => {
                 });
             }
             currentWritePlane = undefined;
-            return { timings };
+            const timeline = entryTimeline?.snapshot();
+            return {
+                timings,
+                // Reply only the current command's bounded records. Full detached
+                // history (including a pending put) remains in profile checkpoints.
+                ...(timeline
+                    ? {
+                          entryTimeline: {
+                              ...timeline,
+                              records: timeline.records.filter(
+                                  (record) => record.context.request === request
+                              ),
+                          },
+                      }
+                    : {}),
+            };
         }
         if (command.type === "barrier") {
             assert(role === "publisher" && !config.offline);
@@ -579,7 +635,11 @@ const main = async () => {
                         stopTrace.point("command.dequeued");
                     }
                     try {
-                        const value = await execute(message.command, stopTrace);
+                        const value = await execute(
+                            message.command,
+                            message.request,
+                            stopTrace
+                        );
                         await reply(
                             { request: message.request, ok: true, value },
                             stopTrace
@@ -590,6 +650,10 @@ const main = async () => {
                         }
                     } catch (error) {
                         const evidence = errorInfo(error);
+                        // Existing rejection checkpoint, not a pure receipt-wait
+                        // timestamp. Never reject a previously settled put on IPC error.
+                        if (message.command.type === "write")
+                            entryTimeline?.rejected(evidence);
                         if (
                             message.command.type === "write" &&
                             currentWritePlane

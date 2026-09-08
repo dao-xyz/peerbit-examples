@@ -145,4 +145,5 @@ export type PlacementConfig = {
     generation: number;
     profile: boolean;
     peerReadinessDiagnostics: boolean;
+    entryTimeline: boolean;
 };
