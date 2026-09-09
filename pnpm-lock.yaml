@@ -1105,14 +1105,14 @@ importers:
         specifier: 3.1.6
         version: 3.1.6
       '@peerbit/document':
-        specifier: 15.1.5
-        version: 15.1.5
+        specifier: 15.1.6
+        version: 15.1.6
       '@peerbit/program':
         specifier: 6.0.63
         version: 6.0.63
       '@peerbit/trusted-network':
-        specifier: 6.0.136
-        version: 6.0.136
+        specifier: 6.0.137
+        version: 6.0.137
       peerbit:
         specifier: 5.4.5
         version: 5.4.5(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
@@ -3174,8 +3174,8 @@ packages:
   '@peerbit/document@13.1.3':
     resolution: {integrity: sha512-fVzw8zC19hMiQ0QelQCP05+ep5HbQsAH1EZjDiTuhiY/a1YvglLngNVF0P0P6qb0aOG/gDnUWX+OoX79wzPUlw==}
 
-  '@peerbit/document@15.1.5':
-    resolution: {integrity: sha512-IzLE+zEeXiowusFQnbssJO8wN0sV5idBN3AlBtEIEKOWhJn57RQ6TOK+qyUtMQDWKT7cp34ea0wJ2AUNzOWgbw==}
+  '@peerbit/document@15.1.6':
+    resolution: {integrity: sha512-UMOYVSQu3JJ4L9Ts7tLOd9mULFQO7AR6aaWq0uTzfYDQvIWa8+kpcZx0/2+6mYgXYjjQosqibg0WmNA7vBx0Dg==}
 
   '@peerbit/indexer-cache@0.2.11':
     resolution: {integrity: sha512-WNUf6JFOCUlNpMt4AJGyk7ANwrJTvC6TmeD1cnV/S4EC2OtPGVXlBBDTrb8aJMewFu0n6DqetMT87utnO2g9uA==}
@@ -3483,8 +3483,8 @@ packages:
   '@peerbit/time@3.0.1':
     resolution: {integrity: sha512-TceT0VZ9f1lymF61Wr7rYbfs2Zlxa2ehwxYIOkpHUdnwfvp53TMTOKfKNWg1kXkOTgCPBaEk3A2qAcKdWfYHnQ==}
 
-  '@peerbit/trusted-network@6.0.136':
-    resolution: {integrity: sha512-pYcA8nCmHLxG3kqxLI3xw6lmGwzjG+cXMauYK+sdAMbECDoODToOTphLi/tLI6Tq05UMiGLVz7muGGlf7NdO3Q==}
+  '@peerbit/trusted-network@6.0.137':
+    resolution: {integrity: sha512-LE/ljPHcuA2c5f0UEOAmQ4yKywRhjOLnJjcTxH+6WRAsoh8uCbJbCOh1LJ8vmJLrGwZ78BNaSeW5c5L9cUhD4Q==}
 
   '@peerbit/trusted-network@6.0.48':
     resolution: {integrity: sha512-yqa3SwLrmXl2GD4iMlgn38beAFExC3wsiHczqIAAMEp2PR1IkKSESSPBptTIO4bdhLe7D2nhuehWXCLF3NplvA==}
@@ -12589,7 +12589,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@peerbit/document@15.1.5':
+  '@peerbit/document@15.1.6':
     dependencies:
       '@chainsafe/libp2p-yamux': 8.0.1
       '@dao-xyz/borsh': 6.0.1
@@ -13890,7 +13890,7 @@ snapshots:
 
   '@peerbit/time@3.0.1': {}
 
-  '@peerbit/trusted-network@6.0.136':
+  '@peerbit/trusted-network@6.0.137':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.5
@@ -13898,7 +13898,7 @@ snapshots:
       '@peerbit/any-store-interface': 1.1.4
       '@peerbit/blocks-interface': 2.2.1
       '@peerbit/crypto': 3.1.6
-      '@peerbit/document': 15.1.5
+      '@peerbit/document': 15.1.6
       '@peerbit/log': 6.2.35
       '@peerbit/program': 6.0.63
       '@peerbit/shared-log': 16.0.35
