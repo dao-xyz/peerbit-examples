@@ -14,8 +14,10 @@ import type {
 } from "./process-crash-durability.protocol.js";
 import { patternedBytes } from "./process-crash-durability.protocol.js";
 
-const WAIT_TIMEOUT_MS = process.env.CI ? 240_000 : 90_000;
-const TEST_TIMEOUT_MS = process.env.CI ? 360_000 : 180_000;
+// Keep these identical on every OS: platform failures are evidence, not a
+// reason to inflate the persisted-disposal deadline or hide a slow path.
+const WAIT_TIMEOUT_MS = 90_000;
+const TEST_TIMEOUT_MS = 180_000;
 const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 const workerPath = fileURLToPath(
     new URL("./process-crash-durability.worker.ts", import.meta.url)

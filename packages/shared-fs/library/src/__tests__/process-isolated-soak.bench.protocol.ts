@@ -1,4 +1,8 @@
-import type { BootstrapStatus, BootstrapTelemetryEvent } from "../index.js";
+import type {
+    BootstrapStatus,
+    BootstrapTelemetryEvent,
+    SharedFsOpenProfileEvent,
+} from "../index.js";
 import type { ProcessSoakStorageSnapshot } from "./process-isolated-soak-storage.js";
 
 export type ProcessSoakContentExpectation =
@@ -190,6 +194,7 @@ export type ProcessSoakWorkerCommand =
           remoteChunkFetch?: boolean;
           gcSchedule?: boolean;
           captureBootstrapTelemetry?: boolean;
+          captureOpenProfile?: boolean;
           awaitBootstrapConverged?: boolean;
       })
     | (ProcessSoakRequestBase & {
@@ -291,6 +296,7 @@ export type ProcessSoakOpenResult = {
     bootstrapConvergence?: { verified: boolean };
     bootstrapTelemetry: BootstrapTelemetryEvent[];
     memoryCalibration: ProcessSoakMemoryCalibration;
+    openProfile: SharedFsOpenProfileEvent[];
 };
 
 export type ProcessSoakClockOffsetResult = {

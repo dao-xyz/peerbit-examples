@@ -1658,6 +1658,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const result = await (async () => {
                     const directory = resolveDirectory(argv.directory);
                     const peerbit = await createPeerbitForCli(directory);
+                    let preparation:
+                        | { ok: true; value: PrepareForDisposalResult }
+                        | { ok: false; reason: unknown };
                     try {
                         await connectToNetwork(peerbit, argv.peer, {
                             bootstrap: true,
@@ -1668,16 +1671,44 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             replicate: true,
                             gc: false,
                         });
-                        return await fsHandle.prepareForDisposal({
-                            minAcks: argv.minAcks,
-                            timeout: argv.timeoutMs,
-                        });
-                    } finally {
-                        // Unlike ordinary read/write commands, disposal must
-                        // fail closed: even a shutdown error prevents the
-                        // success report from being emitted.
-                        await peerbit.stop();
+                        preparation = {
+                            ok: true,
+                            value: await fsHandle.prepareForDisposal({
+                                minAcks: argv.minAcks,
+                                timeout: argv.timeoutMs,
+                            }),
+                        };
+                    } catch (reason) {
+                        preparation = { ok: false, reason };
                     }
+                    // Unlike ordinary read/write commands, disposal must fail
+                    // closed: shutdown failure prevents a success report too.
+                    try {
+                        await peerbit.stop();
+                    } catch (shutdownFailure) {
+                        if (preparation.ok) throw shutdownFailure;
+                        // Preserve both original failures, including falsy
+                        // rejections, instead of replacing receipt evidence.
+                        const failures = [preparation.reason, shutdownFailure];
+                        const messages = failures.map((failure) => {
+                            try {
+                                return String(
+                                    failure instanceof Error
+                                        ? failure.message
+                                        : failure
+                                );
+                            } catch {
+                                return "unprintable rejection";
+                            }
+                        });
+                        throw new AggregateError(
+                            failures,
+                            `Disposal preparation failed: ${messages[0]}; peer shutdown also failed: ${messages[1]}; keep the source machine.`,
+                            { cause: preparation.reason }
+                        );
+                    }
+                    if (!preparation.ok) throw preparation.reason;
+                    return preparation.value;
                 })();
                 if (argv.json) {
                     console.log(JSON.stringify(result, null, 2));
