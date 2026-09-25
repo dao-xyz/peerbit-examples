@@ -72,7 +72,7 @@ jobs:
                     --skip-missing-credentials
 
     provision-macos:
-        name: Provision ephemeral macOS runner
+        name: Provision reusable physical macOS host + ephemeral GitHub runner
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos') }}
         runs-on: ubuntu-latest
         timeout-minutes: 30

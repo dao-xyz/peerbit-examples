@@ -85,7 +85,7 @@ jobs:
                   echo "expected_joiners=$expected_joiners"
 
     provision-macos:
-        name: Provision reusable macOS runner
+        name: Provision reusable physical macOS host + ephemeral GitHub runner
         needs: plan
         if: ${{ needs.plan.outputs.macos == 'true' }}
         runs-on: ubuntu-latest
