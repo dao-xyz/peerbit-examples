@@ -9,7 +9,7 @@ describe("identity-supabase keypair codec", () => {
     it("roundtrips an Ed25519 keypair", async () => {
         const keypair = await Ed25519Keypair.create();
         const encoded = serializeEd25519Keypair(keypair);
-        const decoded = deserializeEd25519Keypair(encoded);
+        const decoded = await deserializeEd25519Keypair(encoded);
         expect(decoded.equals(keypair)).to.equal(true);
     });
 });
