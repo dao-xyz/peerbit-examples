@@ -165,6 +165,27 @@ describe("shared fs garbage collection", () => {
         );
     });
 
+    it(
+        "plans version retirement over histories deeper than the call stack",
+        { timeout: 240_000 },
+        async () => {
+            // A recursive ancestor walk overflowed at a few thousand
+            // levels. Planning (a dry run) is what must stay iterative;
+            // deleting thousands of rows would only slow the test down.
+            const depth = 6_000;
+            for (let i = 0; i < depth; i++) {
+                await fs.writeFile("/deep.txt", `revision ${i}`);
+            }
+            fakeNow += 40 * DAY_MS;
+            const report = await fastGc({ keepVersions: 2, dryRun: true });
+            expect(report.retiredVersions).toBe(depth - 2);
+            expect(await countRows("file-version")).toBe(depth);
+            expect(decode(await fs.readFile("/deep.txt"))).toBe(
+                `revision ${depth - 1}`
+            );
+        }
+    );
+
     it("compacts naming histories without changing winners", async () => {
         await fs.writeFile("/wander.txt", "content");
         for (let i = 0; i < 20; i++) {

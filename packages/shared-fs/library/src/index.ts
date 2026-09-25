@@ -13476,22 +13476,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         }
                     }
                 }
-                const ancestorMemo = new Map<string, Set<string>>();
+                // Present documents reachable through one or more parent
+                // links. An explicit stack keeps deep histories off the
+                // call stack, and only the heads' sets are materialized.
                 const ancestorsOf = (id: string): Set<string> => {
-                    const memo = ancestorMemo.get(id);
-                    if (memo) {
-                        return memo;
-                    }
                     const out = new Set<string>();
-                    ancestorMemo.set(id, out); // cycle guard
-                    const doc = byId.get(id);
-                    if (doc) {
+                    const stack = [id];
+                    while (stack.length > 0) {
+                        const doc = byId.get(stack.pop()!);
+                        if (!doc) {
+                            continue;
+                        }
                         for (const parent of parentsOf(doc)) {
-                            if (byId.has(parent)) {
+                            if (byId.has(parent) && !out.has(parent)) {
                                 out.add(parent);
-                                for (const deep of ancestorsOf(parent)) {
-                                    out.add(deep);
-                                }
+                                stack.push(parent);
                             }
                         }
                     }
