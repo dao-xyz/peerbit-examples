@@ -1,0 +1,215 @@
+{
+    "scope": "disk-backed Peerbit SQLite index and actual slot cache; no Documents writes, replication, mounts, or OS cache eviction",
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.13.1",
+    "versions": {
+        "peerbit": "5.3.35",
+        "@peerbit/document": "15.0.16",
+        "@peerbit/shared-log": "16.0.15",
+        "@peerbit/indexer-sqlite3": "3.0.19"
+    },
+    "lockfileSha256": "4a4a8df381f6abb29fa12d604a6c8a1b7c5487ed3df6273b7e069422dc475f57",
+    "cacheSourceSha256": "0728db212addf91187ae54d5943fd23e0fdf07255e4b35df0f3be750f4d69348",
+    "width": 100000,
+    "case": "unique",
+    "setupMs": 8911.825416,
+    "diskBytes": 32359856,
+    "timings": {
+        "coldHitMs": 1052.0462500000012,
+        "coldMissMs": 1075.4371250000004,
+        "warmHit": {
+            "count": 500,
+            "p50Ms": 0.0012079999996785773,
+            "p95Ms": 0.0022499999995488906,
+            "p99Ms": 0.003333000000566244
+        },
+        "warmMiss": {
+            "count": 500,
+            "p50Ms": 0.0008330000000569271,
+            "p95Ms": 0.0013750000016443664,
+            "p99Ms": 0.0024999999986903276
+        },
+        "warmFullListMs": 3.8317079999997077,
+        "coldFullListMs": 1203.2932089999995,
+        "installMs": [95.9853750000002, 143.6712090000001, 90.06666699999914],
+        "concurrentUnrelatedMutationMs": [
+            1071.6954580000001, 1038.8266670000012, 1187.9210420000018
+        ]
+    },
+    "cardinalities": {
+        "filled": {
+            "parents": 1,
+            "names": 100000,
+            "rows": 100000,
+            "reverse": 100000
+        },
+        "evicted": {
+            "parents": 45000,
+            "names": 0,
+            "rows": 0,
+            "reverse": 0
+        },
+        "final": {
+            "parents": 0,
+            "names": 0,
+            "rows": 0,
+            "reverse": 0
+        }
+    },
+    "rowQueries": 7,
+    "samples": {
+        "empty": {
+            "beforeGc": {
+                "heapUsed": 98391592,
+                "heapTotal": 165281792,
+                "rss": 423641088,
+                "external": 14073341,
+                "arrayBuffers": 3678363
+            },
+            "afterGc": {
+                "heapUsed": 66875232,
+                "heapTotal": 137494528,
+                "rss": 421380096,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "oldIdMapControl": {
+            "beforeGc": {
+                "heapUsed": 477244568,
+                "heapTotal": 568590336,
+                "rss": 880050176,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 111596720,
+                "heapTotal": 319963136,
+                "rss": 866779136,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "controlReleased": {
+            "beforeGc": {
+                "heapUsed": 111601032,
+                "heapTotal": 319963136,
+                "rss": 866779136,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 67128280,
+                "heapTotal": 204603392,
+                "rss": 863092736,
+                "external": 12708390,
+                "arrayBuffers": 2313372
+            }
+        },
+        "filled": {
+            "beforeGc": {
+                "heapUsed": 520888416,
+                "heapTotal": 609599488,
+                "rss": 923828224,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 119385400,
+                "heapTotal": 333086720,
+                "rss": 891633664,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            }
+        },
+        "deleted": {
+            "beforeGc": {
+                "heapUsed": 141617608,
+                "heapTotal": 341442560,
+                "rss": 899989504,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 67278952,
+                "heapTotal": 204865536,
+                "rss": 884260864,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            }
+        },
+        "refilled": {
+            "beforeGc": {
+                "heapUsed": 505259144,
+                "heapTotal": 611794944,
+                "rss": 926154752,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 119452920,
+                "heapTotal": 333348864,
+                "rss": 897269760,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            }
+        },
+        "evictedAndCleared": {
+            "beforeGc": {
+                "heapUsed": 151914880,
+                "heapTotal": 343048192,
+                "rss": 906706944,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 67327312,
+                "heapTotal": 204865536,
+                "rss": 877101056,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            }
+        },
+        "discardedFills": {
+            "beforeGc": {
+                "heapUsed": 1255225728,
+                "heapTotal": 1338359808,
+                "rss": 1523957760,
+                "external": 12737174,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 66347656,
+                "heapTotal": 204865536,
+                "rss": 1499463680,
+                "external": 12731734,
+                "arrayBuffers": 2313372
+            }
+        },
+        "finalReleased": {
+            "beforeGc": {
+                "heapUsed": 516884640,
+                "heapTotal": 600440832,
+                "rss": 1543536640,
+                "external": 12731734,
+                "arrayBuffers": 2313372
+            },
+            "afterGc": {
+                "heapUsed": 64527464,
+                "heapTotal": 203931648,
+                "rss": 1497546752,
+                "external": 12729708,
+                "arrayBuffers": 2313372
+            }
+        }
+    },
+    "observedPeaks": {
+        "heapUsed": 1255226208,
+        "heapTotal": 1338359808,
+        "rss": 1543536640,
+        "external": 14073381,
+        "arrayBuffers": 3678363
+    },
+    "peakCaveat": "synchronous transient allocations between sampling points may exceed observed peaks"
+}

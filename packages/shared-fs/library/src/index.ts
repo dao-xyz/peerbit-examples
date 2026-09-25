@@ -76,6 +76,10 @@ import {
     type ChangesetStatus,
     type ChangesetWatcher,
 } from "./changeset.js";
+import {
+    BoundedSlotCandidateCache,
+    type SlotNamingRow as NamingLike,
+} from "./slot-candidate-cache.js";
 
 export * from "./model.js";
 export {
@@ -1443,18 +1447,139 @@ const computeDag = <T extends { id: string }>(
  * computation runs on whichever the caller has — hot paths use rows and
  * never resolve documents.
  */
-type NamingLike = {
-    id: string;
-    nodeId: string;
-    parentId: string;
-    name: string;
-    deleted: boolean;
-    causalDepth: bigint;
-    createdAt: bigint;
-    parentNamingIds: string[];
-    authorKey?: string;
-    machineLabel?: string;
-    changesetId?: string;
+/**
+ * All naming events that ever asserted a placement under one directory,
+ * indexed by their asserted name. A name normally has one event, so keep the
+ * singleton directly and allocate an array only for history or collisions.
+ */
+type SlotSweepBucket = Map<string, NamingLike | NamingLike[]>;
+
+const slotRowsForName = (
+    bucket: SlotSweepBucket,
+    name: string
+): NamingLike[] => {
+    const value = bucket.get(name);
+    return value === undefined
+        ? []
+        : Array.isArray(value)
+          ? [...value]
+          : [value];
+};
+
+const allSlotRows = (bucket: SlotSweepBucket): NamingLike[] => {
+    const rows: NamingLike[] = [];
+    for (const value of bucket.values()) {
+        if (Array.isArray(value)) {
+            // Same-name histories are unbounded. Spreading a hot history
+            // through function arguments exceeds V8's argument limit around
+            // 100k entries; append elements without an argument fan-out.
+            for (const row of value) {
+                rows.push(row);
+            }
+        } else {
+            rows.push(value);
+        }
+    }
+    return rows;
+};
+
+const removeSlotRow = (bucket: SlotSweepBucket, name: string, id: string) => {
+    const value = bucket.get(name);
+    if (value === undefined) {
+        return;
+    }
+    if (!Array.isArray(value)) {
+        if (value.id === id) {
+            bucket.delete(name);
+        }
+        return;
+    }
+    const remaining = value.filter((candidate) => candidate.id !== id);
+    if (remaining.length === 0) {
+        bucket.delete(name);
+    } else if (remaining.length === 1) {
+        bucket.set(name, remaining[0]);
+    } else if (remaining.length !== value.length) {
+        bucket.set(name, remaining);
+    }
+};
+
+const upsertSlotRow = (
+    bucket: SlotSweepBucket,
+    row: NamingLike,
+    previousName?: string
+) => {
+    if (previousName !== undefined && previousName !== row.name) {
+        removeSlotRow(bucket, previousName, row.id);
+    }
+
+    const value = bucket.get(row.name);
+    if (value === undefined) {
+        bucket.set(row.name, row);
+        return;
+    }
+    if (!Array.isArray(value)) {
+        bucket.set(row.name, value.id === row.id ? row : [value, row]);
+        return;
+    }
+    const index = value.findIndex((candidate) => candidate.id === row.id);
+    if (index < 0) {
+        value.push(row);
+    } else {
+        value[index] = row;
+    }
+};
+
+const indexSlotRows = (rows: NamingLike[]): SlotSweepBucket => {
+    // Bulk fills can contain arbitrarily long same-name histories. Index
+    // those by id during construction: calling the dynamic array upsert
+    // for every row scans the growing history and makes a fill quadratic.
+    // Keep singletons inline, as in the retained cache, to avoid allocating
+    // a second Map for every name in the usual unique-name directory.
+    const grouped = new Map<string, NamingLike | Map<string, NamingLike>>();
+    const namesById = new Map<string, string>();
+    for (const row of rows) {
+        const id = row.id;
+        const previousName = namesById.get(id);
+        if (previousName !== undefined && previousName !== row.name) {
+            const previous = grouped.get(previousName);
+            if (previous instanceof Map) {
+                previous.delete(id);
+                if (previous.size === 0) grouped.delete(previousName);
+            } else if (previous?.id === id) {
+                grouped.delete(previousName);
+            }
+        }
+        const value = grouped.get(row.name);
+        if (value === undefined) {
+            grouped.set(row.name, row);
+        } else if (value instanceof Map) {
+            // Map.set replaces in place: same-name replacements retain
+            // their position, while a move away/back appends at the end.
+            value.set(id, row);
+        } else if (value.id === id) {
+            grouped.set(row.name, row);
+        } else {
+            grouped.set(
+                row.name,
+                new Map([
+                    [value.id, value],
+                    [id, row],
+                ])
+            );
+        }
+        namesById.set(id, row.name);
+    }
+    const bucket: SlotSweepBucket = new Map();
+    for (const [name, value] of grouped) {
+        if (value instanceof Map) {
+            const history = [...value.values()];
+            bucket.set(name, history.length === 1 ? history[0] : history);
+        } else {
+            bucket.set(name, value);
+        }
+    }
+    return bucket;
 };
 
 type VersionLike = {
@@ -2013,20 +2138,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private namingRowCache = new Map<string, Map<string, NamingLike>>();
     /**
      * Per-node change counters (bumped for added AND removed, whether or
-     * not a bucket exists) plus a global epoch bumped on evictions: a cache
-     * fill only installs its snapshot when nothing changed for that node
-     * during the fill's awaits — otherwise the node stays cold and the next
-     * access re-queries. Closes the fill/event race that would otherwise
-     * leave a warm bucket stale forever.
+     * not a bucket exists) plus a monotonic global epoch bumped on evictions
+     * and every open: a cache fill only installs its snapshot when nothing
+     * changed for that node or lifecycle generation during the fill's awaits
+     * — otherwise the node stays cold and the next access re-queries. Closes
+     * the fill/event and close/reopen races that would otherwise leave a warm
+     * bucket stale forever.
      */
     private cacheEpochs = new Map<string, number>();
     private cacheGlobalEpoch = 0;
-    /**
-     * Per-directory naming-event sweeps ("which events ever asserted a
-     * placement under parent P"). A sweep only changes when a naming event
-     * with that parentId is added or removed, so invalidation is exact.
-     */
-    private slotSweepCache = new Map<string, Map<string, NamingLike>>();
+    /** Bounded complete slot histories; only full sweeps mark a parent complete. */
+    private slotCandidateCache = new BoundedSlotCandidateCache();
+    /** Rejects cold parent fills that overlap any potentially moving row. */
+    private slotMutationEpoch = 0;
+    /** Diagnostic counter for deterministic width-scaling tests. */
+    private slotCandidateRowsExamined = 0;
     private changeListener: ((event: any) => void) | undefined;
     /** Memoized isTrusted verdicts; see canPerformEntry. */
     private trustVerdicts = new Map<string, { ok: boolean; at: number }>();
@@ -2111,15 +2237,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private guardLifecycleGeneration = 0;
     /**
      * Read-through overlay over the snapshot's head documents. HARD
-     * INVARIANT: visible ONLY to the five enumerated metadata read points
-     * (namingStatesForNodes, sweepRows, headsForNodes, getDocument-on-miss
-     * for naming/version ids, versionDocumentsForNode) — never to
+     * INVARIANT: visible ONLY to the enumerated metadata read points
+     * (namingStatesForNodes, sweepRows, slotRows/overlayUnionSlot,
+     * headsForNodes, getDocument-on-miss for naming/version ids,
+     * versionDocumentsForNode) — never to
      * touchChunks, hasDocument, GC planning, or Guard D. Nothing in the
      * overlay ever enters the log, index, or block store.
      */
     private overlayNaming = new Map<string, Map<string, NamingLike>>();
     private overlayVersions = new Map<string, Map<string, VersionLike>>();
-    private overlaySweep = new Map<string, Map<string, NamingLike>>();
+    private overlaySweep = new Map<string, SlotSweepBucket>();
     private overlayDocs = new Map<string, SharedFsEntry>();
     private overlayPending = new Map<
         string,
@@ -2558,8 +2685,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.versionRowCache = new Map();
         this.namingRowCache = new Map();
         this.cacheEpochs = new Map();
-        this.cacheGlobalEpoch = 0;
-        this.slotSweepCache = new Map();
+        // Keep this monotonic across opens: an old async naming/version fill
+        // can resume after the per-open node epochs and maps were reset.
+        this.cacheGlobalEpoch = (this.cacheGlobalEpoch ?? 0) + 1;
+        this.slotCandidateCache = new BoundedSlotCandidateCache();
+        this.slotMutationEpoch = (this.slotMutationEpoch ?? 0) + 1;
+        this.slotCandidateRowsExamined = 0;
         this.writeBatchChain = Promise.resolve();
         this.mountNamespaceMutationChain = Promise.resolve();
         this.mountNamespaceFenceActive = false;
@@ -3677,6 +3808,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
+    private installSlotSweep(
+        parentId: string,
+        rows: NamingLike[],
+        cache = this.slotCandidateCache
+    ) {
+        const bucket = indexSlotRows(rows);
+        return cache.installSweep(
+            parentId,
+            [...bucket].map(([name, value]) => [
+                name,
+                Array.isArray(value) ? value : [value],
+            ])
+        );
+    }
+
     private applyCacheChanges(added: unknown[], removed: unknown[]) {
         for (const value of added) {
             if (value instanceof FileVersion) {
@@ -3686,16 +3832,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     bucket.set(value.id, versionRowOf(value));
                 }
             } else if (value instanceof NamingEvent) {
+                const row = namingRowOf(value);
+                this.slotMutationEpoch++;
                 this.bumpEpoch(value.nodeId);
                 const bucket = this.namingRowCache.get(value.nodeId);
                 if (bucket) {
-                    bucket.set(value.id, namingRowOf(value));
+                    bucket.set(value.id, row);
                 }
                 this.bumpEpoch(`slot:${value.parentId}`);
-                const sweep = this.slotSweepCache.get(value.parentId);
-                if (sweep) {
-                    sweep.set(value.id, namingRowOf(value));
-                }
+                this.slotCandidateCache.applyAdded(row);
             }
         }
         // Removals (GC) invalidate conservatively: the next access re-reads
@@ -3705,15 +3850,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.bumpEpoch(value.nodeId);
                 this.versionRowCache.delete(value.nodeId);
             } else if (value instanceof NamingEvent) {
+                this.slotMutationEpoch++;
                 this.bumpEpoch(value.nodeId);
                 this.namingRowCache.delete(value.nodeId);
                 this.bumpEpoch(`slot:${value.parentId}`);
-                this.slotSweepCache.delete(value.parentId);
+                this.slotCandidateCache.applyRemoved(namingRowOf(value));
             }
         }
         this.boundCache(this.versionRowCache);
         this.boundCache(this.namingRowCache);
-        this.boundCache(this.slotSweepCache);
     }
 
     /** Upsert a locally written document into a warm cache immediately. */
@@ -3809,27 +3954,79 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /** Cache-first per-directory naming sweep; epoch-gated fill. */
     private async sweepRows(parentId: string): Promise<NamingLike[]> {
-        const cached = this.slotSweepCache.get(parentId);
-        if (cached) {
-            return this.overlayUnionSweep(parentId, [...cached.values()]);
+        const cache = this.slotCandidateCache;
+        const cached = cache.getSweep(parentId);
+        if (cached !== undefined) {
+            return this.overlayUnionSweep(parentId, cached);
         }
+        const revision = cache.revision;
+        const generation = this.openGeneration;
         const epochKey = `slot:${parentId}`;
         const fillEpoch = this.epochOf(epochKey);
+        const mutationEpoch = this.slotMutationEpoch;
         const rows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "naming" }),
                 new StringMatch({ key: "parentId", value: parentId }),
             ])
         ).map(namingRowOf);
-        if (this.epochOf(epochKey) === fillEpoch) {
-            this.slotSweepCache.set(
-                parentId,
-                new Map(rows.map((row) => [row.id, row]))
-            );
-            this.boundCache(this.slotSweepCache);
+        if (
+            this.openGeneration === generation &&
+            this.slotCandidateCache === cache &&
+            cache.revision === revision &&
+            this.epochOf(epochKey) === fillEpoch &&
+            this.slotMutationEpoch === mutationEpoch
+        ) {
+            this.installSlotSweep(parentId, rows, cache);
         }
         // Overlay union after the cache install: read view only.
         return this.overlayUnionSweep(parentId, rows);
+    }
+
+    /** Exact candidate history for one directory slot, without a width scan. */
+    private async slotRows(
+        parentId: string,
+        name: string
+    ): Promise<NamingLike[]> {
+        const cache = this.slotCandidateCache;
+        const cached = cache.getSlot(parentId, name);
+        if (cached !== undefined)
+            return this.overlayUnionSlot(parentId, name, cached);
+        const revision = cache.revision;
+        const generation = this.openGeneration;
+        const epochKey = `slot:${parentId}`;
+        const fillEpoch = this.epochOf(epochKey);
+        const mutationEpoch = this.slotMutationEpoch;
+        const stamp = `${generation}:${revision}:${fillEpoch}:${mutationEpoch}`;
+        const rows = await cache.runSlotFill(
+            parentId,
+            name,
+            stamp,
+            async () => {
+                const rows = (
+                    await this.queryRows([
+                        new StringMatch({ key: "kind", value: "naming" }),
+                        new StringMatch({ key: "parentId", value: parentId }),
+                        new StringMatch({ key: "name", value: name }),
+                    ])
+                ).map(namingRowOf);
+                if (
+                    this.openGeneration === generation &&
+                    this.slotCandidateCache === cache &&
+                    cache.revision === revision &&
+                    this.epochOf(epochKey) === fillEpoch &&
+                    this.slotMutationEpoch === mutationEpoch
+                ) {
+                    // Cache admission may reject an oversized history. The
+                    // operation still returns every row from the index snapshot.
+                    cache.installSlot(parentId, name, rows);
+                }
+                return rows;
+            }
+        );
+        // A shared query owns its snapshot array; callers retain the same
+        // independent result-array behavior as warm cache reads.
+        return this.overlayUnionSlot(parentId, name, [...rows]);
     }
 
     /**
@@ -3850,9 +4047,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
           }
         | undefined
     > {
-        const slotRows = (await this.sweepRows(parentId)).filter(
-            (row) => row.name === name
-        );
+        const slotRows = await this.slotRows(parentId, name);
+        this.slotCandidateRowsExamined += slotRows.length;
         const candidates = [...new Set(slotRows.map((row) => row.nodeId))];
         if (candidates.length === 0) {
             return undefined;
@@ -5343,14 +5539,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const parent = await this.resolvePath(parentPath);
         if (!parent || parent.kind === "file") return undefined;
         const parentId = parent.kind === "root" ? ROOT_NODE_ID : parent.nodeId;
-        const slotRows = await this.sweepRows(parentId);
-        const nodeIds = [
-            ...new Set(
-                slotRows
-                    .filter((row) => row.name === name)
-                    .map((row) => row.nodeId)
-            ),
-        ];
+        const slotRows = await this.slotRows(parentId, name);
+        const nodeIds = [...new Set(slotRows.map((row) => row.nodeId))];
         if (nodeIds.length === 0) return undefined;
         const states = await this.namingStatesForNodes(nodeIds);
         for (const nodeId of nodeIds) {
@@ -9333,7 +9523,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 sweep = new Map();
                 this.overlaySweep.set(doc.parentId, sweep);
             }
-            sweep.set(doc.id, row);
+            upsertSlotRow(sweep, row);
             this.overlayPending.set(doc.id, {
                 nodeId: doc.nodeId,
                 kind: "naming",
@@ -9408,8 +9598,30 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const seen = new Set(rows.map((row) => row.id));
         const merged = [...rows];
-        for (const [id, row] of bucket) {
-            if (!seen.has(id)) {
+        for (const row of allSlotRows(bucket)) {
+            if (!seen.has(row.id)) {
+                merged.push(row);
+            }
+        }
+        return merged;
+    }
+
+    private overlayUnionSlot(
+        parentId: string,
+        name: string,
+        rows: NamingLike[]
+    ): NamingLike[] {
+        if (this.bootstrapPhase !== "overlay-active") {
+            return rows;
+        }
+        const bucket = this.overlaySweep.get(parentId);
+        if (!bucket || bucket.size === 0) {
+            return rows;
+        }
+        const seen = new Set(rows.map((row) => row.id));
+        const merged = [...rows];
+        for (const row of slotRowsForName(bucket, name)) {
+            if (!seen.has(row.id)) {
                 merged.push(row);
             }
         }
@@ -9718,7 +9930,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // never re-validated on read), so clear them outright.
         this.versionRowCache = new Map();
         this.namingRowCache = new Map();
-        this.slotSweepCache = new Map();
+        this.slotCandidateCache = new BoundedSlotCandidateCache();
+        this.slotMutationEpoch++;
         this.cacheGlobalEpoch++;
         if (this.supersessionTimer) {
             clearInterval(this.supersessionTimer);
