@@ -1,5 +1,34 @@
 # @peerbit/shared-fs-cli
 
+## 0.13.17
+
+### Patch Changes
+
+- 475d60f: Compact emitted JavaScript whitespace while preserving declarations, source maps, module surfaces, and the CLI shebang.
+- 31356ed: Preserve both disposal-preparation and shutdown failures when they occur together. Keep the original receipt evidence as the aggregate cause, retain shutdown failure details, and never print disposal success after either failure.
+- 31356ed: Upgrade Shared FS to the coherent Peerbit persisted-readiness and cold-open
+  cohort. Forward advisory SharedLog open/profile spans through the existing
+  telemetry surface, migrate durability tests to the public exact-entry readiness
+  waiter, and require caller-exclusive upstream block-store safety metadata in
+  addition to the Shared FS ownership assertion before physical snapshot segment
+  reclamation.
+- Updated dependencies [475d60f]
+- Updated dependencies [dbf5321]
+- Updated dependencies [31356ed]
+- Updated dependencies [dd79d42]
+- Updated dependencies [a7eb210]
+- Updated dependencies [630ac12]
+- Updated dependencies [e30a8d4]
+- Updated dependencies [fde5d3f]
+- Updated dependencies [31356ed]
+- Updated dependencies [31356ed]
+- Updated dependencies [31356ed]
+- Updated dependencies [c26a600]
+- Updated dependencies [a05b7c1]
+- Updated dependencies [a7279fb]
+- Updated dependencies [31356ed]
+    - @peerbit/shared-fs@0.13.16
+
 ## 0.13.16
 
 ### Patch Changes

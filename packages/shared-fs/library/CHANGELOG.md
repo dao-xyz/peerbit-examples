@@ -1,5 +1,62 @@
 # @peerbit/shared-fs
 
+## 0.13.16
+
+### Patch Changes
+
+- 475d60f: Compact emitted JavaScript whitespace while preserving declarations, source maps, module surfaces, and the CLI shebang.
+- dbf5321: Plan garbage collection over deep version and naming histories without
+  recursion. The common-ancestor walk used one stack frame per history level and
+  threw `RangeError` at a few thousand levels, and it kept a full ancestor set for
+  every document. It now walks each head's ancestors with an explicit stack.
+  Retirement decisions for acyclic histories are unchanged.
+- 31356ed: Remove redundant head filtering and row conversions when assembling writeBatch results. Returned version fields and head flags are unchanged; publication ordering and chunk-presence repair are unaffected.
+- dd79d42: Trim implementation comments from the published JavaScript and source maps while preserving API documentation in the declaration files.
+- a7eb210: Release watcher and changeset lifecycle state promptly on close, detach abort
+  listeners, and cancel superseded retry timers.
+- 630ac12: Add experimental, generation-isolated Merkle v1 block and content-root codecs,
+  codec-local structural verification, bitmap helpers, and cross-runtime golden
+  vectors as the first bounded random-write storage slice.
+- e30a8d4: Define the generation-isolated Merkle v1 file-version wire model and its
+  strict, derived reverse-index projection, bounded canonical decode APIs, and
+  cross-runtime golden vectors.
+- fde5d3f: Add an opt-in, generation-isolated Merkle v1 exact-range read session with
+  fail-closed block verification, authenticated sparse holes, bounded verified
+  LRU caches, cancellation-safe concurrent fetch coalescing, and structural work
+  counters.
+- 31356ed: Adopt the coherent published Peerbit 5.4.6 cohort: Documents 15.1.7, Shared
+  Log 16.0.36, Program 6.0.64, Trusted Network 6.0.138, RPC 6.2.0 and PubSub
+  5.4.9. Since the 5.3.35 cohort this brings upstream indexed-query policy
+  compatibility, cooperative receive shutdown, subscription lifecycle and routing
+  fixes, stopped pubsub idle timers, and opt-in persisted-delivery, query and RPC
+  diagnostics. The shared-fs storage format, replication policy, writer
+  authorization and persisted-disposal acceptance requirements are unchanged.
+- 31356ed: Reduce work and temporary allocations when matching artifact-ignore rules without directory globstars, while preserving ignore verdicts and subtree boundaries.
+- 31356ed: Reject trust checks invalidated by a local trust-graph change or retirement of their filesystem open, preventing stale positive or negative verdicts from refilling the cache. Keep stable verdict caching and trust invalidation active while already-admitted writes drain during close, and fail closed without retrying an invalidated admission. This closes a downstream cache race, not the separate distributed revocation-convergence window.
+- c26a600: Bound per-node cache epoch metadata under high-cardinality filesystem churn.
+  Epochs are evicted in batches only after advancing a global generation, so an
+  in-flight row-cache fill cannot mistake a pruned counter for an unchanged node
+  and install stale metadata. The generation also remains monotonic across a
+  same-program reopen, preventing an old public read from populating fresh
+  lifecycle caches.
+- a05b7c1: Remove unused recursive history-depth calculations from naming and content
+  head resolution. Preserve head and conflict-winner ordering while avoiding
+  stack overflow on deep, reverse-ordered histories.
+- a7279fb: Add `readFileWithVersion(path, { mode })`, which returns verified bytes with the
+  id of the version actually read, the visible head, all current heads and
+  whether an ancestor was substituted for an unavailable head. The `"exact"` mode
+  never substitutes and throws `SharedFsVersionUnavailableError` (code `EIO`),
+  matching exact-version mount reads. `readFile()` returns the same bytes as
+  before. The artifact-ignore `rulesFileAuthors` gate now checks the advisory
+  author of the rules-file version it installs, so an unavailable allowed head can
+  no longer cause rules from an unchecked ancestor to be installed.
+- 31356ed: Upgrade Shared FS to the coherent Peerbit persisted-readiness and cold-open
+  cohort. Forward advisory SharedLog open/profile spans through the existing
+  telemetry surface, migrate durability tests to the public exact-entry readiness
+  waiter, and require caller-exclusive upstream block-store safety metadata in
+  addition to the Shared FS ownership assertion before physical snapshot segment
+  reclamation.
+
 ## 0.13.15
 
 ### Patch Changes
