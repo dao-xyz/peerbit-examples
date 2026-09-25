@@ -34,11 +34,44 @@ jobs:
                     - windows-2025
 
         steps:
+            - name: Checkout released manifests
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+                  sparse-checkout: |
+                      packages/shared-fs/library/package.json
+                      packages/shared-fs/cli/package.json
+                  sparse-checkout-cone-mode: false
+
             - name: Setup Node
               uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
                   node-version: 22
                   registry-url: https://registry.npmjs.org
+
+            - name: Await released versions on npm
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  library_version="$(node -p "require('./packages/shared-fs/library/package.json').version")"
+                  cli_version="$(node -p "require('./packages/shared-fs/cli/package.json').version")"
+                  echo "SHARED_FS_VERSION=$library_version" >> "$GITHUB_ENV"
+                  echo "SHARED_FS_CLI_VERSION=$cli_version" >> "$GITHUB_ENV"
+                  # Release can finish before the registry serves what it
+                  # published; wait for the exact versions instead of
+                  # smoke-testing the previous release.
+                  for spec in "@peerbit/shared-fs@$library_version" "@peerbit/shared-fs-cli@$cli_version"; do
+                    attempt=0
+                    until [ -n "$(npm view "$spec" version 2>/dev/null)" ]; do
+                      attempt=$((attempt + 1))
+                      if [ "$attempt" -ge 40 ]; then
+                        echo "$spec is still not served by npm after 10 minutes" >&2
+                        exit 1
+                      fi
+                      sleep 15
+                    done
+                    echo "available: $spec"
+                  done
 
             - name: Install library from npm
               shell: bash
@@ -48,14 +81,16 @@ jobs:
                   mkdir -p "$project_dir"
                   cd "$project_dir"
                   npm init -y
-                  npm install --omit=peer @peerbit/shared-fs
+                  npm install --omit=peer "@peerbit/shared-fs@$SHARED_FS_VERSION"
+                  npm ls @peerbit/shared-fs peerbit
                   node --input-type=module -e "import('@peerbit/shared-fs').then((m) => { if (typeof m.openSharedFs !== 'function') throw new Error('openSharedFs export missing'); })"
 
             - name: Install CLI globally from npm
               shell: bash
               run: |
                   set -euo pipefail
-                  npm install -g --omit=peer @peerbit/shared-fs-cli
+                  npm install -g --omit=peer "@peerbit/shared-fs-cli@$SHARED_FS_CLI_VERSION"
+                  npm ls -g @peerbit/shared-fs-cli
                   global_prefix="$(npm prefix -g)"
                   if [ "$RUNNER_OS" = "Windows" ]; then
                     echo "$global_prefix" >> "$GITHUB_PATH"
