@@ -72,8 +72,12 @@ important for any deployment with more than one writer:
 - **Library and mounted reads deliberately differ during partial replication.**
   `readFile()` first tries the visible head, then may return the newest complete,
   hash-verified ancestor when that head or one of its chunks is unavailable. It
-  returns bytes without identifying the substituted version. The native mount
-  uses the exact `readVersionForMount()` path and fails with `EIO` rather than
+  returns bytes only. `readFileWithVersion(path)` returns the same bytes with
+  the `versionId` actually read, the visible head, every current head, and
+  `substituted: true` when an ancestor was returned. With `{ mode: "exact" }`
+  it reads only the visible head and throws `SharedFsVersionUnavailableError`
+  (code `EIO`) instead of substituting. The native mount uses the exact
+  `readVersionForMount()` path and likewise fails with `EIO` rather than
   substituting an ancestor when the stable visible version cannot be verified.
 - **Garbage collection does not guarantee disk-space reclamation.**
   Normal GC retires version, naming, and chunk entries from Peerbit Documents;

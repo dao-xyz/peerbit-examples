@@ -1,6 +1,6 @@
 import { FileVersion, NamingEvent } from "../model.js";
 import { ROOT_NODE_ID } from "../path.js";
-import type { SharedFileSystem } from "../index.js";
+import type { SharedFileSystem, SharedFsReadResult } from "../index.js";
 import {
     EMPTY_IGNORE_RULES,
     compileIgnoreRules,
@@ -353,14 +353,18 @@ export class IgnorePolicyEngine {
                 })
             );
         }
+        // Content authors by version id; set only when rulesFileAuthors gates.
+        let versionAuthors: Map<string, string> | undefined;
         if (this.policy.rulesFileAuthors) {
             // Gate BOTH planes: the naming winner (who placed the file)
             // and every current content head (who wrote the rules) —
             // content overwrites mint no naming event, so checking the
             // naming author alone gates the wrong plane.
             const authors = new Set<string>([info.authorKey]);
+            versionAuthors = new Map();
             try {
                 for (const version of await this.program.versions(path)) {
+                    versionAuthors.set(version.id, version.authorKey);
                     if (version.head) {
                         authors.add(version.authorKey);
                     }
@@ -378,13 +382,30 @@ export class IgnorePolicyEngine {
                 return;
             }
         }
-        let content: Uint8Array | undefined;
+        let read: SharedFsReadResult | undefined;
         try {
-            content = await this.program.readFile(path);
+            read = await this.program.readFileWithVersion(path);
         } catch (error: any) {
             this.degrade(`rules file unreadable: ${error?.message ?? error}`);
             return;
         }
+        if (read && versionAuthors) {
+            // The read may return an ancestor substituted for an unavailable
+            // head, or a head that arrived after the check above: gate the
+            // author of the version actually installed, failing closed when
+            // it was not among the versions checked.
+            const author = versionAuthors.get(read.versionId);
+            if (
+                author === undefined ||
+                !this.policy.rulesFileAuthors!.includes(author)
+            ) {
+                this.degrade(
+                    `rules file version ${read.versionId} authored by ${author ?? "an unchecked author"}, not in rulesFileAuthors`
+                );
+                return;
+            }
+        }
+        const content = read?.bytes;
         try {
             const lines = new TextDecoder()
                 .decode(content)

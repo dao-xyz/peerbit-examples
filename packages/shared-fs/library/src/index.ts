@@ -197,6 +197,25 @@ export type SharedFsMountReadSnapshot = {
 };
 
 /**
+ * How `readFileWithVersion` treats a visible head it cannot verify.
+ * - `"available"` (default, the `readFile()` behavior): fall back to the
+ *   newest complete, hash-verified ancestor.
+ * - `"exact"`: read only the visible head and fail with
+ *   `SharedFsVersionUnavailableError` (`EIO`) instead of substituting, like
+ *   exact-version mount reads.
+ */
+export type SharedFsReadMode = "available" | "exact";
+
+export type SharedFsReadResult = SharedFsMountReadSnapshot & {
+    /** The visible content head when the read resolved the path. */
+    visibleVersionId: string;
+    /** Every content head at that point; more than one is a content conflict. */
+    headVersionIds: string[];
+    /** `versionId` is an ancestor returned in place of the visible head. */
+    substituted: boolean;
+};
+
+/**
  * How many chunk documents are appended / fetched concurrently for one file.
  * Keeps large files from serializing hundreds of sequential round trips while
  * bounding memory and outbound queue pressure.
@@ -1313,6 +1332,25 @@ export class SharedFsWritePendingError extends SharedFsError {
             `${operation} is unavailable until this address-open has a settled initial view (bootstrap phase: ${phase}); await write readiness and retry`
         );
         this.name = "SharedFsWritePendingError";
+    }
+}
+
+/**
+ * An exact read could not verify the visible head's version document, a
+ * chunk, or its whole-file hash. Code `EIO`, so errno mapping is unchanged.
+ */
+export class SharedFsVersionUnavailableError extends SharedFsError {
+    constructor(
+        readonly path: string,
+        readonly versionId: string,
+        cause: unknown
+    ) {
+        super(
+            "EIO",
+            `Visible version ${versionId} of ${path} is unavailable: ${(cause as Error)?.message ?? String(cause)}`
+        );
+        this.name = "SharedFsVersionUnavailableError";
+        this.cause = cause;
     }
 }
 
@@ -5704,6 +5742,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     async readFile(path: string) {
+        return (await this.readFileWithVersion(path))?.bytes;
+    }
+
+    /**
+     * `readFile()` that also identifies the version whose verified bytes it
+     * returned. The default `"available"` mode returns the same bytes as
+     * `readFile()` and reports an ancestor fallback via `substituted`;
+     * `"exact"` never substitutes (see `SharedFsReadMode`).
+     */
+    async readFileWithVersion(
+        path: string,
+        options: { mode?: SharedFsReadMode } = {}
+    ): Promise<SharedFsReadResult | undefined> {
+        const mode = options.mode ?? "available";
+        if (mode !== "available" && mode !== "exact") {
+            throw new SharedFsError(
+                "EINVAL",
+                `invalid read mode ${String(mode)}; expected "available" or "exact"`
+            );
+        }
         const normalized = normalizeFsPath(path);
         const resolved = await this.resolvePath(normalized);
         if (!resolved || resolved.kind !== "file") {
@@ -5714,13 +5772,54 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!visible) {
             return undefined;
         }
+        const headVersionIds = heads.map((head) => head.id);
+        const readResult = (
+            version: FileVersion,
+            bytes: Uint8Array
+        ): SharedFsReadResult => ({
+            bytes,
+            versionId: version.id,
+            nodeId: version.nodeId,
+            contentHash: version.contentHash,
+            size: version.size,
+            visibleVersionId: visible.id,
+            headVersionIds,
+            substituted: version.id !== visible.id,
+        });
+        if (mode === "exact") {
+            this.pinVersions(headVersionIds);
+            try {
+                const doc = await this.getDocument<SharedFsEntry>(visible.id);
+                if (!(doc instanceof FileVersion)) {
+                    throw new SharedFsError(
+                        "EIO",
+                        `Missing version document ${visible.id} for ${normalized}`
+                    );
+                }
+                return readResult(
+                    doc,
+                    await this.readFileVersion(doc, normalized)
+                );
+            } catch (error) {
+                // Only verification failures become a typed unavailability;
+                // close/timeout errors keep their own codes.
+                if (error instanceof SharedFsError && error.code === "EIO") {
+                    throw new SharedFsVersionUnavailableError(
+                        normalized,
+                        visible.id,
+                        error
+                    );
+                }
+                throw error;
+            }
+        }
         // A version can replicate before its chunks. Prefer the visible head
         // but fall back to the newest complete ancestor version instead of
         // failing the read outright. Only the candidates actually read are
         // resolved; head selection itself ran on index rows.
         let firstError: unknown;
         const seen = new Set<string>([visible.id]);
-        this.pinVersions(heads.map((head) => head.id));
+        this.pinVersions(headVersionIds);
         // Walk candidate ids ancestor-ward; a missing version DOCUMENT does
         // not dead-end the walk because the row graph still supplies its
         // parents.
@@ -5760,7 +5859,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         for (let i = 0; i < candidates.length; i++) {
             const candidate = candidates[i];
             try {
-                return await this.readFileVersion(candidate, normalized);
+                return readResult(
+                    candidate,
+                    await this.readFileVersion(candidate, normalized)
+                );
             } catch (error) {
                 firstError = firstError ?? error;
                 for (const parentId of candidate.parentVersionIds) {
@@ -14179,6 +14281,10 @@ export class SharedFsHandle {
 
     readFile(path: string) {
         return this.program.readFile(path);
+    }
+
+    readFileWithVersion(path: string, options?: { mode?: SharedFsReadMode }) {
+        return this.program.readFileWithVersion(path, options);
     }
 
     writeFile(
