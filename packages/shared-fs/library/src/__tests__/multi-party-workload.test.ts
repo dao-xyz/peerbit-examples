@@ -164,26 +164,35 @@ describe("shared fs multi-party workload", () => {
             const first = await burst(0);
             const second = await burst(1); // overwrites: version churn
             const third = await burst(2);
-            // The same 100-file change applied as one write-set.
-            const batchStart = performance.now();
-            await fs.writeBatch(
-                Array.from({ length: 100 }, (_, i) => ({
-                    path: `/project/${["a", "b", "c", "d"][i % 4]}/file-${i}.txt`,
-                    content: `round 3 content ${i}`,
-                }))
-            );
-            const batched = performance.now() - batchStart;
+            // The same 100-file change applied as one write-set. Sample it
+            // as often as the sequential bursts: one runner stall in a
+            // single batched sample must not decide the comparison.
+            let round = 3;
+            const batchedSamples: number[] = [];
+            for (let sample = 0; sample < 3; sample++, round++) {
+                const batchStart = performance.now();
+                await fs.writeBatch(
+                    Array.from({ length: 100 }, (_, i) => ({
+                        path: `/project/${["a", "b", "c", "d"][i % 4]}/file-${i}.txt`,
+                        content: `round ${round} content ${i}`,
+                    }))
+                );
+                batchedSamples.push(performance.now() - batchStart);
+            }
+            const batched = median(batchedSamples);
             report("burst-100-files", {
                 first,
                 second,
                 third,
                 median: median([first, second, third]),
                 batched,
+                batchedMin: Math.min(...batchedSamples),
+                batchedMax: Math.max(...batchedSamples),
             });
             // The batched form must beat the sequential steady state.
             expect(batched).toBeLessThan(median([first, second, third]));
             expect(decode(await fs.readFile("/project/a/file-0.txt"))).toBe(
-                "round 3 content 0"
+                `round ${round - 1} content 0`
             );
             // A 100-file burst must stay comfortably interactive, and
             // overwrite bursts must not degrade versus creation bursts.
