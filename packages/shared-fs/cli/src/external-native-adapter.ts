@@ -3,7 +3,21 @@ import { spawn, type ChildProcess } from "node:child_process";
 type ExternalNativeAdapterOptions = {
     readinessTimeoutMs?: number;
     exitTimeoutMs?: number;
+    ipcConcurrency?: number;
     spawnAdapter?: typeof spawn;
+};
+
+export const resolveNativeIpcConcurrency = (value: unknown = 1) => {
+    if (
+        !Number.isSafeInteger(value) ||
+        (value as number) < 1 ||
+        (value as number) > 16
+    ) {
+        throw new TypeError(
+            "native IPC concurrency must be an integer between 1 and 16"
+        );
+    }
+    return value as number;
 };
 
 const childExited = (child: ChildProcess) =>
@@ -114,6 +128,12 @@ export const mountExternalNativeAdapter = async (
     options: ExternalNativeAdapterOptions = {}
 ) => {
     const args = ["--endpoint", endpoint, "--mountpoint", mountpoint];
+    const ipcConcurrency = resolveNativeIpcConcurrency(options.ipcConcurrency);
+    // Preserve compatibility with older custom adapters at the default. The
+    // current native binary also defaults to one serialized connection.
+    if (ipcConcurrency > 1) {
+        args.push("--ipc-concurrency", String(ipcConcurrency));
+    }
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
     }

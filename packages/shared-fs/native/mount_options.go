@@ -1,7 +1,10 @@
 package main
 
-func nativeMountOptions(goos string, debug bool) []string {
-	options := []string{"-s"}
+func nativeMountOptions(goos string, debug bool, ipcConcurrency int) []string {
+	options := make([]string, 0, 4)
+	if ipcConcurrency == defaultIPCConcurrency {
+		options = append(options, "-s")
+	}
 	if goos == "windows" {
 		// WinFsp derives a persistent ACL from uid/gid/mode. Shared-fs has no
 		// portable ownership metadata, so absent uid/gid otherwise become 0.

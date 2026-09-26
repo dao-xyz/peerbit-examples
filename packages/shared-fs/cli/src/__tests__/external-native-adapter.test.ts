@@ -2,7 +2,10 @@ import type { ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { mountExternalNativeAdapter } from "../external-native-adapter.js";
+import {
+    mountExternalNativeAdapter,
+    resolveNativeIpcConcurrency,
+} from "../external-native-adapter.js";
 
 class FakeChild extends EventEmitter {
     readonly stdout = new PassThrough();
@@ -65,11 +68,69 @@ describe("external native adapter lifecycle", () => {
             "/unused",
             { exitTimeoutMs: 100, spawnAdapter }
         );
+        expect(spawnAdapter).toHaveBeenCalledWith(
+            "ready-adapter",
+            ["--endpoint", "tcp://127.0.0.1:1", "--mountpoint", "/unused"],
+            { stdio: ["ignore", "pipe", "pipe"] }
+        );
         await mounted.unmount();
 
         expect(child.kill).toHaveBeenCalledOnce();
         expect(child.kill).toHaveBeenCalledWith("SIGINT");
         expect(child.signalCode).toBe("SIGINT");
+    });
+
+    it("forwards an opt-in bounded IPC concurrency to the adapter", async () => {
+        const child = new FakeChild();
+        const spawnAdapter = vi.fn(
+            () => child as unknown as ChildProcess
+        ) as unknown as typeof spawn;
+        queueMicrotask(() => {
+            child.stdout.write("peerbit-shared-fs-native ready\n");
+        });
+
+        const mounted = await mountExternalNativeAdapter(
+            "parallel-adapter",
+            "tcp://127.0.0.1:2",
+            "/parallel",
+            { exitTimeoutMs: 100, ipcConcurrency: 4, spawnAdapter }
+        );
+        expect(spawnAdapter).toHaveBeenCalledWith(
+            "parallel-adapter",
+            [
+                "--endpoint",
+                "tcp://127.0.0.1:2",
+                "--mountpoint",
+                "/parallel",
+                "--ipc-concurrency",
+                "4",
+            ],
+            { stdio: ["ignore", "pipe", "pipe"] }
+        );
+        await mounted.unmount();
+    });
+
+    it.each([0, 17, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+        "rejects invalid IPC concurrency %s before spawning",
+        async (ipcConcurrency) => {
+            const spawnAdapter = vi.fn() as unknown as typeof spawn;
+            await expect(
+                mountExternalNativeAdapter(
+                    "invalid-adapter",
+                    "tcp://127.0.0.1:3",
+                    "/invalid",
+                    { ipcConcurrency, spawnAdapter }
+                )
+            ).rejects.toThrow(
+                "native IPC concurrency must be an integer between 1 and 16"
+            );
+            expect(spawnAdapter).not.toHaveBeenCalled();
+        }
+    );
+
+    it("accepts both IPC concurrency boundaries", () => {
+        expect(resolveNativeIpcConcurrency(1)).toBe(1);
+        expect(resolveNativeIpcConcurrency(16)).toBe(16);
     });
 
     it("stops and reaps a child that times out before readiness", async () => {

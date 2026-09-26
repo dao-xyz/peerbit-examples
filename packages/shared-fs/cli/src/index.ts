@@ -18,7 +18,10 @@ import os from "node:os";
 import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { mountExternalNativeAdapter } from "./external-native-adapter.js";
+import {
+    mountExternalNativeAdapter,
+    resolveNativeIpcConcurrency,
+} from "./external-native-adapter.js";
 import {
     installNativeAdapter,
     resolveExternalNativeAdapter,
@@ -829,6 +832,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER.",
                     })
+                    .option("native-ipc-concurrency", {
+                        type: "number",
+                        default: 1,
+                        description:
+                            "Experimental external-adapter IPC connections (1-16). Values above 1 enable concurrent native callbacks.",
+                    })
                     .option("write-ready-timeout-ms", {
                         type: "number",
                         default: 120_000,
@@ -847,6 +856,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         "mount requires a full replica; --no-replicate is not allowed for a writable mount"
                     );
                 }
+                const nativeIpcConcurrency = resolveNativeIpcConcurrency(
+                    argv.nativeIpcConcurrency
+                );
                 const {
                     NativeMountUnavailableError,
                     createSharedFsIpcServer,
@@ -907,9 +919,15 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         mounted = await mountExternalNativeAdapter(
                             externalAdapter,
                             ipc.endpoint,
-                            mountpoint
+                            mountpoint,
+                            { ipcConcurrency: nativeIpcConcurrency }
                         );
                     } else {
+                        if (nativeIpcConcurrency !== 1) {
+                            throw new Error(
+                                "--native-ipc-concurrency above 1 requires an external native adapter"
+                            );
+                        }
                         // In-process fuse-native mounts talk to the backend
                         // directly; a loopback JSON hop would only add
                         // latency and base64 CPU.

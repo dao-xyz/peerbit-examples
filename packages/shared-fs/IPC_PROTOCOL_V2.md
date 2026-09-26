@@ -162,6 +162,14 @@ await completion of an operation before sending another operation that depends
 on its result or ordering; only independent operations may be outstanding
 together.
 
+Multiple connections to one server are independent protocol sessions and have
+no implicit ordering between them. A client that uses a connection pool MUST
+assign dependent operations to a stable ordered lane. In particular, the
+native adapter binds every operation carrying a live file handle to the
+serialized connection that completed its `open`, retains that binding when
+`release` fails or its response is lost, and removes it only after a successful
+`release`. A failed operation MUST NOT be replayed on another connection.
+
 All frame writes on a connection MUST pass through one atomic serialization
 point so bytes from different headers, metadata sections, and bodies never
 interleave. Writers MUST honor socket backpressure. Each endpoint MUST enforce
