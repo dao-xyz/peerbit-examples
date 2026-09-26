@@ -763,6 +763,25 @@ one-descriptor delta plus 10% and a small fixed allocator allowance; after the
 last release both cases must return close to their baseline. Open time is
 reported for diagnosis only and has no pass/fail budget.
 
+The exact-slot benchmark measures cold and warm `stat` of one entry, and of an
+absent name, in a directory of each given width, then a cold `list` and a
+`stat` after it. A second case seeds one directory of
+`PEERBIT_SHARED_FS_SLOT_CACHE_BENCH_INDEX_WIDTH` (default 100,000) naming rows
+straight into a disk-backed SQLite index and measures path-slot resolution on
+top of it:
+
+```bash
+PEERBIT_SHARED_FS_SLOT_CACHE_BENCH=1 \
+PEERBIT_SHARED_FS_SLOT_CACHE_BENCH_WIDTHS=100,10000 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/slot-point-cache.bench.test.ts --reporter=verbose
+```
+
+It reports latencies and row queries by kind (exact slot, directory sweep,
+per-node). Its gates are structural only: a cold lookup issues one exact-slot
+query and no directory sweep, and warm lookups and lookups after a listing
+issue no slot queries. Timings are descriptive.
+
 ## Native Mounts
 
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
