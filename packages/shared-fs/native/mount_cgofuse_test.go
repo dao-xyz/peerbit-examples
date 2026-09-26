@@ -3,12 +3,26 @@
 package main
 
 import (
+	"bytes"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
+
+func TestStatfsProfilesCompleteNativeCallback(t *testing.T) {
+	var output bytes.Buffer
+	fs := &peerbitFS{profile: newMountProfiler(&output)}
+	var stat fuse.Statfs_t
+	if code := fs.Statfs("/", &stat); code != 0 {
+		t.Fatalf("statfs returned %d", code)
+	}
+	events := decodeMountProfileEvents(t, output.String())
+	if len(events) != 1 || events[0].Phase != "native.callback" || events[0].Operation != "statfs" || !events[0].OK {
+		t.Fatalf("unexpected profile events: %#v", events)
+	}
+}
 
 func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	got := errno(&ipcError{

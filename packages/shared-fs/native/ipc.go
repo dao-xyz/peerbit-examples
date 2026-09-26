@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const defaultIPCMaxFrameBytes = 64 * 1024 * 1024
@@ -21,6 +22,7 @@ var errIPCFrameTooLarge = errors.New("IPC frame exceeds configured byte limit")
 type ipcClientOptions struct {
 	maxRequestFrameBytes  int
 	maxResponseFrameBytes int
+	profile               *mountProfiler
 }
 
 type ipcClient struct {
@@ -41,6 +43,7 @@ type ipcClient struct {
 	v2Limits    ipcV2Limits
 	closed      bool
 	requestJSON bytes.Buffer
+	profile     *mountProfiler
 }
 
 type ipcRequest struct {
@@ -91,24 +94,42 @@ func newIPCClient(endpoint string, provided ...ipcClientOptions) *ipcClient {
 		if provided[0].maxResponseFrameBytes > 0 {
 			options.maxResponseFrameBytes = provided[0].maxResponseFrameBytes
 		}
+		options.profile = provided[0].profile
 	}
 	return &ipcClient{
 		endpoint:              endpoint,
 		maxRequestFrameBytes:  options.maxRequestFrameBytes,
 		maxResponseFrameBytes: options.maxResponseFrameBytes,
+		profile:               options.profile,
 	}
 }
 
-func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error) {
+func (c *ipcClient) request(op string, args ...interface{}) (result interface{}, requestErr error) {
+	var queuedAt time.Time
+	if c.profile != nil {
+		queuedAt = time.Now()
+	}
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
+	var acquiredAt time.Time
+	if c.profile != nil {
+		acquiredAt = time.Now()
+	}
+	id := c.nextRequestID()
+	if c.profile != nil {
+		detail := map[string]interface{}{"requestId": id}
+		c.profile.observe("native-adapter", "ipc.queue", op, acquiredAt.Sub(queuedAt), true, detail)
+		started := time.Now()
+		defer func() {
+			c.profile.observe("native-adapter", "ipc.roundTrip", op, time.Since(started), requestErr == nil, detail)
+		}()
+	}
 
 	conn, reader, protocol, v2Limits, err := c.connect()
 	if err != nil {
 		return nil, err
 	}
 
-	id := c.nextRequestID()
 	request := ipcRequest{ID: id, Op: op, Args: args}
 	if protocol == ipcWireProtocolV2 {
 		frame, err := encodeIPCV2Request(request, args, v2Limits.maxRequestFrameBytes, v2Limits.maxMetadataBytes)

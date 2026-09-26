@@ -8,11 +8,17 @@ import {
     createSharedFsMountBackend,
 } from "./mount-backend.js";
 import { openFuseNativeCreate } from "./fuse-native-create.js";
+import {
+    beginSharedFsMountProfile,
+    type SharedFsMountProfileSink,
+} from "./mount-profile.js";
 
 export type NativeMountOptions = {
     mountpoint: string;
     force?: boolean;
     mkdir?: boolean;
+    /** Observe userspace callback duration; disabled by default. */
+    profile?: SharedFsMountProfileSink;
 };
 
 export type NativeMountSession = {
@@ -200,11 +206,52 @@ const toErrno = (error: unknown) => {
     return errno.EIO;
 };
 
+const withNativeCallback = <T>(
+    profile: SharedFsMountProfileSink | undefined,
+    operation: string,
+    fn: () => Promise<T>,
+    success: (value: T) => void,
+    failure: (error: unknown) => void
+) => {
+    if (!profile) {
+        fn().then(success, failure);
+        return;
+    }
+    const finish = beginSharedFsMountProfile(profile, {
+        source: "fuse-native",
+        phase: "native.callback",
+        operation,
+    });
+    fn().then(
+        (value) => {
+            try {
+                success(value);
+                finish(true);
+            } catch (error) {
+                finish(false);
+                throw error;
+            }
+        },
+        (error) => {
+            try {
+                failure(error);
+            } finally {
+                finish(false);
+            }
+        }
+    );
+};
+
 const withCallback = (
     fn: () => Promise<void>,
-    callback: (errno: number) => void
+    callback: (errno: number) => void,
+    profile?: SharedFsMountProfileSink,
+    operation = "unknown"
 ) => {
-    fn().then(
+    withNativeCallback(
+        profile,
+        operation,
+        fn,
         () => callback(0),
         (error) => callback(toErrno(error))
     );
@@ -242,9 +289,10 @@ export const mountNativeSharedFs = async (
         );
     }
 
+    const profile = options.profile;
     const backend = isBackend(target)
         ? target
-        : createSharedFsMountBackend(target);
+        : createSharedFsMountBackend(target, { profile });
     const Fuse = (await loadFuseNative()) as any;
     const fuse = new Fuse(
         options.mountpoint,
@@ -253,7 +301,10 @@ export const mountNativeSharedFs = async (
                 path: string,
                 callback: (errno: number, stat?: unknown) => void
             ) {
-                backend.getattr(path).then(
+                withNativeCallback(
+                    profile,
+                    "getattr",
+                    () => backend.getattr(path),
                     (stat) =>
                         callback(0, {
                             mtime: new Date(stat.mtimeMs),
@@ -271,7 +322,10 @@ export const mountNativeSharedFs = async (
                 path: string,
                 callback: (errno: number, names?: string[]) => void
             ) {
-                backend.readdir(path).then(
+                withNativeCallback(
+                    profile,
+                    "readdir",
+                    () => backend.readdir(path),
                     (entries) =>
                         callback(
                             0,
@@ -285,7 +339,10 @@ export const mountNativeSharedFs = async (
                 flags: number,
                 callback: (errno: number, fd?: number) => void
             ) {
-                backend.open(path, flags).then(
+                withNativeCallback(
+                    profile,
+                    "open",
+                    () => backend.open(path, flags),
                     (handle) => callback(0, handle),
                     (error) => callback(toErrno(error))
                 );
@@ -295,7 +352,10 @@ export const mountNativeSharedFs = async (
                 _mode: number,
                 callback: (errno: number, fd?: number) => void
             ) {
-                openFuseNativeCreate(backend, path).then(
+                withNativeCallback(
+                    profile,
+                    "create",
+                    () => openFuseNativeCreate(backend, path),
                     (handle) => callback(0, handle),
                     (error) => callback(toErrno(error))
                 );
@@ -308,7 +368,10 @@ export const mountNativeSharedFs = async (
                 position: number,
                 callback: (bytesRead: number) => void
             ) {
-                backend.read(fd, length, position).then(
+                withNativeCallback(
+                    profile,
+                    "read",
+                    () => backend.read(fd, length, position),
                     (bytes) => {
                         buffer.set(bytes);
                         callback(bytes.byteLength);
@@ -324,23 +387,30 @@ export const mountNativeSharedFs = async (
                 position: number,
                 callback: (bytesWritten: number) => void
             ) {
-                backend
-                    .write(
-                        fd,
-                        new Uint8Array(buffer.subarray(0, length)),
-                        position
-                    )
-                    .then(
-                        (written) => callback(written),
-                        (error) => callback(toErrno(error))
-                    );
+                withNativeCallback(
+                    profile,
+                    "write",
+                    () =>
+                        backend.write(
+                            fd,
+                            new Uint8Array(buffer.subarray(0, length)),
+                            position
+                        ),
+                    (written) => callback(written),
+                    (error) => callback(toErrno(error))
+                );
             },
             truncate(
                 path: string,
                 size: number,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.truncate(path, size), callback);
+                withCallback(
+                    () => backend.truncate(path, size),
+                    callback,
+                    profile,
+                    "truncate"
+                );
             },
             ftruncate(
                 _path: string,
@@ -348,14 +418,24 @@ export const mountNativeSharedFs = async (
                 size: number,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.truncate(fd, size), callback);
+                withCallback(
+                    () => backend.truncate(fd, size),
+                    callback,
+                    profile,
+                    "ftruncate"
+                );
             },
             flush(
                 _path: string,
                 fd: number,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.flush(fd), callback);
+                withCallback(
+                    () => backend.flush(fd),
+                    callback,
+                    profile,
+                    "flush"
+                );
             },
             fsync(
                 _path: string,
@@ -363,34 +443,64 @@ export const mountNativeSharedFs = async (
                 _datasync: boolean,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.fsync(fd), callback);
+                withCallback(
+                    () => backend.fsync(fd),
+                    callback,
+                    profile,
+                    "fsync"
+                );
             },
             release(
                 _path: string,
                 fd: number,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.release(fd), callback);
+                withCallback(
+                    () => backend.release(fd),
+                    callback,
+                    profile,
+                    "release"
+                );
             },
             mkdir(
                 path: string,
                 _mode: number,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.mkdir(path), callback);
+                withCallback(
+                    () => backend.mkdir(path),
+                    callback,
+                    profile,
+                    "mkdir"
+                );
             },
             rmdir(path: string, callback: (errno: number) => void) {
-                withCallback(() => backend.rmdir(path), callback);
+                withCallback(
+                    () => backend.rmdir(path),
+                    callback,
+                    profile,
+                    "rmdir"
+                );
             },
             rename(
                 from: string,
                 to: string,
                 callback: (errno: number) => void
             ) {
-                withCallback(() => backend.rename(from, to), callback);
+                withCallback(
+                    () => backend.rename(from, to),
+                    callback,
+                    profile,
+                    "rename"
+                );
             },
             unlink(path: string, callback: (errno: number) => void) {
-                withCallback(() => backend.unlink(path), callback);
+                withCallback(
+                    () => backend.unlink(path),
+                    callback,
+                    profile,
+                    "unlink"
+                );
             },
         },
         {
