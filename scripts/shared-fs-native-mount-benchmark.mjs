@@ -183,6 +183,23 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
 const now = () => process.hrtime.bigint();
 const elapsed = (started) => Number(now() - started);
 
+// Pair one wall-clock reading with the monotonic clock once. Every sample
+// window is then derived from the same monotonic readings that time it, so
+// windows are exactly as long as their durations, never overlap, and can be
+// joined with mount-profile records (which use the same Unix-ns anchoring).
+const UNIX_ANCHOR_NS = BigInt(
+    Math.round((performance.timeOrigin + performance.now()) * 1e6)
+);
+const MONOTONIC_ANCHOR_NS = now();
+const unixNs = (monotonic) =>
+    (UNIX_ANCHOR_NS + (monotonic - MONOTONIC_ANCHOR_NS)).toString();
+const sampleWindow = (started, ended) => ({
+    durationNs: Number(ended - started),
+    startedAtUnixNs: unixNs(started),
+    endedAtUnixNs: unixNs(ended),
+});
+const UNIX_NS_PATTERN = /^[1-9][0-9]{0,18}$/u;
+
 const throwIfAborted = (signal) => {
     if (!signal?.aborted) return;
     throw signal.reason instanceof Error
@@ -284,9 +301,10 @@ const timedHandleOperation = async ({ path, flags, io, sync }) => {
     } catch (error) {
         if (!primaryError) primaryError = error;
     }
+    const totalEnded = now();
     if (primaryError) throw primaryError;
     return {
-        durationNs: elapsed(totalStarted),
+        ...sampleWindow(totalStarted, totalEnded),
         openNs,
         ioNs,
         fsyncNs,
@@ -457,14 +475,16 @@ export const hashNativeMountBenchmarkInputs = async (additional = []) => {
 };
 
 const collect = async (options, signal, run) => {
+    const warmupSamples = [];
     const samples = [];
     for (let index = 0; index < options.warmups + options.samples; index += 1) {
         throwIfAborted(signal);
         const sample = await run(index);
         throwIfAborted(signal);
-        if (index >= options.warmups) samples.push(sample);
+        const warmup = index < options.warmups;
+        (warmup ? warmupSamples : samples).push({ ...sample, warmup });
     }
-    return samples;
+    return { warmupSamples, samples };
 };
 
 const readPackageVersion = async (path) =>
@@ -487,7 +507,7 @@ const executeWorkload = async (root, options, signal) => {
     const statSamples = await collect(options, signal, async () => {
         const started = now();
         const result = await stat(statTarget.path);
-        const sample = { durationNs: elapsed(started) };
+        const sample = sampleWindow(started, now());
         if (!result.isFile() || result.size !== 1 << 20) {
             throw new Error("stat returned unexpected metadata");
         }
@@ -496,8 +516,8 @@ const executeWorkload = async (root, options, signal) => {
     scenarios.push({
         name: "stat-1048576",
         operation: "stat",
-        samples: statSamples,
-        summary: summarize(statSamples),
+        ...statSamples,
+        summary: summarize(statSamples.samples),
     });
 
     for (const size of BINARY_SIZES) {
@@ -513,8 +533,8 @@ const executeWorkload = async (root, options, signal) => {
             operation: "read",
             logicalBytes: size,
             semantics: "open/read-exactly/close",
-            samples: readSamples,
-            summary: summarize(readSamples, size),
+            ...readSamples,
+            summary: summarize(readSamples.samples, size),
         });
 
         const writePath = join(root, `write-${size}.bin`);
@@ -539,8 +559,8 @@ const executeWorkload = async (root, options, signal) => {
             operation: "write",
             logicalBytes: size,
             semantics: "open/truncate/write/fsync/close",
-            samples: writeSamples,
-            summary: summarize(writeSamples, size),
+            ...writeSamples,
+            summary: summarize(writeSamples.samples, size),
         });
     }
 
@@ -566,7 +586,7 @@ const executeWorkload = async (root, options, signal) => {
             for (const key of Object.keys(phaseTotals))
                 phaseTotals[key] += sample[key];
         }
-        const sample = { durationNs: elapsed(started), ...phaseTotals };
+        const sample = { ...sampleWindow(started, now()), ...phaseTotals };
         for (let index = 0; index < options.smallFiles; index += 1) {
             throwIfAborted(signal);
             assertBytes(
@@ -589,9 +609,9 @@ const executeWorkload = async (root, options, signal) => {
         itemCount: options.smallFiles,
         logicalBytes: options.smallFiles * 1024,
         semantics: "per-file open/write/fsync/close",
-        samples: smallSamples,
+        ...smallSamples,
         summary: summarize(
-            smallSamples,
+            smallSamples.samples,
             options.smallFiles * 1024,
             options.smallFiles
         ),
@@ -613,7 +633,7 @@ const executeWorkload = async (root, options, signal) => {
     const readdirSamples = await collect(options, signal, async () => {
         const started = now();
         const entries = await readdir(directory, { withFileTypes: true });
-        const sample = { durationNs: elapsed(started) };
+        const sample = sampleWindow(started, now());
         // Some FUSE implementations return DT_UNKNOWN when readdir does not
         // carry stat data, so validate exact names without assuming dirent type.
         const names = entries.map((entry) => entry.name).sort();
@@ -626,8 +646,8 @@ const executeWorkload = async (root, options, signal) => {
         name: `readdir-${options.readdirEntries}`,
         operation: "readdir",
         itemCount: options.readdirEntries,
-        samples: readdirSamples,
-        summary: summarize(readdirSamples, 0, options.readdirEntries),
+        ...readdirSamples,
+        summary: summarize(readdirSamples.samples, 0, options.readdirEntries),
     });
 
     const overwritePath = join(root, "overwrite-base.bin");
@@ -666,8 +686,8 @@ const executeWorkload = async (root, options, signal) => {
         logicalBytes: OVERWRITE_BYTES,
         baseFileBytes: options.overwriteBaseBytes,
         semantics: "open-r+/positional-write/fsync/close",
-        samples: overwriteSamples,
-        summary: summarize(overwriteSamples, OVERWRITE_BYTES),
+        ...overwriteSamples,
+        summary: summarize(overwriteSamples.samples, OVERWRITE_BYTES),
     });
 
     return scenarios;
@@ -687,12 +707,13 @@ export const expectedNativeMountBenchmarkScenarioNames = (options) => [
 export const validateNativeMountBenchmarkReport = (report, options) => {
     const expectedOptions = options ?? {
         samples: report?.run?.samplesPerScenario,
+        warmups: report?.run?.warmupsPerScenario,
         smallFiles: report?.run?.smallFilesPerSample,
         readdirEntries: report?.run?.readdirEntries,
         overwriteBaseBytes: report?.run?.overwriteBaseBytes,
     };
     if (
-        report?.schemaVersion !== 2 ||
+        report?.schemaVersion !== 3 ||
         report.benchmark !== "shared-fs-native-mount" ||
         JSON.stringify(report.corpus) !==
             JSON.stringify(nativeMountBenchmarkCorpus) ||
@@ -793,6 +814,7 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
     const names = report.scenarios.map(({ name }) => name);
     if (
         report.run.samplesPerScenario !== expectedOptions.samples ||
+        report.run.warmupsPerScenario !== expectedOptions.warmups ||
         report.run.smallFilesPerSample !== expectedOptions.smallFiles ||
         report.run.readdirEntries !== expectedOptions.readdirEntries ||
         report.run.overwriteBaseBytes !== expectedOptions.overwriteBaseBytes
@@ -807,16 +829,48 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
     ) {
         throw new Error(`unexpected scenario set: ${names.join(", ")}`);
     }
+    let previousEndedAt = -1n;
     for (const scenario of report.scenarios) {
         if (
             scenario.samples?.length !== expectedOptions.samples ||
+            scenario.warmupSamples?.length !== expectedOptions.warmups ||
             scenario.summary?.count !== expectedOptions.samples ||
             !Number.isSafeInteger(scenario.summary?.p50Ns) ||
             !Number.isSafeInteger(scenario.summary?.p95Ns)
         ) {
             throw new Error(`${scenario.name} has an incomplete sample set`);
         }
-        for (const sample of scenario.samples) {
+        // Warmups run first, then measured samples; every window is derived
+        // from the monotonic readings that time it, so windows are exact and
+        // strictly ordered across the whole report.
+        const windows = [
+            ...scenario.warmupSamples.map((sample) => [sample, true]),
+            ...scenario.samples.map((sample) => [sample, false]),
+        ];
+        for (const [sample, warmup] of windows) {
+            if (
+                sample.warmup !== warmup ||
+                !UNIX_NS_PATTERN.test(sample.startedAtUnixNs ?? "") ||
+                !UNIX_NS_PATTERN.test(sample.endedAtUnixNs ?? "")
+            ) {
+                throw new Error(
+                    `${scenario.name} has an invalid sample window`
+                );
+            }
+            const startedAt = BigInt(sample.startedAtUnixNs);
+            const endedAt = BigInt(sample.endedAtUnixNs);
+            if (
+                !Number.isSafeInteger(sample.durationNs) ||
+                endedAt - startedAt !== BigInt(sample.durationNs) ||
+                startedAt < previousEndedAt
+            ) {
+                throw new Error(
+                    `${scenario.name} has an invalid sample window`
+                );
+            }
+            previousEndedAt = endedAt;
+        }
+        for (const sample of [...scenario.warmupSamples, ...scenario.samples]) {
             if (
                 !Number.isSafeInteger(sample.durationNs) ||
                 sample.durationNs <= 0
@@ -957,7 +1011,7 @@ export const runNativeMountBenchmark = async (options) => {
     ]);
     return validateNativeMountBenchmarkReport(
         {
-            schemaVersion: 2,
+            schemaVersion: 3,
             benchmark: "shared-fs-native-mount",
             corpus: nativeMountBenchmarkCorpus,
             target: {
@@ -1003,6 +1057,8 @@ export const runNativeMountBenchmark = async (options) => {
             run: {
                 startedAt,
                 clock: "process.hrtime.bigint monotonic durations",
+                sampleWindows:
+                    "startedAtUnixNs/endedAtUnixNs bracket each timed operation (decimal Unix nanoseconds from one wall-clock anchor plus the monotonic clock); warmupSamples precede samples and are excluded from summaries",
                 percentiles: "nearest-rank",
                 warmupsPerScenario: options.warmups,
                 samplesPerScenario: options.samples,

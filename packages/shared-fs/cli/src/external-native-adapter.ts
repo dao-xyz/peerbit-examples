@@ -4,7 +4,16 @@ type ExternalNativeAdapterOptions = {
     readinessTimeoutMs?: number;
     exitTimeoutMs?: number;
     spawnAdapter?: typeof spawn;
+    /**
+     * Opt-in NDJSON profile file for the adapter. It is passed through the
+     * environment, never argv, so an adapter built before profiling existed
+     * ignores it instead of rejecting an unknown flag.
+     */
+    profileFile?: string;
 };
+
+export const NATIVE_ADAPTER_PROFILE_FILE_ENV =
+    "PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE";
 
 const childExited = (child: ChildProcess) =>
     child.exitCode != null || child.signalCode != null;
@@ -117,9 +126,19 @@ export const mountExternalNativeAdapter = async (
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
     }
-    const child = (options.spawnAdapter ?? spawn)(command, args, {
-        stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = (options.spawnAdapter ?? spawn)(
+        command,
+        args,
+        options.profileFile === undefined
+            ? { stdio: ["ignore", "pipe", "pipe"] }
+            : {
+                  stdio: ["ignore", "pipe", "pipe"],
+                  env: {
+                      ...process.env,
+                      [NATIVE_ADAPTER_PROFILE_FILE_ENV]: options.profileFile,
+                  },
+              }
+    );
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 
     try {

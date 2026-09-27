@@ -208,6 +208,47 @@ performance threshold. The Linux native smoke workflow can collect its FUSE
 report and same-runner control directly; the native-OS workflow can collect
 paired macFUSE and WinFsp reports from its real provisioned mounts.
 
+The mounted-benchmark report (schema version 3) also records each sample's
+`startedAtUnixNs`/`endedAtUnixNs` window and keeps warmups in a separate
+`warmupSamples` list flagged `warmup: true`, so mount profile records can be
+attributed to exact samples. `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES`
+selects the in-place overwrite base size in the smoke wrappers.
+
+### Live callback and IPC profiling
+
+`peerbit-fs mount --mount-profile <dir>` asks the adapter to write
+`<dir>/native-adapter.ndjson` by setting
+`PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE` in the adapter's environment. The
+adapter never receives a new command-line flag, so an adapter built before
+profiling existed ignores the variable and still mounts; only adapter builds
+that contain this change write the file. An existing file is never truncated
+or appended to: the adapter reports why on stderr and runs unprofiled.
+
+Records use schema `peerbit.shared-fs.mount-profile` version 1 with a decimal
+`startUnixNs` string and a monotonic `durationNs`:
+
+- `native.callback` spans cgofuse callback entry through return. Read and
+  write callbacks carry the requested `bytes` and `offset`; failures carry the
+  negative FUSE `errno` and its portable `code` name (for example `ENOENT`).
+- `ipc.queue` is the wait for the adapter's serialized request lane.
+- `ipc.roundTrip` covers connection setup when needed (`connected: true`),
+  framing, loopback, the Node service, and response decode. Failures carry the
+  daemon's `code`, or `EIO` with `transport: true` when the daemon never
+  answered.
+- Queue and round-trip records carry `requestId` and the TCP `localPort`,
+  which equal the daemon's `requestId` and `remotePort`.
+
+Emitting never blocks a callback. Records are copied into a bounded queue after
+the request lane is released and written by one background goroutine; when the
+queue is full a record is dropped and counted. On clean shutdown the adapter
+writes a `profile.summary` record with `emitted`, `written`, `dropped`, and
+`writeErrors`. A forced kill (for example the Windows smoke teardown) leaves
+no summary, which the summarizer reports as an incomplete session. With
+profiling off the only added work is a nil check.
+
+Kernel time before callback entry, cached operations that never enter
+userspace, and time after callback return are not observable here.
+
 ## POSIX metadata limits
 
 The shared model currently persists names and file content, not POSIX mode,

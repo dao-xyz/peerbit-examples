@@ -894,6 +894,52 @@ detaching it. Mutations admitted later through sibling descriptors remain
 buffered for a later fence. The current target interface still has no
 backend-independent hardware cache or power-loss barrier.
 
+### Opt-in mounted-path profiling
+
+`createSharedFsMountBackend`, `createSharedFsIpcServer`, and
+`mountNativeSharedFs` accept a `profile` sink. It receives
+`peerbit.shared-fs.mount-profile` (schema version 1) events with a decimal
+Unix-nanosecond `startUnixNs` string and a monotonic `durationNs`. Profiling is
+disabled by default; the disabled hot path only checks the absent sink. Sink
+exceptions are ignored because the sink is report-only. When
+`mountNativeSharedFs` receives an already-created backend, pass the same sink
+to `createSharedFsMountBackend` to receive its inner commit events.
+
+A sink runs on the mount path. Use `openSharedFsMountProfileFile(path)` or
+`createSharedFsMountProfileWriter(stream)` for output: the sink only appends to
+a bounded queue (16,384 events by default) and batches are written
+asynchronously; while the stream holds 8 MiB or more of unwritten bytes, new
+events are dropped and counted. `close()` flushes, appends a `profile.summary`
+record with `emitted`, `written`, `dropped`, and `lost` counts, and ends the
+stream. Files are created exclusively and never overwritten.
+
+The phases are deliberately narrow and nest rather than add up:
+
+- `native.callback` (source `fuse-native`) spans userspace entry through
+  handing the result to `fuse-native`; reads and writes carry `bytes` and
+  `offset`. The external Go adapter writes the same phase to its own file.
+- `ipc.service` covers only the Node server's backend method, not parsing or
+  response delivery. It carries the wire `requestId`, `protocol`, and the
+  adapter connection's `remotePort`, which join it to the adapter's
+  `ipc.roundTrip` record.
+- `mount.localCommit` is one record per commit fence, with `trigger`
+  (`flush`, `fsync`, `release`, or path `truncate`), `requiredCommit`, and the
+  number of commits it started or joined. `writeFileNs` is the time of the
+  target writes it started, so consumers can subtract rather than double count.
+- `mount.target.writeFile` covers the exact target `writeFile` promise used to
+  publish mounted bytes (nested in a `mount.localCommit`). It does not assert
+  storage-engine, hardware, remote-readability, replication, or
+  persisted-receipt phases.
+
+Failures carry `detail.code`: the backend error code the mount returns, so
+absent (`ENOENT`) and unavailable (`EAGAIN`, `EIO`) outcomes stay separable.
+
+These events cannot measure time spent in the kernel before a userspace mount
+callback, kernel cache hits that never call userspace, or time after the
+callback returns. The current APIs also expose no truthful sub-boundaries for
+chunk hashing, block persistence, document append, or remote replication, so
+the profiler does not invent them.
+
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
 shared filesystem address and read each other's files. The native Linux FUSE

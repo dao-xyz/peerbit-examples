@@ -29,6 +29,10 @@ import {
     SHARED_FS_IPC_V2_MAX_METADATA_BYTES,
     writeIpcV2Frame,
 } from "./ipc-v2.js";
+import {
+    profileSharedFsMountOperation,
+    type SharedFsMountProfileSink,
+} from "./mount-profile.js";
 
 export type SharedFsIpcEndpoint = string;
 
@@ -71,6 +75,11 @@ export const DEFAULT_SHARED_FS_IPC_MAX_FRAME_BYTES = 64 * 1024 * 1024;
 export type SharedFsIpcOptions = {
     maxRequestFrameBytes?: number;
     maxResponseFrameBytes?: number;
+};
+
+export type SharedFsIpcServerOptions = SharedFsIpcOptions & {
+    /** Time backend service only; framing and socket writes are excluded. */
+    profile?: SharedFsMountProfileSink;
 };
 
 type ResolvedSharedFsIpcOptions = {
@@ -472,14 +481,15 @@ const connectEndpoint = (endpoint: string): Socket => {
 export const createSharedFsIpcServer = async (
     backend: SharedFsMountBackend,
     endpoint = defaultSharedFsIpcEndpoint(),
-    options: SharedFsIpcOptions = {}
+    options: SharedFsIpcServerOptions = {}
 ): Promise<SharedFsIpcServer> => {
     const limits = resolveIpcOptions(options);
+    const profile = options.profile;
     const sockets = new Set<Socket>();
     const server: Server = createServer((socket) => {
         sockets.add(socket);
         socket.once("close", () => sockets.delete(socket));
-        void serveSocket(socket, backend, limits).catch(() => {
+        void serveSocket(socket, backend, limits, profile).catch(() => {
             // A client abort (ECONNRESET/EPIPE), malformed frame, or local
             // response failure must never take the mount daemon down.
             socket.destroy();
@@ -677,12 +687,18 @@ export const createSharedFsIpcClient = (
 const serveSocket = async (
     socket: Socket,
     backend: SharedFsMountBackend,
-    limits: ResolvedSharedFsIpcOptions
+    limits: ResolvedSharedFsIpcOptions,
+    profile?: SharedFsMountProfileSink
 ) => {
     const reader = new BoundedIpcByteReader(
         socket,
         limits.maxRequestFrameBytes
     );
+    // The adapter reports its TCP local port; the pair is the cross-process
+    // connection key for joining `ipc.service` with `ipc.roundTrip` records.
+    const serviceProfile: IpcServiceProfile | undefined = profile
+        ? { sink: profile, remotePort: socket.remotePort }
+        : undefined;
 
     let firstFrame: Buffer | undefined;
     for (;;) {
@@ -723,7 +739,14 @@ const serveSocket = async (
             socket.destroy();
             return;
         }
-        await serveV1Requests(socket, reader, backend, limits, request);
+        await serveV1Requests(
+            socket,
+            reader,
+            backend,
+            limits,
+            serviceProfile,
+            request
+        );
         return;
     }
 
@@ -777,7 +800,13 @@ const serveSocket = async (
             return;
         }
         await writeFrame(socket, acknowledgement);
-        await serveV2Requests(socket, reader, backend, v2Limits);
+        await serveV2Requests(
+            socket,
+            reader,
+            backend,
+            v2Limits,
+            serviceProfile
+        );
         return;
     }
 
@@ -799,7 +828,7 @@ const serveSocket = async (
             return;
         }
         await writeFrame(socket, acknowledgement);
-        await serveV1Requests(socket, reader, backend, limits);
+        await serveV1Requests(socket, reader, backend, limits, serviceProfile);
         return;
     }
 
@@ -820,14 +849,43 @@ const serveSocket = async (
     socket.end();
 };
 
+type IpcServiceProfile = {
+    sink: SharedFsMountProfileSink;
+    remotePort?: number;
+};
+
+/** The code the adapter receives for a failed request (see errorResponse). */
+const ipcServiceErrorCode = (error: unknown) =>
+    error instanceof SharedFsBackendError ? error.code : "EIO";
+
 const invokeBackend = async (
     backend: SharedFsMountBackend,
-    request: IpcRequest
+    request: IpcRequest,
+    profile: IpcServiceProfile | undefined,
+    protocol: "v1" | "v2"
 ) => {
     const method = backend[request.op] as (
         ...args: unknown[]
     ) => Promise<unknown>;
-    return method.apply(backend, request.args);
+    if (!profile) return method.apply(backend, request.args);
+    return profileSharedFsMountOperation(
+        profile.sink,
+        {
+            source: "node-daemon",
+            phase: "ipc.service",
+            operation: request.op,
+            detail:
+                profile.remotePort === undefined
+                    ? { requestId: request.id, protocol }
+                    : {
+                          requestId: request.id,
+                          protocol,
+                          remotePort: profile.remotePort,
+                      },
+        },
+        () => method.apply(backend, request.args),
+        ipcServiceErrorCode
+    );
 };
 
 const errorResponse = (id: number, error: unknown): IpcResponse => ({
@@ -844,6 +902,7 @@ const serveV1Requests = async (
     reader: BoundedIpcByteReader,
     backend: SharedFsMountBackend,
     limits: ResolvedSharedFsIpcOptions,
+    profile?: IpcServiceProfile,
     initialRequest?: IpcRequest
 ) => {
     let nextRequest = initialRequest;
@@ -875,7 +934,12 @@ const serveV1Requests = async (
         let response: IpcResponse;
         try {
             const args = decodeBytes(request.args) as unknown[];
-            const result = await invokeBackend(backend, { ...request, args });
+            const result = await invokeBackend(
+                backend,
+                { ...request, args },
+                profile,
+                "v1"
+            );
             response = {
                 id: request.id,
                 ok: true,
@@ -914,7 +978,8 @@ const serveV2Requests = async (
     socket: Socket,
     reader: BoundedIpcByteReader,
     backend: SharedFsMountBackend,
-    limits: IpcV2Limits
+    limits: IpcV2Limits,
+    profile?: IpcServiceProfile
 ) => {
     for (;;) {
         const frame = await readIpcV2Frame(
@@ -934,7 +999,7 @@ const serveV2Requests = async (
         let response: IpcResponse;
         let responseBody: Uint8Array = Buffer.alloc(0);
         try {
-            const result = await invokeBackend(backend, request);
+            const result = await invokeBackend(backend, request, profile, "v2");
             if (request.op === "read") {
                 if (!(result instanceof Uint8Array)) {
                     throw new Error("IPC read backend did not return bytes");

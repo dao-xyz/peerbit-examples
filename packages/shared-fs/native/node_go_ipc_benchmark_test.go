@@ -442,7 +442,7 @@ func TestNodeGoIPCExternalBenchmark(t *testing.T) {
 			// Keep negotiation outside every measured sample, including runs with
 			// zero warmups, and prove every retained lane is v2 before timing.
 			for lane, client := range clients {
-				_, _, protocol, _, err := client.connect()
+				_, _, protocol, _, _, err := client.connect()
 				if err != nil {
 					t.Fatalf("adapter width %d lane %d negotiation: %v", width, lane+1, err)
 				}

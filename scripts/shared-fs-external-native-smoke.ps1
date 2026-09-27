@@ -102,6 +102,12 @@ $Args = @(
   "--native-adapter",
   $Adapter
 )
+# Opt-in mount profiling writes NDJSON files into a new directory. The forced
+# process-tree teardown below cannot let the CLI or adapter write their final
+# summary records, so Windows profiles are reported as incomplete sessions.
+if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR) {
+  $Args += @("--mount-profile", $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR)
+}
 
 $Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 
@@ -221,6 +227,9 @@ try {
       "--implementation-input",
       "packages/shared-fs/library/lib/esm"
     )
+    if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES) {
+      $BenchmarkCommonArgs += @("--overwrite-base-bytes", $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES)
+    }
   }
 
   if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT) {
