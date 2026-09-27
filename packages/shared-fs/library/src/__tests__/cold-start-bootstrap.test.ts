@@ -1626,6 +1626,23 @@ describe("shared fs cold-start bootstrap", () => {
             let donor!: Awaited<ReturnType<typeof buildDonor>>;
             let joiner!: Awaited<ReturnType<typeof openSharedFs>>;
             let stranded = false;
+            // Overlay heads carry the final round's content; scan back
+            // through history rounds for an absent-but-referenced chunk.
+            const findAbsentHistoryChunk = async (program: any) => {
+                for (let round = 8; round >= 1; round--) {
+                    for (let i = 399; i >= 0; i--) {
+                        const content = `round ${round} content ${i}`;
+                        const id = chunkIdForBytes(
+                            new TextEncoder().encode(content)
+                        );
+                        if (!(await program.hasDocument(id))) {
+                            return { content, id };
+                        }
+                    }
+                }
+                return undefined;
+            };
+            let absentHistoryChunk: { content: string; id: string } | undefined;
             for (let attempt = 0; attempt < 4 && !stranded; attempt++) {
                 donor = await buildDonor();
                 const joinerPeer = await createPeer();
@@ -1650,7 +1667,14 @@ describe("shared fs cold-start bootstrap", () => {
                 // Strand the joiner mid-sync: the overlay must keep
                 // serving, and retirement must take the unverified path.
                 await donor.peer.stop();
-                if (joiner.bootstrapStatus().pendingDocs > 0) {
+                // The W1 check below also needs a history chunk the joiner
+                // has not fetched yet; pending documents alone do not imply
+                // one (the stream may have delivered every chunk first).
+                absentHistoryChunk =
+                    joiner.bootstrapStatus().pendingDocs > 0
+                        ? await findAbsentHistoryChunk(joiner.program)
+                        : undefined;
+                if (absentHistoryChunk) {
                     stranded = true;
                 } else {
                     // The engine outran the stop; rebuild and try again.
@@ -1674,25 +1698,12 @@ describe("shared fs cold-start bootstrap", () => {
             // invisible to dedup witness probes, so nothing may be skipped
             // on their account.
             const program: any = joiner.program;
-            let sharedContent: string | undefined;
-            let sharedChunkId: string | undefined;
-            // Overlay heads carry the final round's content; scan back
-            // through history rounds so a partially streamed chunk set can
-            // always yield an absent-but-referenced candidate.
-            outer: for (let round = 8; round >= 1; round--) {
-                for (let i = 399; i >= 0; i--) {
-                    const candidate = `round ${round} content ${i}`;
-                    const id = chunkIdForBytes(
-                        new TextEncoder().encode(candidate)
-                    );
-                    if (!(await program.hasDocument(id))) {
-                        sharedContent = candidate;
-                        sharedChunkId = id;
-                        break outer;
-                    }
-                }
-            }
+            // Found while stranding; the donor is gone, so it is still absent.
+            const sharedContent: string | undefined =
+                absentHistoryChunk?.content;
+            const sharedChunkId: string | undefined = absentHistoryChunk?.id;
             expect(sharedContent).toBeDefined();
+            expect(await program.hasDocument(sharedChunkId!)).toBe(false);
             await joiner.writeFile("/dup-of-overlay.txt", sharedContent!);
             expect(await program.hasDocument(sharedChunkId!)).toBe(true);
 
