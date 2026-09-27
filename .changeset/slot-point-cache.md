@@ -1,0 +1,5 @@
+---
+"@peerbit/shared-fs": patch
+---
+
+Resolve paths in wide directories that have not been listed with an exact `(parent, name)` index query instead of reading the whole directory. A lookup in a directory that is not known to be wide reads it with a bounded query (at most 2,049 naming rows, using the existing directory index). If the directory fits, it is cached whole exactly as before. If it does not, it is remembered as wide, and it and later lookups use exact-slot queries, so a cold `stat` in a wide directory costs about 2,000 rows plus one small query instead of a full directory scan. Exact-slot results are kept in a separate bounded cache: at most 4,096 slots, 16,384 rows and about 8 MiB (estimated). A name history too large for that cache is still returned in full, just not cached, and never evicts other entries. Filesystems without wide directories never create the extra index that exact-slot queries need. Waiting lookups at the 64-query cap are admitted in FIFO order, and identical lookups share one query. Results are unchanged.

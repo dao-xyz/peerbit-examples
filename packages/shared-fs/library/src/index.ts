@@ -80,6 +80,7 @@ import {
     type ChangesetStatus,
     type ChangesetWatcher,
 } from "./changeset.js";
+import { BoundedSlotPointCache } from "./slot-point-cache.js";
 
 export * from "./model.js";
 export {
@@ -2130,6 +2131,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * with that parentId is added or removed, so invalidation is exact.
      */
     private slotSweepCache = new Map<string, Map<string, NamingLike>>();
+    /**
+     * Exact `(parentId, name)` histories for point lookups (path resolution,
+     * stat, create checks) in directories that have no cached sweep. Bounded
+     * separately from the sweeps above; it never represents a listing.
+     */
+    private slotPointCache = new BoundedSlotPointCache();
     private changeListener: ((event: any) => void) | undefined;
     /** Memoized isTrusted verdicts; see canPerformEntry. */
     private trustVerdicts = new Map<string, { ok: boolean; at: number }>();
@@ -2217,8 +2224,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     /**
      * Read-through overlay over the snapshot's head documents. HARD
      * INVARIANT: visible ONLY to the five enumerated metadata read points
-     * (namingStatesForNodes, sweepRows, headsForNodes, getDocument-on-miss
-     * for naming/version ids, versionDocumentsForNode) — never to
+     * (namingStatesForNodes, sweepRows and its per-name slotRows,
+     * headsForNodes, getDocument-on-miss for naming/version ids,
+     * versionDocumentsForNode) — never to
      * touchChunks, hasDocument, GC planning, or Guard D. Nothing in the
      * overlay ever enters the log, index, or block store.
      */
@@ -2677,6 +2685,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // with its previous-session snapshot.
         this.cacheGlobalEpoch = (this.cacheGlobalEpoch ?? 0) + 1;
         this.slotSweepCache = new Map();
+        this.slotPointCache = new BoundedSlotPointCache();
         this.writeBatchChain = Promise.resolve();
         this.mountNamespaceMutationChain = Promise.resolve();
         this.mountNamespaceFenceActive = false;
@@ -3875,6 +3884,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (sweep) {
                     sweep.set(value.id, namingRowOf(value));
                 }
+                this.slotPointCache.applyAdded(namingRowOf(value));
             }
         }
         // Removals (GC) invalidate conservatively: the next access re-reads
@@ -3888,6 +3898,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.namingRowCache.delete(value.nodeId);
                 this.bumpEpoch(`slot:${value.parentId}`);
                 this.slotSweepCache.delete(value.parentId);
+                this.slotPointCache.applyRemoved(namingRowOf(value));
             }
         }
         this.boundCache(this.versionRowCache);
@@ -3906,6 +3917,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return (await this.entries.index
             .iterate({ query }, { local: true, remote: false, resolve: false })
             .all()) as any[];
+    }
+
+    /**
+     * At most `limit + 1` rows; `complete` only when the result provably
+     * holds every matching row.
+     */
+    private async queryRowsUpTo(
+        query: Query[],
+        limit: number
+    ): Promise<{ rows: any[]; complete: boolean }> {
+        this.rowQueries++;
+        const iterator = this.entries.index.iterate(
+            { query },
+            { local: true, remote: false, resolve: false }
+        );
+        try {
+            const rows = (await iterator.next(limit + 1)) as any[];
+            return { rows, complete: rows.length <= limit && iterator.done() };
+        } finally {
+            await (iterator as any).close?.();
+        }
     }
 
     /**
@@ -3994,13 +4026,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const epochKey = `slot:${parentId}`;
         const fillEpoch = this.epochOf(epochKey);
+        // close()/open()/overlay retirement replace the map: a fill that
+        // spans that must not repopulate the replacement.
+        const sweepCache = this.slotSweepCache;
         const rows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "naming" }),
                 new StringMatch({ key: "parentId", value: parentId }),
             ])
         ).map(namingRowOf);
-        if (this.epochOf(epochKey) === fillEpoch) {
+        if (rows.length > this.slotPointCache.limits.wideDirectoryRows) {
+            this.slotPointCache.markWide(parentId);
+        }
+        if (
+            this.slotSweepCache === sweepCache &&
+            this.epochOf(epochKey) === fillEpoch
+        ) {
             this.slotSweepCache.set(
                 parentId,
                 new Map(rows.map((row) => [row.id, row]))
@@ -4009,6 +4050,141 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         // Overlay union after the cache install: read view only.
         return this.overlayUnionSweep(parentId, rows);
+    }
+
+    /**
+     * The directory's listing, read and installed exactly like `sweepRows`,
+     * if it has at most `wideDirectoryRows` naming rows. A wider directory is
+     * remembered as wide and yields undefined: callers use exact-slot queries
+     * for it, and only such filesystems pay for the planner's slot indexes.
+     */
+    private async sweepRowsIfNarrow(
+        parentId: string
+    ): Promise<NamingLike[] | undefined> {
+        const cached = this.slotSweepCache.get(parentId);
+        if (cached) {
+            return this.overlayUnionSweep(parentId, [...cached.values()]);
+        }
+        const pointCache = this.slotPointCache;
+        const epochKey = `slot:${parentId}`;
+        const fillEpoch = this.epochOf(epochKey);
+        const sweepCache = this.slotSweepCache;
+        // Same query shape as sweepRows, so no new planner index is created.
+        const { rows: raw, complete } = await this.queryRowsUpTo(
+            [
+                new StringMatch({ key: "kind", value: "naming" }),
+                new StringMatch({ key: "parentId", value: parentId }),
+            ],
+            pointCache.limits.wideDirectoryRows
+        );
+        if (!complete) {
+            pointCache.markWide(parentId);
+            return undefined;
+        }
+        const rows = raw.map(namingRowOf);
+        if (
+            this.slotSweepCache === sweepCache &&
+            this.epochOf(epochKey) === fillEpoch
+        ) {
+            this.slotSweepCache.set(
+                parentId,
+                new Map(rows.map((row) => [row.id, row]))
+            );
+            this.boundCache(this.slotSweepCache);
+        }
+        return this.overlayUnionSweep(parentId, rows);
+    }
+
+    /**
+     * Every naming event that ever asserted the placement (parentId, name):
+     * the candidate history behind one slot. Answered, in order, from a
+     * cached directory sweep (a complete listing also proves absence), from
+     * the bounded point cache, from a bounded whole-directory read for a
+     * directory not known to be wide, or from one exact index query whose
+     * cost depends on this slot's history rather than on the directory's
+     * width.
+     *
+     * The exact query is not truncated: a history too large to retain is
+     * still returned whole and simply not cached (`installSlot` rejects it
+     * without evicting anything). Truncating could hide the winner. Point
+     * queries serve only directories known to be wider than
+     * `wideDirectoryRows`; any other directory is read and cached whole, as
+     * before, so filesystems without wide directories never create the
+     * planner's (parentId, name) indexes.
+     *
+     * The point fill uses the same fences as the sweep fill (the per-directory
+     * `slot:<parentId>` epoch, which includes the global epoch) plus the open
+     * generation and cache identity. No global mutation epoch is needed:
+     *  - Every arrival or removal under `parentId` bumps that epoch, so an
+     *    installed snapshot never lacks a row the index has for the slot.
+     *  - A same-id Documents replacement that moves a row out to another
+     *    directory bumps only the destination's epoch, so a fill racing it
+     *    may retain that row as a stale extra. Like a stale row left in a
+     *    sweep after the same move, it is harmless: every consumer keeps a
+     *    candidate only if its current winning event is at (parentId, name).
+     *    The next event or fill that places the id elsewhere evicts the slot.
+     *  - The cache removes rows only by evicting whole slots, so a racing fill
+     *    can never delete a live row from another cached slot.
+     */
+    private async slotRows(
+        parentId: string,
+        name: string
+    ): Promise<NamingLike[]> {
+        const sweep = this.slotSweepCache.get(parentId);
+        if (sweep) {
+            const rows: NamingLike[] = [];
+            for (const row of sweep.values()) {
+                if (row.name === name) {
+                    rows.push(row);
+                }
+            }
+            return this.overlayUnionSlot(parentId, name, rows);
+        }
+        const cache = this.slotPointCache;
+        const cached = cache.getSlot(parentId, name);
+        if (cached) {
+            return this.overlayUnionSlot(parentId, name, cached);
+        }
+        if (!cache.isWide(parentId)) {
+            // A directory not known to be wide is read and cached whole, as
+            // every lookup did before point queries, unless the bounded read
+            // proves it wide.
+            const listing = await this.sweepRowsIfNarrow(parentId);
+            if (listing) {
+                return listing.filter((row) => row.name === name);
+            }
+        }
+        const generation = this.openGeneration;
+        const epochKey = `slot:${parentId}`;
+        const fillEpoch = this.epochOf(epochKey);
+        const rows = await cache.runSlotFill(
+            parentId,
+            name,
+            `${generation}:${fillEpoch}`,
+            async () => {
+                // Only naming rows carry parentId/name, so `kind` adds
+                // nothing here; leaving it out keeps the planner's lazily
+                // created composite indexes to two columns, which every
+                // later write must maintain.
+                const rows = (
+                    await this.queryRows([
+                        new StringMatch({ key: "parentId", value: parentId }),
+                        new StringMatch({ key: "name", value: name }),
+                    ])
+                ).map(namingRowOf);
+                if (
+                    this.openGeneration === generation &&
+                    this.slotPointCache === cache &&
+                    this.epochOf(epochKey) === fillEpoch
+                ) {
+                    cache.installSlot(parentId, name, rows);
+                }
+                return rows;
+            }
+        );
+        // Joined callers share one snapshot array; each gets its own copy.
+        // Overlay union after the cache install: read view only.
+        return this.overlayUnionSlot(parentId, name, [...rows]);
     }
 
     /**
@@ -4029,9 +4205,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
           }
         | undefined
     > {
-        const slotRows = (await this.sweepRows(parentId)).filter(
-            (row) => row.name === name
-        );
+        const slotRows = await this.slotRows(parentId, name);
         const candidates = [...new Set(slotRows.map((row) => row.nodeId))];
         if (candidates.length === 0) {
             return undefined;
@@ -5520,14 +5694,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const parent = await this.resolvePath(parentPath);
         if (!parent || parent.kind === "file") return undefined;
         const parentId = parent.kind === "root" ? ROOT_NODE_ID : parent.nodeId;
-        const slotRows = await this.sweepRows(parentId);
-        const nodeIds = [
-            ...new Set(
-                slotRows
-                    .filter((row) => row.name === name)
-                    .map((row) => row.nodeId)
-            ),
-        ];
+        const slotRows = await this.slotRows(parentId, name);
+        const nodeIds = [...new Set(slotRows.map((row) => row.nodeId))];
         if (nodeIds.length === 0) return undefined;
         const states = await this.namingStatesForNodes(nodeIds);
         for (const nodeId of nodeIds) {
@@ -8595,6 +8763,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // writes have drained, so it cannot race a stale marker onto disk.
         this.detachTrustChangeListener();
         this.openGeneration = (this.openGeneration || 0) + 1;
+        // Change events stopped with the listener above, so the slot caches
+        // are no longer maintained. Release them here. open() replaces both
+        // again, discarding anything a late fill installed in between.
+        this.slotSweepCache = new Map();
+        this.slotPointCache = new BoundedSlotPointCache();
         this.writesReady = false;
         this.writeReadinessRequired = false;
         this.watchHub?.closeAll();
@@ -9658,6 +9831,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return merged;
     }
 
+    /** overlayUnionSweep restricted to one name (slot lookups). */
+    private overlayUnionSlot(
+        parentId: string,
+        name: string,
+        rows: NamingLike[]
+    ): NamingLike[] {
+        if (this.bootstrapPhase !== "overlay-active") {
+            return rows;
+        }
+        const bucket = this.overlaySweep.get(parentId);
+        if (!bucket || bucket.size === 0) {
+            return rows;
+        }
+        const seen = new Set(rows.map((row) => row.id));
+        const merged = [...rows];
+        for (const [id, row] of bucket) {
+            if (row.name === name && !seen.has(id)) {
+                merged.push(row);
+            }
+        }
+        return merged;
+    }
+
     /**
      * Convergence tracking: a snapshot document is covered by arrival or
      * removal (change events drain overlayPending directly) or by
@@ -9961,6 +10157,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.versionRowCache = new Map();
         this.namingRowCache = new Map();
         this.slotSweepCache = new Map();
+        this.slotPointCache = new BoundedSlotPointCache();
         this.cacheGlobalEpoch++;
         if (this.supersessionTimer) {
             clearInterval(this.supersessionTimer);

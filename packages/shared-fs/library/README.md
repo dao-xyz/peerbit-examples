@@ -177,6 +177,15 @@ not with the total store size, and file content chunks are only loaded by
 reads. The warm row-bucket maps and per-key change-counter map each use the
 same 50,000-entry cap; oldest entries are evicted in batches, and epoch
 eviction invalidates any in-flight fill before its counter can be reused.
+A path lookup in a directory that has not been listed reads that directory
+whole and caches it, as before, when it has at most 2,048 naming rows; that
+read is bounded, so a wider directory is detected after 2,049 rows instead of
+being read completely. A directory known to be wider is served by exact
+`(parent, name)` index queries, kept in a separate LRU of at most 4,096 slots
+and markers, 16,384 rows and about 8 MiB (estimated). A history too large for
+it is still returned whole, just not cached. Only filesystems with such wide
+directories pay for the extra index those queries need. Once a directory is
+listed, its lookups are answered from the listing, as before.
 Every syncing peer keeps a full replica by default
 (`replicate: { factor: 1 }`); pass `replicate: false` for a peer that should
 not store content — reads then fall back to bounded remote chunk fetches
@@ -756,6 +765,25 @@ allocation. The eight-descriptor retained delta is bounded to the
 one-descriptor delta plus 10% and a small fixed allocator allowance; after the
 last release both cases must return close to their baseline. Open time is
 reported for diagnosis only and has no pass/fail budget.
+
+The exact-slot benchmark measures cold and warm `stat` of one entry, and of an
+absent name, in a directory of each given width, then a cold `list` and a
+`stat` after it. A second case seeds one directory of
+`PEERBIT_SHARED_FS_SLOT_CACHE_BENCH_INDEX_WIDTH` (default 100,000) naming rows
+straight into a disk-backed SQLite index and measures path-slot resolution on
+top of it:
+
+```bash
+PEERBIT_SHARED_FS_SLOT_CACHE_BENCH=1 \
+PEERBIT_SHARED_FS_SLOT_CACHE_BENCH_WIDTHS=100,10000 \
+pnpm --filter @peerbit/shared-fs exec vitest run \
+  src/__tests__/slot-point-cache.bench.test.ts --reporter=verbose
+```
+
+It reports latencies and row queries by kind (exact slot, directory sweep,
+per-node). Its gates are structural only: a cold lookup issues one exact-slot
+query and no directory sweep, and warm lookups and lookups after a listing
+issue no slot queries. Timings are descriptive.
 
 ## Native Mounts
 
