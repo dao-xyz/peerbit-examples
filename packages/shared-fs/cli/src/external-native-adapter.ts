@@ -1,9 +1,57 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import {
+    spawn,
+    type ChildProcess,
+    type SpawnOptionsWithStdioTuple,
+    type StdioNull,
+    type StdioPipe,
+} from "node:child_process";
+
+type AdapterSpawnOptions = SpawnOptionsWithStdioTuple<
+    StdioNull,
+    StdioPipe,
+    StdioPipe
+>;
 
 type ExternalNativeAdapterOptions = {
     readinessTimeoutMs?: number;
     exitTimeoutMs?: number;
     spawnAdapter?: typeof spawn;
+    /**
+     * Opt-in NDJSON profile file for the adapter. It is passed through the
+     * environment, never argv, so an adapter built before profiling existed
+     * ignores it instead of rejecting an unknown flag.
+     */
+    profileFile?: string;
+};
+
+export const NATIVE_ADAPTER_PROFILE_FILE_ENV =
+    "PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE";
+
+/**
+ * The adapter profiles only when this mount asked for it: an explicit file is
+ * set, and a value inherited from the CLI's own environment is removed.
+ * Otherwise the adapter inherits the environment unchanged.
+ */
+export const adapterSpawnOptions = (
+    profileFile: string | undefined,
+    environment: NodeJS.ProcessEnv = process.env
+): AdapterSpawnOptions => {
+    const stdio: AdapterSpawnOptions["stdio"] = ["ignore", "pipe", "pipe"];
+    if (profileFile !== undefined) {
+        return {
+            stdio,
+            env: {
+                ...environment,
+                [NATIVE_ADAPTER_PROFILE_FILE_ENV]: profileFile,
+            },
+        };
+    }
+    if (environment[NATIVE_ADAPTER_PROFILE_FILE_ENV] === undefined) {
+        return { stdio };
+    }
+    const env = { ...environment };
+    delete env[NATIVE_ADAPTER_PROFILE_FILE_ENV];
+    return { stdio, env };
 };
 
 const childExited = (child: ChildProcess) =>
@@ -117,9 +165,11 @@ export const mountExternalNativeAdapter = async (
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
     }
-    const child = (options.spawnAdapter ?? spawn)(command, args, {
-        stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = (options.spawnAdapter ?? spawn)(
+        command,
+        args,
+        adapterSpawnOptions(options.profileFile)
+    );
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 
     try {

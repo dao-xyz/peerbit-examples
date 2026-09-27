@@ -13,6 +13,7 @@ on:
             - "vitest.setup.ts"
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
+            - "scripts/shared-fs-mount-profile-summary*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
             - "scripts/shared-fs-strict-tests/**"
             - "scripts/shared-fs-external-native-smoke.ps1"
@@ -30,6 +31,7 @@ on:
             - "vitest.setup.ts"
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
+            - "scripts/shared-fs-mount-profile-summary*.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
             - "scripts/shared-fs-strict-tests/**"
             - "scripts/shared-fs-external-native-smoke.ps1"
@@ -105,6 +107,9 @@ jobs:
             - name: Test Node-Go IPC benchmark harness
               run: node --test scripts/shared-fs-node-go-ipc-benchmark.test.mjs
 
+            - name: Test mount profile summarizer
+              run: node --test scripts/shared-fs-mount-profile-summary.test.mjs
+
             - name: Validate native smoke wrapper syntax
               if: runner.os != 'Windows'
               shell: bash
@@ -151,7 +156,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-strict-tests .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-mount-profile-summary*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-strict-tests .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})

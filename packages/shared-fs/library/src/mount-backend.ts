@@ -30,6 +30,25 @@ import {
     normalizeFsPath,
     pathSegments,
 } from "./path.js";
+import {
+    finishSharedFsMountProfile,
+    sharedFsMountProfileErrorCode,
+    type SharedFsMountProfileSink,
+} from "./mount-profile.js";
+
+/** Why a mount commit fence ran; reported as `mount.localCommit` trigger. */
+type LocalCommitTrigger = "flush" | "fsync" | "release" | "truncate";
+
+/**
+ * Per-fence counters, allocated only while profiling. `writeFileNs` is the
+ * time of the target writes this fence started itself, so a consumer can
+ * subtract it instead of adding nested phases twice.
+ */
+type LocalCommitProfileStats = {
+    commitsStarted: number;
+    commitsJoined: number;
+    writeFileNs: number;
+};
 
 export type SharedFsMountBackendTarget = {
     /** Exact node-bound remove/rename capability used by native mounts. */
@@ -120,6 +139,11 @@ export type SharedFsMountBackendOptions = {
      * compatibility.
      */
     writeFileInput?: "immutable-borrowed";
+    /**
+     * Opt-in mount-path timing sink. The default path does not read a clock;
+     * sink failures are ignored and cannot change filesystem results.
+     */
+    profile?: SharedFsMountProfileSink;
 };
 
 export type SharedFsOpenFlags =
@@ -681,6 +705,7 @@ export const createSharedFsMountBackend = (
     const namespaceTransitions = new Map<symbol, readonly string[]>();
     const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
+    const profile = options.profile;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
     const delegatesNamespaceMutation =
@@ -1338,7 +1363,10 @@ export const createSharedFsMountBackend = (
         return bytes;
     };
 
-    const commitNow = async (state: OpenFileState) => {
+    const commitNow = async (
+        state: OpenFileState,
+        profileStats?: LocalCommitProfileStats
+    ) => {
         if (state.namespaceDetached) {
             // POSIX-style unlinked/replaced descriptors retain their shared
             // inode buffer, but it no longer has a pathname to publish through.
@@ -1473,11 +1501,49 @@ export const createSharedFsMountBackend = (
                 ReturnType<SharedFsMountBackendTarget["writeFile"]>
             >;
             try {
-                result = await target.writeFile(
-                    state.path,
-                    bytes,
-                    writeOptions
-                );
+                if (profile) {
+                    const identity = {
+                        source: "node-daemon",
+                        phase: "mount.target.writeFile",
+                        operation: "writeFile",
+                        detail: {
+                            bytes: snapshot.length,
+                            mutationGeneration: snapshot.mutationGeneration,
+                        },
+                    } as const;
+                    const started = process.hrtime.bigint();
+                    try {
+                        result = await target.writeFile(
+                            state.path,
+                            bytes,
+                            writeOptions
+                        );
+                    } catch (error) {
+                        const durationNs = finishSharedFsMountProfile(
+                            profile,
+                            identity,
+                            started,
+                            false,
+                            { code: sharedFsMountProfileErrorCode(error) }
+                        );
+                        if (profileStats)
+                            profileStats.writeFileNs += durationNs;
+                        throw error;
+                    }
+                    const durationNs = finishSharedFsMountProfile(
+                        profile,
+                        identity,
+                        started,
+                        true
+                    );
+                    if (profileStats) profileStats.writeFileNs += durationNs;
+                } else {
+                    result = await target.writeFile(
+                        state.path,
+                        bytes,
+                        writeOptions
+                    );
+                }
             } catch (error) {
                 const expectedMismatch =
                     error instanceof SharedFsExpectedNodeMismatchError &&
@@ -1643,7 +1709,11 @@ export const createSharedFsMountBackend = (
         }
     };
 
-    const commitThrough = async (state: OpenFileState, cutoff: number) => {
+    const commitThrough = async (
+        state: OpenFileState,
+        cutoff: number,
+        profileStats?: LocalCommitProfileStats
+    ) => {
         // A fence is bounded by the generation captured synchronously by its
         // caller. Sibling writes admitted later remain for the next fence.
         while (state.persistedGeneration < cutoff) {
@@ -1653,6 +1723,7 @@ export const createSharedFsMountBackend = (
                 return;
             }
             if (state.committing) {
+                if (profileStats) profileStats.commitsJoined++;
                 await state.committing;
                 continue;
             }
@@ -1662,12 +1733,64 @@ export const createSharedFsMountBackend = (
                     `Dirty generation bookkeeping is inconsistent: ${state.path}`
                 );
             }
-            const run = commitNow(state).finally(() => {
+            if (profileStats) profileStats.commitsStarted++;
+            const run = commitNow(state, profileStats).finally(() => {
                 if (state.committing === run) state.committing = undefined;
             });
             state.committing = run;
             await run;
         }
+    };
+
+    /**
+     * Run one commit fence. With profiling on, emit exactly one
+     * `mount.localCommit` record per fence call; the `mount.target.writeFile`
+     * records it started are nested inside it and summed in `writeFileNs`.
+     */
+    const localCommit = (
+        state: OpenFileState,
+        cutoff: number,
+        trigger: LocalCommitTrigger
+    ): Promise<void> => {
+        if (!profile) return commitThrough(state, cutoff);
+        return profileLocalCommit(profile, state, cutoff, trigger);
+    };
+
+    const profileLocalCommit = async (
+        sink: SharedFsMountProfileSink,
+        state: OpenFileState,
+        cutoff: number,
+        trigger: LocalCommitTrigger
+    ) => {
+        const persistedBefore = state.persistedGeneration;
+        const profileStats: LocalCommitProfileStats = {
+            commitsStarted: 0,
+            commitsJoined: 0,
+            writeFileNs: 0,
+        };
+        const identity = {
+            source: "node-daemon",
+            phase: "mount.localCommit",
+            operation: trigger,
+        } as const;
+        const started = process.hrtime.bigint();
+        const detail = () => ({
+            trigger,
+            requiredCommit: persistedBefore < cutoff,
+            cutoffGeneration: cutoff,
+            persistedGenerationBefore: persistedBefore,
+            ...profileStats,
+        });
+        try {
+            await commitThrough(state, cutoff, profileStats);
+        } catch (error) {
+            finishSharedFsMountProfile(sink, identity, started, false, {
+                ...detail(),
+                code: sharedFsMountProfileErrorCode(toBackendError(error)),
+            });
+            throw error;
+        }
+        finishSharedFsMountProfile(sink, identity, started, true, detail());
     };
 
     const requireHandle = (handle: number) => {
@@ -2434,7 +2557,7 @@ export const createSharedFsMountBackend = (
                 try {
                     resizeState(openHandle.state, size);
                     const cutoff = openHandle.state.mutationGeneration;
-                    await commitThrough(openHandle.state, cutoff);
+                    await localCommit(openHandle.state, cutoff, "truncate");
                 } finally {
                     detachHandle(handle, openHandle);
                 }
@@ -2444,13 +2567,13 @@ export const createSharedFsMountBackend = (
         async flush(handle: number) {
             const openHandle = requireHandle(handle);
             const cutoff = openHandle.state.mutationGeneration;
-            return wrap(() => commitThrough(openHandle.state, cutoff));
+            return wrap(() => localCommit(openHandle.state, cutoff, "flush"));
         },
 
         async fsync(handle: number) {
             const openHandle = requireHandle(handle);
             const cutoff = openHandle.state.mutationGeneration;
-            return wrap(() => commitThrough(openHandle.state, cutoff));
+            return wrap(() => localCommit(openHandle.state, cutoff, "fsync"));
         },
 
         async release(handle: number) {
@@ -2472,7 +2595,7 @@ export const createSharedFsMountBackend = (
             // with EBADF. Sibling descriptors keep their own admission state.
             openHandle.closing = true;
             const cutoff = state.mutationGeneration;
-            const releasing = wrap(() => commitThrough(state, cutoff))
+            const releasing = wrap(() => localCommit(state, cutoff, "release"))
                 .then(
                     () => {
                         detachHandle(handle, openHandle);

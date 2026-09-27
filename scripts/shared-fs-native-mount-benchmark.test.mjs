@@ -234,6 +234,44 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
     assert.match(powershell, /MOUNT_BENCH_WARMUPS[\s\S]*"3"/u);
 });
 
+test("native smoke wrappers plumb opt-in mount profiling and the overwrite base", async () => {
+    // Windows checkouts may use CRLF (core.autocrlf); match on LF text.
+    const readLf = async (relative) =>
+        (await readFile(new URL(relative, import.meta.url), "utf8")).replace(
+            /\r\n/gu,
+            "\n"
+        );
+    const [posix, powershell, workflow] = await Promise.all([
+        readLf("./shared-fs-external-native-smoke.sh"),
+        readLf("./shared-fs-external-native-smoke.ps1"),
+        readLf("../.github/workflows/shared-fs-native-smoke.yml"),
+    ]);
+    for (const source of [posix, powershell]) {
+        assert.match(
+            source,
+            /PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR[\s\S]*--mount-profile/u
+        );
+        assert.match(
+            source,
+            /PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES[\s\S]*--overwrite-base-bytes/u
+        );
+    }
+    // Profiling stays opt-in: without the variable the mount argv is unchanged.
+    assert.match(
+        posix,
+        /if \[ -n "\$\{PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-\}" \]; then\n\s+mount_args\+=/u
+    );
+    assert.match(workflow, /mount_profile:[\s\S]*default: false/u);
+    assert.match(
+        workflow,
+        /overwrite_base_bytes:[\s\S]*default: "4194304"[\s\S]*- "4194304"\n\s+- "33554432"/u
+    );
+    assert.match(
+        workflow,
+        /A1:unprofiled B1:profiled B2:profiled A2:unprofiled/u
+    );
+});
+
 test("native-mount cooperative timeout cleans its owned root", async () => {
     const temporary = await mkdtemp(
         join(tmpdir(), "peerbit-native-mount-timeout-test-")
@@ -336,7 +374,7 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         "--samples",
         "2",
         "--warmups",
-        "0",
+        "1",
         "--small-files",
         "2",
         "--readdir-entries",
@@ -353,7 +391,8 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             expectedNativeMountBenchmarkScenarioNames(options)
         );
         assert.equal(report.scope.performanceGate, false);
-        assert.equal(report.schemaVersion, 2);
+        assert.equal(report.schemaVersion, 3);
+        assert.equal(report.run.warmupsPerScenario, 1);
         assert.equal(report.target.kind, "shared-fs-mount");
         assert.equal(
             report.scope.cacheSemantics.mode,
@@ -379,11 +418,70 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             formatNativeMountBenchmarkSummary(report),
             /Report-only: no performance threshold was applied/u
         );
+        let previousEnd = 0n;
         for (const scenario of report.scenarios) {
             assert.equal(scenario.samples.length, 2);
+            assert.equal(scenario.warmupSamples.length, 1);
             assert.ok(scenario.summary.p50Ns > 0);
             assert.ok(scenario.summary.p95Ns > 0);
+            for (const sample of [
+                ...scenario.warmupSamples,
+                ...scenario.samples,
+            ]) {
+                assert.equal(
+                    sample.warmup,
+                    scenario.warmupSamples.includes(sample)
+                );
+                const start = BigInt(sample.startedAtUnixNs);
+                const end = BigInt(sample.endedAtUnixNs);
+                assert.equal(end - start, BigInt(sample.durationNs));
+                assert.ok(start >= previousEnd, "sample windows overlap");
+                previousEnd = end;
+            }
         }
+        // A warmup window may not overlap the measured samples after it.
+        const overlapping = structuredClone(report);
+        const [warmup] = overlapping.scenarios[0].warmupSamples;
+        const overlapEnd =
+            BigInt(overlapping.scenarios[0].samples[0].startedAtUnixNs) + 1n;
+        warmup.endedAtUnixNs = overlapEnd.toString();
+        warmup.durationNs = Number(overlapEnd - BigInt(warmup.startedAtUnixNs));
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(overlapping, options),
+            /invalid sample window/u
+        );
+        const flipped = structuredClone(report);
+        flipped.scenarios[1].samples[0].warmup = true;
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(flipped, options),
+            /invalid sample window/u
+        );
+        const stretched = structuredClone(report);
+        stretched.scenarios[2].samples[1].endedAtUnixNs = (
+            BigInt(stretched.scenarios[2].samples[1].endedAtUnixNs) + 1n
+        ).toString();
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(stretched, options),
+            /invalid sample window/u
+        );
+        const reordered = structuredClone(report);
+        reordered.scenarios[3].samples.reverse();
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(reordered, options),
+            /invalid sample window|invalid .* summary/u
+        );
+        const missingWarmups = structuredClone(report);
+        delete missingWarmups.scenarios[0].warmupSamples;
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(missingWarmups, options),
+            /incomplete sample set/u
+        );
+        const oldSchema = structuredClone(report);
+        oldSchema.schemaVersion = 2;
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(oldSchema),
+            /envelope is invalid/u
+        );
         const tampered = structuredClone(report);
         tampered.scenarios[0].summary.p50Ns += 1;
         assert.throws(

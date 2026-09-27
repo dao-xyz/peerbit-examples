@@ -12,7 +12,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
     conflictScanIsPartial,
     normalizeNativeMountpoint,
+    openMountProfileFiles,
+    resolveMountProfileDirectory,
     runCli,
+    stopMountSession,
 } from "../index.js";
 
 const stopPeer = async (peer: Peerbit) => {
@@ -398,6 +401,136 @@ describe("peerbit-fs cli", () => {
         ).rejects.toThrow(
             "mount requires a full replica; --no-replicate is not allowed for a writable mount"
         );
+    });
+
+    it("requires an output directory for --mount-profile before mounting", async () => {
+        await expect(
+            runCli([
+                "mount",
+                "zb2rh-not-opened",
+                "/tmp/peerbit-shared-fs-not-mounted",
+                "--mount-profile",
+                "--directory",
+                "",
+            ])
+        ).rejects.toThrow("--mount-profile requires an output directory");
+        expect(resolveMountProfileDirectory(undefined)).toBeUndefined();
+        expect(resolveMountProfileDirectory("profile-out")).toBe(
+            path.resolve("profile-out")
+        );
+    });
+
+    it("never reuses or truncates an existing mount profile", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-profile-")
+        );
+        try {
+            const opened: string[] = [];
+            const writer = {
+                sink: () => {},
+                stats: () => ({}) as any,
+                close: async () => ({}) as any,
+            };
+            const target = path.join(directory, "run");
+            const files = await openMountProfileFiles(target, async (file) => {
+                opened.push(file);
+                await fs.writeFile(file, "started\n", { flag: "wx" });
+                return writer;
+            });
+            expect(opened).toEqual([path.join(target, "node-daemon.ndjson")]);
+            expect(files.nativeAdapterFile).toBe(
+                path.join(target, "native-adapter.ndjson")
+            );
+
+            await expect(
+                openMountProfileFiles(target, async () => writer)
+            ).rejects.toThrow("--mount-profile output already exists");
+
+            const adapterOnly = path.join(directory, "adapter-only");
+            await fs.mkdir(adapterOnly);
+            await fs.writeFile(
+                path.join(adapterOnly, "native-adapter.ndjson"),
+                "old\n"
+            );
+            await expect(
+                openMountProfileFiles(adapterOnly, async () => writer)
+            ).rejects.toThrow("native-adapter.ndjson");
+            expect(
+                await fs.readFile(
+                    path.join(adapterOnly, "native-adapter.ndjson"),
+                    "utf8"
+                )
+            ).toBe("old\n");
+        } finally {
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("closes the mount profile before stopping Peerbit", async () => {
+        const order: string[] = [];
+        const profileWriter = {
+            sink: () => {},
+            stats: () => ({}) as any,
+            close: async () => {
+                order.push("profile");
+                return {
+                    emitted: 0,
+                    written: 0,
+                    dropped: 0,
+                    lost: 0,
+                    droppedAfterClose: 0,
+                    writeErrors: 0,
+                    closeTimedOut: false,
+                    maxQueuedEvents: 1,
+                    maxQueuedBytes: 1,
+                };
+            },
+        };
+        const session = (failures: Partial<Record<string, Error>> = {}) => ({
+            mounted: {
+                unmount: async () => {
+                    order.push("unmount");
+                    if (failures.unmount) throw failures.unmount;
+                },
+            },
+            ipc: {
+                close: async () => {
+                    order.push("ipc");
+                },
+            },
+            profileWriter,
+            stopPeerbit: async () => {
+                order.push("peerbit");
+                if (failures.peerbit) throw failures.peerbit;
+            },
+        });
+
+        await stopMountSession(session());
+        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+
+        // A failing Peerbit shutdown no longer loses the profile summary.
+        order.length = 0;
+        const stopFailure = new Error("peerbit stop failed");
+        await expect(
+            stopMountSession(session({ peerbit: stopFailure }))
+        ).rejects.toBe(stopFailure);
+        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+
+        // A failing unmount still closes the profile before rethrowing.
+        order.length = 0;
+        const unmountFailure = new Error("unmount failed");
+        await expect(
+            stopMountSession(session({ unmount: unmountFailure }))
+        ).rejects.toBe(unmountFailure);
+        expect(order).toEqual(["unmount", "profile"]);
+
+        // The error path runs every step and swallows failures.
+        order.length = 0;
+        await stopMountSession(
+            session({ unmount: unmountFailure, peerbit: stopFailure }),
+            { ignoreErrors: true }
+        );
+        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
     });
 
     it("persists an explicit legacy-replica trust assertion", async () => {

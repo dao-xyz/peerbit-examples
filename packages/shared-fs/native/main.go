@@ -17,7 +17,15 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := runNativeMount(*endpoint, *mountpoint, *debug); err != nil {
+	// Opt-in profiling is configured through the environment so a CLI that
+	// requests it cannot break an adapter built before profiling existed.
+	profiler := openMountProfilerFromEnv(os.Getenv, os.Stderr)
+	err := runNativeMount(*endpoint, *mountpoint, *debug, profiler)
+	// The mount's Init already holds shutdown signals while profiling; this
+	// also covers a mount that failed before Init. close is bounded.
+	profiler.holdShutdownSignals()
+	profiler.close()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

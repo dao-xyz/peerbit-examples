@@ -16,15 +16,17 @@ import (
 
 type peerbitFS struct {
 	fuse.FileSystemBase
-	client *ipcClient
-	debug  bool
-	ready  sync.Once
+	client  *ipcClient
+	debug   bool
+	profile *mountProfiler
+	ready   sync.Once
 }
 
-func runNativeMount(endpoint string, mountpoint string, debug bool) error {
+func runNativeMount(endpoint string, mountpoint string, debug bool, profile *mountProfiler) error {
 	fs := &peerbitFS{
-		client: newIPCClient(endpoint),
-		debug:  debug,
+		client:  newIPCClient(endpoint, ipcClientOptions{profile: profile}),
+		debug:   debug,
+		profile: profile,
 	}
 	defer fs.client.close()
 	fs.debugf("starting mount endpoint=%s mountpoint=%s", endpoint, mountpoint)
@@ -45,6 +47,48 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
 	}
 	return nil
+}
+
+// beginCallback returns nil when profiling is off, so the disabled path adds
+// only a nil check. The returned finisher records the callback's FUSE result;
+// a negative result carries the errno and its portable name.
+func (fs *peerbitFS) beginCallback(operation string) func(int) {
+	if fs.profile == nil {
+		return nil
+	}
+	return fs.beginCallbackRecord(mountProfileRecord{operation: operation})
+}
+
+// beginIOCallback also records the requested byte count and file offset.
+func (fs *peerbitFS) beginIOCallback(operation string, size int, offset int64) func(int) {
+	if fs.profile == nil {
+		return nil
+	}
+	return fs.beginCallbackRecord(mountProfileRecord{
+		operation: operation,
+		fields:    profileBytes | profileOffset,
+		bytes:     int64(size),
+		offset:    offset,
+	})
+}
+
+func (fs *peerbitFS) beginCallbackRecord(record mountProfileRecord) func(int) {
+	started := time.Now()
+	return func(result int) {
+		record.phase = "native.callback"
+		record.startUnixNs = started.UnixNano()
+		record.durationNs = time.Since(started).Nanoseconds()
+		record.ok = result >= 0
+		if result < 0 {
+			record.fields |= profileErrno
+			record.errno = result
+			if name := errnoName(result); name != "" {
+				record.fields |= profileCode
+				record.code = name
+			}
+		}
+		fs.profile.emit(record)
+	}
 }
 
 func (fs *peerbitFS) debugf(format string, args ...interface{}) {
@@ -78,13 +122,22 @@ func (fs *peerbitFS) preflight() error {
 }
 
 func (fs *peerbitFS) Init() {
+	if finish := fs.beginCallback("init"); finish != nil {
+		defer finish(0)
+	}
+	// Keep the post-unmount SIGINT the CLI sends from killing the adapter
+	// before the profile is flushed (no-op when profiling is off).
+	fs.profile.holdShutdownSignals()
 	fs.debugf("fuse init")
 	fs.ready.Do(func() {
 		fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")
 	})
 }
 
-func (fs *peerbitFS) Statfs(path string, stat *fuse.Statfs_t) int {
+func (fs *peerbitFS) Statfs(path string, stat *fuse.Statfs_t) (code int) {
+	if finish := fs.beginCallback("statfs"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	stat.Bsize = 4096
 	stat.Frsize = 4096
@@ -98,7 +151,10 @@ func (fs *peerbitFS) Statfs(path string, stat *fuse.Statfs_t) int {
 	return 0
 }
 
-func (fs *peerbitFS) Access(path string, mask uint32) int {
+func (fs *peerbitFS) Access(path string, mask uint32) (code int) {
+	if finish := fs.beginCallback("access"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = mask
 	result, err := fs.client.request("getattr", path)
 	if err != nil {
@@ -110,7 +166,10 @@ func (fs *peerbitFS) Access(path string, mask uint32) int {
 	return 0
 }
 
-func (fs *peerbitFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
+func (fs *peerbitFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) (code int) {
+	if finish := fs.beginCallback("getattr"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = fh
 	result, err := fs.client.request("getattr", path)
 	if err != nil {
@@ -124,7 +183,10 @@ func (fs *peerbitFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	return 0
 }
 
-func (fs *peerbitFS) Opendir(path string) (int, uint64) {
+func (fs *peerbitFS) Opendir(path string) (code int, handle uint64) {
+	if finish := fs.beginCallback("opendir"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	result, err := fs.client.request("getattr", path)
 	if err != nil {
 		return errno(err), ^uint64(0)
@@ -139,7 +201,10 @@ func (fs *peerbitFS) Opendir(path string) (int, uint64) {
 	return 0, 0
 }
 
-func (fs *peerbitFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
+func (fs *peerbitFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) (code int) {
+	if finish := fs.beginCallback("readdir"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = ofst
 	_ = fh
 	args := []interface{}{path}
@@ -172,20 +237,29 @@ func (fs *peerbitFS) Readdir(path string, fill func(name string, stat *fuse.Stat
 	return 0
 }
 
-func (fs *peerbitFS) Releasedir(path string, fh uint64) int {
+func (fs *peerbitFS) Releasedir(path string, fh uint64) (code int) {
+	if finish := fs.beginCallback("releasedir"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_ = fh
 	return 0
 }
 
-func (fs *peerbitFS) Fsyncdir(path string, datasync bool, fh uint64) int {
+func (fs *peerbitFS) Fsyncdir(path string, datasync bool, fh uint64) (code int) {
+	if finish := fs.beginCallback("fsyncdir"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_ = datasync
 	_ = fh
 	return 0
 }
 
-func (fs *peerbitFS) Open(path string, flags int) (int, uint64) {
+func (fs *peerbitFS) Open(path string, flags int) (code int, handle uint64) {
+	if finish := fs.beginCallback("open"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	result, err := fs.client.request("open", path, flags)
 	if err != nil {
 		return errno(err), ^uint64(0)
@@ -193,7 +267,10 @@ func (fs *peerbitFS) Open(path string, flags int) (int, uint64) {
 	return 0, uint64FromResult(result)
 }
 
-func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) int {
+func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) (code int) {
+	if finish := fs.beginCallback("mknod"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = mode
 	_ = dev
 	result, err := fs.client.request("open", path, map[string]interface{}{
@@ -209,7 +286,10 @@ func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) int {
 	return errno(err)
 }
 
-func (fs *peerbitFS) Create(path string, flags int, mode uint32) (int, uint64) {
+func (fs *peerbitFS) Create(path string, flags int, mode uint32) (code int, handle uint64) {
+	if finish := fs.beginCallback("create"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = mode
 	result, err := fs.client.request("open", path, flags)
 	if err != nil {
@@ -218,7 +298,10 @@ func (fs *peerbitFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	return 0, uint64FromResult(result)
 }
 
-func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) int {
+func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) (code int) {
+	if finish := fs.beginCallback("truncate"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	// cgofuse passes ^uint64(0) when no file handle is associated with the
 	// truncate (path-based SETATTR).
 	if fh != ^uint64(0) {
@@ -229,7 +312,10 @@ func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) int {
 	return errno(err)
 }
 
-func (fs *peerbitFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
+func (fs *peerbitFS) Read(path string, buff []byte, ofst int64, fh uint64) (code int) {
+	if finish := fs.beginIOCallback("read", len(buff), ofst); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	result, err := fs.client.request("read", fh, len(buff), ofst)
 	if err != nil {
@@ -242,7 +328,10 @@ func (fs *peerbitFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	return copy(buff, bytes)
 }
 
-func (fs *peerbitFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
+func (fs *peerbitFS) Write(path string, buff []byte, ofst int64, fh uint64) (code int) {
+	if finish := fs.beginIOCallback("write", len(buff), ofst); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	result, err := fs.client.request("write", fh, buff, ofst)
 	if err != nil {
@@ -251,63 +340,93 @@ func (fs *peerbitFS) Write(path string, buff []byte, ofst int64, fh uint64) int 
 	return int(uint64FromResult(result))
 }
 
-func (fs *peerbitFS) Flush(path string, fh uint64) int {
+func (fs *peerbitFS) Flush(path string, fh uint64) (code int) {
+	if finish := fs.beginCallback("flush"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_, err := fs.client.request("flush", fh)
 	return errno(err)
 }
 
-func (fs *peerbitFS) Release(path string, fh uint64) int {
+func (fs *peerbitFS) Release(path string, fh uint64) (code int) {
+	if finish := fs.beginCallback("release"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_, err := fs.client.request("release", fh)
 	return errno(err)
 }
 
-func (fs *peerbitFS) Fsync(path string, datasync bool, fh uint64) int {
+func (fs *peerbitFS) Fsync(path string, datasync bool, fh uint64) (code int) {
+	if finish := fs.beginCallback("fsync"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_ = datasync
 	_, err := fs.client.request("fsync", fh)
 	return errno(err)
 }
 
-func (fs *peerbitFS) Mkdir(path string, mode uint32) int {
+func (fs *peerbitFS) Mkdir(path string, mode uint32) (code int) {
+	if finish := fs.beginCallback("mkdir"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = mode
 	_, err := fs.client.request("mkdir", path)
-	code := errno(err)
+	code = errno(err)
 	fs.debugf("mkdir path=%s code=%d err=%v", path, code, err)
 	return code
 }
 
-func (fs *peerbitFS) Chmod(path string, mode uint32) int {
+func (fs *peerbitFS) Chmod(path string, mode uint32) (code int) {
+	if finish := fs.beginCallback("chmod"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_ = mode
 	return -fuse.ENOSYS
 }
 
-func (fs *peerbitFS) Chown(path string, uid uint32, gid uint32) int {
+func (fs *peerbitFS) Chown(path string, uid uint32, gid uint32) (code int) {
+	if finish := fs.beginCallback("chown"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_ = uid
 	_ = gid
 	return -fuse.ENOSYS
 }
 
-func (fs *peerbitFS) Utimens(path string, tmsp []fuse.Timespec) int {
+func (fs *peerbitFS) Utimens(path string, tmsp []fuse.Timespec) (code int) {
+	if finish := fs.beginCallback("utimens"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_ = path
 	_ = tmsp
 	return -fuse.ENOSYS
 }
 
-func (fs *peerbitFS) Rmdir(path string) int {
+func (fs *peerbitFS) Rmdir(path string) (code int) {
+	if finish := fs.beginCallback("rmdir"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_, err := fs.client.request("rmdir", path)
 	return errno(err)
 }
 
-func (fs *peerbitFS) Rename(oldpath string, newpath string) int {
+func (fs *peerbitFS) Rename(oldpath string, newpath string) (code int) {
+	if finish := fs.beginCallback("rename"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_, err := fs.client.request("rename", oldpath, newpath)
 	return errno(err)
 }
 
-func (fs *peerbitFS) Unlink(path string) int {
+func (fs *peerbitFS) Unlink(path string) (code int) {
+	if finish := fs.beginCallback("unlink"); finish != nil {
+		defer func() { finish(code) }()
+	}
 	_, err := fs.client.request("unlink", path)
 	return errno(err)
 }
@@ -497,4 +616,36 @@ func errno(err error) int {
 	}
 	fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %v\n", err)
 	return -fuse.EIO
+}
+
+// errnoName names a negative FUSE result portably, so profile consumers can
+// classify failures without platform-specific errno numbers.
+func errnoName(result int) string {
+	switch -result {
+	case fuse.ENOENT:
+		return "ENOENT"
+	case fuse.EAGAIN:
+		return "EAGAIN"
+	case fuse.EIO:
+		return "EIO"
+	case fuse.EEXIST:
+		return "EEXIST"
+	case fuse.EISDIR:
+		return "EISDIR"
+	case fuse.ENOTDIR:
+		return "ENOTDIR"
+	case fuse.EACCES:
+		return "EACCES"
+	case fuse.EBADF:
+		return "EBADF"
+	case fuse.EINVAL:
+		return "EINVAL"
+	case fuse.ENOTEMPTY:
+		return "ENOTEMPTY"
+	case fuse.EROFS:
+		return "EROFS"
+	case fuse.ENOSYS:
+		return "ENOSYS"
+	}
+	return ""
 }

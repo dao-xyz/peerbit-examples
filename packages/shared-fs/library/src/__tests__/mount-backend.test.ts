@@ -15,6 +15,7 @@ import {
     SharedFsHandle,
     type SharedFsEntryInfo,
     type SharedFsMountBackendTarget,
+    type SharedFsMountProfileEvent,
     type WriteFileOptions,
 } from "../index.js";
 
@@ -108,6 +109,37 @@ const gatedBorrowingBackend = (
     return { backend, firstStarted, firstAllowed, inputs, writeFile };
 };
 
+const gatedProfiledBackend = (
+    fs: SharedFsHandle,
+    options: { failCalls?: number } = {}
+) => {
+    const firstStarted = deferred();
+    const firstAllowed = deferred();
+    const events: SharedFsMountProfileEvent[] = [];
+    let calls = 0;
+    const writeFile = vi.fn(
+        async (
+            path: string,
+            source: Uint8Array | string | AsyncIterable<Uint8Array>,
+            writeOptions?: WriteFileOptions
+        ) => {
+            calls++;
+            if (calls === 1) {
+                firstStarted.resolve();
+                await firstAllowed.promise;
+            }
+            if (calls <= (options.failCalls ?? 0)) {
+                throw new Error("injected commit failure");
+            }
+            return fs.writeFile(path, source, writeOptions);
+        }
+    );
+    const backend = createSharedFsMountBackend(mountTarget(fs, { writeFile }), {
+        profile: (event) => events.push(event),
+    });
+    return { backend, firstStarted, firstAllowed, writeFile, events };
+};
+
 describe("shared fs mount backend", () => {
     let peer: Peerbit;
     let fs: SharedFsHandle;
@@ -150,6 +182,193 @@ describe("shared fs mount backend", () => {
 
         await backend.release(handle);
         expect(decode(await fs.readFile("/docs/file.txt"))).toBe("hello");
+    });
+
+    it("profiles each commit fence once with its trigger and nested target write", async () => {
+        const events: SharedFsMountProfileEvent[] = [];
+        const backend = createSharedFsMountBackend(fs, {
+            profile: (event) => events.push(event),
+        });
+        const handle = await backend.open("/profiled.txt", {
+            write: true,
+            create: true,
+        });
+        await backend.write(handle, encode("hello"), 0);
+        await backend.flush(handle);
+
+        expect(events.map((event) => event.phase)).toEqual([
+            "mount.target.writeFile",
+            "mount.localCommit",
+        ]);
+        const [writeFile, flush] = events;
+        expect(writeFile).toMatchObject({
+            source: "node-daemon",
+            operation: "writeFile",
+            ok: true,
+            detail: { bytes: 5, mutationGeneration: 2 },
+        });
+        expect(flush).toMatchObject({
+            operation: "flush",
+            ok: true,
+            detail: {
+                trigger: "flush",
+                requiredCommit: true,
+                cutoffGeneration: 2,
+                persistedGenerationBefore: 0,
+                commitsStarted: 1,
+                commitsJoined: 0,
+                writeFileNs: writeFile.durationNs,
+            },
+        });
+        // The nested write lies inside its fence on the same monotonic clock,
+        // so a consumer can subtract writeFileNs instead of adding both.
+        expect(BigInt(writeFile.startUnixNs) >= BigInt(flush.startUnixNs)).toBe(
+            true
+        );
+        expect(flush.durationNs).toBeGreaterThanOrEqual(writeFile.durationNs);
+
+        events.length = 0;
+        await backend.fsync(handle);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+            phase: "mount.localCommit",
+            operation: "fsync",
+            detail: {
+                trigger: "fsync",
+                requiredCommit: false,
+                commitsStarted: 0,
+                writeFileNs: 0,
+            },
+        });
+
+        events.length = 0;
+        await backend.release(handle);
+        expect(events.map((event) => [event.phase, event.operation])).toEqual([
+            ["mount.localCommit", "release"],
+        ]);
+
+        events.length = 0;
+        await backend.truncate("/profiled.txt", 2);
+        expect(events.map((event) => [event.phase, event.operation])).toEqual([
+            ["mount.target.writeFile", "writeFile"],
+            ["mount.localCommit", "truncate"],
+        ]);
+        expect(events[1].detail).toMatchObject({
+            trigger: "truncate",
+            requiredCommit: true,
+            commitsStarted: 1,
+        });
+        expect(decode(await fs.readFile("/profiled.txt"))).toBe("he");
+    });
+
+    it("reports a fence that joins an in-flight commit without its write time", async () => {
+        const { backend, firstStarted, firstAllowed, writeFile, events } =
+            gatedProfiledBackend(fs);
+        const handle = await backend.open("/joined.txt", {
+            write: true,
+            create: true,
+        });
+        await backend.write(handle, encode("joined"), 0);
+        const flushing = backend.flush(handle);
+        await firstStarted.promise;
+        const syncing = backend.fsync(handle);
+        firstAllowed.resolve();
+        await Promise.all([flushing, syncing]);
+
+        const fences = events.filter(
+            (event) => event.phase === "mount.localCommit"
+        );
+        expect(fences.map((event) => event.operation).sort()).toEqual([
+            "flush",
+            "fsync",
+        ]);
+        const fsync = fences.find((event) => event.operation === "fsync")!;
+        expect(fsync.detail).toMatchObject({
+            requiredCommit: true,
+            commitsStarted: 0,
+            commitsJoined: 1,
+            writeFileNs: 0,
+        });
+        expect(writeFile).toHaveBeenCalledOnce();
+        await backend.release(handle);
+    });
+
+    it("keeps one shared fence and one record for overlapping profiled releases", async () => {
+        const { backend, firstStarted, firstAllowed, writeFile, events } =
+            gatedProfiledBackend(fs);
+        const handle = await backend.open("/profiled-release.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("once"), 0);
+
+        const firstRelease = backend.release(handle);
+        await firstStarted.promise;
+        let secondSettled = false;
+        const secondRelease = backend.release(handle).then(() => {
+            secondSettled = true;
+        });
+        await Promise.resolve();
+        expect(secondSettled).toBe(false);
+
+        firstAllowed.resolve();
+        await Promise.all([firstRelease, secondRelease]);
+        expect(decode(await fs.readFile("/profiled-release.txt"))).toBe("once");
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(
+            events.filter((event) => event.phase === "mount.localCommit")
+        ).toMatchObject([
+            {
+                operation: "release",
+                ok: true,
+                detail: { trigger: "release", commitsStarted: 1 },
+            },
+        ]);
+        // The descriptor is gone after the shared fence completed.
+        await expect(backend.fsync(handle)).rejects.toMatchObject({
+            code: "EBADF",
+        });
+    });
+
+    it("retains a failed profiled release for retry and records both attempts", async () => {
+        const { backend, firstAllowed, writeFile, events } =
+            gatedProfiledBackend(fs, { failCalls: 1 });
+        firstAllowed.resolve();
+        const handle = await backend.open("/profiled-retry.txt", {
+            write: true,
+            create: true,
+            truncate: true,
+        });
+        await backend.write(handle, encode("retry me"), 0);
+
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EIO",
+            message: "injected commit failure",
+        });
+        await expect(
+            backend.write(handle, encode("too late"), 0)
+        ).rejects.toMatchObject({ code: "EBADF" });
+
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/profiled-retry.txt"))).toBe(
+            "retry me"
+        );
+        expect(writeFile).toHaveBeenCalledTimes(2);
+        expect(
+            events
+                .filter((event) => event.phase !== "profile.start")
+                .map((event) => [
+                    event.phase,
+                    event.ok,
+                    event.detail?.code ?? null,
+                ])
+        ).toEqual([
+            ["mount.target.writeFile", false, "EIO"],
+            ["mount.localCommit", false, "EIO"],
+            ["mount.target.writeFile", true, null],
+            ["mount.localCommit", true, null],
+        ]);
     });
 
     it("keeps default directory entries compact without per-entry lookups", async () => {

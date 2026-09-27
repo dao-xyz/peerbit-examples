@@ -106,6 +106,20 @@ export type { IgnoreAwareFs } from "./ignore/ignore-fs.js";
 export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
+export {
+    SHARED_FS_MOUNT_PROFILE_SCHEMA,
+    SHARED_FS_MOUNT_PROFILE_SCHEMA_VERSION,
+    createSharedFsMountProfileWriter,
+    openSharedFsMountProfileFile,
+    type SharedFsMountProfileDetailValue,
+    type SharedFsMountProfileEvent,
+    type SharedFsMountProfilePhase,
+    type SharedFsMountProfileSink,
+    type SharedFsMountProfileSource,
+    type SharedFsMountProfileWriter,
+    type SharedFsMountProfileWriterOptions,
+    type SharedFsMountProfileWriterStats,
+} from "./mount-profile.js";
 export * from "./merkle-v1.js";
 export * from "./merkle-file-version-v1.js";
 export * from "./merkle-read-session-v1.js";

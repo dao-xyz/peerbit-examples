@@ -8,6 +8,19 @@ on:
                 required: true
                 default: false
                 type: boolean
+            mount_profile:
+                description: Also run alternating unprofiled/profiled mounted benchmark passes (A-B-B-A) and publish the mount profile summary.
+                required: false
+                default: false
+                type: boolean
+            overwrite_base_bytes:
+                description: Base file size for the mounted 4 KiB in-place overwrite scenario.
+                required: false
+                default: "4194304"
+                type: choice
+                options:
+                    - "4194304"
+                    - "33554432"
 
 permissions:
     contents: read
@@ -19,7 +32,8 @@ jobs:
     linux-fuse:
         name: Linux FUSE native smoke
         runs-on: ubuntu-latest
-        timeout-minutes: 30
+        # Four extra mounted benchmark passes need more time than the smoke.
+        timeout-minutes: ${{ inputs.mount_profile && 120 || 30 }}
 
         steps:
             - name: Checkout
@@ -82,6 +96,7 @@ jobs:
               env:
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-linux-fuse-benchmark.json', runner.temp) || '' }}
                   PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-linux-control-benchmark.json', runner.temp) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
               run: scripts/shared-fs-external-native-smoke.sh
 
             - name: Add filesystem benchmark summaries
@@ -117,5 +132,95 @@ jobs:
                   path: |
                       ${{ runner.temp }}/shared-fs-linux-fuse-benchmark.json
                       ${{ runner.temp }}/shared-fs-linux-control-benchmark.json
+                  if-no-files-found: error
+                  retention-days: 14
+
+            # Opt-in mount profiling. Unprofiled (A) and profiled (B) passes
+            # alternate A-B-B-A on this one VM so profiling overhead and drift
+            # are visible next to the profile itself.
+            - name: Run alternating unprofiled and profiled mounted benchmark passes
+              if: ${{ inputs.mount_profile }}
+              shell: bash
+              env:
+                  PROFILE_ROOT: ${{ runner.temp }}/shared-fs-mount-profile
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
+              run: |
+                  set -euo pipefail
+                  rm -rf "$PROFILE_ROOT"
+                  mkdir -p "$PROFILE_ROOT"
+                  for pass in A1:unprofiled B1:profiled B2:profiled A2:unprofiled; do
+                    label="${pass%%:*}"
+                    mode="${pass##*:}"
+                    echo "::group::Mounted benchmark pass $label ($mode)"
+                    if [ "$mode" = "profiled" ]; then
+                      PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR="$PROFILE_ROOT/$label-profile" \
+                        PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT="$PROFILE_ROOT/$label-benchmark.json" \
+                        scripts/shared-fs-external-native-smoke.sh
+                    else
+                      PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT="$PROFILE_ROOT/$label-benchmark.json" \
+                        scripts/shared-fs-external-native-smoke.sh
+                    fi
+                    echo "::endgroup::"
+                  done
+
+            - name: Summarize mount profile
+              if: ${{ always() && inputs.mount_profile }}
+              shell: bash
+              env:
+                  PROFILE_ROOT: ${{ runner.temp }}/shared-fs-mount-profile
+                  STEP_SUMMARY_LIMIT_BYTES: "65536"
+              run: |
+                  set -euo pipefail
+                  mkdir -p "$PROFILE_ROOT"
+                  for label in B1 B2; do
+                    if [ ! -d "$PROFILE_ROOT/$label-profile" ]; then
+                      continue
+                    fi
+                    args=(--profile-dir "$PROFILE_ROOT/$label-profile")
+                    if [ -f "$PROFILE_ROOT/$label-benchmark.json" ]; then
+                      args+=(--benchmark "$label=$PROFILE_ROOT/$label-benchmark.json")
+                    fi
+                    node scripts/shared-fs-mount-profile-summary.mjs "${args[@]}" \
+                      --title "Shared FS mount profile: pass $label (profiled)" \
+                      --json "$PROFILE_ROOT/$label-summary.json" \
+                      --markdown "$PROFILE_ROOT/$label-summary.md" >/dev/null
+                  done
+                  ab=()
+                  for pass in A1:unprofiled B1:profiled B2:profiled A2:unprofiled; do
+                    report="$PROFILE_ROOT/${pass%%:*}-benchmark.json"
+                    if [ -f "$report" ]; then
+                      ab+=(--ab-report "$pass=$report")
+                    fi
+                  done
+                  if [ "${#ab[@]}" -gt 0 ]; then
+                    node scripts/shared-fs-mount-profile-summary.mjs "${ab[@]}" \
+                      --markdown "$PROFILE_ROOT/overhead.md" >/dev/null
+                  fi
+                  summary="$PROFILE_ROOT/step-summary.md"
+                  : > "$summary"
+                  for part in overhead B1-summary B2-summary; do
+                    if [ -f "$PROFILE_ROOT/$part.md" ]; then
+                      cat "$PROFILE_ROOT/$part.md" >> "$summary"
+                    fi
+                  done
+                  if [ ! -s "$summary" ]; then
+                    echo "## Shared FS mount profile" >> "$GITHUB_STEP_SUMMARY"
+                    echo >> "$GITHUB_STEP_SUMMARY"
+                    echo "No mount profile or benchmark pass was produced." >> "$GITHUB_STEP_SUMMARY"
+                    exit 1
+                  fi
+                  if [ "$(wc -c < "$summary")" -gt "$STEP_SUMMARY_LIMIT_BYTES" ]; then
+                    head -c "$STEP_SUMMARY_LIMIT_BYTES" "$summary" >> "$GITHUB_STEP_SUMMARY"
+                    printf '\n\n(Step summary truncated at %s bytes; see the uploaded artifact.)\n' "$STEP_SUMMARY_LIMIT_BYTES" >> "$GITHUB_STEP_SUMMARY"
+                  else
+                    cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+                  fi
+
+            - name: Upload mount profile
+              if: ${{ always() && inputs.mount_profile }}
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: shared-fs-linux-mount-profile-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: ${{ runner.temp }}/shared-fs-mount-profile
                   if-no-files-found: error
                   retention-days: 14

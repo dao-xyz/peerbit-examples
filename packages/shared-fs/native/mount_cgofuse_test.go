@@ -3,12 +3,62 @@
 package main
 
 import (
+	"bytes"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
+
+func TestStatfsProfilesCompleteNativeCallback(t *testing.T) {
+	var output bytes.Buffer
+	profile := newMountProfiler(&output, 4)
+	fs := &peerbitFS{profile: profile}
+	var stat fuse.Statfs_t
+	if code := fs.Statfs("/", &stat); code != 0 {
+		t.Fatalf("statfs returned %d", code)
+	}
+	profile.close()
+	records, _ := splitProfile(t, decodeMountProfileRecords(t, output.String()))
+	if len(records) != 1 || records[0].Phase != "native.callback" || records[0].Operation != "statfs" || !records[0].OK || records[0].Detail != nil {
+		t.Fatalf("unexpected profile records: %#v", records)
+	}
+}
+
+func TestIOCallbackProfileCarriesSizeOffsetAndErrno(t *testing.T) {
+	var output bytes.Buffer
+	profile := newMountProfiler(&output, 4)
+	fs := &peerbitFS{profile: profile}
+	fs.beginIOCallback("read", 4096, 1<<20)(-fuse.ENOENT)
+	fs.beginIOCallback("write", 131072, 0)(131072)
+	fs.beginCallback("chmod")(-fuse.ENOSYS)
+	profile.close()
+
+	records, _ := splitProfile(t, decodeMountProfileRecords(t, output.String()))
+	if len(records) != 3 {
+		t.Fatalf("got %d records, want three", len(records))
+	}
+	read, write, chmod := records[0], records[1], records[2]
+	if read.Operation != "read" || read.OK || detailNumber(t, read, "bytes") != 4096 || detailNumber(t, read, "offset") != 1<<20 ||
+		detailNumber(t, read, "errno") != int64(-fuse.ENOENT) || read.Detail["code"] != "ENOENT" {
+		t.Fatalf("unexpected read record: %#v", read)
+	}
+	if write.Operation != "write" || !write.OK || detailNumber(t, write, "bytes") != 131072 || detailNumber(t, write, "offset") != 0 ||
+		write.Detail["errno"] != nil || write.Detail["code"] != nil {
+		t.Fatalf("unexpected write record: %#v", write)
+	}
+	if chmod.OK || chmod.Detail["code"] != "ENOSYS" || chmod.Detail["bytes"] != nil {
+		t.Fatalf("unexpected chmod record: %#v", chmod)
+	}
+}
+
+func TestDisabledCallbackProfileHasNoFinisher(t *testing.T) {
+	fs := &peerbitFS{}
+	if fs.beginCallback("getattr") != nil || fs.beginIOCallback("read", 1, 0) != nil {
+		t.Fatal("disabled profiling returned a callback finisher")
+	}
+}
 
 func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	got := errno(&ipcError{

@@ -2,7 +2,11 @@ import type { ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { mountExternalNativeAdapter } from "../external-native-adapter.js";
+import {
+    adapterSpawnOptions,
+    mountExternalNativeAdapter,
+    NATIVE_ADAPTER_PROFILE_FILE_ENV,
+} from "../external-native-adapter.js";
 
 class FakeChild extends EventEmitter {
     readonly stdout = new PassThrough();
@@ -50,6 +54,98 @@ class FakeChild extends EventEmitter {
 }
 
 describe("external native adapter lifecycle", () => {
+    it("passes the opt-in profile file through the environment, not argv", async () => {
+        const child = new FakeChild();
+        const spawnAdapter = vi.fn(
+            () => child as unknown as ChildProcess
+        ) as unknown as typeof spawn;
+        queueMicrotask(() => {
+            child.stdout.write("peerbit-shared-fs-native ready\n");
+        });
+
+        const mounted = await mountExternalNativeAdapter(
+            "profiled-adapter",
+            "tcp://127.0.0.1:1",
+            "/unused",
+            {
+                exitTimeoutMs: 100,
+                profileFile: "/profiles/native-adapter.ndjson",
+                spawnAdapter,
+            }
+        );
+        await mounted.unmount();
+
+        // An adapter built before profiling existed must still start: argv is
+        // unchanged and the file is only visible through its environment.
+        expect(spawnAdapter).toHaveBeenCalledWith(
+            "profiled-adapter",
+            ["--endpoint", "tcp://127.0.0.1:1", "--mountpoint", "/unused"],
+            {
+                stdio: ["ignore", "pipe", "pipe"],
+                env: expect.objectContaining({
+                    [NATIVE_ADAPTER_PROFILE_FILE_ENV]:
+                        "/profiles/native-adapter.ndjson",
+                }),
+            }
+        );
+        expect(NATIVE_ADAPTER_PROFILE_FILE_ENV).toBe(
+            "PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE"
+        );
+    });
+
+    it("leaves the adapter environment untouched when profiling is off", async () => {
+        const child = new FakeChild();
+        const spawnAdapter = vi.fn(
+            () => child as unknown as ChildProcess
+        ) as unknown as typeof spawn;
+        queueMicrotask(() => {
+            child.stdout.write("peerbit-shared-fs-native ready\n");
+        });
+
+        const mounted = await mountExternalNativeAdapter(
+            "plain-adapter",
+            "tcp://127.0.0.1:1",
+            "/unused",
+            { exitTimeoutMs: 100, spawnAdapter }
+        );
+        await mounted.unmount();
+
+        expect(spawnAdapter).toHaveBeenCalledWith(
+            "plain-adapter",
+            ["--endpoint", "tcp://127.0.0.1:1", "--mountpoint", "/unused"],
+            { stdio: ["ignore", "pipe", "pipe"] }
+        );
+    });
+
+    it("does not let an inherited profile variable enable adapter profiling", () => {
+        const inherited = {
+            PATH: "/bin",
+            [NATIVE_ADAPTER_PROFILE_FILE_ENV]: "/stale/native-adapter.ndjson",
+        };
+        const options = adapterSpawnOptions(undefined, inherited);
+        expect(options).toEqual({
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { PATH: "/bin" },
+        });
+        // The caller's environment object is not mutated.
+        expect(inherited[NATIVE_ADAPTER_PROFILE_FILE_ENV]).toBe(
+            "/stale/native-adapter.ndjson"
+        );
+        // An explicit profile file replaces the inherited value.
+        expect(
+            adapterSpawnOptions("/profiles/native-adapter.ndjson", inherited)
+                .env
+        ).toEqual({
+            PATH: "/bin",
+            [NATIVE_ADAPTER_PROFILE_FILE_ENV]:
+                "/profiles/native-adapter.ndjson",
+        });
+        // Without the variable the common path passes no env at all.
+        expect(adapterSpawnOptions(undefined, { PATH: "/bin" })).toEqual({
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+    });
+
     it("stops and reaps a ready child during unmount", async () => {
         const child = new FakeChild();
         const spawnAdapter = vi.fn(

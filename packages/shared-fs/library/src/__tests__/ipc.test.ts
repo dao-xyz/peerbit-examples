@@ -1,6 +1,8 @@
 import { EventEmitter, once } from "node:events";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { createConnection, createServer, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
@@ -15,7 +17,14 @@ import {
     SHARED_FS_IPC_V2_MAX_METADATA_BYTES,
     writeIpcV2Frame,
 } from "../ipc-v2.js";
-import type { SharedFsMountBackend } from "../mount-backend.js";
+import {
+    SharedFsBackendError,
+    type SharedFsMountBackend,
+} from "../mount-backend.js";
+import {
+    openSharedFsMountProfileFile,
+    type SharedFsMountProfileEvent,
+} from "../mount-profile.js";
 
 const backendWith = (
     methods: Partial<SharedFsMountBackend>
@@ -145,6 +154,82 @@ const decodeV2Response = async (
 };
 
 describe("shared-fs IPC framing", () => {
+    it("profiles only the backend service boundary with its connection key", async () => {
+        const events: SharedFsMountProfileEvent[] = [];
+        const server = await createSharedFsIpcServer(
+            backendWith({ getattr: async (path) => ({ path }) as any }),
+            "tcp://127.0.0.1:0",
+            { profile: (event) => events.push(event) }
+        );
+        const socket = await connect(server.endpoint);
+        try {
+            socket.write(
+                `${JSON.stringify({ id: 1, op: "getattr", args: ["/profiled"] })}\n`
+            );
+            await expect(readJsonLines(socket, 1)).resolves.toEqual([
+                { id: 1, ok: true, result: { path: "/profiled" } },
+            ]);
+            expect(events).toHaveLength(1);
+            expect(events[0]).toMatchObject({
+                schema: "peerbit.shared-fs.mount-profile",
+                schemaVersion: 1,
+                source: "node-daemon",
+                phase: "ipc.service",
+                operation: "getattr",
+                ok: true,
+                detail: {
+                    requestId: 1,
+                    protocol: "v1",
+                    remotePort: socket.localPort,
+                },
+            });
+            expect(events[0].startUnixNs).toMatch(/^[1-9][0-9]{0,18}$/u);
+            expect(events[0].detail).not.toHaveProperty("framingNs");
+            expect(events[0].detail).not.toHaveProperty("code");
+        } finally {
+            socket.destroy();
+            await server.close();
+        }
+    });
+
+    it("profiles failed service calls with the code the adapter receives", async () => {
+        const events: SharedFsMountProfileEvent[] = [];
+        const server = await createSharedFsIpcServer(
+            backendWith({
+                getattr: async (path) => {
+                    if (path === "/absent") {
+                        throw new SharedFsBackendError("ENOENT", "absent");
+                    }
+                    if (path === "/settling") {
+                        throw new SharedFsBackendError("EAGAIN", "settling");
+                    }
+                    throw Object.assign(new Error("uncoded"), {
+                        code: "ENOENT",
+                    });
+                },
+            }),
+            "tcp://127.0.0.1:0",
+            { profile: (event) => events.push(event) }
+        );
+        try {
+            const client = createSharedFsIpcClient(server.endpoint);
+            for (const path of ["/absent", "/settling", "/uncoded"]) {
+                await expect(client.getattr(path)).rejects.toBeDefined();
+            }
+            expect(
+                events.map((event) => [event.ok, event.detail?.code])
+            ).toEqual([
+                [false, "ENOENT"],
+                [false, "EAGAIN"],
+                // The wire carries no code for non-backend errors, so the
+                // adapter surfaces EIO; the profile reports the same.
+                [false, "EIO"],
+            ]);
+        } finally {
+            await server.close();
+        }
+    });
+
     it("keeps additive readdir options compatible with legacy backends", async () => {
         const readdir = vi.fn(async (_path: string) => [
             { name: "legacy.txt", kind: "file" as const },
@@ -455,6 +540,49 @@ describe("shared-fs IPC framing", () => {
 });
 
 describe("shared-fs negotiated IPC v2", () => {
+    it("profiles the v2 backend service with its wire request id", async () => {
+        const events: SharedFsMountProfileEvent[] = [];
+        const server = await createSharedFsIpcServer(
+            backendWith({ getattr: async (path) => ({ path }) as any }),
+            "tcp://127.0.0.1:0",
+            { profile: (event) => events.push(event) }
+        );
+        const socket = await connect(server.endpoint);
+        try {
+            const { reader, limits } = await negotiateV2(socket);
+            const request = encodeIpcV2Frame(
+                IpcV2FrameKind.Request,
+                { id: 37, op: "getattr", args: ["/profiled-v2"] },
+                Buffer.alloc(0),
+                limits.maxRequestFrameBytes,
+                limits.maxMetadataBytes
+            );
+            await writeIpcV2Frame(socket, request);
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: {
+                    id: 37,
+                    ok: true,
+                    result: { path: "/profiled-v2" },
+                },
+                body: Buffer.alloc(0),
+            });
+            expect(events).toHaveLength(1);
+            expect(events[0]).toMatchObject({
+                phase: "ipc.service",
+                operation: "getattr",
+                ok: true,
+                detail: {
+                    requestId: 37,
+                    protocol: "v2",
+                    remotePort: socket.localPort,
+                },
+            });
+        } finally {
+            socket.destroy();
+            await server.close();
+        }
+    });
+
     it("retains zero-copy frame bytes until the final socket write completes", async () => {
         const callbacks: Array<(error?: Error | null) => void> = [];
         const socket = Object.assign(new EventEmitter(), {
@@ -535,6 +663,100 @@ describe("shared-fs negotiated IPC v2", () => {
             expect(write).toHaveBeenCalledOnce();
         } finally {
             await server.close();
+        }
+    });
+
+    it("joins real Go adapter and Node daemon profiles by connection and request id", async () => {
+        const directory = await mkdtemp(
+            join(tmpdir(), "peerbit-profile-join-")
+        );
+        const nodeProfile = join(directory, "node-daemon.ndjson");
+        const nativeProfile = join(directory, "native-adapter.ndjson");
+        const writer = await openSharedFsMountProfileFile(nodeProfile);
+        const server = await createSharedFsIpcServer(
+            backendWith({
+                getattr: async (path) => {
+                    if (path === "/absent") {
+                        throw new SharedFsBackendError("ENOENT", "absent");
+                    }
+                    return { path } as any;
+                },
+                read: async () => Buffer.from([1, 2, 3]),
+            }),
+            "tcp://127.0.0.1:0",
+            { profile: writer.sink }
+        );
+        try {
+            await execFileAsync(
+                "go",
+                [
+                    "test",
+                    "-run",
+                    "^TestMountProfileNodeInterop$",
+                    "-count=1",
+                    ".",
+                ],
+                {
+                    cwd: new URL("../../../native/", import.meta.url),
+                    env: {
+                        ...process.env,
+                        PEERBIT_SHARED_FS_NODE_PROFILE_TEST_ENDPOINT:
+                            server.endpoint,
+                        PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE: nativeProfile,
+                    },
+                }
+            );
+        } finally {
+            await server.close();
+        }
+        await writer.close();
+        const records = async (path: string) =>
+            (await readFile(path, "utf8"))
+                .trimEnd()
+                .split("\n")
+                .map((line) => JSON.parse(line) as SharedFsMountProfileEvent);
+        try {
+            const adapter = await records(nativeProfile);
+            const daemon = await records(nodeProfile);
+            for (const profile of [adapter, daemon]) {
+                expect(profile[0].phase).toBe("profile.start");
+                expect(profile.at(-1)).toMatchObject({
+                    phase: "profile.summary",
+                    detail: { dropped: 0 },
+                });
+            }
+            const roundTrips = adapter.filter(
+                (record) => record.phase === "ipc.roundTrip"
+            );
+            const services = daemon.filter(
+                (record) => record.phase === "ipc.service"
+            );
+            expect(roundTrips.map((record) => record.operation)).toEqual([
+                "getattr",
+                "getattr",
+                "read",
+            ]);
+            expect(services).toHaveLength(3);
+            expect(roundTrips[0].detail?.connected).toBe(true);
+            expect(roundTrips[1].detail?.connected).toBeUndefined();
+            for (const service of services) {
+                const matches = roundTrips.filter(
+                    (roundTrip) =>
+                        roundTrip.detail?.localPort ===
+                            service.detail?.remotePort &&
+                        roundTrip.detail?.requestId ===
+                            service.detail?.requestId
+                );
+                expect(matches).toHaveLength(1);
+                expect(matches[0].operation).toBe(service.operation);
+                expect(matches[0].ok).toBe(service.ok);
+                expect(matches[0].detail?.code).toBe(service.detail?.code);
+            }
+            expect(
+                services.map((service) => service.detail?.code ?? null)
+            ).toEqual([null, "ENOENT", null]);
+        } finally {
+            await rm(directory, { recursive: true, force: true });
         }
     });
 

@@ -4,6 +4,7 @@ import type {
     PrepareForDisposalResult,
     ResolveNamingAction,
     SharedFsConflict,
+    SharedFsMountProfileWriter,
     SharedFsNamingConflict,
     SharedFsVersionInfo,
     Peerbit,
@@ -198,6 +199,94 @@ const isPeerbitIndexCloseError = (error: unknown) => {
         error.message.includes("clearAll") &&
         error.stack?.includes("DocumentIndex.close")
     );
+};
+
+export const MOUNT_PROFILE_NODE_FILE = "node-daemon.ndjson";
+export const MOUNT_PROFILE_NATIVE_ADAPTER_FILE = "native-adapter.ndjson";
+
+/** Validate `--mount-profile` before any Peerbit or mount work starts. */
+export const resolveMountProfileDirectory = (value: unknown) => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || value.trim() === "") {
+        throw new Error(
+            "--mount-profile requires an output directory, for example --mount-profile ./mount-profile"
+        );
+    }
+    return path.resolve(value);
+};
+
+/**
+ * Create the daemon profile file exclusively and reserve the adapter's path.
+ * Existing profiles are never truncated, appended to, or mixed with a new run.
+ */
+export const openMountProfileFiles = async (
+    directory: string,
+    openFile: (path: string) => Promise<SharedFsMountProfileWriter>
+) => {
+    await fs.promises.mkdir(directory, { recursive: true });
+    const nativeAdapterFile = path.join(
+        directory,
+        MOUNT_PROFILE_NATIVE_ADAPTER_FILE
+    );
+    const nodeFile = path.join(directory, MOUNT_PROFILE_NODE_FILE);
+    for (const existing of [nodeFile, nativeAdapterFile]) {
+        if (fs.existsSync(existing)) {
+            throw new Error(
+                `--mount-profile output already exists: ${existing}; choose a new or empty directory`
+            );
+        }
+    }
+    return { writer: await openFile(nodeFile), nativeAdapterFile };
+};
+
+const closeMountProfile = async (
+    writer: SharedFsMountProfileWriter | undefined
+) => {
+    if (!writer) return;
+    // close() is bounded (default 5 s) and resolves with final counters even
+    // when the profile output is wedged.
+    const stats = await writer.close();
+    if (
+        stats.dropped > 0 ||
+        stats.lost > 0 ||
+        stats.writeErrors > 0 ||
+        stats.closeTimedOut
+    ) {
+        console.error(
+            `Mount profile was incomplete: dropped=${stats.dropped} lost=${stats.lost} writeErrors=${stats.writeErrors}${stats.closeTimedOut ? " (close timed out)" : ""}`
+        );
+    }
+};
+
+/**
+ * Tear down a mount in dependency order. The profile is closed once the mount
+ * and IPC server have stopped producing events, before Peerbit stops, so a
+ * slow or failing Peerbit shutdown cannot lose the profile summary. With
+ * `ignoreErrors` every step runs and failures are swallowed (error path);
+ * otherwise the first failure is rethrown after the profile is closed.
+ */
+export const stopMountSession = async (
+    session: {
+        mounted?: { unmount(): Promise<void> };
+        ipc?: { close(): Promise<void> };
+        profileWriter?: SharedFsMountProfileWriter;
+        stopPeerbit(): Promise<void>;
+    },
+    options: { ignoreErrors?: boolean } = {}
+) => {
+    const step = (run: () => Promise<void> | undefined) =>
+        options.ignoreErrors
+            ? Promise.resolve()
+                  .then(run)
+                  .catch(() => {})
+            : run();
+    try {
+        await step(() => session.mounted?.unmount());
+        await step(() => session.ipc?.close());
+    } finally {
+        await closeMountProfile(session.profileWriter).catch(() => {});
+    }
+    await step(() => session.stopPeerbit());
 };
 
 const waitForTermination = async (stop: () => Promise<void>) => {
@@ -840,6 +929,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         default: false,
                         description:
                             "UNSAFE session-only recovery override: expose namespace writes without a proven settled full-replica view.",
+                    })
+                    .option("mount-profile", {
+                        type: "string",
+                        description:
+                            "Diagnostic: write mounted-path timing records as NDJSON into this new or empty directory (node-daemon.ndjson, plus native-adapter.ndjson from a profiling-capable external adapter).",
                     }),
             async (argv) => {
                 if (argv.replicate === false) {
@@ -847,11 +941,15 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         "mount requires a full replica; --no-replicate is not allowed for a writable mount"
                     );
                 }
+                const mountProfileDirectory = resolveMountProfileDirectory(
+                    argv.mountProfile
+                );
                 const {
                     NativeMountUnavailableError,
                     createSharedFsIpcServer,
                     createSharedFsMountBackend,
                     mountNativeSharedFs,
+                    openSharedFsMountProfileFile,
                 } = await loadSharedFsRuntime();
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
@@ -862,6 +960,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | Awaited<ReturnType<typeof mountNativeSharedFs>>
                     | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
+                let profileWriter: SharedFsMountProfileWriter | undefined;
                 try {
                     await connectToNetwork(peerbit, argv.peer);
                     const fsHandle = await openCliFs(peerbit, {
@@ -887,11 +986,25 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         }
                         throw error;
                     }
+                    let nativeProfileFile: string | undefined;
+                    if (mountProfileDirectory) {
+                        const profileFiles = await openMountProfileFiles(
+                            mountProfileDirectory,
+                            openSharedFsMountProfileFile
+                        );
+                        profileWriter = profileFiles.writer;
+                        nativeProfileFile = profileFiles.nativeAdapterFile;
+                        console.log(
+                            `Mount profile directory: ${mountProfileDirectory}`
+                        );
+                    }
+                    const profile = profileWriter?.sink;
                     const backend = createSharedFsMountBackend(fsHandle, {
                         // SharedFileSystem treats chunk input as immutable and
                         // may retain its views, so the backend transfers a
                         // stable COW snapshot instead of copying on release.
                         writeFileInput: "immutable-borrowed",
+                        profile,
                     });
                     const externalAdapter = await resolveExternalNativeAdapter(
                         argv.nativeAdapter
@@ -902,12 +1015,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     if (externalAdapter) {
                         ipc = await createSharedFsIpcServer(
                             backend,
-                            "tcp://127.0.0.1:0"
+                            "tcp://127.0.0.1:0",
+                            { profile }
                         );
                         mounted = await mountExternalNativeAdapter(
                             externalAdapter,
                             ipc.endpoint,
-                            mountpoint
+                            mountpoint,
+                            nativeProfileFile === undefined
+                                ? {}
+                                : { profileFile: nativeProfileFile }
                         );
                     } else {
                         // In-process fuse-native mounts talk to the backend
@@ -915,6 +1032,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         // latency and base64 CPU.
                         mounted = await mountNativeSharedFs(backend, {
                             mountpoint,
+                            profile,
                         });
                     }
                     console.log(
@@ -931,15 +1049,24 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
                             : "gc schedule: off"
                     );
-                    await waitForTermination(async () => {
-                        await mounted?.unmount();
-                        await ipc?.close();
-                        await stopPeerbitForCli(peerbit);
-                    });
+                    await waitForTermination(() =>
+                        stopMountSession({
+                            mounted,
+                            ipc,
+                            profileWriter,
+                            stopPeerbit: () => stopPeerbitForCli(peerbit),
+                        })
+                    );
                 } catch (error) {
-                    await mounted?.unmount().catch(() => {});
-                    await ipc?.close().catch(() => {});
-                    await stopPeerbitForCli(peerbit).catch(() => {});
+                    await stopMountSession(
+                        {
+                            mounted,
+                            ipc,
+                            profileWriter,
+                            stopPeerbit: () => stopPeerbitForCli(peerbit),
+                        },
+                        { ignoreErrors: true }
+                    );
                     if (error instanceof NativeMountUnavailableError) {
                         console.error(chalk.red(error.message));
                         await printNativeRequirements();

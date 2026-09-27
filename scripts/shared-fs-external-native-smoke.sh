@@ -119,10 +119,17 @@ mount_runtime="$(single_line_detail "$mount_runtime")"
 )
 
 address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state")"
-node packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint" \
-  --directory "$state" \
-  --native-adapter "$adapter" \
-  >"$log" 2>&1 &
+mount_args=(
+  packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint"
+  --directory "$state"
+  --native-adapter "$adapter"
+)
+# Opt-in mount profiling writes NDJSON files into a new directory; the CLI
+# refuses to reuse existing profile files.
+if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-}" ]; then
+  mount_args+=(--mount-profile "$PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR")
+fi
+node "${mount_args[@]}" >"$log" 2>&1 &
 mount_pid="$!"
 
 wait_for_mount_exit() {
@@ -244,6 +251,11 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ] ||
     --implementation-input packages/shared-fs/cli/lib/esm
     --implementation-input packages/shared-fs/library/lib/esm
   )
+  if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES:-}" ]; then
+    benchmark_common_args+=(
+      --overwrite-base-bytes "$PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES"
+    )
+  fi
 fi
 
 if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ]; then
