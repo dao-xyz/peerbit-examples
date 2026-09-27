@@ -10,6 +10,9 @@ bounded-memory, block-granular random writes. It follows the fixed-layout lazy
 read and phase-1 patch work, while preserving the existing namespace and
 file-version conflict model.
 
+The proposed integration as a live storage generation, and the migration from
+v9, are in [MERKLE_V10_GENERATION.md](MERKLE_V10_GENERATION.md).
+
 ## Decision summary
 
 - Introduce a new top-level program generation and filesystem address. Do not
