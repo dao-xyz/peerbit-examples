@@ -1,9 +1,9 @@
 # Shared FS v10: the Merkle storage generation and v9 migration
 
-Status: design for owner review, revision 3. Owner decision of 2026-09-27:
+Status: design for owner review, revision 4. Owner decision of 2026-09-27:
 "design v10 first". Nothing in this document is implemented, and no v10
 format, program, or migration code should land before it is approved.
-Revisions 2 and 3 answer two rounds of adversarial review; section 12 lists
+Revisions 2 to 4 answer three rounds of adversarial review; section 12 lists
 what changed, by finding number.
 
 [MERKLE_STORAGE_V1.md](MERKLE_STORAGE_V1.md) remains the normative content
@@ -26,13 +26,15 @@ Conventions:
 1. **A new generation with a new address.** Program variant
    `peerbit_shared_fs_v10_merkle_v1`, entries salt `/shared-fs/v10-merkle-v1`,
    a fresh program id, and a distinct Borsh variant for every entry kind.
-   Every signed metadata document (naming events and file versions) is bound
-   to its own store id, so entries cannot be replayed between generations or
-   between two v10 filesystems.
+   Every signed metadata document, manifest, and trust relation carries the
+   filesystem's **store binding**: the SHA-256 of the program's canonical
+   bytes, the value its address commits to. A creator can copy a program id
+   but not a binding without creating the same filesystem, so entries cannot
+   be replayed between generations or between two v10 filesystems.
 2. **A store-bound trust program.** The upstream trust relation binds no
    network, so v9 grants (including revoked ones) could otherwise be replayed
    into v10. v10 uses an in-repo trust program whose relations carry the
-   filesystem's store id and are rejected anywhere else (section 2.3). It
+   filesystem's store binding and are rejected anywhere else (section 2.3). It
    replaces revision 2's time-based rule, which relied on author-asserted
    clocks. Upstream network-bound relations (U2) can replace it later (D22).
 3. **Content** uses the merged Merkle v1 codecs unchanged (sparse radix tree,
@@ -284,15 +286,16 @@ not these absolute numbers; section 9.3 sets gates with margin.
 | Item                   | v9 (today)                              | v10 (proposed)                                                                                            |
 | ---------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Program variant        | `peerbit_shared_fs` (`index.ts` ~L2073) | `peerbit_shared_fs_v10_merkle_v1`                                                                         |
-| Entries salt           | `/shared-fs/v9` (~L2387)                | `/shared-fs/v10-merkle-v1`                                                                                |
-| Program id             | random 32 bytes                         | fresh random 32 bytes; a caller-supplied id is rejected for v10                                           |
-| Trust program          | upstream `TrustedNetwork({ id })`       | `SharedFsTrustGraphV10` (section 2.3), id `sha256(id \|\| "/shared-fs/v10-merkle-v1/trust")`              |
+| Entries salt           | `/shared-fs/v9` (~L2387)                | `/shared-fs/v10-merkle-v1`, hashed with the program id and root key (section 2.2)                         |
+| Program id             | random 32 bytes                         | fresh random 32 bytes; not a security boundary (section 2.2)                                              |
+| Store binding          | none (`this.id` is used)                | SHA-256 of the program's canonical bytes (section 2.2)                                                    |
+| Trust program          | upstream `TrustedNetwork({ id })`       | `SharedFsTrustGraphV10` (section 2.3), id derived from the program id and root key (section 2.2)          |
 | Entry root             | `SharedFsEntry` (`model.ts` L27)        | `SharedFsEntryV10` (abstract, fieldless)                                                                  |
 | Content blocks         | `shared_fs_file_chunk`                  | `shared_fs_merkle_data_block_v1`, `shared_fs_merkle_tree_block_v1` (merged, unchanged)                    |
 | File version           | `shared_fs_file_version`                | `shared_fs_v10_bound_version`, an envelope around the canonical `MerkleFileVersionV1` bytes (section 2.2) |
-| Naming                 | `shared_fs_naming_event`                | `shared_fs_v10_naming_event` (v9 fields plus `storeId`)                                                   |
-| Snapshot pointer       | `shared_fs_bootstrap_manifest`          | `shared_fs_v10_bootstrap_manifest`                                                                        |
-| Changeset manifest     | `shared_fs_changeset_manifest`          | `shared_fs_v10_changeset_manifest`                                                                        |
+| Naming                 | `shared_fs_naming_event`                | `shared_fs_v10_naming_event` (v9 fields plus `storeBinding`)                                              |
+| Snapshot pointer       | `shared_fs_bootstrap_manifest`          | `shared_fs_v10_bootstrap_manifest` (payload binds `storeBinding`)                                         |
+| Changeset manifest     | `shared_fs_changeset_manifest`          | `shared_fs_v10_changeset_manifest` (payload binds `storeBinding`)                                         |
 | Index row              | `shared_fs_indexable_entry`             | `shared_fs_v10_indexable_entry`                                                                           |
 | Snapshot format        | `SNAPSHOT_FORMAT_VERSION = 1`           | 2, with the v10 segment entry type                                                                        |
 | Changeset manifest fmt | `CHANGESET_MANIFEST_FORMAT_VERSION = 1` | 2                                                                                                         |
@@ -336,16 +339,46 @@ and several flows create more than one destination from one source (an M6
 abort, rollback before cutover, a re-run, a rehearsal). A replayed head from
 another destination would become an extra head, or even the winning head when
 its stored depth is higher (rollback after v10 writes, then re-migration).
-v10 therefore binds every signed metadata document to its store:
 
-- `NamingEventV10` carries `storeId` (the v10 program id).
-- A file version is stored as a `SharedFsBoundVersionV10` envelope with
-  fields `id`, `storeId`, `publishedAt`, and `versionBytes`. `versionBytes` is
-  the canonical encoding of a `MerkleFileVersionV1`, decoded only through the
-  merged strict entry point `decodeMerkleContentEntryV1()`. `id` must equal
+**Why the program id is not enough.** The program id is chosen by the creator
+and is readable by anyone who holds the address. v9 binds its manifests to it
+(`index.ts` ~L3565, ~L3608, ~L9455), and an address-loaded program's fields are
+deserialized, not re-derived (the entries id is computed only in the
+constructor, ~L2369-2388). So anyone can serialize a different, openable v10
+program X with V's id but another root key or another field, and entries that
+a key trusted in both signs in X (grants, tombstones, edits) would carry V's
+id. Entry metadata does not bind the log, so they could be re-delivered into V
+and would pass an id check. The "fresh random id, caller-supplied id
+rejected" rule only constrains honest creation code.
+
+**The store binding.** `storeBinding` is the SHA-256 of the program's
+canonical Borsh serialization: the program id, the entries and trust
+sub-program ids, the trust root key, `sealedIgnoredNames`, `defaultLeafSize`,
+and `predecessor`. Those are exactly the bytes the address commits to, and
+none of them depends on the binding, so there is no cycle. A program that
+differs in any field, including one with V's id and V's owner as root but
+another leaf size, has a different binding; a program with the same binding is
+byte-identical to V, which is V. Every replica computes the binding from the
+program it opened (**A13**). v10 then:
+
+- **Binds every signed document:** `NamingEventV10` carries `storeBinding`; a
+  file version is stored as a `SharedFsBoundVersionV10` envelope with fields
+  `id`, `storeBinding`, `publishedAt`, and `versionBytes`; bootstrap and
+  changeset manifest payloads bind `storeBinding` instead of the program id;
+  `TrustRelationV10` carries it too (section 2.3). `versionBytes` is the
+  canonical encoding of a `MerkleFileVersionV1`, decoded only through the
+  merged strict entry point `decodeMerkleContentEntryV1()`, and `id` must equal
   the inner version id.
-- `canPerformEntry` rejects any naming event or bound version whose `storeId`
-  differs from this program's id. Manifests already bind `storeId`.
+- **Rejects everything else:** `canPerformEntry` and the trust program reject
+  any naming event, bound version, manifest, or relation whose `storeBinding`
+  differs from the opened program's.
+- **Derives and checks sub-program ids on open.** The entries id is
+  `sha256(id || rootKey || "/shared-fs/v10-merkle-v1")` and the trust program
+  id is `sha256(id || rootKey || "/shared-fs/v10-merkle-v1/trust")`, with an
+  empty root key for filesystems without access control. Opening a v10
+  address recomputes both and refuses a program whose serialized sub-program
+  ids differ, with a typed error. A crafted program with V's id and another
+  root therefore also gets its own logs, rather than attaching to V's.
 - Blocks are not bound: they are self-certifying, and replaying one is
   harmless.
 
@@ -390,12 +423,13 @@ separate filesystems.
    `TrustedNetwork`'s semantics: a rooted graph; a relation is admitted when
    its signer equals `from` and is trusted; only the signer of an edge can
    delete it; trust is reachability from the root. Its relation,
-   `TrustRelationV10 { storeId, from, to }`, has its own variant and an id
-   derived from the store id and both keys, and is admitted only when
-   `storeId` equals this filesystem's program id. Consequences:
+   `TrustRelationV10 { storeBinding, from, to }`, has its own variant and an
+   id derived from the binding and both keys, and is admitted only when its
+   `storeBinding` equals this filesystem's (section 2.2). Consequences:
     - no v9 relation decodes in v10, revoked or not, whatever its timestamp;
     - no relation from another v10 filesystem is admitted, even one signed by
-      the same root key;
+      the same root key, and even from a crafted program that copies this
+      filesystem's program id;
     - v10 relations do not decode in v9, so trust relations cannot move in
       either direction;
     - `trustedWriters()` and `isTrusted` use a breadth-first walk keyed by
@@ -416,8 +450,9 @@ separate filesystems.
    both generations can still make native grants in the frozen v9 filesystem:
    v10-aware releases refuse them there (section 8.5), v9-only peers admit
    them, and `late-writes` lists them. They never reach v10.
-4. The trust program's id is derived with a domain tag (section 2.1), so a
-   caller-supplied program id can never make v10 share the v9 trust log.
+4. The trust program's id is derived from the program id and root key with a
+   domain tag and checked on open (section 2.2), so v10 can never share the
+   v9 trust log or another v10 filesystem's.
 
 ### 2.4 How a peer tells v9 from v10
 
@@ -452,9 +487,15 @@ separate filesystems.
 - S1 tests:
     - v10 payloads rejected by v9 ingest and the reverse;
     - a signed v9 naming entry replayed into v10 rejected;
-    - a naming event, version, or trust relation bound to another v10 store
-      rejected, including a grant signed by the same root key in another
-      filesystem;
+    - a naming event, version, manifest, or trust relation bound to another
+      v10 store rejected, including a grant signed by the same root key in
+      another filesystem;
+    - a crafted, openable program that copies V's program id with a different
+      root key, and one with V's owner as root but another field changed:
+      every entry, manifest, and relation signed in it is rejected by V, and
+      it cannot attach to V's logs;
+    - an opened program whose entries or trust sub-program id differs from its
+      derivation is refused;
     - every v9 relation rejected by v10: a revoked root-to-X grant, a carried
       delegator's grant, and a grant signed after the root's clock was pulled
       forward by a future-stamped relation;
@@ -711,7 +752,8 @@ A `MerkleFileVersionV1` (#336) carries `id` (`version:` plus 32 random bytes),
 `nodeId`, `parentVersionIds`, the stored `causalDepth`, `size`, `leafSize`,
 `rootLevel`, `rootHash?`, `contentRoot`, advisory `createdAt`, `authorKey` and
 `machineLabel`, `conflictResolution`, `changesetId?`, and `legacyWholeSha256?`
-(set only by migration). Its envelope adds `storeId` and `publishedAt`. It
+(set only by migration). Its envelope adds `storeBinding` and `publishedAt`.
+It
 references zero or one block, its root, and its size is independent of `F`.
 That removes v9's ceiling of about 8,000 chunks per version (about 4 GiB at
 the default chunk size).
@@ -1088,7 +1130,11 @@ heads). Arming, bootstrap disarming, and lifecycle generations are unchanged.
 Conclusion: under A6 and v9's clock assumptions, GC deletes no block that is
 reachable from a present version row or a leased root. The one deliberate
 exception is `abandon-version` (section 5.6): it retires a superseded, broken
-version early, removing that version itself on every replica.
+version before `keepVersions` and full retention would, removing that version
+itself on every replica. It never retires a version inside the retention
+floor, so a version that another replica relied on as a young witness (item
+
+1. still outlives the propagation window.
 
 ### 5.6 Unhealable trees: blocking and the exit
 
@@ -1117,11 +1163,22 @@ of guessing about its region:
 2. **Optionally retire V early.**
    `peerbit-fs gc abandon-version <address> <versionId>` is refused while V is
    a head. Otherwise it records, in the replica's GC ledger, that V may be
-   retired in the next run regardless of `keepVersions`, retention, and grace.
-   The retirement is a replicated CUT of V's row: it removes that superseded
-   version on every replica, including replicas where it is intact. That is
-   history loss the operator accepts explicitly; the current head is never
-   touched. The record is cleared if the tree heals first.
+   retired without waiting for `keepVersions` or the part of `retentionMs`
+   above the retention floor. It never waives the floor itself, because R1 and
+   R3 rely on it (section 5.5): V is retired only in a run where
+    - V's `publishedAt`, `createdAt`, and local arrival are all older than
+      `skipHorizon + max(grace, 48 h)` (18 days by default);
+    - V still has a strict present descendant older than `graceMs`, as the
+      normal retirement rule requires; and
+    - V is still not a head on this replica, rechecked in that run.
+
+    The retirement is a replicated CUT of V's row: it removes that superseded
+    version on every replica, including replicas where it is intact. That is
+    history loss the operator accepts explicitly. A replica that has not yet
+    seen the resolution may still hold V as a head; there Guard D restores V if
+    armed, as for any CUT of a head it holds. The record is cleared if the tree
+    heals first.
+
 3. **Alerting.** After 4 consecutive blocked runs (about a day at the default
    6 h interval), GC emits `gc:error` and `status` shows the blocking version,
    the tree, whether V is still a head, and the command to use. GC never
@@ -1150,8 +1207,8 @@ kinds are never deleted.
 ### 6.1 Snapshots and bootstrap
 
 v10 segments (format 2) contain naming heads and full bound-version heads,
-including tombstones, never blocks. The manifest payload binds the v10 program
-id as `storeId`. The overlay serves version documents; blocks are fetched
+including tombstones, never blocks. The manifest payload binds the store
+binding (section 2.2). The overlay serves version documents; blocks are fetched
 lazily through the block source and verified. A missing, corrupt, unknown, or
 wrong-level block fails with `EIO`; only an authenticated absent child reads
 as zeros. Overlay retirement, the write gate, and Guard D arming keep their
@@ -1387,14 +1444,18 @@ prefixes:
 
 | Marker    | Changeset id                                    | Published at |
 | --------- | ----------------------------------------------- | ------------ |
-| Freeze    | `shared-fs-freeze:<nonce>`                      | M1           |
+| Freeze    | `shared-fs-freeze:<v9-binding>:<nonce>`         | M1           |
 | Successor | `shared-fs-successor:<freeze-id>:<v10-address>` | M9 (cutover) |
 | Thaw      | `shared-fs-thaw:<freeze-id>`                    | on `thaw`    |
 
 Rules in v10-aware releases:
 
-- **Only the v9 root key counts.** A marker is honored only when its inner
-  signer is the v9 trust graph's root. Any trusted writer, or anyone on an open
+- **Only the v9 root key counts, and only for this filesystem.** A marker is
+  honored only when its inner signer is the v9 trust graph's root. v9 manifests
+  bind only the copyable program id, so a freeze also names the v9 program's
+  binding (the SHA-256 of its canonical bytes, as in section 2.2), and
+  v10-aware releases check it; successors and thaws name the freeze's manifest
+  id, which covers it. Any trusted writer, or anyone on an open
   filesystem, can publish a manifest with these ids through today's
   `writeBatch([], { changesetId, manifest: true })`, so a weaker gate would let
   them freeze peers or redirect writers. On a filesystem without a root key,
@@ -1692,7 +1753,10 @@ lease-aware mark and Guard D, retirement of non-head damaged versions, and
   version arriving after the mark vetoes deletion; a leased base retired
   remotely stays readable; a blocked sweep unblocks after the file is resolved
   (normal retirement and `abandon-version`); a second replica holding the
-  lost tree keeps the head and every block it reaches.
+  lost tree keeps the head and every block it reaches; a partitioned replica
+  that commits over V using R1 or R3 after another replica abandons V keeps
+  its new version's blocks, because V is not retired before the retention
+  floor, even with Guard D disarmed on the partitioned replica.
 
 **S6. Snapshots and disposal.** v10 snapshots (format 2), overlay block fetch,
 readiness evidence, and the disposal closure walk with block-aware moving-view
@@ -1807,10 +1871,12 @@ through upstream put diagnostics (#18).
 - **GC:** no race removes a block reachable from a present version row or a
   leased root, including a remote CUT of the leased row; true orphans disappear
   after the barrier; a blocked sweep recovers once the file is resolved.
-- **Replay and trust:** replay of entries and trust relations between stores
-  (v9 into v10, v10 into v9, v10 into v10) is rejected, including revoked
-  grants, grants signed after a forward-pulled clock, and same-root grants from
-  other filesystems (MERKLE_STORAGE_V1's gate, restored).
+- **Replay and trust:** replay of entries, manifests, and trust relations
+  between stores (v9 into v10, v10 into v9, v10 into v10) is rejected,
+  including revoked grants, grants signed after a forward-pulled clock,
+  same-root grants from other filesystems, and everything signed in a crafted
+  program that copies the target's program id (MERKLE_STORAGE_V1's gate,
+  restored).
 - **Migration:** byte-exact, with ids, winners, conflicts, tombstones, sealed
   names, and the trusted-writer set preserved, verified from a fresh peer.
 
@@ -1947,9 +2013,11 @@ Measure as well:
 - **D13. Trust carryover:** `carry-flat` with `revoke-carried` (proposed; loses
   cascading revocation unless `revoke-carried` is used), `carry-direct` (keeps
   topology; delegates locked out until re-granted), or `none`.
-- **D14. v10 root key:** reuse the v9 root key (proposed; safe for trust replay
-  in both directions once S1's store-bound trust program lands) or a fresh v10
-  root key (the owner operates a second identity).
+- **D14. v10 root key:** reuse the v9 root key (proposed) or a fresh v10 root
+  key (the owner operates a second identity). Reuse is safe for trust replay
+  only because relations bind the store binding (section 2.2), which a crafted
+  program with the same root and id cannot reproduce; it depends on S1's
+  store-bound trust program.
 - **D15. Stale-base policy:** v9's witness rule for every block the new version
   reuses (proposed; migrated files are covered for 15 days after migration),
   or reuse anyway when the base is the sole local head on a write-ready
@@ -1959,8 +2027,9 @@ Measure as well:
   fields (breaks A7).
 - **D17. Blocked-sweep exit:** resolve the file, then normal retirement or an
   explicit `abandon-version` of the superseded broken version, which removes
-  that version on every replica (proposed); or also automatic abandonment of
-  superseded broken versions after N blocked runs.
+  that version on every replica but never inside the retention floor (18 days
+  by default; proposed); or also automatic abandonment of superseded broken
+  versions after N blocked runs.
 - **D18. Rollback after v10 writes:** manual and unsupported in the first
   release (proposed), or build a v10-to-v9 export and a v10 freeze marker.
 - **D19. Freeze and live handles:** already-open writable states keep
@@ -1992,6 +2061,7 @@ Measure as well:
 | A10 | The in-repo trust program reproduces the upstream `TrustedNetwork` semantics v9 relies on                                | S1                         |
 | A11 | A blocks-only `putMany` resolves only after every item is committed locally, or reports which were                       | S3                         |
 | A12 | An R3 climb costs about `d + 1` local index queries per present block, comparable to v9's per-chunk witness query        | S2                         |
+| A13 | Every release that can open an address recomputes the same store binding from the program it deserialized                | S1                         |
 
 ### 10.4 Upstream needs (relayed through the owner)
 
@@ -2021,7 +2091,9 @@ Measure as well:
 Refinements:
 
 - Program variant `peerbit_shared_fs_v10_merkle_v1` (D4), a v10 variant for
-  every entry kind, and store-bound naming and versions (section 2.2).
+  every entry kind, and naming, versions, manifests, and trust relations bound
+  to the program's canonical bytes, with sub-program ids checked on open
+  (section 2.2).
 - A store-bound v10 trust program (section 2.3). This implements V1's "Do not
   blindly replay owner-authorized trust edges into a new trust domain", and
   restores V1's replay and revoked-writer release gate in section 9.3.
@@ -2061,8 +2133,9 @@ Weakened or replaced, for owner sign-off (D21):
 ### Round 1
 
 Revision 2 (after an adversarial review of revision 1, commit `e1e35e0d`; 27
-verified findings). By finding number. Where the second round changed a fix,
-its note below supersedes this one (notably items 1, 7, 9, 13, 15, and 21).
+verified findings). By finding number. Where a later round changed a fix,
+its note below supersedes this one (notably items 1, 7, 9, 10, 13, 15, and
+21).
 
 1. R1 now requires a young witness (base `publishedAt` within the skip
    horizon), the retention floor is carried unchanged, stale bases re-put their
@@ -2205,3 +2278,27 @@ findings, one further point refuted and not acted on). By finding number:
 11. The state file records edges, not paths; `plan` shows at most three example
     chains; `revoke-carried` is one O(V + E) reachability walk that also
     handles several delegators revoked one at a time.
+
+### Round 3
+
+Revision 4 (after a third, high-severity-only review of revision 3, commit
+`3ac06ee8`):
+
+1. **Store binding.** Binding documents to the program id did not hold: the
+   creator chooses the id, anyone holding the address can read it, and a
+   crafted program with the same id but another root (or the same owner and
+   another field) could sign entries that pass V's check. Every naming event,
+   bound version, manifest, and trust relation now carries `storeBinding`, the
+   SHA-256 of the program's canonical bytes (the value the address commits
+   to), and the entries and trust sub-program ids are derived from the program
+   id and root key and checked on open. Freeze markers also name the v9
+   binding. Key decisions 1 and 2, sections 2.1-2.5, 6.1, 8.5, the 9.3 gate,
+   D14, and section 11 were corrected; S1 tests cover crafted programs with
+   V's id and a different root, including V's owner as root; A13 added.
+2. **`abandon-version` and the retention floor.** Early retirement now waives
+   only `keepVersions` and retention above the floor. It waits until V's
+   `publishedAt`, `createdAt`, and arrival are older than
+   `skipHorizon + max(grace, 48 h)`, keeps the grace-old-descendant rule, and
+   rechecks that V is not a head in the run that retires it. Section 5.5's
+   exception and the head wording were corrected, D17 updated, and an S5 test
+   added for a partitioned replica that relies on V.
