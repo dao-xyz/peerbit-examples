@@ -492,7 +492,10 @@ test("breaks library writeFile time into sub-phases without double counting", ()
         existingFile: 2,
         unchanged: 1,
         failed: 1,
+        incomplete: 0,
     });
+    assert.equal(breakdown.subPhaseGaps, 0);
+    assert.equal(breakdown.incompleteWrites, 0);
 
     const all = breakdown.all;
     // Parents: 6_600+100, 8_600+100, 4_750+100, 350+100, 300+100.
@@ -641,6 +644,9 @@ test("joins sub-phases per profile file and flags overlapping ones", () => {
     const flagged = summarizeWriteFileBreakdown(overlapping.records);
     assert.equal(flagged.overlappingSubPhases, 1);
     assert.equal(flagged.joinedWrites, 1);
+    // An overlapping chain cannot partition its parent: it is excluded.
+    assert.equal(flagged.incompleteWrites, 1);
+    assert.equal(flagged.all.writes, 0);
     // Profiles without writeFile sub-phases add no breakdown section.
     const plain = summarizeMountProfile({ inputs: parsedInputs() });
     assert.equal(plain.writeFileBreakdown.joinedWrites, 0);
@@ -648,6 +654,113 @@ test("joins sub-phases per profile file and flags overlapping ones", () => {
     assert.doesNotMatch(
         formatMountProfileSummaryMarkdown(plain),
         /### writeFile breakdown/u
+    );
+});
+
+const newFileWrite = (writeId, offset, { drop, ok = true } = {}) =>
+    profiledWrite({
+        writeId,
+        offset,
+        ok,
+        ...(ok ? {} : { parentDetail: { code: "EAGAIN" } }),
+        phases: ok
+            ? [
+                  ["prepare", 100],
+                  ["resolvePath", 100],
+                  ["readHeads", 50],
+                  ["hash", 50],
+                  ["chunk", 50],
+                  [
+                      "touchChunks",
+                      700,
+                      {
+                          probes: 1,
+                          probeNs: 100,
+                          chunkPuts: 1,
+                          chunkPutBytes: 1024,
+                          chunkPutNs: 600,
+                          absentPuts: 1,
+                      },
+                  ],
+                  ["guard", 50, { checkpoint: "before-version" }],
+                  ["versionPut", 700],
+                  ["cacheApply", 20, { document: "version" }],
+                  ["verifyChunks", 200, { chunks: 1, reputs: 0 }],
+                  ["guard", 50, { checkpoint: "before-naming" }],
+                  ["resolveParent", 30],
+                  ["namingPut", 600],
+                  ["cacheApply", 20, { document: "naming" }],
+                  ["result", 30, { outcome: "created", newFile: true }],
+              ]
+            : [
+                  ["prepare", 100],
+                  ["resolvePath", 200, { code: "EAGAIN" }, false],
+              ],
+    }).filter(
+        // Simulate the bounded writer dropping one record of this write.
+        (line) => drop === undefined || JSON.parse(line).phase !== drop
+    );
+
+test("keeps chains with dropped sub-phase records out of the breakdown", () => {
+    const text =
+        [
+            ...newFileWrite(1, 100_000),
+            // A dropped middle record leaves a gap; its time would otherwise
+            // be reported as outside the library.
+            ...newFileWrite(2, 200_000, { drop: "writeFile.touchChunks" }),
+            // Without writeFile.result a new file would look like an
+            // existing one.
+            ...newFileWrite(3, 300_000, { drop: "writeFile.result" }),
+            ...newFileWrite(4, 400_000, { drop: "writeFile.prepare" }),
+            // A failed call whose failing sub-phase was dropped.
+            ...newFileWrite(5, 500_000, {
+                ok: false,
+                drop: "writeFile.resolvePath",
+            }),
+        ].join("\n") + "\n";
+    const summary = summarizeMountProfile({
+        inputs: [parseMountProfileText(text, "node-daemon.ndjson")],
+    });
+    const breakdown = summary.writeFileBreakdown;
+    assert.equal(breakdown.joinedWrites, 5);
+    assert.equal(breakdown.subPhaseGaps, 1);
+    assert.equal(breakdown.overlappingSubPhases, 0);
+    assert.equal(breakdown.incompleteWrites, 4);
+    assert.deepEqual(breakdown.kindCounts, {
+        newFile: 1,
+        existingFile: 0,
+        unchanged: 0,
+        failed: 0,
+        incomplete: 4,
+    });
+    assert.deepEqual(Object.keys(breakdown.byKind), ["newFile"]);
+
+    // Only the complete write feeds the tables: 2_750 ns of sub-phases plus
+    // 100 ns outside.
+    const all = breakdown.all;
+    assert.equal(all.writes, 1);
+    assert.equal(all.totalWriteFileNs, 2_850);
+    assert.equal(all.outsideSubPhasesNs.totalNs, 100);
+    const namingPut = all.phases.find(
+        (entry) => entry.phase === "writeFile.namingPut"
+    );
+    assert.equal(namingPut.writes, 1);
+    assert.equal(namingPut.shareOfWriteFile, 600 / 2_850);
+    assert.equal(breakdown.touchChunks.writes, 1);
+    assert.equal(breakdown.touchChunks.totals.chunkPuts, 1);
+
+    const markdown = formatMountProfileSummaryMarkdown(summary);
+    assert.match(
+        markdown,
+        /new file 1, existing file 0, unchanged 0, failed 0, incomplete 4\).*sub-phase gaps=1, incomplete chains=4\./u
+    );
+    assert.match(
+        markdown,
+        /Incomplete chains \(dropped, overlapping, or out-of-order sub-phase records\) are excluded from the tables below, which cover 1 complete writes\./u
+    );
+    assert.match(
+        markdown,
+        /^\| mount\.target\.writeFile \| 1 \| 1 \| 0\.003 ms \| 0\.003 ms \| 100% \|$/mu
     );
 });
 

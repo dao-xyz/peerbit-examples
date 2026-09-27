@@ -258,6 +258,29 @@ export const createSharedFsWriteFileChunkCounters =
         unprobedPuts: 0,
     });
 
+/**
+ * @internal Private opt-in, not exported from the package: a mount target
+ * whose method under this key returns true hands
+ * `WriteFileOptions.mountProfile` (a live function) to
+ * `SharedFileSystem.writeFile` unchanged. The public `mountWriteSemantics`
+ * handshake does not imply this, because a capable third-party target may
+ * clone, serialize, or validate its options.
+ */
+export const SHARED_FS_WRITE_FILE_PROFILE_TARGET = Symbol(
+    "peerbit.shared-fs.writeFileProfileTarget"
+);
+
+/** @internal Whether `target` opted in with SHARED_FS_WRITE_FILE_PROFILE_TARGET. */
+export const acceptsSharedFsWriteFileProfile = (target: unknown): boolean => {
+    if (target === null || typeof target !== "object") return false;
+    try {
+        const probe = Reflect.get(target, SHARED_FS_WRITE_FILE_PROFILE_TARGET);
+        return typeof probe === "function" && probe.call(target) === true;
+    } catch {
+        return false;
+    }
+};
+
 /** @internal Monotonic nanoseconds since `started` (process.hrtime.bigint()). */
 export const sharedFsMountProfileElapsedNs = elapsedNs;
 

@@ -4,7 +4,7 @@ import {
     createSharedFsMountBackend,
     openSharedFs,
     SharedFsExpectedNodeMismatchError,
-    type SharedFsHandle,
+    SharedFsHandle,
     type SharedFsMountBackendTarget,
     type SharedFsMountProfileEvent,
     type WriteFileOptions,
@@ -122,7 +122,102 @@ describe("opt-in writeFile sub-phase profiling", () => {
         await peer.stop();
     });
 
-    it("passes no hook and emits no sub-phases unless a capable target is profiled", async () => {
+    it("never hands the live hook to a capable target that is not a SharedFs handle", async () => {
+        const commit = async (
+            target: SharedFsMountBackendTarget,
+            path: string,
+            content: string
+        ) => {
+            const events: SharedFsMountProfileEvent[] = [];
+            const backend = createSharedFsMountBackend(target, {
+                profile: (event) => events.push(event),
+            });
+            const handle = await backend.open(path, {
+                write: true,
+                create: true,
+            });
+            await backend.write(handle, encode(content), 0);
+            await backend.release(handle);
+            return events;
+        };
+
+        // A third-party target that advertises the public mount write
+        // handshake but clones its options (as a worker or IPC proxy would):
+        // a function-valued hook would make every profiled commit fail.
+        const cloned: (WriteFileOptions | undefined)[] = [];
+        const capable = spiedTarget(fs, true).target;
+        expect(capable.mountWriteSemantics?.()).toBe(fs.mountWriteSemantics());
+        const cloning: SharedFsMountBackendTarget = {
+            ...capable,
+            writeFile: (path, source, writeOptions) => {
+                const copy = structuredClone(writeOptions);
+                cloned.push(copy);
+                return fs.writeFile(path, source, copy);
+            },
+        };
+        let events = await commit(cloning, "/cloned.txt", "cloned");
+        expect(cloned).toHaveLength(1);
+        expect(cloned[0]).not.toHaveProperty("mountProfile");
+        expect(cloned[0]).toMatchObject({ expectedNodeId: null });
+        expect(events.filter(isSubPhase)).toEqual([]);
+        expect(events.map((event) => [event.phase, event.ok])).toEqual([
+            ["mount.target.writeFile", true],
+            ["mount.localCommit", true],
+        ]);
+        expect(decode(await fs.readFile("/cloned.txt"))).toBe("cloned");
+
+        // A SharedFsHandle subclass that overrides writeFile loses the
+        // private opt-in unless it re-establishes it.
+        const seen: (WriteFileOptions | undefined)[] = [];
+        class CopyingHandle extends SharedFsHandle {
+            writeFile(
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                writeOptions?: WriteFileOptions
+            ) {
+                seen.push(writeOptions);
+                return super.writeFile(
+                    path,
+                    source,
+                    structuredClone(writeOptions)
+                );
+            }
+        }
+        events = await commit(
+            new CopyingHandle(fs.program),
+            "/copied.txt",
+            "copied"
+        );
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).not.toHaveProperty("mountProfile");
+        expect(events.filter(isSubPhase)).toEqual([]);
+        expect(decode(await fs.readFile("/copied.txt"))).toBe("copied");
+
+        // The default handle and the artifact-ignore wrapper, which forwards
+        // options unchanged, keep it.
+        events = await commit(fs, "/handle.txt", "handle");
+        expect(events.filter(isSubPhase).length).toBeGreaterThan(0);
+        const ignorePeer = await Peerbit.create();
+        try {
+            const ignoring = await openSharedFs({
+                peerbit: ignorePeer,
+                machineLabel: "write-profile-test",
+                ignore: { patterns: ["dist/"] },
+            });
+            expect(ignoring.constructor.name).toBe("IgnoreAwareFs");
+            events = await commit(ignoring, "/ignored-wrapper.txt", "wrapped");
+            const [write] = joinedWrites(events);
+            expectNested(write.parent, write.children);
+            expect(phaseSequence(write.children).at(-1)).toBe("result");
+            expect(
+                decode(await ignoring.readFile("/ignored-wrapper.txt"))
+            ).toBe("wrapped");
+        } finally {
+            await ignorePeer.stop();
+        }
+    });
+
+    it("passes no hook without profiling or to a target without the write handshake", async () => {
         const unprofiled = spiedTarget(fs, true);
         const plain = createSharedFsMountBackend(unprofiled.target);
         let handle = await plain.open("/plain.txt", {

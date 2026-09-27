@@ -970,9 +970,12 @@ The phases are deliberately narrow and nest rather than add up:
   counts, dedup skips, puts, outcome). They are contiguous and lie inside
   their `mount.target.writeFile` record, so they may be added to each other
   but never to their parent. `touchChunks` also reports probe, witness and put
-  task time summed over its concurrent chunk tasks. The backend passes this
-  request only to targets that advertise the versioned mount write capability
-  (`SharedFileSystem` handles); other targets receive the unprofiled options.
+  task time summed over its concurrent chunk tasks. The request is a live
+  function in the write options, so the backend passes it only to
+  `SharedFsHandle` and the artifact-ignore wrapper while they keep their
+  default `writeFile` delegation (a private opt-in). Every other target,
+  including one that advertises the public mount write handshake, receives
+  the unprofiled options.
   A failing sub-phase closes with `ok: false` and the library error's `code`;
   no sub-phase record follows it.
 

@@ -17,7 +17,12 @@ append and indexing inside it are not separated. The summary script adds a
 "writeFile breakdown" table (per sub-phase p50/p95 per write and share of
 `writeFile` time).
 
-Only targets that advertise the versioned mount write capability receive the
-request; other targets see exactly the unprofiled options. Profiling stays off
-by default: an unprofiled write only checks that the internal option is absent
-and reads no clock.
+The request is a live function in the write options, so the backend passes it
+only to `SharedFsHandle` and the artifact-ignore wrapper while they keep their
+default `writeFile` delegation (a private opt-in). Every other target,
+including a third-party target that advertises the public mount write
+handshake, sees exactly the unprofiled options. The summary counts sub-phase
+gaps and incomplete chains (for example records dropped by a full profile
+writer) and keeps those writes out of its tables. Profiling stays off by
+default: an unprofiled write only checks that the internal option is absent and
+reads no clock.

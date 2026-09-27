@@ -82,6 +82,7 @@ import {
 } from "./changeset.js";
 import { BoundedSlotPointCache } from "./slot-point-cache.js";
 import {
+    SHARED_FS_WRITE_FILE_PROFILE_TARGET,
     createSharedFsWriteFileChunkCounters,
     createSharedFsWriteFileProfiler,
     sharedFsMountProfileElapsedNs,
@@ -14609,6 +14610,24 @@ export class SharedFsHandle {
      */
     mountWriteSemantics(): SharedFsMountWriteSemantics {
         return SHARED_FS_MOUNT_WRITE_SEMANTICS;
+    }
+
+    /**
+     * @internal Private mount-profile opt-in: true only while `writeFile`
+     * hands its options, including the live `mountProfile` hook, unchanged
+     * to SharedFileSystem.writeFile. A subclass that overrides `writeFile`
+     * is excluded unless it overrides this too.
+     */
+    [SHARED_FS_WRITE_FILE_PROFILE_TARGET](): boolean {
+        return (
+            this.writeFile === SharedFsHandle.prototype.writeFile &&
+            this.programAcceptsWriteFileProfile()
+        );
+    }
+
+    /** @internal The delegated program runs the profiled library write. */
+    protected programAcceptsWriteFileProfile(): boolean {
+        return this.program.writeFile === SharedFileSystem.prototype.writeFile;
     }
 
     /**

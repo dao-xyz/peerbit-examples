@@ -12,6 +12,7 @@ import {
     type WriteBatchOptions,
     type WriteFileOptions,
 } from "../index.js";
+import { SHARED_FS_WRITE_FILE_PROFILE_TARGET } from "../mount-profile.js";
 import { normalizeFsPath } from "../path.js";
 import type { FsWatcher, FsWatchOptions } from "../watch.js";
 import type { CompiledIgnoreRules, IgnoreVerdict } from "./patterns.js";
@@ -149,6 +150,17 @@ export class IgnoreAwareFs extends SharedFsHandle {
         const rules = this.ignorePolicy.current();
         this.guardWrite(rules, path, "writeFile");
         return super.writeFile(path, source, options);
+    }
+
+    /**
+     * @internal This writeFile only guards the path, then forwards its
+     * options unchanged, so it keeps the private mount-profile opt-in.
+     */
+    [SHARED_FS_WRITE_FILE_PROFILE_TARGET](): boolean {
+        return (
+            this.writeFile === IgnoreAwareFs.prototype.writeFile &&
+            this.programAcceptsWriteFileProfile()
+        );
     }
 
     async mkdir(path: string) {

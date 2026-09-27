@@ -537,6 +537,8 @@ export const WRITE_FILE_SUB_PHASES = [
 ];
 const WRITE_FILE_SUB_PHASE_PREFIX = "writeFile.";
 const WRITE_KINDS = ["newFile", "existingFile", "unchanged", "failed"];
+const FIRST_SUB_PHASE = "writeFile.prepare";
+const LAST_SUB_PHASE = "writeFile.result";
 const CHUNK_TASK_TIMES = ["probeNs", "witnessNs", "chunkPutNs"];
 const CHUNK_COUNTERS = [
     "probes",
@@ -672,6 +674,7 @@ export const summarizeWriteFileBreakdown = (records) => {
         children.push(record);
     }
     let overlappingSubPhases = 0;
+    let subPhaseGaps = 0;
     const writes = [];
     for (const [parent, children] of byParent) {
         children.sort((left, right) => (left.start < right.start ? -1 : 1));
@@ -680,10 +683,19 @@ export const summarizeWriteFileBreakdown = (records) => {
         let failed = !parent.ok;
         let outcome;
         let newFile = false;
+        // A complete chain is contiguous from writeFile.prepare to its end: a
+        // successful call ends with writeFile.result, a failed one with its
+        // failing sub-phase. Dropped records (a full profile writer) break it.
+        let contiguous = true;
         const chunkIo = {};
         for (const [index, child] of children.entries()) {
             if (index > 0 && child.start < children[index - 1].end) {
                 overlappingSubPhases++;
+                contiguous = false;
+            }
+            if (index > 0 && child.start > children[index - 1].end) {
+                subPhaseGaps++;
+                contiguous = false;
             }
             const entry = phases.get(child.phase) ?? { ns: 0, records: 0 };
             entry.ns += child.durationNs;
@@ -710,6 +722,12 @@ export const summarizeWriteFileBreakdown = (records) => {
                 }
             }
         }
+        const last = children.at(-1);
+        const complete =
+            contiguous &&
+            children[0].phase === FIRST_SUB_PHASE &&
+            children.slice(0, -1).every((child) => child.ok) &&
+            (parent.ok ? last.ok && last.phase === LAST_SUB_PHASE : !last.ok);
         writes.push({
             parent,
             phases,
@@ -719,8 +737,14 @@ export const summarizeWriteFileBreakdown = (records) => {
             outcome,
             newFile,
             chunkIo,
+            complete,
         });
     }
+    // Incomplete chains are counted but kept out of every table: their
+    // missing time would otherwise land in "outside" and their kind (for
+    // example a new file whose writeFile.result was dropped) would be wrong.
+    const completeWrites = writes.filter((write) => write.complete);
+    const incompleteWrites = writes.length - completeWrites.length;
     let parentsWithoutSubPhases = 0;
     for (const candidates of parents.values()) {
         for (const parent of candidates) {
@@ -729,10 +753,12 @@ export const summarizeWriteFileBreakdown = (records) => {
     }
     const kinds = {};
     for (const kind of WRITE_KINDS) {
-        const selected = writes.filter((write) => writeKind(write) === kind);
+        const selected = completeWrites.filter(
+            (write) => writeKind(write) === kind
+        );
         if (selected.length > 0) kinds[kind] = breakdownTable(selected);
     }
-    const withChunks = writes.filter(
+    const withChunks = completeWrites.filter(
         (write) => write.phases.get("writeFile.touchChunks") !== undefined
     );
     const chunkTaskNs = {};
@@ -743,7 +769,7 @@ export const summarizeWriteFileBreakdown = (records) => {
     }
     const chunkTotals = {};
     for (const key of [...CHUNK_COUNTERS, "reputs", "reputBytes"]) {
-        chunkTotals[key] = writes.reduce(
+        chunkTotals[key] = completeWrites.reduce(
             (sum, write) => sum + (write.chunkIo[key] ?? 0),
             0
         );
@@ -759,11 +785,17 @@ export const summarizeWriteFileBreakdown = (records) => {
         orphanSubPhases,
         containmentViolations,
         overlappingSubPhases,
+        subPhaseGaps,
         ambiguousJoins,
-        kindCounts: Object.fromEntries(
-            WRITE_KINDS.map((kind) => [kind, kinds[kind]?.writes ?? 0])
-        ),
-        all: breakdownTable(writes),
+        incompleteWrites,
+        kindCounts: {
+            ...Object.fromEntries(
+                WRITE_KINDS.map((kind) => [kind, kinds[kind]?.writes ?? 0])
+            ),
+            incomplete: incompleteWrites,
+        },
+        // Complete chains only.
+        all: breakdownTable(completeWrites),
         byKind: kinds,
         touchChunks: {
             writes: withChunks.length,
@@ -963,7 +995,13 @@ export const formatWriteFileBreakdownLines = (breakdown) => {
         "",
         "### writeFile breakdown",
         "",
-        `Joined ${breakdown.joinedWrites}/${breakdown.writeFileRecords} mount.target.writeFile records to their library sub-phases (new file ${counts.newFile}, existing file ${counts.existingFile}, unchanged ${counts.unchanged}, failed ${counts.failed}); without sub-phases=${breakdown.parentsWithoutSubPhases}, without writeId=${breakdown.unkeyedParents}, orphan sub-phase records=${breakdown.orphanSubPhases}, containment violations=${breakdown.containmentViolations}, overlapping sub-phases=${breakdown.overlappingSubPhases}.`,
+        `Joined ${breakdown.joinedWrites}/${breakdown.writeFileRecords} mount.target.writeFile records to their library sub-phases (new file ${counts.newFile}, existing file ${counts.existingFile}, unchanged ${counts.unchanged}, failed ${counts.failed}, incomplete ${counts.incomplete}); without sub-phases=${breakdown.parentsWithoutSubPhases}, without writeId=${breakdown.unkeyedParents}, orphan sub-phase records=${breakdown.orphanSubPhases}, containment violations=${breakdown.containmentViolations}, overlapping sub-phases=${breakdown.overlappingSubPhases}, sub-phase gaps=${breakdown.subPhaseGaps}, incomplete chains=${breakdown.incompleteWrites}.`,
+        ...(breakdown.incompleteWrites > 0
+            ? [
+                  "",
+                  `Incomplete chains (dropped, overlapping, or out-of-order sub-phase records) are excluded from the tables below, which cover ${all.writes} complete writes.`,
+              ]
+            : []),
         "",
         "| Sub-phase | Writes | Records | p50/write | p95/write | Share of writeFile |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
