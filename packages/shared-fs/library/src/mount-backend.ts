@@ -31,6 +31,7 @@ import {
     pathSegments,
 } from "./path.js";
 import {
+    acceptsSharedFsWriteFileProfile,
     finishSharedFsMountProfile,
     sharedFsMountProfileErrorCode,
     type SharedFsMountProfileSink,
@@ -706,6 +707,9 @@ export const createSharedFsMountBackend = (
     const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
     const profile = options.profile;
+    // Joins a `mount.target.writeFile` record to the target's own sub-phase
+    // records; advanced only while profiling.
+    let profileWriteId = 0;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
     const delegatesNamespaceMutation =
@@ -713,6 +717,16 @@ export const createSharedFsMountBackend = (
         SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
     const delegatesWriteHashing =
         target.mountWriteSemantics?.() === SHARED_FS_MOUNT_WRITE_SEMANTICS;
+    // The library writeFile sub-phase hook is a live function inside the
+    // options object. Pass it only to targets that privately opted in
+    // (SharedFsHandle and the artifact-ignore wrapper with their default
+    // delegation), never merely because a target advertises the public
+    // mount write handshake: such a target may clone, serialize, or
+    // validate its options. Evaluated only while profiling.
+    const passesWriteFileProfile =
+        profile !== undefined &&
+        delegatesWriteHashing &&
+        acceptsSharedFsWriteFileProfile(target);
 
     const requireRemoveMutationResult = (
         value: unknown,
@@ -1502,6 +1516,7 @@ export const createSharedFsMountBackend = (
             >;
             try {
                 if (profile) {
+                    const writeId = ++profileWriteId;
                     const identity = {
                         source: "node-daemon",
                         phase: "mount.target.writeFile",
@@ -1509,14 +1524,25 @@ export const createSharedFsMountBackend = (
                         detail: {
                             bytes: snapshot.length,
                             mutationGeneration: snapshot.mutationGeneration,
+                            writeId,
                         },
                     } as const;
+                    // Only privately opted-in SharedFs handles receive the
+                    // sub-phase hook; every other target sees exactly the
+                    // unprofiled options.
+                    const targetOptions: typeof writeOptions =
+                        passesWriteFileProfile
+                            ? {
+                                  ...writeOptions,
+                                  mountProfile: { sink: profile, writeId },
+                              }
+                            : writeOptions;
                     const started = process.hrtime.bigint();
                     try {
                         result = await target.writeFile(
                             state.path,
                             bytes,
-                            writeOptions
+                            targetOptions
                         );
                     } catch (error) {
                         const durationNs = finishSharedFsMountProfile(

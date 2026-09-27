@@ -208,10 +208,12 @@ peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 
 For a diagnostic run, add `--mount-profile <dir>`. The CLI creates the
 directory if needed and refuses to reuse existing profile files. It writes
-`<dir>/node-daemon.ndjson` (IPC backend service, local commit fences, and the
-exact Peerbit-facing `writeFile` call) and asks a profiling-capable external
-adapter to write `<dir>/native-adapter.ndjson` (native callbacks, IPC queue,
-and IPC round trips). Older adapters ignore the request and mount normally;
+`<dir>/node-daemon.ndjson` (IPC backend service, local commit fences, the
+exact Peerbit-facing `writeFile` call, and that call's sequential `writeFile.*`
+sub-phases such as chunk I/O and the version and naming document puts) and
+asks a profiling-capable external adapter to write
+`<dir>/native-adapter.ndjson` (native callbacks, IPC queue, and IPC round
+trips). Older adapters ignore the request and mount normally;
 native-adapter records require an adapter release that includes profiling.
 Profiling is opt-in, uses bounded asynchronous file writers that drop and
 count records instead of slowing the mount, and does not change mount
@@ -228,8 +230,11 @@ node scripts/shared-fs-mount-profile-summary.mjs --profile-dir ./mount-profile \
 
 The phases nest: a native callback contains its IPC round trip, which contains
 the daemon's service time, which can contain a local commit fence and its
-target write. Do not add them. Kernel scheduling and cache time, remote
-readability, replication, and persisted acknowledgements are not reported.
+target write, which contains its `writeFile.*` sub-phases. Do not add a phase
+to the phase that contains it; the summary's "writeFile breakdown" table shows
+each sub-phase's share of the target write. Kernel scheduling and cache time,
+remote readability, replication, and persisted acknowledgements are not
+reported.
 
 On Windows PowerShell:
 

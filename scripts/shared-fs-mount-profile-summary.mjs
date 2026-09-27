@@ -518,6 +518,295 @@ export const summarizeLocalCommits = (records) => {
         }));
 };
 
+/** Library writeFile sub-phases in code order (see mount-profile.ts). */
+export const WRITE_FILE_SUB_PHASES = [
+    "writeFile.prepare",
+    "writeFile.resolvePath",
+    "writeFile.readHeads",
+    "writeFile.hash",
+    "writeFile.loadBase",
+    "writeFile.chunk",
+    "writeFile.touchChunks",
+    "writeFile.guard",
+    "writeFile.versionPut",
+    "writeFile.cacheApply",
+    "writeFile.verifyChunks",
+    "writeFile.resolveParent",
+    "writeFile.namingPut",
+    "writeFile.result",
+];
+const WRITE_FILE_SUB_PHASE_PREFIX = "writeFile.";
+const WRITE_KINDS = ["newFile", "existingFile", "unchanged", "failed"];
+const FIRST_SUB_PHASE = "writeFile.prepare";
+const LAST_SUB_PHASE = "writeFile.result";
+const CHUNK_TASK_TIMES = ["probeNs", "witnessNs", "chunkPutNs"];
+const CHUNK_COUNTERS = [
+    "probes",
+    "witnessQueries",
+    "dedupSkips",
+    "dedupSkipBytes",
+    "chunkPuts",
+    "chunkPutBytes",
+    "absentPuts",
+    "linkedPuts",
+    "unprobedPuts",
+];
+
+const writeKind = (write) =>
+    write.failed
+        ? "failed"
+        : write.outcome === "unchanged"
+          ? "unchanged"
+          : write.newFile
+            ? "newFile"
+            : "existingFile";
+
+const phaseOrder = (phase) => {
+    const index = WRITE_FILE_SUB_PHASES.indexOf(phase);
+    return index < 0 ? WRITE_FILE_SUB_PHASES.length : index;
+};
+
+const breakdownTable = (writes) => {
+    const totalWriteFileNs = writes.reduce(
+        (sum, write) => sum + write.parent.durationNs,
+        0
+    );
+    const share = (ns) =>
+        totalWriteFileNs === 0 ? null : ns / totalWriteFileNs;
+    const perPhase = new Map();
+    for (const write of writes) {
+        for (const [phase, entry] of write.phases) {
+            let group = perPhase.get(phase);
+            if (!group) {
+                group = { records: 0, perWrite: [] };
+                perPhase.set(phase, group);
+            }
+            group.records += entry.records;
+            group.perWrite.push(entry.ns);
+        }
+    }
+    const phases = [...perPhase.entries()]
+        .sort(
+            ([left], [right]) =>
+                phaseOrder(left) - phaseOrder(right) || (left < right ? -1 : 1)
+        )
+        .map(([phase, group]) => {
+            const stats = durationStats(group.perWrite);
+            return {
+                phase,
+                writes: group.perWrite.length,
+                records: group.records,
+                perWriteNs: stats,
+                totalNs: stats.totalNs,
+                shareOfWriteFile: share(stats.totalNs),
+            };
+        });
+    const outside = durationStats(writes.map((write) => write.outsideNs));
+    return {
+        writes: writes.length,
+        writeFileNs: durationStats(
+            writes.map((write) => write.parent.durationNs)
+        ),
+        totalWriteFileNs,
+        phases,
+        // Parent time not covered by a sub-phase: backend-to-library dispatch
+        // and handle wrappers (for example an artifact-ignore guard).
+        outsideSubPhasesNs: outside,
+        outsideShareOfWriteFile: share(outside.totalNs ?? 0),
+    };
+};
+
+/**
+ * Break the library `writeFile` behind each profiled mount commit into its
+ * sequential `writeFile.*` sub-phases. Sub-phase records join their
+ * `mount.target.writeFile` parent by (file, detail.writeId) and must lie
+ * inside it. They partition the library call, so their sums are compared with
+ * the parent and the remainder is reported as outside time; a sub-phase is
+ * never added to its parent.
+ */
+export const summarizeWriteFileBreakdown = (records) => {
+    const parents = new Map();
+    let unkeyedParents = 0;
+    for (const record of records) {
+        if (
+            record.source !== "node-daemon" ||
+            record.phase !== "mount.target.writeFile"
+        ) {
+            continue;
+        }
+        if (!Number.isSafeInteger(record.detail.writeId)) {
+            unkeyedParents++;
+            continue;
+        }
+        const key = `${record.file}\u0000${record.detail.writeId}`;
+        parents.set(key, [...(parents.get(key) ?? []), record]);
+    }
+    const byParent = new Map();
+    let orphanSubPhases = 0;
+    let containmentViolations = 0;
+    let ambiguousJoins = 0;
+    for (const record of records) {
+        if (
+            record.source !== "node-daemon" ||
+            !record.phase.startsWith(WRITE_FILE_SUB_PHASE_PREFIX)
+        ) {
+            continue;
+        }
+        const candidates = Number.isSafeInteger(record.detail.writeId)
+            ? (parents.get(`${record.file}\u0000${record.detail.writeId}`) ??
+              [])
+            : [];
+        const containing = candidates.filter((parent) =>
+            contains(parent, record, 0)
+        );
+        if (containing.length === 0) {
+            if (candidates.length > 0) containmentViolations++;
+            else orphanSubPhases++;
+            continue;
+        }
+        if (containing.length > 1) ambiguousJoins++;
+        const parent = containing[0];
+        let children = byParent.get(parent);
+        if (!children) {
+            children = [];
+            byParent.set(parent, children);
+        }
+        children.push(record);
+    }
+    let overlappingSubPhases = 0;
+    let subPhaseGaps = 0;
+    const writes = [];
+    for (const [parent, children] of byParent) {
+        children.sort((left, right) => (left.start < right.start ? -1 : 1));
+        const phases = new Map();
+        let subPhaseNs = 0;
+        let failed = !parent.ok;
+        let outcome;
+        let newFile = false;
+        // A complete chain is contiguous from writeFile.prepare to its end: a
+        // successful call ends with writeFile.result, a failed one with its
+        // failing sub-phase. Dropped records (a full profile writer) break it.
+        let contiguous = true;
+        const chunkIo = {};
+        for (const [index, child] of children.entries()) {
+            if (index > 0 && child.start < children[index - 1].end) {
+                overlappingSubPhases++;
+                contiguous = false;
+            }
+            if (index > 0 && child.start > children[index - 1].end) {
+                subPhaseGaps++;
+                contiguous = false;
+            }
+            const entry = phases.get(child.phase) ?? { ns: 0, records: 0 };
+            entry.ns += child.durationNs;
+            entry.records++;
+            phases.set(child.phase, entry);
+            subPhaseNs += child.durationNs;
+            if (!child.ok) failed = true;
+            if (child.phase === "writeFile.result") {
+                outcome = child.detail.outcome;
+                newFile = child.detail.newFile === true;
+            }
+            if (child.phase === "writeFile.touchChunks") {
+                for (const key of [...CHUNK_TASK_TIMES, ...CHUNK_COUNTERS]) {
+                    if (typeof child.detail[key] === "number") {
+                        chunkIo[key] = (chunkIo[key] ?? 0) + child.detail[key];
+                    }
+                }
+            }
+            if (child.phase === "writeFile.verifyChunks") {
+                for (const key of ["reputs", "reputBytes"]) {
+                    if (typeof child.detail[key] === "number") {
+                        chunkIo[key] = (chunkIo[key] ?? 0) + child.detail[key];
+                    }
+                }
+            }
+        }
+        const last = children.at(-1);
+        const complete =
+            contiguous &&
+            children[0].phase === FIRST_SUB_PHASE &&
+            children.slice(0, -1).every((child) => child.ok) &&
+            (parent.ok ? last.ok && last.phase === LAST_SUB_PHASE : !last.ok);
+        writes.push({
+            parent,
+            phases,
+            subPhaseNs,
+            outsideNs: Math.max(0, parent.durationNs - subPhaseNs),
+            failed,
+            outcome,
+            newFile,
+            chunkIo,
+            complete,
+        });
+    }
+    // Incomplete chains are counted but kept out of every table: their
+    // missing time would otherwise land in "outside" and their kind (for
+    // example a new file whose writeFile.result was dropped) would be wrong.
+    const completeWrites = writes.filter((write) => write.complete);
+    const incompleteWrites = writes.length - completeWrites.length;
+    let parentsWithoutSubPhases = 0;
+    for (const candidates of parents.values()) {
+        for (const parent of candidates) {
+            if (!byParent.has(parent)) parentsWithoutSubPhases++;
+        }
+    }
+    const kinds = {};
+    for (const kind of WRITE_KINDS) {
+        const selected = completeWrites.filter(
+            (write) => writeKind(write) === kind
+        );
+        if (selected.length > 0) kinds[kind] = breakdownTable(selected);
+    }
+    const withChunks = completeWrites.filter(
+        (write) => write.phases.get("writeFile.touchChunks") !== undefined
+    );
+    const chunkTaskNs = {};
+    for (const key of CHUNK_TASK_TIMES) {
+        chunkTaskNs[key] = durationStats(
+            withChunks.map((write) => write.chunkIo[key] ?? 0)
+        );
+    }
+    const chunkTotals = {};
+    for (const key of [...CHUNK_COUNTERS, "reputs", "reputBytes"]) {
+        chunkTotals[key] = completeWrites.reduce(
+            (sum, write) => sum + (write.chunkIo[key] ?? 0),
+            0
+        );
+    }
+    return {
+        joinedWrites: writes.length,
+        writeFileRecords: [...parents.values()].reduce(
+            (sum, candidates) => sum + candidates.length,
+            0
+        ),
+        parentsWithoutSubPhases,
+        unkeyedParents,
+        orphanSubPhases,
+        containmentViolations,
+        overlappingSubPhases,
+        subPhaseGaps,
+        ambiguousJoins,
+        incompleteWrites,
+        kindCounts: {
+            ...Object.fromEntries(
+                WRITE_KINDS.map((kind) => [kind, kinds[kind]?.writes ?? 0])
+            ),
+            incomplete: incompleteWrites,
+        },
+        // Complete chains only.
+        all: breakdownTable(completeWrites),
+        byKind: kinds,
+        touchChunks: {
+            writes: withChunks.length,
+            // Summed over concurrent chunk tasks: equal to wall time only for
+            // single-chunk writes.
+            taskNs: chunkTaskNs,
+            totals: chunkTotals,
+        },
+    };
+};
+
 const sampleWindows = (report) => {
     const windows = [];
     for (const scenario of report.scenarios) {
@@ -664,11 +953,13 @@ export const summarizeMountProfile = ({
         ipc: joinIpcRecords(operational, joinToleranceNs),
         adapterCallbacks: summarizeAdapterCallbacks(operational),
         localCommit: summarizeLocalCommits(operational),
+        writeFileBreakdown: summarizeWriteFileBreakdown(operational),
         benchmark: benchmarks.map(({ label, report }) =>
             attributeToBenchmark(operational, report, label)
         ),
         notes: [
-            "Phases nest (native.callback > ipc.roundTrip > ipc.service > mount.localCommit > mount.target.writeFile); never add them.",
+            "Phases nest (native.callback > ipc.roundTrip > ipc.service > mount.localCommit > mount.target.writeFile > writeFile.*); never add a phase to its parent.",
+            "writeFile.* sub-phases are sequential and partition the library writeFile behind one mount.target.writeFile (joined by writeId); they may be added to each other. versionPut and namingPut include everything inside the upstream Documents.put (signing, log append, indexing).",
             "transportNs = joined ipc.roundTrip - ipc.service (framing, loopback, adapter encode/decode).",
             "Failures: absent = ENOENT; unavailable = EAGAIN/EIO/EBUSY/ENOLCK/ETIMEDOUT/ECLOSED or no code; error = any other code.",
             "Kernel time outside userspace callbacks and cached operations that never reach userspace are not observable.",
@@ -683,6 +974,90 @@ const statsCells = (stats) =>
     stats.count === 0
         ? "— | — | — | —"
         : `${ms(stats.p50Ns)} | ${ms(stats.p95Ns)} | ${ms(stats.p99Ns)} | ${ms(stats.maxNs)}`;
+
+const percent = (fraction) =>
+    fraction === null || fraction === undefined
+        ? "—"
+        : `${(fraction * 100).toFixed(1)}%`;
+
+const KIND_LABELS = {
+    newFile: "new file",
+    existingFile: "existing file",
+    unchanged: "unchanged",
+    failed: "failed",
+};
+
+/** Markdown lines for {@link summarizeWriteFileBreakdown}. */
+export const formatWriteFileBreakdownLines = (breakdown) => {
+    const counts = breakdown.kindCounts;
+    const all = breakdown.all;
+    const lines = [
+        "",
+        "### writeFile breakdown",
+        "",
+        `Joined ${breakdown.joinedWrites}/${breakdown.writeFileRecords} mount.target.writeFile records to their library sub-phases (new file ${counts.newFile}, existing file ${counts.existingFile}, unchanged ${counts.unchanged}, failed ${counts.failed}, incomplete ${counts.incomplete}); without sub-phases=${breakdown.parentsWithoutSubPhases}, without writeId=${breakdown.unkeyedParents}, orphan sub-phase records=${breakdown.orphanSubPhases}, containment violations=${breakdown.containmentViolations}, overlapping sub-phases=${breakdown.overlappingSubPhases}, sub-phase gaps=${breakdown.subPhaseGaps}, incomplete chains=${breakdown.incompleteWrites}.`,
+        ...(breakdown.incompleteWrites > 0
+            ? [
+                  "",
+                  `Incomplete chains (dropped, overlapping, or out-of-order sub-phase records) are excluded from the tables below, which cover ${all.writes} complete writes.`,
+              ]
+            : []),
+        "",
+        "| Sub-phase | Writes | Records | p50/write | p95/write | Share of writeFile |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ];
+    for (const phase of all.phases) {
+        lines.push(
+            `| ${phase.phase} | ${phase.writes} | ${phase.records} | ${ms(phase.perWriteNs.p50Ns)} | ${ms(phase.perWriteNs.p95Ns)} | ${percent(phase.shareOfWriteFile)} |`
+        );
+    }
+    lines.push(
+        `| (outside sub-phases) | ${all.writes} | — | ${ms(all.outsideSubPhasesNs.p50Ns)} | ${ms(all.outsideSubPhasesNs.p95Ns)} | ${percent(all.outsideShareOfWriteFile)} |`,
+        `| mount.target.writeFile | ${all.writes} | ${all.writes} | ${ms(all.writeFileNs.p50Ns)} | ${ms(all.writeFileNs.p95Ns)} | 100% |`
+    );
+    const chunks = breakdown.touchChunks;
+    if (chunks.writes > 0) {
+        const task = (key) =>
+            `${ms(chunks.taskNs[key].p50Ns)} / ${ms(chunks.taskNs[key].p95Ns)}`;
+        const totals = chunks.totals;
+        lines.push(
+            "",
+            `touchChunks task time per write, p50 / p95 (summed over concurrent chunk tasks): probe ${task("probeNs")}, witness query ${task("witnessNs")}, chunk put ${task("chunkPutNs")}.`,
+            `Chunk I/O totals: ${totals.chunkPuts} chunk puts (${totals.chunkPutBytes} bytes; absent ${totals.absentPuts}, linked ${totals.linkedPuts}, unprobed ${totals.unprobedPuts}), ${totals.dedupSkips} dedup skips (${totals.dedupSkipBytes} bytes), ${totals.probes} probes, ${totals.witnessQueries} witness queries, ${totals.reputs} W2 re-puts.`
+        );
+    }
+    const kinds = WRITE_KINDS.filter((kind) => breakdown.byKind[kind]);
+    if (kinds.length > 1) {
+        const phaseNames = [
+            ...new Set(
+                kinds.flatMap((kind) =>
+                    breakdown.byKind[kind].phases.map((phase) => phase.phase)
+                )
+            ),
+        ].sort(
+            (left, right) =>
+                phaseOrder(left) - phaseOrder(right) || (left < right ? -1 : 1)
+        );
+        lines.push(
+            "",
+            `| Sub-phase (p50/write) | ${kinds.map((kind) => `${KIND_LABELS[kind]} (${breakdown.byKind[kind].writes})`).join(" | ")} |`,
+            `| --- | ${kinds.map(() => "---:").join(" | ")} |`
+        );
+        for (const name of phaseNames) {
+            const cells = kinds.map((kind) => {
+                const phase = breakdown.byKind[kind].phases.find(
+                    (entry) => entry.phase === name
+                );
+                return phase ? ms(phase.perWriteNs.p50Ns) : "—";
+            });
+            lines.push(`| ${name} | ${cells.join(" | ")} |`);
+        }
+        lines.push(
+            `| mount.target.writeFile | ${kinds.map((kind) => ms(breakdown.byKind[kind].writeFileNs.p50Ns)).join(" | ")} |`
+        );
+    }
+    return lines;
+};
 
 export const formatMountProfileSummaryMarkdown = (
     summary,
@@ -763,6 +1138,11 @@ export const formatMountProfileSummaryMarkdown = (
                 `| ${fence.trigger} | ${fence.fenceNs.count} | ${fence.requiredCommit} | ${fence.joinedInFlight} | ${fence.failed} | ${ms(fence.fenceNs.p50Ns)} | ${ms(fence.fenceNs.p95Ns)} | ${ms(fence.exclusiveOfWriteFileNs.p50Ns)} | ${ms(fence.exclusiveOfWriteFileNs.p95Ns)} |`
             );
         }
+    }
+
+    const breakdown = summary.writeFileBreakdown;
+    if (breakdown && breakdown.joinedWrites > 0) {
+        lines.push(...formatWriteFileBreakdownLines(breakdown));
     }
 
     for (const benchmark of summary.benchmark) {

@@ -81,6 +81,15 @@ import {
     type ChangesetWatcher,
 } from "./changeset.js";
 import { BoundedSlotPointCache } from "./slot-point-cache.js";
+import {
+    SHARED_FS_WRITE_FILE_PROFILE_TARGET,
+    createSharedFsWriteFileChunkCounters,
+    createSharedFsWriteFileProfiler,
+    sharedFsMountProfileElapsedNs,
+    type SharedFsWriteFileChunkCounters,
+    type SharedFsWriteFileProfileHook,
+    type SharedFsWriteFileProfiler,
+} from "./mount-profile.js";
 
 export * from "./model.js";
 export {
@@ -120,6 +129,7 @@ export {
     type SharedFsMountProfileWriter,
     type SharedFsMountProfileWriterOptions,
     type SharedFsMountProfileWriterStats,
+    type SharedFsWriteFileProfilePhase,
 } from "./mount-profile.js";
 export * from "./merkle-v1.js";
 export * from "./merkle-file-version-v1.js";
@@ -1084,6 +1094,14 @@ export type WriteFileOptions = {
      * "off": always re-put every chunk (partition-proof mode).
      */
     dedup?: "verify" | "off";
+    /**
+     * @internal Diagnostic opt-in set only by a profiled mount backend: emit
+     * sequential `writeFile.*` sub-phase records to this sink, joined to the
+     * backend's `mount.target.writeFile` record by `writeId`. Report-only; it
+     * never changes the write. Absent (the default), the write path does not
+     * read a clock.
+     */
+    mountProfile?: SharedFsWriteFileProfileHook;
 };
 
 export type SharedFsWriteFileResult = SharedFsVersionInfo & {
@@ -1661,6 +1679,21 @@ const computeNamingState = (
     const conflicted =
         sorted.length > 1 && !sorted.every((head) => samePayload(head, winner));
     return { nodeId, events, heads: sorted, winner, conflicted };
+};
+
+/** Time one chunk put into opt-in writeFile profile counters. */
+const profileChunkPut = async (
+    profile: SharedFsWriteFileChunkCounters,
+    chunk: FileChunk,
+    counter: "absentPuts" | "linkedPuts" | "unprobedPuts",
+    put: () => Promise<unknown>
+) => {
+    const started = process.hrtime.bigint();
+    await put();
+    profile.chunkPutNs += sharedFsMountProfileElapsedNs(started);
+    profile.chunkPuts++;
+    profile.chunkPutBytes += chunk.bytes.byteLength;
+    profile[counter]++;
 };
 
 const mapWithConcurrency = async <T, R>(
@@ -4551,6 +4584,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         expectedNamespaceEpoch?: number;
         /** Starts a caller-owned critical tail only after naming admission. */
         enterCriticalTail?: () => void;
+        /** Opt-in writeFile profile: the put ends `writeFile.namingPut`. */
+        profiler?: SharedFsWriteFileProfiler;
     }) {
         const metadata = this.signedMetadata();
         if (properties.parentHeads.length > 8000) {
@@ -4577,6 +4612,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             async () => {
                 properties.enterCriticalTail?.();
                 await this.entries.put(event, { unique: true });
+                properties.profiler?.enter("writeFile.cacheApply", {
+                    document: "naming",
+                });
                 this.cacheLocalWrite(event);
             },
             properties.expectedNamespaceEpoch
@@ -4602,27 +4640,57 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private async touchChunks(
         chunks: FileChunk[],
-        dedup: "verify" | "off" | undefined
+        dedup: "verify" | "off" | undefined,
+        profile?: SharedFsWriteFileChunkCounters
     ) {
         const fullReplica = this.isFullReplica();
         const horizonFloor = BigInt(
             Math.max(0, Math.floor(this.clock() - this.skipHorizonMs))
         );
+        // Opt-in profile counters: each timed step reads the clock only when
+        // `profile` is present.
         await mapWithConcurrency(
             chunks,
             CHUNK_IO_CONCURRENCY,
             async (chunk) => {
                 if (dedup === "off" || !fullReplica) {
+                    if (profile) {
+                        await profileChunkPut(
+                            profile,
+                            chunk,
+                            "unprobedPuts",
+                            () => this.entries.put(chunk)
+                        );
+                        return;
+                    }
                     await this.entries.put(chunk);
                     return;
                 }
-                if (!(await this.hasDocument(chunk.id))) {
+                const probeStarted = profile && process.hrtime.bigint();
+                const present = await this.hasDocument(chunk.id);
+                if (profile) {
+                    profile.probes++;
+                    profile.probeNs += sharedFsMountProfileElapsedNs(
+                        probeStarted!
+                    );
+                }
+                if (!present) {
                     // Absence just verified; a fresh chain with no
                     // existing-key lookup. Duplicate-id races are idempotent
                     // by construction under content addressing.
+                    if (profile) {
+                        await profileChunkPut(
+                            profile,
+                            chunk,
+                            "absentPuts",
+                            () => this.entries.put(chunk, { unique: true })
+                        );
+                        return;
+                    }
                     await this.entries.put(chunk, { unique: true });
                     return;
                 }
+                const witnessStarted = profile && process.hrtime.bigint();
                 const iterator = this.entries.index.iterate(
                     {
                         query: [
@@ -4649,7 +4717,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 } finally {
                     await (iterator as any).close?.();
                 }
+                if (profile) {
+                    profile.witnessQueries++;
+                    profile.witnessNs += sharedFsMountProfileElapsedNs(
+                        witnessStarted!
+                    );
+                }
                 if (witnessed) {
+                    if (profile) {
+                        profile.dedupSkips++;
+                        profile.dedupSkipBytes += chunk.bytes.byteLength;
+                    }
+                    return;
+                }
+                if (profile) {
+                    await profileChunkPut(profile, chunk, "linkedPuts", () =>
+                        this.entries.put(chunk)
+                    );
                     return;
                 }
                 await this.entries.put(chunk);
@@ -4910,6 +4994,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options: WriteFileOptions = {}
     ): Promise<SharedFsWriteFileResult> {
+        if (options.mountProfile !== undefined) {
+            const profiler = createSharedFsWriteFileProfiler(
+                options.mountProfile
+            );
+            if (profiler) {
+                return this.profiledWriteFile(path, source, options, profiler);
+            }
+        }
         this.assertWriteReady("writeFile");
         const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("writeFile");
         return this.runForegroundMutation("writeFile", (context) =>
@@ -4917,12 +5009,48 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         );
     }
 
+    /**
+     * The same write as {@link writeFile}, with its sequential sub-phases
+     * reported to a mount profile (see SharedFsWriteFileProfilePhase). The
+     * failing sub-phase is closed with the error's code.
+     */
+    private async profiledWriteFile(
+        path: string,
+        source: Uint8Array | string | AsyncIterable<Uint8Array>,
+        options: WriteFileOptions,
+        profiler: SharedFsWriteFileProfiler
+    ): Promise<SharedFsWriteFileResult> {
+        try {
+            this.assertWriteReady("writeFile");
+            const namespaceEpoch =
+                this.captureOrdinaryNamespaceEpoch("writeFile");
+            const result = await this.runForegroundMutation(
+                "writeFile",
+                (context) =>
+                    this.writeFileInner(
+                        path,
+                        source,
+                        options,
+                        namespaceEpoch,
+                        context,
+                        profiler
+                    )
+            );
+            profiler.finish();
+            return result;
+        } catch (error) {
+            profiler.fail(error);
+            throw error;
+        }
+    }
+
     private async writeFileInner(
         path: string,
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options: WriteFileOptions,
         namespaceEpoch: number,
-        context: ForegroundMutationContext
+        context: ForegroundMutationContext,
+        profiler?: SharedFsWriteFileProfiler
     ): Promise<SharedFsWriteFileResult> {
         const normalized = normalizeFsPath(path);
         if (normalized === "/") {
@@ -4979,6 +5107,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         }
         const bytes = await toBytes(source);
+        profiler?.set("bytes", bytes.byteLength);
+        profiler?.enter("writeFile.resolvePath");
         const resolved = await this.resolvePath(normalized);
         const expectedNodeId = options.expectedNodeId;
         const resolvedNodeId = resolved?.nodeId ?? null;
@@ -4988,6 +5118,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (expectedNodeId === undefined) {
                 return;
             }
+            profiler?.enter("writeFile.guard", { checkpoint });
             const current = await this.resolvePath(normalized);
             const currentNodeId = current?.nodeId ?? null;
             if (currentNodeId !== expectedNodeId) {
@@ -5015,9 +5146,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         const existingNodeId = resolved?.nodeId;
+        profiler?.set("existing", existingNodeId !== undefined);
+        profiler?.enter("writeFile.readHeads");
         const currentHeads = existingNodeId
             ? await this.headsForNode(existingNodeId)
             : [];
+        profiler?.set("heads", currentHeads.length);
+        profiler?.enter("writeFile.hash", { bytes: bytes.byteLength });
         // Keep hashing at the historical post-lookup point for every caller.
         // In particular, do not lengthen the interval in which a caller-owned
         // Uint8Array could change after its digest was computed.
@@ -5047,6 +5182,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (expectedNodeId !== undefined) {
                 await assertExpectedNode("no-op");
             }
+            profiler?.enter("writeFile.result", {
+                outcome: "unchanged",
+                newFile: false,
+            });
             return {
                 ...this.versionInfo(currentHeads[0], normalized, currentHeads),
                 mountWriteOutcome: "unchanged",
@@ -5066,6 +5205,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (expectedNodeId !== undefined) {
                 await assertExpectedNode("no-op");
             }
+            profiler?.enter("writeFile.result", {
+                outcome: "unchanged",
+                newFile: false,
+            });
             return this.versionInfo(currentHeads[0], normalized, currentHeads);
         }
         if ((options.baseVersionIds?.length ?? 0) > 8000) {
@@ -5079,6 +5222,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let parentVersionIds: string[];
         let parentVersions: VersionLike[];
         if (options.baseVersionIds !== undefined) {
+            profiler?.enter("writeFile.loadBase", {
+                baseVersions: options.baseVersionIds.length,
+            });
             parentVersionIds = options.baseVersionIds;
             parentVersions = [];
             for (const parentId of parentVersionIds) {
@@ -5111,6 +5257,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentVersionIds = currentHeads.map((head) => head.id);
             parentVersions = currentHeads;
         }
+        profiler?.enter("writeFile.chunk", { bytes: bytes.byteLength });
         const versionId = createId("version");
         // Content-addressed chunks: identical bytes — across versions of
         // this file or across entirely different files — share one chunk
@@ -5132,8 +5279,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `File has ${uniqueChunks.length} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version)`
             );
         }
+        profiler?.set("chunks", orderedChunks.length);
+        profiler?.set("uniqueChunks", uniqueChunks.length);
+        profiler?.enter("writeFile.touchChunks", {
+            chunks: uniqueChunks.length,
+            dedup: options.dedup ?? "verify",
+        });
         this.enterForegroundMutationCriticalTail(context);
-        await this.touchChunks(uniqueChunks, options.dedup);
+        await this.touchChunks(
+            uniqueChunks,
+            options.dedup,
+            profiler?.counters(createSharedFsWriteFileChunkCounters())
+        );
         // Path lookup, base loading, hashing and chunk IO all await. Recheck
         // immediately before publishing the node-scoped version so a local
         // replacement that landed during that work cannot receive these
@@ -5141,6 +5298,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (expectedNodeId !== undefined) {
             await assertExpectedNode("before-version");
         }
+        profiler?.enter("writeFile.versionPut", {
+            parents: parentVersionIds.length,
+            chunkRefs: orderedChunks.length,
+        });
         const metadata = this.signedMetadata();
         const nodeId = existingNodeId ?? createId("file");
         const version = new FileVersion({
@@ -5157,16 +5318,25 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
         this.throwIfForegroundMutationInactive(context);
         await this.entries.put(version, { unique: true });
+        profiler?.enter("writeFile.cacheApply", { document: "version" });
         this.cacheLocalWrite(version);
         // W2: the version now references the chunks; re-verify every chunk
         // is still present and re-put from memory any that a concurrently
         // executing collector removed inside the probe window.
         if (options.dedup !== "off") {
+            profiler?.enter("writeFile.verifyChunks", {
+                chunks: uniqueChunks.length,
+            });
+            const verified = profiler?.counters({ reputs: 0, reputBytes: 0 });
             await mapWithConcurrency(
                 uniqueChunks,
                 CHUNK_IO_CONCURRENCY,
                 async (chunk) => {
                     if (!(await this.hasDocument(chunk.id))) {
+                        if (verified) {
+                            verified.reputs++;
+                            verified.reputBytes += chunk.bytes.byteLength;
+                        }
                         await this.putPreferLinked(chunk);
                     }
                 }
@@ -5179,6 +5349,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (expectedNodeId !== undefined) {
                 await assertExpectedNode("before-naming");
             }
+            profiler?.enter("writeFile.resolveParent", {
+                guarded: expectedNodeId === null,
+            });
             const parentId =
                 expectedNodeId === null
                     ? await this.resolveExpectedCreateParent(
@@ -5186,12 +5359,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                           expectedParentNodeId
                       )
                     : await this.resolveParent(normalized);
+            profiler?.enter("writeFile.namingPut");
             await this.appendNamingEvent({
                 nodeId,
                 parentId,
                 name: basename(normalized),
                 parentHeads: [],
                 expectedNamespaceEpoch: namespaceEpoch,
+                profiler,
             });
         } else {
             // A replacement that won while the node-scoped version was being
@@ -5202,6 +5377,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 await assertExpectedNode("after-version");
             }
         }
+        profiler?.enter("writeFile.result", {
+            outcome: "created",
+            newFile: !existingNodeId,
+        });
         const referenced = new Set(parentVersionIds);
         const heads = [
             version,
@@ -14431,6 +14610,24 @@ export class SharedFsHandle {
      */
     mountWriteSemantics(): SharedFsMountWriteSemantics {
         return SHARED_FS_MOUNT_WRITE_SEMANTICS;
+    }
+
+    /**
+     * @internal Private mount-profile opt-in: true only while `writeFile`
+     * hands its options, including the live `mountProfile` hook, unchanged
+     * to SharedFileSystem.writeFile. A subclass that overrides `writeFile`
+     * is excluded unless it overrides this too.
+     */
+    [SHARED_FS_WRITE_FILE_PROFILE_TARGET](): boolean {
+        return (
+            this.writeFile === SharedFsHandle.prototype.writeFile &&
+            this.programAcceptsWriteFileProfile()
+        );
+    }
+
+    /** @internal The delegated program runs the profiled library write. */
+    protected programAcceptsWriteFileProfile(): boolean {
+        return this.program.writeFile === SharedFileSystem.prototype.writeFile;
     }
 
     /**
