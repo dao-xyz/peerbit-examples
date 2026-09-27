@@ -1,10 +1,10 @@
 # Shared FS v10: the Merkle storage generation and v9 migration
 
-Status: design for owner review, revision 2. Owner decision of 2026-09-27:
+Status: design for owner review, revision 3. Owner decision of 2026-09-27:
 "design v10 first". Nothing in this document is implemented, and no v10
 format, program, or migration code should land before it is approved.
-Revision 2 answers an adversarial review; section 12 lists what changed, by
-finding number.
+Revisions 2 and 3 answer two rounds of adversarial review; section 12 lists
+what changed, by finding number.
 
 [MERKLE_STORAGE_V1.md](MERKLE_STORAGE_V1.md) remains the normative content
 format: hash domains, codecs, root descriptor, and golden vectors. This
@@ -29,36 +29,43 @@ Conventions:
    Every signed metadata document (naming events and file versions) is bound
    to its own store id, so entries cannot be replayed between generations or
    between two v10 filesystems.
-2. **A domain-separated trust store.** The upstream trust relation binds no
+2. **A store-bound trust program.** The upstream trust relation binds no
    network, so v9 grants (including revoked ones) could otherwise be replayed
-   into v10. v10 uses its own trust program with an admission rule that
-   rejects every relation signed before the filesystem's genesis (section
-   2.3), until upstream offers domain-bound relations (U2).
+   into v10. v10 uses an in-repo trust program whose relations carry the
+   filesystem's store id and are rejected anywhere else (section 2.3). It
+   replaces revision 2's time-based rule, which relied on author-asserted
+   clocks. Upstream network-bound relations (U2) can replace it later (D22).
 3. **Content** uses the merged Merkle v1 codecs unchanged (sparse radix tree,
    fanout 256). The proposed default leaf size is 512 KiB, the v9 chunk size
    (D1), because Linux `Documents.put` costs about 3 ms per document.
-4. **Path-copy writes with a witness rule.** A 4 KiB in-place overwrite puts
+4. **Path-copy writes with v9's witness rule.** A 4 KiB in-place overwrite puts
    one data block, at most `rootLevel` tree blocks, and one constant-size
-   version. Untouched subtrees are reused by reference only while the base is
-   younger than the skip horizon; an older base has its closure re-put once,
-   exactly as v9 re-puts unwitnessed chunks. Reuse is full-replica-only.
-5. **Lazy verified reads, verified writable opens.** Read-only opens read
-   nothing. Writable opens verify the root and the rightmost path, and
-   prefetch base leaves in the background. A commit that fails permanently
-   spills its dirty ranges to a recovery file instead of stranding them.
+   version. A block the new version shares with existing content is not re-put
+   when a version younger than the skip horizon already reaches it; otherwise
+   it is re-put, as v9's W1 re-puts unwitnessed chunks. No-op writes and
+   writable opens put nothing. Reuse is full-replica-only.
+5. **Lazy verified reads; full rewrites need no old content.** Read-only opens
+   read nothing. Writable opens without `O_TRUNC` verify the root and the
+   rightmost path, and prefetch base leaves in the background. Full-coverage
+   writes never read base data. A commit that fails permanently spills its
+   dirty ranges to a recovery file instead of stranding them.
 6. **GC** marks the closure of every present version and every leased root
    (damaged nodes included), vetoes a delete while any live referrer remains,
-   keeps a clamped 48 h orphan span as defense in depth, and blocks the block
-   sweep on an unhealable missing tree until an operator acknowledges the loss.
+   and keeps a clamped 48 h orphan span as defense in depth. While a present
+   version references an unhealable tree, the block sweep stays blocked; the
+   exit is resolving the file, optionally followed by an explicit early
+   retirement of the superseded broken version.
 7. **Durability semantics are unchanged for full replicas.** Mount commits stay
    local-first and disposal stays O(live closure). Partial-replica writers
    re-put every block they reference, as in v9. O(delta) remote full-version
    durability needs U1 and is not claimed.
 8. **Migration is an explicit, one-way freeze-and-copy** to a new address. It
-   persists the captured semantic state, verifies from a fresh peer with an
-   independent trust computation, and fails closed on heads it cannot convert.
-   Freeze, thaw, and successor markers count only when the v9 root key signs
-   them. The v9 filesystem is retained read-only.
+   persists the captured semantic state and row ids, verifies from a fresh
+   peer with an independent trust computation, and fails closed on heads it
+   cannot convert. Freeze, thaw, and successor markers count only when the v9
+   root key signs them, are protected as one set, and successor-less freezes
+   expire. Trust changes after capture are listed, never mirrored
+   automatically. The v9 filesystem is retained read-only.
 9. **Rollout** is nine slices behind an opt-in `generation: "v10"`, promoted
    only after the strict three-OS CI and Linux FUSE gates computed within one
    job, with v9 and v10 interleaved.
@@ -125,17 +132,21 @@ grows with `n`, and may re-put every chunk.
 
 ### 1.3 Goals
 
-- **G1.** In-place writes (overwrite, append, truncate, sparse growth) against
-  a base younger than the skip horizon commit in O(changed leaves x tree
-  depth), through the library and the mount, on full replicas.
+- **G1.** In-place writes (overwrite, append, truncate, sparse growth) commit
+  in O(changed leaves x tree depth), through the library and the mount, on
+  full replicas, whenever the content they reuse is reached by a version
+  younger than the skip horizon.
 - **G2.** Read-only mount opens are O(1) and writable opens O(depth); a read
   is O(returned leaves + depth).
 - **G3.** Every v9 safety property holds: fail-closed integrity (`EIO`, never
   invented zeros), per-node causal conflicts, the naming CRDT, the trust model
   including revocation, GC never deleting reachable content, the disposal
-  fence, and the write-readiness gate. One failure mode moves: a base block
-  that disappears after a writable open can fail an already accepted write at
-  commit time (section 4.4), where v9 failed the open instead.
+  fence, and the write-readiness gate. Two failure modes move (section 4.4): a
+  partial write can fail at commit time when a base block it needs disappears
+  after a writable open, where v9 failed the open instead; and a partial write
+  over a stale base fails if the untouched content it must re-put is
+  unavailable, where v9 re-puts it from its in-memory buffer. Full rewrites
+  never need the old content.
 - **G4.** A one-way, verifiable migration from any v9 filesystem whose heads
   are convertible, with explicit handling of those that are not.
 - **G5.** Structural work counters prove the complexity change independently
@@ -148,10 +159,13 @@ Non-goals:
 - No mixed-log rolling upgrade, no dual write, no automatic block-level merge.
 - No O(delta) remote full-version durability without U1.
 - No compression, encryption, reader confidentiality, or per-file ACL.
-- No gain for writers that replace files (temporary file plus `rename`, the
-  usual "atomic save"): that creates a new node and stays O(file).
-- No gain for the first edit of a base older than the skip horizon, which
-  re-puts the base closure as v9 does (section 3.5).
+- Little gain for writers that replace files (temporary file plus `rename`,
+  the usual "atomic save") or copy them. A new node hashes every byte. Blocks
+  that already exist and are reached by a young version are not re-put (R3,
+  section 3.5), so puts match v9, plus bounded reverse-edge queries.
+- No gain for the first edit of a file whose reused content no young version
+  reaches: those blocks are re-put, as v9 re-puts unwitnessed chunks
+  (section 3.5).
 - No change to the fixed per-document cost (about 3 ms per put on Linux, an
   upstream matter, #18) or to metadata transport (0.18 ms per callback).
 
@@ -198,12 +212,17 @@ local puts adds about `B` of hashing.
 | 64 KiB  |     3 |      4 |       4 | ~0.19 MiB |
 | 256 KiB |     3 |      3 |       4 | ~0.75 MiB |
 
-**Stale base (older than the 15-day skip horizon), any leaf size.** The commit
-first re-puts the base closure: `n` data blocks plus every tree block, so about
-9 puts (4 MiB), 65 (32 MiB), or 1,029 (512 MiB) at 512 KiB leaves, which is
-about 27 ms, 195 ms, and 3.1 s of put time before the O(delta) commit. v9 does
-the same amount of re-putting in this case (8, 64, or 1,024 chunks). Only the
-first commit after the base goes stale pays it; the new version is young.
+**Stale base (no version younger than the 15-day skip horizon reaches the
+reused content).** A no-op still puts nothing, and so does a writable open.
+Otherwise the commit also re-puts every block it reuses without a young
+witness (section 3.5): for a 4 KiB edit, the untouched leaves and the
+untouched subtrees. At 512 KiB leaves that is about 7 extra puts for a 4 MiB
+file, 63 for 32 MiB, and about 1,026 for 512 MiB, so about 30 ms, 200 ms, and
+3.1 s of put time in total. v9 re-puts the same number of chunks in this case
+(7, 63, and 1,023 unchanged chunks) from its in-memory buffer; v10 must first
+read the untouched leaves from the local store. After that commit the new
+version is the young witness. A full rewrite of a stale file puts only the new
+version's blocks, as v9 does.
 
 **v9, 512 KiB chunks, same edit:**
 
@@ -242,14 +261,16 @@ not these absolute numbers; section 9.3 sets gates with margin.
   the mount) and the `available`-mode ancestor fallback, as in v9. The first
   read of each leaf fetches and verifies the whole leaf.
 - Full-content `writeFile(path, bytes)` and an in-place `O_TRUNC` rewrite
-  through the mount: every rewritten byte is hashed, but only leaves that
-  differ from the original base at the same position are put (sections 3.3
-  and 4.3). Scattered small writes cost one full leaf write (`B`) and hash per
+  through the mount: every rewritten byte is hashed, but no base data is read,
+  and only blocks that are new or lack a young witness are put (sections 3.3
+  and 3.5). Scattered small writes cost one full leaf write (`B`) and hash per
   touched leaf.
-- File replacement by rename, copies, and an explicit leaf-size change.
-- The first commit over a base older than the skip horizon, and conflict
-  resolution or restore that points at such a version: the reused closure is
-  re-put (section 3.5), as in v9.
+- File replacement by rename and copies hash every byte and run one bounded
+  reverse-edge climb per block that already exists (R3); an explicit
+  leaf-size change puts every block.
+- The first commit, other than a no-op, whose reused content no young version
+  reaches: those blocks are re-put, untouched ones after a local read
+  (section 3.5). v9 re-puts the same chunks from memory.
 - Full-content writes on a partial replica: every block is put (v9 parity).
 - GC heal and mark: O(distinct reachable blocks) per GC run, the same order as
   v9's heal pass (`index.ts` ~L13986). No write pays it.
@@ -265,7 +286,7 @@ not these absolute numbers; section 9.3 sets gates with margin.
 | Program variant        | `peerbit_shared_fs` (`index.ts` ~L2073) | `peerbit_shared_fs_v10_merkle_v1`                                                                         |
 | Entries salt           | `/shared-fs/v9` (~L2387)                | `/shared-fs/v10-merkle-v1`                                                                                |
 | Program id             | random 32 bytes                         | fresh random 32 bytes; a caller-supplied id is rejected for v10                                           |
-| Trust program          | upstream `TrustedNetwork({ id })`       | `SharedFsTrustedNetworkV10` (section 2.3), id `sha256(id \|\| "/shared-fs/v10-merkle-v1/trust")`          |
+| Trust program          | upstream `TrustedNetwork({ id })`       | `SharedFsTrustGraphV10` (section 2.3), id `sha256(id \|\| "/shared-fs/v10-merkle-v1/trust")`              |
 | Entry root             | `SharedFsEntry` (`model.ts` L27)        | `SharedFsEntryV10` (abstract, fieldless)                                                                  |
 | Content blocks         | `shared_fs_file_chunk`                  | `shared_fs_merkle_data_block_v1`, `shared_fs_merkle_tree_block_v1` (merged, unchanged)                    |
 | File version           | `shared_fs_file_version`                | `shared_fs_v10_bound_version`, an envelope around the canonical `MerkleFileVersionV1` bytes (section 2.2) |
@@ -296,8 +317,6 @@ The program also serializes, as part of the address:
   size, and readers accept any allowed size (D1, D10).
 - `sealedIgnoredNames`, exactly as v9 (migration copies the source list,
   section 8.3).
-- `trustGenesisMs: u64`, the creation time used by the trust admission rule
-  (section 2.3).
 - `predecessor?: { address, captureDigest }`, set only by migration. It lets
   v10-aware peers authenticate a successor marker (section 8.5).
 
@@ -342,38 +361,62 @@ v9 uses upstream `TrustedNetwork`. Its `IdentityRelation` (`@variant(0)`, id
 `identity-graph.ts` ~L143-184) carries no network or store binding. Put
 admission (`controller.ts` `canPerformByRelation` ~L62-101) only requires the
 signer to equal `relation.from` and to be trusted, and a first put stands
-alone. So, unless v10 changes the trust program:
+alone. So, if v10 kept that relation type:
 
 - any root-signed v9 grant, including a grant later revoked in v9, would be
   admissible in a v10 filesystem with the same root key, and would re-trust a
   deliberately uncarried, revoked writer;
 - a carried delegator's old v9 grants, including ones it revoked, would be
   admissible even under a new root;
+- grants signed in any other filesystem by a key v10 trusts would be
+  admissible. The CLI roots every filesystem it creates at the local identity
+  (`cli/src/index.ts` ~L668-670), so this is the normal case;
 - v10 grants would be admissible in the frozen v9 filesystem.
 
-The design:
+**Why not a time rule.** Revision 2 admitted a relation only if its log
+entry's signed HLC wall time was at or after the filesystem's creation. That
+does not hold. The wall time is author-asserted and unbounded at ingest: in
+the installed `@peerbit/log` 6.2.35 the log's `HLC` has no maximum offset
+(`log.ts` ~L833; `clock.ts` ~L116-201), every join pulls the local clock
+forward to the received time, and an appender may supply any timestamp. One
+future-stamped relation from any trusted v9 key moves every trust-log
+replica's clock, so later v9 grants carry times after the v10 creation; a
+fast root clock or a slow creator clock does the same. Time also cannot
+separate filesystems.
 
-1. **Proper fix, upstream (U2):** relations that carry a network id, checked at
-   admission.
-2. **v10 in S1:** `SharedFsTrustedNetworkV10`, a trust program with its own
-   variant that extends upstream `TrustedNetwork` and adds one admission rule:
-   a relation put is admitted only if its log entry's signed HLC wall time is
-   at or after the program's `trustGenesisMs`. Every v9 relation was signed
-   before the v10 filesystem existed, so no v9 grant, revoked or not, can be
-   replayed into v10. Relations created by trusted keys after genesis are
-   ordinary delegation, not replay. **A10:** the subclass can hook admission
-   and read the entry's signed HLC time. If it cannot, S1 falls back to an
-   in-repo trust program with its own relation variant that carries `storeId`.
-3. **Clock caveat.** A writer whose clock lags genesis by `s` cannot add
-   relations for the first `s` after creation. Migration creates its own
-   relations on the creating machine, after genesis.
-4. **Reverse direction.** Nothing in v9 can reject v10 grants. With the same
-   root key in both generations, a root-signed v10 grant replays into v9, and
-   a carried writer's v10 grants replay into v9 regardless of roots. The frozen
-   v9 filesystem refuses such writers only in v10-aware releases (section
-   8.5); v9-only peers admit them, and `late-writes` reports their writes.
-   Whether the v10 root reuses the v9 root key is D14.
-5. The v10 trust program's id is derived with a domain tag (section 2.1), so a
+**The design binds relations to the store:**
+
+1. **`SharedFsTrustGraphV10` (S1).** An in-repo trust program with upstream
+   `TrustedNetwork`'s semantics: a rooted graph; a relation is admitted when
+   its signer equals `from` and is trusted; only the signer of an edge can
+   delete it; trust is reachability from the root. Its relation,
+   `TrustRelationV10 { storeId, from, to }`, has its own variant and an id
+   derived from the store id and both keys, and is admitted only when
+   `storeId` equals this filesystem's program id. Consequences:
+    - no v9 relation decodes in v10, revoked or not, whatever its timestamp;
+    - no relation from another v10 filesystem is admitted, even one signed by
+      the same root key;
+    - v10 relations do not decode in v9, so trust relations cannot move in
+      either direction;
+    - `trustedWriters()` and `isTrusted` use a breadth-first walk keyed by
+      public key, so the upstream path-generator issue (U3) does not affect v10.
+
+    **A10:** the in-repo program can reproduce the upstream semantics v9 relies
+    on (admission, owner-only delete, reachability); S1 tests them against the
+    upstream behavior.
+
+2. **Upstream.** trusted-network 6.0.138 already contains network-bound v2
+   primitives (`v2.ts`: `TrustedNetworkV2`, network ids from
+   `deriveNetworkIdV2`), but only as a decode-only codec that cannot be opened
+   and is not exported. U2 asks for it to be finished. If it lands before S1,
+   v10 can use it instead of the in-repo program (D22).
+3. **Residuals.** Within one filesystem, whether a revoked relation's original
+   put can be re-delivered after its CUT depends on upstream `Documents` CUT
+   semantics; v10 inherits v9's exposure (noted under U2). A writer trusted in
+   both generations can still make native grants in the frozen v9 filesystem:
+   v10-aware releases refuse them there (section 8.5), v9-only peers admit
+   them, and `late-writes` lists them. They never reach v10.
+4. The trust program's id is derived with a domain tag (section 2.1), so a
    caller-supplied program id can never make v10 share the v9 trust log.
 
 ### 2.4 How a peer tells v9 from v10
@@ -397,20 +440,27 @@ The design:
 
 - Neither generation's code deserializes the other's program or admits the
   other's documents or trust relations. One v10 filesystem admits no signed
-  metadata bound to another.
+  metadata or trust relation bound to another.
 - Opening a v9 address never migrates it. Migration is an explicit command
   that produces a new address.
 - Migration opens the source with scheduled GC and automatic snapshot
   publishing disabled (section 8.3). Its only writes to v9 are the root-signed
-  freeze, successor, and thaw markers, and any revocations the owner chooses.
-  Guard D on the migrating replica may still re-put a removed live head, which
-  does not change the captured semantic state.
-- S1 tests: v10 payloads rejected by v9 ingest and the reverse; a signed v9
-  naming entry replayed into v10 rejected; a naming event or version bound to
-  another v10 store rejected; a v9 root-to-X grant for a revoked X rejected by
-  v10; a carried delegator's v9 grant rejected by v10; v9 program bytes and
-  addresses unchanged (byte-for-byte fixture); unknown program variants fail
-  with the typed error.
+  freeze, successor, and thaw markers, lockdown revocations (section 8.8), and
+  any other revocations the owner chooses. Guard D on the migrating replica
+  may still re-put a removed live head, which does not change the captured
+  semantic state.
+- S1 tests:
+    - v10 payloads rejected by v9 ingest and the reverse;
+    - a signed v9 naming entry replayed into v10 rejected;
+    - a naming event, version, or trust relation bound to another v10 store
+      rejected, including a grant signed by the same root key in another
+      filesystem;
+    - every v9 relation rejected by v10: a revoked root-to-X grant, a carried
+      delegator's grant, and a grant signed after the root's clock was pulled
+      forward by a future-stamped relation;
+    - a v10 relation rejected by v9;
+    - v9 program bytes and addresses unchanged (byte-for-byte fixture);
+    - unknown program variants fail with the typed error.
 
 ### 2.6 Implementation strategy
 
@@ -451,25 +501,33 @@ internal commit serves `writeFile`, `writeBatch`, `patchFile`, and mounts:
    commits hand over their frozen, immutable overlay buffers without a second
    copy.
 2. Take local version leases (root descriptor included) on the content base
-   and every observed head (section 5.1).
+   and every observed head (section 5.1); a mount state also holds a lease on
+   its open base (section 4.3).
 3. Check the path and expected node (the existing
    `SharedFsExpectedNodeMismatchError` checkpoints `initial` and
    `base-version`).
-4. Apply the witness rule (section 3.5). If the base is stale, re-put its
-   closure first, or fail with `EIO` if any block of it is unavailable.
-5. Build with `MerklePatchBuilderV1` (#329/#339) in deferred-put mode: the
-   builder computes the new root and returns the new blocks, children first,
-   without putting anything.
-6. If the new root descriptor equals the base descriptor and the observed heads
-   are unchanged, return `unchanged`. No document is put.
-7. Put the new blocks. Data blocks go with bounded concurrency (4, like v9's
-   `CHUNK_IO_CONCURRENCY`) or as one blocks-only `putMany` (S3 measures both;
-   A11); each tree block goes after its children. A partial failure leaves
-   only unreachable blocks, so it is crash-safe.
+4. Build with `MerklePatchBuilderV1` (#329/#339) in deferred-put mode: the
+   builder computes the new root and returns a block plan without putting
+   anything. It reads base tree blocks to compare leaves by position, and base
+   data only for leaves that a write covers partly. A full-coverage write
+   (section 3.3) reads no base data, and starts from the empty root if a base
+   tree it needs is unavailable.
+5. **No-op.** If the new root descriptor equals the base descriptor and the
+   observed heads are unchanged, return `unchanged`. Nothing is put, and
+   nothing beyond step 4's reads is fetched.
+6. Classify every block the new version references with the rules of section
+   3.5: new (put), reused and reached by a young version (skipped), or reused
+   without a young witness (re-put). An unwitnessed untouched subtree is read
+   from the local store; if any of it is unavailable, the commit fails with
+   `EIO` before anything is published.
+7. Put the new and re-put blocks. Data blocks go with bounded concurrency (4,
+   like v9's `CHUNK_IO_CONCURRENCY`) or as one blocks-only `putMany` (S3
+   measures both; A11); each tree block goes after its children. A partial
+   failure leaves only unreachable or already reachable blocks, so it is
+   crash-safe.
 8. Recheck the expected node (`before-version`).
 9. Put the bound version last, as `unique`.
-10. R4 (section 3.5): recheck that every newly introduced block is present and
-    re-put any missing one from memory.
+10. R4 (section 3.5): recheck presence and re-put from memory.
 11. For a new file, append the naming event (`before-naming`); for an existing
     file, run the `after-version` check.
 12. Advance the caller's base and release leases no longer needed.
@@ -495,7 +553,7 @@ partial replica it fails with `EINVAL` (section 3.6).
   is authenticated zeros.
 - **Truncate, then grow, in one commit** (including `O_TRUNC` followed by a
   rewrite). The commit builds once, against the original leased base, so every
-  leaf is compared positionally with the base:
+  leaf is compared by position with it:
     - byte patches for every range written after the truncation;
     - a new, bytes-free zero-range patch kind for any part of
       `[floor, min(baseSize, finalSize))` that no later write covers, where
@@ -504,10 +562,16 @@ partial replica it fails with `EINVAL` (section 3.6).
       base leaf;
     - `size = finalSize`.
 
-    An in-place save covers the whole range, so it needs no zero patches. An
-    unchanged rewrite then ends at step 6 of the commit with no document put,
-    and a rewrite that changes one leaf puts that leaf, its path, and a version.
+    An in-place save that rewrites the whole file is a full-coverage write
+    (section 3.3): no base data is read, an unchanged rewrite ends at the no-op
+    with nothing put, and a rewrite that changes one leaf puts that leaf, its
+    path, and a version.
 
+- **Saves spread over several commits** (a shell redirection, where closing a
+  duplicated descriptor flushes an empty file before the command writes, or an
+  `fsync` midway). The mount state keeps its open base leased for its whole
+  life and compares every commit against it as well as against the latest
+  committed version (section 4.3), so unchanged bytes are not re-put.
 - **Chaining.** Dirty sets beyond one build's limits (1,024 patches, 64 MiB of
   patch bytes, or 4,096 changed leaves by default; mounts use the defaults)
   are committed as ascending, disjoint builds, each over the previous
@@ -516,23 +580,33 @@ partial replica it fails with `EINVAL` (section 3.6).
   size is applied by the last build, only the final root is published, and
   intermediate O(d) boundary blocks become orphans for GC.
 
-Builder work needed in S3 (the builder is unmerged, D6): deferred-put mode,
-zero-range patches, adoption of immutable patch buffers without copying, and
-reporting of leaves whose hash equals the base at the same position, so that
-the commit's R1 policy (not a blind re-put) decides what happens to them.
+Builder work needed in S3 (the builder is unmerged, D6): deferred-put mode with
+a block plan (new, reused by position, untouched subtree), zero-range patches,
+adoption of immutable patch buffers without copying, a second positional
+comparison base (the open base), and the empty-root fallback for full-coverage
+writes.
 
 ### 3.3 Full-content `writeFile` and the no-op rule
 
 `writeFile(path, bytes)` keeps its signature. On a full replica it is a
-`patchFile` with one patch covering `[0, bytes.length)` and
-`size = bytes.length`, over the leased base: hashing is O(F), but only leaves
-that differ from the base at the same position are put. New files build from
-the empty root. Migration uses a dedicated streaming builder (section 8.3).
+full-coverage `patchFile`: one patch covering `[0, bytes.length)` and
+`size = bytes.length`.
+
+- Leaves are compared by position with the base using base tree blocks only;
+  base data is never read. If a base tree needed for the comparison is missing
+  or corrupt, the build starts from the empty root instead, and every block is
+  classified by R2 and R3 (section 3.5). Either way the new version's parents
+  are the observed heads, as today.
+- Overwriting a damaged file therefore succeeds whenever the new bytes are
+  available, as in v9, which never reads the base on a write. This is also how
+  a user resolves a node whose tree is lost (section 5.6).
+- New files build from the empty root. Migration uses a dedicated streaming
+  builder (section 8.3).
 
 The no-op rule replaces `contentHash` equality (`writeFileInner` ~L5064): a
 write is a no-op when the built root descriptor (`size`, `leafSize`,
 `rootLevel`, `rootHash`) equals the single current head's, decided before any
-put (section 3.1 step 6). The native-mount exact-head no-op
+put (section 3.1 step 5). The native-mount exact-head no-op
 (`noOpIfHeadVersionIds`) keeps its shape checks and returns
 `mountWriteOutcome: "unchanged"`.
 
@@ -550,49 +624,69 @@ releases, for both generations.
 
 ### 3.5 Dedup rules that replace W1 and W2
 
-**The witness rule.** v9's W1 skips a chunk put only when a version younger
-than the skip horizon (15 days, `DEFAULT_SKIP_HORIZON_MS`, ~L366) references
-the chunk, and GC clamps retention to at least `skipHorizon + max(grace, 48 h)`
-(`retentionFloor`, ~L13589). A young witness cannot be retired by any replica
-for at least `retention - skipHorizon`, so its chunks stay referenced
-everywhere while the new version propagates. v10 applies the same bound to
-reuse by reference. The witness is the base version itself, judged by its
-`publishedAt`:
+**v9's rule.** W1 (`touchChunks`, ~L4603) skips a chunk put only when a version
+younger than the skip horizon (15 days, `DEFAULT_SKIP_HORIZON_MS`, ~L366)
+references the chunk, on any node and at any position. GC clamps retention to
+at least `skipHorizon + max(grace, 48 h)` (`retentionFloor`, ~L13589). A young
+witness cannot be retired by any replica for at least
+`retention - skipHorizon`, so what it references stays referenced everywhere
+while the new version propagates. Otherwise W1 re-puts the chunk from memory.
+v9 applies W1 only to the chunks of the new version, and only after its no-op
+checks (~L5039-5069 and ~L5504-5524), so no-op writes and opens put nothing.
 
-- **Young base** (`publishedAt >= now - skipHorizon`): R1 applies, and
-  untouched subtrees are reused by reference.
-- **Stale base, or no base row present:** before the build, fetch, verify, and
-  `putPreferLinked` every block of the reused closure (O(file), matching v9's
-  re-put of unwitnessed chunks), or fail with `EIO` and publish nothing. After
-  that one commit, the new version is the young witness.
+**v10's rule** applies the same bound to every block the new version
+references. A _young version_ is one whose `publishedAt` is within the skip
+horizon. Every replica's arrival time is at or after `publishedAt` (section
+2.2), and retirement (`ageOk`, ~L13663) needs both `createdAt` and arrival to
+be older than retention, so a young version is unretirable everywhere for at
+least `retention - skipHorizon`. Migrated versions are young for 15 days after
+migration (D15). The same clock assumptions as v9's W1 apply.
 
-Retirement (`ageOk`, ~L13663) requires both `createdAt` and local arrival to
-be older than retention. Every replica's arrival is at or after
-`publishedAt`, so a migrated version is unretirable for 30 days after
-migration and counts as young for 15 (D15). The same clock assumptions as v9's
-W1 apply. The witness rule also covers conflict resolution and `restore`,
-which point at an existing root. For resolution that is stricter than v9, which
-reuses `chunkIds` without re-putting.
+- **R1, positional reuse (no queries).** A block equal to the block at the same
+  position in a leased version of this commit (the base or, for a mount state,
+  its open base) is covered when that version is young: it is neither put nor
+  fetched. This covers untouched subtrees and leaves rewritten with identical
+  bytes.
+- **R2, new blocks.** A block that is absent locally is put `unique`.
+- **R3, witness climb (W1, generalized).** A block that is present but not
+  covered by R1 (a stale leased version, a shifted position, a copy, or an
+  atomic save to a new node) is skipped only if a young version reaches it.
+    - The climb follows `blockRefs` reverse edges upward (present tree rows, then
+      version rows). It is memoized per commit and bounded like Guard D: depth at
+      most 7, at most 64 referrers per step, at most 1,024 rows visited.
+    - If it finds no young version, or hits a bound, the block is re-put with
+      `putPreferLinked`, which refreshes its arrival age and links the live head,
+      like v9's unwitnessed re-put.
+    - For an untouched subtree only its root is checked, because a young version
+      that reaches the root reaches the whole subtree. An unwitnessed untouched
+      subtree is read from the local store and re-put in full; if any of it is
+      unavailable, the commit fails with `EIO` and publishes nothing.
+    - Leaves rewritten with identical bytes are re-put from the patch bytes,
+      never fetched.
+- **R4, post-publication recheck (W2).** After the version put, `hasDocument`
+  for every block this commit put and every leaf rewritten with identical
+  bytes; a missing one is re-put from memory. This keeps v9's W2 repair of a
+  lost chunk that a rewrite happens to cover.
 
-The four rules:
+Scope and cost:
 
-- **R1, reuse by reference** (replaces W1's skip of witnessed chunks).
-  Untouched subtrees of a young, leased base, and leaves rewritten with
-  identical bytes, are never re-put, fetched, or copied. Full replicas only.
-- **R2, changed blocks** (replaces W1's witness query for everything but
-  roots). Every block whose hash differs from the base at its position is put:
-  `unique` if absent, `putPreferLinked` if present. The linked re-put refreshes
-  the arrival age and links the live head, like v9's unwitnessed re-put.
-- **R3, root witness** (W1, unchanged in spirit). For a root block only (a
-  small file's single data block, or a root tree), a full replica skips the put
-  when a version row with a young `publishedAt` already references it (the W1
-  query, on `blockRefs`).
-- **R4, post-publication recheck** (replaces W2, which rechecked every chunk).
-  After the version put, `hasDocument` for each block this commit introduced;
-  a missing one is re-put from memory.
+- Nothing runs before the no-op decision, and a writable open puts nothing.
+- A 4 KiB edit over a young base uses only R1 and R2: no queries for untouched
+  content.
+- The first commit, other than a no-op, whose reused content no young version
+  reaches re-puts that content (section 1.5). v9 re-puts the same number of
+  chunks from memory; v10 reads the untouched ones locally first.
+- An atomic save or a copy of a large file with a small change puts the
+  changed blocks, the root path, the version, and the naming event, and runs
+  one memoized climb per block that already exists (about `d + 1` index
+  queries each, **A12**), where v9 runs a witness query per chunk.
+- Conflict resolution and `restore` apply the same rules to the version they
+  point at. For resolution this is stricter than v9, which reuses `chunkIds`
+  without any check.
 
 `dedup: "off"` disables R1 and R3: every block the version references is put
-(O(file)), matching v9's partition-proof mode.
+(O(file)), matching v9's partition-proof mode. Partial replicas also disable
+R1 and R3 (section 3.6).
 
 ### 3.6 Partial-replica writers
 
@@ -705,11 +799,17 @@ fields are unchanged.
 
 - A read-only open resolves the entry, confirms `sameFileSnapshot`, takes the
   lease, and creates the session. It reads no data.
-- A writable open also verifies the root block and the rightmost root-to-leaf
-  tree path, and checks that the final leaf is present (appends extend it):
-  O(depth) local reads. It fails with `EIO` as v9 would if any is missing.
-- If the base is stale (section 3.5), the writable open starts the closure
-  re-put in the background, so the first commit rarely waits for it.
+- A writable open without `O_TRUNC` also verifies the root block and the
+  rightmost root-to-leaf tree path, and checks that the final leaf is present
+  (appends extend it): O(depth) local reads. If any is missing it fails with
+  `EIO`; v9 fails the same open, because it reads the whole file.
+- A writable open with `O_TRUNC` verifies nothing, as v9 skips the read
+  (`loadWritableSnapshot` ~L1840). Its commits are full-coverage writes.
+- No writable open puts anything, whatever the base's age. The witness rule
+  runs only in a commit that is not a no-op (section 3.5).
+- The state's first base is its **open base**. It stays leased for the life of
+  the state, and every commit compares its leaves by position against it as
+  well as against the latest committed version (R1).
 
 **`write()`** stays synchronous. It computes the offset (`O_APPEND` uses
 `state.length`), copies the data into the top layer's sorted range map
@@ -750,6 +850,14 @@ new base. The old session stays open, and its version leased, until the reads
 that captured it drain. The frozen layer is dropped and `persistedGeneration`
 advances.
 
+**Saves spread over several commits.** Because every commit also compares
+against the open base, a save that truncates, commits, and then rewrites
+unchanged bytes puts nothing for those bytes while the open base is young.
+Examples are `cmd > file`, where the shell closes the duplicated descriptor
+and so flushes an empty file before the command writes, and an explicit
+`fsync` midway through a save. When the open base is stale, R3 applies as for
+any other commit.
+
 **On commit failure, the merge rule** folds the frozen layer back without
 resurrecting truncated bytes:
 
@@ -781,7 +889,7 @@ their ages. A memory-mapped reader of an unavailable block gets `SIGBUS`, as
 for any read-time `EIO`.
 
 **No-op.** A built descriptor equal to the base, with unchanged opened heads,
-returns `unchanged` with no document put (section 3.1 step 6), as v9 does at
+returns `unchanged` with no document put (section 3.1 step 5), as v9 does at
 ~L1441.
 
 **Memory** is at most the top layer, plus the frozen layer, plus one build's
@@ -813,15 +921,19 @@ Changed:
 
 - A read-only open no longer fails with `EIO` when a block is unavailable; the
   read that needs the block does.
-- A writable open fails only if the root or rightmost path is unavailable.
-  Other base blocks are verified by background prefetch or at commit, so an
-  accepted `write()` can fail later with `EIO`: at the next write or `flush`
-  after a failed prefetch, or at commit. v9 cannot fail this way, because it
-  verifies the whole file at open.
+- A writable open without `O_TRUNC` fails only if the root or the rightmost
+  path is unavailable. A partial write whose base leaf or path turns out to be
+  unavailable fails later: at the next write or `flush` after a failed
+  background prefetch, or at commit. v9 fails such files at open instead.
+- An `O_TRUNC` open and a full-coverage write never need base data, so they
+  succeed on damaged files, as in v9.
+- A partial write over a stale base whose untouched, unwitnessed content is
+  unavailable fails with `EIO` (R3). v9, holding the whole buffer, re-puts that
+  content from memory.
 - A base block can also disappear after open, when remote GC retires a
   superseded base; leases, the lease-aware mark, and Guard D protect the local
   replica against that (section 5), at the cost of re-put churn.
-- A commit never publishes over a base whose required path could not be
+- A commit never publishes over a base whose required blocks could not be
   verified.
 
 D11 decides whether writable opens should verify more at open.
@@ -861,9 +973,11 @@ The 60 s `pinVersions` TTL (~L12035) remains for short library reads.
     - An unhealable missing data block marks its node **damaged**.
     - An unhealable missing or corrupt tree marks its node damaged and sets
       **`sweepBlocked`** for the run, because the tree's descendants are unknown
-      (section 5.6), unless that loss has been acknowledged.
-    - As in v9 (~L14043-14061), damage only exempts the node from retirement and
-      purge.
+      (section 5.6).
+    - As in v9 (~L14043-14061), damage exempts the node from retirement and
+      purge, with one change: a damaged version that is no longer a head
+      follows the normal retirement rules, so resolving the file lets it retire
+      (section 5.6).
 2. **Retire** undamaged nodes' planned versions and naming events, then settle,
    as today.
 3. **Mark** (after retirement settles). The mark is the union of the closures
@@ -949,55 +1063,79 @@ heads). Arming, bootstrap disarming, and lifecycle generations are unchanged.
 
 ### 5.5 Safety argument
 
-1. **Young base.** The base's `publishedAt` is younger than the skip horizon,
-   so no replica can retire it for at least `retention - skipHorizon` (the
-   retention floor keeps that at least `max(grace, 48 h)`). Its closure stays
-   marked on every replica, so no replica can sweep a reused subtree while the
-   new version propagates. This holds under **A6**: a new version reaches every
-   full replica within `retention - skipHorizon` of publication, the same
-   assumption v9's W1 makes.
-2. **Stale base.** The closure is re-put before the version is published, so
-   the new version never depends on a stale witness (v9 parity).
+1. **Reused blocks.** A block the new version reuses without re-putting it is
+   reached by a young version: through a leased base or open base by position
+   (R1), or through a climb (R3). No replica can retire that version for at
+   least `retention - skipHorizon` (the retention floor keeps that at least
+   `max(grace, 48 h)`), so the block stays marked on every replica while the
+   new version propagates. This holds under **A6**: a new version reaches
+   every full replica within `retention - skipHorizon` of publication, the
+   same assumption v9's W1 makes.
+2. **Unwitnessed reuse.** Such blocks are re-put before the version is
+   published, so the new version never depends on a stale witness (v9 parity).
 3. **In-flight sessions.** A session's base can become stale, or be retired
    remotely, while it is open. The lease keeps its root marked locally, Guard D
    restores removed blocks and leased version rows, and the commit applies the
-   witness rule at commit time. If the closure is no longer available, the
-   commit fails with `EIO` and the dirty ranges are spilled (section 4.3).
-   Nothing broken is published.
+   witness rule at commit time. If content it must re-put is no longer
+   available, the commit fails with `EIO` and the dirty ranges are spilled
+   (section 4.3). Nothing broken is published.
 4. **Late arrivals during a sweep.** The live veto (section 5.3) rejects a
    delete that any version row or live tree still reaches, including a version
    that arrived after the mark.
 5. **Defense in depth.** The 48 h minimum orphan span, Guard D on every replica
    that holds the new version, and GC heal from peers.
 
-Conclusion: under A6 and v9's clock assumptions, no block reachable from a
-present version row or a leased root is permanently lost to GC. Section 9.3
-gates this with race tests.
+Conclusion: under A6 and v9's clock assumptions, GC deletes no block that is
+reachable from a present version row or a leased root. The one deliberate
+exception is `abandon-version` (section 5.6): it retires a superseded, broken
+version early, removing that version itself on every replica.
 
 ### 5.6 Unhealable trees: blocking and the exit
 
 A missing tree hides its descendants, and deleting them would turn a
 recoverable loss (the tree may be healed later from a peer) into a permanent
-one. So an unhealable missing or corrupt tree still blocks every block delete
-in the run (MERKLE_STORAGE_V1 blocked the whole sweep for any incomplete
-root). This has a liveness cost: without an exit, block reclamation would stop
-forever on every full replica. Reachable causes include a writer that crashed
-after its version replicated but before its blocks did, local corruption, and
-any trusted writer publishing a version whose root never existed (ingest
-cannot require a referenced block to be present).
+one. So an unhealable missing or corrupt tree under a present version blocks
+every block delete in the run (MERKLE_STORAGE_V1 blocked the whole sweep for
+any incomplete root). Reachable causes include a writer that crashed after its
+version replicated but before its blocks did, local corruption, and any
+trusted writer publishing a version whose root never existed (ingest cannot
+require a referenced block to be present).
 
-The exit:
+Revision 2's exit let an operator abandon the unknown region while its version
+was still present. That was unsafe: deletes are replicated CUTs, so one
+replica's local loss would delete blocks that other replicas still reach
+through the tree, and blocks shared between the lost region and retired
+versions look exactly like garbage. The exit now removes the version instead
+of guessing about its region:
 
-- **Acknowledgement.** `peerbit-fs gc acknowledge-lost <address> <versionId>`
-  persists, in the replica's GC ledger, that the closure under that version's
-  missing trees is lost. The mark then treats those regions as abandoned, so
-  their unknown descendants may be swept, and the sweep is unblocked. The
-  node's damage no longer exempts it from retirement or purge once the user
-  resolves it (overwrite, delete, or conflict resolution).
-- **Alerting.** After 4 consecutive blocked runs (about a day at the default
-  6 h interval), GC emits `gc:error` and `status` shows the blocking version
-  and tree. It never abandons a region automatically (D17).
-- S5 tests a blocked sweep and its recovery through acknowledgement.
+1. **Resolve the file.** The user overwrites it (a full-coverage write needs no
+   base data, section 3.3), deletes it, or resolves the conflict. The broken
+   version V is then no longer a head. A damaged version that is not a head
+   follows the normal retirement rules (section 5.2). Once V is retired, no
+   present version references the lost tree, the mark no longer needs it, and
+   the sweep unblocks by itself.
+2. **Optionally retire V early.**
+   `peerbit-fs gc abandon-version <address> <versionId>` is refused while V is
+   a head. Otherwise it records, in the replica's GC ledger, that V may be
+   retired in the next run regardless of `keepVersions`, retention, and grace.
+   The retirement is a replicated CUT of V's row: it removes that superseded
+   version on every replica, including replicas where it is intact. That is
+   history loss the operator accepts explicitly; the current head is never
+   touched. The record is cleared if the tree heals first.
+3. **Alerting.** After 4 consecutive blocked runs (about a day at the default
+   6 h interval), GC emits `gc:error` and `status` shows the blocking version,
+   the tree, whether V is still a head, and the command to use. GC never
+   abandons anything automatically (D17).
+
+The liveness cost remains: while V is still a head, block reclamation stays
+blocked on every full replica until someone resolves the file, and after
+that, until V retires (at least the retention window) unless the operator
+abandons it.
+
+S5 tests: overwriting a head whose root tree is missing succeeds without base
+data; the sweep unblocks after V's normal retirement, and immediately after
+`abandon-version`; a second replica that holds the tree keeps the current head
+and every block the head reaches.
 
 ### 5.7 Other interactions
 
@@ -1083,13 +1221,14 @@ reader ACL and advisory `authorKey`; changeset barrier semantics.
 **Changed:**
 
 - Conflict-resolution versions are constant-size and point at the selected
-  root (v9 copied `chunkIds`, ~L6318). Under the witness rule, resolving to a
-  stale version re-puts its closure; v9 does not re-put there.
+  root (v9 copied `chunkIds`, ~L6318). Under the witness rule (R3), resolving to
+  a version no young version reaches re-puts its blocks; v9 does not re-put
+  there.
 - The `restore` action publishes an O(1) version when the restored head is
-  young, and re-puts its closure otherwise, matching v9's re-put
-  (`touchChunks(chunkDocs, "off")`, ~L8044) in that case.
-- Trust relations are admitted only after the filesystem's trust genesis
-  (section 2.3). Migrated trust is flattened (section 8.6, D13).
+  reached by a young version, and re-puts its blocks otherwise, matching v9's
+  re-put (`touchChunks(chunkDocs, "off")`, ~L8044) in that case.
+- Trust relations are bound to their filesystem (section 2.3). Migrated trust
+  is flattened (section 8.6, D13).
 - `contentHash` changes meaning (section 3.7, D5).
 - The content-equality leak moves to leaf and subtree granularity, and omitted
   zero leaves reveal which leaf-aligned ranges are all zeros.
@@ -1118,16 +1257,20 @@ peerbit-fs migrate run         <v9-address> --state <file> [--leaf-size ...] [--
 peerbit-fs migrate verify      <v9-address> <v10-address> --state <file> [--fresh-dir <dir>] [--json]
 peerbit-fs migrate cutover     <v9-address> <v10-address> --state <file>
 peerbit-fs migrate thaw        <v9-address> <freeze-id>
-peerbit-fs migrate late-writes <v9-address> --state <file> [--apply <v10-address>] [--json]
+peerbit-fs migrate lockdown    <v9-address> --state <file> [--all | --keys <key>...]
+peerbit-fs migrate late-writes <v9-address> --state <file> [--apply <v10-address>] [--revoke <key>...] [--json]
 peerbit-fs migrate revoke-carried <v10-address> <public-key> --state <file>
 peerbit-fs recover list|apply  <recovery-file>
+peerbit-fs gc abandon-version  <address> <version-id>
 ```
 
 `plan` changes nothing. It reports:
 
 - counts, live bytes, and the projected time, disk, and network cost;
 - the source's `sealedIgnoredNames`;
-- the trusted-writer set and delegation chains (computed as in section 8.6);
+- the trusted-writer set, with at most three example delegation chains per key
+  (the shortest paths found by the section 8.6 walk; paths are never
+  enumerated);
 - every head that cannot be converted, with the reason (section 8.4).
 
 ### 8.3 Procedure
@@ -1153,16 +1296,20 @@ peerbit-fs recover list|apply  <recovery-file>
        content hash, which covers a tombstone's `observedContentHeads`), every
        content head (id and document content hash), and the trust relation set
        (from, to). Persist the full capture set and its digest in the `--state`
-       file.
+       file, together with the ids of every naming and version row present,
+       heads or not, which `late-writes` needs to find the ancestry of later
+       changes (section 8.8).
+    5. If the migration outlasts the freeze's expiry (section 8.5), `run`
+       publishes a fresh freeze before it expires.
 
     Retiring non-heads or re-putting an identical value does not change the
     captured state. A purge of a deleted file does, and aborts at M6; re-run.
 
 3. **M2, create the destination.** A v10 program with a fresh id, the chosen
    `defaultLeafSize`, the source's `sealedIgnoredNames` copied exactly,
-   `trustGenesisMs`, `predecessor = { v9 address, capture digest }`, and a
-   root key (D14). The migration opens it with `gc: false` until M7 passes, and
-   operators who open it early must do the same.
+   `predecessor = { v9 address, capture digest }`, and a root key (D14). The
+   migration opens it with `gc: false` until M7 passes, and operators who open
+   it early must do the same.
 4. **M3/M4, convert and publish, one head at a time.** For each content head of
    every file node, including nodes whose naming winner is a delete (heads of
    tombstoned nodes carry delete-vs-edit recoverability):
@@ -1252,29 +1399,51 @@ Rules in v10-aware releases:
   `writeBatch([], { changesetId, manifest: true })`, so a weaker gate would let
   them freeze peers or redirect writers. On a filesystem without a root key,
   markers are shown only as unverified hints: no `EROFS`, no successor.
-- **Freeze.** A freeze is active until a thaw names its manifest id. While it
-  is active, on v10-aware replicas: new writable opens, mutations, and
-  namespace changes fail with `EROFS`; v9 GC retirement and sweeps are
-  suspended; Guard D and heal stay active. Writable states already open when
-  the freeze arrives keep committing (D19). Their commits become late writes
-  and are reported by `late-writes`, and `status` warns while any exist.
+- **Freeze.** A freeze is active from publication until a thaw names its
+  manifest id or, if no successor names it, until it expires `freezeTtlMs`
+  (default 7 days, D8) after its root-signed `createdAtWallMs`. While a freeze
+  is active, on v10-aware replicas:
+    - new writable opens, file mutations, and namespace changes fail with
+      `EROFS`;
+    - v9 GC retirement and sweeps are suspended; Guard D and heal stay active;
+    - trust administration by the root (`authorizeWriter`, `revokeWriter`,
+      `migrate lockdown`) stays allowed;
+    - writable states already open when the freeze arrives keep committing
+      (D19). Their commits are late writes, reported by `late-writes`, and
+      `status` warns while any exist.
 - **Successor.** `handle.frozen.successor` is shown only when the root-signed
   marker names an active freeze and the named v10 program's
-  `predecessor.address` equals this v9 address. The program's
-  `predecessor.captureDigest` is for audit and verification. Two or more
-  verified successors form a conflict: read-only, no successor shown.
+  `predecessor.address` equals this v9 address. A successor makes its freeze
+  permanent (no expiry). The program's `predecessor.captureDigest` is for audit
+  and verification. Two or more verified successors form a conflict:
+  read-only, no successor shown.
 - **Thaw** names the freeze it cancels (causal, never by wall time).
-- **Convergence.** v9-only GC retires manifests after about 30 days of arrival
-  age (~L14279-14345). v10-aware full replicas never sweep live root-signed
-  markers, persist them in a local sidecar, and, when a CUT removes one,
-  re-put it from the removed value (event-driven, like Guard D). Late joiners
-  therefore converge while at least one v10-aware full replica of the v9
-  filesystem stays online. Otherwise a late joiner may never see the freeze,
-  and the owner should revoke or dispose of v9 (D8).
+- **One protected set.** Freeze, successor, and thaw markers are protected
+  alike. v10-aware full replicas never sweep any of them, record all three
+  kinds in a local sidecar, and re-put any of them from the removed value when
+  a CUT removes one (event-driven, like Guard D).
+    - A freeze or successor is enforced, and re-put, only after the replica's
+      synchronization after reconnecting has settled (the existing
+      write-readiness signal) without finding a thaw for it. Until then it is
+      shown as unconfirmed and not enforced; write readiness gates writes during
+      that window anyway.
+    - An expired freeze is shown as a stale hint and is never enforced or re-put,
+      so neither a lost thaw nor a replayed old freeze can bring it back.
+    - `status` shows every freeze without a visible thaw, with the `migrate thaw`
+      command.
+- **Limits.** v9-only GC retires manifests, thaws included, after about 30
+  days of arrival age (~L14279-14345), and a replica that never held a thaw's
+  payload cannot learn it from the CUT. So markers converge for late joiners
+  only while at least one v10-aware full replica that holds the whole set stays
+  online. Without one, a late joiner may miss a freeze (D8), and a replica that
+  holds a freeze and its successor but never saw a later thaw (a rollback
+  after cutover, section 8.9) can re-freeze the filesystem; the operator then
+  publishes a new thaw. A successor-less freeze cannot come back after its
+  expiry.
 - v9-only peers admit markers and surface them as empty changesets in
   `watchChangesets` and `changesetStatus`.
 
-M6 abort leaves the freeze active until the operator thaws or re-runs.
+M6 abort leaves the freeze active until the operator thaws it or it expires.
 Rollback before cutover thaws.
 
 ### 8.6 Trust carryover
@@ -1284,8 +1453,12 @@ Rollback before cutover thaws.
   from the whole walk on a revisited relation. It can silently drop writers on
   diamond-shaped graphs, and loop on cycles when its cache misses (U3). The
   tool therefore computes the carried set with its own breadth-first walk over
-  the captured relation set, keyed by `publicKey.hashcode()`, and records each
-  carried key's v9 delegation chains in the state file and report.
+  the captured relation edges, keyed by `publicKey.hashcode()`, in O(V + E).
+- **Edges, not paths.** The state file records the captured edge set. `plan`
+  and the report show at most three example chains per key (the walk's
+  shortest paths). Paths are never enumerated: any trusted key can authorize
+  any other, so meshed graphs are ordinary, and their simple paths grow
+  factorially.
 - **Modes** (D13):
     - `carry-flat` (proposed): the v10 root authorizes every carried key
       directly.
@@ -1296,14 +1469,19 @@ Rollback before cutover thaws.
 - **Flattening removes cascading revocation.** In v9, revoking root to A also
   untrusts every writer reachable only through A (`revokeWriter` JSDoc
   ~L3716-3727). After `carry-flat`, each such writer has a direct root edge, so
-  revoking A leaves them trusted, and A can no longer revoke them. Revoking a
-  former delegator must name its former delegates:
-  `migrate revoke-carried <v10-address> <key>` revokes the key and every
-  carried key whose every recorded v9 path passed through it.
-- Revoked keys are not carried, and pre-genesis relations cannot be replayed
-  into v10 (section 2.3).
-- v9 revocations that arrive after capture are mirrored in v10 by
-  `late-writes --apply` (section 8.8).
+  revoking A leaves them trusted, and A can no longer revoke them.
+  `migrate revoke-carried <v10-address> <key>` restores the cascade: it adds
+  the key to a revoked set kept in the state file, then walks the captured v9
+  edges from the root, skipping every key in that set, and revokes the v10
+  root edge of every carried key the walk no longer reaches. That is one
+  O(V + E) walk, and it handles a key with several delegators revoked one at a
+  time.
+- Under `carry-direct`, the root can revoke only its own direct grants;
+  delegates re-granted in v10 by a delegator hang off that delegator's edges,
+  so v10's own reachability cascades normally.
+- Revoked keys are not carried, and no v9 relation can enter v10 (section 2.3).
+- Trust changes after capture are listed by `late-writes`, never applied
+  automatically (section 8.8).
 - A v9 filesystem without a root key becomes a v10 filesystem without one.
 
 ### 8.7 Verification
@@ -1332,19 +1510,51 @@ cutover.
 
 ### 8.8 Late writes
 
-`migrate late-writes <v9-address> --state <file>` diffs v9's current semantic
-state against the persisted capture: naming heads, content heads, and trust
-relations that were added or removed. The result does not depend on which peer
-runs it, as long as that peer is a converged full replica of v9. It excludes
-GC CUTs of non-heads and identical re-puts, which do not change semantic
-state.
+`migrate late-writes <v9-address> --state <file>` compares v9's current state
+with the capture and lists:
 
-`--apply <v10-address>` re-applies late v9 naming and version entries through
-the M4 conversion, keeping ids and parent ids. Their parents are captured
-versions that exist in v10 under the same ids, so a concurrent v10 edit
-becomes a conflict, not an overwrite. v9 revocations that arrived after capture
-are mirrored as v10 revocations; late v9 grants are listed for the owner and
-never applied automatically.
+- **Content and naming.** Every current naming or content head that was not
+  captured, with its late ancestry: the rows reachable from it through parent
+  ids that were not present at capture (the state file keeps the captured row
+  ids). Rows that existed at capture, and GC retirement of old non-head rows,
+  are not late writes.
+- **Trust.** The effective trusted set, recomputed with the section 8.6 walk
+  over v9's current relations, against the captured effective set: keys that
+  gained trust and keys that lost it, each with the relation changes
+  responsible. Revocations issued by `migrate lockdown` (recorded in the state
+  file) are listed separately and never proposed for v10.
+
+The result does not depend on which peer runs it, as long as that peer is a
+converged full replica of v9.
+
+`--apply <v10-address>` re-applies the late naming and version rows through
+the M4 conversion, in topological order (parents first), keeping ids and
+parent ids. Every late chain therefore ends at a captured row that exists in
+v10 under the same id, so v10's heads match v9's, and a concurrent v10 edit
+becomes a conflict, not an overwrite. A late intermediate that v9 has already
+retired cannot be converted; it is reported, with a warning that its
+descendant will show a spurious conflict with the captured head. v10-aware v9
+replicas keep v9 GC suspended while frozen, and operators must keep scheduled
+GC disabled on v9-only replicas until the last `--apply`, or until v9 is
+disposed of.
+
+Trust is never changed automatically. `--revoke <key>` applies one listed loss
+of trust to v10:
+
+- with `carry-flat`, through the `revoke-carried` computation, so a v9
+  revocation of root to A also untrusts A's flattened delegates that have no
+  other path;
+- with `carry-direct`, by revoking the root's own edge; losses of delegated
+  keys are listed for their delegators;
+- with `none`, not at all.
+
+Late v9 grants are listed and never applied, and they cannot be replayed into
+v10 (section 2.3).
+
+`migrate lockdown` is the D8 command for revoking v9 writers after cutover. It
+runs on a frozen filesystem (trust administration is exempt from the freeze)
+and records its revocations in the state file, so a later `late-writes` never
+proposes them for v10.
 
 On v10-aware v9 replicas, post-freeze arrivals also surface as an event-driven
 `frozen.lateArrivals` status, with no polling.
@@ -1432,26 +1642,33 @@ green on the strict three-OS gate after every slice.
 
 **S1. Generation identity.** The v10 program, salt, entry root and variants,
 store-bound naming and versions, the v10 index, strict v10 ingest,
-`SharedFsTrustedNetworkV10` with the genesis rule, the generation probe,
+`SharedFsTrustGraphV10` with store-bound relations, the generation probe,
 `handle.generation`, and typed errors. Rebases the #329 builder and the #339
 hashing fix (D6).
 
-- Tests: the section 2.5 tests (both directions, cross-store, revoked and
-  delegated trust replay); golden vectors unchanged after re-parenting (A4);
-  probe errors (A5); the trust admission hook (A10).
+- Tests: the section 2.5 tests (both directions, cross-store, revoked,
+  delegated, clock-skewed, and same-root trust replay); the trust program's
+  semantics against upstream `TrustedNetwork` (A10); golden vectors unchanged
+  after re-parenting (A4); probe errors (A5).
 
 **S2. Library content.** The `Documents` block source and sink, read
 concurrency, `writeFile`, `writeBatch`, `readFile`, `readFileWithVersion`,
-`readRange`, R1-R4 with the witness rule, the partial-writer path, and the
-no-op before any put. Adds the opt-in `generation: "v10"` create.
+`readRange`, R1-R4 with the witness rule and climb, the partial-writer path,
+the empty-root fallback, and the no-op before any put. Adds the opt-in
+`generation: "v10"` create.
 
 - Tests: crash injection at every publication boundary; randomized byte-oracle
-  tests; exact and available reads; conflict convergence; stale-base closure
-  re-put; partial-writer retention.
+  tests; exact and available reads; conflict convergence; stale bases (a no-op
+  puts nothing, a full rewrite puts only the new version's blocks, a partial
+  edit re-puts only unwitnessed reused blocks); an atomic save and a copy put
+  only changed blocks; overwriting a damaged file succeeds; R4 repairs a lost
+  leaf covered by an identical rewrite; partial-writer retention; climb cost
+  (A12).
 
-**S3. Patches.** Builder changes (deferred puts, zero-range patches, adopted
-buffers), `patchFile`, version leases, chained builds, bounded-concurrency or
-`putMany` block puts, and work counters.
+**S3. Patches.** Builder changes (deferred puts with a block plan, zero-range
+patches, adopted buffers, the open-base comparison), `patchFile`, version
+leases, chained builds, bounded-concurrency or `putMany` block puts, and work
+counters.
 
 - Tests: zero whole-file hash bytes; flat 4 KiB patch cost from 4 MiB to
   1 GiB (library); an in-place rewrite puts only changed leaves; put
@@ -1467,12 +1684,15 @@ and their fallback, and the harness work of section 9.4.
   concurrent reads; native smoke; the Linux FUSE profile against section 9.3.
 
 **S5. GC.** Heal, mark after retirement, the block ledger, the live veto, the
-lease-aware mark and Guard D, and the acknowledgement exit.
+lease-aware mark and Guard D, retirement of non-head damaged versions, and
+`abandon-version`.
 
 - Tests: randomized GC, read, write, and CUT races; a node with one unhealable
   leaf keeps all its other blocks for three runs past the orphan span; a
   version arriving after the mark vetoes deletion; a leased base retired
-  remotely stays readable; a blocked sweep recovers through acknowledgement.
+  remotely stays readable; a blocked sweep unblocks after the file is resolved
+  (normal retirement and `abandon-version`); a second replica holding the
+  lost tree keeps the head and every block it reaches.
 
 **S6. Snapshots and disposal.** v10 snapshots (format 2), overlay block fetch,
 readiness evidence, and the disposal closure walk with block-aware moving-view
@@ -1481,16 +1701,23 @@ rejection.
 - Tests: the cold-start, bootstrap, and `durable-disposal` suites on v10;
   disposal racing a block-only CUT; the process-crash suite.
 
-**S7. Migration.** The library and CLI: markers, semantic capture, the
-conversion policy, trust carry and `revoke-carried`, the verifier, and
-`late-writes`. The v9-line bridge is a separate PR.
+**S7. Migration.** The library and CLI: markers, semantic capture with row
+ids, the conversion policy, trust carry and `revoke-carried`, the verifier,
+`late-writes` with ancestry and trust listing, and `lockdown`. The v9-line
+bridge is a separate PR.
 
 - Tests: ids, winners, conflicts, tombstones, sparse and large files; resume
   and fresh-destination refusal; source-moved abort; unconvertible-head
   fixtures (including conflict writes with absent bases); custom and empty
-  `sealedIgnoredNames`; diamond and cyclic trust graphs; forged markers
-  ignored; a freeze while a mount holds dirty state; bounded-memory conversion
-  of 1 GiB.
+  `sealedIgnoredNames`; diamond, cyclic, and dense (50-key mesh) trust graphs
+  in O(V + E); a key with two delegators revoked one at a time; forged markers
+  ignored; a freeze while a mount holds dirty state; freeze, thaw, a v9-only
+  GC sweep, then an offline replica reconnects without re-freezing; two
+  sequential late writes to one file, a two-step rename, and edit, edit,
+  delete, applied without spurious conflicts; a post-capture v9 revocation of
+  root to A listed, then applied with `--revoke`, untrusting A's flattened
+  delegates; `lockdown` followed by `--apply` leaves v10 trust unchanged;
+  bounded-memory conversion of 1 GiB.
 
 **S8. Promotion.** Both generations in the three-OS matrix, the FUSE
 comparison, the leaf-size decision, and docs.
@@ -1525,6 +1752,14 @@ timeout inflation.
   base at the same position; an unchanged in-place `O_TRUNC` save of a 32 MiB
   file puts zero documents, and one with one changed leaf puts at most one
   data block, `d` trees, and one version;
+- an `O_TRUNC` save spread over two commits (`sh -c 'cat src > dst'`, and a
+  save with an `fsync` midway) puts no data block for unchanged leaves;
+- an atomic save (temporary file plus rename) and a copy of a 32 MiB file with
+  one changed leaf put at most one data block, the path trees, the version,
+  and the naming event;
+- a writable open with no write, and an unchanged save of a stale 32 MiB file,
+  put zero documents; a full rewrite of a stale file puts at most the new
+  version's blocks and the version;
 - new tree blocks are at most the unique dirty ancestors;
 - encoded version size is flat from 16 MiB to 1 GiB;
 - random 4 KiB reads fetch at most one leaf per touched leaf;
@@ -1571,10 +1806,11 @@ through upstream put diagnostics (#18).
   fails with `EIO`; available mode falls back exactly where v9 does.
 - **GC:** no race removes a block reachable from a present version row or a
   leased root, including a remote CUT of the leased row; true orphans disappear
-  after the barrier; a blocked sweep recovers through acknowledgement.
-- **Replay and trust:** store-domain replay (v9 into v10, v10 into v10) and
-  revoked-writer relation puts are rejected (MERKLE_STORAGE_V1's gate,
-  restored).
+  after the barrier; a blocked sweep recovers once the file is resolved.
+- **Replay and trust:** replay of entries and trust relations between stores
+  (v9 into v10, v10 into v9, v10 into v10) is rejected, including revoked
+  grants, grants signed after a forward-pulled clock, and same-root grants from
+  other filesystems (MERKLE_STORAGE_V1's gate, restored).
 - **Migration:** byte-exact, with ids, winners, conflicts, tombstones, sealed
   names, and the trusted-writer set preserved, verified from a fresh peer.
 
@@ -1602,7 +1838,10 @@ range inside a large one. S4 therefore adds:
 - a higher sample cap, sequential 8 MiB reads (local and remote-backed), and
   the 500-file cold-open profile;
 - an in-place `O_TRUNC` save of an unchanged and a one-leaf-changed 32 MiB
-  file;
+  file, the same save spread over two commits (`sh -c 'cat src > dst'` and an
+  `fsync` midway), an atomic save, and a copy, each with counters for data
+  blocks put;
+- a writable open with no write, and an unchanged save, of a stale file;
 - A9: confirm, with unprofiled same-job baselines, that runner variance allows
   the ratio gates.
 
@@ -1624,33 +1863,41 @@ Measure as well:
   golden vectors checked in TypeScript and Go, byte-oracle tests, `contentRoot`
   recomputed on every ingest, and fail-closed `EIO`.
 - **The witness rule gives up v10's gain on idle files.** The first edit of a
-  file untouched for more than 15 days re-puts its closure, as in v9 (D15).
-- **Reclamation liveness:** one unhealable tree, including one a buggy or
-  hostile trusted writer never published, blocks block reclamation on every
-  full replica until an operator acknowledges it (D17).
-- **Accepted writes can fail at commit** when a base block disappears after
-  open (section 4.4). Recovery files prevent silent loss, but Linux drops
-  `release` errors and applications often ignore `close` errors.
+  file whose reused content no version younger than 15 days reaches re-puts
+  that content: the same puts as v9, plus a local read of the untouched part
+  (D15).
+- **Reclamation liveness:** one unhealable tree under a present version,
+  including one a buggy or hostile trusted writer never published, blocks
+  block reclamation on every full replica until the file is resolved and the
+  broken version retires, normally or through `abandon-version` (D17).
+- **Accepted writes can fail at commit** when a base block that a partial write
+  needs disappears after open, or when a stale base's untouched content is
+  unavailable (section 4.4). Recovery files prevent silent loss, but Linux
+  drops `release` errors and applications often ignore `close` errors.
 - **Document count per commit** is the main cost on Linux (about 3 ms per put).
   256 KiB leaves are projected to fail the 1 MiB write gate unless block puts
   overlap (D1).
+- **Reverse-edge climbs** (R3) replace v9's per-chunk witness query for copies,
+  atomic saves, and shifted content; their cost is A12.
 - **Index growth:** tree rows carry up to 256 `blockRefs`, well under the
   indexer's roughly 8,191-row batch ceiling; data rows grow with `L/B`.
 - **API meaning change** of `contentHash` for watch events, CLI output, and
   applications (D5).
-- **Trust:** the v10 genesis rule depends on A10; the reverse direction (v10
-  grants into the frozen v9 filesystem) stays possible (section 2.3, D14), and
-  flattening removes cascading revocation (D13).
+- **Trust:** v10 needs an in-repo trust program until upstream finishes
+  network-bound relations (A10, U2, D22). Flattening removes cascading
+  revocation unless `revoke-carried` is used (D13). Replay of a revoked
+  relation within one filesystem follows upstream CUT semantics, as in v9.
 - **Freeze markers do not bind v9-only peers**, and converge for late joiners
-  only while a v10-aware full replica of v9 stays online (section 8.5).
+  only while a v10-aware full replica holding the whole marker set stays
+  online; without one, a lost post-cutover thaw can be undone (section 8.5).
 - **Migration cost:** twice the disk at peak, and a full re-download on every
   replica.
 - **Only Linux FUSE has been measured.** macOS and Windows mounts may differ;
   macOS evidence is blocked on macFUSE capacity.
 - **Workload fit:** v10 helps in-place writers (databases, disk images, logs,
-  editors that save in place) on files edited at least every 15 days.
-  Atomic-save editors and small-file workloads gain nothing. This is a product
-  question.
+  editors that save in place) on files whose content a young version reaches.
+  Atomic-save editors and copies put what v9 puts, plus reverse-edge queries;
+  small-file workloads are unchanged. This is a product question.
 - **The S0/S1 refactor** touches `index.ts` broadly; the v9 address-bytes and
   wire fixtures are the guard.
 
@@ -1679,9 +1926,10 @@ Measure as well:
 - **D7. Migration UX:** explicit CLI only (proposed) or also a prompt on open;
   heads-only history by default (proposed) or all retained history.
 - **D8. Freeze enforcement:** root-signed markers honored by v10-aware
-  releases, plus late-write detection (proposed); additionally revoke v9
-  writers after cutover on access-controlled filesystems (recommended where
-  late joiners or v9-only peers remain); or out-of-band announcement only.
+  releases, plus late-write detection (proposed); additionally
+  `migrate lockdown` of v9 writers after cutover on access-controlled
+  filesystems (recommended where late joiners or v9-only peers remain); or an
+  out-of-band announcement only. Also the freeze expiry (7 days proposed).
   Filesystems without a root key get hints only.
 - **D9. Compatibility window:** how long v10-aware releases keep v9 read-write
   (proposal: at least two minor releases and at least 3 months after
@@ -1691,27 +1939,28 @@ Measure as well:
 - **D10.** Leaf size fixed per filesystem in the program (proposed) or
   selectable per writer.
 - **D11. Writable-open verification:** root plus rightmost path plus
-  background prefetch (proposed), or the whole tree closure plus data presence
-  at open (O(n) probes, about 0.27 ms each), or an opt-in
-  `verifyOnOpen: "full"`. Read-only opens stay lazy.
+  background prefetch, skipped for `O_TRUNC` (proposed); or the whole tree
+  closure plus data presence at open (O(n) probes, about 0.27 ms each); or an
+  opt-in `verifyOnOpen: "full"`. Read-only opens stay lazy.
 - **D12. Orphan span floor:** 48 h, clamped (proposed). Lowering the floor is
   an owner decision backed by evidence, never an operator option.
 - **D13. Trust carryover:** `carry-flat` with `revoke-carried` (proposed; loses
-  cascading revocation), `carry-direct` (keeps topology; delegates locked out
-  until re-granted), or `none`.
-- **D14. v10 root key:** reuse the v9 root key (proposed only once S1's
-  genesis rule or its fallback lands; root-signed v10 grants then replay into
-  the frozen v9) or a fresh v10 root key (no reverse replay of root grants;
-  the owner operates a second identity).
-- **D15. Stale-base policy:** v9-parity closure re-put for bases whose
-  `publishedAt` is older than the skip horizon (proposed; migrated files get
-  15 days from migration), or reuse anyway when the base is the sole local
-  head on a write-ready replica (weaker than v9; relies on Guard D and heal).
+  cascading revocation unless `revoke-carried` is used), `carry-direct` (keeps
+  topology; delegates locked out until re-granted), or `none`.
+- **D14. v10 root key:** reuse the v9 root key (proposed; safe for trust replay
+  in both directions once S1's store-bound trust program lands) or a fresh v10
+  root key (the owner operates a second identity).
+- **D15. Stale-base policy:** v9's witness rule for every block the new version
+  reuses (proposed; migrated files are covered for 15 days after migration),
+  or reuse anyway when the base is the sole local head on a write-ready
+  replica (weaker than v9; relies on Guard D and heal).
 - **D16. Unconvertible heads:** fail closed, with only `--drop-absent-parents`
   and explicit `--exclude-node` (proposed), or also allow rewriting invalid
   fields (breaks A7).
-- **D17. Sweep-block exit:** operator acknowledgement only (proposed), or
-  automatic abandonment of a region after N blocked runs.
+- **D17. Blocked-sweep exit:** resolve the file, then normal retirement or an
+  explicit `abandon-version` of the superseded broken version, which removes
+  that version on every replica (proposed); or also automatic abandonment of
+  superseded broken versions after N blocked runs.
 - **D18. Rollback after v10 writes:** manual and unsupported in the first
   release (proposed), or build a v10-to-v9 export and a v10 freeze marker.
 - **D19. Freeze and live handles:** already-open writable states keep
@@ -1722,6 +1971,9 @@ Measure as well:
   peer-evidence gate alone (proposed).
 - **D21. Dropped or changed MERKLE_STORAGE_V1 gates and method** (section 11):
   sign off.
+- **D22. Trust program:** build the in-repo store-bound
+  `SharedFsTrustGraphV10` in S1 (proposed), or wait for upstream network-bound
+  relations (U2) and hold S1 until they ship.
 
 ### 10.3 Assumptions register
 
@@ -1737,21 +1989,30 @@ Measure as well:
 | A7  | Absent historical parents preserve heads, winners, and conflicts after a head-only copy                                  | S7                         |
 | A8  | Migration runs at 30 MiB/s or more                                                                                       | S7                         |
 | A9  | Runner variance allows the section 9.3 ratios when computed within one job                                               | S4/S8 unprofiled baselines |
-| A10 | A `TrustedNetwork` subclass can add an admission rule that reads the entry's signed HLC time; otherwise use the fallback | S1                         |
+| A10 | The in-repo trust program reproduces the upstream `TrustedNetwork` semantics v9 relies on                                | S1                         |
 | A11 | A blocks-only `putMany` resolves only after every item is committed locally, or reports which were                       | S3                         |
+| A12 | An R3 climb costs about `d + 1` local index queries per present block, comparable to v9's per-chunk witness query        | S2                         |
 
 ### 10.4 Upstream needs (relayed through the owner)
 
 - **U1.** A persisted-root session, or retained-root lease, for O(delta)
   full-version remote durability (section 6.4). Not blocking.
-- **U2.** Domain-bound trust relations: a relation that carries a network id,
-  checked at admission, so grants cannot be replayed between trust networks.
-  The proper fix for section 2.3.
+- **U2.** Network-bound trust relations, checked at admission, so grants
+  cannot be replayed between trust networks. trusted-network 6.0.138 contains
+  `TrustedNetworkV2` primitives with derived network ids, but only as a
+  decode-only codec that cannot be opened and is not exported; the ask is to
+  finish it. Related: document whether a revoked relation's original put can
+  be re-delivered and re-admitted after its CUT. Until U2 ships, v10 uses the
+  in-repo program (D22).
 - **U3.** `getPathGenerator` (`identity-graph.ts` ~L85-110) returns from the
   whole walk on a revisited relation, dropping trusted keys on diamond-shaped
   graphs, and can loop on cycles when its cache misses. It should dedupe by key
   and `continue`. The same generator backs `isTrusted`, which can then fail
-  closed.
+  closed. It still affects v9 and the migration's reading of v9 trust.
+- **U4.** Bounded HLC wall time: the log's `HLC` has no maximum offset, and
+  joins pull the local clock forward to any received time (`@peerbit/log`
+  6.2.35 `log.ts` ~L833, `clock.ts` ~L116-201). v10 no longer depends on
+  entry wall time for security, but anything that does inherits this.
 - Existing asks from the 2026-09-27 list that matter more for v10: `putMany`
   all-or-none (#17) and put-phase diagnostics (#18).
 
@@ -1761,10 +2022,9 @@ Refinements:
 
 - Program variant `peerbit_shared_fs_v10_merkle_v1` (D4), a v10 variant for
   every entry kind, and store-bound naming and versions (section 2.2).
-- A v10 trust program with a genesis admission rule (section 2.3). This
-  implements V1's "Do not blindly replay owner-authorized trust edges into a
-  new trust domain", and restores V1's replay and revoked-writer release gate
-  in section 9.3.
+- A store-bound v10 trust program (section 2.3). This implements V1's "Do not
+  blindly replay owner-authorized trust edges into a new trust domain", and
+  restores V1's replay and revoked-writer release gate in section 9.3.
 - A `SharedFsEntryV10` root and a combined v10 index row (section 2.1).
 - The witness rule, dedup rules R1-R4, the partial-writer path, deferred puts,
   zero-range patches, and chained builds (sections 3.1-3.6).
@@ -1773,8 +2033,8 @@ Refinements:
   verification, and recovery spill (section 4.3).
 - GC: heal before retirement, mark after it; damaged nodes' versions marked; a
   live veto at sweep time (V1's "recheck reachability"); leases carrying root
-  descriptors; a clamped 48 h orphan span; an acknowledgement exit for blocked
-  sweeps (section 5).
+  descriptors; a clamped 48 h orphan span; blocked sweeps that recover once the
+  file is resolved, with an explicit early retirement (section 5).
 
 Weakened or replaced, for owner sign-off (D21):
 
@@ -1798,8 +2058,11 @@ Weakened or replaced, for owner sign-off (D21):
 
 ## 12. Revision notes
 
+### Round 1
+
 Revision 2 (after an adversarial review of revision 1, commit `e1e35e0d`; 27
-verified findings). By finding number:
+verified findings). By finding number. Where the second round changed a fix,
+its note below supersedes this one (notably items 1, 7, 9, 13, 15, and 21).
 
 1. R1 now requires a young witness (base `publishedAt` within the skip
    horizon), the retention floor is carried unchanged, stale bases re-put their
@@ -1893,3 +2156,52 @@ contradicts v9; that the 1.10x and 1.15x gates are below measured noise (the
 same-job method still addresses cross-job noise); and that the latency
 projection rested on an unmeasured put cost (it was re-derived from the
 measured cost anyway).
+
+### Round 2
+
+Revision 3 (after a second review of revision 2, commit `f7b67620`; 11 verified
+findings, one further point refuted and not acted on). By finding number:
+
+1. The no-op is decided before any witness re-put, writable opens put nothing,
+   and the stale rule applies only to blocks the new version reuses:
+   untouched subtrees are read locally and re-put, identical leaves are re-put
+   from the patch bytes. Key decision 4, sections 1.4, 1.5, 1.7, 3.1, 3.5, 4.3,
+   10.1, and D15 no longer overstate v9 parity; section 9.3 gained counters for
+   a no-write open, an unchanged stale save, and a stale full rewrite.
+2. Full-coverage writes read no base data and fall back to an empty-root build
+   when a base tree is missing; `O_TRUNC` opens verify nothing; overwriting a
+   damaged file succeeds, which makes the section 5.6 exit work; section 4.4
+   and G3 list the remaining `EIO` cases.
+3. Mount states keep their open base leased and compare every commit against
+   it, so saves spread over several commits do not re-put unchanged bytes. R3
+   generalizes v9's W1 to any present block through a bounded, memoized
+   reverse-edge climb, so atomic saves and copies no longer re-put present
+   blocks v9 skips. New counters and scenarios cover both, and section 1.4's
+   claims are corrected.
+4. The acknowledgement that swept an unknown region under a present version is
+   removed. The exit is resolving the file (non-head damaged versions retire
+   normally) plus an optional, explicit `abandon-version` that retires the
+   superseded version early; section 5.5 names that one exception.
+5. The time-based genesis rule is dropped: HLC wall time is author-asserted and
+   unbounded, and forward pulls re-admit revoked grants. v10 uses an in-repo
+   trust program with store-bound relations (A10, D22), with U2 and U4 as
+   upstream asks. S1 tests cover forward-pulled and skewed clocks.
+6. Store-bound relations also reject post-genesis grants from other
+   filesystems with the same key, so key decision 2, sections 2.3 and 2.5, the
+   9.3 gate, and D14 are now accurate.
+7. `late-writes` diffs the effective trusted set, not edges, and `--revoke`
+   applies a loss of trust with `revoke-carried` semantics under `carry-flat`;
+   `carry-direct` and `none` are specified.
+8. Trust changes are never mirrored automatically; `migrate lockdown` records
+   its revocations, which `late-writes` never proposes, and trust
+   administration is exempt from the freeze.
+9. The capture records every row id, and `--apply` converts each late head's
+   whole late ancestry in topological order; v9 GC stays off until the last
+   `--apply`; retired intermediates are reported.
+10. Freeze, successor, and thaw form one protected set; a freeze is enforced or
+    re-put only after a settled sync finds no thaw; successor-less freezes
+    expire after 7 days; `status` shows unthawed freezes; the remaining limit
+    is stated.
+11. The state file records edges, not paths; `plan` shows at most three example
+    chains; `revoke-carried` is one O(V + E) reachability walk that also
+    handles several delegators revoked one at a time.
