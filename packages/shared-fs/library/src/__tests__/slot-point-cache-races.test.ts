@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { NamingEvent, SharedFileSystem } from "../index.js";
-import { parkNextRowQuery } from "./cache-race-park.js";
+import { forcePointTier, parkNextRowQuery } from "./cache-race-park.js";
 
 const naming = (
     id: string,
@@ -26,7 +26,11 @@ const programs: any[] = [];
 // The backing index is deliberately synchronous until queryRows' snapshot is
 // returned. parkNextRowQuery then holds that exact snapshot across the event.
 // No scheduler sleeps, polling, or retries determine which state is observed.
-const harness = (initial: NamingEvent[] = []) => {
+const harness = (
+    initial: NamingEvent[] = [],
+    // Point-path tests treat every directory as wide; width-gate tests opt in.
+    { widthGate = false }: { widthGate?: boolean } = {}
+) => {
     const program: any = new SharedFileSystem();
     programs.push(program);
     const index = new Map(initial.map((row) => [row.id, row]));
@@ -49,6 +53,17 @@ const harness = (initial: NamingEvent[] = []) => {
             )
         );
     };
+    // Bounded reads go through queryRows so recording and parking see them.
+    program.queryRowsUpTo = async (query: any[], limit: number) => {
+        const rows = await program.queryRows(query);
+        return {
+            rows: rows.slice(0, limit + 1),
+            complete: rows.length <= limit,
+        };
+    };
+    if (!widthGate) {
+        forcePointTier(program);
+    }
     // Overlay retirement's persistence/arming effects are unrelated to the
     // cache admission proof and would require opening a real Peerbit node.
     program.writeBootstrapState = async () => {};
@@ -526,31 +541,55 @@ describe("shared fs slot point cache races", () => {
         expect(replacement.has("dir:left")).toBe(false);
     });
 
-    it("sweeps an unlisted directory once its point-query allowance is spent", async () => {
-        const present = naming("present", "dir:left", "name-40.txt");
-        const { program, slotQueries, sweepQueries } = harness([present]);
-        const allowance = program.slotPointCache.limits.pointQueriesBeforeSweep;
-        for (let i = 0; i < allowance; i++) {
-            expect(await program.slotRows("dir:left", `name-${i}.txt`)).toEqual(
-                []
-            );
-        }
-        expect(slotQueries("dir:left")).toHaveLength(allowance);
-        expect(sweepQueries("dir:left")).toHaveLength(0);
-        // The next distinct miss reads the directory once, as every lookup
-        // did before point queries, and its listing answers the rest.
-        expect(
-            ids(await program.slotRows("dir:left", `name-${allowance}.txt`))
-        ).toEqual([]);
-        expect(sweepQueries("dir:left")).toHaveLength(1);
-        expect(program.slotSweepCache.has("dir:left")).toBe(true);
-        expect(ids(await program.slotRows("dir:left", "name-40.txt"))).toEqual([
+    it("reads and caches a narrow unlisted directory whole, with no slot query", async () => {
+        const present = naming("present", "dir:left", "name-7.txt");
+        const { program, slotQueries, sweepQueries } = harness([present], {
+            widthGate: true,
+        });
+        expect(ids(await program.slotRows("dir:left", "name-7.txt"))).toEqual([
             present.id,
         ]);
-        for (let i = 41; i < 60; i++) {
-            await program.slotRows("dir:left", `name-${i}.txt`);
-        }
-        expect(slotQueries("dir:left")).toHaveLength(allowance);
+        expect(await program.slotRows("dir:left", "absent.txt")).toEqual([]);
         expect(sweepQueries("dir:left")).toHaveLength(1);
+        expect(slotQueries("dir:left")).toHaveLength(0);
+        expect(program.slotSweepCache.has("dir:left")).toBe(true);
+        expect(program.slotPointCache.isWide("dir:left")).toBe(false);
+    });
+
+    it("serves a directory proven wide by the bounded read with exact-slot queries", async () => {
+        const rows = [0, 1, 2].map((i) =>
+            naming(`entry-${i}`, "dir:left", `name-${i}.txt`)
+        );
+        const { program, slotQueries, sweepQueries } = harness(rows, {
+            widthGate: true,
+        });
+        program.slotPointCache = new program.slotPointCache.constructor({
+            wideDirectoryRows: 2,
+        });
+        expect(ids(await program.slotRows("dir:left", "name-1.txt"))).toEqual([
+            rows[1].id,
+        ]);
+        expect(sweepQueries("dir:left")).toHaveLength(1);
+        expect(slotQueries("dir:left")).toHaveLength(1);
+        expect(program.slotSweepCache.has("dir:left")).toBe(false);
+        expect(program.slotPointCache.isWide("dir:left")).toBe(true);
+        // Known wide: later lookups go straight to exact-slot queries.
+        expect(ids(await program.slotRows("dir:left", "name-2.txt"))).toEqual([
+            rows[2].id,
+        ]);
+        expect(sweepQueries("dir:left")).toHaveLength(1);
+        expect(slotQueries("dir:left")).toHaveLength(2);
+    });
+
+    it("remembers a directory as wide after a full listing of it", async () => {
+        const rows = [0, 1, 2].map((i) =>
+            naming(`entry-${i}`, "dir:left", `name-${i}.txt`)
+        );
+        const { program } = harness(rows, { widthGate: true });
+        program.slotPointCache = new program.slotPointCache.constructor({
+            wideDirectoryRows: 2,
+        });
+        expect(await program.sweepRows("dir:left")).toHaveLength(3);
+        expect(program.slotPointCache.isWide("dir:left")).toBe(true);
     });
 });

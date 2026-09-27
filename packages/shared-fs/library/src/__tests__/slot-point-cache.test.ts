@@ -123,6 +123,7 @@ describe("shared fs bounded slot point cache", () => {
             queries.push(query.map((clause) => [clause.key].flat().join(".")));
             return rows;
         };
+        program.slotPointCache.markWide("dir:wide");
         let examinedCandidates = 0;
         program.namingStatesForNodes = async (nodeIds: string[]) => {
             examinedCandidates = nodeIds.length;
@@ -275,20 +276,17 @@ describe("shared fs bounded slot point cache", () => {
         expect(cache.snapshot().entries).toBe(4);
     });
 
-    it("counts point queries per directory within a bounded map", () => {
-        const cache = new BoundedSlotPointCache({
-            maxSlots: 4,
-            pointQueriesBeforeSweep: 2,
-        });
-        expect(cache.shouldSweepInstead("dir:a")).toBe(false);
-        expect(cache.shouldSweepInstead("dir:a")).toBe(false);
-        expect(cache.shouldSweepInstead("dir:a")).toBe(true);
-        // The allowance restarts after a sweep.
-        expect(cache.shouldSweepInstead("dir:a")).toBe(false);
+    it("remembers wide directories within a bounded set", () => {
+        const cache = new BoundedSlotPointCache({ maxSlots: 4 });
+        expect(cache.isWide("dir:a")).toBe(false);
+        cache.markWide("dir:a");
+        expect(cache.isWide("dir:a")).toBe(true);
         for (let i = 0; i < 100; i++) {
-            cache.shouldSweepInstead(`dir:${i}`);
+            cache.markWide(`dir:${i}`);
         }
-        expect((cache as any).pointQueries.size).toBeLessThanOrEqual(4);
+        expect((cache as any).wideParents.size).toBeLessThanOrEqual(4);
+        expect(cache.isWide("dir:99")).toBe(true);
+        expect(cache.isWide("dir:a")).toBe(false);
     });
 
     it("admits queued fills in FIFO order within the in-flight bound", async () => {

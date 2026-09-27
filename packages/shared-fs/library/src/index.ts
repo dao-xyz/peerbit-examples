@@ -3920,6 +3920,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
+     * At most `limit + 1` rows; `complete` only when the result provably
+     * holds every matching row.
+     */
+    private async queryRowsUpTo(
+        query: Query[],
+        limit: number
+    ): Promise<{ rows: any[]; complete: boolean }> {
+        this.rowQueries++;
+        const iterator = this.entries.index.iterate(
+            { query },
+            { local: true, remote: false, resolve: false }
+        );
+        try {
+            const rows = (await iterator.next(limit + 1)) as any[];
+            return { rows, complete: rows.length <= limit && iterator.done() };
+        } finally {
+            await (iterator as any).close?.();
+        }
+    }
+
+    /**
      * Full naming histories for many nodes, batched — served entirely from
      * index rows: no document resolution on the path-resolution hot path.
      */
@@ -4014,6 +4035,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 new StringMatch({ key: "parentId", value: parentId }),
             ])
         ).map(namingRowOf);
+        if (rows.length > this.slotPointCache.limits.wideDirectoryRows) {
+            this.slotPointCache.markWide(parentId);
+        }
         if (
             this.slotSweepCache === sweepCache &&
             this.epochOf(epochKey) === fillEpoch
@@ -4029,18 +4053,64 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
+     * The directory's listing, read and installed exactly like `sweepRows`,
+     * if it has at most `wideDirectoryRows` naming rows. A wider directory is
+     * remembered as wide and yields undefined: callers use exact-slot queries
+     * for it, and only such filesystems pay for the planner's slot indexes.
+     */
+    private async sweepRowsIfNarrow(
+        parentId: string
+    ): Promise<NamingLike[] | undefined> {
+        const cached = this.slotSweepCache.get(parentId);
+        if (cached) {
+            return this.overlayUnionSweep(parentId, [...cached.values()]);
+        }
+        const pointCache = this.slotPointCache;
+        const epochKey = `slot:${parentId}`;
+        const fillEpoch = this.epochOf(epochKey);
+        const sweepCache = this.slotSweepCache;
+        // Same query shape as sweepRows, so no new planner index is created.
+        const { rows: raw, complete } = await this.queryRowsUpTo(
+            [
+                new StringMatch({ key: "kind", value: "naming" }),
+                new StringMatch({ key: "parentId", value: parentId }),
+            ],
+            pointCache.limits.wideDirectoryRows
+        );
+        if (!complete) {
+            pointCache.markWide(parentId);
+            return undefined;
+        }
+        const rows = raw.map(namingRowOf);
+        if (
+            this.slotSweepCache === sweepCache &&
+            this.epochOf(epochKey) === fillEpoch
+        ) {
+            this.slotSweepCache.set(
+                parentId,
+                new Map(rows.map((row) => [row.id, row]))
+            );
+            this.boundCache(this.slotSweepCache);
+        }
+        return this.overlayUnionSweep(parentId, rows);
+    }
+
+    /**
      * Every naming event that ever asserted the placement (parentId, name):
      * the candidate history behind one slot. Answered, in order, from a
      * cached directory sweep (a complete listing also proves absence), from
-     * the bounded point cache, or from one exact index query whose cost
-     * depends on this slot's history rather than on the directory's width.
+     * the bounded point cache, from a bounded whole-directory read for a
+     * directory not known to be wide, or from one exact index query whose
+     * cost depends on this slot's history rather than on the directory's
+     * width.
      *
      * The exact query is not truncated: a history too large to retain is
      * still returned whole and simply not cached (`installSlot` rejects it
-     * without evicting anything). Truncating could hide the winner. Only
-     * repeated distinct misses under one directory (past its point-query
-     * allowance) fall back to a directory sweep, which then caches the
-     * listing exactly as every lookup did before point queries existed.
+     * without evicting anything). Truncating could hide the winner. Point
+     * queries serve only directories known to be wider than
+     * `wideDirectoryRows`; any other directory is read and cached whole, as
+     * before, so filesystems without wide directories never create the
+     * planner's (parentId, name) indexes.
      *
      * The point fill uses the same fences as the sweep fill (the per-directory
      * `slot:<parentId>` epoch, which includes the global epoch) plus the open
@@ -4075,13 +4145,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (cached) {
             return this.overlayUnionSlot(parentId, name, cached);
         }
-        if (cache.shouldSweepInstead(parentId)) {
-            // Many distinct cold lookups under one unlisted directory (bulk
-            // creates, scans): sweep it once, exactly as every lookup did
-            // before point queries, so its cached listing answers the rest.
-            return (await this.sweepRows(parentId)).filter(
-                (row) => row.name === name
-            );
+        if (!cache.isWide(parentId)) {
+            // A directory not known to be wide is read and cached whole, as
+            // every lookup did before point queries, unless the bounded read
+            // proves it wide.
+            const listing = await this.sweepRowsIfNarrow(parentId);
+            if (listing) {
+                return listing.filter((row) => row.name === name);
+            }
         }
         const generation = this.openGeneration;
         const epochKey = `slot:${parentId}`;

@@ -177,14 +177,15 @@ not with the total store size, and file content chunks are only loaded by
 reads. The warm row-bucket maps and per-key change-counter map each use the
 same 50,000-entry cap; oldest entries are evicted in batches, and epoch
 eviction invalidates any in-flight fill before its counter can be reused.
-A path lookup in a directory that has not been listed reads only the exact
-`(parent, name)` history instead of the whole directory; those histories are
-kept in a separate LRU of at most 4,096 slots and markers, 16,384 rows and
-about 8 MiB (estimated). A history too large for it is still returned whole,
-just not cached. After 32 such exact queries under one unlisted directory (a
-bulk create or scan), the next miss reads and caches the whole directory once,
-as every lookup did before. Once a directory is listed, its lookups are
-answered from the listing, as before.
+A path lookup in a directory that has not been listed reads that directory
+whole and caches it, as before, when it has at most 2,048 naming rows; that
+read is bounded, so a wider directory is detected after 2,049 rows instead of
+being read completely. A directory known to be wider is served by exact
+`(parent, name)` index queries, kept in a separate LRU of at most 4,096 slots
+and markers, 16,384 rows and about 8 MiB (estimated). A history too large for
+it is still returned whole, just not cached. Only filesystems with such wide
+directories pay for the extra index those queries need. Once a directory is
+listed, its lookups are answered from the listing, as before.
 Every syncing peer keeps a full replica by default
 (`replicate: { factor: 1 }`); pass `replicate: false` for a peer that should
 not store content — reads then fall back to bounded remote chunk fetches

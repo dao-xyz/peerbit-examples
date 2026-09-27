@@ -29,10 +29,11 @@ export type SlotPointCacheLimits = {
     /** Distinct active slot queries; other callers wait for capacity. */
     maxInFlight: number;
     /**
-     * Exact-slot queries one unlisted directory may issue before its next
-     * miss sweeps it instead, so its cached listing answers later lookups.
+     * Naming rows a directory may have and still be read and cached whole
+     * on a lookup (as every lookup did before point queries). A wider one is
+     * remembered as wide and served by exact-slot queries instead.
      */
-    pointQueriesBeforeSweep: number;
+    wideDirectoryRows: number;
 };
 
 export const DEFAULT_SLOT_POINT_CACHE_LIMITS: SlotPointCacheLimits = {
@@ -40,7 +41,7 @@ export const DEFAULT_SLOT_POINT_CACHE_LIMITS: SlotPointCacheLimits = {
     maxRows: 16_384,
     maxEstimatedBytes: 8 * 1024 * 1024,
     maxInFlight: 64,
-    pointQueriesBeforeSweep: 32,
+    wideDirectoryRows: 2_048,
 };
 
 type Parent = {
@@ -90,8 +91,8 @@ export class BoundedSlotPointCache {
     private fills = new Map<string, Promise<SlotNamingRow[]>>();
     private waitersByKey = new Map<string, Array<() => void>>();
     private waitingKeys: string[] = [];
-    /** Point queries per unlisted directory; bounded like the slots. */
-    private pointQueries = new Map<string, number>();
+    /** Directories known to exceed `wideDirectoryRows`; bounded like the slots. */
+    private wideParents = new Set<string>();
 
     constructor(limits: Partial<SlotPointCacheLimits> = {}) {
         this.limits = { ...DEFAULT_SLOT_POINT_CACHE_LIMITS, ...limits };
@@ -343,23 +344,17 @@ export class BoundedSlotPointCache {
         this.evictSlot(row.parentId, row.name);
     }
 
-    /**
-     * Count one exact-slot query under `parentId`. Returns true once the
-     * directory exceeded its point-query allowance; the count then restarts,
-     * because the caller sweeps the directory instead.
-     */
-    shouldSweepInstead(parentId: string): boolean {
-        const count = (this.pointQueries.get(parentId) ?? 0) + 1;
-        this.pointQueries.delete(parentId);
-        if (count > this.limits.pointQueriesBeforeSweep) {
-            return true;
+    isWide(parentId: string): boolean {
+        return this.wideParents.has(parentId);
+    }
+
+    markWide(parentId: string) {
+        this.wideParents.delete(parentId);
+        this.wideParents.add(parentId);
+        if (this.wideParents.size > this.limits.maxSlots) {
+            // Oldest-marked first: Set keeps insertion order.
+            this.wideParents.delete(this.wideParents.values().next().value!);
         }
-        this.pointQueries.set(parentId, count);
-        if (this.pointQueries.size > this.limits.maxSlots) {
-            // Oldest-touched first: Map keeps insertion order.
-            this.pointQueries.delete(this.pointQueries.keys().next().value!);
-        }
-        return false;
     }
 
     /**

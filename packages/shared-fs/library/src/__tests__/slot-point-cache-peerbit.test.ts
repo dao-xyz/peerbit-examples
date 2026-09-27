@@ -1,5 +1,6 @@
 import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { forcePointTier } from "./cache-race-park.js";
 import {
     NamingEvent,
     ROOT_NODE_ID,
@@ -40,16 +41,34 @@ const recordQueries = (program: any) => {
         );
         return queryRows(query);
     };
+    const queryRowsUpTo = program.queryRowsUpTo.bind(program);
+    program.queryRowsUpTo = async (query: any[], limit: number) => {
+        queries.push({
+            ...Object.fromEntries(
+                query
+                    .filter((clause) => clause.key !== undefined)
+                    .map((clause) => [
+                        [clause.key].flat().join("."),
+                        clause.value,
+                    ])
+            ),
+            bounded: String(limit),
+        });
+        return queryRowsUpTo(query, limit);
+    };
     return queries;
 };
 
 describe("shared fs slot point cache (real index)", () => {
     let peer: Peerbit;
     let fs: SharedFsHandle;
+    let undoPointTier: () => void;
 
     beforeEach(async () => {
         peer = await Peerbit.create();
         fs = await openSharedFs({ peerbit: peer, machineLabel: "slot-point" });
+        // Most cases target the point tier; the width-gate case undoes this.
+        undoPointTier = forcePointTier(fs.program);
     });
 
     afterEach(async () => {
@@ -109,6 +128,10 @@ describe("shared fs slot point cache (real index)", () => {
         program.slotPointCache.clear();
         program.namingRowCache.clear();
         program.versionRowCache.clear();
+        // Known wide (as a >2,048-row directory would be after one bounded
+        // read), so lookups take the exact-slot path under test here.
+        program.slotPointCache.markWide(ROOT_NODE_ID);
+        program.slotPointCache.markWide(wideId);
         const queries = recordQueries(program);
 
         expect((await fs.stat("/wide/entry-100.txt"))?.name).toBe(
@@ -137,6 +160,34 @@ describe("shared fs slot point cache (real index)", () => {
         });
     });
 
+    it("reads a narrow unlisted directory whole and never issues an exact-slot query", async () => {
+        await fs.mkdir("/narrow");
+        await fs.writeBatch(
+            Array.from({ length: 50 }, (_, index) => ({
+                path: `/narrow/entry-${index}.txt`,
+                content: `value ${index}`,
+            }))
+        );
+        undoPointTier();
+        const program: any = fs.program;
+        const narrowId = (await fs.stat("/narrow"))!.nodeId;
+        program.slotSweepCache.clear();
+        program.slotPointCache.clear();
+        const queries = recordQueries(program);
+
+        expect((await fs.stat("/narrow/entry-7.txt"))?.name).toBe(
+            "entry-7.txt"
+        );
+        expect(await fs.stat("/narrow/absent.txt")).toBeUndefined();
+        await fs.writeFile("/narrow/new.txt", "new");
+        expect(queries.filter((q) => q.parentId === narrowId)).toEqual([
+            { kind: "naming", parentId: narrowId, bounded: "2048" },
+        ]);
+        // No (parentId, name) query shape at all: the planner never creates
+        // those indexes for a filesystem without wide directories.
+        expect(queries.filter((q) => q.name !== undefined)).toEqual([]);
+        expect(program.slotPointCache.isWide(narrowId)).toBe(false);
+    });
     it("moves a same-id Documents replacement out of its old name", async () => {
         await fs.writeFile("/before.txt", "content");
         const originalInfo = (await fs.stat("/before.txt"))!;
@@ -201,6 +252,11 @@ describe("shared fs slot point cache (real index)", () => {
         const program: any = fs.program;
         const original = (await program.namingStateForNode(originalInfo.nodeId))
             .winner;
+        // Exercise the point tier: both directories count as wide, so no
+        // listing answers these slots.
+        program.slotSweepCache.clear();
+        program.slotPointCache.markWide(left.nodeId);
+        program.slotPointCache.markWide(right.nodeId);
 
         expect(
             (await program.slotRows(left.nodeId, "moved.txt")).map(

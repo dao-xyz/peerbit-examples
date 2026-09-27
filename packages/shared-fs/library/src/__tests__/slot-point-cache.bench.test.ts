@@ -28,7 +28,7 @@ const percentile = (samples: number[], fraction: number) => {
     return sorted[Math.ceil(sorted.length * fraction) - 1];
 };
 
-type QueryKind = "point" | "sweep" | "node";
+type QueryKind = "point" | "sweep" | "node" | "bounded";
 
 /**
  * Point metadata lookups in one wide directory, cold and warm. The bench only
@@ -49,6 +49,13 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
                     point: 0,
                     sweep: 0,
                     node: 0,
+                    bounded: 0,
+                };
+                // Width-gate reads: at most wideDirectoryRows + 1 rows.
+                const queryRowsUpTo = program.queryRowsUpTo.bind(program);
+                program.queryRowsUpTo = async (query: any[], limit: number) => {
+                    counts.bounded++;
+                    return queryRowsUpTo(query, limit);
                 };
                 const queryRows = program.queryRows.bind(program);
                 program.queryRows = async (query: any[]) => {
@@ -71,6 +78,7 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
                 const take = () => {
                     const taken = { ...counts };
                     counts.point = counts.sweep = counts.node = 0;
+                    counts.bounded = 0;
                     return taken;
                 };
                 const clearCaches = () => {
@@ -175,6 +183,8 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
                     statAfterListMs: afterList.ms,
                     afterListQueries,
                     pointCache: program.slotPointCache?.snapshot(),
+                    wideDirectoryRows:
+                        program.slotPointCache?.limits?.wideDirectoryRows,
                 };
             } finally {
                 await peer.stop().catch(() => {});
@@ -197,29 +207,24 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
 
         // Structural gates only; timings are descriptive because CI runners
         // are heterogeneous.
+        const none = { point: 0, sweep: 0, node: 0, bounded: 0 };
         for (const result of report) {
-            expect(result.warmHitQueries).toEqual({
-                point: 0,
-                sweep: 0,
-                node: 0,
-            });
-            expect(result.warmMissQueries).toEqual({
-                point: 0,
-                sweep: 0,
-                node: 0,
-            });
+            expect(result.warmHitQueries).toEqual(none);
+            expect(result.warmMissQueries).toEqual(none);
             // A listed directory answers its slots without slot queries.
             expect(result.afterListQueries.point).toBe(0);
             expect(result.afterListQueries.sweep).toBe(0);
             if (result.pointCache) {
-                // Cold lookups read one exact slot, never the whole parent.
+                // Never a full sweep for a lookup: a narrow directory is read
+                // by one bounded query; a wide one by at most that plus one
+                // exact-slot query.
                 expect(result.coldHitQueries.sweep).toBe(0);
-                expect(result.coldHitQueries.point).toBe(1);
-                expect(result.coldMissQueries).toEqual({
-                    point: 1,
-                    sweep: 0,
-                    node: 0,
-                });
+                expect(result.coldMissQueries.sweep).toBe(0);
+                expect(result.coldHitQueries.bounded).toBeLessThanOrEqual(1);
+                expect(result.coldMissQueries.bounded).toBeLessThanOrEqual(1);
+                const wide = result.width > result.wideDirectoryRows;
+                expect(result.coldHitQueries.point).toBe(wide ? 1 : 0);
+                expect(result.coldMissQueries.point).toBe(wide ? 1 : 0);
             }
         }
     }, 600_000);
@@ -262,7 +267,23 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
             const seedMs = performance.now() - seedStarted;
 
             const program: any = new SharedFileSystem();
-            const counts = { point: 0, sweep: 0, node: 0, rows: 0 };
+            const counts = { point: 0, sweep: 0, node: 0, bounded: 0, rows: 0 };
+            program.queryRowsUpTo = async (query: any[], limit: number) => {
+                counts.bounded++;
+                const iterator = index.iterate({ query });
+                try {
+                    const rows = (await iterator.next(limit + 1)).map(
+                        (result: any) => result.value
+                    );
+                    counts.rows += rows.length;
+                    return {
+                        rows,
+                        complete: rows.length <= limit && iterator.done(),
+                    };
+                } finally {
+                    await iterator.close();
+                }
+            };
             program.queryRows = async (query: any[]) => {
                 const keys = new Set(
                     query.map((clause) => [clause.key].flat().join("."))
@@ -283,6 +304,7 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
             const take = () => {
                 const taken = { ...counts };
                 counts.point = counts.sweep = counts.node = counts.rows = 0;
+                counts.bounded = 0;
                 return taken;
             };
             const forgetSlots = () => {
@@ -341,12 +363,23 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
                     2
                 )
             );
-            const none = { point: 0, sweep: 0, node: 0, rows: 0 };
+            const none = { point: 0, sweep: 0, node: 0, bounded: 0, rows: 0 };
             expect(warmHitQueries).toEqual(none);
             expect(warmMissQueries).toEqual(none);
             if (program.slotPointCache) {
-                expect(coldHitQueries).toMatchObject({ point: 1, sweep: 0 });
-                expect(coldMissQueries).toEqual({ ...none, point: 1 });
+                // The first lookup's bounded read proves the directory wide;
+                // it is remembered, so the next cold lookup skips it.
+                expect(coldHitQueries).toMatchObject({
+                    point: 1,
+                    sweep: 0,
+                    bounded: 1,
+                });
+                expect(coldMissQueries).toMatchObject({
+                    point: 1,
+                    sweep: 0,
+                    node: 0,
+                    bounded: 0,
+                });
             }
         } finally {
             await indices.stop().catch(() => {});

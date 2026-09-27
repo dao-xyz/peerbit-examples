@@ -1,7 +1,7 @@
 import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ROOT_NODE_ID, openSharedFs, type SharedFsHandle } from "../index.js";
-import { parkNextRowQuery } from "./cache-race-park.js";
+import { forcePointTier, parkNextRowQuery } from "./cache-race-park.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -28,6 +28,8 @@ describe("shared fs cache fill/event race (directory slots)", () => {
     beforeEach(async () => {
         peer = await Peerbit.create();
         fs = await openSharedFs({ peerbit: peer, machineLabel: "slot-race" });
+        // These races target the point tier and sweep fills directly.
+        forcePointTier(fs.program);
     });
 
     afterEach(async () => {
@@ -50,6 +52,9 @@ describe("shared fs cache fill/event race (directory slots)", () => {
         const program: any = fs.program;
         program.slotSweepCache.clear();
         program.slotPointCache.clear();
+        // Known wide, so the concurrent create resolves its own absent slot
+        // with an exact query rather than caching a (fresh) listing itself.
+        program.slotPointCache.markWide(ROOT_NODE_ID);
 
         const { release, parkedReached } = parkNextRowQuery(program);
         // Park a full sweep: the concurrent create resolves its own absent
@@ -76,7 +81,11 @@ describe("shared fs cache fill/event race (directory slots)", () => {
         const program: any = fs.program;
         const nodeId = (await fs.stat("/removed.txt"))!.nodeId;
         const naming = (await program.namingStateForNode(nodeId)).winner;
+        // The race under test is the point slot's; keep root off the
+        // listing tier (a narrow root is otherwise read and cached whole).
+        program.slotSweepCache.clear();
         program.slotPointCache.clear();
+        program.slotPointCache.markWide(ROOT_NODE_ID);
         expect(program.slotSweepCache.has(ROOT_NODE_ID)).toBe(false);
 
         const { release, parkedReached } = parkNextRowQuery(program);

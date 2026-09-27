@@ -22,3 +22,30 @@ export const parkNextRowQuery = (program: any) => {
     });
     return { release, parkedReached };
 };
+
+/**
+ * Makes every directory count as wide for `program`, including on point
+ * caches that open/close/overlay retirement swap in, so lookups take the
+ * exact-slot path under test (a narrow directory is otherwise read and
+ * cached whole). `isWide` stays synchronous, so await structure is unchanged.
+ * Returns an undo function.
+ */
+export const forcePointTier = (program: any) => {
+    const forceWide = (cache: any) => {
+        cache.isWide = () => true;
+        return cache;
+    };
+    let pointCache = forceWide(program.slotPointCache);
+    Object.defineProperty(program, "slotPointCache", {
+        configurable: true,
+        get: () => pointCache,
+        set: (cache: any) => {
+            pointCache = forceWide(cache);
+        },
+    });
+    return () => {
+        delete pointCache.isWide;
+        delete program.slotPointCache;
+        program.slotPointCache = pointCache;
+    };
+};
