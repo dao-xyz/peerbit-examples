@@ -4005,13 +4005,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const epochKey = `slot:${parentId}`;
         const fillEpoch = this.epochOf(epochKey);
+        // close()/open()/overlay retirement replace the map: a fill that
+        // spans that must not repopulate the replacement.
+        const sweepCache = this.slotSweepCache;
         const rows = (
             await this.queryRows([
                 new StringMatch({ key: "kind", value: "naming" }),
                 new StringMatch({ key: "parentId", value: parentId }),
             ])
         ).map(namingRowOf);
-        if (this.epochOf(epochKey) === fillEpoch) {
+        if (
+            this.slotSweepCache === sweepCache &&
+            this.epochOf(epochKey) === fillEpoch
+        ) {
             this.slotSweepCache.set(
                 parentId,
                 new Map(rows.map((row) => [row.id, row]))
@@ -4031,9 +4037,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      *
      * The exact query is not truncated: a history too large to retain is
      * still returned whole and simply not cached (`installSlot` rejects it
-     * without evicting anything). Truncating could hide the winner, and
-     * falling back to a sweep would read a superset of rows and retain the
-     * whole directory.
+     * without evicting anything). Truncating could hide the winner. Only
+     * repeated distinct misses under one directory (past its point-query
+     * allowance) fall back to a directory sweep, which then caches the
+     * listing exactly as every lookup did before point queries existed.
      *
      * The point fill uses the same fences as the sweep fill (the per-directory
      * `slot:<parentId>` epoch, which includes the global epoch) plus the open
@@ -4068,6 +4075,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (cached) {
             return this.overlayUnionSlot(parentId, name, cached);
         }
+        if (cache.shouldSweepInstead(parentId)) {
+            // Many distinct cold lookups under one unlisted directory (bulk
+            // creates, scans): sweep it once, exactly as every lookup did
+            // before point queries, so its cached listing answers the rest.
+            return (await this.sweepRows(parentId)).filter(
+                (row) => row.name === name
+            );
+        }
         const generation = this.openGeneration;
         const epochKey = `slot:${parentId}`;
         const fillEpoch = this.epochOf(epochKey);
@@ -4076,9 +4091,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             name,
             `${generation}:${fillEpoch}`,
             async () => {
+                // Only naming rows carry parentId/name, so `kind` adds
+                // nothing here; leaving it out keeps the planner's lazily
+                // created composite indexes to two columns, which every
+                // later write must maintain.
                 const rows = (
                     await this.queryRows([
-                        new StringMatch({ key: "kind", value: "naming" }),
                         new StringMatch({ key: "parentId", value: parentId }),
                         new StringMatch({ key: "name", value: name }),
                     ])

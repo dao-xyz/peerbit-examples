@@ -181,8 +181,10 @@ A path lookup in a directory that has not been listed reads only the exact
 `(parent, name)` history instead of the whole directory; those histories are
 kept in a separate LRU of at most 4,096 slots and markers, 16,384 rows and
 about 8 MiB (estimated). A history too large for it is still returned whole,
-just not cached. Once a directory is listed, its lookups are answered from the
-listing, as before.
+just not cached. After 32 such exact queries under one unlisted directory (a
+bulk create or scan), the next miss reads and caches the whole directory once,
+as every lookup did before. Once a directory is listed, its lookups are
+answered from the listing, as before.
 Every syncing peer keeps a full replica by default
 (`replicate: { factor: 1 }`); pass `replicate: false` for a peer that should
 not store content — reads then fall back to bounded remote chunk fetches

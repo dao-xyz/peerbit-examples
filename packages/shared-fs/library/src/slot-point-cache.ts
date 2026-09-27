@@ -28,6 +28,11 @@ export type SlotPointCacheLimits = {
     maxEstimatedBytes: number;
     /** Distinct active slot queries; other callers wait for capacity. */
     maxInFlight: number;
+    /**
+     * Exact-slot queries one unlisted directory may issue before its next
+     * miss sweeps it instead, so its cached listing answers later lookups.
+     */
+    pointQueriesBeforeSweep: number;
 };
 
 export const DEFAULT_SLOT_POINT_CACHE_LIMITS: SlotPointCacheLimits = {
@@ -35,6 +40,7 @@ export const DEFAULT_SLOT_POINT_CACHE_LIMITS: SlotPointCacheLimits = {
     maxRows: 16_384,
     maxEstimatedBytes: 8 * 1024 * 1024,
     maxInFlight: 64,
+    pointQueriesBeforeSweep: 32,
 };
 
 type Parent = {
@@ -82,8 +88,10 @@ export class BoundedSlotPointCache {
     private slots = 0;
     private bytes = 0;
     private fills = new Map<string, Promise<SlotNamingRow[]>>();
-    private capacityChanged: Promise<void> | undefined;
-    private notifyCapacity: (() => void) | undefined;
+    private waitersByKey = new Map<string, Array<() => void>>();
+    private waitingKeys: string[] = [];
+    /** Point queries per unlisted directory; bounded like the slots. */
+    private pointQueries = new Map<string, number>();
 
     constructor(limits: Partial<SlotPointCacheLimits> = {}) {
         this.limits = { ...DEFAULT_SLOT_POINT_CACHE_LIMITS, ...limits };
@@ -336,6 +344,25 @@ export class BoundedSlotPointCache {
     }
 
     /**
+     * Count one exact-slot query under `parentId`. Returns true once the
+     * directory exceeded its point-query allowance; the count then restarts,
+     * because the caller sweeps the directory instead.
+     */
+    shouldSweepInstead(parentId: string): boolean {
+        const count = (this.pointQueries.get(parentId) ?? 0) + 1;
+        this.pointQueries.delete(parentId);
+        if (count > this.limits.pointQueriesBeforeSweep) {
+            return true;
+        }
+        this.pointQueries.set(parentId, count);
+        if (this.pointQueries.size > this.limits.maxSlots) {
+            // Oldest-touched first: Map keeps insertion order.
+            this.pointQueries.delete(this.pointQueries.keys().next().value!);
+        }
+        return false;
+    }
+
+    /**
      * Single-flight for identical slot queries. `stamp` must change whenever
      * a caller could observe a newer snapshot than an active query, so a
      * later caller never joins a pre-event result.
@@ -349,23 +376,57 @@ export class BoundedSlotPointCache {
         const key = JSON.stringify([parentId, name, stamp]);
         for (;;) {
             const existing = this.fills.get(key);
-            if (existing) return existing;
+            if (existing) {
+                // A woken waiter that joins instead of starting a fill must
+                // pass its wakeup on, or the freed slot would sit idle.
+                this.wakeNextKey();
+                return existing;
+            }
             if (this.fills.size < this.limits.maxInFlight) break;
-            this.capacityChanged ??= new Promise<void>((resolve) => {
-                this.notifyCapacity = resolve;
+            // Waiters queue per key in FIFO order of first arrival. A freed
+            // slot wakes one key's waiters (O(1) per completion instead of
+            // waking every queued caller), and they share one fill.
+            await new Promise<void>((resolve) => {
+                const queued = this.waitersByKey.get(key);
+                if (queued) {
+                    queued.push(resolve);
+                } else {
+                    this.waitersByKey.set(key, [resolve]);
+                    this.waitingKeys.push(key);
+                }
             });
-            await this.capacityChanged;
         }
         const promise: Promise<SlotNamingRow[]> = Promise.resolve()
             .then(fill)
             .finally(() => {
                 if (this.fills.get(key) === promise) this.fills.delete(key);
-                const notify = this.notifyCapacity;
-                this.capacityChanged = undefined;
-                this.notifyCapacity = undefined;
-                notify?.();
+                this.wakeNextKey();
             });
         this.fills.set(key, promise);
+        // Callers queued for this key can join now instead of waiting for
+        // capacity and then repeating the same query.
+        this.wakeKey(key);
         return promise;
+    }
+
+    private wakeKey(key: string) {
+        const queued = this.waitersByKey.get(key);
+        if (!queued) return;
+        this.waitersByKey.delete(key);
+        for (const resolve of queued) resolve();
+    }
+
+    private wakeNextKey() {
+        while (
+            this.fills.size < this.limits.maxInFlight &&
+            this.waitingKeys.length > 0
+        ) {
+            const key = this.waitingKeys.shift()!;
+            if (this.waitersByKey.has(key)) {
+                // Keys already woken by wakeKey are skipped lazily here.
+                this.wakeKey(key);
+                return;
+            }
+        }
     }
 }

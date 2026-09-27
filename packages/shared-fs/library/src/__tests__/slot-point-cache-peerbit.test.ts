@@ -116,10 +116,10 @@ describe("shared fs slot point cache (real index)", () => {
         );
         const underWide = queries.filter((q) => q.parentId === wideId);
         expect(underWide).toEqual([
-            { kind: "naming", parentId: wideId, name: "entry-100.txt" },
+            { parentId: wideId, name: "entry-100.txt" },
         ]);
         expect(queries.filter((q) => q.parentId === ROOT_NODE_ID)).toEqual([
-            { kind: "naming", parentId: ROOT_NODE_ID, name: "wide" },
+            { parentId: ROOT_NODE_ID, name: "wide" },
         ]);
 
         queries.length = 0;
@@ -128,9 +128,7 @@ describe("shared fs slot point cache (real index)", () => {
             expect(await fs.stat("/wide/absent.txt")).toBeUndefined();
         }
         // One cold negative, then nothing.
-        expect(queries).toEqual([
-            { kind: "naming", parentId: wideId, name: "absent.txt" },
-        ]);
+        expect(queries).toEqual([{ parentId: wideId, name: "absent.txt" }]);
         expect(program.slotSweepCache.size).toBe(0);
         expect(program.slotPointCache.snapshot()).toMatchObject({
             parents: 2,

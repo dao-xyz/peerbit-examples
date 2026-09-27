@@ -134,7 +134,7 @@ describe("shared fs bounded slot point cache", () => {
             );
         };
         const result = await program.slotResolution("dir:wide", "shared.txt");
-        expect(queries).toEqual([["kind", "parentId", "name"]]);
+        expect(queries).toEqual([["parentId", "name"]]);
         expect(examinedCandidates).toBe(count);
         expect(result.nodeId).toBe(`file:${count - 1}`);
         expect(result.shadowed).toHaveLength(count - 1);
@@ -273,5 +273,86 @@ describe("shared fs bounded slot point cache", () => {
         expect(cache.getSlot("dir:p", "c")).toEqual([]);
         expect(cache.getSlot("dir:p", "d")).toEqual([]);
         expect(cache.snapshot().entries).toBe(4);
+    });
+
+    it("counts point queries per directory within a bounded map", () => {
+        const cache = new BoundedSlotPointCache({
+            maxSlots: 4,
+            pointQueriesBeforeSweep: 2,
+        });
+        expect(cache.shouldSweepInstead("dir:a")).toBe(false);
+        expect(cache.shouldSweepInstead("dir:a")).toBe(false);
+        expect(cache.shouldSweepInstead("dir:a")).toBe(true);
+        // The allowance restarts after a sweep.
+        expect(cache.shouldSweepInstead("dir:a")).toBe(false);
+        for (let i = 0; i < 100; i++) {
+            cache.shouldSweepInstead(`dir:${i}`);
+        }
+        expect((cache as any).pointQueries.size).toBeLessThanOrEqual(4);
+    });
+
+    it("admits queued fills in FIFO order within the in-flight bound", async () => {
+        const cache = new BoundedSlotPointCache({ maxInFlight: 2 });
+        const started: string[] = [];
+        const releases = new Map<string, () => void>();
+        let inFlight = 0;
+        let maxSeen = 0;
+        const fill = (name: string) => async () => {
+            started.push(name);
+            inFlight++;
+            maxSeen = Math.max(maxSeen, inFlight);
+            await new Promise<void>((resolve) => releases.set(name, resolve));
+            inFlight--;
+            return [];
+        };
+        const names = Array.from({ length: 200 }, (_, i) => `n-${i}`);
+        const all = names.map((name) =>
+            cache.runSlotFill("dir:p", name, "s", fill(name))
+        );
+        // Release fills one at a time as they start; each completion must
+        // admit exactly the next queued caller.
+        for (let i = 0; i < names.length; i++) {
+            while (!releases.has(names[i])) {
+                await new Promise((resolve) => setImmediate(resolve));
+            }
+            releases.get(names[i])!();
+        }
+        await Promise.all(all);
+        expect(started).toEqual(names);
+        expect(maxSeen).toBeLessThanOrEqual(2);
+        expect(cache.snapshot().inFlight).toBe(0);
+    });
+
+    it("passes a wakeup on when a woken caller joins an identical fill", async () => {
+        const cache = new BoundedSlotPointCache({ maxInFlight: 2 });
+        const gates = new Map<string, () => void>();
+        const started: string[] = [];
+        const fill = (label: string) => async () => {
+            started.push(label);
+            await new Promise<void>((resolve) => gates.set(label, resolve));
+            return [];
+        };
+        const tick = () => new Promise((resolve) => setImmediate(resolve));
+        const a = cache.runSlotFill("dir:p", "a", "s", fill("a"));
+        const d = cache.runSlotFill("dir:p", "d", "s", fill("d"));
+        const b1 = cache.runSlotFill("dir:p", "b", "s", fill("b1"));
+        const b2 = cache.runSlotFill("dir:p", "b", "s", fill("b2"));
+        const e = cache.runSlotFill("dir:p", "e", "s", fill("e"));
+        await tick();
+        expect(started).toEqual(["a", "d"]);
+        gates.get("a")!();
+        await a;
+        await tick();
+        expect(started).toEqual(["a", "d", "b1"]);
+        // d's completion wakes b2, which joins b1's fill without using the
+        // freed slot and must hand the wakeup to e.
+        gates.get("d")!();
+        await d;
+        await tick();
+        expect(started).toEqual(["a", "d", "b1", "e"]);
+        gates.get("b1")!();
+        gates.get("e")!();
+        await Promise.all([b1, b2, e]);
+        expect(started).not.toContain("b2");
     });
 });

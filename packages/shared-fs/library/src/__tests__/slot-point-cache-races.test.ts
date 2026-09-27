@@ -36,7 +36,13 @@ const harness = (initial: NamingEvent[] = []) => {
             query.map((clause) => [[clause.key].flat().join("."), clause.value])
         );
         queries.push(predicates);
-        expect(predicates.kind).toBe("naming");
+        // Directory sweeps filter by kind; exact-slot queries rely on only
+        // naming rows carrying parentId/name.
+        if (predicates.name === undefined) {
+            expect(predicates.kind).toBe("naming");
+        } else {
+            expect(predicates.kind).toBeUndefined();
+        }
         return [...index.values()].filter((row: any) =>
             Object.entries(predicates).every(
                 ([key, value]) => key === "kind" || row[key] === value
@@ -98,7 +104,6 @@ describe("shared fs slot point cache races", () => {
             expect(ids(current)).toEqual(direction === "out" ? [] : [moved.id]);
             expect(queries).toHaveLength(2);
             expect(queries[0]).toEqual({
-                kind: "naming",
                 parentId: target.parentId,
                 name: target.name,
             });
@@ -278,8 +283,8 @@ describe("shared fs slot point cache races", () => {
         );
         expect(await program.slotRows("dir:wide", "absent.txt")).toEqual([]);
         expect(slotQueries("dir:wide")).toEqual([
-            { kind: "naming", parentId: "dir:wide", name: "entry-25.txt" },
-            { kind: "naming", parentId: "dir:wide", name: "absent.txt" },
+            { parentId: "dir:wide", name: "entry-25.txt" },
+            { parentId: "dir:wide", name: "absent.txt" },
         ]);
         for (let i = 0; i < 10; i++) {
             await program.slotRows("dir:wide", "entry-25.txt");
@@ -504,4 +509,48 @@ describe("shared fs slot point cache races", () => {
             expect(program.slotPointCache.snapshot().rows).toBe(0);
         }
     );
+
+    it("does not let a directory sweep that spans a cache replacement repopulate it", async () => {
+        const existing = naming("present");
+        const { program } = harness([existing]);
+        const { parkedReached, release } = parkNextRowQuery(program);
+        const sweep = program.sweepRows("dir:left");
+        await parkedReached;
+        // close()/open()/overlay retirement swap in a fresh map; no slot
+        // epoch changes, so only the map identity fences the stale fill.
+        const replacement = new Map();
+        program.slotSweepCache = replacement;
+        release();
+        expect(ids(await sweep)).toEqual([existing.id]);
+        expect(program.slotSweepCache).toBe(replacement);
+        expect(replacement.has("dir:left")).toBe(false);
+    });
+
+    it("sweeps an unlisted directory once its point-query allowance is spent", async () => {
+        const present = naming("present", "dir:left", "name-40.txt");
+        const { program, slotQueries, sweepQueries } = harness([present]);
+        const allowance = program.slotPointCache.limits.pointQueriesBeforeSweep;
+        for (let i = 0; i < allowance; i++) {
+            expect(await program.slotRows("dir:left", `name-${i}.txt`)).toEqual(
+                []
+            );
+        }
+        expect(slotQueries("dir:left")).toHaveLength(allowance);
+        expect(sweepQueries("dir:left")).toHaveLength(0);
+        // The next distinct miss reads the directory once, as every lookup
+        // did before point queries, and its listing answers the rest.
+        expect(
+            ids(await program.slotRows("dir:left", `name-${allowance}.txt`))
+        ).toEqual([]);
+        expect(sweepQueries("dir:left")).toHaveLength(1);
+        expect(program.slotSweepCache.has("dir:left")).toBe(true);
+        expect(ids(await program.slotRows("dir:left", "name-40.txt"))).toEqual([
+            present.id,
+        ]);
+        for (let i = 41; i < 60; i++) {
+            await program.slotRows("dir:left", `name-${i}.txt`);
+        }
+        expect(slotQueries("dir:left")).toHaveLength(allowance);
+        expect(sweepQueries("dir:left")).toHaveLength(1);
+    });
 });
