@@ -186,8 +186,15 @@ describe("shared fs mount backend", () => {
 
     it("profiles each commit fence once with its trigger and nested target write", async () => {
         const events: SharedFsMountProfileEvent[] = [];
+        // The library's own writeFile sub-phases (see write-file-profile
+        // tests) are kept apart so this test pins the mount-level stream.
+        const subPhases: SharedFsMountProfileEvent[] = [];
         const backend = createSharedFsMountBackend(fs, {
-            profile: (event) => events.push(event),
+            profile: (event) =>
+                (event.phase.startsWith("writeFile.")
+                    ? subPhases
+                    : events
+                ).push(event),
         });
         const handle = await backend.open("/profiled.txt", {
             write: true,
@@ -205,8 +212,12 @@ describe("shared fs mount backend", () => {
             source: "node-daemon",
             operation: "writeFile",
             ok: true,
-            detail: { bytes: 5, mutationGeneration: 2 },
+            detail: { bytes: 5, mutationGeneration: 2, writeId: 1 },
         });
+        expect(subPhases.length).toBeGreaterThan(0);
+        expect(subPhases.every((event) => event.detail?.writeId === 1)).toBe(
+            true
+        );
         expect(flush).toMatchObject({
             operation: "flush",
             ok: true,
@@ -248,11 +259,17 @@ describe("shared fs mount backend", () => {
         ]);
 
         events.length = 0;
+        subPhases.length = 0;
         await backend.truncate("/profiled.txt", 2);
         expect(events.map((event) => [event.phase, event.operation])).toEqual([
             ["mount.target.writeFile", "writeFile"],
             ["mount.localCommit", "truncate"],
         ]);
+        expect(events[0].detail).toMatchObject({ writeId: 2 });
+        expect(subPhases.length).toBeGreaterThan(0);
+        expect(subPhases.every((event) => event.detail?.writeId === 2)).toBe(
+            true
+        );
         expect(events[1].detail).toMatchObject({
             trigger: "truncate",
             requiredCommit: true,

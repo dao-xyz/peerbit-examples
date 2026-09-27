@@ -706,6 +706,9 @@ export const createSharedFsMountBackend = (
     const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
     const profile = options.profile;
+    // Joins a `mount.target.writeFile` record to the target's own sub-phase
+    // records; advanced only while profiling.
+    let profileWriteId = 0;
     const delegatesReadVerification =
         target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
     const delegatesNamespaceMutation =
@@ -1502,6 +1505,7 @@ export const createSharedFsMountBackend = (
             >;
             try {
                 if (profile) {
+                    const writeId = ++profileWriteId;
                     const identity = {
                         source: "node-daemon",
                         phase: "mount.target.writeFile",
@@ -1509,14 +1513,26 @@ export const createSharedFsMountBackend = (
                         detail: {
                             bytes: snapshot.length,
                             mutationGeneration: snapshot.mutationGeneration,
+                            writeId,
                         },
                     } as const;
+                    // Only a target advertising the versioned mount write
+                    // capability (SharedFileSystem and its handles) receives
+                    // the sub-phase hook; custom targets see exactly the
+                    // unprofiled options.
+                    const targetOptions: typeof writeOptions =
+                        delegatesWriteHashing
+                            ? {
+                                  ...writeOptions,
+                                  mountProfile: { sink: profile, writeId },
+                              }
+                            : writeOptions;
                     const started = process.hrtime.bigint();
                     try {
                         result = await target.writeFile(
                             state.path,
                             bytes,
-                            writeOptions
+                            targetOptions
                         );
                     } catch (error) {
                         const durationNs = finishSharedFsMountProfile(

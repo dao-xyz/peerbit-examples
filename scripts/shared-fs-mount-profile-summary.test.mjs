@@ -16,6 +16,7 @@ import {
     parseMountProfileText,
     runMountProfileSummary,
     summarizeMountProfile,
+    summarizeWriteFileBreakdown,
 } from "./shared-fs-mount-profile-summary.mjs";
 
 const T0 = 1_790_000_000_000_000_000n;
@@ -306,6 +307,348 @@ test("reports commit fences without double counting their target writes", () => 
     assert.equal(flush.exclusiveOfWriteFileNs.count, 0);
     assert.equal(release.failed, 1);
     assert.equal(release.exclusiveOfWriteFileNs.p50Ns, 400);
+});
+
+// One profiled library write: contiguous sub-phases laid out from `offset`
+// inside a `mount.target.writeFile` parent that starts 50 ns earlier.
+const profiledWrite = ({
+    writeId,
+    offset,
+    phases,
+    outsideNs = 100,
+    ok = true,
+    parentDetail = {},
+}) => {
+    const lines = [];
+    let cursor = offset + 50;
+    for (const [phase, durationNs, detail = {}, phaseOk = true] of phases) {
+        lines.push(
+            daemon(
+                `writeFile.${phase}`,
+                "writeFile",
+                cursor,
+                durationNs,
+                phaseOk,
+                {
+                    writeId,
+                    ...detail,
+                }
+            )
+        );
+        cursor += durationNs;
+    }
+    const subPhaseNs = cursor - (offset + 50);
+    lines.push(
+        daemon(
+            "mount.target.writeFile",
+            "writeFile",
+            offset,
+            subPhaseNs + outsideNs,
+            ok,
+            { bytes: 4096, mutationGeneration: 2, writeId, ...parentDetail }
+        )
+    );
+    return lines;
+};
+
+const existingWrite = (writeId, offset, versionPutNs) =>
+    profiledWrite({
+        writeId,
+        offset,
+        phases: [
+            ["prepare", 100],
+            ["resolvePath", 200],
+            ["readHeads", 100],
+            ["hash", 100],
+            ["loadBase", 300],
+            ["chunk", 100],
+            [
+                "touchChunks",
+                1_000,
+                {
+                    chunks: 1,
+                    probes: 1,
+                    probeNs: 200,
+                    witnessQueries: 0,
+                    witnessNs: 0,
+                    chunkPuts: 1,
+                    chunkPutBytes: 4096,
+                    chunkPutNs: 780,
+                    absentPuts: 1,
+                    linkedPuts: 0,
+                    unprobedPuts: 0,
+                    dedupSkips: 0,
+                    dedupSkipBytes: 0,
+                },
+            ],
+            ["guard", 150, { checkpoint: "before-version" }],
+            ["versionPut", versionPutNs],
+            ["cacheApply", 50, { document: "version" }],
+            ["verifyChunks", 300, { chunks: 1, reputs: 0, reputBytes: 0 }],
+            ["guard", 150, { checkpoint: "after-version" }],
+            ["result", 50, { outcome: "created", newFile: false }],
+        ],
+    });
+
+const breakdownProfile = () =>
+    [
+        daemon("profile.start", "open", 0, 0, true, { pid: 33 }),
+        // Two existing-file writes: 2_600 ns of sub-phases besides versionPut.
+        ...existingWrite(1, 100_000, 4_000),
+        ...existingWrite(2, 200_000, 6_000),
+        // A new file adds a naming put and a second cache update.
+        ...profiledWrite({
+            writeId: 3,
+            offset: 300_000,
+            phases: [
+                ["prepare", 100],
+                [
+                    "touchChunks",
+                    500,
+                    {
+                        probes: 1,
+                        probeNs: 100,
+                        witnessQueries: 1,
+                        witnessNs: 400,
+                        chunkPuts: 0,
+                        chunkPutBytes: 0,
+                        chunkPutNs: 0,
+                        dedupSkips: 1,
+                        dedupSkipBytes: 1024,
+                    },
+                ],
+                ["versionPut", 2_000],
+                ["cacheApply", 50, { document: "version" }],
+                ["namingPut", 2_000],
+                ["cacheApply", 50, { document: "naming" }],
+                ["result", 50, { outcome: "created", newFile: true }],
+            ],
+        }),
+        // Identical bytes: the library no-op.
+        ...profiledWrite({
+            writeId: 4,
+            offset: 400_000,
+            phases: [
+                ["prepare", 100],
+                ["hash", 100],
+                ["guard", 100, { checkpoint: "no-op" }],
+                ["result", 50, { outcome: "unchanged", newFile: false }],
+            ],
+        }),
+        // A failure closes its sub-phase with a code; the parent fails too.
+        ...profiledWrite({
+            writeId: 5,
+            offset: 500_000,
+            ok: false,
+            parentDetail: { code: "EAGAIN" },
+            phases: [
+                ["prepare", 100],
+                ["resolvePath", 200, { code: "EAGAIN" }, false],
+            ],
+        }),
+        // A custom target without the capability, and an older profile.
+        daemon("mount.target.writeFile", "writeFile", 600_000, 900, true, {
+            bytes: 1,
+            mutationGeneration: 2,
+            writeId: 6,
+        }),
+        daemon("mount.target.writeFile", "writeFile", 700_000, 900, true, {
+            bytes: 1,
+            mutationGeneration: 2,
+        }),
+        // Sub-phases without a parent, and one outside its parent's window.
+        daemon("writeFile.prepare", "writeFile", 800_000, 100, true, {
+            writeId: 99,
+        }),
+        daemon("writeFile.result", "writeFile", 900_000, 100, true, {
+            writeId: 1,
+        }),
+        daemon("profile.summary", "close", 0, 1_000_000, true, {
+            pid: 33,
+            emitted: 0,
+            written: 0,
+            dropped: 0,
+            lost: 0,
+            writeErrors: 0,
+        }),
+    ].join("\n") + "\n";
+
+test("breaks library writeFile time into sub-phases without double counting", () => {
+    const summary = summarizeMountProfile({
+        inputs: [
+            parseMountProfileText(breakdownProfile(), "node-daemon.ndjson"),
+        ],
+    });
+    const breakdown = summary.writeFileBreakdown;
+    assert.equal(breakdown.writeFileRecords, 6);
+    assert.equal(breakdown.joinedWrites, 5);
+    assert.equal(breakdown.parentsWithoutSubPhases, 1);
+    assert.equal(breakdown.unkeyedParents, 1);
+    assert.equal(breakdown.orphanSubPhases, 1);
+    assert.equal(breakdown.containmentViolations, 1);
+    assert.equal(breakdown.overlappingSubPhases, 0);
+    assert.deepEqual(breakdown.kindCounts, {
+        newFile: 1,
+        existingFile: 2,
+        unchanged: 1,
+        failed: 1,
+    });
+
+    const all = breakdown.all;
+    // Parents: 6_600+100, 8_600+100, 4_750+100, 350+100, 300+100.
+    assert.equal(all.totalWriteFileNs, 21_100);
+    assert.equal(all.writeFileNs.count, 5);
+    assert.deepEqual(
+        all.phases.map((phase) => phase.phase),
+        [
+            "writeFile.prepare",
+            "writeFile.resolvePath",
+            "writeFile.readHeads",
+            "writeFile.hash",
+            "writeFile.loadBase",
+            "writeFile.chunk",
+            "writeFile.touchChunks",
+            "writeFile.guard",
+            "writeFile.versionPut",
+            "writeFile.cacheApply",
+            "writeFile.verifyChunks",
+            "writeFile.namingPut",
+            "writeFile.result",
+        ]
+    );
+    const phase = (name) => all.phases.find((entry) => entry.phase === name);
+    const versionPut = phase("writeFile.versionPut");
+    assert.equal(versionPut.writes, 3);
+    assert.equal(versionPut.records, 3);
+    assert.equal(versionPut.totalNs, 12_000);
+    assert.equal(versionPut.perWriteNs.p50Ns, 4_000);
+    assert.equal(versionPut.perWriteNs.p95Ns, 6_000);
+    assert.equal(versionPut.shareOfWriteFile, 12_000 / 21_100);
+    // Repeated sub-phases are summed per write before the percentiles.
+    const guard = phase("writeFile.guard");
+    assert.equal(guard.writes, 3);
+    assert.equal(guard.records, 5);
+    assert.deepEqual(
+        [guard.perWriteNs.minNs, guard.perWriteNs.maxNs],
+        [100, 300]
+    );
+    assert.equal(phase("writeFile.cacheApply").perWriteNs.maxNs, 100);
+    // Sub-phases plus outside time account for every parent nanosecond once.
+    const subPhaseTotal = all.phases.reduce(
+        (sum, entry) => sum + entry.totalNs,
+        0
+    );
+    assert.equal(all.outsideSubPhasesNs.totalNs, 500);
+    assert.equal(subPhaseTotal + all.outsideSubPhasesNs.totalNs, 21_100);
+    // Shares partition the parent time (up to floating-point rounding).
+    assert.ok(
+        Math.abs(
+            all.phases.reduce((sum, entry) => sum + entry.shareOfWriteFile, 0) +
+                all.outsideShareOfWriteFile -
+                1
+        ) < 1e-12
+    );
+
+    assert.equal(breakdown.byKind.existingFile.writes, 2);
+    assert.equal(
+        breakdown.byKind.newFile.phases.find(
+            (entry) => entry.phase === "writeFile.namingPut"
+        ).perWriteNs.p50Ns,
+        2_000
+    );
+    assert.deepEqual(breakdown.touchChunks.totals, {
+        probes: 3,
+        witnessQueries: 1,
+        dedupSkips: 1,
+        dedupSkipBytes: 1024,
+        chunkPuts: 2,
+        chunkPutBytes: 8192,
+        absentPuts: 2,
+        linkedPuts: 0,
+        unprobedPuts: 0,
+        reputs: 0,
+        reputBytes: 0,
+    });
+    assert.equal(breakdown.touchChunks.writes, 3);
+    assert.equal(breakdown.touchChunks.taskNs.chunkPutNs.p50Ns, 780);
+    assert.equal(breakdown.touchChunks.taskNs.witnessNs.maxNs, 400);
+
+    // The per-phase table still lists sub-phases on their own.
+    assert.equal(
+        summary.phases.find((group) => group.phase === "writeFile.versionPut")
+            .count,
+        3
+    );
+
+    const markdown = formatMountProfileSummaryMarkdown(summary);
+    assert.match(markdown, /### writeFile breakdown/u);
+    assert.match(
+        markdown,
+        /Joined 5\/6 mount\.target\.writeFile records .*new file 1, existing file 2, unchanged 1, failed 1.*orphan sub-phase records=1, containment violations=1/u
+    );
+    assert.match(
+        markdown,
+        /^\| writeFile\.versionPut \| 3 \| 3 \| 0\.004 ms \| 0\.006 ms \| 56\.9% \|$/mu
+    );
+    assert.match(
+        markdown,
+        /^\| \(outside sub-phases\) \| 5 \| — \| 0\.000 ms \| 0\.000 ms \| 2\.4% \|$/mu
+    );
+    assert.match(markdown, /2 chunk puts \(8192 bytes; absent 2/u);
+    assert.match(
+        markdown,
+        /^\| Sub-phase \(p50\/write\) \| new file \(1\) \| existing file \(2\) \| unchanged \(1\) \| failed \(1\) \|$/mu
+    );
+    assert.match(markdown, /never add a phase to its parent/u);
+});
+
+test("joins sub-phases per profile file and flags overlapping ones", () => {
+    const first = parseMountProfileText(
+        existingWrite(1, 100_000, 4_000).join("\n"),
+        "a/node-daemon.ndjson"
+    );
+    const second = parseMountProfileText(
+        existingWrite(1, 100_000, 5_000).join("\n"),
+        "b/node-daemon.ndjson"
+    );
+    const breakdown = summarizeWriteFileBreakdown([
+        ...first.records,
+        ...second.records,
+    ]);
+    // The same writeId in two files is two writes, not an ambiguous join.
+    assert.equal(breakdown.joinedWrites, 2);
+    assert.equal(breakdown.ambiguousJoins, 0);
+    assert.equal(
+        breakdown.all.phases.find(
+            (entry) => entry.phase === "writeFile.versionPut"
+        ).totalNs,
+        9_000
+    );
+
+    const overlapping = parseMountProfileText(
+        [
+            daemon("writeFile.prepare", "writeFile", 1_000, 500, true, {
+                writeId: 7,
+            }),
+            daemon("writeFile.hash", "writeFile", 1_400, 500, true, {
+                writeId: 7,
+            }),
+            daemon("mount.target.writeFile", "writeFile", 900, 2_000, true, {
+                writeId: 7,
+            }),
+        ].join("\n")
+    );
+    const flagged = summarizeWriteFileBreakdown(overlapping.records);
+    assert.equal(flagged.overlappingSubPhases, 1);
+    assert.equal(flagged.joinedWrites, 1);
+    // Profiles without writeFile sub-phases add no breakdown section.
+    const plain = summarizeMountProfile({ inputs: parsedInputs() });
+    assert.equal(plain.writeFileBreakdown.joinedWrites, 0);
+    assert.equal(plain.writeFileBreakdown.unkeyedParents, 1);
+    assert.doesNotMatch(
+        formatMountProfileSummaryMarkdown(plain),
+        /### writeFile breakdown/u
+    );
 });
 
 test("reports drops and sessions that ended without a summary", () => {

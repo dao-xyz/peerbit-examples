@@ -10,6 +10,45 @@ export type SharedFsMountProfileSource =
     | "native-adapter"
     | "node-daemon";
 
+/**
+ * Sequential sub-phases of one library `writeFile` call made by a profiled
+ * mount commit. Each record is nested in the `mount.target.writeFile` record
+ * with the same `detail.writeId`; together they partition the library call in
+ * code order, so they may be added to each other but never to their parent.
+ *
+ * - `prepare`: readiness and argument guards, source bytes.
+ * - `resolvePath` / `readHeads`: path lookup and the node's content heads.
+ * - `hash`: whole-file SHA-256 and the no-op checks.
+ * - `loadBase`: explicit base-version documents (mount writes to existing
+ *   files).
+ * - `chunk`: splitting and per-chunk SHA-256 ids.
+ * - `touchChunks`: W1 dedup (presence probes, fresh-witness queries) and chunk
+ *   puts; its `*Ns` detail is task time summed over concurrent chunk tasks.
+ * - `guard`: one expected-node recheck (`detail.checkpoint`).
+ * - `versionPut` / `namingPut`: building and `Documents.put` of the
+ *   FileVersion / NamingEvent (signing, log append, indexing, and anything
+ *   else inside that upstream call).
+ * - `cacheApply`: warm-cache update for the document just put.
+ * - `verifyChunks`: W2 presence re-verification and re-puts.
+ * - `resolveParent`: parent lookup for a new path.
+ * - `result`: the returned version info.
+ */
+export type SharedFsWriteFileProfilePhase =
+    | "writeFile.prepare"
+    | "writeFile.resolvePath"
+    | "writeFile.readHeads"
+    | "writeFile.hash"
+    | "writeFile.loadBase"
+    | "writeFile.chunk"
+    | "writeFile.touchChunks"
+    | "writeFile.guard"
+    | "writeFile.versionPut"
+    | "writeFile.cacheApply"
+    | "writeFile.verifyChunks"
+    | "writeFile.resolveParent"
+    | "writeFile.namingPut"
+    | "writeFile.result";
+
 export type SharedFsMountProfilePhase =
     | "native.callback"
     | "ipc.queue"
@@ -17,6 +56,7 @@ export type SharedFsMountProfilePhase =
     | "ipc.service"
     | "mount.localCommit"
     | "mount.target.writeFile"
+    | SharedFsWriteFileProfilePhase
     | "profile.start"
     | "profile.summary";
 
@@ -163,6 +203,170 @@ export const beginSharedFsMountProfile = (
         extraDetail?: Readonly<Record<string, SharedFsMountProfileDetailValue>>
     ) => finishSharedFsMountProfile(sink, identity, started, ok, extraDetail);
 };
+
+/**
+ * @internal Opt-in request, passed by a profiled mount backend as
+ * `WriteFileOptions.mountProfile`, for `writeFile` sub-phase records.
+ * `writeId` joins them to the backend's `mount.target.writeFile` record.
+ */
+export type SharedFsWriteFileProfileHook = {
+    readonly sink: SharedFsMountProfileSink;
+    readonly writeId: number;
+};
+
+/**
+ * @internal W1 chunk I/O counters. Chunk tasks run concurrently, so the `*Ns`
+ * fields are task time summed over tasks, not wall time; for a single-chunk
+ * write they partition the `writeFile.touchChunks` window.
+ */
+export type SharedFsWriteFileChunkCounters = {
+    /** Index-only presence probes. */
+    probes: number;
+    probeNs: number;
+    /** Fresh-witness version queries for chunks already present. */
+    witnessQueries: number;
+    witnessNs: number;
+    /** Chunks skipped because a fresh witness references them. */
+    dedupSkips: number;
+    dedupSkipBytes: number;
+    /** Chunk documents put (absent, unwitnessed, or dedup disabled). */
+    chunkPuts: number;
+    chunkPutBytes: number;
+    chunkPutNs: number;
+    /** Puts after a verified absence (fresh chain). */
+    absentPuts: number;
+    /** Present but unwitnessed chunks re-put to link the live head. */
+    linkedPuts: number;
+    /** Puts without a probe (`dedup: "off"` or a partial replica). */
+    unprobedPuts: number;
+};
+
+/** @internal */
+export const createSharedFsWriteFileChunkCounters =
+    (): SharedFsWriteFileChunkCounters => ({
+        probes: 0,
+        probeNs: 0,
+        witnessQueries: 0,
+        witnessNs: 0,
+        dedupSkips: 0,
+        dedupSkipBytes: 0,
+        chunkPuts: 0,
+        chunkPutBytes: 0,
+        chunkPutNs: 0,
+        absentPuts: 0,
+        linkedPuts: 0,
+        unprobedPuts: 0,
+    });
+
+/** @internal Monotonic nanoseconds since `started` (process.hrtime.bigint()). */
+export const sharedFsMountProfileElapsedNs = elapsedNs;
+
+/**
+ * @internal Cursor over the sequential sub-phases of one profiled `writeFile`.
+ * Allocated only when a caller passed a hook. `enter` closes the open phase
+ * and opens the next from one clock reading, so consecutive records are
+ * contiguous and their durations sum to the profiled span exactly.
+ */
+export class SharedFsWriteFileProfiler {
+    private readonly sink: SharedFsMountProfileSink;
+    private readonly writeId: number | undefined;
+    private phase: SharedFsWriteFileProfilePhase = "writeFile.prepare";
+    private started: bigint;
+    private detail: Record<string, SharedFsMountProfileDetailValue>;
+    private counterSet: Readonly<Record<string, number>> | undefined;
+    private closed = false;
+
+    constructor(hook: SharedFsWriteFileProfileHook) {
+        this.sink = hook.sink;
+        this.writeId = Number.isSafeInteger(hook.writeId)
+            ? hook.writeId
+            : undefined;
+        this.detail = this.baseDetail();
+        this.started = process.hrtime.bigint();
+    }
+
+    private baseDetail(): Record<string, SharedFsMountProfileDetailValue> {
+        return this.writeId === undefined ? {} : { writeId: this.writeId };
+    }
+
+    /** Add scalar context to the open sub-phase. */
+    set(key: string, value: SharedFsMountProfileDetailValue) {
+        if (!this.closed) this.detail[key] = value;
+    }
+
+    /** Merge these (possibly concurrently updated) counters when it closes. */
+    counters<T extends Record<string, number>>(counters: T): T {
+        if (!this.closed) this.counterSet = counters;
+        return counters;
+    }
+
+    /** Close the open sub-phase and open `phase`. */
+    enter(
+        phase: SharedFsWriteFileProfilePhase,
+        detail?: Readonly<Record<string, SharedFsMountProfileDetailValue>>
+    ) {
+        if (this.closed) return;
+        const now = process.hrtime.bigint();
+        this.emit(true, now);
+        this.phase = phase;
+        this.started = now;
+        this.detail = detail
+            ? { ...this.baseDetail(), ...detail }
+            : this.baseDetail();
+        this.counterSet = undefined;
+    }
+
+    /** Close the last sub-phase of a successful call. */
+    finish() {
+        if (this.closed) return;
+        this.closed = true;
+        this.emit(true, process.hrtime.bigint());
+    }
+
+    /** Close the open sub-phase as the one that failed. */
+    fail(error: unknown) {
+        if (this.closed) return;
+        this.closed = true;
+        this.detail.code = sharedFsMountProfileErrorCode(error);
+        this.emit(false, process.hrtime.bigint());
+    }
+
+    private emit(ok: boolean, now: bigint) {
+        const elapsed = now - this.started;
+        const durationNs =
+            elapsed < 0n
+                ? 0
+                : Number(
+                      elapsed > BigInt(Number.MAX_SAFE_INTEGER)
+                          ? BigInt(Number.MAX_SAFE_INTEGER)
+                          : elapsed
+                  );
+        emitSharedFsMountProfile(this.sink, {
+            schema: SHARED_FS_MOUNT_PROFILE_SCHEMA,
+            schemaVersion: SHARED_FS_MOUNT_PROFILE_SCHEMA_VERSION,
+            source: "node-daemon",
+            phase: this.phase,
+            operation: "writeFile",
+            startUnixNs: sharedFsMountProfileUnixNs(this.started),
+            durationNs,
+            ok,
+            detail: this.counterSet
+                ? { ...this.detail, ...this.counterSet }
+                : this.detail,
+        });
+    }
+}
+
+/**
+ * @internal A profiler for a caller-supplied hook, or undefined when the hook
+ * cannot emit (no sink function).
+ */
+export const createSharedFsWriteFileProfiler = (
+    hook: SharedFsWriteFileProfileHook
+): SharedFsWriteFileProfiler | undefined =>
+    hook !== null && typeof hook === "object" && typeof hook.sink === "function"
+        ? new SharedFsWriteFileProfiler(hook)
+        : undefined;
 
 /**
  * Time an async phase after its caller has established that a sink exists.

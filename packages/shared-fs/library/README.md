@@ -959,16 +959,32 @@ The phases are deliberately narrow and nest rather than add up:
 - `mount.target.writeFile` covers the exact target `writeFile` promise used to
   publish mounted bytes (nested in a `mount.localCommit`). It does not assert
   storage-engine, hardware, remote-readability, replication, or
-  persisted-receipt phases.
+  persisted-receipt phases. Its `writeId` joins it to the sub-phases below.
+- `writeFile.*` records break that library call into sequential sub-phases,
+  in code order: `prepare`, `resolvePath`, `readHeads`, `hash` (whole-file
+  SHA-256 and no-op checks), `loadBase`, `chunk` (splitting and chunk ids),
+  `touchChunks` (W1 dedup probes, fresh-witness queries and chunk puts),
+  `guard` (one expected-node recheck, with its `checkpoint`), `versionPut`,
+  `cacheApply`, `verifyChunks` (W2), `resolveParent`, `namingPut`, and
+  `result`. Each carries the same `writeId` plus bounded detail (bytes, chunk
+  counts, dedup skips, puts, outcome). They are contiguous and lie inside
+  their `mount.target.writeFile` record, so they may be added to each other
+  but never to their parent. `touchChunks` also reports probe, witness and put
+  task time summed over its concurrent chunk tasks. The backend passes this
+  request only to targets that advertise the versioned mount write capability
+  (`SharedFileSystem` handles); other targets receive the unprofiled options.
+  A failing sub-phase closes with `ok: false` and the library error's `code`;
+  no sub-phase record follows it.
 
 Failures carry `detail.code`: the backend error code the mount returns, so
 absent (`ENOENT`) and unavailable (`EAGAIN`, `EIO`) outcomes stay separable.
 
 These events cannot measure time spent in the kernel before a userspace mount
 callback, kernel cache hits that never call userspace, or time after the
-callback returns. The current APIs also expose no truthful sub-boundaries for
-chunk hashing, block persistence, document append, or remote replication, so
-the profiler does not invent them.
+callback returns. `versionPut`, `namingPut` and the chunk puts each time one
+whole `Documents.put`; the current APIs expose no truthful sub-boundaries
+inside it for signing, block persistence, log append, indexing, or remote
+replication, so the profiler does not invent them.
 
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
