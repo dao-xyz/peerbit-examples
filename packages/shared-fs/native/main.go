@@ -21,6 +21,9 @@ func main() {
 	// requests it cannot break an adapter built before profiling existed.
 	profiler := openMountProfilerFromEnv(os.Getenv, os.Stderr)
 	err := runNativeMount(*endpoint, *mountpoint, *debug, profiler)
+	// The mount's Init already holds shutdown signals while profiling; this
+	// also covers a mount that failed before Init. close is bounded.
+	profiler.holdShutdownSignals()
 	profiler.close()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

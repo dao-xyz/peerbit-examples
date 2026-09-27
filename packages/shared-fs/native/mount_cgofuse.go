@@ -125,6 +125,9 @@ func (fs *peerbitFS) Init() {
 	if finish := fs.beginCallback("init"); finish != nil {
 		defer finish(0)
 	}
+	// Keep the post-unmount SIGINT the CLI sends from killing the adapter
+	// before the profile is flushed (no-op when profiling is off).
+	fs.profile.holdShutdownSignals()
 	fs.debugf("fuse init")
 	fs.ready.Do(func() {
 		fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")

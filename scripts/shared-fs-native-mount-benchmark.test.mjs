@@ -235,22 +235,16 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
 });
 
 test("native smoke wrappers plumb opt-in mount profiling and the overwrite base", async () => {
+    // Windows checkouts may use CRLF (core.autocrlf); match on LF text.
+    const readLf = async (relative) =>
+        (await readFile(new URL(relative, import.meta.url), "utf8")).replace(
+            /\r\n/gu,
+            "\n"
+        );
     const [posix, powershell, workflow] = await Promise.all([
-        readFile(
-            new URL("./shared-fs-external-native-smoke.sh", import.meta.url),
-            "utf8"
-        ),
-        readFile(
-            new URL("./shared-fs-external-native-smoke.ps1", import.meta.url),
-            "utf8"
-        ),
-        readFile(
-            new URL(
-                "../.github/workflows/shared-fs-native-smoke.yml",
-                import.meta.url
-            ),
-            "utf8"
-        ),
+        readLf("./shared-fs-external-native-smoke.sh"),
+        readLf("./shared-fs-external-native-smoke.ps1"),
+        readLf("../.github/workflows/shared-fs-native-smoke.yml"),
     ]);
     for (const source of [posix, powershell]) {
         assert.match(

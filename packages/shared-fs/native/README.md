@@ -242,7 +242,8 @@ Emitting never blocks a callback. Records are copied into a bounded queue after
 the request lane is released and written by one background goroutine; when the
 queue is full a record is dropped and counted. On clean shutdown the adapter
 writes a `profile.summary` record with `emitted`, `written`, `dropped`, and
-`writeErrors`. A forced kill (for example the Windows smoke teardown) leaves
+`writeErrors`; while profiling, a follow-up SIGINT/SIGTERM after unmount does
+not interrupt that bounded (at most 5 s) flush. A forced kill (for example the Windows smoke teardown) leaves
 no summary, which the summarizer reports as an incomplete session. With
 profiling off the only added work is a nil check.
 

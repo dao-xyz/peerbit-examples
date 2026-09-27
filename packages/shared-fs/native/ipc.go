@@ -110,12 +110,14 @@ func (c *ipcClient) request(op string, args ...interface{}) (interface{}, error)
 	}
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
-	result, _, err := c.requestLocked(c.nextRequestID(), op, args)
+	result, _, err := c.requestLocked(op, args)
 	return result, err
 }
 
-// ipcRequestTrace is populated only for profiled requests.
+// ipcRequestTrace describes one request for profiling.
 type ipcRequestTrace struct {
+	// requestID is 0 when the request failed before it was assigned an id.
+	requestID uint64
 	localPort int
 	// connected means the sample included dialing and protocol negotiation.
 	connected bool
@@ -130,7 +132,6 @@ func (c *ipcClient) profiledRequest(op string, args []interface{}) (interface{},
 	var (
 		acquiredAt time.Time
 		finishedAt time.Time
-		id         uint64
 		result     interface{}
 		trace      ipcRequestTrace
 		err        error
@@ -139,12 +140,14 @@ func (c *ipcClient) profiledRequest(op string, args []interface{}) (interface{},
 		c.requestMu.Lock()
 		defer c.requestMu.Unlock()
 		acquiredAt = time.Now()
-		id = c.nextRequestID()
-		result, trace, err = c.requestLocked(id, op, args)
+		result, trace, err = c.requestLocked(op, args)
 		finishedAt = time.Now()
 	}()
 
-	fields := profileRequestID
+	var fields mountProfileField
+	if trace.requestID != 0 {
+		fields |= profileRequestID
+	}
 	if trace.localPort > 0 {
 		fields |= profileLocalPort
 	}
@@ -155,7 +158,7 @@ func (c *ipcClient) profiledRequest(op string, args []interface{}) (interface{},
 		durationNs:  acquiredAt.Sub(queuedAt).Nanoseconds(),
 		ok:          true,
 		fields:      fields,
-		requestID:   id,
+		requestID:   trace.requestID,
 		localPort:   trace.localPort,
 	})
 	roundTrip := mountProfileRecord{
@@ -165,7 +168,7 @@ func (c *ipcClient) profiledRequest(op string, args []interface{}) (interface{},
 		durationNs:  finishedAt.Sub(acquiredAt).Nanoseconds(),
 		ok:          err == nil,
 		fields:      fields,
-		requestID:   id,
+		requestID:   trace.requestID,
 		localPort:   trace.localPort,
 	}
 	if trace.connected {
@@ -193,8 +196,10 @@ func tcpLocalPort(conn net.Conn) int {
 	return 0
 }
 
-// requestLocked performs one request while the caller holds requestMu.
-func (c *ipcClient) requestLocked(id uint64, op string, args []interface{}) (interface{}, ipcRequestTrace, error) {
+// requestLocked performs one request while the caller holds requestMu. A
+// request id is allocated only after a connection is available, so a failed
+// dial or negotiation never consumes one.
+func (c *ipcClient) requestLocked(op string, args []interface{}) (interface{}, ipcRequestTrace, error) {
 	var trace ipcRequestTrace
 	conn, reader, protocol, v2Limits, dialed, err := c.connect()
 	trace.connected = dialed
@@ -204,6 +209,9 @@ func (c *ipcClient) requestLocked(id uint64, op string, args []interface{}) (int
 	if err != nil {
 		return nil, trace, err
 	}
+
+	id := c.nextRequestID()
+	trace.requestID = id
 
 	request := ipcRequest{ID: id, Op: op, Args: args}
 	if protocol == ipcWireProtocolV2 {

@@ -917,6 +917,18 @@ export const parseMountProfileSummaryArguments = (argv) => {
                 options.maxRows = rows;
                 break;
             }
+            case "--title":
+                if (
+                    value.length < 1 ||
+                    value.length > 160 ||
+                    /[\r\n]/u.test(value)
+                ) {
+                    throw new Error(
+                        "--title requires a single line of at most 160 characters"
+                    );
+                }
+                options.title = value;
+                break;
             case "--json":
                 options.json = resolve(value);
                 break;
@@ -971,6 +983,7 @@ export const runMountProfileSummary = async (options) => {
         sections.push(
             formatMountProfileSummaryMarkdown(summary, {
                 maxRows: options.maxRows,
+                ...(options.title ? { title: options.title } : {}),
             })
         );
     }

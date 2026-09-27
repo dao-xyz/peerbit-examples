@@ -531,8 +531,15 @@ test("runs from profile directories and writes JSON and Markdown", async () => {
             join(temporary, "out", "summary.md"),
             "--max-rows",
             "2",
+            "--title",
+            "Shared FS mount profile: pass B1 (profiled)",
         ]);
         const { summary, markdown } = await runMountProfileSummary(options);
+        // Distinct titles keep several passes apart in one step summary.
+        assert.match(
+            markdown,
+            /^## Shared FS mount profile: pass B1 \(profiled\)$/mu
+        );
         assert.equal(summary.inputs.length, 2);
         assert.equal(summary.ipc.joined, 3);
         const written = JSON.parse(
@@ -543,7 +550,6 @@ test("runs from profile directories and writes JSON and Markdown", async () => {
             await readFile(join(temporary, "out", "summary.md"), "utf8"),
             markdown
         );
-        assert.match(markdown, /## Shared FS mount profile/u);
         assert.match(markdown, /### IPC lane: queue vs service/u);
         assert.match(markdown, /### Local commit fences/u);
         assert.match(markdown, /more phase groups in the JSON summary/u);
@@ -568,6 +574,16 @@ test("rejects incomplete or unknown summary arguments", () => {
     assert.throws(
         () => parseMountProfileSummaryArguments(["--ab-report", "A1=x.json"]),
         /--ab-report requires/u
+    );
+    assert.throws(
+        () =>
+            parseMountProfileSummaryArguments([
+                "--input",
+                "x",
+                "--title",
+                "two\nlines",
+            ]),
+        /--title requires a single line/u
     );
     assert.throws(
         () =>

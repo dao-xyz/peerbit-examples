@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { open, unlink } from "node:fs/promises";
 import { finished } from "node:stream/promises";
 import type { Writable } from "node:stream";
 
@@ -195,6 +195,12 @@ export type SharedFsMountProfileWriterOptions = {
     maxQueuedBytes?: number;
     /** Source written on the writer's own start/summary records. */
     source?: SharedFsMountProfileSource;
+    /**
+     * Upper bound for `close()` (default 5000 ms). A profile output that stops
+     * making progress is destroyed after this and its in-flight events are
+     * counted as lost, so a wedged disk cannot hang mount shutdown.
+     */
+    closeTimeoutMs?: number;
 };
 
 export type SharedFsMountProfileWriterStats = {
@@ -204,11 +210,13 @@ export type SharedFsMountProfileWriterStats = {
     written: number;
     /** Events rejected by a full queue or a failed output. */
     dropped: number;
-    /** Events serialized but lost to an output error. */
+    /** Events serialized but lost to an output error or a close timeout. */
     lost: number;
     /** Events offered after close began; never written. */
     droppedAfterClose: number;
     writeErrors: number;
+    /** close() hit its time bound and destroyed the output. */
+    closeTimedOut: boolean;
     maxQueuedEvents: number;
     maxQueuedBytes: number;
 };
@@ -219,13 +227,15 @@ export type SharedFsMountProfileWriter = {
     stats(): SharedFsMountProfileWriterStats;
     /**
      * Stop admission, flush accepted events, append a `profile.summary`
-     * record with the final counters, and end the output stream.
+     * record with the final counters, and end the output stream. Bounded by
+     * `closeTimeoutMs`; it resolves (never rejects) with the final counters.
      */
     close(): Promise<SharedFsMountProfileWriterStats>;
 };
 
 const DEFAULT_MAX_QUEUED_EVENTS = 16_384;
 const DEFAULT_MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 
 const positiveInteger = (value: number | undefined, fallback: number) => {
     if (value === undefined) return fallback;
@@ -236,6 +246,24 @@ const positiveInteger = (value: number | undefined, fallback: number) => {
     }
     return value;
 };
+
+const resolveWriterOptions = (options: SharedFsMountProfileWriterOptions) => ({
+    maxQueuedEvents: positiveInteger(
+        options.maxQueuedEvents,
+        DEFAULT_MAX_QUEUED_EVENTS
+    ),
+    maxQueuedBytes: positiveInteger(
+        options.maxQueuedBytes,
+        DEFAULT_MAX_QUEUED_BYTES
+    ),
+    closeTimeoutMs: positiveInteger(
+        options.closeTimeoutMs,
+        DEFAULT_CLOSE_TIMEOUT_MS
+    ),
+    source: options.source ?? "node-daemon",
+});
+
+type ProfileBatch = { events: number; settled: boolean };
 
 /**
  * Bounded asynchronous NDJSON writer for mount profile events.
@@ -250,15 +278,8 @@ export const createSharedFsMountProfileWriter = (
     output: Writable,
     options: SharedFsMountProfileWriterOptions = {}
 ): SharedFsMountProfileWriter => {
-    const maxQueuedEvents = positiveInteger(
-        options.maxQueuedEvents,
-        DEFAULT_MAX_QUEUED_EVENTS
-    );
-    const maxQueuedBytes = positiveInteger(
-        options.maxQueuedBytes,
-        DEFAULT_MAX_QUEUED_BYTES
-    );
-    const source = options.source ?? "node-daemon";
+    const { maxQueuedEvents, maxQueuedBytes, closeTimeoutMs, source } =
+        resolveWriterOptions(options);
     const openedAt = process.hrtime.bigint();
     const counters = {
         emitted: 0,
@@ -271,24 +292,36 @@ export const createSharedFsMountProfileWriter = (
     let pending: SharedFsMountProfileEvent[] = [];
     let scheduled: NodeJS.Immediate | undefined;
     let closed = false;
+    let closeTimedOut = false;
     let failed = false;
     let closing: Promise<SharedFsMountProfileWriterStats> | undefined;
-    let inFlightBatches = 0;
+    const inFlight = new Set<ProfileBatch>();
     let idleWaiters: Array<() => void> = [];
 
     const stats = (): SharedFsMountProfileWriterStats => ({
         ...counters,
+        closeTimedOut,
         maxQueuedEvents,
         maxQueuedBytes,
     });
 
-    const settleBatch = () => {
-        inFlightBatches--;
-        if (inFlightBatches === 0 && idleWaiters.length > 0) {
+    const releaseIdleWaiters = () => {
+        if (inFlight.size === 0 && idleWaiters.length > 0) {
             const waiters = idleWaiters;
             idleWaiters = [];
             for (const resolve of waiters) resolve();
         }
+    };
+
+    // Each batch is counted exactly once: by its write callback, or as lost
+    // when close() gives up on a stalled output.
+    const settleBatch = (batch: ProfileBatch, error?: unknown) => {
+        if (batch.settled) return;
+        batch.settled = true;
+        inFlight.delete(batch);
+        if (error) counters.lost += batch.events;
+        else counters.written += batch.events;
+        releaseIdleWaiters();
     };
 
     const onOutputError = () => {
@@ -297,25 +330,15 @@ export const createSharedFsMountProfileWriter = (
     };
     output.on("error", onOutputError);
 
-    const writeLines = (
-        text: string,
-        eventCount: number,
-        countsAsEvents: boolean
-    ) => {
-        inFlightBatches++;
+    const writeLines = (text: string, events: number) => {
+        const batch: ProfileBatch = { events, settled: false };
+        inFlight.add(batch);
         try {
-            output.write(text, (error) => {
-                if (countsAsEvents) {
-                    if (error) counters.lost += eventCount;
-                    else counters.written += eventCount;
-                }
-                settleBatch();
-            });
-        } catch {
-            if (countsAsEvents) counters.lost += eventCount;
+            output.write(text, (error) => settleBatch(batch, error));
+        } catch (error) {
             failed = true;
             counters.writeErrors++;
-            settleBatch();
+            settleBatch(batch, error ?? new Error("profile write failed"));
         }
     };
 
@@ -330,7 +353,7 @@ export const createSharedFsMountProfileWriter = (
         }
         let text = "";
         for (const event of batch) text += `${JSON.stringify(event)}\n`;
-        writeLines(text, batch.length, true);
+        writeLines(text, batch.length);
     };
 
     const meta = (
@@ -359,8 +382,7 @@ export const createSharedFsMountProfileWriter = (
                 maxQueuedBytes,
             })
         )}\n`,
-        0,
-        false
+        0
     );
 
     const sink: SharedFsMountProfileSink = (event) => {
@@ -381,46 +403,67 @@ export const createSharedFsMountProfileWriter = (
         scheduled ??= setImmediate(drain);
     };
 
+    const flushAndEnd = async () => {
+        if (inFlight.size > 0) {
+            await new Promise<void>((resolve) => idleWaiters.push(resolve));
+        }
+        if (closeTimedOut) return;
+        const final = stats();
+        if (!failed) {
+            writeLines(
+                `${JSON.stringify(
+                    meta(
+                        "profile.summary",
+                        "close",
+                        elapsedNs(openedAt),
+                        final.writeErrors === 0,
+                        {
+                            pid: process.pid,
+                            emitted: final.emitted,
+                            written: final.written,
+                            dropped: final.dropped,
+                            lost: final.lost,
+                            droppedAfterClose: final.droppedAfterClose,
+                            writeErrors: final.writeErrors,
+                            maxQueuedEvents,
+                            maxQueuedBytes,
+                        }
+                    )
+                )}\n`,
+                0
+            );
+        }
+        output.end();
+        try {
+            await finished(output);
+        } catch {
+            // The error listener (kept attached so a late error cannot
+            // become an uncaught exception) already counted the failure.
+        }
+    };
+
     const close = () => {
         closing ??= (async () => {
             closed = true;
             if (scheduled) clearImmediate(scheduled);
             drain();
-            if (inFlightBatches > 0) {
-                await new Promise<void>((resolve) => idleWaiters.push(resolve));
-            }
-            const final = stats();
-            if (!failed) {
-                writeLines(
-                    `${JSON.stringify(
-                        meta(
-                            "profile.summary",
-                            "close",
-                            elapsedNs(openedAt),
-                            final.writeErrors === 0,
-                            {
-                                pid: process.pid,
-                                emitted: final.emitted,
-                                written: final.written,
-                                dropped: final.dropped,
-                                lost: final.lost,
-                                droppedAfterClose: final.droppedAfterClose,
-                                writeErrors: final.writeErrors,
-                                maxQueuedEvents,
-                                maxQueuedBytes,
-                            }
-                        )
-                    )}\n`,
-                    0,
-                    false
-                );
-            }
-            output.end();
-            try {
-                await finished(output);
-            } catch {
-                // The error listener (kept attached so a late error cannot
-                // become an uncaught exception) already counted the failure.
+            let timer: NodeJS.Timeout | undefined;
+            const deadline = new Promise<"timeout">((resolve) => {
+                timer = setTimeout(() => resolve("timeout"), closeTimeoutMs);
+                // Do not keep an otherwise finished process alive.
+                timer.unref?.();
+            });
+            const outcome = await Promise.race([
+                flushAndEnd().then(() => "flushed" as const),
+                deadline,
+            ]);
+            clearTimeout(timer);
+            if (outcome === "timeout") {
+                closeTimedOut = true;
+                for (const batch of [...inFlight]) {
+                    settleBatch(batch, new Error("profile close timed out"));
+                }
+                output.destroy();
             }
             return stats();
         })();
@@ -436,11 +479,20 @@ export const createSharedFsMountProfileWriter = (
  */
 export const openSharedFsMountProfileFile = async (
     path: string,
-    options?: SharedFsMountProfileWriterOptions
+    options: SharedFsMountProfileWriterOptions = {}
 ): Promise<SharedFsMountProfileWriter> => {
+    // Reject invalid bounds before creating the file, so a bad call neither
+    // leaks a handle nor leaves an empty file that blocks an exclusive retry.
+    resolveWriterOptions(options);
     const handle = await open(path, "wx");
-    return createSharedFsMountProfileWriter(
-        handle.createWriteStream(),
-        options
-    );
+    try {
+        return createSharedFsMountProfileWriter(
+            handle.createWriteStream(),
+            options
+        );
+    } catch (error) {
+        await handle.close().catch(() => {});
+        await unlink(path).catch(() => {});
+        throw error;
+    }
 };

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -318,6 +318,64 @@ describe("bounded mount profile writer", () => {
         expect(stats.dropped + stats.lost).toBe(2);
     });
 
+    it("bounds close on a stalled output and counts in-flight events as lost", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+            const output = new GatedWritable({ gated: true });
+            const writer = createSharedFsMountProfileWriter(output, {
+                closeTimeoutMs: 5_000,
+            });
+            writer.sink(event("stalled-1"));
+            writer.sink(event("stalled-2"));
+            let settled = false;
+            const closing = writer.close().then((stats) => {
+                settled = true;
+                return stats;
+            });
+            // The output never completes its first write; close waits for
+            // its bound and not a moment longer on the fake clock.
+            await vi.advanceTimersByTimeAsync(4_999);
+            expect(settled).toBe(false);
+            await vi.advanceTimersByTimeAsync(1);
+            const stats = await closing;
+            expect(stats).toMatchObject({
+                emitted: 2,
+                written: 0,
+                dropped: 0,
+                lost: 2,
+                closeTimedOut: true,
+            });
+            expect(output.destroyed).toBe(true);
+            // Late completion of the destroyed stream is not counted twice.
+            output.release();
+            await nextMacrotask();
+            expect(writer.stats()).toMatchObject({ written: 0, lost: 2 });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("clears the close bound when the output finishes in time", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+            const output = new GatedWritable({ gated: false });
+            const writer = createSharedFsMountProfileWriter(output, {
+                closeTimeoutMs: 5_000,
+            });
+            writer.sink(event("prompt"));
+            const stats = await writer.close();
+            expect(stats).toMatchObject({
+                written: 1,
+                lost: 0,
+                closeTimedOut: false,
+            });
+            expect(vi.getTimerCount()).toBe(0);
+            expect(output.lines().at(-1)?.phase).toBe("profile.summary");
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it("rejects invalid bounds", () => {
         const output = new GatedWritable({ gated: false });
         expect(() =>
@@ -325,6 +383,9 @@ describe("bounded mount profile writer", () => {
         ).toThrow(RangeError);
         expect(() =>
             createSharedFsMountProfileWriter(output, { maxQueuedBytes: 1.5 })
+        ).toThrow(RangeError);
+        expect(() =>
+            createSharedFsMountProfileWriter(output, { closeTimeoutMs: -1 })
         ).toThrow(RangeError);
     });
 
@@ -346,6 +407,17 @@ describe("bounded mount profile writer", () => {
                 "ipc.service",
                 "profile.summary",
             ]);
+
+            // Invalid bounds are rejected before the file is created, so the
+            // exclusive path stays free for a corrected retry.
+            const retried = join(directory, "retried.ndjson");
+            await expect(
+                openSharedFsMountProfileFile(retried, { maxQueuedEvents: 0 })
+            ).rejects.toThrow(RangeError);
+            await expect(access(retried)).rejects.toMatchObject({
+                code: "ENOENT",
+            });
+            await (await openSharedFsMountProfileFile(retried)).close();
 
             const existing = join(directory, "existing.ndjson");
             await writeFile(existing, "keep\n");

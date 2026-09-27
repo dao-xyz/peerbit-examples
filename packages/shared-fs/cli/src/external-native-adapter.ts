@@ -1,4 +1,16 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import {
+    spawn,
+    type ChildProcess,
+    type SpawnOptionsWithStdioTuple,
+    type StdioNull,
+    type StdioPipe,
+} from "node:child_process";
+
+type AdapterSpawnOptions = SpawnOptionsWithStdioTuple<
+    StdioNull,
+    StdioPipe,
+    StdioPipe
+>;
 
 type ExternalNativeAdapterOptions = {
     readinessTimeoutMs?: number;
@@ -14,6 +26,33 @@ type ExternalNativeAdapterOptions = {
 
 export const NATIVE_ADAPTER_PROFILE_FILE_ENV =
     "PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE";
+
+/**
+ * The adapter profiles only when this mount asked for it: an explicit file is
+ * set, and a value inherited from the CLI's own environment is removed.
+ * Otherwise the adapter inherits the environment unchanged.
+ */
+export const adapterSpawnOptions = (
+    profileFile: string | undefined,
+    environment: NodeJS.ProcessEnv = process.env
+): AdapterSpawnOptions => {
+    const stdio: AdapterSpawnOptions["stdio"] = ["ignore", "pipe", "pipe"];
+    if (profileFile !== undefined) {
+        return {
+            stdio,
+            env: {
+                ...environment,
+                [NATIVE_ADAPTER_PROFILE_FILE_ENV]: profileFile,
+            },
+        };
+    }
+    if (environment[NATIVE_ADAPTER_PROFILE_FILE_ENV] === undefined) {
+        return { stdio };
+    }
+    const env = { ...environment };
+    delete env[NATIVE_ADAPTER_PROFILE_FILE_ENV];
+    return { stdio, env };
+};
 
 const childExited = (child: ChildProcess) =>
     child.exitCode != null || child.signalCode != null;
@@ -129,15 +168,7 @@ export const mountExternalNativeAdapter = async (
     const child = (options.spawnAdapter ?? spawn)(
         command,
         args,
-        options.profileFile === undefined
-            ? { stdio: ["ignore", "pipe", "pipe"] }
-            : {
-                  stdio: ["ignore", "pipe", "pipe"],
-                  env: {
-                      ...process.env,
-                      [NATIVE_ADAPTER_PROFILE_FILE_ENV]: options.profileFile,
-                  },
-              }
+        adapterSpawnOptions(options.profileFile)
     );
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 

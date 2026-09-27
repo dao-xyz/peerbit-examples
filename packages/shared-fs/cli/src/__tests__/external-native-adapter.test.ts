@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+    adapterSpawnOptions,
     mountExternalNativeAdapter,
     NATIVE_ADAPTER_PROFILE_FILE_ENV,
 } from "../external-native-adapter.js";
@@ -114,6 +115,35 @@ describe("external native adapter lifecycle", () => {
             ["--endpoint", "tcp://127.0.0.1:1", "--mountpoint", "/unused"],
             { stdio: ["ignore", "pipe", "pipe"] }
         );
+    });
+
+    it("does not let an inherited profile variable enable adapter profiling", () => {
+        const inherited = {
+            PATH: "/bin",
+            [NATIVE_ADAPTER_PROFILE_FILE_ENV]: "/stale/native-adapter.ndjson",
+        };
+        const options = adapterSpawnOptions(undefined, inherited);
+        expect(options).toEqual({
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { PATH: "/bin" },
+        });
+        // The caller's environment object is not mutated.
+        expect(inherited[NATIVE_ADAPTER_PROFILE_FILE_ENV]).toBe(
+            "/stale/native-adapter.ndjson"
+        );
+        // An explicit profile file replaces the inherited value.
+        expect(
+            adapterSpawnOptions("/profiles/native-adapter.ndjson", inherited)
+                .env
+        ).toEqual({
+            PATH: "/bin",
+            [NATIVE_ADAPTER_PROFILE_FILE_ENV]:
+                "/profiles/native-adapter.ndjson",
+        });
+        // Without the variable the common path passes no env at all.
+        expect(adapterSpawnOptions(undefined, { PATH: "/bin" })).toEqual({
+            stdio: ["ignore", "pipe", "pipe"],
+        });
     });
 
     it("stops and reaps a ready child during unmount", async () => {

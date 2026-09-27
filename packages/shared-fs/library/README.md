@@ -911,7 +911,9 @@ a bounded queue (16,384 events by default) and batches are written
 asynchronously; while the stream holds 8 MiB or more of unwritten bytes, new
 events are dropped and counted. `close()` flushes, appends a `profile.summary`
 record with `emitted`, `written`, `dropped`, and `lost` counts, and ends the
-stream. Files are created exclusively and never overwritten.
+stream. `close()` is bounded (`closeTimeoutMs`, default 5 s): a stalled output is
+destroyed and its in-flight events are counted as lost. Files are created
+exclusively and never overwritten.
 
 The phases are deliberately narrow and nest rather than add up:
 

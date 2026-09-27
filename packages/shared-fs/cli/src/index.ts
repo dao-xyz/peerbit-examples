@@ -243,12 +243,50 @@ const closeMountProfile = async (
     writer: SharedFsMountProfileWriter | undefined
 ) => {
     if (!writer) return;
+    // close() is bounded (default 5 s) and resolves with final counters even
+    // when the profile output is wedged.
     const stats = await writer.close();
-    if (stats.dropped > 0 || stats.lost > 0 || stats.writeErrors > 0) {
+    if (
+        stats.dropped > 0 ||
+        stats.lost > 0 ||
+        stats.writeErrors > 0 ||
+        stats.closeTimedOut
+    ) {
         console.error(
-            `Mount profile was incomplete: dropped=${stats.dropped} lost=${stats.lost} writeErrors=${stats.writeErrors}`
+            `Mount profile was incomplete: dropped=${stats.dropped} lost=${stats.lost} writeErrors=${stats.writeErrors}${stats.closeTimedOut ? " (close timed out)" : ""}`
         );
     }
+};
+
+/**
+ * Tear down a mount in dependency order. The profile is closed once the mount
+ * and IPC server have stopped producing events, before Peerbit stops, so a
+ * slow or failing Peerbit shutdown cannot lose the profile summary. With
+ * `ignoreErrors` every step runs and failures are swallowed (error path);
+ * otherwise the first failure is rethrown after the profile is closed.
+ */
+export const stopMountSession = async (
+    session: {
+        mounted?: { unmount(): Promise<void> };
+        ipc?: { close(): Promise<void> };
+        profileWriter?: SharedFsMountProfileWriter;
+        stopPeerbit(): Promise<void>;
+    },
+    options: { ignoreErrors?: boolean } = {}
+) => {
+    const step = (run: () => Promise<void> | undefined) =>
+        options.ignoreErrors
+            ? Promise.resolve()
+                  .then(run)
+                  .catch(() => {})
+            : run();
+    try {
+        await step(() => session.mounted?.unmount());
+        await step(() => session.ipc?.close());
+    } finally {
+        await closeMountProfile(session.profileWriter).catch(() => {});
+    }
+    await step(() => session.stopPeerbit());
 };
 
 const waitForTermination = async (stop: () => Promise<void>) => {
@@ -1011,17 +1049,24 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
                             : "gc schedule: off"
                     );
-                    await waitForTermination(async () => {
-                        await mounted?.unmount();
-                        await ipc?.close();
-                        await stopPeerbitForCli(peerbit);
-                        await closeMountProfile(profileWriter);
-                    });
+                    await waitForTermination(() =>
+                        stopMountSession({
+                            mounted,
+                            ipc,
+                            profileWriter,
+                            stopPeerbit: () => stopPeerbitForCli(peerbit),
+                        })
+                    );
                 } catch (error) {
-                    await mounted?.unmount().catch(() => {});
-                    await ipc?.close().catch(() => {});
-                    await stopPeerbitForCli(peerbit).catch(() => {});
-                    await closeMountProfile(profileWriter).catch(() => {});
+                    await stopMountSession(
+                        {
+                            mounted,
+                            ipc,
+                            profileWriter,
+                            stopPeerbit: () => stopPeerbitForCli(peerbit),
+                        },
+                        { ignoreErrors: true }
+                    );
                     if (error instanceof NativeMountUnavailableError) {
                         console.error(chalk.red(error.message));
                         await printNativeRequirements();

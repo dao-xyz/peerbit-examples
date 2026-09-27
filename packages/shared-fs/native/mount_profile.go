@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -74,6 +76,11 @@ type mountProfiler struct {
 	capacity   int
 	pid        int
 
+	// signals keeps SIGINT/SIGTERM from terminating the process while the
+	// profile is still being flushed; see holdShutdownSignals.
+	signalOnce sync.Once
+	signals    chan os.Signal
+
 	// Owned by the writer goroutine until done is closed.
 	written     uint64
 	writeErrors uint64
@@ -133,6 +140,24 @@ func (p *mountProfiler) emit(record mountProfileRecord) {
 	p.mu.RUnlock()
 }
 
+// holdShutdownSignals registers a Go signal channel for SIGINT and SIGTERM.
+// cgofuse unmounts on the first SIGINT and then calls signal.Stop on its own
+// channel, which restores Go's default "exit immediately" action while the
+// profile may still be flushing. The CLI sends a follow-up SIGINT during
+// shutdown, so a registered channel keeps that signal from killing the adapter
+// before close finishes; the channel is released at the end of close, and the
+// CLI still escalates to SIGKILL. It is idempotent and a no-op when profiling
+// is off.
+func (p *mountProfiler) holdShutdownSignals() {
+	if p == nil {
+		return
+	}
+	p.signalOnce.Do(func() {
+		p.signals = make(chan os.Signal, 1)
+		signal.Notify(p.signals, os.Interrupt, syscall.SIGTERM)
+	})
+}
+
 // close stops admission, drains the queue, writes the summary record, and
 // closes the output. It waits at most closeLimit for a stalled writer so a
 // wedged profile file cannot keep an unmounted adapter alive.
@@ -151,7 +176,15 @@ func (p *mountProfiler) close() {
 		case <-p.done:
 		case <-timer.C:
 		}
+		p.releaseShutdownSignals()
 	})
+}
+
+func (p *mountProfiler) releaseShutdownSignals() {
+	p.signalOnce.Do(func() {})
+	if p.signals != nil {
+		signal.Stop(p.signals)
+	}
 }
 
 func (p *mountProfiler) run() {

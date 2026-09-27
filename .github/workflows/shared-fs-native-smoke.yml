@@ -181,6 +181,7 @@ jobs:
                       args+=(--benchmark "$label=$PROFILE_ROOT/$label-benchmark.json")
                     fi
                     node scripts/shared-fs-mount-profile-summary.mjs "${args[@]}" \
+                      --title "Shared FS mount profile: pass $label (profiled)" \
                       --json "$PROFILE_ROOT/$label-summary.json" \
                       --markdown "$PROFILE_ROOT/$label-summary.md" >/dev/null
                   done

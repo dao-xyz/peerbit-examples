@@ -15,6 +15,7 @@ import {
     openMountProfileFiles,
     resolveMountProfileDirectory,
     runCli,
+    stopMountSession,
 } from "../index.js";
 
 const stopPeer = async (peer: Peerbit) => {
@@ -463,6 +464,73 @@ describe("peerbit-fs cli", () => {
         } finally {
             await fs.rm(directory, { recursive: true, force: true });
         }
+    });
+
+    it("closes the mount profile before stopping Peerbit", async () => {
+        const order: string[] = [];
+        const profileWriter = {
+            sink: () => {},
+            stats: () => ({}) as any,
+            close: async () => {
+                order.push("profile");
+                return {
+                    emitted: 0,
+                    written: 0,
+                    dropped: 0,
+                    lost: 0,
+                    droppedAfterClose: 0,
+                    writeErrors: 0,
+                    closeTimedOut: false,
+                    maxQueuedEvents: 1,
+                    maxQueuedBytes: 1,
+                };
+            },
+        };
+        const session = (failures: Partial<Record<string, Error>> = {}) => ({
+            mounted: {
+                unmount: async () => {
+                    order.push("unmount");
+                    if (failures.unmount) throw failures.unmount;
+                },
+            },
+            ipc: {
+                close: async () => {
+                    order.push("ipc");
+                },
+            },
+            profileWriter,
+            stopPeerbit: async () => {
+                order.push("peerbit");
+                if (failures.peerbit) throw failures.peerbit;
+            },
+        });
+
+        await stopMountSession(session());
+        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+
+        // A failing Peerbit shutdown no longer loses the profile summary.
+        order.length = 0;
+        const stopFailure = new Error("peerbit stop failed");
+        await expect(
+            stopMountSession(session({ peerbit: stopFailure }))
+        ).rejects.toBe(stopFailure);
+        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+
+        // A failing unmount still closes the profile before rethrowing.
+        order.length = 0;
+        const unmountFailure = new Error("unmount failed");
+        await expect(
+            stopMountSession(session({ unmount: unmountFailure }))
+        ).rejects.toBe(unmountFailure);
+        expect(order).toEqual(["unmount", "profile"]);
+
+        // The error path runs every step and swallows failures.
+        order.length = 0;
+        await stopMountSession(
+            session({ unmount: unmountFailure, peerbit: stopFailure }),
+            { ignoreErrors: true }
+        );
+        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
     });
 
     it("persists an explicit legacy-replica trust assertion", async () => {

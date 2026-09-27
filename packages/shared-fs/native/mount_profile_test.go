@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -238,6 +242,54 @@ func TestIPCClientProfilesTransportFailure(t *testing.T) {
 	}
 	if records[1].Detail["code"] != "EIO" || records[1].Detail["transport"] != true || records[1].Detail["localPort"] != nil {
 		t.Fatalf("transport failure was not classified: %#v", records[1].Detail)
+	}
+	// No connection was available, so no request id was assigned.
+	for _, record := range records {
+		if record.Detail["requestId"] != nil {
+			t.Fatalf("failed connect reported a request id: %#v", record)
+		}
+	}
+}
+
+// A request that cannot connect must not consume a request id, with or
+// without profiling (the id sequence matches the pre-profiling adapter).
+func TestFailedConnectDoesNotConsumeRequestID(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "tcp://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, profiled := range []bool{false, true} {
+		var options ipcClientOptions
+		var profile *mountProfiler
+		if profiled {
+			profile = newMountProfiler(io.Discard, 4)
+			options.profile = profile
+		}
+		refused := newIPCClient(endpoint, options)
+		if _, err := refused.request("getattr", "/"); err == nil {
+			t.Fatal("request to a closed listener unexpectedly succeeded")
+		}
+		refused.close()
+		if _, err := refused.request("getattr", "/"); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("closed client returned %v", err)
+		}
+		if id := atomic.LoadUint64(&refused.nextID); id != 0 {
+			t.Fatalf("profiled=%v: failed connects consumed request ids up to %d", profiled, id)
+		}
+		profile.close()
+	}
+
+	server := startIPCEchoServer(t, func(request ipcRequest) interface{} {
+		return float64(request.ID)
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
+	t.Cleanup(client.close)
+	if result, err := client.request("getattr", "/"); err != nil || result != float64(1) {
+		t.Fatalf("first connected request = (%#v, %v), want id 1", result, err)
 	}
 }
 
