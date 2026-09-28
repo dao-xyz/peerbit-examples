@@ -1,21 +1,14 @@
-import { sha256Base64Sync } from "@peerbit/crypto";
 import {
-    SHARED_FS_MOUNT_READ_SEMANTICS,
-    SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
-    SHARED_FS_MOUNT_WRITE_SEMANTICS,
     SharedFsCreateParentMismatchError,
     SharedFsError,
     SharedFsExpectedNamespaceMismatchError,
     SharedFsExpectedNodeMismatchError,
     type SharedFsConflict,
     type SharedFsEntryInfo,
-    type SharedFsMountReadSemantics,
     type SharedFsMountReadSnapshot,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
-    type SharedFsMountNamespaceSemantics,
     type SharedFsMountWriteOutcome,
-    type SharedFsMountWriteSemantics,
     type SharedFsVersionInfo,
     type WriteFileOptions,
 } from "./index.js";
@@ -51,37 +44,43 @@ type LocalCommitProfileStats = {
     writeFileNs: number;
 };
 
+/**
+ * The filesystem a native mount runs against. Mounts read file contents only
+ * through `readVersionForMount`, commit through `writeFile`, remove and rename
+ * only through `mutateNamespaceForMount`, and look paths up through `stat`;
+ * they never call a target's ordinary `readVersion`, `rm` or `rename`. A
+ * SharedFsHandle or SharedFileSystem subclass (or any delegating wrapper)
+ * that customizes read, remove or rename policy must therefore apply the same
+ * policy in these mount-facing methods at the layer it overrides, as
+ * IgnoreAwareFs does in `mutateNamespaceForMount`.
+ */
 export type SharedFsMountBackendTarget = {
-    /** Exact node-bound remove/rename capability used by native mounts. */
-    mountNamespaceSemantics?(): SharedFsMountNamespaceSemantics | undefined;
-    mutateNamespaceForMount?(
+    /**
+     * Exact node-bound remove/rename. Must return the exact result ids and
+     * throw SharedFsExpectedNamespaceMismatchError when a binding changed.
+     */
+    mutateNamespaceForMount(
         mutation: SharedFsMountNamespaceMutation
     ): Promise<SharedFsMountNamespaceMutationResult>;
     /**
-     * Explicit, versioned exact-read handshake. Implementations advertising
-     * this value must return the exact requested version from
-     * `readVersionForMount`, after verifying both its content-addressed chunks
-     * and assembled whole-file hash. The returned bytes must be a fresh,
-     * mutable allocation that the mount owns.
+     * Must return the exact requested version after verifying both its
+     * content-addressed chunks and assembled whole-file hash. The returned
+     * bytes must be a fresh, mutable allocation that the mount owns.
      */
-    mountReadSemantics?(): SharedFsMountReadSemantics | undefined;
-    readVersionForMount?(
+    readVersionForMount(
         path: string,
         versionId: string
     ): Promise<SharedFsMountReadSnapshot | undefined>;
     /**
-     * Explicit, versioned write handshake. Implementations advertising this
-     * value must hash input themselves, honor `noOpIfHeadVersionIds` as a
-     * conditional exact-head no-op (mismatch still writes), and return
-     * `mountWriteOutcome`.
-     */
-    mountWriteSemantics?(): SharedFsMountWriteSemantics;
-    readFile(path: string): Promise<Uint8Array | undefined>;
-    readVersion(
-        path: string,
-        versionId: string
-    ): Promise<Uint8Array | undefined>;
-    /**
+     * Must hash `source` itself, honor `noOpIfHeadVersionIds` as a
+     * conditional exact-head no-op (mismatch still writes), and resolve to
+     * the committed version with a `mountWriteOutcome`; a result without one
+     * fails the commit with EIO.
+     *
+     * The target may retain the `source` Uint8Array indefinitely, but must
+     * never mutate it or transfer/detach its ArrayBuffer: the mount lends its
+     * handle buffer without copying and detaches before any later mutation.
+     *
      * Implementations honoring `expectedNodeId` must throw
      * SharedFsExpectedNodeMismatchError for that atomic mismatch. Untyped
      * EAGAIN failures are treated as transient and remain retryable. Built-in
@@ -94,14 +93,11 @@ export type SharedFsMountBackendTarget = {
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options?: WriteFileOptions
     ): Promise<
-        | (Pick<SharedFsVersionInfo, "id" | "nodeId" | "contentHash"> & {
-              mountWriteOutcome?: SharedFsMountWriteOutcome;
-          })
-        | void
+        Pick<SharedFsVersionInfo, "id" | "nodeId" | "contentHash"> & {
+            mountWriteOutcome?: SharedFsMountWriteOutcome;
+        }
     >;
     mkdir(path: string): Promise<unknown>;
-    rm(path: string): Promise<unknown>;
-    rename(from: string, to: string): Promise<unknown>;
     list(path?: string): Promise<SharedFsEntryInfo[]>;
     versions(path: string): Promise<SharedFsVersionInfo[]>;
     conflicts(
@@ -116,10 +112,12 @@ export type SharedFsMountBackendTarget = {
      */
     ignoreCheck?(path: string): { ignored: boolean };
     /**
-     * Optional single-path lookup. When present the backend uses it for
-     * getattr/open instead of listing the parent directory.
+     * Single-path lookup for getattr, open and namespace guards. For files it
+     * must include `versionId`, `contentHash`, `size` and `headVersionIds`,
+     * matching what `readVersionForMount` returns for that version; opens
+     * fail with EIO otherwise.
      */
-    stat?(path: string): Promise<SharedFsEntryInfo | undefined>;
+    stat(path: string): Promise<SharedFsEntryInfo | undefined>;
     /**
      * Optional cold-join readiness probe. A writable open is rejected before
      * any path/content lookup while this reports `writeReady: false`; reads
@@ -132,14 +130,6 @@ export type SharedFsMountBackendTarget = {
 };
 
 export type SharedFsMountBackendOptions = {
-    /**
-     * Avoid an eager file-sized commit copy by giving `writeFile` an immutable
-     * Uint8Array view. The target may retain that view indefinitely, but must
-     * never mutate it; the backend detaches before any later handle mutation.
-     * Unknown/custom targets keep the isolated-copy default for backwards
-     * compatibility.
-     */
-    writeFileInput?: "immutable-borrowed";
     /**
      * Opt-in mount-path timing sink. The default path does not read a clock;
      * sink failures are ignored and cannot change filesystem results.
@@ -270,9 +260,8 @@ type OpenFileState = {
     /** Namespace no longer names this node; buffered fd state is local-only. */
     namespaceDetached?: boolean;
     /**
-     * Node observed by a commit-capable open. `null` means the path was
-     * absent. Pure reads may leave this undefined; namespace guards bind
-     * every descriptor through `nodeId` instead.
+     * Node whose exact snapshot seeded this state. `null` means the path was
+     * absent. Only read-only conflict-version states leave this undefined.
      */
     openedNodeId?: string | null;
     /** Exact non-root parent directory observed for an absent nested create. */
@@ -281,8 +270,6 @@ type OpenFileState = {
     baseVersionIds?: string[];
     /** All content heads observed in the coherent writable-open snapshot. */
     openedHeadVersionIds?: string[];
-    /** Content hash of the version the buffer was loaded from. */
-    baseContentHash?: string;
     /** Serializes every descriptor's commit for this file identity. */
     committing?: Promise<void>;
     /**
@@ -295,20 +282,6 @@ type OpenFileState = {
     persistedGeneration: number;
     /** Number of descriptors retaining this state. */
     openHandles: number;
-};
-
-/**
- * Exact bytes and causal binding loaded for a legacy state's first writable
- * descriptor. Loading may await remote storage, so it remains staged until
- * namespace admission is checked again.
- */
-type PreparedWritableState = {
-    path: string;
-    nodeId: string;
-    buffer: Uint8Array;
-    baseVersionIds?: string[];
-    openedHeadVersionIds?: string[];
-    baseContentHash?: string;
 };
 
 type OpenHandle = {
@@ -547,11 +520,7 @@ const findEntry = async (
     if (normalized === "/") {
         return undefined;
     }
-    if (target.stat) {
-        return target.stat(normalized);
-    }
-    const entries = await target.list(dirname(normalized));
-    return entries.find((entry) => entry.name === basename(normalized));
+    return target.stat(normalized);
 };
 
 const mapWithBoundedConcurrency = async <T, R>(
@@ -710,23 +679,13 @@ export const createSharedFsMountBackend = (
     // Joins a `mount.target.writeFile` record to the target's own sub-phase
     // records; advanced only while profiling.
     let profileWriteId = 0;
-    const delegatesReadVerification =
-        target.mountReadSemantics?.() === SHARED_FS_MOUNT_READ_SEMANTICS;
-    const delegatesNamespaceMutation =
-        target.mountNamespaceSemantics?.() ===
-        SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
-    const delegatesWriteHashing =
-        target.mountWriteSemantics?.() === SHARED_FS_MOUNT_WRITE_SEMANTICS;
     // The library writeFile sub-phase hook is a live function inside the
     // options object. Pass it only to targets that privately opted in
     // (SharedFsHandle and the artifact-ignore wrapper with their default
-    // delegation), never merely because a target advertises the public
-    // mount write handshake: such a target may clone, serialize, or
-    // validate its options. Evaluated only while profiling.
+    // delegation), never to any other target: such a target may clone,
+    // serialize, or validate its options. Evaluated only while profiling.
     const passesWriteFileProfile =
-        profile !== undefined &&
-        delegatesWriteHashing &&
-        acceptsSharedFsWriteFileProfile(target);
+        profile !== undefined && acceptsSharedFsWriteFileProfile(target);
 
     const requireRemoveMutationResult = (
         value: unknown,
@@ -952,8 +911,8 @@ export const createSharedFsMountBackend = (
 
     /**
      * A typed CAS mismatch proves that the guarded append did not happen in
-     * the built-in implementation, but a custom capable delegate may have
-     * changed the namespace before surfacing that error. Re-read every
+     * the built-in implementation, but a custom target may have changed the
+     * namespace before surfacing that error. Re-read every
      * affected path while the backend transition is still held and detach
      * only descriptors whose opened node is no longer the visible binding.
      * If the recheck itself is indeterminate, fail closed for all candidates.
@@ -1367,14 +1326,14 @@ export const createSharedFsMountBackend = (
                 `Path is not a conflict file: ${path}`
             );
         }
-        const bytes = await target.readVersion(
+        const snapshot = await target.readVersionForMount(
             parsed.filePath,
             parsed.versionId
         );
-        if (!bytes) {
+        if (!snapshot) {
             throw notFound(path);
         }
-        return bytes;
+        return snapshot.bytes;
     };
 
     const commitNow = async (
@@ -1428,9 +1387,8 @@ export const createSharedFsMountBackend = (
         };
         // A subarray would retain unused geometric-growth capacity forever in
         // targets that keep chunk views. Borrow only exact-sized buffers;
-        // otherwise preserve the legacy exact-length copy.
+        // otherwise hand the target an exact-length copy.
         const borrowInput =
-            options.writeFileInput === "immutable-borrowed" &&
             snapshot.buffer.byteLength === snapshot.length &&
             snapshot.buffer.byteOffset === 0 &&
             snapshot.buffer.buffer instanceof ArrayBuffer &&
@@ -1447,50 +1405,12 @@ export const createSharedFsMountBackend = (
         try {
             const bytes = borrowInput
                 ? snapshot.buffer.subarray(0, snapshot.length)
-                : snapshot.buffer.slice(0, snapshot.length);
-            const contentHash = delegatesWriteHashing
-                ? undefined
-                : sha256Base64Sync(bytes);
-            if (
-                !delegatesWriteHashing &&
-                state.baseContentHash !== undefined &&
-                state.baseContentHash === contentHash &&
-                (state.baseVersionIds?.length ?? 0) <= 1 &&
-                state.openedHeadVersionIds !== undefined
-            ) {
-                // An equal byte buffer is a no-op only while the exact content
-                // head snapshot opened by this handle is still current. A
-                // same-node concurrent version must not make an explicit
-                // rewrite disappear: fall through and publish it as a
-                // concurrent head.
-                const current = await findEntry(target, state.path);
-                const sameNode =
-                    typeof state.openedNodeId === "string" &&
-                    current?.kind === "file" &&
-                    current.nodeId === state.openedNodeId;
-                if (!sameNode) {
-                    throw new SharedFsBackendError(
-                        "EAGAIN",
-                        `Path changed after it was opened: ${state.path}`
-                    );
-                }
-                if (
-                    current.headVersionIds !== undefined &&
-                    sameHeads(
-                        state.openedHeadVersionIds,
-                        current.headVersionIds
-                    )
-                ) {
-                    // Editors flush/fsync liberally: do not mint a new version
-                    // when neither the bytes nor the exact causal snapshot
-                    // moved. A write may have detached the backing buffer
-                    // while the stat above was in flight. In that case this
-                    // snapshot is still a no-op, but the newer buffer must
-                    // remain dirty.
-                    markSnapshotPersisted();
-                    return;
-                }
-            }
+                : // Uint8Array.prototype.slice copies; Buffer#slice would alias.
+                  Uint8Array.prototype.slice.call(
+                      snapshot.buffer,
+                      0,
+                      snapshot.length
+                  );
             const writeOptions: WriteFileOptions & {
                 expectedNodeId?: string | null;
             } = {
@@ -1502,13 +1422,10 @@ export const createSharedFsMountBackend = (
                 ...(state.openedParentNodeId !== undefined
                     ? { expectedParentNodeId: state.openedParentNodeId }
                     : {}),
-                ...(delegatesWriteHashing
-                    ? {
-                          noOpIfHeadVersionIds: [
-                              ...(state.openedHeadVersionIds ?? []),
-                          ],
-                      }
-                    : {}),
+                // Editors flush/fsync liberally: the target skips minting a
+                // version only while both the bytes and this exact opened
+                // head snapshot are unchanged.
+                noOpIfHeadVersionIds: [...(state.openedHeadVersionIds ?? [])],
             };
             inputExposed = borrowInput;
             let result: Awaited<
@@ -1599,9 +1516,7 @@ export const createSharedFsMountBackend = (
                               createParentMismatch.message
                           )
                         : new SharedFsBackendError(
-                              state.exclusiveCreate && delegatesWriteHashing
-                                  ? "EEXIST"
-                                  : "EAGAIN",
+                              state.exclusiveCreate ? "EEXIST" : "EAGAIN",
                               `Path was created concurrently; the losing file state is closed: ${state.path}`
                           );
                     terminalizeStateLoss(state, terminal);
@@ -1617,7 +1532,7 @@ export const createSharedFsMountBackend = (
                 }
                 throw error;
             }
-            let committed =
+            const committed =
                 result &&
                 typeof result.id === "string" &&
                 typeof result.nodeId === "string" &&
@@ -1626,49 +1541,25 @@ export const createSharedFsMountBackend = (
                     : undefined;
             const mountWriteOutcome = committed?.mountWriteOutcome;
             if (
-                delegatesWriteHashing &&
-                (!committed ||
-                    (mountWriteOutcome !== "unchanged" &&
-                        mountWriteOutcome !== "created"))
+                !committed ||
+                (mountWriteOutcome !== "unchanged" &&
+                    mountWriteOutcome !== "created")
             ) {
                 throw new SharedFsBackendError(
                     "EIO",
                     `Mount write capability returned invalid metadata: ${state.path}`
                 );
             }
-            if (!committed) {
-                // Keep custom/legacy adapters that return void correct: reload
-                // the committed visible version instead of retaining a null
-                // node id or stale causal base on the handle.
-                const observed = await findEntry(target, state.path);
-                if (
-                    observed?.kind !== "file" ||
-                    typeof observed.versionId !== "string" ||
-                    typeof observed.contentHash !== "string"
-                ) {
-                    throw new SharedFsBackendError(
-                        "EIO",
-                        `Committed version metadata is unavailable: ${state.path}`
-                    );
-                }
-                committed = {
-                    id: observed.versionId,
-                    nodeId: observed.nodeId,
-                    contentHash: observed.contentHash,
-                };
-            }
             if (
-                (typeof state.openedNodeId === "string" &&
-                    state.openedNodeId !== committed.nodeId) ||
-                (!delegatesWriteHashing &&
-                    committed.contentHash !== contentHash)
+                typeof state.openedNodeId === "string" &&
+                state.openedNodeId !== committed.nodeId
             ) {
                 throw new SharedFsBackendError(
                     "EAGAIN",
                     `Path changed while it was being committed: ${state.path}`
                 );
             }
-            if (delegatesWriteHashing && mountWriteOutcome === "unchanged") {
+            if (mountWriteOutcome === "unchanged") {
                 const unchangedIsValid =
                     state.baseVersionIds?.length === 1 &&
                     state.openedHeadVersionIds !== undefined &&
@@ -1681,9 +1572,9 @@ export const createSharedFsMountBackend = (
                         `Mount write capability returned an invalid unchanged result: ${state.path}`
                     );
                 }
-                // The target has observed `bytes` and the immutable-borrowed
-                // contract permits indefinite retention even on a no-op.
-                // Keep this buffer protected until the state mutates/unregisters.
+                // The target has observed `bytes` and its writeFile contract
+                // permits indefinite retention even on a no-op. Keep this
+                // buffer protected until the state mutates/unregisters.
                 markSnapshotPersisted();
                 return;
             }
@@ -1710,7 +1601,6 @@ export const createSharedFsMountBackend = (
             state.openedHeadVersionIds = [committed.id];
             state.openedNodeId = committed.nodeId;
             state.openedParentNodeId = undefined;
-            state.baseContentHash = committed.contentHash;
             // The first successful create commit makes the path visible in
             // the target, so the backend-local absent-path reservation is no
             // longer needed. Later writes use the committed node id.
@@ -1860,25 +1750,14 @@ export const createSharedFsMountBackend = (
                 );
             }
             const candidate = entry;
-            let exact: Uint8Array | undefined;
             let verifiedRead: unknown;
             let readError: unknown;
             if (!truncate) {
                 try {
-                    if (delegatesReadVerification) {
-                        if (typeof target.readVersionForMount !== "function") {
-                            throw new SharedFsBackendError(
-                                "EIO",
-                                `Mount read capability is missing its exact-version reader: ${path}`
-                            );
-                        }
-                        verifiedRead = await target.readVersionForMount(
-                            path,
-                            versionId
-                        );
-                    } else {
-                        exact = await target.readVersion(path, versionId);
-                    }
+                    verifiedRead = await target.readVersionForMount(
+                        path,
+                        versionId
+                    );
                 } catch (error) {
                     readError = error;
                 }
@@ -1904,95 +1783,25 @@ export const createSharedFsMountBackend = (
                 return { bytes: new Uint8Array(0), entry: confirmed };
             }
 
-            let contentHash: string;
-            if (delegatesReadVerification) {
-                if (verifiedRead === undefined) {
-                    throw new SharedFsBackendError(
-                        "EIO",
-                        `Visible version is unavailable: ${path}`
-                    );
-                }
-                const verified = requireVerifiedReadSnapshot(
-                    verifiedRead,
-                    path,
-                    versionId,
-                    candidate,
-                    confirmed
+            if (verifiedRead === undefined) {
+                throw new SharedFsBackendError(
+                    "EIO",
+                    `Visible version is unavailable: ${path}`
                 );
-                exact = verified.bytes;
-                contentHash = verified.contentHash;
-            } else {
-                if (exact === undefined) {
-                    throw new SharedFsBackendError(
-                        "EIO",
-                        `Visible version is unavailable: ${path}`
-                    );
-                }
-                contentHash = sha256Base64Sync(exact);
             }
-            return {
-                bytes: exact,
-                entry: { ...confirmed, contentHash },
-            };
+            const verified = requireVerifiedReadSnapshot(
+                verifiedRead,
+                path,
+                versionId,
+                candidate,
+                confirmed
+            );
+            return { bytes: verified.bytes, entry: confirmed };
         }
         throw new SharedFsBackendError(
             "EAGAIN",
             `File changed repeatedly while it was being opened: ${path}`
         );
-    };
-
-    const prepareStateForWrite = async (
-        state: OpenFileState,
-        entry: SharedFsEntryInfo,
-        truncate: boolean
-    ): Promise<PreparedWritableState | undefined> => {
-        if (state.openedNodeId !== undefined) return;
-        const path = state.path;
-        const nodeId = state.nodeId;
-        if (
-            nodeId === null ||
-            typeof nodeId !== "string" ||
-            nodeId !== entry.nodeId
-        ) {
-            throw new SharedFsBackendError(
-                "EAGAIN",
-                `File identity changed before writable attach: ${path}`
-            );
-        }
-        const loaded = await loadWritableSnapshot(path, entry, truncate);
-        if (loaded.entry.nodeId !== nodeId) {
-            throw new SharedFsBackendError(
-                "EAGAIN",
-                `File identity changed before writable attach: ${path}`
-            );
-        }
-        return {
-            path,
-            nodeId,
-            buffer: loaded.bytes,
-            baseVersionIds: loaded.entry.versionId
-                ? [loaded.entry.versionId]
-                : loaded.entry.headVersionIds !== undefined
-                  ? [...loaded.entry.headVersionIds]
-                  : undefined,
-            openedHeadVersionIds:
-                loaded.entry.headVersionIds !== undefined
-                    ? [...loaded.entry.headVersionIds]
-                    : undefined,
-            baseContentHash: loaded.entry.contentHash,
-        };
-    };
-
-    const installPreparedWritableState = (
-        state: OpenFileState,
-        prepared: PreparedWritableState
-    ) => {
-        state.buffer = prepared.buffer;
-        state.length = prepared.buffer.byteLength;
-        state.openedNodeId = prepared.nodeId;
-        state.baseVersionIds = prepared.baseVersionIds;
-        state.openedHeadVersionIds = prepared.openedHeadVersionIds;
-        state.baseContentHash = prepared.baseContentHash;
     };
 
     const openPath = async (
@@ -2156,74 +1965,23 @@ export const createSharedFsMountBackend = (
                     );
                 }
 
-                const attachExisting = async (
-                    state: OpenFileState
-                ): Promise<number> => {
-                    if (state.terminal || state.path !== normalized) {
+                const attachExisting = (state: OpenFileState): number => {
+                    assertNoNamespaceTransition(normalized);
+                    if (
+                        state.terminal ||
+                        state.path !== normalized ||
+                        state.nodeId !== entry!.nodeId
+                    ) {
                         throw new SharedFsBackendError(
                             "EAGAIN",
                             "File identity moved while it was being opened: " +
                                 normalized
                         );
                     }
-                    // Pin the state across a legacy fallback-to-exact upgrade.
-                    // The last older descriptor may release while its exact
-                    // version is loading; without this pin it could unregister
-                    // the state just before the new descriptor attaches.
-                    state.openHandles++;
-                    try {
-                        let prepared: PreparedWritableState | undefined;
-                        try {
-                            prepared = parsedFlags.write
-                                ? await prepareStateForWrite(
-                                      state,
-                                      entry!,
-                                      parsedFlags.truncate
-                                  )
-                                : undefined;
-                        } catch (error) {
-                            // Exact loading may discover a remote rename,
-                            // removal, or replacement after the initial stat.
-                            // Preserve same-node transient failures, but
-                            // detach a state whose pathname binding moved.
-                            await revalidateStatesAfterNamespaceMismatch([
-                                state,
-                            ]);
-                            throw error;
-                        }
-                        assertNoNamespaceTransition(normalized);
-                        if (
-                            state.terminal ||
-                            state.path !== normalized ||
-                            state.nodeId !== entry!.nodeId ||
-                            (prepared !== undefined &&
-                                (prepared.path !== normalized ||
-                                    prepared.nodeId !== entry!.nodeId ||
-                                    state.openedNodeId !== undefined))
-                        ) {
-                            throw new SharedFsBackendError(
-                                "EAGAIN",
-                                "File identity moved while it was being opened: " +
-                                    normalized
-                            );
-                        }
-                        // No await may appear between admission above and
-                        // installing the exact snapshot/truncate below. A
-                        // failed writable upgrade must leave sibling readers'
-                        // bytes and causal binding entirely unchanged.
-                        if (prepared !== undefined) {
-                            installPreparedWritableState(state, prepared);
-                        }
-                        if (parsedFlags.truncate) {
-                            resizeState(state, 0);
-                        }
-                        return attachHandle(state, parsedFlags);
-                    } finally {
-                        state.openHandles--;
-                        if (state.openHandles === 0) {
-                            unregisterState(state);
-                        }
+                    if (parsedFlags.truncate) {
+                        resizeState(state, 0);
                     }
+                    return attachHandle(state, parsedFlags);
                 };
 
                 const shared = statesByNodeId.get(entry.nodeId);
@@ -2244,37 +2002,27 @@ export const createSharedFsMountBackend = (
                     detachNamespaceState(shared);
                 }
 
-                let state: OpenFileState;
-                if (parsedFlags.write || delegatesReadVerification) {
-                    // An advertised verified reader lets the first descriptor,
-                    // including a read-only one, establish the coherent state
-                    // later writable siblings can reuse without another load
-                    // or hash. Legacy targets retain their readFile fallback.
-                    const loaded = await loadWritableSnapshot(
-                        normalized,
-                        entry,
-                        parsedFlags.truncate
-                    );
-                    state = newFileState(
-                        normalized,
-                        loaded.entry.nodeId,
-                        loaded.bytes
-                    );
-                    state.openedNodeId = loaded.entry.nodeId;
-                    state.baseVersionIds = loaded.entry.versionId
-                        ? [loaded.entry.versionId]
-                        : loaded.entry.headVersionIds;
-                    state.openedHeadVersionIds =
-                        loaded.entry.headVersionIds !== undefined
-                            ? [...loaded.entry.headVersionIds]
-                            : undefined;
-                    state.baseContentHash = loaded.entry.contentHash;
-                } else {
-                    const existing =
-                        (await target.readFile(normalized)) ??
-                        new Uint8Array(0);
-                    state = newFileState(normalized, entry.nodeId, existing);
-                }
+                // The first descriptor, including a read-only one, loads the
+                // exact verified snapshot that later writable siblings reuse
+                // without another load or hash.
+                const loaded = await loadWritableSnapshot(
+                    normalized,
+                    entry,
+                    parsedFlags.truncate
+                );
+                const state = newFileState(
+                    normalized,
+                    loaded.entry.nodeId,
+                    loaded.bytes
+                );
+                state.openedNodeId = loaded.entry.nodeId;
+                state.baseVersionIds = loaded.entry.versionId
+                    ? [loaded.entry.versionId]
+                    : loaded.entry.headVersionIds;
+                state.openedHeadVersionIds =
+                    loaded.entry.headVersionIds !== undefined
+                        ? [...loaded.entry.headVersionIds]
+                        : undefined;
 
                 assertNoNamespaceTransition(normalized);
                 const raced = statesByNodeId.get(state.nodeId as string);
@@ -2727,27 +2475,15 @@ export const createSharedFsMountBackend = (
                             );
                         }
                         try {
-                            if (delegatesNamespaceMutation) {
-                                if (!target.mutateNamespaceForMount) {
-                                    throw new SharedFsBackendError(
-                                        "EIO",
-                                        "Target advertises guarded namespace semantics without an implementation"
-                                    );
+                            const result = await target.mutateNamespaceForMount(
+                                {
+                                    type: "remove",
+                                    path: normalized,
+                                    expectedNodeId: entry.nodeId,
+                                    expectedKind: "directory",
                                 }
-                                const result =
-                                    await target.mutateNamespaceForMount({
-                                        type: "remove",
-                                        path: normalized,
-                                        expectedNodeId: entry.nodeId,
-                                        expectedKind: "directory",
-                                    });
-                                requireRemoveMutationResult(
-                                    result,
-                                    entry.nodeId
-                                );
-                            } else {
-                                await target.rm(normalized);
-                            }
+                            );
+                            requireRemoveMutationResult(result, entry.nodeId);
                         } catch (error) {
                             // Even an untyped error can be deterministic
                             // (notably ENOTEMPTY). Re-read every descriptor's
@@ -2794,255 +2530,146 @@ export const createSharedFsMountBackend = (
                             toPath,
                             true
                         );
-                        if (delegatesNamespaceMutation) {
-                            if (!target.mutateNamespaceForMount) {
-                                throw new SharedFsBackendError(
-                                    "EIO",
-                                    "Target advertises guarded namespace semantics without an implementation"
-                                );
-                            }
-                            const source = await findEntry(target, fromPath);
-                            const sourceObservedMismatch =
-                                reconcileObservedNamespaceScope(
-                                    fromPath,
-                                    source,
-                                    sourceScopeStates
-                                );
-                            if (!source) throw notFound(fromPath);
-                            const destination = await findEntry(target, toPath);
-                            const destinationObservedMismatch =
-                                reconcileObservedNamespaceScope(
-                                    toPath,
-                                    destination,
-                                    destinationScopeStates
-                                );
-                            const sourceStates = sourceScopeStates.filter(
-                                (state) =>
-                                    !state.namespaceDetached &&
-                                    (state.path === fromPath ||
-                                        source.kind === "directory")
-                            );
-                            const sourceRootStates = sourceStates.filter(
-                                (state) => state.path === fromPath
-                            );
-                            const sourceDescendantStates = sourceStates.filter(
-                                (state) => state.path !== fromPath
-                            );
-                            const byPath =
-                                source.kind === "directory"
-                                    ? await revalidateOpenDescendantBindings(
-                                          fromPath,
-                                          sourceDescendantStates
-                                      )
-                                    : new Map<string, string>();
-                            // Destination descendants never participate in
-                            // the guarded move binding, but stale descriptors
-                            // must still be reconciled before any early
-                            // preflight error (including a stale root EAGAIN).
-                            if (destination?.kind === "directory") {
-                                await revalidateOpenDescendantBindings(
-                                    toPath,
-                                    destinationScopeStates
-                                );
-                            }
-                            const destinationStates =
-                                destinationScopeStates.filter(
-                                    (state) => !state.namespaceDetached
-                                );
-                            const destinationRootStates =
-                                destinationStates.filter(
-                                    (state) => state.path === toPath
-                                );
-                            const sourceBindingMismatch =
-                                sourceObservedMismatch ??
-                                requireStateNodeBindings(
-                                    sourceRootStates,
-                                    () => source.nodeId
-                                );
-                            const destinationBindingMismatch =
-                                destinationObservedMismatch ??
-                                requireStateNodeBindings(
-                                    destinationRootStates,
-                                    () => destination?.nodeId
-                                );
-                            throwStateBindingMismatch(
-                                `rename ${fromPath} to ${toPath}`,
-                                sourceBindingMismatch ??
-                                    destinationBindingMismatch
-                            );
-                            // Validate every active source descendant before
-                            // consulting the destination parent. A replaced
-                            // source directory can otherwise leave stale
-                            // descendant descriptors attached when the rename
-                            // exits early for an invalid parent.
-                            const parentPath = dirname(toPath);
-                            const parent =
-                                parentPath === "/"
-                                    ? undefined
-                                    : await findEntry(target, parentPath);
-                            if (
-                                parentPath !== "/" &&
-                                (!parent || parent.kind !== "directory")
-                            ) {
-                                throw new SharedFsBackendError(
-                                    parent ? "ENOTDIR" : "ENOENT",
-                                    `Parent directory does not exist: ${parentPath}`
-                                );
-                            }
-                            const parentNodeId = parent?.nodeId ?? ROOT_NODE_ID;
-                            try {
-                                const result =
-                                    await target.mutateNamespaceForMount({
-                                        type: "rename",
-                                        from: fromPath,
-                                        to: toPath,
-                                        expectedSourceNodeId: source.nodeId,
-                                        expectedDestinationNodeId:
-                                            destination?.nodeId ?? null,
-                                        expectedDestinationParentNodeId:
-                                            parentNodeId,
-                                        expectedOpenDescendants: [
-                                            ...byPath,
-                                        ].map(([path, nodeId]) => ({
-                                            path,
-                                            nodeId,
-                                        })),
-                                    });
-                                requireRenameMutationResult(
-                                    result,
-                                    source.nodeId,
-                                    destination?.nodeId ?? null,
-                                    parentNodeId
-                                );
-                            } catch (error) {
-                                if (
-                                    error instanceof
-                                    SharedFsExpectedNamespaceMismatchError
-                                ) {
-                                    await handleTypedRenameMismatch(
-                                        error,
-                                        sourceStates,
-                                        destinationStates
-                                    );
-                                } else {
-                                    await revalidateStatesAfterNamespaceMismatch(
-                                        [...sourceStates, ...destinationStates]
-                                    );
-                                }
-                                throw error;
-                            }
-                            for (const state of destinationStates) {
-                                detachNamespaceState(state);
-                            }
-                            for (const state of sourceStates) {
-                                if (state.namespaceDetached) continue;
-                                rebaseStatePath(
-                                    state,
-                                    state.path === fromPath
-                                        ? toPath
-                                        : toPath +
-                                              state.path.slice(fromPath.length)
-                                );
-                            }
-                            return;
-                        } else {
-                            // Legacy delegates cannot perform the exact
-                            // node-bound CAS, but stale local inode state must
-                            // still never follow (and later overwrite) a
-                            // remotely replaced source or destination.
-                            const source = await findEntry(target, fromPath);
+                        const source = await findEntry(target, fromPath);
+                        const sourceObservedMismatch =
                             reconcileObservedNamespaceScope(
                                 fromPath,
                                 source,
                                 sourceScopeStates
                             );
-                            const destination = await findEntry(target, toPath);
+                        if (!source) throw notFound(fromPath);
+                        const destination = await findEntry(target, toPath);
+                        const destinationObservedMismatch =
                             reconcileObservedNamespaceScope(
                                 toPath,
                                 destination,
                                 destinationScopeStates
                             );
-                            if (source?.kind === "directory") {
-                                await revalidateOpenDescendantBindings(
-                                    fromPath,
-                                    sourceScopeStates
-                                );
-                            }
-                            if (destination?.kind === "directory") {
-                                await revalidateOpenDescendantBindings(
-                                    toPath,
-                                    destinationScopeStates
-                                );
-                            }
-                            const sourceStates = sourceScopeStates.filter(
-                                (state) =>
-                                    !state.namespaceDetached &&
-                                    (state.path === fromPath ||
-                                        source?.kind === "directory")
+                        const sourceStates = sourceScopeStates.filter(
+                            (state) =>
+                                !state.namespaceDetached &&
+                                (state.path === fromPath ||
+                                    source.kind === "directory")
+                        );
+                        const sourceRootStates = sourceStates.filter(
+                            (state) => state.path === fromPath
+                        );
+                        const sourceDescendantStates = sourceStates.filter(
+                            (state) => state.path !== fromPath
+                        );
+                        const byPath =
+                            source.kind === "directory"
+                                ? await revalidateOpenDescendantBindings(
+                                      fromPath,
+                                      sourceDescendantStates
+                                  )
+                                : new Map<string, string>();
+                        // Destination descendants never participate in
+                        // the guarded move binding, but stale descriptors
+                        // must still be reconciled before any early
+                        // preflight error (including a stale root EAGAIN).
+                        if (destination?.kind === "directory") {
+                            await revalidateOpenDescendantBindings(
+                                toPath,
+                                destinationScopeStates
                             );
-                            try {
-                                await target.rename(fromPath, toPath);
-                            } catch (error) {
-                                await revalidateStatesAfterNamespaceMismatch([
-                                    ...sourceScopeStates,
-                                    ...destinationScopeStates,
-                                ]);
-                                throw error;
-                            }
-                            for (const state of destinationScopeStates) {
-                                detachNamespaceState(state);
-                            }
-                            let movedBindings:
-                                | {
-                                      state: OpenFileState;
-                                      path: string;
-                                      entry: SharedFsEntryInfo | undefined;
-                                  }[]
-                                | undefined;
-                            try {
-                                movedBindings = await mapWithBoundedConcurrency(
-                                    sourceStates,
-                                    4,
-                                    async (state) => {
-                                        const path =
-                                            state.path === fromPath
-                                                ? toPath
-                                                : toPath +
-                                                  state.path.slice(
-                                                      fromPath.length
-                                                  );
-                                        return {
-                                            state,
+                        }
+                        const destinationStates = destinationScopeStates.filter(
+                            (state) => !state.namespaceDetached
+                        );
+                        const destinationRootStates = destinationStates.filter(
+                            (state) => state.path === toPath
+                        );
+                        const sourceBindingMismatch =
+                            sourceObservedMismatch ??
+                            requireStateNodeBindings(
+                                sourceRootStates,
+                                () => source.nodeId
+                            );
+                        const destinationBindingMismatch =
+                            destinationObservedMismatch ??
+                            requireStateNodeBindings(
+                                destinationRootStates,
+                                () => destination?.nodeId
+                            );
+                        throwStateBindingMismatch(
+                            `rename ${fromPath} to ${toPath}`,
+                            sourceBindingMismatch ?? destinationBindingMismatch
+                        );
+                        // Validate every active source descendant before
+                        // consulting the destination parent. A replaced
+                        // source directory can otherwise leave stale
+                        // descendant descriptors attached when the rename
+                        // exits early for an invalid parent.
+                        const parentPath = dirname(toPath);
+                        const parent =
+                            parentPath === "/"
+                                ? undefined
+                                : await findEntry(target, parentPath);
+                        if (
+                            parentPath !== "/" &&
+                            (!parent || parent.kind !== "directory")
+                        ) {
+                            throw new SharedFsBackendError(
+                                parent ? "ENOTDIR" : "ENOENT",
+                                `Parent directory does not exist: ${parentPath}`
+                            );
+                        }
+                        const parentNodeId = parent?.nodeId ?? ROOT_NODE_ID;
+                        try {
+                            const result = await target.mutateNamespaceForMount(
+                                {
+                                    type: "rename",
+                                    from: fromPath,
+                                    to: toPath,
+                                    expectedSourceNodeId: source.nodeId,
+                                    expectedDestinationNodeId:
+                                        destination?.nodeId ?? null,
+                                    expectedDestinationParentNodeId:
+                                        parentNodeId,
+                                    expectedOpenDescendants: [...byPath].map(
+                                        ([path, nodeId]) => ({
                                             path,
-                                            entry: await findEntry(
-                                                target,
-                                                path
-                                            ),
-                                        };
-                                    }
+                                            nodeId,
+                                        })
+                                    ),
+                                }
+                            );
+                            requireRenameMutationResult(
+                                result,
+                                source.nodeId,
+                                destination?.nodeId ?? null,
+                                parentNodeId
+                            );
+                        } catch (error) {
+                            if (
+                                error instanceof
+                                SharedFsExpectedNamespaceMismatchError
+                            ) {
+                                await handleTypedRenameMismatch(
+                                    error,
+                                    sourceStates,
+                                    destinationStates
                                 );
-                            } catch {
-                                // The delegate already reported success. Do
-                                // not turn that into a retryable rename; fail
-                                // closed locally when post-move binding cannot
-                                // be established.
-                                for (const state of sourceStates) {
-                                    detachNamespaceState(state);
-                                }
-                                return;
+                            } else {
+                                await revalidateStatesAfterNamespaceMismatch([
+                                    ...sourceStates,
+                                    ...destinationStates,
+                                ]);
                             }
-                            for (const binding of movedBindings) {
-                                const { state } = binding;
-                                if (
-                                    state.namespaceDetached ||
-                                    typeof state.nodeId !== "string" ||
-                                    binding.entry?.nodeId !== state.nodeId
-                                ) {
-                                    detachNamespaceState(state);
-                                    continue;
-                                }
-                                rebaseStatePath(state, binding.path);
-                            }
+                            throw error;
+                        }
+                        for (const state of destinationStates) {
+                            detachNamespaceState(state);
+                        }
+                        for (const state of sourceStates) {
+                            if (state.namespaceDetached) continue;
+                            rebaseStatePath(
+                                state,
+                                state.path === fromPath
+                                    ? toPath
+                                    : toPath + state.path.slice(fromPath.length)
+                            );
                         }
                     }
                 );
@@ -3079,60 +2706,40 @@ export const createSharedFsMountBackend = (
                                 `Path is a directory: ${normalized}`
                             );
                         }
-                        if (delegatesNamespaceMutation) {
-                            if (!target.mutateNamespaceForMount) {
-                                throw new SharedFsBackendError(
-                                    "EIO",
-                                    "Target advertises guarded namespace semantics without an implementation"
-                                );
-                            }
-                            throwStateBindingMismatch(
-                                `unlink ${normalized}`,
-                                requireStateNodeBindings(
-                                    affected,
-                                    () => entry.nodeId
-                                )
+                        throwStateBindingMismatch(
+                            `unlink ${normalized}`,
+                            requireStateNodeBindings(
+                                affected,
+                                () => entry.nodeId
+                            )
+                        );
+                        try {
+                            const result = await target.mutateNamespaceForMount(
+                                {
+                                    type: "remove",
+                                    path: normalized,
+                                    expectedNodeId: entry.nodeId,
+                                    expectedKind: "file",
+                                }
                             );
-                            try {
-                                const result =
-                                    await target.mutateNamespaceForMount({
-                                        type: "remove",
-                                        path: normalized,
-                                        expectedNodeId: entry.nodeId,
-                                        expectedKind: "file",
-                                    });
-                                requireRemoveMutationResult(
-                                    result,
-                                    entry.nodeId
-                                );
-                            } catch (error) {
+                            requireRemoveMutationResult(result, entry.nodeId);
+                        } catch (error) {
+                            if (
+                                error instanceof
+                                SharedFsExpectedNamespaceMismatchError
+                            ) {
                                 if (
-                                    error instanceof
-                                    SharedFsExpectedNamespaceMismatchError
+                                    error.actualNodeId !== error.expectedNodeId
                                 ) {
-                                    if (
-                                        error.actualNodeId !==
-                                        error.expectedNodeId
-                                    ) {
-                                        for (const state of affected) {
-                                            detachNamespaceState(state);
-                                        }
+                                    for (const state of affected) {
+                                        detachNamespaceState(state);
                                     }
                                 }
-                                await revalidateStatesAfterNamespaceMismatch(
-                                    affected
-                                );
-                                throw error;
                             }
-                        } else {
-                            try {
-                                await target.rm(normalized);
-                            } catch (error) {
-                                await revalidateStatesAfterNamespaceMismatch(
-                                    affected
-                                );
-                                throw error;
-                            }
+                            await revalidateStatesAfterNamespaceMismatch(
+                                affected
+                            );
+                            throw error;
                         }
                         for (const state of affected) {
                             detachNamespaceState(state);

@@ -2,12 +2,10 @@ import {
     SharedFsError,
     SharedFileSystem,
     SharedFsHandle,
-    SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
     type ResolveNamingAction,
     type ResolveNamingConflictOptions,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
-    type SharedFsMountNamespaceSemantics,
     type WriteBatchEntry,
     type WriteBatchOptions,
     type WriteFileOptions,
@@ -254,31 +252,10 @@ export class IgnoreAwareFs extends SharedFsHandle {
         return super.rename(from, to);
     }
 
-    mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
-        // This wrapper's policy-aware guarded method is coherent only when
-        // both its exact methods retain their known implementation and its
-        // delegated program explicitly advertises the exact CAS. A subclass
-        // changing policy behavior must override and re-advertise coherently.
-        const usesExactIgnoreMethods =
-            this.rm === IgnoreAwareFs.prototype.rm &&
-            this.rename === IgnoreAwareFs.prototype.rename &&
-            this.mutateNamespaceForMount ===
-                IgnoreAwareFs.prototype.mutateNamespaceForMount;
-        const usesExactDelegatedMethods =
-            this.program.rm === SharedFileSystem.prototype.rm &&
-            this.program.rename === SharedFileSystem.prototype.rename &&
-            this.program.mutateNamespaceForMount ===
-                SharedFileSystem.prototype.mutateNamespaceForMount &&
-            this.program.mountNamespaceSemantics ===
-                SharedFileSystem.prototype.mountNamespaceSemantics;
-        return usesExactIgnoreMethods &&
-            usesExactDelegatedMethods &&
-            this.program.mountNamespaceSemantics() ===
-                SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-            ? SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-            : undefined;
-    }
-
+    /**
+     * Mounts remove and rename only through this method, so it applies the
+     * same policy as `rm` and `rename`.
+     */
     async mutateNamespaceForMount(
         mutation: SharedFsMountNamespaceMutation
     ): Promise<SharedFsMountNamespaceMutationResult> {

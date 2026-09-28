@@ -8,7 +8,6 @@ import {
     FileVersion,
     NamingEvent,
     ROOT_NODE_ID,
-    SHARED_FS_MOUNT_READ_SEMANTICS,
     SharedFsExpectedNamingConflictMismatchError,
     encodePublicSignKey,
     openSharedFs,
@@ -275,7 +274,6 @@ describe("shared fs library", () => {
             "/verified-mount-read.txt",
             "verified snapshot"
         );
-        expect(fs.mountReadSemantics()).toBe(SHARED_FS_MOUNT_READ_SEMANTICS);
 
         const snapshot = await fs.readVersionForMount(
             "/verified-mount-read.txt",

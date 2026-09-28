@@ -135,9 +135,8 @@ after every merge.
 
 ## Node-guarded mount namespace mutations
 
-Native mounts negotiate
-`SHARED_FS_MOUNT_NAMESPACE_SEMANTICS` (`"node-guarded-namespace-v1"`) before
-using `mutateNamespaceForMount()`. The additive API accepts either a `remove`
+Native mounts remove and rename only through `mutateNamespaceForMount()`.
+The additive API accepts either a `remove`
 bound to an exact path, node id, and kind, or a `rename` bound to the exact
 source node, destination node (or absence), destination-parent node, and every
 active open descendant supplied by the mount. It returns the exact removed
@@ -152,9 +151,9 @@ proof. A concurrent delete/rename not yet visible locally may still conflict
 after the guarded append; the existing naming conflict rules, including the
 non-delete preference, are deliberately unchanged. Rename-over-file emits the
 replacement tombstone and source move together with `putMany`, but remote
-replicas still ingest immutable events incrementally. Wrappers must explicitly
-preserve policy and re-advertise the exact capability; ordinary `rm()` and
-`rename()` retain their existing local-first behavior.
+replicas still ingest immutable events incrementally. Wrappers that customize
+`rm()` or `rename()` policy must apply it in `mutateNamespaceForMount()` too;
+ordinary `rm()` and `rename()` retain their existing local-first behavior.
 
 Within one program instance, a guarded mutation fences local ordinary naming
 appends from validation through publication. Overlapping `mkdir`, `rm`,
@@ -482,19 +481,14 @@ total. Reported GC settle wall time includes both requests and both event-loop
 turns; it is not GC CPU time.
 
 The mount backend's manual copy-on-write benchmark isolates 4, 64, and 256 MiB
-commit buffers behind a gated fake target that retains the immutable commit
-input after resolution. For every size it runs a legacy fallback (mount and
-target each SHA-256 the full input) and the versioned capable path (only the
-target hashes it) in fresh `--expose-gc` children. It reports paired commit
-entry times, the target's measured hash time, first post-commit mutation time,
-and RSS/external/ArrayBuffer memory snapshots and deltas. This deliberately
-uses a new/truncated file and a fake target: it isolates mount commit hashing
-and COW allocation, not writable-open hashing, SharedFileSystem chunk hashing,
-authorization, replication, or storage IO. The numbers are descriptive only;
-there are no performance budgets. Exact unchanged writes still perform one
-full-file hash in either mode (in the mount for fallback, in SharedFileSystem
-for the capable path); the duplicate-pass saving applies to version-creating
-commits:
+commit buffers behind a gated fake target that hashes and retains the immutable
+commit input after resolution. Each size runs in a fresh `--expose-gc` child.
+It reports commit entry time, the target's measured hash time, first
+post-commit mutation time, and RSS/external/ArrayBuffer memory snapshots and
+deltas. This deliberately uses a new/truncated file and a fake target: it
+isolates the mount commit handoff and COW allocation, not writable-open
+hashing, SharedFileSystem chunk hashing, authorization, replication, or storage
+IO. The numbers are descriptive only; there are no performance budgets:
 
 ```bash
 PEERBIT_SHARED_FS_MOUNT_COW_BENCH=1 \
@@ -503,16 +497,14 @@ pnpm --filter @peerbit/shared-fs exec vitest run \
 ```
 
 The separate writable-open benchmark isolates the exact-version read path for
-existing 4, 64, and 256 MiB files. In both modes its fake target allocates one
-fresh snapshot and performs one whole-file SHA-256 verification, modeling
-`SharedFileSystem.readVersion()` after chunk assembly. The fallback mount then
-hashes those bytes again for its local no-op baseline; the versioned verified
-path returns strictly bound version/node/hash/size metadata and reuses the
-target's verified hash without another byte copy or hash. It reports five-run
-p50 open, target-copy, and target-hash times plus a descriptive paired delta.
-It does not model chunk fetch/verification, Peerbit document resolution,
-authorization, replication, storage IO, commits, or read-buffer copies, and it
-has no timing budget:
+existing 4, 64, and 256 MiB files. Its fake target allocates one fresh snapshot,
+performs one whole-file SHA-256 verification, and returns strictly bound
+version/node/hash/size metadata, modeling
+`SharedFileSystem.readVersionForMount()` after chunk assembly; the mount reuses
+that snapshot without another byte copy or hash. It reports five-run p50 open,
+target-copy, and target-hash times. It does not model chunk
+fetch/verification, Peerbit document resolution, authorization, replication,
+storage IO, commits, or read-buffer copies, and it has no timing budget:
 
 ```bash
 PEERBIT_SHARED_FS_MOUNT_OPEN_BENCH=1 \
@@ -777,10 +769,9 @@ constants, truncate shrinks and zero-fill grows both open handles and paths,
 and flushing unchanged content does not mint a new version. Writable opens load
 the exact visible version rather than a temporarily available ancestor, retain
 that version as their sole causal base, and compare-and-set the path's node id
-at commit. A verified-read-capable target also lets a read-only first opener
-establish that exact shared snapshot once; legacy targets retain their
-`readFile` availability fallback and upgrade coherently on the first writable
-attach. A typed remove/recreate mismatch quarantines every descriptor for the
+at commit. A read-only first opener also loads that exact verified snapshot,
+which later writable siblings share without another load or hash. A typed
+remove/recreate mismatch quarantines every descriptor for the
 old local state, so repairing the path cannot make a retry publish stale bytes;
 other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
@@ -831,11 +822,23 @@ through the normal conflict model. Creation remains
 commit-on-flush/fsync/release, so a race discovered after open can surface at
 that later fence. A confirmed absent-path loser is terminal and cannot recreate
 the path after the winner is removed; unrelated `EIO` and readiness failures
-remain retryable. Targets advertising the versioned native-mount write
-capability translate an exclusive commit-time loss to `EEXIST`; custom targets
-retain their original `EAGAIN` result.
+remain retryable. An exclusive commit-time loss is reported as `EEXIST`.
 
-Custom mount targets that implement `expectedNodeId` compare-and-set should
+Custom mount targets implement `SharedFsMountBackendTarget`. Mounts read file
+contents only through `readVersionForMount()`, commit through `writeFile()`,
+remove and rename only through `mutateNamespaceForMount()`, and look paths up
+through `stat()`; they never call `readVersion()`, `rm()`, or `rename()`. A
+`SharedFsHandle` or `SharedFileSystem` subclass (or any delegating wrapper)
+that customizes read, remove, or rename policy must therefore apply it in those
+mount-facing methods at the layer it overrides, as `IgnoreAwareFs` does. For
+files, `stat()` must include `versionId`, `contentHash`, `size`, and
+`headVersionIds`, matching what `readVersionForMount()` returns.
+`writeFile()` must hash its input itself, honor `noOpIfHeadVersionIds`, and
+return the committed version with a `mountWriteOutcome`. It may retain the
+input `Uint8Array` indefinitely but must never mutate it or transfer/detach its
+`ArrayBuffer`: the mount lends its buffer without copying.
+
+Custom targets that implement `expectedNodeId` compare-and-set should
 throw the exported `SharedFsExpectedNodeMismatchError` for an atomic mismatch.
 The mount uses that discriminator to terminalize both an absent-path loser and
 an existing file state whose node was replaced, without a racy follow-up
@@ -960,8 +963,8 @@ The phases are deliberately narrow and nest rather than add up:
   is a live function in the write options, so the backend passes it only to
   `SharedFsHandle` and the artifact-ignore wrapper while they keep their
   default `writeFile` delegation (a private opt-in). Every other target,
-  including one that advertises the public mount write handshake, receives
-  the unprofiled options.
+  including a third-party custom mount target, receives the unprofiled
+  options.
   A failing sub-phase closes with `ok: false` and the library error's `code`;
   no sub-phase record follows it.
 

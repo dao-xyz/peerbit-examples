@@ -8,9 +8,6 @@ import {
 
 const MEBIBYTE = 1024 * 1024;
 const ALLOWED_SIZES_MIB = new Set([4, 64, 256]);
-const MODES = new Set(["capable", "fallback"] as const);
-
-type BenchmarkMode = "capable" | "fallback";
 
 type MemorySnapshot = {
     rssBytes: number;
@@ -23,7 +20,6 @@ type MemorySnapshot = {
 type MemoryDelta = MemorySnapshot;
 
 type CowBenchmarkSample = {
-    mode: BenchmarkMode;
     sizeMiB: number;
     sizeBytes: number;
     commitEnterMs: number;
@@ -105,15 +101,11 @@ const memoryDelta = (
 const throughputMiBPerSecond = (sizeMiB: number, durationMs: number) =>
     durationMs > 0 ? (sizeMiB * 1000) / durationMs : 0;
 
-const run = async (
-    sizeMiB: number,
-    mode: BenchmarkMode
-): Promise<CowBenchmarkSample> => {
+const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
     assert.ok(
         ALLOWED_SIZES_MIB.has(sizeMiB),
         `COW benchmark size must be one of ${[...ALLOWED_SIZES_MIB].join(", ")} MiB`
     );
-    assert.ok(MODES.has(mode), `Unknown COW benchmark mode: ${mode}`);
     const sizeBytes = sizeMiB * MEBIBYTE;
     const writeEntered = deferred();
     const writeAllowed = deferred();
@@ -125,14 +117,7 @@ const run = async (
     let targetHashMs = 0;
 
     const target: SharedFsMountBackendTarget = {
-        ...(mode === "capable"
-            ? {
-                  mountWriteSemantics: () =>
-                      "self-hashed-exact-head-noop-v1" as const,
-              }
-            : {}),
-        readFile: async () => undefined,
-        readVersion: async () => undefined,
+        readVersionForMount: async () => undefined,
         stat: async () => undefined,
         writeFile: async (_path, source) => {
             writeFileCalls++;
@@ -162,23 +147,20 @@ const run = async (
                 id: "benchmark-version",
                 nodeId: "benchmark-node",
                 contentHash,
-                ...(mode === "capable"
-                    ? { mountWriteOutcome: "created" as const }
-                    : {}),
+                mountWriteOutcome: "created",
             };
         },
         mkdir: async () => undefined,
-        rm: async () => undefined,
-        rename: async () => undefined,
+        mutateNamespaceForMount: async () => {
+            throw new Error("COW benchmark must not mutate the namespace");
+        },
         list: async () => [],
         versions: async () => [],
         conflicts: async () => [],
         bootstrapStatus: () => ({ writeReady: true }),
     };
 
-    const backend = createSharedFsMountBackend(target, {
-        writeFileInput: "immutable-borrowed",
-    });
+    const backend = createSharedFsMountBackend(target);
     const handle = await backend.open("/cow-benchmark.bin", {
         read: true,
         write: true,
@@ -222,7 +204,7 @@ const run = async (
 
         // The target still owns the exact commit input after writeFile has
         // resolved. The first later mutation therefore measures the permanent
-        // immutable-borrowed detachment, not merely an in-flight overlap.
+        // borrowed-input detachment, not merely an in-flight overlap.
         const cowWriteStartedAt = performance.now();
         await backend.write(handle, Uint8Array.of(1), 0);
         const retainedCowWriteMs = performance.now() - cowWriteStartedAt;
@@ -244,7 +226,6 @@ const run = async (
         assert.equal(liveMutationPreserved, true);
 
         return {
-            mode,
             sizeMiB,
             sizeBytes,
             commitEnterMs,
@@ -310,8 +291,7 @@ const send = (message: WorkerMessage) =>
 
 const main = async () => {
     const sizeMiB = Number(process.argv[2]);
-    const mode = process.argv[3] as BenchmarkMode;
-    const sample = await run(sizeMiB, mode);
+    const sample = await run(sizeMiB);
     await send({ type: "result", sample });
     process.disconnect();
 };

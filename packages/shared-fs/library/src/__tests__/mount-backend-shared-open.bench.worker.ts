@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
-    SHARED_FS_MOUNT_READ_SEMANTICS,
     createSharedFsMountBackend,
     type SharedFsEntryInfo,
     type SharedFsMountBackendTarget,
@@ -30,8 +29,6 @@ type SharedOpenBenchmarkSample = {
     verifiedReadCalls: number;
     targetHashCalls: number;
     targetHashedBytes: number;
-    readFileCalls: number;
-    readVersionCalls: number;
     statCalls: number;
     writeFileCalls: number;
     memory: {
@@ -109,13 +106,10 @@ const run = async (handleCount: number): Promise<SharedOpenBenchmarkSample> => {
     let targetHashedBytes = 0;
     let verifiedCopyMs = 0;
     let verifiedHashMs = 0;
-    let readFileCalls = 0;
-    let readVersionCalls = 0;
     let statCalls = 0;
     let writeFileCalls = 0;
 
     const target: SharedFsMountBackendTarget = {
-        mountReadSemantics: () => SHARED_FS_MOUNT_READ_SEMANTICS,
         readVersionForMount: async (_path, versionId) => {
             verifiedReadCalls++;
             assert.equal(versionId, entry.versionId);
@@ -138,14 +132,6 @@ const run = async (handleCount: number): Promise<SharedOpenBenchmarkSample> => {
                 size: entry.size,
             };
         },
-        readFile: async () => {
-            readFileCalls++;
-            throw new Error("verified shared opens must not use readFile");
-        },
-        readVersion: async () => {
-            readVersionCalls++;
-            throw new Error("verified shared opens must not use readVersion");
-        },
         stat: async () => {
             statCalls++;
             return entry;
@@ -155,8 +141,9 @@ const run = async (handleCount: number): Promise<SharedOpenBenchmarkSample> => {
             throw new Error("read-only shared opens must not commit");
         },
         mkdir: async () => undefined,
-        rm: async () => undefined,
-        rename: async () => undefined,
+        mutateNamespaceForMount: async () => {
+            throw new Error("read-only shared opens must not mutate");
+        },
         list: async () => [entry],
         versions: async () => [],
         conflicts: async () => [],
@@ -188,8 +175,6 @@ const run = async (handleCount: number): Promise<SharedOpenBenchmarkSample> => {
     assert.equal(verifiedReadCalls, 1);
     assert.equal(targetHashCalls, 1);
     assert.equal(targetHashedBytes, SIZE_BYTES);
-    assert.equal(readFileCalls, 0);
-    assert.equal(readVersionCalls, 0);
     assert.equal(statCalls, handleCount + 1);
     assert.equal(writeFileCalls, 0);
 
@@ -203,8 +188,6 @@ const run = async (handleCount: number): Promise<SharedOpenBenchmarkSample> => {
         verifiedReadCalls,
         targetHashCalls,
         targetHashedBytes,
-        readFileCalls,
-        readVersionCalls,
         statCalls,
         writeFileCalls,
         memory: {

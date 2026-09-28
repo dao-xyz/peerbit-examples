@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
-    SHARED_FS_MOUNT_READ_SEMANTICS,
     createSharedFsMountBackend,
     type SharedFsEntryInfo,
     type SharedFsMountBackendTarget,
@@ -10,13 +9,9 @@ import {
 
 const MEBIBYTE = 1024 * 1024;
 const ALLOWED_SIZES_MIB = new Set([4, 64, 256]);
-const MODES = new Set(["fallback", "verified"] as const);
 const SAMPLES = 5;
 
-type BenchmarkMode = "fallback" | "verified";
-
 type OpenHashBenchmarkSample = {
-    mode: BenchmarkMode;
     sizeMiB: number;
     sizeBytes: number;
     samples: number;
@@ -24,7 +19,6 @@ type OpenHashBenchmarkSample = {
     targetCopyP50Ms: number;
     targetHashP50Ms: number;
     openP50MiBPerSecond: number;
-    legacyReadCalls: number;
     verifiedReadCalls: number;
     targetHashCalls: number;
     targetHashedBytes: number;
@@ -58,15 +52,11 @@ const forceGc = async () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 };
 
-const run = async (
-    sizeMiB: number,
-    mode: BenchmarkMode
-): Promise<OpenHashBenchmarkSample> => {
+const run = async (sizeMiB: number): Promise<OpenHashBenchmarkSample> => {
     assert.ok(
         ALLOWED_SIZES_MIB.has(sizeMiB),
         `Open-hash benchmark size must be one of ${[...ALLOWED_SIZES_MIB].join(", ")} MiB`
     );
-    assert.ok(MODES.has(mode), `Unknown open-hash benchmark mode: ${mode}`);
     const sizeBytes = sizeMiB * MEBIBYTE;
     const storedBytes = new Uint8Array(sizeBytes);
     for (let offset = 0; offset < storedBytes.byteLength; offset += 4096) {
@@ -92,54 +82,35 @@ const run = async (
     const openSamples: number[] = [];
     const targetCopySamples: number[] = [];
     const targetHashSamples: number[] = [];
-    let legacyReadCalls = 0;
     let verifiedReadCalls = 0;
     let targetHashCalls = 0;
     let targetHashedBytes = 0;
     let statCalls = 0;
     let writeFileCalls = 0;
 
-    const exactRead = () => {
-        const copyStartedAt = performance.now();
-        // Models readFileVersion's newly assembled, mount-owned allocation.
-        const bytes = storedBytes.slice();
-        targetCopySamples.push(performance.now() - copyStartedAt);
-        const hashStartedAt = performance.now();
-        const observedHash = createHash("sha256")
-            .update(bytes)
-            .digest("base64");
-        targetHashSamples.push(performance.now() - hashStartedAt);
-        targetHashCalls++;
-        targetHashedBytes += bytes.byteLength;
-        assert.equal(observedHash, contentHash);
-        return bytes;
-    };
-
     const target: SharedFsMountBackendTarget = {
-        ...(mode === "verified"
-            ? {
-                  mountReadSemantics: () => SHARED_FS_MOUNT_READ_SEMANTICS,
-                  readVersionForMount: async (
-                      _path: string,
-                      versionId: string
-                  ) => {
-                      verifiedReadCalls++;
-                      assert.equal(versionId, entry.versionId);
-                      return {
-                          bytes: exactRead(),
-                          versionId,
-                          nodeId: entry.nodeId,
-                          contentHash,
-                          size: entry.size,
-                      };
-                  },
-              }
-            : {}),
-        readFile: async () => undefined,
-        readVersion: async (_path, versionId) => {
-            legacyReadCalls++;
+        readVersionForMount: async (_path, versionId) => {
+            verifiedReadCalls++;
             assert.equal(versionId, entry.versionId);
-            return exactRead();
+            const copyStartedAt = performance.now();
+            // Models readFileVersion's newly assembled, mount-owned allocation.
+            const bytes = storedBytes.slice();
+            targetCopySamples.push(performance.now() - copyStartedAt);
+            const hashStartedAt = performance.now();
+            const observedHash = createHash("sha256")
+                .update(bytes)
+                .digest("base64");
+            targetHashSamples.push(performance.now() - hashStartedAt);
+            targetHashCalls++;
+            targetHashedBytes += bytes.byteLength;
+            assert.equal(observedHash, contentHash);
+            return {
+                bytes,
+                versionId,
+                nodeId: entry.nodeId,
+                contentHash,
+                size: entry.size,
+            };
         },
         stat: async () => {
             statCalls++;
@@ -150,8 +121,9 @@ const run = async (
             throw new Error("writable-open benchmark must not commit");
         },
         mkdir: async () => undefined,
-        rm: async () => undefined,
-        rename: async () => undefined,
+        mutateNamespaceForMount: async () => {
+            throw new Error("writable-open benchmark must not mutate");
+        },
         list: async () => [entry],
         versions: async () => [],
         conflicts: async () => [],
@@ -168,7 +140,6 @@ const run = async (
     openSamples.length = 0;
     targetCopySamples.length = 0;
     targetHashSamples.length = 0;
-    legacyReadCalls = 0;
     verifiedReadCalls = 0;
     targetHashCalls = 0;
     targetHashedBytes = 0;
@@ -190,12 +161,10 @@ const run = async (
     assert.equal(targetHashedBytes, SAMPLES * sizeBytes);
     assert.equal(statCalls, SAMPLES * 2);
     assert.equal(writeFileCalls, 0);
-    assert.equal(legacyReadCalls, mode === "fallback" ? SAMPLES : 0);
-    assert.equal(verifiedReadCalls, mode === "verified" ? SAMPLES : 0);
+    assert.equal(verifiedReadCalls, SAMPLES);
 
     const openP50Ms = p50(openSamples);
     return {
-        mode,
         sizeMiB,
         sizeBytes,
         samples: SAMPLES,
@@ -203,7 +172,6 @@ const run = async (
         targetCopyP50Ms: p50(targetCopySamples),
         targetHashP50Ms: p50(targetHashSamples),
         openP50MiBPerSecond: openP50Ms > 0 ? (sizeMiB * 1000) / openP50Ms : 0,
-        legacyReadCalls,
         verifiedReadCalls,
         targetHashCalls,
         targetHashedBytes,
@@ -224,8 +192,7 @@ const send = (message: WorkerMessage) => {
 };
 
 const sizeMiB = Number(process.argv[2]);
-const mode = process.argv[3] as BenchmarkMode;
-run(sizeMiB, mode).then(
+run(sizeMiB).then(
     (sample) => {
         send({ type: "result", sample });
         process.exitCode = 0;

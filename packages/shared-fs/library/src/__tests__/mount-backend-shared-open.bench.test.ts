@@ -32,8 +32,6 @@ type SharedOpenBenchmarkSample = {
     verifiedReadCalls: number;
     targetHashCalls: number;
     targetHashedBytes: number;
-    readFileCalls: number;
-    readVersionCalls: number;
     statCalls: number;
     writeFileCalls: number;
     memory: {
@@ -172,8 +170,6 @@ const validateSample = (sample: SharedOpenBenchmarkSample, handles: number) => {
         verifiedReadCalls: 1,
         targetHashCalls: 1,
         targetHashedBytes: SIZE_BYTES,
-        readFileCalls: 0,
-        readVersionCalls: 0,
         statCalls: handles + 1,
         writeFileCalls: 0,
     });
