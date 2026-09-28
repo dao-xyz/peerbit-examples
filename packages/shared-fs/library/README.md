@@ -777,13 +777,14 @@ other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
-Native mounts do not yet expose the stored exec bit, mtime, or symlinks (see
-[File metadata and symlinks](#file-metadata-and-symlinks)), and owner is not
-stored. Native stat results use synthetic fixed modes (`0755` directories and
-`0644` files on Linux/macOS, normalized to `0777`/`0666` on Windows), synthetic
-ownership, logical/synthetic mtime and ctime, and atime mirrored from mtime.
-Creation modes are not preserved. chmod, chown, and explicit timestamp changes
-are unsupported and fail rather than falsely claiming persistence. These
+Native mounts report a file's stored mtime but do not yet expose its exec bit
+or symlinks (see [File metadata and symlinks](#file-metadata-and-symlinks)): a
+symlink appears as a regular file holding its target, and writing it through a
+mount fails with `EINVAL`. Owner is not stored. Native stat results use
+synthetic fixed modes (`0755` directories and `0644` files on Linux/macOS,
+normalized to `0777`/`0666` on Windows), synthetic ownership, logical/synthetic
+directory mtime and ctime, and atime mirrored from mtime. Creation modes are
+not preserved. chmod, chown, and explicit timestamp changes are unsupported and fail rather than falsely claiming persistence. These
 fields are not an authorization boundary; use Shared FS writer authorization.
 The external adapter's OS access callback checks path existence but not its
 requested mask, so `access(2)` and `test -w` are advisory.
@@ -1017,12 +1018,15 @@ await fs.writeFile("/latest", "releases/v2", { mode: SHARED_FS_MODE.symlink });
   `mtime`.
 - A write without `mode` or `mtime` keeps the best-ranked parent's mode, and
   keeps its mtime only when the bytes are unchanged; otherwise mtime is the
-  write time. `writeBatch`, `resolveConflict()`, and naming restores keep the
-  mode too. Re-saving identical bytes and metadata is still a no-op.
+  write time. `writeBatch` and naming restores keep the mode too;
+  `resolveConflict()` keeps the selected version's mode, and its mtime only
+  when the selected bytes are the visible ones. Re-saving identical bytes and
+  metadata is still a no-op.
 - `setMetadata(path, { mode?, mtime? }, { expectedNodeId? })` publishes one
   version that reuses the current chunks, so it moves no chunk bytes. A write
-  of the same bytes with a new mode or mtime reuses them the same way (unless
-  it sets `chunkSize` or `dedup: "off"`). `setMetadata` rejects directories
+  of a current head's bytes with a new mode or mtime reuses them the same way
+  while they are all stored locally (unless it sets `chunkSize` or
+  `dedup: "off"`). `setMetadata` rejects directories
   with `EISDIR` and symlinks with `EINVAL`.
 - A symlink is a file node whose bytes are its target: 1-1023 bytes of UTF-8
   without NUL. `stat()`, `list()`, and watch events report it as a file; check
@@ -1031,8 +1035,8 @@ await fs.writeFile("/latest", "releases/v2", { mode: SHARED_FS_MODE.symlink });
   them, so absolute and dangling targets are allowed.
 - A node never changes type. Writing a symlink requires
   `mode: SHARED_FS_MODE.symlink` every time; plain bytes to a symlink, or a
-  symlink over a regular file, fail with `EINVAL`, and `writeBatch` rejects
-  symlinks. Use `rm` or `rename` to replace one.
+  symlink over a regular file, fail with `EINVAL`, as does an explicit base
+  version of the other type, and `writeBatch` rejects symlinks. Use `rm` or `rename` to replace one.
 - Ignore patterns do not look at the node type, so `node_modules/` also
   matches a symlink with that name (unlike git), and a `.artifactignore`
   symlink is compiled from its target text.

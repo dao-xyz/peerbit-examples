@@ -971,7 +971,10 @@ export type SharedFsEntryInfo = {
     conflict: boolean;
     /** Visible head version id for files. */
     versionId?: string;
-    /** All current head version ids for files (more than one means conflict). */
+    /**
+     * All current head version ids for files. Heads holding the same bytes
+     * are not a conflict; see `conflict`.
+     */
     headVersionIds?: string[];
     /** Content hash of the visible head version for files. */
     contentHash?: string;
@@ -1100,7 +1103,8 @@ export type WriteFileOptions = {
      * Defaults to the best-ranked parent's mode (0o100644 for a new file).
      * A symlink must pass SHARED_FS_MODE.symlink explicitly: its bytes are
      * the target (1-1023 bytes of UTF-8 without NUL), and a node can never
-     * change between symlink and regular file (EINVAL).
+     * change between symlink and regular file, nor build on a base version
+     * of the other type (EINVAL).
      */
     mode?: SharedFsFileMode;
     /**
@@ -5609,6 +5613,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             `Base version ${parentId} no longer belongs to the expected node at ${normalized}`
                         );
                     }
+                    if ((parent.mode === SHARED_FS_MODE.symlink) !== link) {
+                        // A base may come from another node; inheritMeta
+                        // must never pass its type on to this write.
+                        throw new SharedFsError(
+                            "EINVAL",
+                            `Base version ${parentId} is ${link ? "not " : ""}a symlink: ${normalized}`
+                        );
+                    }
                     parentVersions.push(parent);
                 } else if (expectedNodeId !== undefined) {
                     throw new SharedFsExpectedNodeMismatchError(
@@ -5638,24 +5650,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             parentVersionIds = currentHeads.map((head) => head.id);
             parentVersions = currentHeads;
         }
-        // Same bytes as a parent (a metadata-only write): reuse its chunk
-        // list with no chunk IO. As for resolveConflict, the parent still
-        // references those chunks and Guard D is the backstop.
-        const sameBytesParent =
+        // Same bytes as a current head (a metadata-only write): reuse its
+        // chunk list with no chunk IO while every chunk is local. Heads are
+        // never retired, so the head keeps referencing those chunks and
+        // Guard D is the backstop. A superseded base takes the full path.
+        const sameBytesHead =
             options.chunkSize === undefined && options.dedup !== "off"
-                ? parentVersions.find(
-                      (parent) => parent.contentHash === contentHash
-                  )
+                ? currentHeads.find((head) => head.contentHash === contentHash)
                 : undefined;
         const reused =
-            sameBytesParent &&
-            (sameBytesParent instanceof FileVersion
-                ? sameBytesParent
-                : await this.getDocument<SharedFsEntry>(sameBytesParent.id));
+            sameBytesHead &&
+            (sameBytesHead instanceof FileVersion
+                ? sameBytesHead
+                : await this.getDocument<SharedFsEntry>(sameBytesHead.id));
         const versionId = createId("version");
         let chunkIds: string[];
         let uniqueChunks: FileChunk[] | undefined;
-        if (reused instanceof FileVersion) {
+        if (
+            reused instanceof FileVersion &&
+            (await this.indexRowsById(reused.chunkIds, { id: true })).size ===
+                new Set(reused.chunkIds).size
+        ) {
             chunkIds = reused.chunkIds;
             this.enterForegroundMutationCriticalTail(context);
         } else {
@@ -6894,7 +6909,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         const heads = await this.headsForNode(resolved.nodeId);
-        const resolution = this.copyVersion(selected, heads, selected, true);
+        // Selecting other bytes than the visible ones modifies the file now.
+        const resolution = this.copyVersion(
+            selected,
+            heads,
+            {
+                mode: selected.mode,
+                mtime:
+                    selected.contentHash === heads[0]?.contentHash
+                        ? selected.mtime
+                        : undefined,
+            },
+            true
+        );
         this.enterForegroundMutationCriticalTail(context);
         await this.entries.put(resolution, { unique: true });
         this.cacheLocalWrite(resolution);
@@ -6998,12 +7025,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * A new version of `source`'s bytes over `parents`, reusing its chunk
-     * list: shared by setMetadata, resolveConflict and naming restore.
+     * list: shared by setMetadata, resolveConflict and naming restore. The
+     * mtime defaults to the write time.
      */
     private copyVersion(
         source: FileVersion,
         parents: VersionLike[],
-        meta: { mode: number; mtime: bigint },
+        meta: { mode: number; mtime?: bigint },
         conflictResolution: boolean
     ) {
         const metadata = this.signedMetadata();
@@ -7015,7 +7043,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             contentHash: source.contentHash,
             size: source.size,
             mode: meta.mode,
-            mtime: meta.mtime,
+            mtime: meta.mtime ?? metadata.timestamp,
             chunkIds: source.chunkIds,
             createdAt: metadata.timestamp,
             authorKey: metadata.authorKey,

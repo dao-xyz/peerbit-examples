@@ -116,7 +116,9 @@ describe("shared fs posix metadata", () => {
             forged("long-link", { mode: LINK, size: 1024n }),
             forged("mtime", { mtime: 2n ** 53n }),
         ]) {
-            await expect(fs.program.entries.put(version)).rejects.toThrow();
+            await expect(
+                fs.program.entries.put(version).then(() => version.id)
+            ).rejects.toThrow();
         }
         // The variant is the format break: an old program no longer loads.
         const blocks = peers[0].services.blocks;
@@ -145,17 +147,31 @@ describe("shared fs posix metadata", () => {
         await fs.writeFile("/t.sh", "one", { mode: EXEC });
         expect((await fs.writeFile("/t.sh", "two")).mode).toBe(EXEC);
         await fs.writeBatch([{ path: "/t.sh", content: "three" }]);
-        const base = (await fs.stat("/t.sh"))!.versionId!;
-        const left = await fs.writeFile("/t.sh", "left", {
-            baseVersionIds: [base],
-        });
-        await fs.writeFile("/t.sh", "right", { baseVersionIds: [base] });
-        const [conflict] = await fs.conflicts("/t.sh");
-        expect(conflict.versions.map((version) => version.mode)).toEqual([
-            EXEC,
-            EXEC,
-        ]);
-        expect((await fs.resolveConflict("/t.sh", left.id)).mode).toBe(EXEC);
+        // Selecting the hidden bytes modifies the file at resolution time;
+        // selecting the visible ones keeps their mtime.
+        for (const pick of [1, 0]) {
+            const base = (await fs.stat("/t.sh"))!.versionId!;
+            for (const [content, mtime] of [
+                ["left", 1],
+                ["right", 2],
+            ] as const) {
+                await fs.writeFile("/t.sh", `${content}${pick}`, {
+                    baseVersionIds: [base],
+                    mtime,
+                });
+            }
+            const [conflict] = await fs.conflicts("/t.sh");
+            expect(conflict.versions.map((version) => version.mode)).toEqual([
+                EXEC,
+                EXEC,
+            ]);
+            const selected = conflict.versions[pick];
+            const resolution = await fs.resolveConflict("/t.sh", selected.id);
+            expect(resolution).toMatchObject({
+                mode: EXEC,
+                mtime: pick ? resolution.createdAt : selected.mtime,
+            });
+        }
 
         const entry = (await fs.stat("/t.sh"))!;
         const visible = await versionDoc(fs, entry.versionId!);
@@ -260,6 +276,31 @@ describe("shared fs posix metadata", () => {
         expect(decode(await fs.readFile("/r.bin"))).toBe("payload");
     });
 
+    it("reuses chunks only from a current head whose chunks are all local", async () => {
+        const fs = await open();
+        const program = fs.program as any;
+        const touch = vi.spyOn(program, "touchChunks");
+        // A superseded base can be retired under the write: full path.
+        const old = await fs.writeFile("/f.txt", "old");
+        await fs.writeFile("/f.txt", "new");
+        await fs.writeFile("/f.txt", "old", { baseVersionIds: [old.id] });
+        expect(touch).toHaveBeenCalledTimes(3);
+        // A head whose chunk is not local (still replicating in, say): the
+        // full path re-puts it from the caller's bytes.
+        const head = await fs.writeFile("/g.sh", "gone");
+        const [gone] = (await versionDoc(fs, head.id)).chunkIds;
+        program.gcSuppressed.add(gone);
+        try {
+            await program.entries.del(gone);
+            expect(await program.hasDocument(gone)).toBe(false);
+            await fs.writeFile("/g.sh", "gone", { mode: EXEC });
+        } finally {
+            program.gcSuppressed.delete(gone);
+        }
+        expect(touch).toHaveBeenCalledTimes(5);
+        expect(await program.hasDocument(gone)).toBe(true);
+    });
+
     it("guards setMetadata and keeps the other head of a content conflict", async () => {
         const fs = await open({ ignore: { patterns: ["dist/"] } });
         const file = await fs.writeFile("/s.txt", "s");
@@ -276,6 +317,27 @@ describe("shared fs posix metadata", () => {
                 { expectedNodeId: "file:other" }
             )
         ).rejects.toMatchObject({ code: "EAGAIN", checkpoint: "initial" });
+        // A local replacement while the source loads is caught before the put.
+        const replaced = await fs.writeFile("/r.txt", "r");
+        const program = fs.program as any;
+        const getDocument = program.getDocument.bind(program);
+        vi.spyOn(program, "getDocument").mockImplementationOnce(
+            async (...args: unknown[]) => {
+                await fs.rm("/r.txt");
+                await fs.writeFile("/r.txt", "r");
+                return getDocument(...args);
+            }
+        );
+        await expect(
+            fs.setMetadata(
+                "/r.txt",
+                { mode: EXEC },
+                { expectedNodeId: replaced.nodeId }
+            )
+        ).rejects.toMatchObject({
+            code: "EAGAIN",
+            checkpoint: "before-version",
+        });
         await fs.mkdir("/d");
         await fs.writeFile("/l", "s.txt", { mode: LINK });
         for (const [path, code] of [
@@ -307,6 +369,9 @@ describe("shared fs posix metadata", () => {
         expect(before).toMatchObject({ conflict: true });
         expect(before.headVersionIds).toHaveLength(3);
         expect((await fs.conflicts("/s.txt"))[0].versions).toHaveLength(2);
+        expect(
+            (await fs.conflicts()).map((c) => [c.path, c.versions.length])
+        ).toEqual([["/s.txt", 2]]);
         const heads = (await fs.versions("/s.txt")).filter((v) => v.head);
         const ids = (same: boolean) =>
             heads
@@ -315,10 +380,12 @@ describe("shared fs posix metadata", () => {
         // setMetadata merges only the heads holding the visible bytes.
         const updated = await fs.setMetadata("/s.txt", { mode: EXEC });
         expect(updated.parentVersionIds.sort()).toEqual(ids(true).sort());
-        const [conflict] = await fs.conflicts("/s.txt");
-        expect(conflict.versions.map((v) => v.id).sort()).toEqual(
+        expect((await fs.stat("/s.txt"))!.headVersionIds!.sort()).toEqual(
             [updated.id, ...ids(false)].sort()
         );
+        const [conflict] = await fs.conflicts("/s.txt");
+        expect(conflict.versions).toHaveLength(2);
+        expect(conflict.versions[0].id).toBe(updated.id);
     });
 
     it("stores symlinks as fixed-type file nodes with validated targets", async () => {
@@ -346,6 +413,19 @@ describe("shared fs posix metadata", () => {
                 fs.writeFile(path, content, { mode })
             ).rejects.toMatchObject({ code: "EINVAL" });
         }
+        // A base of the other type (say from a replaced node) fails too.
+        const linkId = (await fs.stat("/link"))!.versionId!;
+        const fileId = (await fs.stat("/file"))!.versionId!;
+        for (const [path, baseId, mode] of [
+            ["/file", linkId, undefined],
+            ["/new", linkId, undefined],
+            ["/new", fileId, LINK],
+        ] as const) {
+            await expect(
+                fs.writeFile(path, "t", { baseVersionIds: [baseId], mode })
+            ).rejects.toMatchObject({ code: "EINVAL" });
+        }
+        expect((await fs.stat("/file"))!.mode).toBe(FILE);
         await expect(
             fs.writeBatch([{ path: "/link", content: "x" }])
         ).rejects.toMatchObject({ code: "EINVAL" });

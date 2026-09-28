@@ -78,9 +78,11 @@ peerbit-fs resolve-conflict \
 
 The JSON document includes address, path filter, view metadata, and a
 `conflicts` array. Each record contains the file's `nodeId`,
-`visibleVersionId`, and every head in the converged local view: immutable
-version id, content hash, parent ids, author, machine, size, and creation time.
-Size and time are decimal strings so the output is safe to parse in JavaScript.
+`visibleVersionId`, and one head per distinct content in the converged local
+view (heads holding the same bytes are listed once, and any of them can be
+selected): immutable version id, content hash, mode, mtime, parent ids, author,
+machine, size, and creation time. Size and times are decimal strings so the
+output is safe to parse in JavaScript.
 `snapshotCoverageVerified` means only that every id in the accepted signed
 snapshot was covered before overlay retirement; it is not a global/log-frontier
 claim and remains false for bootstrap-off/plain-join views. Inspection still
