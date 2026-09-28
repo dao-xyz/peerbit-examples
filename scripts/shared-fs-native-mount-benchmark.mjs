@@ -16,6 +16,15 @@ import {
 import { arch, cpus, platform, release, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+    DEV_WORKLOAD_MODULE_PATH,
+    devWorkloadScenarioNames,
+    executeDevWorkload,
+    formatDevWorkloadSummaryLines,
+    isDevWorkloadGitScenario,
+    validateDevWorkloadScenario,
+    validateDevWorkloadSection,
+} from "./shared-fs-native-mount-benchmark-dev-workload.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(HERE, "..");
@@ -32,6 +41,7 @@ const REQUIRED_IMPLEMENTATION_DETAILS = [
     "mount.runtime",
 ];
 const TARGET_KINDS = new Set(["shared-fs-mount", "local-filesystem-control"]);
+const SCHEMA_VERSION = 4;
 
 export const nativeMountBenchmarkCorpus = Object.freeze({
     id: "counter-mix32-v1",
@@ -46,8 +56,15 @@ const integerOptions = {
     "--small-files": ["smallFiles", 1, 128],
     "--readdir-entries": ["readdirEntries", 1, 5000],
     "--overwrite-base-bytes": ["overwriteBaseBytes", OVERWRITE_BYTES, 32 << 20],
-    "--timeout-ms": ["timeoutMs", 1000, 600_000],
+    "--timeout-ms": ["timeoutMs", 1000, 3_600_000],
+    "--dev-git-samples": ["devGitSamples", 1, 20],
+    "--dev-git-warmups": ["devGitWarmups", 0, 5],
 };
+const DEV_WORKLOAD_ONLY_OPTIONS = new Set([
+    "--dev-git-samples",
+    "--dev-git-warmups",
+    "--dev-git-executable",
+]);
 
 export const parseNativeMountBenchmarkArguments = (argv) => {
     const options = {
@@ -62,10 +79,32 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
         mountOptions: [],
         targetKind: "shared-fs-mount",
         targetLabel: "caller-supplied mounted path",
+        devWorkload: false,
+        devGitSamples: 3,
+        devGitWarmups: 1,
+        devGitExecutable: "git",
     };
+    const devWorkloadOnlyOptions = [];
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index];
         if (argument === "--") continue;
+        if (DEV_WORKLOAD_ONLY_OPTIONS.has(argument)) {
+            devWorkloadOnlyOptions.push(argument);
+        }
+        if (argument === "--dev-workload") {
+            options.devWorkload = true;
+            continue;
+        }
+        if (argument === "--dev-git-executable") {
+            const value = argv[++index];
+            if (!value || value.length > 1024 || /[\r\n]/u.test(value)) {
+                throw new Error(
+                    "--dev-git-executable requires a single-line path of at most 1024 characters"
+                );
+            }
+            options.devGitExecutable = value;
+            continue;
+        }
         if (argument === "--mount" || argument === "--output") {
             const value = argv[++index];
             if (!value) throw new Error(`${argument} requires a path`);
@@ -169,6 +208,9 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
         options[key] = value;
     }
     if (!options.mount) throw new Error("--mount is required");
+    if (!options.devWorkload && devWorkloadOnlyOptions.length > 0) {
+        throw new Error(`${devWorkloadOnlyOptions[0]} requires --dev-workload`);
+    }
     if (
         options.targetKind === "local-filesystem-control" &&
         options.mountOptions.length > 0
@@ -439,6 +481,7 @@ const normalizeImplementationDetails = (details = []) => {
 export const hashNativeMountBenchmarkInputs = async (additional = []) => {
     const roots = [
         HARNESS_PATH,
+        DEV_WORKLOAD_MODULE_PATH,
         join(REPOSITORY_ROOT, "pnpm-lock.yaml"),
         join(REPOSITORY_ROOT, "packages/shared-fs/library/package.json"),
         join(REPOSITORY_ROOT, "packages/shared-fs/cli/package.json"),
@@ -693,6 +736,22 @@ const executeWorkload = async (root, options, signal) => {
     return scenarios;
 };
 
+// Primitives shared with the opt-in developer workload, so its samples use
+// the same clock, windows, warmup handling and summaries as the core set.
+const devWorkloadHarness = Object.freeze({
+    now,
+    elapsed,
+    sampleWindow,
+    collect,
+    summarize,
+    timedHandleOperation,
+    writeAll,
+    durableWrite,
+    assertBytes,
+    throwIfAborted,
+});
+
+/** Every planned scenario, including developer-workload ones not measured. */
 export const expectedNativeMountBenchmarkScenarioNames = (options) => [
     "stat-1048576",
     "read-4096",
@@ -702,18 +761,36 @@ export const expectedNativeMountBenchmarkScenarioNames = (options) => [
     `small-files-${options.smallFiles}`,
     `readdir-${options.readdirEntries}`,
     `overwrite-4096-in-${options.overwriteBaseBytes}`,
+    ...(options.devWorkload ? devWorkloadScenarioNames(options) : []),
 ];
 
+const runDevWorkloadRecord = (options) =>
+    options.devWorkload
+        ? {
+              enabled: true,
+              gitSamplesPerScenario: options.devGitSamples,
+              gitWarmupsPerScenario: options.devGitWarmups,
+              sampleCounts:
+                  "git scenarios use gitSamplesPerScenario/gitWarmupsPerScenario; other developer-workload scenarios use samplesPerScenario/warmupsPerScenario",
+          }
+        : { enabled: false };
+
+/** The run options a report was produced with, in CLI option shape. */
+export const nativeMountBenchmarkRunOptions = (report) => ({
+    samples: report?.run?.samplesPerScenario,
+    warmups: report?.run?.warmupsPerScenario,
+    smallFiles: report?.run?.smallFilesPerSample,
+    readdirEntries: report?.run?.readdirEntries,
+    overwriteBaseBytes: report?.run?.overwriteBaseBytes,
+    devWorkload: report?.run?.devWorkload?.enabled === true,
+    devGitSamples: report?.run?.devWorkload?.gitSamplesPerScenario,
+    devGitWarmups: report?.run?.devWorkload?.gitWarmupsPerScenario,
+});
+
 export const validateNativeMountBenchmarkReport = (report, options) => {
-    const expectedOptions = options ?? {
-        samples: report?.run?.samplesPerScenario,
-        warmups: report?.run?.warmupsPerScenario,
-        smallFiles: report?.run?.smallFilesPerSample,
-        readdirEntries: report?.run?.readdirEntries,
-        overwriteBaseBytes: report?.run?.overwriteBaseBytes,
-    };
+    const expectedOptions = options ?? nativeMountBenchmarkRunOptions(report);
     if (
-        report?.schemaVersion !== 3 ||
+        report?.schemaVersion !== SCHEMA_VERSION ||
         report.benchmark !== "shared-fs-native-mount" ||
         JSON.stringify(report.corpus) !==
             JSON.stringify(nativeMountBenchmarkCorpus) ||
@@ -822,19 +899,58 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         throw new Error("native-mount benchmark run options are invalid");
     }
     if (
-        JSON.stringify(names) !==
-        JSON.stringify(
-            expectedNativeMountBenchmarkScenarioNames(expectedOptions)
-        )
+        JSON.stringify(report.run.devWorkload) !==
+            JSON.stringify(runDevWorkloadRecord(expectedOptions)) ||
+        (expectedOptions.devWorkload &&
+            (!Number.isSafeInteger(expectedOptions.devGitSamples) ||
+                expectedOptions.devGitSamples < 1 ||
+                expectedOptions.devGitSamples > 20 ||
+                !Number.isSafeInteger(expectedOptions.devGitWarmups) ||
+                expectedOptions.devGitWarmups < 0 ||
+                expectedOptions.devGitWarmups > 5))
     ) {
+        throw new Error(
+            "native-mount developer-workload run options are invalid"
+        );
+    }
+    // Developer-workload scenarios that could not run (missing tool, failed
+    // operation or missing dependency) are listed with a reason instead.
+    const devNames = new Set(
+        expectedOptions.devWorkload
+            ? devWorkloadScenarioNames(expectedOptions)
+            : []
+    );
+    let measuredNames =
+        expectedNativeMountBenchmarkScenarioNames(expectedOptions);
+    if (expectedOptions.devWorkload) {
+        const measuredDev = new Set(
+            validateDevWorkloadSection(report, expectedOptions)
+        );
+        measuredNames = measuredNames.filter(
+            (name) => !devNames.has(name) || measuredDev.has(name)
+        );
+    } else if (report.devWorkload !== null) {
+        throw new Error(
+            "native-mount developer-workload section requires --dev-workload"
+        );
+    }
+    if (JSON.stringify(names) !== JSON.stringify(measuredNames)) {
         throw new Error(`unexpected scenario set: ${names.join(", ")}`);
     }
     let previousEndedAt = -1n;
     for (const scenario of report.scenarios) {
+        const expectedCounts =
+            devNames.has(scenario.name) &&
+            isDevWorkloadGitScenario(scenario.name)
+                ? {
+                      samples: expectedOptions.devGitSamples,
+                      warmups: expectedOptions.devGitWarmups,
+                  }
+                : expectedOptions;
         if (
-            scenario.samples?.length !== expectedOptions.samples ||
-            scenario.warmupSamples?.length !== expectedOptions.warmups ||
-            scenario.summary?.count !== expectedOptions.samples ||
+            scenario.samples?.length !== expectedCounts.samples ||
+            scenario.warmupSamples?.length !== expectedCounts.warmups ||
+            scenario.summary?.count !== expectedCounts.samples ||
             !Number.isSafeInteger(scenario.summary?.p50Ns) ||
             !Number.isSafeInteger(scenario.summary?.p95Ns)
         ) {
@@ -896,6 +1012,11 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
                 throw new Error(`${scenario.name} has an invalid fsync phase`);
             }
         }
+        if (devNames.has(scenario.name)) {
+            validateDevWorkloadScenario(scenario);
+        } else if (scenario.suite !== undefined) {
+            throw new Error(`${scenario.name} has an unexpected suite`);
+        }
         const expectedSummary = summarize(
             scenario.samples,
             scenario.logicalBytes,
@@ -911,6 +1032,9 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
     }
     return report;
 };
+
+const formatDuration = (ns) =>
+    ns >= 1e9 ? `${(ns / 1e9).toFixed(2)} s` : `${(ns / 1e6).toFixed(3)} ms`;
 
 export const formatNativeMountBenchmarkSummary = (report) => {
     const implementation = Object.fromEntries(
@@ -931,12 +1055,82 @@ export const formatNativeMountBenchmarkSummary = (report) => {
     for (const scenario of report.scenarios) {
         const throughput = scenario.summary.p50LogicalMiBPerSecond;
         lines.push(
-            `| ${scenario.name} | ${(scenario.summary.p50Ns / 1e6).toFixed(3)} ms | ${(scenario.summary.p95Ns / 1e6).toFixed(3)} ms | ${throughput == null ? "—" : `${throughput.toFixed(2)} MiB/s`} |`
+            `| ${scenario.name} | ${formatDuration(scenario.summary.p50Ns)} | ${formatDuration(scenario.summary.p95Ns)} | ${throughput == null ? "—" : `${throughput.toFixed(2)} MiB/s`} |`
+        );
+    }
+    lines.push(...formatDevWorkloadSummaryLines(report));
+    lines.push(
+        "",
+        "Report-only: no performance threshold was applied. Local fsync completion does not prove remote persisted delivery.",
+        ""
+    );
+    return lines.join("\n");
+};
+
+/**
+ * One table for a mounted report and its same-runner local-disk control, with
+ * the mount/control p50 ratio for every planned scenario.
+ */
+export const formatNativeMountBenchmarkComparison = (mount, control) => {
+    validateNativeMountBenchmarkReport(mount);
+    validateNativeMountBenchmarkReport(control);
+    if (
+        mount.target.kind !== "shared-fs-mount" ||
+        control.target.kind !== "local-filesystem-control"
+    ) {
+        throw new Error(
+            "a comparison needs a shared-fs-mount report and a local-filesystem-control report"
+        );
+    }
+    const options = nativeMountBenchmarkRunOptions(mount);
+    if (
+        JSON.stringify(options) !==
+        JSON.stringify(nativeMountBenchmarkRunOptions(control))
+    ) {
+        throw new Error(
+            "mount and control reports were run with different options"
+        );
+    }
+    const measured = (report) =>
+        new Map(report.scenarios.map((scenario) => [scenario.name, scenario]));
+    const skipped = (report) =>
+        new Map(
+            (report.devWorkload?.notMeasured ?? []).map((entry) => [
+                entry.scenario,
+                entry.cause,
+            ])
+        );
+    const [mountScenarios, controlScenarios] = [
+        measured(mount),
+        measured(control),
+    ];
+    const [mountSkipped, controlSkipped] = [skipped(mount), skipped(control)];
+    const cell = (scenario, causes, name, key) =>
+        scenario
+            ? formatDuration(scenario.summary[key])
+            : `not measured (${causes.get(name)})`;
+    const lines = [
+        "## Shared FS mount vs local filesystem control (same runner)",
+        "",
+        `Mount: ${mount.target.label}. Control: ${control.target.label}.`,
+        "",
+        "| Scenario | Mount p50 | Control p50 | Mount/control p50 | Mount p95 | Control p95 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ];
+    for (const name of expectedNativeMountBenchmarkScenarioNames(options)) {
+        const onMount = mountScenarios.get(name);
+        const onControl = controlScenarios.get(name);
+        const ratio =
+            onMount && onControl
+                ? `${(onMount.summary.p50Ns / onControl.summary.p50Ns).toFixed(1)}×`
+                : "—";
+        lines.push(
+            `| ${name} | ${cell(onMount, mountSkipped, name, "p50Ns")} | ${cell(onControl, controlSkipped, name, "p50Ns")} | ${ratio} | ${cell(onMount, mountSkipped, name, "p95Ns")} | ${cell(onControl, controlSkipped, name, "p95Ns")} |`
         );
     }
     lines.push(
         "",
-        "Report-only: no performance threshold was applied. Local fsync completion does not prove remote persisted delivery.",
+        "Ratios compare p50s measured on one runner. Report-only: no threshold is applied. Each report's summary lists why a scenario was not measured.",
         ""
     );
     return lines.join("\n");
@@ -961,6 +1155,7 @@ export const runNativeMountBenchmark = async (options) => {
     const controller = new AbortController();
     let timeout;
     let scenarios;
+    let devWorkload = null;
     let workloadError;
     try {
         timeout = setTimeout(
@@ -972,6 +1167,16 @@ export const runNativeMountBenchmark = async (options) => {
         );
         timeout.unref();
         scenarios = await executeWorkload(root, options, controller.signal);
+        if (options.devWorkload) {
+            const result = await executeDevWorkload(
+                root,
+                options,
+                controller.signal,
+                devWorkloadHarness
+            );
+            scenarios.push(...result.scenarios);
+            devWorkload = result.section;
+        }
     } catch (error) {
         workloadError = error;
     } finally {
@@ -1011,7 +1216,7 @@ export const runNativeMountBenchmark = async (options) => {
     ]);
     return validateNativeMountBenchmarkReport(
         {
-            schemaVersion: 3,
+            schemaVersion: SCHEMA_VERSION,
             benchmark: "shared-fs-native-mount",
             corpus: nativeMountBenchmarkCorpus,
             target: {
@@ -1069,6 +1274,7 @@ export const runNativeMountBenchmark = async (options) => {
                 smallFilesPerSample: options.smallFiles,
                 readdirEntries: options.readdirEntries,
                 overwriteBaseBytes: options.overwriteBaseBytes,
+                devWorkload: runDevWorkloadRecord(options),
             },
             runtime: {
                 nodeVersion: process.version,
@@ -1086,6 +1292,7 @@ export const runNativeMountBenchmark = async (options) => {
                 ),
             },
             inputs: inputsBefore,
+            devWorkload,
             scenarios,
         },
         options

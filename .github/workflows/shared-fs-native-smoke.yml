@@ -21,6 +21,11 @@ on:
                 options:
                     - "4194304"
                     - "33554432"
+            dev_workload:
+                description: Also run the report-only developer-machine workload (git clone and status of a synthetic 2,000-file repo, editor saves, JSONL appends, SQLite transactions) on the mount and the local control. Implies the mounted benchmark.
+                required: false
+                default: false
+                type: boolean
 
 permissions:
     contents: read
@@ -32,8 +37,9 @@ jobs:
     linux-fuse:
         name: Linux FUSE native smoke
         runs-on: ubuntu-latest
-        # Four extra mounted benchmark passes need more time than the smoke.
-        timeout-minutes: ${{ inputs.mount_profile && 120 || 30 }}
+        # Four extra mounted benchmark passes need more time than the smoke,
+        # and the developer workload adds a git clone/status set to each pass.
+        timeout-minutes: ${{ inputs.mount_profile && (inputs.dev_workload && 180 || 120) || (inputs.dev_workload && 60 || 30) }}
 
         steps:
             - name: Checkout
@@ -76,13 +82,14 @@ jobs:
             - name: Run external native adapter smoke
               shell: bash
               env:
-                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-linux-fuse-benchmark.json', runner.temp) || '' }}
-                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-linux-control-benchmark.json', runner.temp) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-linux-fuse-benchmark.json', runner.temp) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-linux-control-benchmark.json', runner.temp) || '' }}
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD: ${{ inputs.dev_workload && '1' || '' }}
               run: scripts/shared-fs-external-native-smoke.sh
 
             - name: Add filesystem benchmark summaries
-              if: ${{ always() && inputs.mounted_benchmark }}
+              if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}
               shell: bash
               env:
                   MOUNT_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-linux-fuse-benchmark.json
@@ -98,16 +105,21 @@ jobs:
                   done
                   node --input-type=module -e '
                     import { appendFile, readFile } from "node:fs/promises";
-                    import { formatNativeMountBenchmarkSummary, validateNativeMountBenchmarkReport } from "./scripts/shared-fs-native-mount-benchmark.mjs";
+                    import { formatNativeMountBenchmarkComparison, formatNativeMountBenchmarkSummary, validateNativeMountBenchmarkReport } from "./scripts/shared-fs-native-mount-benchmark.mjs";
+                    const reports = [];
                     for (const path of [process.env.MOUNT_BENCHMARK_REPORT, process.env.CONTROL_BENCHMARK_REPORT]) {
                       const report = JSON.parse(await readFile(path, "utf8"));
                       validateNativeMountBenchmarkReport(report);
+                      reports.push(report);
                       await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkSummary(report));
+                    }
+                    if (reports[0].run.devWorkload.enabled) {
+                      await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkComparison(reports[0], reports[1]));
                     }
                   '
 
             - name: Upload filesystem benchmark reports
-              if: ${{ always() && inputs.mounted_benchmark }}
+              if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
                   name: shared-fs-linux-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
@@ -126,6 +138,7 @@ jobs:
               env:
                   PROFILE_ROOT: ${{ runner.temp }}/shared-fs-mount-profile
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD: ${{ inputs.dev_workload && '1' || '' }}
               run: |
                   set -euo pipefail
                   rm -rf "$PROFILE_ROOT"

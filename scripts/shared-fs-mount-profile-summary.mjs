@@ -15,7 +15,11 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
-import { validateNativeMountBenchmarkReport } from "./shared-fs-native-mount-benchmark.mjs";
+import {
+    expectedNativeMountBenchmarkScenarioNames,
+    nativeMountBenchmarkRunOptions,
+    validateNativeMountBenchmarkReport,
+} from "./shared-fs-native-mount-benchmark.mjs";
 
 export const MOUNT_PROFILE_SCHEMA = "peerbit.shared-fs.mount-profile";
 export const MOUNT_PROFILE_SCHEMA_VERSION = 1;
@@ -1186,15 +1190,32 @@ export const formatMountProfileSummaryMarkdown = (
  */
 export const formatProfilingOverheadMarkdown = (passes) => {
     for (const pass of passes) validateNativeMountBenchmarkReport(pass.report);
-    const names = passes[0]?.report.scenarios.map(({ name }) => name) ?? [];
+    const planned = (report) =>
+        expectedNativeMountBenchmarkScenarioNames(
+            nativeMountBenchmarkRunOptions(report)
+        );
     for (const pass of passes) {
-        const passNames = pass.report.scenarios.map(({ name }) => name);
-        if (JSON.stringify(passNames) !== JSON.stringify(names)) {
+        if (
+            JSON.stringify(planned(pass.report)) !==
+            JSON.stringify(planned(passes[0].report))
+        ) {
             throw new Error(
                 `benchmark pass ${pass.label} has a different scenario set`
             );
         }
     }
+    // Every pass plans the same scenarios, but an opt-in developer-workload
+    // scenario can be unmeasured in one pass (for example a failed git
+    // operation). Such a pass shows "—" for it.
+    const names = passes[0]
+        ? planned(passes[0].report).filter((name) =>
+              passes.some((pass) =>
+                  pass.report.scenarios.some(
+                      (scenario) => scenario.name === name
+                  )
+              )
+          )
+        : [];
     const median = (values) => {
         const sorted = [...values].sort((left, right) => left - right);
         if (sorted.length === 0) return undefined;
@@ -1209,15 +1230,23 @@ export const formatProfilingOverheadMarkdown = (passes) => {
         `| Scenario | ${passes.map((pass) => `${pass.label} (${pass.profiled ? "profiled" : "unprofiled"}) p50`).join(" | ")} | profiled/unprofiled p50 |`,
         `| --- | ${passes.map(() => "---:").join(" | ")} | ---: |`,
     ];
-    for (const [index, name] of names.entries()) {
+    for (const name of names) {
         const p50 = passes.map(
-            (pass) => pass.report.scenarios[index].summary.p50Ns
+            (pass) =>
+                pass.report.scenarios.find((scenario) => scenario.name === name)
+                    ?.summary.p50Ns
         );
         const profiled = median(
-            p50.filter((_, passIndex) => passes[passIndex].profiled)
+            p50.filter(
+                (value, passIndex) =>
+                    value !== undefined && passes[passIndex].profiled
+            )
         );
         const unprofiled = median(
-            p50.filter((_, passIndex) => !passes[passIndex].profiled)
+            p50.filter(
+                (value, passIndex) =>
+                    value !== undefined && !passes[passIndex].profiled
+            )
         );
         const ratio =
             profiled === undefined || unprofiled === undefined

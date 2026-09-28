@@ -391,8 +391,15 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             expectedNativeMountBenchmarkScenarioNames(options)
         );
         assert.equal(report.scope.performanceGate, false);
-        assert.equal(report.schemaVersion, 3);
+        assert.equal(report.schemaVersion, 4);
         assert.equal(report.run.warmupsPerScenario, 1);
+        // Default runs are unchanged: the developer workload is opt-in.
+        assert.deepEqual(report.run.devWorkload, { enabled: false });
+        assert.equal(report.devWorkload, null);
+        assert.doesNotMatch(
+            formatNativeMountBenchmarkSummary(report),
+            /Developer workload/u
+        );
         assert.equal(report.target.kind, "shared-fs-mount");
         assert.equal(
             report.scope.cacheSemantics.mode,
@@ -407,7 +414,9 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             },
             { key: "mount.runtime", value: "test-fuse 1.2.3" },
         ]);
-        assert.equal(report.inputs.files.length, 5);
+        // The harness, its developer-workload module, the lockfile, two
+        // package manifests and the built implementation input.
+        assert.equal(report.inputs.files.length, 6);
         assert.deepEqual(report.inputs.roots, [...report.inputs.roots].sort());
         assert.match(report.inputs.combinedSha256, /^[0-9a-f]{64}$/u);
         assert.match(
@@ -477,7 +486,7 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             /incomplete sample set/u
         );
         const oldSchema = structuredClone(report);
-        oldSchema.schemaVersion = 2;
+        oldSchema.schemaVersion = 3;
         assert.throws(
             () => validateNativeMountBenchmarkReport(oldSchema),
             /envelope is invalid/u

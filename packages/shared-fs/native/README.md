@@ -182,7 +182,8 @@ seconds; it starts before provenance hashing and includes owned-directory
 cleanup, report publication, and stdout flushing. A syscall that stalls until
 that deadline causes exit status 124, and cleanup is only best-effort. Reports
 are written through an adjacent temporary file and atomically renamed. The
-harness hashes itself, the lockfile, and each repeated `--implementation-input`
+harness hashes itself and its developer-workload module, the lockfile, and each
+repeated `--implementation-input`
 file or directory before and after the run. Directory inputs are traversed
 recursively while `.git` and `node_modules` are excluded, allowing callers to
 fingerprint built runtime trees without hashing dependency stores.
@@ -217,11 +218,43 @@ performance threshold. The Linux native smoke workflow can collect its FUSE
 report and same-runner control directly; the native-OS workflow can collect
 paired macFUSE and WinFsp reports from its real provisioned mounts.
 
-The mounted-benchmark report (schema version 3) also records each sample's
+The mounted-benchmark report (schema version 4) also records each sample's
 `startedAtUnixNs`/`endedAtUnixNs` window and keeps warmups in a separate
 `warmupSamples` list flagged `warmup: true`, so mount profile records can be
 attributed to exact samples. `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES`
 selects the in-place overwrite base size in the smoke wrappers.
+
+`--dev-workload` (`PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD=1` in the
+smoke wrappers, or the Linux smoke workflow's `dev_workload` input) appends
+report-only developer-machine scenarios to both the mount and the control
+report:
+
+- `edit-save-20480`: an editor-style atomic save of a 20 KiB source file
+  (exclusive temporary file, write, `fsync`, `close`, rename over the original).
+- `jsonl-append-1024-at-4194304` and `-at-33554432`: `fsync`'d 1 KiB appends
+  (`open` for append, write, `fsync`, `close`) to a JSONL log of 4 MiB and
+  32 MiB.
+- `sqlite-insert-txn-in-<overwrite base>`: one-row insert transactions through
+  `node:sqlite` with SQLite's default rollback journal, in a database grown to
+  the overwrite base size.
+- `git-clone-checkout-2000`: `git clone --no-local` of the pinned
+  `synthetic-source-tree-v1` tree (2,000 files, 16.7 MiB, 135 directories),
+  generated in memory from a fixed seed and imported into a local bare origin
+  with `git fast-import`. Nothing is downloaded, and the tree, commit and
+  checkout are validated. `--no-local` is the pack transport a network clone
+  uses; a local-path clone copies object files and then calls `utime(2)`,
+  which the mount rejects.
+- `git-status-clean-2000` and `git-status-porcelain-10-modified`: `git status`
+  in that checkout, and `git status --porcelain` after ten untimed edits.
+
+Git scenarios use `--dev-git-samples` (default 3) and `--dev-git-warmups`
+(default 1); the others use the core sample counts. Git runs with an isolated
+configuration. A missing `git` or `node:sqlite` is recorded as
+`tool-unavailable`, a failed command or filesystem or SQLite error as
+`operation-failed` with the failing warmup or sample, and status runs without a
+checkout as `dependency-not-measured`. Content mismatches still fail the run.
+With the developer workload the wrappers default to a 30-minute workload
+timeout.
 
 ### Live callback and IPC profiling
 
