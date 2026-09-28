@@ -131,9 +131,7 @@ an error, inspect the namespace before retrying because the outcome may be
 uncertain. A write that was absent from both validation passes may later appear
 beneath the deleted source; it is retained and surfaced as an `unreachable`
 conflict for an explicit `move`, not silently discarded. Reinspect conflicts
-after every merge. The emitted documents use the existing naming-event format,
-so rolling upgrades are wire-compatible: older replicas converge on the repair
-but cannot initiate the new action or interpret its structured result.
+after every merge.
 
 ## Node-guarded mount namespace mutations
 
@@ -248,31 +246,10 @@ converged durable replica before disposal. A signed trust frontier plus
 entry-bound authorization epochs is required upstream to close this gap.
 
 `peerbit-fs create` publishes a signed zero-document snapshot so the normal
-empty create/mount/share flow has that evidence. Stores created before the
-readiness marker was introduced are intentionally not trusted silently. Merely
-connecting an already-identical donor may produce no new arrival event. The
-non-assertion path is to keep a complete replicator connected and make one
-normal remote namespace mutation after the legacy handle opens. Otherwise,
-after independently verifying the exact local directory, make a one-time
-operator assertion:
-
-```ts
-const status = fs.bootstrapStatus();
-if (status.legacyPromotionEligible) {
-    await fs.trustLegacyLocalReplica({
-        assumeComplete: true,
-        timeout: 30_000,
-    });
-}
-```
-
-Only use that assertion when this same directory was previously a complete full
-replica, was cleanly shut down, was never copied mid-bootstrap, and its data has
-been inspected. It strictly persists a per-directory/per-address marker before
-enabling writes; do not copy that marker to another machine. `bootstrapStatus()`
-reports `writeReadinessSource` and `legacyPromotionEligible` for audit and
-diagnosis. `allowPartialWrites` is for exporting or repairing data during one
-session, not for migration.
+empty create/mount/share flow has that evidence. `bootstrapStatus()` reports
+`writeReadinessSource` (`creator` or `remote-settled`) for audit and diagnosis.
+`allowPartialWrites` is for exporting or repairing data during one session; it
+never restores durable readiness.
 
 ## Cold-join telemetry
 
@@ -655,7 +632,6 @@ peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
 peerbit-fs revoke <address> <public-key>
-peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs install-adapter
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
@@ -744,10 +720,7 @@ in JSON results, so repeated runs do not silently benchmark content-addressed
 deduplication. Pass that value back with `--seed <seed>` or the library's `seed`
 option to reproduce the exact bytes. Payload generation and byte verification
 remain outside the high-resolution I/O timings; every returned byte is still
-verified. Because older benchmark versions included some of that harness work,
-establish a fresh baseline before comparing performance across this timing
-boundary; an apparent jump at the boundary is not by itself a filesystem
-speedup.
+verified.
 
 The manual shared-open benchmark runs with:
 

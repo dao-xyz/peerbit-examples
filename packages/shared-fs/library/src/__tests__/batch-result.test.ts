@@ -52,7 +52,6 @@ describe("shared fs batch result assembly", () => {
             createdAt: stored.createdAt,
             authorKey: stored.authorKey,
             machineLabel: stored.machineLabel,
-            deleted: false,
             head: true,
         });
         expect((await fs.versions(path)).filter((item) => item.head)).toEqual([

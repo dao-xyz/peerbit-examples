@@ -843,64 +843,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
             }
         )
         .command(
-            "trust-legacy-replica <address>",
-            "persist a one-time operator trust assertion for an eligible pre-marker local replica",
-            (command) =>
-                command
-                    .positional("address", {
-                        type: "string",
-                        demandOption: true,
-                    })
-                    .option("assume-local-replica-complete", {
-                        type: "boolean",
-                        demandOption: true,
-                        description:
-                            "Required assertion that this exact local directory was cleanly shut down as a complete full replica.",
-                    })
-                    .option("timeout-ms", {
-                        type: "number",
-                        default: 30_000,
-                        description:
-                            "Maximum time to wait for local synchronization activity to become idle.",
-                    }),
-            async (argv) => {
-                if (argv.replicate === false) {
-                    throw new Error(
-                        "trust-legacy-replica requires a full replica; --no-replicate is not allowed"
-                    );
-                }
-                if (argv.assumeLocalReplicaComplete !== true) {
-                    throw new Error(
-                        "trust-legacy-replica requires --assume-local-replica-complete"
-                    );
-                }
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: false,
-                    });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: true,
-                        gc: false,
-                    });
-                    await fsHandle.trustLegacyLocalReplica({
-                        assumeComplete: true,
-                        timeout: argv.timeoutMs,
-                    });
-                    console.log(
-                        chalk.green(
-                            "Legacy local replica trusted by explicit operator assertion; durable write readiness is now enabled for this directory and address."
-                        )
-                    );
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
-        )
-        .command(
             "mount <address> <mountpoint>",
             "mount a writable shared filesystem using a full replica",
             (command) =>
@@ -980,7 +922,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     } catch (error: any) {
                         if (error?.code === "ETIMEDOUT") {
                             throw new Error(
-                                `mount did not establish a safe initial write view within ${argv.writeReadyTimeoutMs} ms; keep a complete replicator connected and retry. If status reports legacy promotion eligibility, independently verify this exact local replica and run: peerbit-fs trust-legacy-replica ${argv.address} --assume-local-replica-complete. --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`,
+                                `mount did not establish a safe initial write view within ${argv.writeReadyTimeoutMs} ms; keep a complete replicator connected and retry. --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`,
                                 { cause: error }
                             );
                         }
@@ -1167,8 +1109,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                     writeReadinessSource:
                                         bootstrapAfter.writeReadinessSource ??
                                         null,
-                                    legacyPromotionEligible:
-                                        bootstrapAfter.legacyPromotionEligible,
                                 },
                                 localPublicKey: fsHandle.localPublicKey,
                                 accessControlled: fsHandle.accessControlled,
@@ -1212,9 +1152,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }
                     console.log(
                         `write readiness: ${bootstrapAfter.writeReady ? "ready" : "pending"}${bootstrapAfter.writeReadinessSource ? ` (${bootstrapAfter.writeReadinessSource})` : ""}`
-                    );
-                    console.log(
-                        `legacy promotion eligible: ${bootstrapAfter.legacyPromotionEligible ? "yes" : "no"}`
                     );
                     console.log(`local public key: ${fsHandle.localPublicKey}`);
                     console.log(

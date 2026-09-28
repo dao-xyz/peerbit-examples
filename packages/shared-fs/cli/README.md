@@ -17,7 +17,6 @@ peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
 peerbit-fs revoke <address> <public-key>
 peerbit-fs install-adapter
-peerbit-fs trust-legacy-replica <address> --assume-local-replica-complete
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
@@ -35,15 +34,13 @@ workload. It is a baseline for tracking regressions, not a claim that v0 is
 optimized for code workspaces. It generates a fresh byte corpus by default and
 prints its seed; use `--seed <seed>` to reproduce those exact bytes. This avoids
 silently measuring content-addressed deduplication on repeated runs. JSON output
-also includes the seed. Establish a fresh baseline when adopting these I/O-only
-timings: older results included corpus generation or verification work and are
-not directly comparable.
+also includes the seed. Timings cover filesystem I/O only; corpus generation and
+byte verification are excluded.
 
 `status` prints the current native mount adapter, whether its prerequisites are
 available on the host, and any missing pieces before optionally opening an
-address. Address status also reports write readiness, its durable source, and
-whether the local directory is eligible for one-time legacy promotion. Add
-`--json` for one JSON document containing `nativeMount` and either a
+address. Address status also reports write readiness and its durable source.
+Add `--json` for one JSON document containing `nativeMount` and either a
 `filesystem` object or `null`. `nativeMount.metadata` reports the synthetic
 fixed file/directory modes, non-persisted creation mode, synthetic ownership,
 existence-only OS access checks, logical timestamps, and unsupported
@@ -145,14 +142,11 @@ local batch with the tombstone last, but replicas may ingest those independent
 events in another order; there is no cross-node causal edge or remote
 atomicity. Reinspect before retrying after a reported publication error. A
 child first seen later beneath the deleted source is surfaced as an
-`unreachable` conflict and can be moved into the merged tree. The event format
-is unchanged, so older replicas converge during a rolling upgrade even though
-only upgraded libraries/CLIs expose this action.
-Content resolution reports both the heads
-observed during CLI preflight and the heads actually superseded so automation
-can detect its corresponding race. Neither command waits for persisted remote
-acknowledgements; run `prepare-disposal` separately before retiring the
-resolving machine.
+`unreachable` conflict and can be moved into the merged tree. Content resolution
+reports both the heads observed during CLI preflight and the heads actually
+superseded so automation can detect its corresponding race. Neither command
+waits for persisted remote acknowledgements; run `prepare-disposal` separately
+before retiring the resolving machine.
 
 ## Install
 
@@ -318,26 +312,9 @@ no such phase, so a populated store with a missing sidecar cannot certify
 itself; when it is already identical to its donor, one later donor mutation or
 a verified snapshot is still required.
 
-Pre-marker stores have no persisted readiness proof. Connection alone is
-insufficient when local and remote states are already identical, because no new
-metadata event may arrive. The normal path is to open the legacy handle, keep a
-complete replicator connected, and make one normal namespace mutation on that
-replicator. If `peerbit-fs status "$ADDRESS"` reports
-`legacy promotion eligible: yes`, and only after independently verifying that
-this exact directory was a cleanly shut down, complete full replica that was
-never copied mid-bootstrap, run:
-
-```bash
-peerbit-fs trust-legacy-replica "$ADDRESS" \
-  --assume-local-replica-complete
-```
-
-This is an operator assertion, not a network proof. It persists a marker for
-this directory/address before enabling writes and is safe to repeat after
-success; never copy the marker to another machine. The `--allow-partial-writes`
-mount escape hatch is instead a session-only recovery bypass. It can manufacture
-duplicate paths or overwrite from stale state, does not persist proof, and keeps
-snapshot, GC, ACL, and disposal operations blocked.
+The `--allow-partial-writes` mount escape hatch is a session-only recovery
+bypass. It can manufacture duplicate paths or overwrite from stale state, does
+not persist proof, and keeps snapshot, GC, ACL, and disposal operations blocked.
 
 Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can

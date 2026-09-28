@@ -404,11 +404,6 @@ export class FileVersion extends SharedFsEntry {
     }
 }
 
-export type FileHead = FileVersion;
-
-export const isFileHead = (entry: SharedFsEntry): entry is FileHead =>
-    entry instanceof FileVersion;
-
 // ---------------------------------------------------------------------
 // Cold-start bootstrap snapshots
 // ---------------------------------------------------------------------

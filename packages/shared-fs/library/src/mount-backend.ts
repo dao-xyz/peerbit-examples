@@ -1349,7 +1349,7 @@ export const createSharedFsMountBackend = (
         const version = conflict.versions.find(
             (candidate) => candidate.id === parsed.versionId
         );
-        if (!version || version.deleted) {
+        if (!version) {
             throw notFound(path);
         }
         return fileStat(
@@ -2390,24 +2390,22 @@ export const createSharedFsMountBackend = (
                     if (!conflict) {
                         throw notFound(normalized);
                     }
-                    return conflict.versions
-                        .filter((version) => !version.deleted)
-                        .map((version) => {
-                            if (!includeStats) {
-                                return {
-                                    name: version.id,
-                                    kind: "file" as const,
-                                };
-                            }
+                    return conflict.versions.map((version) => {
+                        if (!includeStats) {
                             return {
                                 name: version.id,
                                 kind: "file" as const,
-                                stat: fileDirentStat(
-                                    bigintToSize(version.size),
-                                    Number(version.createdAt)
-                                ),
                             };
-                        });
+                        }
+                        return {
+                            name: version.id,
+                            kind: "file" as const,
+                            stat: fileDirentStat(
+                                bigintToSize(version.size),
+                                Number(version.createdAt)
+                            ),
+                        };
+                    });
                 }
                 const byName = new Map<string, SharedFsDirent>(
                     (await target.list(normalized)).map((entry) => {

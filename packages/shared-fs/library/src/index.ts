@@ -54,8 +54,6 @@ import {
     SnapshotCounts,
     SnapshotManifestPayload,
     SnapshotSegment,
-    isFileHead,
-    type FileHead,
 } from "./model.js";
 import {
     ROOT_NODE_ID,
@@ -577,7 +575,7 @@ export type BootstrapTelemetryEvent =
           atMs: number;
           /** Time since this filesystem open began. */
           durationMs: number;
-          source: "creator" | "remote-settled" | "legacy-operator-assertion";
+          source: "creator" | "remote-settled";
       }
     | {
           type: "fallback";
@@ -685,7 +683,7 @@ export type SharedFsOpenArgs = {
     /**
      * Explicitly permit mutations before a fresh address-open has established
      * a settled full-replica view. This can manufacture duplicate paths or
-     * overwrite from stale state; intended only for recovery/legacy observer
+     * overwrite from stale state; intended only for explicit recovery
      * workflows. It never persists a write-readiness proof.
      */
     allowPartialWrites?: boolean;
@@ -774,12 +772,7 @@ export type BootstrapStatus = {
     /** True when writeReady comes from the explicit unsafe override. */
     partialWriteOverride?: boolean;
     /** Durable provenance for a ready full replica, when recorded. */
-    writeReadinessSource?:
-        | "creator"
-        | "remote-settled"
-        | "legacy-operator-assertion";
-    /** Whether this local directory may use the explicit legacy trust API. */
-    legacyPromotionEligible?: boolean;
+    writeReadinessSource?: "creator" | "remote-settled";
     manifest?: {
         authorKey: string;
         snapshotSeq: bigint;
@@ -803,14 +796,6 @@ export type AwaitWriteReadyOptions = {
     /** Reject with ETIMEDOUT if readiness is not reached in this many ms. */
     timeout?: number;
     /** Abort only this wait; it does not change filesystem state. */
-    signal?: AbortSignal;
-};
-
-export type TrustLegacyLocalReplicaOptions = {
-    /** Required operator assertion; this method does not verify completeness. */
-    assumeComplete: true;
-    /** Bound the best-effort synchronizer-idle wait (default 30s). */
-    timeout?: number;
     signal?: AbortSignal;
 };
 
@@ -995,8 +980,6 @@ export type SharedFsVersionInfo = {
     createdAt: bigint;
     authorKey: string;
     machineLabel: string;
-    /** @deprecated Deletion lives in naming events now; always false. */
-    deleted: boolean;
     head: boolean;
 };
 
@@ -1074,8 +1057,8 @@ export type WriteFileOptions = {
     expectedNodeId?: string | null;
     /**
      * Parent-directory identity guard for an initially absent nested create.
-     * Valid only with `expectedNodeId: null`; omission preserves root creates
-     * and compatibility for callers that do not bind a parent directory.
+     * Valid only with `expectedNodeId: null`. When omitted, root creates and
+     * nested creates that do not bind a parent directory are not parent-guarded.
      */
     expectedParentNodeId?: string;
     /**
@@ -2216,14 +2199,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessCheckRunning = false;
     /** Owns the async readiness probe so an older finally cannot unlock a reopen. */
     private writeReadinessCheckRunningRequestGeneration: number | undefined;
-    private openedExistingAddress = false;
-    private legacyPromotionEligible = false;
-    private legacyPromotionCrashMarker = false;
-    private writeReadinessSource:
-        | "creator"
-        | "remote-settled"
-        | "legacy-operator-assertion"
-        | undefined;
+    private writeReadinessSource: "creator" | "remote-settled" | undefined;
     private writeReadinessWaiters: Array<{
         resolve: () => void;
         reject: (error: unknown) => void;
@@ -2561,7 +2537,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         const internalArgs = args as SharedFsInternalOpenArgs | undefined;
         const addressOpen = internalArgs?.addressOpen === true;
-        this.openedExistingAddress = addressOpen;
         const partialWriteOverride =
             addressOpen && args?.allowPartialWrites === true;
         // A previous generation may still be inside remote snapshot discovery.
@@ -2662,8 +2637,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessQuietChecks = 0;
         this.writeReadinessCheckRunning = false;
         this.writeReadinessCheckRunningRequestGeneration = undefined;
-        this.legacyPromotionEligible = false;
-        this.legacyPromotionCrashMarker = false;
         this.writeReadinessSource = undefined;
         this.writeReadinessStartedAtMs = Date.now();
         this.writeReadinessSettleMs = Math.max(
@@ -2850,17 +2823,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const persisted = await this.readBootstrapState();
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         const marker = persisted.bootstrap;
-        this.legacyPromotionEligible =
-            addressOpen &&
-            this.isFullReplica() &&
-            persisted.legacyUnproven &&
-            marker === undefined &&
-            !partialWriteOverride;
         this.writeReadinessSource = persisted.writeReadySource;
         const trustedWarmWriteReady =
             addressOpen &&
             this.isFullReplica() &&
-            persisted.openedBefore &&
             persisted.writeReady &&
             persisted.writeReadySource !== undefined &&
             marker === undefined;
@@ -2879,9 +2845,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // an observer: a later full reopen must not trust observer state.
             await this.writeBootstrapState(
                 {
-                    openedBefore: true,
                     writeReady: false,
-                    legacyUnproven: this.legacyPromotionEligible,
                     writeReadySource: null,
                 },
                 openGeneration,
@@ -2902,27 +2866,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const preOpenCrashMarker =
             addressOpen &&
             !trustedWarmWriteReady &&
-            this.isFullReplica() &&
             marker === undefined &&
-            (bootstrapCandidate || this.legacyPromotionEligible);
+            bootstrapCandidate;
         if (preOpenCrashMarker) {
-            // entries.open() may ingest a prefix before it resolves. Persist a
-            // crash marker first so that prefix can never reopen as a clean
-            // legacy candidate. The current legacy session may still make its
-            // explicit assertion; both successful readiness transitions clear
-            // this marker through the serialized, crash-safe state update.
+            // entries.open() may ingest a partial prefix before it resolves,
+            // and a non-empty store without a marker would look warm to
+            // startBootstrap. Persist the crash marker first and hand the
+            // bootstrap an "active" marker, so any such prefix is treated as a
+            // resumed (partial) bootstrap: a failed bootstrap stays gated in
+            // the unverified posture instead of abandoning to a plain join,
+            // and a crash before readiness leaves the on-disk marker that
+            // keeps a later reopen (even with bootstrap off) fail-closed.
+            // Successful readiness clears it through the serialized,
+            // crash-safe state update.
             await this.writeBootstrapState(
                 { bootstrap: "active" },
                 openGeneration,
                 true
             );
             this.assertLifecycleRequestActive(lifecycleRequestGeneration);
-            this.legacyPromotionCrashMarker = this.legacyPromotionEligible;
         }
-        const bootstrapMarker =
-            preOpenCrashMarker && !this.legacyPromotionEligible
-                ? "active"
-                : marker;
+        const bootstrapMarker = preOpenCrashMarker ? "active" : marker;
         // Replication is ALWAYS announced at open. An earlier design
         // deferred the announcement until the snapshot overlay installed
         // (to keep ingest off the install's critical path), but an
@@ -3237,14 +3201,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!bootstrapCandidate) {
             this.writeReadinessDecisionSettled = true;
         }
-        // Stamp directory continuity, but never infer write safety from it.
-        // A separate true marker is persisted only by markWriteReady().
+        // A creating open records its readiness: a full-replica creator is
+        // write-ready by construction ("creator" provenance), an observer
+        // records no proof. Every other proof is persisted only by
+        // markWriteReady().
         if (!addressOpen) {
             const openStateWrite = this.writeBootstrapState(
                 {
-                    openedBefore: true,
                     writeReady: this.isFullReplica(),
-                    legacyUnproven: false,
                     writeReadySource: this.isFullReplica() ? "creator" : null,
                 },
                 openGeneration,
@@ -3431,9 +3395,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
-    private emitWriteReadyOnce(
-        source: "creator" | "remote-settled" | "legacy-operator-assertion"
-    ) {
+    private emitWriteReadyOnce(source: "creator" | "remote-settled") {
         if (
             !this.bootstrapTelemetry ||
             this.bootstrapTelemetryWriteReadyEmitted
@@ -4749,7 +4711,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             new StringMatch({ key: "nodeId", value: nodeId }),
             new StringMatch({ key: "kind", value: "file-version" }),
         ]);
-        const versions = documents.filter(isFileHead);
+        const versions = documents.filter(
+            (document): document is FileVersion =>
+                document instanceof FileVersion
+        );
         if (this.bootstrapPhase !== "overlay-active") {
             return versions;
         }
@@ -4866,7 +4831,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             createdAt: head.createdAt,
             authorKey: head.authorKey ?? "",
             machineLabel: head.machineLabel ?? "",
-            deleted: false,
             head: heads.some((candidate) => candidate.id === head.id),
         };
     }
@@ -6413,7 +6377,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ]);
         const byNode = new Map<string, FileVersion[]>();
         for (const document of documents) {
-            if (!isFileHead(document)) {
+            if (!(document instanceof FileVersion)) {
                 continue;
             }
             const list = byNode.get(document.nodeId) ?? [];
@@ -8578,47 +8542,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const peers = pubsub?.peers as Map<string, unknown> | undefined;
         const routes = pubsub?.routes as
             | {
-                  isReachable?: (from: string, target: string) => boolean;
-                  getBestRouteHint?: (
+                  isReachable: (from: string, target: string) => boolean;
+                  getBestRouteHint: (
                       from: string,
                       target: string
                   ) => { nextHop: string; expiresAt?: number } | undefined;
               }
             | undefined;
-        if (!peers?.has && !routes?.isReachable) {
+        // Donor liveness needs the DirectStream route/session API and its
+        // live peer-stream map. A transport without them cannot prove a live
+        // donor, so readiness fails closed; the periodic check keeps retrying.
+        if (
+            typeof peers?.has !== "function" ||
+            typeof routes?.isReachable !== "function" ||
+            typeof routes.getBestRouteHint !== "function"
+        ) {
             return false;
         }
         try {
             const self = this.node.identity.publicKey.hashcode();
             const replicators = await this.entries.log.getReplicators();
             return [...replicators].some((hash) => {
-                if (hash === self) {
+                if (hash === self || !routes.isReachable(self, hash)) {
                     return false;
                 }
-                if (routes?.isReachable) {
-                    if (!routes.isReachable(self, hash)) {
-                        return false;
-                    }
-                    const hint = routes.getBestRouteHint?.(self, hash);
-                    if (routes.getBestRouteHint) {
-                        // DirectStream retains invalidated routes briefly for
-                        // failover, marking them with expiresAt. They are useful
-                        // for delivery retries but are not current donor-liveness
-                        // evidence. The selected next hop must also still be a
-                        // live direct stream when that map is available.
-                        if (hint == null || hint.expiresAt != null) {
-                            return false;
-                        }
-                        if (peers?.has && !peers.has(hint.nextHop)) {
-                            return false;
-                        }
-                    }
-                    return true;
-                }
-                // Compatibility fallback for older transports without the
-                // route/session API. Current transports take the branch above
-                // for both direct and relayed donors.
-                return peers?.has(hash) === true;
+                // DirectStream retains invalidated routes briefly for
+                // failover, marking them with expiresAt. They are useful for
+                // delivery retries but are not current donor-liveness
+                // evidence. The selected next hop, for direct and relayed
+                // donors alike, must also still be a live direct stream.
+                const hint = routes.getBestRouteHint(self, hash);
+                return (
+                    hint != null &&
+                    hint.expiresAt == null &&
+                    peers.has(hint.nextHop)
+                );
             });
         } catch {
             // A cold replication index is not proof. The periodic readiness
@@ -8651,9 +8609,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             await this.writeBootstrapState(
                 {
-                    openedBefore: true,
                     writeReady: true,
-                    legacyUnproven: false,
                     writeReadySource: "remote-settled",
                     bootstrap: null,
                 },
@@ -8662,13 +8618,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             // open()/close() block and drain this entire transition before
             // changing generations. Keeping the memory update in the same
-            // serialization slot also prevents legacy and remote provenance
-            // from crossing on disk versus in status().
+            // serialization slot also keeps the on-disk and status()
+            // provenance from diverging.
             this.writesReady = true;
             this.writeReadinessRequired = false;
             this.writeReadinessQuietChecks = 0;
             this.setGuardArmed(true);
-            this.legacyPromotionEligible = false;
             this.writeReadinessSource = "remote-settled";
             this.emitWriteReadyOnce("remote-settled");
             if (this.writeReadinessTimer) {
@@ -8956,22 +8911,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.watchHub = undefined;
         this.changesetHub = undefined;
         this.resolveBootstrapWaiters({ verified: false });
-        const restoreCleanLegacyEligibility =
-            this.legacyPromotionCrashMarker && this.legacyPromotionEligible;
-        const closed = await super.close(from);
-        if (closed && restoreCleanLegacyEligibility) {
-            await this.writeBootstrapState(
-                {
-                    bootstrap: null,
-                    writeReady: false,
-                    legacyUnproven: true,
-                    writeReadySource: null,
-                },
-                undefined,
-                true
-            );
-        }
-        return closed;
+        return super.close(from);
     }
 
     /**
@@ -9096,7 +9036,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         };
     }
 
-    /** Fire the deferred replication announcement (idempotent). */
+    /**
+     * Path of this address's local bootstrap/readiness sidecar
+     * (`<directory>/shared-fs-bootstrap/<address>.json`), durably creating
+     * its directory on first use. Undefined for in-memory nodes.
+     */
     private async bootstrapStatePath(): Promise<string | undefined> {
         const directory = (this.node as any)?.directory as string | undefined;
         if (!directory) {
@@ -9134,30 +9078,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Persisted per-address open state: whether this directory has opened
-     * the address before (governs announce deferral — a warm reopen must
-     * never unreplicate its persisted ranges), and the bootstrap marker
-     * that keeps Guard D disarmed and GC gated across a crash. An
-     * UNREADABLE state file (not merely absent) fails SAFE: treated as an
-     * interrupted bootstrap on a previously opened store.
+     * Persisted per-address open state: the durable write-readiness proof
+     * (`writeReady` plus its provenance) and the bootstrap marker that keeps
+     * Guard D disarmed and GC gated across a crash. A missing file is gated
+     * (never write-ready). An UNREADABLE or malformed file (not merely
+     * absent) fails SAFE: treated as an interrupted bootstrap without a
+     * readiness proof. Keys this reader does not validate (for example the
+     * retired `openedBefore` and `legacyUnproven`) are ignored; only the
+     * fields checked here decide readiness.
      */
     private async readBootstrapState(): Promise<{
-        openedBefore: boolean;
         bootstrap?: "active" | "unverified";
         writeReady: boolean;
-        legacyUnproven: boolean;
-        writeReadySource?:
-            | "creator"
-            | "remote-settled"
-            | "legacy-operator-assertion";
+        writeReadySource?: "creator" | "remote-settled";
     }> {
         const path = await this.bootstrapStatePath();
         if (!path) {
-            return {
-                openedBefore: false,
-                writeReady: false,
-                legacyUnproven: false,
-            };
+            return { writeReady: false };
         }
         try {
             const { readFile } = await import("node:fs/promises");
@@ -9166,18 +9103,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parsed !== null &&
                 typeof parsed === "object" &&
                 !Array.isArray(parsed);
-            const openedBefore = parsed?.openedBefore === true;
-            const hasOpenedBefore = Object.prototype.hasOwnProperty.call(
-                parsed ?? {},
-                "openedBefore"
-            );
             const hasWriteReady = Object.prototype.hasOwnProperty.call(
                 parsed ?? {},
                 "writeReady"
-            );
-            const hasLegacyUnproven = Object.prototype.hasOwnProperty.call(
-                parsed ?? {},
-                "legacyUnproven"
             );
             const hasBootstrap = Object.prototype.hasOwnProperty.call(
                 parsed ?? {},
@@ -9192,65 +9120,37 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parsed?.bootstrap === "unverified"
                     ? parsed.bootstrap
                     : undefined;
-            const writeReadySource = [
-                "creator",
-                "remote-settled",
-                "legacy-operator-assertion",
-            ].includes(parsed?.writeReadySource)
+            const writeReadySource = ["creator", "remote-settled"].includes(
+                parsed?.writeReadySource
+            )
                 ? parsed.writeReadySource
                 : undefined;
             const malformed =
                 !record ||
-                (hasOpenedBefore && typeof parsed.openedBefore !== "boolean") ||
                 (hasWriteReady && typeof parsed.writeReady !== "boolean") ||
-                (hasLegacyUnproven &&
-                    typeof parsed.legacyUnproven !== "boolean") ||
                 (hasBootstrap && bootstrap === undefined) ||
                 (hasWriteReadySource && writeReadySource === undefined) ||
                 (parsed?.writeReady === true &&
-                    (!openedBefore ||
-                        writeReadySource === undefined ||
-                        parsed?.legacyUnproven === true)) ||
+                    writeReadySource === undefined) ||
                 (parsed?.writeReady !== true && writeReadySource !== undefined);
             if (malformed) {
                 return {
-                    openedBefore: true,
                     bootstrap: "active",
                     writeReady: false,
-                    legacyUnproven: false,
                 };
             }
             return {
-                openedBefore,
                 writeReady: parsed?.writeReady === true,
                 bootstrap,
-                // Upgrade eligibility survives an initial gated open. Only a
-                // valid old state that explicitly records prior use while
-                // lacking the new field can enter this posture; missing or
-                // corrupt files and explicit false markers are ineligible.
-                legacyUnproven:
-                    openedBefore &&
-                    parsed?.writeReady !== true &&
-                    writeReadySource === undefined &&
-                    parsed?.writeReadySource === undefined &&
-                    bootstrap === undefined &&
-                    (parsed?.legacyUnproven === true ||
-                        (!hasWriteReady && !hasLegacyUnproven)),
                 writeReadySource,
             };
         } catch (error: any) {
             if (error?.code === "ENOENT") {
-                return {
-                    openedBefore: false,
-                    writeReady: false,
-                    legacyUnproven: false,
-                };
+                return { writeReady: false };
             }
             return {
-                openedBefore: true,
                 bootstrap: "active",
                 writeReady: false,
-                legacyUnproven: false,
             };
         }
     }
@@ -9290,15 +9190,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     /** Serialized read-merge-write so concurrent patches never clobber. */
     private writeBootstrapState(
         patch: {
-            openedBefore?: boolean;
             bootstrap?: "active" | "unverified" | null;
             writeReady?: boolean;
-            legacyUnproven?: boolean;
-            writeReadySource?:
-                | "creator"
-                | "remote-settled"
-                | "legacy-operator-assertion"
-                | null;
+            writeReadySource?: "creator" | "remote-settled" | null;
         },
         generation?: number,
         failOnError = false
@@ -9317,11 +9211,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             try {
                 const current = await this.readBootstrapState();
                 const next: any = {
-                    openedBefore:
-                        patch.openedBefore ?? current.openedBefore ?? false,
                     writeReady: patch.writeReady ?? current.writeReady ?? false,
-                    legacyUnproven:
-                        patch.legacyUnproven ?? current.legacyUnproven ?? false,
                     writeReadySource:
                         patch.writeReadySource === null
                             ? undefined
@@ -10482,7 +10372,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.writesReady && !this.writeReadinessLifecycleBlocked,
             partialWriteOverride: this.partialWriteOverride,
             writeReadinessSource: this.writeReadinessSource,
-            legacyPromotionEligible: this.legacyPromotionEligible,
             manifest: this.bootstrapManifestMeta
                 ? {
                       ...this.bootstrapManifestMeta,
@@ -10499,177 +10388,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     ? Number.POSITIVE_INFINITY
                     : this.clock() - this.lastArrivalMs,
         };
-    }
-
-    /**
-     * Persist a one-time operator assertion for an eligible pre-marker local
-     * replica. This does not prove completeness: callers must independently
-     * verify that this exact directory was a clean, complete full replica.
-     */
-    async trustLegacyLocalReplica(
-        options: TrustLegacyLocalReplicaOptions
-    ): Promise<void> {
-        if (options?.assumeComplete !== true) {
-            throw new SharedFsError(
-                "EINVAL",
-                "trustLegacyLocalReplica requires { assumeComplete: true }"
-            );
-        }
-        const timeout = options.timeout ?? 30_000;
-        if (!Number.isFinite(timeout) || timeout <= 0) {
-            throw new SharedFsError(
-                "EINVAL",
-                "legacy trust timeout must be a positive finite number"
-            );
-        }
-        if (this.writeReadinessLifecycleBlocked) {
-            throw new SharedFsError(
-                "ECLOSED",
-                "filesystem lifecycle changed while trusting a legacy replica"
-            );
-        }
-        if (this.writesReady && !this.partialWriteOverride) {
-            if (this.writeReadinessSource === "legacy-operator-assertion") {
-                return;
-            }
-            throw new SharedFsError(
-                "EINVAL",
-                "this replica is already write-ready and does not require legacy promotion"
-            );
-        }
-        if (
-            !this.openedExistingAddress ||
-            !this.isFullReplica() ||
-            this.partialWriteOverride ||
-            !this.legacyPromotionEligible
-        ) {
-            throw new SharedFsError(
-                "EINVAL",
-                "this open handle is not an eligible pre-marker full replica"
-            );
-        }
-
-        const generation = this.openGeneration;
-        const deadline = Date.now() + timeout;
-        let quietChecks = 0;
-        while (quietChecks < 2) {
-            if (options.signal?.aborted) {
-                throw (
-                    options.signal.reason ??
-                    new SharedFsError(
-                        "ECLOSED",
-                        "legacy replica trust was aborted"
-                    )
-                );
-            }
-            if (
-                this.writeReadinessLifecycleBlocked ||
-                generation !== this.openGeneration
-            ) {
-                throw new SharedFsError(
-                    "ECLOSED",
-                    "filesystem reopened while trusting a legacy replica"
-                );
-            }
-            if (!this.legacyPromotionEligible) {
-                throw new SharedFsError(
-                    "EINVAL",
-                    "legacy promotion eligibility changed before persistence"
-                );
-            }
-            const settledPhase =
-                this.bootstrapPhase === "off" ||
-                this.bootstrapPhase === "converged";
-            const quietFor =
-                this.lastArrivalMs === 0
-                    ? this.writeReadinessSettleMs
-                    : this.clock() - this.lastArrivalMs;
-            quietChecks =
-                this.writeReadinessDecisionSettled &&
-                settledPhase &&
-                this.synchronizerIdle() &&
-                quietFor >= this.writeReadinessSettleMs
-                    ? quietChecks + 1
-                    : 0;
-            if (quietChecks >= 2) {
-                break;
-            }
-            if (Date.now() >= deadline) {
-                throw new SharedFsError(
-                    "ETIMEDOUT",
-                    "timed out waiting for the legacy replica to become locally idle"
-                );
-            }
-            await new Promise<void>((resolve) => {
-                const timer = setTimeout(resolve, WRITE_READINESS_MIN_CHECK_MS);
-                (timer as any)?.unref?.();
-            });
-        }
-
-        await this.serializeWriteReadinessTransition(async () => {
-            if (options.signal?.aborted) {
-                throw (
-                    options.signal.reason ??
-                    new SharedFsError(
-                        "ECLOSED",
-                        "legacy replica trust was aborted"
-                    )
-                );
-            }
-            if (
-                this.writeReadinessLifecycleBlocked ||
-                generation !== this.openGeneration
-            ) {
-                throw new SharedFsError(
-                    "ECLOSED",
-                    "filesystem reopened while persisting legacy replica trust"
-                );
-            }
-            if (this.writesReady && !this.partialWriteOverride) {
-                if (this.writeReadinessSource === "legacy-operator-assertion") {
-                    return;
-                }
-                throw new SharedFsError(
-                    "EINVAL",
-                    "remote readiness completed before legacy promotion"
-                );
-            }
-            if (!this.legacyPromotionEligible) {
-                throw new SharedFsError(
-                    "EINVAL",
-                    "legacy promotion eligibility changed before persistence"
-                );
-            }
-            await this.writeBootstrapState(
-                {
-                    openedBefore: true,
-                    writeReady: true,
-                    legacyUnproven: false,
-                    writeReadySource: "legacy-operator-assertion",
-                    bootstrap: null,
-                },
-                generation,
-                true
-            );
-            this.writesReady = true;
-            this.writeReadinessRequired = false;
-            this.legacyPromotionEligible = false;
-            this.writeReadinessSource = "legacy-operator-assertion";
-            this.setGuardArmed(true);
-            this.emitWriteReadyOnce("legacy-operator-assertion");
-            if (this.writeReadinessTimer) {
-                clearTimeout(this.writeReadinessTimer);
-                this.writeReadinessTimer = undefined;
-            }
-            this.events.dispatchEvent(
-                new CustomEvent("write:ready", {
-                    detail: this.bootstrapStatus(),
-                })
-            );
-            for (const waiter of this.writeReadinessWaiters.splice(0)) {
-                waiter.resolve();
-            }
-        });
     }
 
     /**
@@ -14797,11 +14515,6 @@ export class SharedFsHandle {
     /** Resolves when mutations are safe to retry on this open handle. */
     awaitWriteReady(options?: AwaitWriteReadyOptions) {
         return this.program.awaitWriteReady(options);
-    }
-
-    /** Persist an explicit one-time trust assertion for an eligible legacy store. */
-    trustLegacyLocalReplica(options: TrustLegacyLocalReplicaOptions) {
-        return this.program.trustLegacyLocalReplica(options);
     }
 
     /** Resolves when the bootstrap overlay retires (either path). */
