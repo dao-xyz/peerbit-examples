@@ -89,6 +89,8 @@ const spiedTarget = (fs: SharedFsHandle) => {
             options.push(writeOptions);
             return fs.writeFile(path, source, writeOptions);
         },
+        setMetadata: (path, patch, metadataOptions) =>
+            fs.setMetadata(path, patch, metadataOptions),
         mkdir: (path) => fs.mkdir(path),
         mutateNamespaceForMount: (mutation) =>
             fs.mutateNamespaceForMount(mutation),
@@ -454,10 +456,14 @@ describe("opt-in writeFile sub-phase profiling", () => {
         const write = async (
             path: string,
             content: string,
-            flags: Parameters<typeof backend.open>[1]
+            flags: Parameters<typeof backend.open>[1],
+            mtimeMs?: number
         ) => {
             const handle = await backend.open(path, flags);
             await backend.write(handle, encode(content), 0);
+            if (mtimeMs !== undefined) {
+                await backend.setattr(path, { mtimeMs });
+            }
             await backend.release(handle);
         };
         await write("/first.txt", "shared bytes", {
@@ -468,11 +474,10 @@ describe("opt-in writeFile sub-phase profiling", () => {
             write: true,
             create: true,
         });
-        await write("/second.txt", "shared bytes", {
-            write: true,
-            truncate: true,
-        });
-        const [first, second, unchanged] = joinedWrites(events);
+        const rewrite = { write: true, truncate: true };
+        await write("/second.txt", "shared bytes", rewrite, 1000);
+        await write("/second.txt", "shared bytes", rewrite, 1000);
+        const [first, second, reused, unchanged] = joinedWrites(events);
 
         expect(first.parent.detail).toMatchObject({ bytes: 12, writeId: 1 });
         expect(byPhase(first.children, "writeFile.prepare")).toEqual({
@@ -541,7 +546,23 @@ describe("opt-in writeFile sub-phase profiling", () => {
             }
         );
 
-        // Identical bytes over the opened head: the library's exact-head no-op.
+        // Identical bytes with a new mtime reuse the head's chunks: no chunk,
+        // touchChunks or verifyChunks record.
+        expect(phaseSequence(reused.children)).toEqual([
+            "prepare",
+            "resolvePath",
+            "readHeads",
+            "hash",
+            "loadBase",
+            "guard:before-version",
+            "versionPut",
+            "cacheApply:version",
+            "guard:after-version",
+            "result",
+        ]);
+
+        // Identical bytes and metadata over the opened head: the library's
+        // exact-head no-op.
         expect(phaseSequence(unchanged.children)).toEqual([
             "prepare",
             "resolvePath",
@@ -551,15 +572,15 @@ describe("opt-in writeFile sub-phase profiling", () => {
             "result",
         ]);
         expect(byPhase(unchanged.children, "writeFile.resolvePath")).toEqual({
-            writeId: 3,
+            writeId: 4,
             existing: true,
         });
         expect(byPhase(unchanged.children, "writeFile.readHeads")).toEqual({
-            writeId: 3,
+            writeId: 4,
             heads: 1,
         });
         expect(byPhase(unchanged.children, "writeFile.result")).toEqual({
-            writeId: 3,
+            writeId: 4,
             outcome: "unchanged",
             newFile: false,
         });

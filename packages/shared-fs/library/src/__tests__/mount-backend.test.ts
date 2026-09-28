@@ -32,6 +32,14 @@ const encode = (value: string) => new TextEncoder().encode(value);
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
 
+const chunkIdsOf = async (fs: SharedFsHandle, versionId: string) =>
+    (
+        (await fs.program.entries.index.get(versionId, {
+            local: true,
+            remote: false,
+        })) as unknown as { chunkIds: string[] }
+    ).chunkIds;
+
 const mountTarget = (
     fs: SharedFsHandle,
     overrides: Partial<SharedFsMountBackendTarget> = {}
@@ -39,6 +47,7 @@ const mountTarget = (
     readVersionForMount: (path, versionId) =>
         fs.readVersionForMount(path, versionId),
     writeFile: (path, source, options) => fs.writeFile(path, source, options),
+    setMetadata: (path, patch, options) => fs.setMetadata(path, patch, options),
     mkdir: (path) => fs.mkdir(path),
     mutateNamespaceForMount: (mutation) => fs.mutateNamespaceForMount(mutation),
     list: (path) => fs.list(path),
@@ -480,6 +489,8 @@ describe("shared fs mount backend", () => {
     it("returns requested directory-entry stats without per-entry lookups", async () => {
         await fs.mkdir("/docs");
         await fs.writeFile("/note.txt", "hello");
+        await fs.writeFile("/tool.sh", "#!", { mode: 0o100755 });
+        await fs.writeFile("/link", "note.txt", { mode: 0o120000 });
         const sourceEntries = new Map(
             (await fs.list("/")).map((entry) => [entry.name, entry])
         );
@@ -519,6 +530,14 @@ describe("shared fs mount backend", () => {
                 nlink: 1,
             },
         });
+        expect(entries.find((entry) => entry.name === "tool.sh")).toMatchObject(
+            { kind: "file", stat: { size: 2, mode: 0o100755 } }
+        );
+        // A symlink lists as DT_LNK with its target's byte length.
+        expect(entries.find((entry) => entry.name === "link")).toMatchObject({
+            kind: "symlink",
+            stat: { size: "note.txt".length, mode: 0o120777, nlink: 1 },
+        });
         expect(
             entries.find((entry) => entry.name === CONFLICTS_DIR)
         ).toMatchObject({
@@ -542,15 +561,15 @@ describe("shared fs mount backend", () => {
             create: true,
             truncate: true,
         });
+        const before = Date.now();
         await backend.write(handle, encode("not committed"), 0);
+        const after = Date.now();
         list.mockClear();
         stat.mockClear();
 
-        const before = Date.now();
         const pending = (
             await backend.readdir("/", { includeStats: true })
         ).find((entry) => entry.name === "pending.txt");
-        const after = Date.now();
 
         expect(list).toHaveBeenCalledOnce();
         expect(stat).not.toHaveBeenCalled();
@@ -563,9 +582,13 @@ describe("shared fs mount backend", () => {
                 nlink: 1,
             },
         });
+        // The time of the last write, as getattr reports it.
         expect(pending!.stat!.mtimeMs).toBeGreaterThanOrEqual(before);
         expect(pending!.stat!.mtimeMs).toBeLessThanOrEqual(after);
         expect(pending!.stat!.ctimeMs).toBe(pending!.stat!.mtimeMs);
+        expect(await backend.getattr("/pending.txt")).toMatchObject(
+            pending!.stat!
+        );
         expect(await fs.readFile("/pending.txt")).toBeUndefined();
 
         await backend.release(handle);
@@ -2425,8 +2448,8 @@ describe("shared fs mount backend", () => {
         expect(inputs[0].buffer).toBe(openedBytes.buffer);
         expect(decode(await fs.readFile("/cow-settled.txt"))).toBe("old!");
         // Dirty operations that do not actually mutate bytes must not replace
-        // and then clear the already-exposed protection token on their no-op
-        // commit path.
+        // and then clear the already-exposed protection token on their
+        // identical-bytes commit.
         await backend.truncate(handle, 4);
         await backend.write(handle, new Uint8Array(0), 0);
         await backend.flush(handle);
@@ -2932,8 +2955,8 @@ describe("shared fs mount backend", () => {
             expect(entry.stat).toEqual({
                 size: Number(version.size),
                 mode: 0o100644,
-                mtimeMs: Number(version.createdAt),
-                ctimeMs: Number(version.createdAt),
+                mtimeMs: Number(version.mtime),
+                ctimeMs: Number(version.mtime),
                 nlink: 1,
             });
         }
@@ -2986,11 +3009,11 @@ describe("shared fs mount backend", () => {
         const client = createIpcV2TestClient(server.endpoint);
         try {
             await client.mkdir("/ipc");
-            const handle = await client.open("/ipc/file.txt", {
-                write: true,
-                create: true,
-                truncate: true,
-            });
+            const handle = await client.open(
+                "/ipc/file.txt",
+                { write: true, create: true, truncate: true },
+                0o755
+            );
             const sharedBacking = new SharedArrayBuffer(12);
             const framed = new Uint8Array(sharedBacking, 2, 8);
             framed.set(encode("over ipc"));
@@ -3011,7 +3034,7 @@ describe("shared fs mount backend", () => {
                 kind: "file",
                 stat: {
                     size: "over ipc".length,
-                    mode: 0o100644,
+                    mode: 0o100755,
                     nlink: 1,
                 },
             });
@@ -3127,7 +3150,7 @@ describe("shared fs mount backend", () => {
         expect((await fs.readFile("/sparse.bin"))!.byteLength).toBe(8);
     });
 
-    it("does not mint a new version when flushing unchanged content", async () => {
+    it("publishes identical-bytes saves with an advanced mtime but mints nothing for a bare flush", async () => {
         const writeFile = vi.fn(
             (
                 path: string,
@@ -3138,9 +3161,15 @@ describe("shared fs mount backend", () => {
         const backend = createSharedFsMountBackend(
             mountTarget(fs, { writeFile })
         );
-        await fs.writeFile("/stable.txt", "same content");
-        const versionsBefore = (await fs.versions("/stable.txt")).length;
+        // An old stored mtime keeps every save below in a later millisecond.
+        const seed = await fs.writeFile("/stable.txt", "same content", {
+            mtime: 1000,
+        });
+        const chunkIds = await chunkIdsOf(fs, seed.id);
+        const versionCount = async () =>
+            (await fs.versions("/stable.txt")).length;
 
+        // A flush with no write mints nothing.
         const handle = await backend.open("/stable.txt", {
             read: true,
             write: true,
@@ -3148,45 +3177,428 @@ describe("shared fs mount backend", () => {
         await backend.flush(handle);
         await backend.fsync(handle);
         await backend.release(handle);
-        expect((await fs.versions("/stable.txt")).length).toBe(versionsBefore);
+        expect(await versionCount()).toBe(1);
+        expect(writeFile).not.toHaveBeenCalled();
 
-        // A dirty handle with identical bytes is also a no-op save.
+        // Any write, even of identical bytes, advances mtime (make, rsync
+        // and git's stat cache depend on it) and publishes one version
+        // across flush+release, with fstat before close equal to the stat
+        // after it.
         const rewrite = await backend.open("/stable.txt", {
             read: true,
             write: true,
         });
         await backend.write(rewrite, encode("same content"), 0);
+        const fstat = await backend.getattr("/stable.txt");
         await backend.flush(rewrite);
         await backend.release(rewrite);
-        expect((await fs.versions("/stable.txt")).length).toBe(versionsBefore);
-
-        // Changed bytes create exactly one new version across flush+release.
-        const change = await backend.open("/stable.txt", {
-            read: true,
-            write: true,
-        });
-        await backend.write(change, encode("different!!!"), 0);
-        await backend.flush(change);
-        await backend.release(change);
-        expect((await fs.versions("/stable.txt")).length).toBe(
-            versionsBefore + 1
-        );
+        expect(await versionCount()).toBe(2);
+        expect(fstat.mtimeMs).toBeGreaterThan(1000);
+        expect(await backend.getattr("/stable.txt")).toEqual(fstat);
 
         // O_TRUNC rewrite with identical content (shell `> file`, editors
-        // that rewrite in place) is also a no-op save.
+        // that rewrite in place) publishes one version too.
+        await fs.setMetadata("/stable.txt", { mtime: 1000 });
         const truncated = await backend.open("/stable.txt", {
             write: true,
             truncate: true,
         });
-        await backend.write(truncated, encode("different!!!"), 0);
+        await backend.write(truncated, encode("same content"), 0);
         await backend.release(truncated);
-        expect((await fs.versions("/stable.txt")).length).toBe(
-            versionsBefore + 1
-        );
-        expect(writeFile).toHaveBeenCalledTimes(3);
+        expect(await versionCount()).toBe(4);
+        expect(
+            Number((await fs.stat("/stable.txt"))!.updatedAt)
+        ).toBeGreaterThan(1000);
+
+        // Every identical-bytes version reuses the source's chunks.
+        for (const version of await fs.versions("/stable.txt")) {
+            expect(await chunkIdsOf(fs, version.id)).toEqual(chunkIds);
+        }
+        expect(writeFile).toHaveBeenCalledTimes(2);
         expect(writeFile.mock.calls[0]?.[2]).toMatchObject({
             noOpIfHeadVersionIds: expect.any(Array),
+            mtime: fstat.mtimeMs,
         });
+    });
+
+    it("creates with the create mode's exec bit and keeps fstat equal to the stat after close", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        const handle = await backend.open(
+            "/tool.sh",
+            { write: true, create: true, exclusive: true },
+            0o755
+        );
+        await backend.write(handle, encode("#!/bin/sh\n"), 0);
+        const fstat = await backend.getattr("/tool.sh");
+        expect(fstat).toMatchObject({ kind: "file", mode: 0o100755 });
+        await backend.release(handle);
+        expect(await backend.getattr("/tool.sh")).toEqual(fstat);
+        expect(await fs.stat("/tool.sh")).toMatchObject({
+            mode: 0o100755,
+            updatedAt: BigInt(fstat.mtimeMs),
+        });
+
+        const plain = await backend.open(
+            "/plain.txt",
+            { write: true, create: true },
+            0o666
+        );
+        await backend.release(plain);
+        expect(await backend.getattr("/plain.txt")).toMatchObject({
+            mode: 0o100644,
+        });
+    });
+
+    it("folds chmod and utimens into a pending create or write as one version", async () => {
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const setMetadata = vi.fn(
+            (
+                path: string,
+                patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+                options?: { expectedNodeId?: string }
+            ) => fs.setMetadata(path, patch, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile, setMetadata })
+        );
+        // git's config.lock: O_EXCL create, chmod, write, close, rename.
+        await backend.mkdir("/.git");
+        const lock = await backend.open(
+            "/.git/config.lock",
+            { write: true, create: true, exclusive: true },
+            0o666
+        );
+        await backend.setattr("/.git/config.lock", { mode: 0o755 });
+        expect((await backend.getattr("/.git/config.lock")).mode).toBe(
+            0o100755
+        );
+        await backend.write(lock, encode("[core]\n"), 0);
+        await backend.release(lock);
+        await backend.rename("/.git/config.lock", "/.git/config");
+        expect(await fs.versions("/.git/config")).toHaveLength(1);
+        expect(await fs.stat("/.git/config")).toMatchObject({
+            mode: 0o100755,
+        });
+
+        // cp -p: write, then futimens before close.
+        const copy = await backend.open("/copy.txt", {
+            write: true,
+            create: true,
+        });
+        await backend.write(copy, encode("copy"), 0);
+        await backend.setattr("/copy.txt", { mtimeMs: 946684800000 });
+        await backend.release(copy);
+        expect(await fs.versions("/copy.txt")).toHaveLength(1);
+        expect(await fs.stat("/copy.txt")).toMatchObject({
+            updatedAt: 946684800000n,
+        });
+        expect(writeFile).toHaveBeenCalledTimes(2);
+        expect(setMetadata).not.toHaveBeenCalled();
+
+        // utimens then write: the write time wins.
+        const edit = await backend.open("/copy.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.setattr("/copy.txt", { mtimeMs: 1000 });
+        const before = Date.now();
+        await backend.write(edit, encode("edit"), 0);
+        await backend.release(edit);
+        expect(
+            Number((await fs.stat("/copy.txt"))!.updatedAt)
+        ).toBeGreaterThanOrEqual(before);
+    });
+
+    it("sets metadata of closed files without reading or writing their bytes", async () => {
+        const readVersionForMount = vi.fn((path: string, versionId: string) =>
+            fs.readVersionForMount(path, versionId)
+        );
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const setMetadata = vi.fn(
+            (
+                path: string,
+                patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+                options?: { expectedNodeId?: string }
+            ) => fs.setMetadata(path, patch, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { readVersionForMount, writeFile, setMetadata })
+        );
+        const seed = await fs.writeFile("/run.sh", "echo hi");
+        // chmod keeps only the exec bit; any x bit gives 0755.
+        await backend.setattr("/run.sh", { mode: 0o744 });
+        expect(await backend.getattr("/run.sh")).toMatchObject({
+            mode: 0o100755,
+        });
+        await backend.setattr("/run.sh", { mode: 0o600 });
+        expect(await backend.getattr("/run.sh")).toMatchObject({
+            mode: 0o100644,
+        });
+        await backend.setattr("/run.sh", { mtimeMs: 946684800000 });
+        expect(await backend.getattr("/run.sh")).toMatchObject({
+            mtimeMs: 946684800000,
+            ctimeMs: 946684800000,
+        });
+        // Values equal to the entry change nothing.
+        await backend.setattr("/run.sh", {
+            mode: 0o644,
+            mtimeMs: 946684800000,
+        });
+        expect(setMetadata.mock.calls).toEqual([
+            ["/run.sh", { mode: 0o100755 }, { expectedNodeId: seed.nodeId }],
+            ["/run.sh", { mode: 0o100644 }, { expectedNodeId: seed.nodeId }],
+            [
+                "/run.sh",
+                { mtime: 946684800000 },
+                { expectedNodeId: seed.nodeId },
+            ],
+        ]);
+        expect(readVersionForMount).not.toHaveBeenCalled();
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(await fs.versions("/run.sh")).toHaveLength(4);
+        expect(decode(await fs.readFile("/run.sh"))).toBe("echo hi");
+
+        // Directories, the root and symlinks ignore chmod and utimens.
+        await fs.mkdir("/dir");
+        await fs.writeFile("/link", "run.sh", { mode: 0o120000 });
+        for (const path of ["/", "/dir", "/link"]) {
+            await backend.setattr(path, { mode: 0o755, mtimeMs: 1 });
+        }
+        expect(setMetadata).toHaveBeenCalledTimes(3);
+        await expect(
+            backend.setattr(`/${CONFLICTS_DIR}`, { mode: 0o755 })
+        ).rejects.toMatchObject({ code: "EROFS" });
+        await expect(
+            backend.setattr("/missing", { mode: 0o755 })
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        for (const mode of [0o10000, -1, 1.5, "x"] as unknown as number[]) {
+            await expect(
+                backend.setattr("/run.sh", { mode })
+            ).rejects.toMatchObject({ code: "EINVAL" });
+            await expect(
+                backend.open("/new.txt", { write: true, create: true }, mode)
+            ).rejects.toMatchObject({ code: "EINVAL" });
+        }
+        expect(await fs.stat("/new.txt")).toBeUndefined();
+    });
+
+    it("rebases open clean files onto a chmod without republishing their bytes", async () => {
+        const writeFile = vi.fn(
+            (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => fs.writeFile(path, source, options)
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { writeFile })
+        );
+        await fs.writeFile("/open.sh", "v1");
+        const handle = await backend.open("/open.sh", {
+            read: true,
+            write: true,
+        });
+        await backend.setattr("/open.sh", { mode: 0o755 });
+        expect(writeFile).not.toHaveBeenCalled();
+        await backend.write(handle, encode("v2"), 0);
+        await backend.release(handle);
+        const heads = (await fs.versions("/open.sh")).filter(
+            (version) => version.head
+        );
+        expect(heads).toHaveLength(1);
+        expect(heads[0]).toMatchObject({ mode: 0o100755 });
+        expect(decode(await fs.readFile("/open.sh"))).toBe("v2");
+
+        // A stale clean descriptor never publishes its old bytes.
+        await fs.writeFile("/stale.sh", "old");
+        const stale = await backend.open("/stale.sh", {
+            read: true,
+            write: true,
+        });
+        await fs.writeFile("/stale.sh", "newer");
+        await backend.setattr("/stale.sh", { mode: 0o755 });
+        await backend.release(stale);
+        expect(await fs.conflicts("/stale.sh")).toEqual([]);
+        expect(decode(await fs.readFile("/stale.sh"))).toBe("newer");
+        expect(await fs.stat("/stale.sh")).toMatchObject({ mode: 0o100755 });
+        expect(writeFile).toHaveBeenCalledOnce();
+    });
+
+    it("rejects a rename that overlaps a chmod of an open file", async () => {
+        const entered = deferred();
+        const allowed = deferred();
+        const setMetadata = vi.fn(
+            async (
+                path: string,
+                patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+                options?: { expectedNodeId?: string }
+            ) => {
+                entered.resolve();
+                await allowed.promise;
+                return fs.setMetadata(path, patch, options);
+            }
+        );
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { setMetadata })
+        );
+        await fs.writeFile("/busy.sh", "x");
+        const handle = await backend.open("/busy.sh", { read: true });
+        const chmod = backend.setattr("/busy.sh", { mode: 0o755 });
+        await entered.promise;
+        await expect(
+            backend.rename("/busy.sh", "/moved.sh")
+        ).rejects.toMatchObject({ code: "EAGAIN" });
+        allowed.resolve();
+        await chmod;
+        await backend.rename("/busy.sh", "/moved.sh");
+        await backend.release(handle);
+        expect(await fs.stat("/moved.sh")).toMatchObject({ mode: 0o100755 });
+    });
+
+    it("creates, reads, lists, replaces and removes symlinks without following them", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        await backend.mkdir("/bin");
+        // Targets are opaque: a dangling relative target is fine.
+        await backend.symlink("../lib/tool.js", "/bin/tool");
+        expect(await backend.readlink("/bin/tool")).toBe("../lib/tool.js");
+        const {
+            path: _path,
+            kind,
+            ...lstat
+        } = await backend.getattr("/bin/tool");
+        expect(kind).toBe("symlink");
+        expect(lstat).toMatchObject({
+            mode: 0o120777,
+            size: "../lib/tool.js".length,
+            nlink: 1,
+        });
+        expect(await backend.readdir("/bin", { includeStats: true })).toEqual([
+            { name: "tool", kind: "symlink", stat: lstat },
+        ]);
+        expect(await fs.stat("/bin/tool")).toMatchObject({
+            kind: "file",
+            mode: 0o120000,
+        });
+
+        for (const [target, path, code] of [
+            ["x", "/bin/tool", "EEXIST"],
+            ["x", "/", "EEXIST"],
+            ["x", "/missing/link", "ENOENT"],
+            ["", "/bin/empty", "EINVAL"],
+            ["x", `/${CONFLICTS_DIR}/link`, "EROFS"],
+        ]) {
+            await expect(backend.symlink(target, path)).rejects.toMatchObject({
+                code,
+            });
+        }
+        await expect(
+            backend.open("/bin/tool", { read: true })
+        ).rejects.toMatchObject({ code: "EINVAL" });
+        for (const [path, code] of [
+            ["/bin", "EINVAL"],
+            ["/", "EINVAL"],
+            ["/bin/none", "ENOENT"],
+        ]) {
+            await expect(backend.readlink(path)).rejects.toMatchObject({
+                code,
+            });
+        }
+        await expect(backend.rmdir("/bin/tool")).rejects.toMatchObject({
+            code: "ENOTDIR",
+        });
+
+        // ln -sf is symlink(tmp) plus rename, over a link and over a file.
+        await backend.symlink("../lib/v2.js", "/bin/tool.tmp");
+        await backend.rename("/bin/tool.tmp", "/bin/tool");
+        expect(await backend.readlink("/bin/tool")).toBe("../lib/v2.js");
+        await fs.writeFile("/bin/file", "bytes");
+        await backend.rename("/bin/tool", "/bin/file");
+        expect(await backend.readlink("/bin/file")).toBe("../lib/v2.js");
+        await backend.unlink("/bin/file");
+        expect(await backend.readdir("/bin")).toEqual([]);
+    });
+
+    it("fails readlink with EIO when the target is unavailable and shows link conflicts as regular files", async () => {
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, { readVersionForMount: async () => undefined })
+        );
+        const base = await fs.writeFile("/link", "a", { mode: 0o120000 });
+        await expect(backend.readlink("/link")).rejects.toMatchObject({
+            code: "EIO",
+        });
+        const left = await fs.writeFile("/link", "left", {
+            mode: 0o120000,
+            baseVersionIds: [base.id],
+        });
+        await fs.writeFile("/link", "right", {
+            mode: 0o120000,
+            baseVersionIds: [base.id],
+        });
+        const dir = `/${CONFLICTS_DIR}/${encodeConflictPathName("/link")}`;
+        expect(await backend.getattr(`${dir}/${left.id}`)).toEqual({
+            path: `${dir}/${left.id}`,
+            kind: "file",
+            size: 4,
+            mode: 0o100644,
+            mtimeMs: Number(left.mtime),
+            ctimeMs: Number(left.mtime),
+            nlink: 1,
+        });
+        for (const entry of await backend.readdir(dir, {
+            includeStats: true,
+        })) {
+            expect(entry).toMatchObject({
+                kind: "file",
+                stat: { mode: 0o100644 },
+            });
+        }
+    });
+
+    it("stats entries without a mode as 0644 and keeps root and conflict directory times stable", async () => {
+        await fs.writeFile("/plain.txt", "x");
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                stat: async (path) => {
+                    const entry = await fs.stat(path);
+                    return entry && { ...entry, mode: undefined };
+                },
+                list: async (path) =>
+                    (await fs.list(path)).map((entry) => ({
+                        ...entry,
+                        mode: undefined,
+                    })),
+            })
+        );
+        expect(await backend.getattr("/plain.txt")).toMatchObject({
+            kind: "file",
+            mode: 0o100644,
+        });
+        const listed = await backend.readdir("/", { includeStats: true });
+        expect(
+            listed.find((entry) => entry.name === "plain.txt")
+        ).toMatchObject({ kind: "file", stat: { mode: 0o100644 } });
+
+        const root = await backend.getattr("/");
+        const conflicts = await backend.getattr(`/${CONFLICTS_DIR}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(await backend.getattr("/")).toEqual(root);
+        expect(await backend.getattr(`/${CONFLICTS_DIR}`)).toEqual(conflicts);
+        expect(conflicts.mtimeMs).toBe(root.mtimeMs);
+        expect(
+            listed.find((entry) => entry.name === CONFLICTS_DIR)?.stat?.mtimeMs
+        ).toBe(root.mtimeMs);
     });
 
     it("publishes a capable rewrite when heads advance inside target.writeFile", async () => {
@@ -3283,6 +3695,12 @@ describe("shared fs mount backend", () => {
             write: true,
         });
         await backend.write(handle, encode("base"), 0);
+        // Restoring the opened mtime leaves nothing to publish.
+        await backend.setattr("/capable-buffer-race.txt", {
+            mtimeMs: Number(
+                (await fs.stat("/capable-buffer-race.txt"))!.updatedAt
+            ),
+        });
 
         const flushing = backend.flush(handle);
         await entered.promise;
@@ -3298,6 +3716,9 @@ describe("shared fs mount backend", () => {
             "next"
         );
         expect(writeFile).toHaveBeenCalledTimes(2);
+        expect(await writeFile.mock.results[0]!.value).toMatchObject({
+            mountWriteOutcome: "unchanged",
+        });
     });
 
     it("protects capable no-op input retained by a forwarding target", async () => {
@@ -3328,8 +3749,17 @@ describe("shared fs mount backend", () => {
             write: true,
         });
         await backend.write(handle, encode("base"), 0);
+        // Restoring the opened mtime leaves nothing to publish.
+        await backend.setattr("/capable-retained-noop.txt", {
+            mtimeMs: Number(
+                (await fs.stat("/capable-retained-noop.txt"))!.updatedAt
+            ),
+        });
         await backend.flush(handle);
         expect(writeFile).toHaveBeenCalledOnce();
+        expect(await writeFile.mock.results[0]!.value).toMatchObject({
+            mountWriteOutcome: "unchanged",
+        });
         expect(decode(retained[0])).toBe("base");
 
         await backend.write(handle, encode("next"), 0);

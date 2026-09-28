@@ -763,11 +763,13 @@ issue no slot queries. Timings are descriptive.
 
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
 negotiated IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
-`truncate`, `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`, and
-`unlink`. Numeric open flags are parsed with the host platform's `O_*`
-constants, truncate shrinks and zero-fill grows both open handles and paths,
-and flushing unchanged content does not mint a new version. Writable opens load
-the exact visible version rather than a temporarily available ancestor, retain
+`truncate`, `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`,
+`unlink`, `setattr`, `symlink`, and `readlink`. Numeric open flags are parsed
+with the host platform's `O_*` constants, and truncate shrinks and zero-fill
+grows both open handles and paths. A flush with no write mints no version; any
+write, even of identical bytes, advances mtime and publishes one version that
+reuses the stored chunks. Writable opens load the exact visible version rather
+than a temporarily available ancestor, retain
 that version as their sole causal base, and compare-and-set the path's node id
 at commit. A read-only first opener also loads that exact verified snapshot,
 which later writable siblings share without another load or hash. A typed
@@ -827,18 +829,20 @@ the path after the winner is removed; unrelated `EIO` and readiness failures
 remain retryable. An exclusive commit-time loss is reported as `EEXIST`.
 
 Custom mount targets implement `SharedFsMountBackendTarget`. Mounts read file
-contents only through `readVersionForMount()`, commit through `writeFile()`,
-remove and rename only through `mutateNamespaceForMount()`, and look paths up
-through `stat()`; they never call `readVersion()`, `rm()`, or `rename()`. A
+contents only through `readVersionForMount()`, commit through `writeFile()` and
+`setMetadata()`, remove and rename only through `mutateNamespaceForMount()`,
+and look paths up through `stat()`; they never call `readVersion()`, `rm()`,
+or `rename()`. A
 `SharedFsHandle` or `SharedFileSystem` subclass (or any delegating wrapper)
 that customizes read, remove, or rename policy must therefore apply it in those
 mount-facing methods at the layer it overrides, as `IgnoreAwareFs` does. For
 files, `stat()` must include `versionId`, `contentHash`, `size`, and
 `headVersionIds`, matching what `readVersionForMount()` returns.
 `writeFile()` must hash its input itself, honor `noOpIfHeadVersionIds`, and
-return the committed version with a `mountWriteOutcome`. It may retain the
-input `Uint8Array` indefinitely but must never mutate it or transfer/detach its
-`ArrayBuffer`: the mount lends its buffer without copying.
+return the committed version with its `mode`, `mtime` and a
+`mountWriteOutcome`. It may retain the input `Uint8Array` indefinitely but must
+never mutate it or transfer/detach its `ArrayBuffer`: the mount lends its
+buffer without copying.
 
 Custom targets that implement `expectedNodeId` compare-and-set should
 throw the exported `SharedFsExpectedNodeMismatchError` for an atomic mismatch.

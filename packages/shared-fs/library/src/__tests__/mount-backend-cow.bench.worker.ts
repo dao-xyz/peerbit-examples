@@ -147,8 +147,13 @@ const run = async (sizeMiB: number): Promise<CowBenchmarkSample> => {
                 id: "benchmark-version",
                 nodeId: "benchmark-node",
                 contentHash,
+                mode: 0o100644,
+                mtime: 0n,
                 mountWriteOutcome: "created",
             };
+        },
+        setMetadata: async () => {
+            throw new Error("COW benchmark must not set metadata");
         },
         mkdir: async () => undefined,
         mutateNamespaceForMount: async () => {

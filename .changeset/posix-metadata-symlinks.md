@@ -38,6 +38,4 @@ users, so no migration path is kept.
   files. `SharedFsVersionInfo.mode` and `mtime`, which the CLI's
   `conflicts --json` and `resolve-conflict --json` now print.
 
-Native mounts now report a file's stored mtime, but cannot set mode or mtime
-and do not expose the exec bit or symlinks yet: a symlink appears as a regular
-file holding its target, and writing it through a mount fails with `EINVAL`.
+Mounts expose these fields; see the mount backend changeset.

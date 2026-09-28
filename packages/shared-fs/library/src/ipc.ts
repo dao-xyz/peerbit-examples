@@ -91,6 +91,9 @@ const IPC_OPS: ReadonlySet<string> = new Set([
     "rmdir",
     "rename",
     "unlink",
+    "setattr",
+    "symlink",
+    "readlink",
 ] satisfies (keyof SharedFsMountBackend)[]);
 
 type IpcResponse =

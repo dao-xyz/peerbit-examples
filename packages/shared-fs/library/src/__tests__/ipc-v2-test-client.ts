@@ -160,7 +160,13 @@ export const createIpcV2TestClient = (endpoint: string) => {
                 "readdir",
                 options === undefined ? [path] : [path, options]
             ),
-        open: (path, flags) => request("open", [path, flags]),
+        open: (path, flags, createMode) =>
+            request(
+                "open",
+                createMode === undefined
+                    ? [path, flags]
+                    : [path, flags, createMode]
+            ),
         read: (handle, size, offset) => request("read", [handle, size, offset]),
         write: (handle, data, offset) =>
             request("write", [handle, { $bytes: null }, offset], data),
@@ -172,6 +178,9 @@ export const createIpcV2TestClient = (endpoint: string) => {
         rmdir: (path) => request("rmdir", [path]),
         rename: (from, to) => request("rename", [from, to]),
         unlink: (path) => request("unlink", [path]),
+        setattr: (path, attrs) => request("setattr", [path, attrs]),
+        symlink: (target, path) => request("symlink", [target, path]),
+        readlink: (path) => request("readlink", [path]),
     };
     return Object.assign(backend, {
         async close() {

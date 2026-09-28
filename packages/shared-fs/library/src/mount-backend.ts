@@ -46,9 +46,10 @@ type LocalCommitProfileStats = {
 
 /**
  * The filesystem a native mount runs against. Mounts read file contents only
- * through `readVersionForMount`, commit through `writeFile`, remove and rename
- * only through `mutateNamespaceForMount`, and look paths up through `stat`;
- * they never call a target's ordinary `readVersion`, `rm` or `rename`. A
+ * through `readVersionForMount`, commit through `writeFile` and
+ * `setMetadata`, remove and rename only through `mutateNamespaceForMount`,
+ * and look paths up through `stat`; they never call a target's ordinary
+ * `readVersion`, `rm` or `rename`. A
  * SharedFsHandle or SharedFileSystem subclass (or any delegating wrapper)
  * that customizes read, remove or rename policy must therefore apply the same
  * policy in these mount-facing methods at the layer it overrides, as
@@ -74,8 +75,8 @@ export type SharedFsMountBackendTarget = {
     /**
      * Must hash `source` itself, honor `noOpIfHeadVersionIds` as a
      * conditional exact-head no-op (mismatch still writes), and resolve to
-     * the committed version with a `mountWriteOutcome`; a result without one
-     * fails the commit with EIO.
+     * the committed version with its `mode`, `mtime` and a
+     * `mountWriteOutcome`; a result without them fails the commit with EIO.
      *
      * The target may retain the `source` Uint8Array indefinitely, but must
      * never mutate it or transfer/detach its ArrayBuffer: the mount lends its
@@ -93,9 +94,24 @@ export type SharedFsMountBackendTarget = {
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options?: WriteFileOptions
     ): Promise<
-        Pick<SharedFsVersionInfo, "id" | "nodeId" | "contentHash"> & {
+        Pick<
+            SharedFsVersionInfo,
+            "id" | "nodeId" | "contentHash" | "mode" | "mtime"
+        > & {
             mountWriteOutcome?: SharedFsMountWriteOutcome;
         }
+    >;
+    /**
+     * chmod/utimens of a regular file: publish one version that keeps the
+     * visible bytes (see SharedFileSystem.setMetadata), honoring
+     * `expectedNodeId` like writeFile.
+     */
+    setMetadata(
+        path: string,
+        patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+        options?: { expectedNodeId?: string }
+    ): Promise<
+        Pick<SharedFsVersionInfo, "id" | "parentVersionIds" | "mode" | "mtime">
     >;
     mkdir(path: string): Promise<unknown>;
     list(path?: string): Promise<SharedFsEntryInfo[]>;
@@ -156,7 +172,7 @@ export type SharedFsOpenFlags =
 
 export type SharedFsStat = {
     path: string;
-    kind: "directory" | "file";
+    kind: "directory" | "file" | "symlink";
     size: number;
     mode: number;
     mtimeMs: number;
@@ -168,7 +184,7 @@ export type SharedFsDirentStat = Omit<SharedFsStat, "path" | "kind">;
 
 export type SharedFsDirent = {
     name: string;
-    kind: "directory" | "file";
+    kind: "directory" | "file" | "symlink";
     /**
      * Metadata captured from the same namespace snapshot as this entry. Path
      * and kind are omitted because the parent path, name, and entry kind
@@ -190,7 +206,12 @@ export type SharedFsMountBackend = {
         path: string,
         options?: SharedFsReaddirOptions
     ): Promise<SharedFsDirent[]>;
-    open(path: string, flags?: SharedFsOpenFlags): Promise<number>;
+    /** `createMode` is the O_CREAT mode; only its exec bit is kept. */
+    open(
+        path: string,
+        flags?: SharedFsOpenFlags,
+        createMode?: number
+    ): Promise<number>;
     /**
      * Returned bytes transfer to the caller. A backend must not later mutate
      * or reuse that view; binary IPC may retain it until the socket write
@@ -209,6 +230,16 @@ export type SharedFsMountBackend = {
     rmdir(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
     unlink(path: string): Promise<void>;
+    /**
+     * chmod (only the exec bit is kept) and/or utimens of a regular file;
+     * a no-op for directories, the root and symlinks.
+     */
+    setattr(
+        path: string,
+        attrs: { mode?: number; mtimeMs?: number }
+    ): Promise<void>;
+    symlink(target: string, path: string): Promise<void>;
+    readlink(path: string): Promise<string>;
 };
 
 export type SharedFsBackendErrorCode =
@@ -249,6 +280,12 @@ type OpenFileState = {
     borrowedCommitSnapshot?: CommitSnapshot;
     /** Logical file length. */
     length: number;
+    /** Exec bit (as a regular-file mode) and mtime that stat reports. */
+    mode: RegularMode;
+    mtimeMs: number;
+    /** The last committed version's values; commits send only changes. */
+    baseMode: RegularMode;
+    baseMtimeMs: number;
     dirty: boolean;
     readOnly: boolean;
     /** O_CREAT|O_EXCL was requested for an initially absent path. */
@@ -301,10 +338,30 @@ type CommitSnapshot = {
     buffer: Uint8Array;
     length: number;
     mutationGeneration: number;
+    mode: RegularMode;
+    mtimeMs: number;
 };
+
+type RegularMode = 0o100644 | 0o100755;
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
+const S_IFLNK = 0o120000;
+
+/** chmod keeps only the exec bit: any x bit gives 0o100755. */
+const regularMode = (mode = 0): RegularMode =>
+    mode & 0o111 ? 0o100755 : 0o100644;
+
+/** A POSIX mode argument (open's create mode, chmod): 0..0o7777 or absent. */
+const posixModeArg = (mode?: number) => {
+    if (
+        mode !== undefined &&
+        !(Number.isInteger(mode) && mode >= 0 && mode <= 0o7777)
+    ) {
+        throw new SharedFsBackendError("EINVAL", `Invalid mode: ${mode}`);
+    }
+    return mode;
+};
 
 /**
  * Open-flag bit values differ per platform. The IPC server always runs on the
@@ -356,9 +413,7 @@ const bigintToSize = (value: bigint) => {
         : Number(value);
 };
 
-const nowMs = () => Date.now();
-
-const directoryDirentStat = (mtimeMs = nowMs()): SharedFsDirentStat => ({
+const directoryDirentStat = (mtimeMs: number): SharedFsDirentStat => ({
     size: 0,
     mode: S_IFDIR | 0o755,
     mtimeMs,
@@ -366,18 +421,23 @@ const directoryDirentStat = (mtimeMs = nowMs()): SharedFsDirentStat => ({
     nlink: 2,
 });
 
-const directoryStat = (path: string, mtimeMs = nowMs()): SharedFsStat => ({
+const directoryStat = (path: string, mtimeMs: number): SharedFsStat => ({
     path,
     kind: "directory",
     ...directoryDirentStat(mtimeMs),
 });
 
+/**
+ * A stored file mode; a symlink reports S_IFLNK|0777. Entries without a
+ * mode and conflict copies (of any version) are regular 0644 files.
+ */
 const fileDirentStat = (
     size: number,
-    mtimeMs = nowMs()
+    mtimeMs: number,
+    mode = S_IFREG | 0o644
 ): SharedFsDirentStat => ({
     size,
-    mode: S_IFREG | 0o644,
+    mode: mode === S_IFLNK ? S_IFLNK | 0o777 : mode,
     mtimeMs,
     ctimeMs: mtimeMs,
     nlink: 1,
@@ -386,11 +446,12 @@ const fileDirentStat = (
 const fileStat = (
     path: string,
     size: number,
-    mtimeMs = nowMs()
+    mtimeMs: number,
+    mode?: number
 ): SharedFsStat => ({
     path,
-    kind: "file",
-    ...fileDirentStat(size, mtimeMs),
+    kind: mode === S_IFLNK ? "symlink" : "file",
+    ...fileDirentStat(size, mtimeMs, mode),
 });
 
 type ParsedSharedFsOpenFlags = {
@@ -482,6 +543,9 @@ const parseConflictPath = (path: string) => {
 const notFound = (path: string) =>
     new SharedFsBackendError("ENOENT", `Path does not exist: ${path}`);
 
+const alreadyExists = (path: string) =>
+    new SharedFsBackendError("EEXIST", `Path already exists: ${path}`);
+
 const badHandle = (handle: number) =>
     new SharedFsBackendError("EBADF", `Unknown file handle: ${handle}`);
 
@@ -521,6 +585,23 @@ const findEntry = async (
         return undefined;
     }
     return target.stat(normalized);
+};
+
+/** `path`'s parent directory node: ENOENT when absent, ENOTDIR for a file. */
+const parentDirectoryNodeId = async (
+    target: SharedFsMountBackendTarget,
+    path: string
+) => {
+    const parentPath = dirname(path);
+    if (parentPath === "/") return ROOT_NODE_ID;
+    const parent = await findEntry(target, parentPath);
+    if (parent?.kind !== "directory") {
+        throw new SharedFsBackendError(
+            parent ? "ENOTDIR" : "ENOENT",
+            `Parent directory does not exist: ${parentPath}`
+        );
+    }
+    return parent.nodeId;
 };
 
 const mapWithBoundedConcurrency = async <T, R>(
@@ -657,8 +738,24 @@ const resizeState = (state: OpenFileState, size: number) => {
         state.buffer.fill(0, state.length, size);
     }
     state.length = size;
+    state.mtimeMs = Date.now();
     state.dirty = true;
     state.mutationGeneration++;
+};
+
+/**
+ * Adopt a committed version's metadata as the base, and as the visible value
+ * unless it changed locally since `snap`.
+ */
+const rebaseMeta = (
+    state: OpenFileState,
+    committed: { mode: number; mtime: bigint },
+    snap: { mode: RegularMode; mtimeMs: number }
+) => {
+    state.baseMode = regularMode(committed.mode);
+    state.baseMtimeMs = Number(committed.mtime);
+    if (state.mode === snap.mode) state.mode = state.baseMode;
+    if (state.mtimeMs === snap.mtimeMs) state.mtimeMs = state.baseMtimeMs;
 };
 
 export const createSharedFsMountBackend = (
@@ -675,6 +772,9 @@ export const createSharedFsMountBackend = (
     const namespaceTransitions = new Map<symbol, readonly string[]>();
     const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
+    // `/` and the conflict directories report one stable time, so tar and
+    // friends never see them change while they read.
+    const mountedAtMs = Date.now();
     const profile = options.profile;
     // Joins a `mount.target.writeFile` record to the target's own sub-phase
     // records; advanced only while profiling.
@@ -1296,14 +1396,14 @@ export const createSharedFsMountBackend = (
             throw notFound(path);
         }
         if (parsed.kind === "root") {
-            return directoryStat(joinFsPath("/", CONFLICTS_DIR));
+            return directoryStat(joinFsPath("/", CONFLICTS_DIR), mountedAtMs);
         }
         const conflict = await conflictForPath(parsed.filePath);
         if (!conflict) {
             throw notFound(path);
         }
         if (parsed.kind === "path") {
-            return directoryStat(path);
+            return directoryStat(path, mountedAtMs);
         }
         const version = conflict.versions.find(
             (candidate) => candidate.id === parsed.versionId
@@ -1314,7 +1414,7 @@ export const createSharedFsMountBackend = (
         return fileStat(
             path,
             bigintToSize(version.size),
-            Number(version.createdAt)
+            Number(version.mtime)
         );
     };
 
@@ -1377,6 +1477,8 @@ export const createSharedFsMountBackend = (
             buffer: state.buffer,
             length: state.length,
             mutationGeneration: state.mutationGeneration,
+            mode: state.mode,
+            mtimeMs: state.mtimeMs,
         };
         const markSnapshotPersisted = () => {
             state.persistedGeneration = Math.max(
@@ -1422,9 +1524,18 @@ export const createSharedFsMountBackend = (
                 ...(state.openedParentNodeId !== undefined
                     ? { expectedParentNodeId: state.openedParentNodeId }
                     : {}),
+                // Send only local metadata changes; otherwise the target
+                // inherits from the best-ranked (absorbed) parent, so a
+                // remote chmod or touch survives a local edit.
+                ...(snapshot.mode !== state.baseMode
+                    ? { mode: snapshot.mode }
+                    : {}),
+                ...(snapshot.mtimeMs !== state.baseMtimeMs
+                    ? { mtime: snapshot.mtimeMs }
+                    : {}),
                 // Editors flush/fsync liberally: the target skips minting a
-                // version only while both the bytes and this exact opened
-                // head snapshot are unchanged.
+                // version only while the bytes, the metadata and this exact
+                // opened head snapshot are unchanged.
                 noOpIfHeadVersionIds: [...(state.openedHeadVersionIds ?? [])],
             };
             inputExposed = borrowInput;
@@ -1536,7 +1647,9 @@ export const createSharedFsMountBackend = (
                 result &&
                 typeof result.id === "string" &&
                 typeof result.nodeId === "string" &&
-                typeof result.contentHash === "string"
+                typeof result.contentHash === "string" &&
+                typeof result.mode === "number" &&
+                typeof result.mtime === "bigint"
                     ? result
                     : undefined;
             const mountWriteOutcome = committed?.mountWriteOutcome;
@@ -1601,6 +1714,7 @@ export const createSharedFsMountBackend = (
             state.openedHeadVersionIds = [committed.id];
             state.openedNodeId = committed.nodeId;
             state.openedParentNodeId = undefined;
+            rebaseMeta(state, committed, snapshot);
             // The first successful create commit makes the path visible in
             // the target, so the backend-local absent-path reservation is no
             // longer needed. Later writes use the committed node id.
@@ -1720,12 +1834,18 @@ export const createSharedFsMountBackend = (
     const newFileState = (
         path: string,
         nodeId: string | null | undefined,
-        buffer: Uint8Array
+        buffer: Uint8Array,
+        mode: RegularMode = 0o100644,
+        mtimeMs = mountedAtMs
     ): OpenFileState => ({
         path,
         nodeId,
         buffer,
         length: buffer.byteLength,
+        mode,
+        baseMode: mode,
+        mtimeMs,
+        baseMtimeMs: mtimeMs,
         dirty: false,
         readOnly: false,
         exclusiveCreate: false,
@@ -1806,7 +1926,8 @@ export const createSharedFsMountBackend = (
 
     const openPath = async (
         normalized: string,
-        parsedFlags: ReturnType<typeof parseFlags>
+        parsedFlags: ReturnType<typeof parseFlags>,
+        createMode?: number
     ): Promise<number> => {
         if (!parsedFlags.read && !parsedFlags.write) {
             throw new SharedFsBackendError(
@@ -1942,6 +2063,11 @@ export const createSharedFsMountBackend = (
                         state.openedNodeId = null;
                         state.openedParentNodeId = openedParentNodeId;
                         state.mutationGeneration = 1;
+                        // A create always sends its mtime, and its mode
+                        // when the create mode has an exec bit.
+                        state.mode = regularMode(createMode);
+                        state.mtimeMs = Date.now();
+                        state.baseMtimeMs = -1;
                         registerState(state);
                         createIntent = undefined;
                         return attachHandle(state, parsedFlags);
@@ -1962,6 +2088,13 @@ export const createSharedFsMountBackend = (
                     throw new SharedFsBackendError(
                         "EISDIR",
                         "Path is a directory: " + normalized
+                    );
+                }
+                if (entry.mode === S_IFLNK) {
+                    // Links are never followed; the kernel resolves them.
+                    throw new SharedFsBackendError(
+                        "EINVAL",
+                        "Path is a symlink: " + normalized
                     );
                 }
 
@@ -2013,7 +2146,9 @@ export const createSharedFsMountBackend = (
                 const state = newFileState(
                     normalized,
                     loaded.entry.nodeId,
-                    loaded.bytes
+                    loaded.bytes,
+                    regularMode(loaded.entry.mode),
+                    Number(loaded.entry.updatedAt)
                 );
                 state.openedNodeId = loaded.entry.nodeId;
                 state.baseVersionIds = loaded.entry.versionId
@@ -2054,13 +2189,14 @@ export const createSharedFsMountBackend = (
 
     const openPathAdmitted = async (
         normalized: string,
-        parsedFlags: ReturnType<typeof parseFlags>
+        parsedFlags: ReturnType<typeof parseFlags>,
+        createMode?: number
     ) => {
         // Synchronous admission precedes openPath's first namespace await.
         // Registration (or failure) releases it.
         const admission = reserveOpenAdmission(normalized);
         try {
-            return await openPath(normalized, parsedFlags);
+            return await openPath(normalized, parsedFlags, createMode);
         } finally {
             openAdmissions.delete(admission);
         }
@@ -2071,7 +2207,7 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const normalized = normalizeFsPath(path);
                 if (normalized === "/") {
-                    return directoryStat("/");
+                    return directoryStat("/", mountedAtMs);
                 }
                 if (isConflictPath(normalized)) {
                     return getattrConflict(normalized);
@@ -2079,8 +2215,13 @@ export const createSharedFsMountBackend = (
                 const pending = pendingDirtyState(normalized);
                 if (pending) {
                     // Uncommitted writes are visible to stat like on a local
-                    // filesystem (size reflects the buffer).
-                    return fileStat(normalized, pending.length);
+                    // filesystem, and equal the stat after their commit.
+                    return fileStat(
+                        normalized,
+                        pending.length,
+                        pending.mtimeMs,
+                        pending.mode
+                    );
                 }
                 const entry = await findEntry(target, normalized);
                 if (!entry) {
@@ -2091,7 +2232,8 @@ export const createSharedFsMountBackend = (
                     : fileStat(
                           normalized,
                           bigintToSize(entry.size),
-                          Number(entry.updatedAt)
+                          Number(entry.updatedAt),
+                          entry.mode
                       );
             });
         },
@@ -2130,7 +2272,7 @@ export const createSharedFsMountBackend = (
                             return {
                                 name,
                                 kind: "directory" as const,
-                                stat: directoryDirentStat(),
+                                stat: directoryDirentStat(mountedAtMs),
                             };
                         });
                     }
@@ -2150,27 +2292,28 @@ export const createSharedFsMountBackend = (
                             kind: "file" as const,
                             stat: fileDirentStat(
                                 bigintToSize(version.size),
-                                Number(version.createdAt)
+                                Number(version.mtime)
                             ),
                         };
                     });
                 }
                 const byName = new Map<string, SharedFsDirent>(
                     (await target.list(normalized)).map((entry) => {
+                        const kind =
+                            entry.mode === S_IFLNK
+                                ? ("symlink" as const)
+                                : entry.kind;
                         if (!includeStats) {
                             return [
                                 entry.name,
-                                {
-                                    name: entry.name,
-                                    kind: entry.kind,
-                                },
+                                { name: entry.name, kind },
                             ] as const;
                         }
                         return [
                             entry.name,
                             {
                                 name: entry.name,
-                                kind: entry.kind,
+                                kind,
                                 stat:
                                     entry.kind === "directory"
                                         ? directoryDirentStat(
@@ -2178,7 +2321,8 @@ export const createSharedFsMountBackend = (
                                           )
                                         : fileDirentStat(
                                               bigintToSize(entry.size),
-                                              Number(entry.updatedAt)
+                                              Number(entry.updatedAt),
+                                              entry.mode
                                           ),
                             },
                         ] as const;
@@ -2199,7 +2343,11 @@ export const createSharedFsMountBackend = (
                                 ? {
                                       name,
                                       kind: "file" as const,
-                                      stat: fileDirentStat(state.length),
+                                      stat: fileDirentStat(
+                                          state.length,
+                                          state.mtimeMs,
+                                          state.mode
+                                      ),
                                   }
                                 : { name, kind: "file" as const }
                         );
@@ -2212,7 +2360,7 @@ export const createSharedFsMountBackend = (
                             ? {
                                   name: CONFLICTS_DIR,
                                   kind: "directory",
-                                  stat: directoryDirentStat(),
+                                  stat: directoryDirentStat(mountedAtMs),
                               }
                             : {
                                   name: CONFLICTS_DIR,
@@ -2224,9 +2372,17 @@ export const createSharedFsMountBackend = (
             });
         },
 
-        async open(path: string, flags?: SharedFsOpenFlags) {
+        async open(
+            path: string,
+            flags?: SharedFsOpenFlags,
+            createMode?: number
+        ) {
             return wrap(() =>
-                openPathAdmitted(normalizeFsPath(path), parseFlags(flags))
+                openPathAdmitted(
+                    normalizeFsPath(path),
+                    parseFlags(flags),
+                    posixModeArg(createMode)
+                )
             );
         },
 
@@ -2287,6 +2443,7 @@ export const createSharedFsMountBackend = (
             }
             state.buffer.set(data, writeOffset);
             state.length = Math.max(state.length, end);
+            state.mtimeMs = Date.now();
             state.dirty = true;
             state.mutationGeneration++;
             return data.byteLength;
@@ -2601,21 +2758,10 @@ export const createSharedFsMountBackend = (
                         // source directory can otherwise leave stale
                         // descendant descriptors attached when the rename
                         // exits early for an invalid parent.
-                        const parentPath = dirname(toPath);
-                        const parent =
-                            parentPath === "/"
-                                ? undefined
-                                : await findEntry(target, parentPath);
-                        if (
-                            parentPath !== "/" &&
-                            (!parent || parent.kind !== "directory")
-                        ) {
-                            throw new SharedFsBackendError(
-                                parent ? "ENOTDIR" : "ENOENT",
-                                `Parent directory does not exist: ${parentPath}`
-                            );
-                        }
-                        const parentNodeId = parent?.nodeId ?? ROOT_NODE_ID;
+                        const parentNodeId = await parentDirectoryNodeId(
+                            target,
+                            toPath
+                        );
                         try {
                             const result = await target.mutateNamespaceForMount(
                                 {
@@ -2746,6 +2892,176 @@ export const createSharedFsMountBackend = (
                         }
                     }
                 );
+            });
+        },
+
+        async setattr(
+            path: string,
+            attrs: { mode?: number; mtimeMs?: number }
+        ) {
+            return wrap(async () => {
+                const posixMode = posixModeArg(attrs.mode);
+                const mode =
+                    posixMode === undefined
+                        ? undefined
+                        : regularMode(posixMode);
+                const { mtimeMs } = attrs;
+                const normalized = normalizeFsPath(path);
+                if (normalized === "/") return;
+                if (isConflictPath(normalized)) {
+                    throw new SharedFsBackendError(
+                        "EROFS",
+                        `Path is read-only: ${normalized}`
+                    );
+                }
+                assertWriteReady(`setattr ${normalized}`);
+                return withOpenPathLock(normalized, async () => {
+                    for (;;) {
+                        const entry = await findEntry(target, normalized);
+                        assertNoNamespaceTransition(normalized);
+                        // statesByPath holds only live, writable-capable states.
+                        const state = statesByPath.get(normalized);
+                        if (state?.committing) {
+                            await state.committing.catch(() => {});
+                            continue;
+                        }
+                        if (state?.dirty) {
+                            // Fold into the pending commit (git's chmod of a
+                            // lock file, cp -p, touch newfile): the bytes and
+                            // metadata publish as one version.
+                            if (mode !== undefined) state.mode = mode;
+                            if (mtimeMs !== undefined) state.mtimeMs = mtimeMs;
+                            state.mutationGeneration++;
+                            return;
+                        }
+                        if (!entry) throw notFound(normalized);
+                        if (entry.kind !== "file" || entry.mode === S_IFLNK) {
+                            return;
+                        }
+                        const patch = {
+                            mode:
+                                mode === regularMode(entry.mode)
+                                    ? undefined
+                                    : mode,
+                            mtime:
+                                mtimeMs === Number(entry.updatedAt)
+                                    ? undefined
+                                    : mtimeMs,
+                        };
+                        if ((patch.mode ?? patch.mtime) === undefined) return;
+                        // A clean or closed file never re-publishes its bytes.
+                        const setMetadata = () =>
+                            target.setMetadata(normalized, patch, {
+                                expectedNodeId: entry.nodeId,
+                            });
+                        if (state?.nodeId !== entry.nodeId) {
+                            await setMetadata();
+                            return;
+                        }
+                        // An open clean state rebases onto the new version.
+                        // Commits queue behind it (its failure is only this
+                        // call's), and an overlapping namespace transition
+                        // fails with EAGAIN.
+                        const snap = {
+                            mode: state.mode,
+                            mtimeMs: state.mtimeMs,
+                        };
+                        const run = setMetadata().then((committed) => {
+                            rebaseMeta(state, committed, snap);
+                            if (
+                                state.baseVersionIds?.every((id) =>
+                                    committed.parentVersionIds.includes(id)
+                                )
+                            ) {
+                                state.baseVersionIds = [committed.id];
+                                state.openedHeadVersionIds = [committed.id];
+                            }
+                        });
+                        const settle = () => {
+                            if (state.committing === committing) {
+                                state.committing = undefined;
+                            }
+                        };
+                        const committing = run.then(settle, settle);
+                        state.committing = committing;
+                        return run;
+                    }
+                });
+            });
+        },
+
+        async symlink(linkTarget: string, path: string) {
+            return wrap(async () => {
+                const normalized = normalizeFsPath(path);
+                if (normalized === "/") throw alreadyExists(normalized);
+                if (isConflictPath(normalized)) {
+                    throw new SharedFsBackendError(
+                        "EROFS",
+                        `Path is read-only: ${normalized}`
+                    );
+                }
+                assertWriteReady(`symlink ${normalized}`);
+                return withNamespaceTransition(
+                    `symlink ${normalized}`,
+                    [normalized],
+                    async () => {
+                        const existing = await findEntry(target, normalized);
+                        reconcileObservedNamespaceScope(
+                            normalized,
+                            existing,
+                            namespaceStates(normalized, false)
+                        );
+                        if (existing) throw alreadyExists(normalized);
+                        const expectedParentNodeId =
+                            await parentDirectoryNodeId(target, normalized);
+                        // The library validates the link target (EINVAL).
+                        await target
+                            .writeFile(normalized, linkTarget, {
+                                mode: S_IFLNK,
+                                expectedNodeId: null,
+                                expectedParentNodeId,
+                            })
+                            .catch((error) => {
+                                throw error instanceof
+                                    SharedFsExpectedNodeMismatchError &&
+                                    error.path === normalized
+                                    ? alreadyExists(normalized)
+                                    : error;
+                            });
+                    }
+                );
+            });
+        },
+
+        async readlink(path: string) {
+            return wrap(async () => {
+                const normalized = normalizeFsPath(path);
+                const notLink = () =>
+                    new SharedFsBackendError(
+                        "EINVAL",
+                        `Path is not a symlink: ${normalized}`
+                    );
+                if (normalized === "/" || isConflictPath(normalized)) {
+                    throw notLink();
+                }
+                const entry = await findEntry(target, normalized);
+                if (!entry) throw notFound(normalized);
+                if (entry.mode !== S_IFLNK || !entry.versionId) {
+                    throw notLink();
+                }
+                // The exact visible version, hash-verified, so a concurrent
+                // re-point cannot mix two targets.
+                const snapshot = await target.readVersionForMount(
+                    normalized,
+                    entry.versionId
+                );
+                if (!snapshot) {
+                    throw new SharedFsBackendError(
+                        "EIO",
+                        `Symlink target is unavailable: ${normalized}`
+                    );
+                }
+                return new TextDecoder().decode(snapshot.bytes);
             });
         },
     };

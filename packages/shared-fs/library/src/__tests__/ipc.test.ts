@@ -187,6 +187,41 @@ describe("shared-fs IPC v2 server", () => {
         }
     });
 
+    it("round-trips the metadata and symlink ops and open's create mode", async () => {
+        const open = vi.fn(async () => 7);
+        const setattr = vi.fn(async () => {});
+        const symlink = vi.fn(async () => {});
+        const readlink = vi.fn(async () => "../lib/tool.js");
+        const server = await createSharedFsIpcServer(
+            backendWith({ open, setattr, symlink, readlink }),
+            "tcp://127.0.0.1:0"
+        );
+        const client = createIpcV2TestClient(server.endpoint);
+        try {
+            await expect(client.open("/a.sh", 0o1101, 0o755)).resolves.toBe(7);
+            await expect(
+                client.setattr("/a.sh", { mode: 0o644, mtimeMs: 1000 })
+            ).resolves.toBeNull();
+            await expect(
+                client.symlink("../lib/tool.js", "/bin/tool")
+            ).resolves.toBeNull();
+            await expect(client.readlink("/bin/tool")).resolves.toBe(
+                "../lib/tool.js"
+            );
+            expect(open.mock.calls).toEqual([["/a.sh", 0o1101, 0o755]]);
+            expect(setattr.mock.calls).toEqual([
+                ["/a.sh", { mode: 0o644, mtimeMs: 1000 }],
+            ]);
+            expect(symlink.mock.calls).toEqual([
+                ["../lib/tool.js", "/bin/tool"],
+            ]);
+            expect(readlink.mock.calls).toEqual([["/bin/tool"]]);
+        } finally {
+            await client.close();
+            await server.close();
+        }
+    });
+
     it("reassembles metadata split inside a multibyte UTF-8 character", async () => {
         const getattr = vi.fn(async (path: string) => ({ path }));
         const server = await createSharedFsIpcServer(

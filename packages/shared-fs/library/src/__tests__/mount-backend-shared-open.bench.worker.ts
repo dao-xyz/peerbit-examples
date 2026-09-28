@@ -140,6 +140,9 @@ const run = async (handleCount: number): Promise<SharedOpenBenchmarkSample> => {
             writeFileCalls++;
             throw new Error("read-only shared opens must not commit");
         },
+        setMetadata: async () => {
+            throw new Error("read-only shared opens must not set metadata");
+        },
         mkdir: async () => undefined,
         mutateNamespaceForMount: async () => {
             throw new Error("read-only shared opens must not mutate");
