@@ -111,7 +111,10 @@ export type SharedFsMountBackendTarget = {
         patch: { mode?: 0o100644 | 0o100755; mtime?: number },
         options?: { expectedNodeId?: string }
     ): Promise<
-        Pick<SharedFsVersionInfo, "id" | "parentVersionIds" | "mode" | "mtime">
+        Pick<
+            SharedFsVersionInfo,
+            "id" | "parentVersionIds" | "contentHash" | "mode" | "mtime"
+        >
     >;
     mkdir(path: string): Promise<unknown>;
     list(path?: string): Promise<SharedFsEntryInfo[]>;
@@ -283,9 +286,8 @@ type OpenFileState = {
     /** Exec bit (as a regular-file mode) and mtime that stat reports. */
     mode: RegularMode;
     mtimeMs: number;
-    /** The last committed version's values; commits send only changes. */
+    /** The base version's mode; commits send the mode only when changed. */
     baseMode: RegularMode;
-    baseMtimeMs: number;
     dirty: boolean;
     readOnly: boolean;
     /** O_CREAT|O_EXCL was requested for an initially absent path. */
@@ -744,8 +746,8 @@ const resizeState = (state: OpenFileState, size: number) => {
 };
 
 /**
- * Adopt a committed version's metadata as the base, and as the visible value
- * unless it changed locally since `snap`.
+ * Adopt a new base version's mode as the base, and its metadata as the
+ * visible value unless it changed locally since `snap`.
  */
 const rebaseMeta = (
     state: OpenFileState,
@@ -753,9 +755,8 @@ const rebaseMeta = (
     snap: { mode: RegularMode; mtimeMs: number }
 ) => {
     state.baseMode = regularMode(committed.mode);
-    state.baseMtimeMs = Number(committed.mtime);
     if (state.mode === snap.mode) state.mode = state.baseMode;
-    if (state.mtimeMs === snap.mtimeMs) state.mtimeMs = state.baseMtimeMs;
+    if (state.mtimeMs === snap.mtimeMs) state.mtimeMs = Number(committed.mtime);
 };
 
 export const createSharedFsMountBackend = (
@@ -1524,15 +1525,14 @@ export const createSharedFsMountBackend = (
                 ...(state.openedParentNodeId !== undefined
                     ? { expectedParentNodeId: state.openedParentNodeId }
                     : {}),
-                // Send only local metadata changes; otherwise the target
-                // inherits from the best-ranked (absorbed) parent, so a
-                // remote chmod or touch survives a local edit.
+                // Send the mode only when changed locally; otherwise the
+                // target inherits it from the best-ranked (absorbed) parent,
+                // so a remote chmod survives a local edit. A dirty state's
+                // mtime is always local (write, truncate, create, utimens).
                 ...(snapshot.mode !== state.baseMode
                     ? { mode: snapshot.mode }
                     : {}),
-                ...(snapshot.mtimeMs !== state.baseMtimeMs
-                    ? { mtime: snapshot.mtimeMs }
-                    : {}),
+                mtime: snapshot.mtimeMs,
                 // Editors flush/fsync liberally: the target skips minting a
                 // version only while the bytes, the metadata and this exact
                 // opened head snapshot are unchanged.
@@ -1845,7 +1845,6 @@ export const createSharedFsMountBackend = (
         mode,
         baseMode: mode,
         mtimeMs,
-        baseMtimeMs: mtimeMs,
         dirty: false,
         readOnly: false,
         exclusiveCreate: false,
@@ -2063,11 +2062,10 @@ export const createSharedFsMountBackend = (
                         state.openedNodeId = null;
                         state.openedParentNodeId = openedParentNodeId;
                         state.mutationGeneration = 1;
-                        // A create always sends its mtime, and its mode
-                        // when the create mode has an exec bit.
+                        // A create sends its mode when the create mode has
+                        // an exec bit.
                         state.mode = regularMode(createMode);
                         state.mtimeMs = Date.now();
-                        state.baseMtimeMs = -1;
                         registerState(state);
                         createIntent = undefined;
                         return attachHandle(state, parsedFlags);
@@ -2966,15 +2964,35 @@ export const createSharedFsMountBackend = (
                             mode: state.mode,
                             mtimeMs: state.mtimeMs,
                         };
+                        const base = state.baseVersionIds;
                         const run = setMetadata().then((committed) => {
-                            rebaseMeta(state, committed, snap);
+                            // Only onto a copy of this fd's own bytes: an
+                            // equal patch returns the visible head as is,
+                            // which may be a peer's edit.
                             if (
-                                state.baseVersionIds?.every((id) =>
-                                    committed.parentVersionIds.includes(id)
-                                )
+                                base?.length === 1 &&
+                                base[0] === entry.versionId &&
+                                committed.contentHash === entry.contentHash &&
+                                committed.parentVersionIds.includes(base[0])
                             ) {
                                 state.baseVersionIds = [committed.id];
                                 state.openedHeadVersionIds = [committed.id];
+                                rebaseMeta(state, committed, snap);
+                                return;
+                            }
+                            // Visible only: the base keeps its mode, so this
+                            // fd's next commit still sends the chmod.
+                            if (
+                                mode !== undefined &&
+                                state.mode === snap.mode
+                            ) {
+                                state.mode = mode;
+                            }
+                            if (
+                                mtimeMs !== undefined &&
+                                state.mtimeMs === snap.mtimeMs
+                            ) {
+                                state.mtimeMs = mtimeMs;
                             }
                         });
                         const settle = () => {
@@ -3044,24 +3062,30 @@ export const createSharedFsMountBackend = (
                 if (normalized === "/" || isConflictPath(normalized)) {
                     throw notLink();
                 }
-                const entry = await findEntry(target, normalized);
-                if (!entry) throw notFound(normalized);
-                if (entry.mode !== S_IFLNK || !entry.versionId) {
-                    throw notLink();
-                }
-                // The exact visible version, hash-verified, so a concurrent
-                // re-point cannot mix two targets.
-                const snapshot = await target.readVersionForMount(
-                    normalized,
-                    entry.versionId
-                );
-                if (!snapshot) {
-                    throw new SharedFsBackendError(
-                        "EIO",
-                        `Symlink target is unavailable: ${normalized}`
+                let entry = await findEntry(target, normalized);
+                for (;;) {
+                    if (!entry) throw notFound(normalized);
+                    const { versionId } = entry;
+                    if (entry.mode !== S_IFLNK || !versionId) throw notLink();
+                    // The exact visible version, hash-verified, so a
+                    // concurrent re-point cannot mix two targets.
+                    const snapshot = await target.readVersionForMount(
+                        normalized,
+                        versionId
                     );
+                    if (snapshot) {
+                        return new TextDecoder().decode(snapshot.bytes);
+                    }
+                    // Also undefined once the path names another version or
+                    // nothing (ln -sf, unlink): answer from the new binding.
+                    entry = await findEntry(target, normalized);
+                    if (entry?.versionId === versionId) {
+                        throw new SharedFsBackendError(
+                            "EIO",
+                            `Symlink target is unavailable: ${normalized}`
+                        );
+                    }
                 }
-                return new TextDecoder().decode(snapshot.bytes);
             });
         },
     };

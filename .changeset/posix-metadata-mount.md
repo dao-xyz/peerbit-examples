@@ -23,9 +23,10 @@ symlinks.
   fails with `EINVAL`, and `readlink` fails with `EIO` while the link's
   version is not readable locally.
 - A write or truncate sets mtime to its own time, and a dirty handle's stat
-  equals the stat after its commit. A commit sends mode and mtime only when
-  they changed locally, so another peer's chmod or touch survives a local
-  edit.
+  equals the stat after its commit. A commit always sends the handle's mtime,
+  so a `utimens` before close (`cp -p`) is kept even when it equals the stored
+  time, and sends the mode only when it changed locally, so another peer's
+  chmod survives a local edit.
 - `SharedFsMountBackendTarget` requires `setMetadata`, and `writeFile` results
   must carry `mode` and `mtime`; a commit fails with `EIO` otherwise.
 - Breaking: saving identical bytes through a mount is no longer a no-op. Any

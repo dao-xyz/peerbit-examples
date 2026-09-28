@@ -556,11 +556,11 @@ describe("shared fs mount backend", () => {
         const backend = createSharedFsMountBackend(
             mountTarget(fs, { list, stat })
         );
-        const handle = await backend.open("/pending.txt", {
-            write: true,
-            create: true,
-            truncate: true,
-        });
+        const handle = await backend.open(
+            "/pending.txt",
+            { write: true, create: true, truncate: true },
+            0o755
+        );
         const before = Date.now();
         await backend.write(handle, encode("not committed"), 0);
         const after = Date.now();
@@ -578,7 +578,7 @@ describe("shared fs mount backend", () => {
             kind: "file",
             stat: {
                 size: "not committed".length,
-                mode: 0o100644,
+                mode: 0o100755,
                 nlink: 1,
             },
         });
@@ -3097,16 +3097,22 @@ describe("shared fs mount backend", () => {
 
     it("truncates open handles and paths, shrinking and zero-fill growing", async () => {
         const backend = createSharedFsMountBackend(fs);
-        await fs.writeFile("/trunc.txt", "long original content");
+        await fs.writeFile("/trunc.txt", "long original content", {
+            mtime: 1000,
+        });
 
-        // ftruncate-style: shrink via an open handle, then commit.
+        // ftruncate-style: shrink via an open handle, then commit. The
+        // truncate alone advances mtime, and fstat equals the stat after.
         const handle = await backend.open("/trunc.txt", {
             read: true,
             write: true,
         });
         await backend.truncate(handle, 4);
+        const fstat = await backend.getattr("/trunc.txt");
+        expect(fstat.mtimeMs).toBeGreaterThan(1000);
         await backend.release(handle);
         expect(decode(await fs.readFile("/trunc.txt"))).toBe("long");
+        expect(await backend.getattr("/trunc.txt")).toEqual(fstat);
 
         // truncate-style: grow by path; the tail must be zero-filled.
         await backend.truncate("/trunc.txt", 6);
@@ -3313,6 +3319,21 @@ describe("shared fs mount backend", () => {
         expect(
             Number((await fs.stat("/copy.txt"))!.updatedAt)
         ).toBeGreaterThanOrEqual(before);
+
+        // cp -p over a file that already has the source's mtime (npm's
+        // 1985 epoch, SOURCE_DATE_EPOCH): the explicit time is kept.
+        const epoch = 499162500000;
+        await fs.writeFile("/pkg.js", "old", { mtime: epoch });
+        const pkg = await backend.open("/pkg.js", {
+            write: true,
+            truncate: true,
+        });
+        await backend.write(pkg, encode("new"), 0);
+        await backend.setattr("/pkg.js", { mtimeMs: epoch });
+        const fstat = await backend.getattr("/pkg.js");
+        expect(fstat.mtimeMs).toBe(epoch);
+        await backend.release(pkg);
+        expect(await backend.getattr("/pkg.js")).toEqual(fstat);
     });
 
     it("sets metadata of closed files without reading or writing their bytes", async () => {
@@ -3413,7 +3434,10 @@ describe("shared fs mount backend", () => {
         await backend.setattr("/open.sh", { mode: 0o755 });
         expect(writeFile).not.toHaveBeenCalled();
         await backend.write(handle, encode("v2"), 0);
+        const fstat = await backend.getattr("/open.sh");
+        expect(fstat.mode).toBe(0o100755);
         await backend.release(handle);
+        expect(await backend.getattr("/open.sh")).toEqual(fstat);
         const heads = (await fs.versions("/open.sh")).filter(
             (version) => version.head
         );
@@ -3434,6 +3458,102 @@ describe("shared fs mount backend", () => {
         expect(decode(await fs.readFile("/stale.sh"))).toBe("newer");
         expect(await fs.stat("/stale.sh")).toMatchObject({ mode: 0o100755 });
         expect(writeFile).toHaveBeenCalledOnce();
+    });
+
+    it("keeps a chmodded fd's base unless the chmod copied that fd's bytes", async () => {
+        const headsOf = async (path: string) =>
+            Promise.all(
+                (await fs.versions(path))
+                    .filter((version) => version.head)
+                    .map(async (version) => ({
+                        bytes: decode(await fs.readVersion(path, version.id)),
+                        mode: version.mode,
+                    }))
+            );
+        // A peer's edit, already 0755, lands before the chmod reads the
+        // heads, so the equal chmod returns that edit as is.
+        const base = await fs.writeFile("/s.sh", "base");
+        let peerEdit = true;
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                setMetadata: async (path, patch, options) => {
+                    if (path === "/s.sh" && peerEdit) {
+                        peerEdit = false;
+                        await fs.writeFile(path, "remote", {
+                            mode: 0o100755,
+                            baseVersionIds: [base.id],
+                        });
+                    }
+                    return fs.setMetadata(path, patch, options);
+                },
+            })
+        );
+        const handle = await backend.open("/s.sh", {
+            read: true,
+            write: true,
+        });
+        await backend.setattr("/s.sh", { mode: 0o755 });
+        await backend.write(handle, encode("-local"), 4);
+        await backend.release(handle);
+        expect(await headsOf("/s.sh")).toEqual(
+            expect.arrayContaining([
+                { bytes: "base-local", mode: 0o100755 },
+                { bytes: "remote", mode: 0o100755 },
+            ])
+        );
+
+        // A stale fd's chmod copies the newer bytes; the fd's own fork
+        // still carries the exec bit it showed.
+        await fs.writeFile("/t.sh", "old");
+        const stale = await backend.open("/t.sh", {
+            read: true,
+            write: true,
+        });
+        await fs.writeFile("/t.sh", "remote-newer");
+        await backend.setattr("/t.sh", { mode: 0o755 });
+        await backend.write(stale, encode("LOCAL"), 0);
+        expect((await backend.getattr("/t.sh")).mode).toBe(0o100755);
+        await backend.release(stale);
+        expect(await headsOf("/t.sh")).toEqual(
+            expect.arrayContaining([
+                { bytes: "LOCAL", mode: 0o100755 },
+                { bytes: "remote-newer", mode: 0o100755 },
+            ])
+        );
+    });
+
+    it("keeps a remote chmod across an open fd's commits and rebases its fstat", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        // A remote chmod +x survives the fd's edit, and the flush rebases
+        // the fd so its next dirty fstat equals the stat after close.
+        await fs.writeFile("/r.sh", "v1");
+        const handle = await backend.open("/r.sh", {
+            read: true,
+            write: true,
+        });
+        await fs.setMetadata("/r.sh", { mode: 0o100755 });
+        await backend.write(handle, encode("v2"), 0);
+        await backend.flush(handle);
+        expect(await fs.stat("/r.sh")).toMatchObject({ mode: 0o100755 });
+        await backend.write(handle, encode("v3"), 0);
+        const fstat = await backend.getattr("/r.sh");
+        expect(fstat.mode).toBe(0o100755);
+        await backend.release(handle);
+        expect(await backend.getattr("/r.sh")).toEqual(fstat);
+
+        // A committed local chmod becomes the base, so a later remote
+        // chmod -x survives the fd's next write.
+        await fs.writeFile("/p.sh", "v1");
+        const edit = await backend.open("/p.sh", { read: true, write: true });
+        await backend.write(edit, encode("v2"), 0);
+        await backend.setattr("/p.sh", { mode: 0o755 });
+        await backend.flush(edit);
+        expect(await fs.stat("/p.sh")).toMatchObject({ mode: 0o100755 });
+        await fs.setMetadata("/p.sh", { mode: 0o100644 });
+        await backend.write(edit, encode("v3"), 0);
+        await backend.release(edit);
+        expect(await fs.stat("/p.sh")).toMatchObject({ mode: 0o100644 });
+        expect(await fs.conflicts("/p.sh")).toEqual([]);
     });
 
     it("rejects a rename that overlaps a chmod of an open file", async () => {
@@ -3530,6 +3650,65 @@ describe("shared fs mount backend", () => {
         expect(await backend.readdir("/bin")).toEqual([]);
     });
 
+    it("answers readlink and symlink races from the path's new binding", async () => {
+        let race: (() => Promise<unknown>) | undefined;
+        const takeRace = async () => {
+            const pending = race;
+            race = undefined;
+            await pending?.();
+        };
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                readVersionForMount: async (path, versionId) => {
+                    await takeRace();
+                    return fs.readVersionForMount(path, versionId);
+                },
+                writeFile: async (path, source, options) => {
+                    await takeRace();
+                    return fs.writeFile(path, source, options);
+                },
+            })
+        );
+        await backend.mkdir("/bin");
+        await backend.symlink("v1", "/bin/tool");
+        // ln -sf (symlink tmp + rename over), unlink, or a file renamed
+        // over the link between readlink's lookup and its read.
+        race = async () => {
+            await fs.writeFile("/bin/tool.tmp", "v2", { mode: 0o120000 });
+            await backend.rename("/bin/tool.tmp", "/bin/tool");
+        };
+        expect(await backend.readlink("/bin/tool")).toBe("v2");
+        race = () => backend.unlink("/bin/tool");
+        await expect(backend.readlink("/bin/tool")).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+        await fs.writeFile("/bin/tool", "v3", { mode: 0o120000 });
+        race = async () => {
+            await fs.writeFile("/bin/file", "bytes");
+            await backend.rename("/bin/file", "/bin/tool");
+        };
+        await expect(backend.readlink("/bin/tool")).rejects.toMatchObject({
+            code: "EINVAL",
+        });
+
+        // A racing ln -s wins the name: EEXIST, and its entry is kept.
+        race = () => fs.writeFile("/bin/raced", "winner");
+        await expect(backend.symlink("x", "/bin/raced")).rejects.toMatchObject({
+            code: "EEXIST",
+        });
+        expect(decode(await fs.readFile("/bin/raced"))).toBe("winner");
+        // A link never lands in a directory that replaced its parent.
+        await fs.mkdir("/lib");
+        race = async () => {
+            await fs.rm("/lib");
+            await fs.mkdir("/lib");
+        };
+        await expect(backend.symlink("x", "/lib/late")).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+        expect(await fs.stat("/lib/late")).toBeUndefined();
+    });
+
     it("fails readlink with EIO when the target is unavailable and shows link conflicts as regular files", async () => {
         const backend = createSharedFsMountBackend(
             mountTarget(fs, { readVersionForMount: async () => undefined })
@@ -3590,15 +3769,30 @@ describe("shared fs mount backend", () => {
             listed.find((entry) => entry.name === "plain.txt")
         ).toMatchObject({ kind: "file", stat: { mode: 0o100644 } });
 
+        const base = await fs.writeFile("/c.txt", "base");
+        for (const side of ["left", "right"]) {
+            await fs.writeFile("/c.txt", side, { baseVersionIds: [base.id] });
+        }
+        const perPath = `/${CONFLICTS_DIR}/${encodeConflictPathName("/c.txt")}`;
         const root = await backend.getattr("/");
         const conflicts = await backend.getattr(`/${CONFLICTS_DIR}`);
+        const conflict = await backend.getattr(perPath);
         await new Promise((resolve) => setTimeout(resolve, 5));
         expect(await backend.getattr("/")).toEqual(root);
         expect(await backend.getattr(`/${CONFLICTS_DIR}`)).toEqual(conflicts);
+        expect(await backend.getattr(perPath)).toEqual(conflict);
         expect(conflicts.mtimeMs).toBe(root.mtimeMs);
+        expect(conflict.mtimeMs).toBe(root.mtimeMs);
         expect(
             listed.find((entry) => entry.name === CONFLICTS_DIR)?.stat?.mtimeMs
         ).toBe(root.mtimeMs);
+        expect(
+            (
+                await backend.readdir(`/${CONFLICTS_DIR}`, {
+                    includeStats: true,
+                })
+            ).map((entry) => entry.stat?.mtimeMs)
+        ).toEqual([root.mtimeMs]);
     });
 
     it("publishes a capable rewrite when heads advance inside target.writeFile", async () => {
