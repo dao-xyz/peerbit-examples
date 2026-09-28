@@ -828,8 +828,11 @@ Custom mount targets implement `SharedFsMountBackendTarget`. Mounts read file
 contents only through `readVersionForMount()`, commit through `writeFile()`,
 remove and rename only through `mutateNamespaceForMount()`, and look paths up
 through `stat()`; they never call `readVersion()`, `rm()`, or `rename()`. A
-`SharedFsHandle` subclass that customizes read, remove, or rename policy must
-therefore apply it in those mount-facing methods too, as `IgnoreAwareFs` does.
+`SharedFsHandle` or `SharedFileSystem` subclass (or any delegating wrapper)
+that customizes read, remove, or rename policy must therefore apply it in those
+mount-facing methods at the layer it overrides, as `IgnoreAwareFs` does. For
+files, `stat()` must include `versionId`, `contentHash`, `size`, and
+`headVersionIds`, matching what `readVersionForMount()` returns.
 `writeFile()` must hash its input itself, honor `noOpIfHeadVersionIds`, and
 return the committed version with a `mountWriteOutcome`. It may retain the
 input `Uint8Array` indefinitely but must never mutate it or transfer/detach its
@@ -960,8 +963,8 @@ The phases are deliberately narrow and nest rather than add up:
   is a live function in the write options, so the backend passes it only to
   `SharedFsHandle` and the artifact-ignore wrapper while they keep their
   default `writeFile` delegation (a private opt-in). Every other target,
-  including one that advertises the public mount write handshake, receives
-  the unprofiled options.
+  including a third-party custom mount target, receives the unprofiled
+  options.
   A failing sub-phase closes with `ok: false` and the library error's `code`;
   no sub-phase record follows it.
 

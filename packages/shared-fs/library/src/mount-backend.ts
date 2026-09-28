@@ -49,8 +49,9 @@ type LocalCommitProfileStats = {
  * through `readVersionForMount`, commit through `writeFile`, remove and rename
  * only through `mutateNamespaceForMount`, and look paths up through `stat`;
  * they never call a target's ordinary `readVersion`, `rm` or `rename`. A
- * SharedFsHandle subclass that customizes read, remove or rename policy must
- * therefore apply the same policy in these mount-facing methods, as
+ * SharedFsHandle or SharedFileSystem subclass (or any delegating wrapper)
+ * that customizes read, remove or rename policy must therefore apply the same
+ * policy in these mount-facing methods at the layer it overrides, as
  * IgnoreAwareFs does in `mutateNamespaceForMount`.
  */
 export type SharedFsMountBackendTarget = {
@@ -110,7 +111,12 @@ export type SharedFsMountBackendTarget = {
      * applications routinely discard.
      */
     ignoreCheck?(path: string): { ignored: boolean };
-    /** Single-path lookup for getattr, open and namespace guards. */
+    /**
+     * Single-path lookup for getattr, open and namespace guards. For files it
+     * must include `versionId`, `contentHash`, `size` and `headVersionIds`,
+     * matching what `readVersionForMount` returns for that version; opens
+     * fail with EIO otherwise.
+     */
     stat(path: string): Promise<SharedFsEntryInfo | undefined>;
     /**
      * Optional cold-join readiness probe. A writable open is rejected before
@@ -1399,7 +1405,12 @@ export const createSharedFsMountBackend = (
         try {
             const bytes = borrowInput
                 ? snapshot.buffer.subarray(0, snapshot.length)
-                : snapshot.buffer.slice(0, snapshot.length);
+                : // Uint8Array.prototype.slice copies; Buffer#slice would alias.
+                  Uint8Array.prototype.slice.call(
+                      snapshot.buffer,
+                      0,
+                      snapshot.length
+                  );
             const writeOptions: WriteFileOptions & {
                 expectedNodeId?: string | null;
             } = {

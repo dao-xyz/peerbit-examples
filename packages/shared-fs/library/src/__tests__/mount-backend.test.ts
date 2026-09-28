@@ -2531,6 +2531,34 @@ describe("shared fs mount backend", () => {
         await backend.release(handle);
     });
 
+    it("copies a pooled Buffer-backed handle instead of aliasing it", async () => {
+        await fs.writeFile("/cow-pooled.txt", "hello");
+        // Buffer.from uses the shared pool (byteOffset > 0), so the commit
+        // copies; Buffer#slice would hand the target a live alias instead.
+        const openedBytes = Buffer.from("hello");
+        const inputs: Uint8Array[] = [];
+        const backend = createSharedFsMountBackend(
+            mountTarget(fs, {
+                readVersionForMount: readVersionAs(fs, openedBytes),
+                writeFile: async (path, source, options) => {
+                    inputs.push(source as Uint8Array);
+                    return fs.writeFile(path, source, options);
+                },
+            })
+        );
+        const handle = await backend.open("/cow-pooled.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("HELLO"), 0);
+        await backend.flush(handle);
+        await backend.write(handle, encode("xxxxx"), 0);
+
+        expect(decode(inputs[0])).toBe("HELLO");
+        await backend.release(handle);
+        expect(decode(await fs.readFile("/cow-pooled.txt"))).toBe("xxxxx");
+    });
+
     it("keeps a borrowed commit snapshot stable across an overlapping shrink", async () => {
         const openedBytes = encode("ABCDEFGH");
         await fs.writeFile("/cow-shrink.txt", openedBytes.slice());

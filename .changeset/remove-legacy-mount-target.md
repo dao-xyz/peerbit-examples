@@ -12,13 +12,16 @@ on-disk formats are unchanged. The CLI already used the remaining path.
 `SharedFsMountBackendTarget` changes:
 
 - `readVersionForMount`, `mutateNamespaceForMount` and `stat` are required.
+  For files, `stat` must include `versionId`, `contentHash`, `size` and
+  `headVersionIds` matching `readVersionForMount`.
   Mounts read file contents only through `readVersionForMount` (including
   `.peerbit-conflicts` version files), remove and rename only through
   `mutateNamespaceForMount`, and look paths up only through `stat`.
 - `readFile`, `readVersion`, `rm` and `rename` are no longer part of the
-  target type; mounts never call them. A `SharedFsHandle` subclass that
-  customizes read, remove or rename policy must apply it in
-  `readVersionForMount` and `mutateNamespaceForMount` too, as `IgnoreAwareFs`
+  target type; mounts never call them. A `SharedFsHandle` or
+  `SharedFileSystem` subclass (or any delegating wrapper) that customizes
+  read, remove or rename policy must apply it in `readVersionForMount` and
+  `mutateNamespaceForMount` at the layer it overrides, as `IgnoreAwareFs`
   does. Overriding `rm`, `rename` or `readVersion` no longer switches a mount
   to a slower path that honours the override.
 - `writeFile` must resolve to `{ id, nodeId, contentHash, mountWriteOutcome }`.
