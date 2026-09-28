@@ -255,15 +255,20 @@ test("native smoke wrappers plumb opt-in mount profiling, the overwrite base and
             source,
             /PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES[\s\S]*--overwrite-base-bytes/u
         );
-        assert.match(
-            source,
-            /PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD[\s\S]*--dev-workload/u
-        );
     }
-    // Profiling stays opt-in: without the variable the mount argv is unchanged.
+    // Profiling and the developer workload stay opt-in: without the variable
+    // the argv is unchanged.
     assert.match(
         posix,
         /if \[ -n "\$\{PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-\}" \]; then\n\s+mount_args\+=/u
+    );
+    assert.match(
+        posix,
+        /if \[ "\$\{PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD:-\}" = "1" \]; then\n\s+benchmark_common_args\+=\(--dev-workload\)/u
+    );
+    assert.match(
+        powershell,
+        /\$DevWorkload = \$env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD\n[\s\S]*if \(\$DevWorkload -eq "1"\) \{\n\s+\$BenchmarkCommonArgs \+= @\("--dev-workload"\)/u
     );
     assert.match(workflow, /mount_profile:[\s\S]*default: false/u);
     assert.match(workflow, /dev_workload:[\s\S]*default: false/u);

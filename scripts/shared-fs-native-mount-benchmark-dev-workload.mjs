@@ -164,7 +164,7 @@ export const buildDevWorkloadCorpus = () => {
 };
 
 /** A git fast-import stream that recreates the pinned commit exactly. */
-export const createDevWorkloadFastImportStream = ({ files }) =>
+const createDevWorkloadFastImportStream = ({ files }) =>
     Buffer.concat([
         ...files.flatMap(({ content }, index) => [
             Buffer.from(`blob\nmark :${index + 1}\ndata ${content.length}\n`),
@@ -521,7 +521,10 @@ const measureGit = async (context, cloneName, statusName) => {
     // index write lands in a later one. Leave the last clone's second once,
     // then refresh the index, so both targets time a steady-state status.
     await sleep(
-        (Math.floor(cloneEndedMs / 1000) + 1) * 1000 + 50 - Date.now(),
+        Math.max(
+            0,
+            (Math.floor(cloneEndedMs / 1000) + 1) * 1000 + 50 - Date.now()
+        ),
         undefined,
         { signal }
     );

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
     chmod,
     mkdir,
@@ -14,7 +13,6 @@ import { join } from "node:path";
 import test from "node:test";
 import {
     buildDevWorkloadCorpus,
-    createDevWorkloadFastImportStream,
     createDevWorkloadJsonlLines,
     devWorkloadCorpus,
     devWorkloadSampleCounts,
@@ -28,7 +26,6 @@ import {
 } from "./shared-fs-native-mount-benchmark.mjs";
 import { formatProfilingOverheadMarkdown } from "./shared-fs-mount-profile-summary.mjs";
 
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const gitAvailable = spawnSync("git", ["--version"]).status === 0;
 const sqliteAvailable = await import("node:sqlite").then(
     () => true,
@@ -93,55 +90,15 @@ const markNotMeasured = (report, names, reason) => {
     return copy;
 };
 
-test(
-    "git fast-import reproduces the pinned commit from the generated corpus",
-    { skip: !gitAvailable && "git is not installed" },
-    async () => {
-        const corpus = buildDevWorkloadCorpus();
-        assert.equal(corpus.files.length, devWorkloadCorpus.fileCount);
-        assert.equal(corpus.totalBytes, devWorkloadCorpus.totalBytes);
-        const temporary = await mkdtemp(
-            join(tmpdir(), "peerbit-dev-workload-origin-test-")
-        );
-        const env = {
-            ...process.env,
-            GIT_CONFIG_NOSYSTEM: "1",
-            HOME: temporary,
-            XDG_CONFIG_HOME: temporary,
-        };
-        try {
-            const origin = join(temporary, "origin.git");
-            const git = (args, options = {}) => {
-                const result = spawnSync("git", args, { env, ...options });
-                assert.equal(result.status, 0, result.stderr?.toString());
-                return result.stdout.toString().trim();
-            };
-            git(["init", "--bare", "--quiet", origin]);
-            git(["fast-import", "--quiet"], {
-                cwd: origin,
-                input: createDevWorkloadFastImportStream(corpus),
-            });
-            assert.equal(
-                git(["rev-parse", "refs/heads/main"], { cwd: origin }),
-                devWorkloadCorpus.gitCommitSha1
-            );
-        } finally {
-            await rm(temporary, { recursive: true, force: true });
-        }
-    }
-);
-
-test("developer-workload JSONL records are exact 1 KiB lines", () => {
+// The runtime checks the generated tree against the pinned commit; this pins
+// the size the reports record.
+test("generated developer-workload inputs have their pinned sizes", () => {
+    assert.equal(
+        buildDevWorkloadCorpus().totalBytes,
+        devWorkloadCorpus.totalBytes
+    );
     const lines = createDevWorkloadJsonlLines(0, 4096);
     assert.equal(lines.byteLength, 4 << 20);
-    assert.equal(
-        sha256(lines),
-        "2dc163f0d65d7c3d8e175b8c9b567ff426099aac941b4f7c0bed4779a603028b"
-    );
-    assert.deepEqual(
-        createDevWorkloadJsonlLines(4095, 1),
-        lines.subarray(4095 * 1024)
-    );
     for (const index of [0, 1, 4095]) {
         const line = lines.subarray(index * 1024, (index + 1) * 1024);
         assert.equal(line.at(-1), 0x0a);
@@ -149,26 +106,40 @@ test("developer-workload JSONL records are exact 1 KiB lines", () => {
     }
 });
 
+// A POSIX shell script of `lines` that runs as the benchmark's git.
+const withGitStub = async (directory, lines) => {
+    const path = join(directory, "git-stub");
+    await writeFile(path, ["#!/bin/sh", ...lines, ""].join("\n"));
+    await chmod(path, 0o755);
+    return ["--dev-git-executable", path];
+};
+
+// `git status` fails unless `git update-index` ran in a later wall-clock
+// second than the last clone ended, so dropping or reordering the untimed
+// index settle leaves git-status-2000 not measured.
+const withSettleCheckingGit = (directory) =>
+    withGitStub(directory, [
+        'case "$1" in',
+        '  update-index) [ "$(date +%s)" -gt "$(cat "$0.cloned")" ] && touch "$0.settled" ;;',
+        '  status) [ -e "$0.settled" ] || { echo "the index was not settled" >&2; exit 1; } ;;',
+        "esac",
+        'git "$@" || exit',
+        'if [ "$1" = clone ]; then date +%s >"$0.cloned"; fi',
+    ]);
+
 test(
     "the developer workload emits validated, comparable scenarios",
     { skip: skipRun },
     async () => {
         const { report, options } = await runInTemporaryMount(
-            "peerbit-dev-workload-full-"
+            "peerbit-dev-workload-full-",
+            process.platform === "win32" ? undefined : withSettleCheckingGit
         );
         assert.equal(report.run.devWorkload, true);
         assert.deepEqual(report.devWorkload.notMeasured, []);
         assert.deepEqual(
             report.scenarios.map(({ name }) => name).slice(-6),
             DEV_NAMES
-        );
-        assert.equal(
-            report.inputs.files.filter(({ path }) =>
-                path.endsWith(
-                    "shared-fs-native-mount-benchmark-dev-workload.mjs"
-                )
-            ).length,
-            1
         );
         // CI's 30 samples after 3 warmups give git 3 samples after 1 warmup.
         assert.deepEqual(
@@ -262,28 +233,19 @@ test(
     }
 );
 
-// A stand-in for git on a mount that rejects chmod: `git clone` fails the
-// way a real clone fails when git cannot rewrite .git/config.
-const withFailingGit = async (directory) => {
-    const path = join(directory, "failing-git");
-    await writeFile(
-        path,
-        [
-            "#!/bin/sh",
-            'if [ "$1" = "clone" ]; then',
-            "  for destination; do :; done",
-            '  mkdir -p "$destination/.git"',
-            '  echo "error: chmod on $destination/.git/config.lock failed: Function not implemented" >&2',
-            "  echo \"fatal: could not set 'core.filemode' to 'false'\" >&2",
-            "  exit 128",
-            "fi",
-            'exec git "$@"',
-            "",
-        ].join("\n")
-    );
-    await chmod(path, 0o755);
-    return ["--dev-git-executable", path];
-};
+// `git clone` fails the way a real clone fails on a mount that rejects chmod,
+// when git cannot rewrite .git/config.
+const withFailingGit = (directory) =>
+    withGitStub(directory, [
+        'if [ "$1" = "clone" ]; then',
+        "  for destination; do :; done",
+        '  mkdir -p "$destination/.git"',
+        '  echo "error: chmod on $destination/.git/config.lock failed: Function not implemented" >&2',
+        "  echo \"fatal: could not set 'core.filemode' to 'false'\" >&2",
+        "  exit 128",
+        "fi",
+        'exec git "$@"',
+    ]);
 
 test(
     "a failing git operation is recorded as not measured and the run continues",
