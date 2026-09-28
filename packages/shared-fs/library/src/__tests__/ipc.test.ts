@@ -439,6 +439,7 @@ describe("shared-fs IPC v2 server", () => {
             const message = (rejection.error as { message: string }).message;
             expect(message).toContain("IPC v1 is retired");
             expect(message).toContain("peerbit-fs install-adapter --force");
+            expect(message).toContain("--native-adapter");
             await didClose;
             expect(mkdir).not.toHaveBeenCalled();
         } finally {

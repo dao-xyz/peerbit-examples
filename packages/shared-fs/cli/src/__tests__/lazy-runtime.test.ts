@@ -80,20 +80,22 @@ describe("peerbit-fs lazy runtime loading", () => {
         const prefix = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-lazy-")
         );
+        const { version } = JSON.parse(
+            await fs.readFile(path.join(cliDirectory, "package.json"), "utf8")
+        ) as { version: string };
+        const slot = path.join(prefix, `shared-fs-native-v${version}`);
         const binaryPath = path.join(
-            prefix,
+            slot,
             process.platform === "win32"
                 ? "peerbit-shared-fs-native.exe"
                 : "peerbit-shared-fs-native"
         );
+        await fs.mkdir(slot);
         await fs.writeFile(binaryPath, "");
         // --if-needed keeps the adapter only because this record pins it to
         // the CLI's own release; otherwise it would download a replacement.
-        const { version } = JSON.parse(
-            await fs.readFile(path.join(cliDirectory, "package.json"), "utf8")
-        ) as { version: string };
         await fs.writeFile(
-            path.join(prefix, "peerbit-shared-fs-native.install.json"),
+            path.join(slot, "peerbit-shared-fs-native.install.json"),
             JSON.stringify({
                 schema: "peerbit.shared-fs.native-adapter-install",
                 schemaVersion: 1,

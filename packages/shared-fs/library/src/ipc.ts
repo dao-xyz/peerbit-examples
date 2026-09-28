@@ -551,7 +551,7 @@ const serveSocket = async (
  * instead of the IPC v2 negotiation.
  */
 const SHARED_FS_IPC_V1_RETIRED_MESSAGE =
-    "IPC v1 is retired: this server requires the IPC v2 negotiation before any filesystem operation. The native adapter is too old (shared-fs-native 0.13.15 or earlier); install the adapter release matching this CLI with `peerbit-fs install-adapter --force`.";
+    "IPC v1 is retired: this server requires the IPC v2 negotiation before any filesystem operation. The native adapter is too old (shared-fs-native 0.13.15 or earlier); install the adapter release matching this CLI with `peerbit-fs install-adapter --force`, and stop passing an older adapter with --native-adapter or PEERBIT_SHARED_FS_NATIVE_ADAPTER.";
 
 const rejectConnection = async (
     socket: Socket,

@@ -15,16 +15,17 @@ Normal CLI users should install a prebuilt adapter:
 peerbit-fs install-adapter
 ```
 
-That command downloads the release asset matching the CLI version
-(`shared-fs-native-v<cli version>`) into `~/.peerbit/shared-fs/bin` and records
-that release, with the binary's SHA-256, in
+That command downloads the release asset matching the CLI version into
+`~/.peerbit/shared-fs/bin/shared-fs-native-v<cli version>/` and records that
+release, target, and the binary's SHA-256 in
 `peerbit-shared-fs-native.install.json` next to it. `peerbit-fs mount`
 auto-detects the managed adapter and refuses it, naming both versions, when
-the record is missing, names another release, or no longer matches the binary.
-Only the adapter from the CLI's own release is supported; run
+the record is missing, names another release or target, or no longer matches
+the binary. Only the adapter from the CLI's own release is supported; run
 `peerbit-fs install-adapter --force` to replace any other. An adapter passed
-with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER` is not pinned,
-but the IPC handshake still refuses an incompatible one.
+with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER` is not checked:
+an adapter from 0.13.15 or earlier (IPC v1 only) still mounts, but the CLI
+rejects every operation it sends.
 
 Build a native adapter binary with:
 

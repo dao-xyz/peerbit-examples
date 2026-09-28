@@ -22,12 +22,11 @@ import { hideBin } from "yargs/helpers";
 import { mountExternalNativeAdapter } from "./external-native-adapter.js";
 import {
     describeNativeAdapterInstall,
-    inspectNativeAdapterInstall,
     installNativeAdapter,
     nativeAdapterReleaseTag,
+    NativeAdapterVersionError,
     readCliPackageVersion,
     resolveMountNativeAdapter,
-    resolveNativeAdapter,
 } from "./native-adapter.js";
 
 type SharedFsRuntime = typeof import("@peerbit/shared-fs");
@@ -316,42 +315,31 @@ const waitForTermination = async (stop: () => Promise<void>) => {
     });
 };
 
-const configureExternalNativeAdapterEnv = async () => {
-    const adapter = await resolveNativeAdapter();
-    if (adapter && !process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER) {
-        process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER = adapter.command;
-    }
-    return adapter;
-};
-
-/** Pin state of the managed adapter; null for explicit or PATH adapters. */
-const readManagedAdapterRelease = async (
-    adapter: Awaited<ReturnType<typeof resolveNativeAdapter>>
-) => {
-    if (adapter?.source !== "managed") {
-        return null;
-    }
-    const expectedTag = nativeAdapterReleaseTag(await readCliPackageVersion());
-    return {
-        expectedTag,
-        ...(await inspectNativeAdapterInstall(adapter.command, expectedTag)),
-    };
-};
-
 const readNativeStatus = async () => {
-    const externalAdapter = await configureExternalNativeAdapterEnv();
-    const externalAdapterRelease =
-        await readManagedAdapterRelease(externalAdapter);
+    // Resolve the adapter exactly as mount does, so status never reports a
+    // mount as available that mount would refuse.
+    let externalAdapter: string | undefined;
+    let refusal: string | undefined;
+    try {
+        externalAdapter = (await resolveMountNativeAdapter())?.command;
+    } catch (error) {
+        if (!(error instanceof NativeAdapterVersionError)) {
+            throw error;
+        }
+        externalAdapter = error.binaryPath;
+        refusal = error.message;
+    }
     const { getNativeMountSupport } = await loadSharedFsRuntime();
-    const support = await getNativeMountSupport();
+    const support = await getNativeMountSupport({
+        externalAdapter: externalAdapter !== undefined,
+    });
     const windows = support.platform === "win32";
     return {
         platform: support.platform,
         adapter: support.adapter,
-        externalAdapter: externalAdapter?.command ?? null,
-        externalAdapterRelease,
-        available: support.available,
-        missing: [...support.missing],
+        externalAdapter: externalAdapter ?? null,
+        available: support.available && refusal === undefined,
+        missing: [...support.missing, ...(refusal ? [refusal] : [])],
         notes: [...support.notes],
         metadata: {
             modes: {
@@ -384,18 +372,6 @@ const printNativeRequirements = async (status?: NativeStatus) => {
     console.log(`platform: ${native.platform}`);
     console.log(`adapter: ${native.adapter}`);
     console.log(`external adapter: ${native.externalAdapter ?? "not found"}`);
-    const release = native.externalAdapterRelease;
-    if (release) {
-        console.log(
-            release.state === "current"
-                ? `external adapter release: ${release.tag} (matches this CLI)`
-                : `external adapter release: ${
-                      release.state === "unrecorded"
-                          ? "unknown (no install record)"
-                          : `${release.tag} (${release.state})`
-                  }; mount requires ${release.expectedTag}, run peerbit-fs install-adapter --force`
-        );
-    }
     console.log(`available: ${native.available ? "yes" : "no"}`);
     console.log(
         `metadata modes: synthetic (directories ${native.metadata.modes.directory}, files ${native.metadata.modes.file}; creation mode not preserved)`
@@ -821,12 +797,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     .option("prefix", {
                         type: "string",
                         description:
-                            "Install directory. Defaults to ~/.peerbit/shared-fs/bin.",
+                            "Install directory; the adapter goes in its shared-fs-native-v<version> subdirectory. Defaults to ~/.peerbit/shared-fs/bin.",
                     })
                     .option("adapter-version", {
                         type: "string",
                         description:
-                            "Adapter release version. Defaults to this CLI package version.",
+                            "Adapter release version. Defaults to this CLI package version, the only release mount uses.",
                     })
                     .option("base-url", {
                         type: "string",
@@ -858,6 +834,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     force: argv.force,
                     ifNeeded: argv.ifNeeded,
                 });
+                const cliTag = nativeAdapterReleaseTag(
+                    await readCliPackageVersion()
+                );
+                if (result.tag !== cliTag) {
+                    console.warn(
+                        chalk.yellow(
+                            `peerbit-fs mount will not use ${result.tag}: it only uses this CLI's own adapter release, ${cliTag}.`
+                        )
+                    );
+                }
                 if (argv.printPath) {
                     console.log(result.binaryPath);
                     return;
@@ -886,7 +872,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     .option("native-adapter", {
                         type: "string",
                         description:
-                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Overrides the managed adapter's release pin; the IPC handshake still rejects an incompatible adapter.",
+                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Bypasses the managed adapter's release pin and is not checked: use an adapter from this CLI's release (one from 0.13.15 or earlier mounts but fails every operation).",
                     })
                     .option("write-ready-timeout-ms", {
                         type: "number",

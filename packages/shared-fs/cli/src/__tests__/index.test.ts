@@ -420,7 +420,7 @@ describe("peerbit-fs cli", () => {
         );
     });
 
-    it("refuses a managed adapter from another release before opening Peerbit", async () => {
+    it("reports and refuses an unpinned managed adapter before opening Peerbit", async () => {
         const installDir = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-adapter-pin-")
         );
@@ -428,24 +428,43 @@ describe("peerbit-fs cli", () => {
             adapter: process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER,
             installDir: process.env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR,
         };
-        const binaryPath = path.join(
-            installDir,
-            process.platform === "win32"
-                ? "peerbit-shared-fs-native.exe"
-                : "peerbit-shared-fs-native"
-        );
-        // An adapter installed before pinning has no install record.
-        await fs.writeFile(binaryPath, "adapter from an older CLI");
         const { version } = JSON.parse(
             await fs.readFile(
                 new URL("../../package.json", import.meta.url),
                 "utf8"
             )
         ) as { version: string };
+        const binaryPath = path.join(
+            installDir,
+            `shared-fs-native-v${version}`,
+            process.platform === "win32"
+                ? "peerbit-shared-fs-native.exe"
+                : "peerbit-shared-fs-native"
+        );
+        // An adapter copied into this CLI's slot without an install record.
+        await fs.mkdir(path.dirname(binaryPath));
+        await fs.writeFile(binaryPath, "adapter from an older CLI");
+        const refusal = `Installed native adapter ${binaryPath} is of unknown version: it has no install record (installed before adapter version pinning, copied manually, or left by an interrupted install), but @peerbit/shared-fs-cli ${version} requires shared-fs-native-v${version}. Run \`peerbit-fs install-adapter --force\``;
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
         const createPeerbit = vi.spyOn(Peerbit, "create");
         try {
             delete process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER;
             process.env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR = installDir;
+
+            await runCli(["status", "--json"]);
+            const { nativeMount } = JSON.parse(String(log.mock.calls[0]?.[0]));
+            expect(nativeMount).toMatchObject({
+                externalAdapter: binaryPath,
+                available: false,
+                missing: expect.arrayContaining([
+                    expect.stringContaining(refusal),
+                ]),
+            });
+            // status must not publish the adapter for a later command.
+            expect(
+                process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER
+            ).toBeUndefined();
+
             await expect(
                 runCli([
                     "mount",
@@ -454,11 +473,10 @@ describe("peerbit-fs cli", () => {
                     "--directory",
                     "",
                 ])
-            ).rejects.toThrow(
-                `Installed native adapter ${binaryPath} is of unknown version: it has no install record (installed before adapter version pinning, copied manually, or left by an interrupted install), but @peerbit/shared-fs-cli ${version} requires shared-fs-native-v${version}. Run \`peerbit-fs install-adapter --force\``
-            );
+            ).rejects.toThrow(refusal);
             expect(createPeerbit).not.toHaveBeenCalled();
         } finally {
+            log.mockRestore();
             createPeerbit.mockRestore();
             for (const [name, value] of [
                 ["PEERBIT_SHARED_FS_NATIVE_ADAPTER", saved.adapter],

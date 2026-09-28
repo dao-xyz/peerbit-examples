@@ -13,6 +13,8 @@ const CLI_PACKAGE_NAME = "@peerbit/shared-fs-cli";
 const DEFAULT_RELEASE_REPOSITORY = "dao-xyz/peerbit-examples";
 const DEFAULT_PATH_COMMAND = "peerbit-shared-fs-native";
 const INSTALL_RECORD_SCHEMA = "peerbit.shared-fs.native-adapter-install";
+/** A release download that receives no bytes for this long is abandoned. */
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 
 /**
  * Sidecar written next to a managed adapter binary. It pins that binary to the
@@ -33,6 +35,9 @@ export type ResolveNativeAdapterOptions = {
     env?: NodeJS.ProcessEnv;
     installDir?: string;
     platform?: NodeJS.Platform;
+    arch?: NodeJS.Architecture;
+    /** Selects the managed adapter's release slot; defaults to this CLI's. */
+    cliVersion?: string;
     commandExists?: (command: string) => Promise<boolean>;
 };
 
@@ -69,8 +74,10 @@ export type NativeAdapterInstallRecord = {
 
 /**
  * How a managed adapter binary relates to an expected release:
- * - current: its install record names the expected tag and matches its bytes;
+ * - current: its install record names the expected tag and target and matches
+ *   its bytes;
  * - stale: its install record names another release;
+ * - other-target: its install record names another platform/architecture;
  * - modified: its bytes no longer match its install record;
  * - unrecorded: it has no readable install record (pre-pin installs, manual
  *   copies, or an interrupted install), so its release is unknown.
@@ -78,6 +85,7 @@ export type NativeAdapterInstallRecord = {
 export type NativeAdapterInstallState =
     | { state: "current"; tag: string }
     | { state: "stale"; tag: string }
+    | { state: "other-target"; tag: string; target: string }
     | { state: "modified"; tag: string }
     | { state: "unrecorded" };
 
@@ -98,6 +106,8 @@ const describeInstallState = (state: NativeAdapterInstallState) => {
         case "current":
         case "stale":
             return state.tag;
+        case "other-target":
+            return `${state.tag} built for ${state.target}`;
         case "modified":
             return `a binary that no longer matches its ${state.tag} install record`;
         case "unrecorded":
@@ -115,16 +125,19 @@ export class NativeAdapterVersionError extends Error {
         binaryPath: string;
         cliVersion: string;
         expectedTag: string;
+        expectedTarget: string;
         installed: NativeAdapterInstallState;
     }) {
+        const required =
+            options.installed.state === "other-target"
+                ? `${options.expectedTag} built for ${options.expectedTarget}`
+                : options.expectedTag;
         super(
             `Installed native adapter ${options.binaryPath} is ${describeInstallState(
                 options.installed
-            )}, but ${CLI_PACKAGE_NAME} ${options.cliVersion} requires ${
+            )}, but ${CLI_PACKAGE_NAME} ${options.cliVersion} requires ${required}. Run \`peerbit-fs install-adapter --force\` to install ${
                 options.expectedTag
-            }. Run \`peerbit-fs install-adapter --force\` to install ${
-                options.expectedTag
-            }, or pass --native-adapter <path> to use a specific adapter build (the IPC handshake still rejects an incompatible one).`
+            }. An adapter passed with --native-adapter is not checked; one from 0.13.15 or earlier mounts but fails every operation.`
         );
         this.name = "NativeAdapterVersionError";
         this.binaryPath = options.binaryPath;
@@ -138,6 +151,11 @@ export const nativeAdapterBinaryName = (
     platform: NodeJS.Platform = process.platform
 ) =>
     platform === "win32" ? `${DEFAULT_PATH_COMMAND}.exe` : DEFAULT_PATH_COMMAND;
+
+const nativeAdapterTargetId = (
+    platform: NodeJS.Platform,
+    arch: NodeJS.Architecture
+) => `${platform}-${arch}`;
 
 export const getNativeAdapterTarget = (
     platform: NodeJS.Platform = process.platform,
@@ -155,7 +173,7 @@ export const getNativeAdapterTarget = (
     }
 
     return {
-        id: `${platform}-${arch}`,
+        id: nativeAdapterTargetId(platform, arch),
         platform,
         arch,
         archiveExtension: platform === "win32" ? "zip" : "tar.gz",
@@ -166,10 +184,19 @@ export const getNativeAdapterTarget = (
 export const nativeAdapterAssetName = (target: NativeAdapterTarget) =>
     `peerbit-shared-fs-native-${target.id}.${target.archiveExtension}`;
 
-export const nativeAdapterReleaseTag = (version: string) =>
-    version.startsWith("shared-fs-native-v")
+export const nativeAdapterReleaseTag = (version: string) => {
+    const tag = version.startsWith("shared-fs-native-v")
         ? version
         : `shared-fs-native-v${version.replace(/^v/, "")}`;
+    // The tag names the managed adapter's directory, so it must stay one
+    // path segment.
+    if (!/^shared-fs-native-v[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(tag)) {
+        throw new NativeAdapterInstallError(
+            `Invalid native adapter version ${JSON.stringify(version)}.`
+        );
+    }
+    return tag;
+};
 
 export const nativeAdapterDownloadBaseUrl = (tag: string) =>
     `https://github.com/${DEFAULT_RELEASE_REPOSITORY}/releases/download/${tag}`;
@@ -190,16 +217,22 @@ export const defaultNativeAdapterInstallDir = (
     env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR ||
     path.join(os.homedir(), ".peerbit", "shared-fs", "bin");
 
-export const defaultNativeAdapterPath = (
-    options: {
-        env?: NodeJS.ProcessEnv;
-        installDir?: string;
-        platform?: NodeJS.Platform;
-    } = {}
-) =>
+/**
+ * Managed adapters live in one directory per release
+ * (`<install dir>/shared-fs-native-v<version>/`), so CLIs of different
+ * versions installed side by side each keep their own pinned adapter.
+ */
+export const defaultNativeAdapterPath = (options: {
+    /** Release tag or version. */
+    tag: string;
+    env?: NodeJS.ProcessEnv;
+    installDir?: string;
+    platform?: NodeJS.Platform;
+}) =>
     path.join(
         options.installDir ??
             defaultNativeAdapterInstallDir(options.env ?? process.env),
+        nativeAdapterReleaseTag(options.tag),
         nativeAdapterBinaryName(options.platform ?? process.platform)
     );
 
@@ -286,6 +319,7 @@ export const resolveNativeAdapter = async (
     }
 
     const managedPath = defaultNativeAdapterPath({
+        tag: options.cliVersion ?? (await readCliPackageVersion()),
         env,
         installDir: options.installDir,
         platform,
@@ -307,16 +341,17 @@ export const resolveExternalNativeAdapter = async (
 ) => (await resolveNativeAdapter(explicitCommand, options))?.command;
 
 /**
- * Resolve the adapter a mount will launch. The managed install is pinned to
- * this CLI's adapter release (`shared-fs-native-v<cli version>`) and is refused
- * with a NativeAdapterVersionError when its install record names another
- * release, is missing, or no longer matches the binary. Explicit adapters
- * (--native-adapter or PEERBIT_SHARED_FS_NATIVE_ADAPTER) and a PATH command
- * are not pinned; the IPC negotiation handshake gates their compatibility.
+ * Resolve the adapter a mount will launch. The managed install is this CLI's
+ * adapter release slot (`shared-fs-native-v<cli version>`) and is refused with
+ * a NativeAdapterVersionError when its install record is missing, names
+ * another release or target, or no longer matches the binary. Explicit
+ * adapters (--native-adapter or PEERBIT_SHARED_FS_NATIVE_ADAPTER) and a PATH
+ * command are not checked: an adapter from 0.13.15 or earlier (IPC v1 only)
+ * still mounts, but the server rejects every operation it sends.
  */
 export const resolveMountNativeAdapter = async (
     explicitCommand?: string,
-    options: ResolveNativeAdapterOptions & { cliVersion?: string } = {}
+    options: ResolveNativeAdapterOptions = {}
 ): Promise<ResolvedNativeAdapter | undefined> => {
     const resolved = await resolveNativeAdapter(explicitCommand, options);
     if (resolved?.source !== "managed") {
@@ -324,15 +359,21 @@ export const resolveMountNativeAdapter = async (
     }
     const cliVersion = options.cliVersion ?? (await readCliPackageVersion());
     const expectedTag = nativeAdapterReleaseTag(cliVersion);
+    const expectedTarget = nativeAdapterTargetId(
+        options.platform ?? process.platform,
+        options.arch ?? process.arch
+    );
     const installed = await inspectNativeAdapterInstall(
         resolved.command,
-        expectedTag
+        expectedTag,
+        expectedTarget
     );
     if (installed.state !== "current") {
         throw new NativeAdapterVersionError({
             binaryPath: resolved.command,
             cliVersion,
             expectedTag,
+            expectedTarget,
             installed,
         });
     }
@@ -384,7 +425,8 @@ export const readNativeAdapterInstallRecord = async (
 /** Compare a managed adapter binary with the release it should be. */
 export const inspectNativeAdapterInstall = async (
     binaryPath: string,
-    expectedTag: string
+    expectedTag: string,
+    expectedTarget: string
 ): Promise<NativeAdapterInstallState> => {
     const record = await readNativeAdapterInstallRecord(binaryPath);
     if (!record) {
@@ -399,9 +441,17 @@ export const inspectNativeAdapterInstall = async (
     if (digest !== record.sha256) {
         return { state: "modified", tag: record.tag };
     }
-    return record.tag === nativeAdapterReleaseTag(expectedTag)
-        ? { state: "current", tag: record.tag }
-        : { state: "stale", tag: record.tag };
+    if (record.tag !== nativeAdapterReleaseTag(expectedTag)) {
+        return { state: "stale", tag: record.tag };
+    }
+    if (record.target !== expectedTarget) {
+        return {
+            state: "other-target",
+            tag: record.tag,
+            target: record.target,
+        };
+    }
+    return { state: "current", tag: record.tag };
 };
 
 export const readCliPackageVersion = async () => {
@@ -444,6 +494,9 @@ const downloadFile = async (
                 headers: {
                     "user-agent": `${CLI_PACKAGE_NAME} native-adapter-installer`,
                 },
+                // Socket idle timeout: covers connecting, waiting for the
+                // response, and a body that stops arriving.
+                timeout: DOWNLOAD_IDLE_TIMEOUT_MS,
             },
             (response) => {
                 const statusCode = response.statusCode ?? 0;
@@ -479,6 +532,13 @@ const downloadFile = async (
                 );
             }
         );
+        request.on("timeout", () => {
+            request.destroy(
+                new NativeAdapterInstallError(
+                    `Download stalled for ${DOWNLOAD_IDLE_TIMEOUT_MS / 1000}s: ${url}`
+                )
+            );
+        });
         request.on("error", reject);
     });
 };
@@ -552,6 +612,36 @@ const findExtractedBinary = async (
     return undefined;
 };
 
+/**
+ * Rename a staged binary over `destination`. Windows refuses to replace an
+ * executable that is running or held by a scanner but usually lets it be
+ * renamed, so move the old binary aside first and restore it if the
+ * replacement still fails.
+ */
+const renameBinaryIntoPlace = async (staged: string, destination: string) => {
+    if (process.platform !== "win32") {
+        await fsp.rename(staged, destination);
+        return;
+    }
+    const aside = `${destination}.${process.pid}.old`;
+    const movedAside = await fsp.rename(destination, aside).then(
+        () => true,
+        () => false
+    );
+    try {
+        await fsp.rename(staged, destination);
+    } catch (error) {
+        if (movedAside) {
+            await fsp.rename(aside, destination).catch(() => {});
+        }
+        throw error;
+    }
+    if (movedAside) {
+        // Still locked while the old adapter runs; harmless if it stays.
+        await fsp.rm(aside, { force: true }).catch(() => {});
+    }
+};
+
 const writeFileAtomically = async (destination: string, data: string) => {
     const temporary = `${destination}.${process.pid}.tmp`;
     try {
@@ -574,14 +664,14 @@ export const installNativeAdapter = async (
     options: InstallNativeAdapterOptions = {}
 ): Promise<InstallNativeAdapterResult> => {
     const target = getNativeAdapterTarget(options.platform, options.arch);
-    const installDir =
-        options.installDir ?? defaultNativeAdapterInstallDir(process.env);
-    const binaryPath = path.join(installDir, target.binaryName);
-    const version =
-        options.version ??
-        process.env.PEERBIT_SHARED_FS_NATIVE_VERSION ??
-        (await readCliPackageVersion());
-    const tag = nativeAdapterReleaseTag(version);
+    const tag = nativeAdapterReleaseTag(
+        options.version ?? (await readCliPackageVersion())
+    );
+    const binaryPath = defaultNativeAdapterPath({
+        tag,
+        installDir: options.installDir,
+        platform: target.platform,
+    });
     const assetName = nativeAdapterAssetName(target);
     const url = nativeAdapterDownloadUrl({
         assetName,
@@ -592,7 +682,7 @@ export const installNativeAdapter = async (
     });
 
     const replaced = (await pathExists(binaryPath))
-        ? await inspectNativeAdapterInstall(binaryPath, tag)
+        ? await inspectNativeAdapterInstall(binaryPath, tag, target.id)
         : undefined;
     if (replaced?.state === "current" && (options.ifNeeded || !options.force)) {
         return {
@@ -623,21 +713,21 @@ export const installNativeAdapter = async (
             );
         }
 
-        await fsp.mkdir(installDir, { recursive: true });
-        // Drop the old pin first: an install interrupted after this point
-        // leaves an unrecorded adapter, which mount refuses and the next
-        // install replaces, never a record vouching for the wrong bytes.
-        const recordPath = nativeAdapterInstallRecordPath(binaryPath);
-        await fsp.rm(recordPath, { force: true });
-        // Rename a staged copy into place so a running adapter keeps its
-        // inode (POSIX) and the managed path never holds a partial binary.
+        await fsp.mkdir(path.dirname(binaryPath), { recursive: true });
+        // Hash a staged copy, rename it into place (a running adapter keeps
+        // its inode on POSIX, and the managed path never holds a partial
+        // binary), then write the record last. Until the record is replaced,
+        // it either still matches the old binary (the rename failed) or no
+        // longer matches the new one, which mount refuses as modified.
         const stagedBinary = `${binaryPath}.${process.pid}.tmp`;
+        let sha256: string;
         try {
             await fsp.copyFile(extractedBinary, stagedBinary);
             if (target.platform !== "win32") {
                 await fsp.chmod(stagedBinary, 0o755);
             }
-            await fsp.rename(stagedBinary, binaryPath);
+            sha256 = await sha256File(stagedBinary);
+            await renameBinaryIntoPlace(stagedBinary, binaryPath);
         } finally {
             await fsp.rm(stagedBinary, { force: true });
         }
@@ -646,10 +736,10 @@ export const installNativeAdapter = async (
             schemaVersion: 1,
             tag,
             target: target.id,
-            sha256: await sha256File(binaryPath),
+            sha256,
         };
         await writeFileAtomically(
-            recordPath,
+            nativeAdapterInstallRecordPath(binaryPath),
             `${JSON.stringify(record, null, 4)}\n`
         );
 
@@ -682,6 +772,6 @@ export const describeNativeAdapterInstall = (
             ? "an unrecorded native adapter of unknown version"
             : replaced.state === "modified"
               ? `a modified native adapter (recorded as ${replaced.tag})`
-              : `native adapter ${replaced.tag}`;
+              : `native adapter ${describeInstallState(replaced)}`;
     return `Replaced ${previous} with ${result.tag} at ${result.binaryPath}`;
 };

@@ -20,7 +20,6 @@ const args = process.argv.slice(2);
 
 installNativeAdapter({
     installDir: takeValue(args, "--prefix"),
-    version: takeValue(args, "--version"),
     baseUrl: takeValue(args, "--base-url"),
     force: hasFlag(args, "--force"),
     ifNeeded: hasFlag(args, "--if-needed"),

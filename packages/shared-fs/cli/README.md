@@ -162,25 +162,29 @@ peerbit-fs status
 peer packages that are not needed by the Node.js CLI.
 
 `peerbit-fs install-adapter` downloads the prebuilt
-`peerbit-shared-fs-native` binary from this CLI's own release
-(`shared-fs-native-v<cli version>`) into `~/.peerbit/shared-fs/bin` and pins it
-there with `peerbit-shared-fs-native.install.json` (release tag and binary
-SHA-256). The global package install also tries this automatically. Both keep
-an adapter only when its pin matches this CLI and replace a stale, modified,
-or unpinned one; `--force` always reinstalls. The explicit command is safe to
-rerun and is the easiest way to repair a missing adapter.
+`peerbit-shared-fs-native` binary from this CLI's own release into
+`~/.peerbit/shared-fs/bin/shared-fs-native-v<cli version>/` and pins it there
+with `peerbit-shared-fs-native.install.json` (release tag, target, and binary
+SHA-256). Each release has its own directory, so CLIs of different versions
+(for example under two Node versions) keep their own adapters side by side.
+The global package install also tries this automatically. Both keep an
+adapter only when its pin matches this CLI and replace a stale, modified, or
+unpinned one; `--force` always reinstalls. The explicit command is safe to
+rerun and is the easiest way to repair a missing adapter. Adapters that older
+CLIs installed directly in `~/.peerbit/shared-fs/bin` are no longer used and
+can be deleted.
 
-`mount` and `status` auto-detect that managed adapter, a
+`mount` and `status` auto-detect this CLI's managed adapter, a
 `peerbit-shared-fs-native` command on `PATH`, or
 `PEERBIT_SHARED_FS_NATIVE_ADAPTER`. Only the adapter from this CLI's release is
-supported: `mount` refuses a managed adapter whose pin is missing (adapters
-installed by 0.13.18 or earlier), names another release, or no longer matches
-the binary, and its error names both versions; `status` reports the same
-check. Run `peerbit-fs install-adapter --force` to fix it. An adapter chosen
-with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER` is not pinned,
-but the IPC v2 handshake still refuses an incompatible one. IPC v1 is retired,
-so adapters and CLIs from 0.13.15 or earlier cannot mount with current
-releases.
+supported: `mount` refuses a managed adapter whose pin is missing, names
+another release or platform, or no longer matches the binary, and its error
+names both versions; `status` then reports the mount as unavailable with the
+same reason. Run `peerbit-fs install-adapter --force` to fix it. An adapter
+chosen with `--native-adapter`, `PEERBIT_SHARED_FS_NATIVE_ADAPTER`, or `PATH`
+is not checked and is your responsibility: IPC v1 is retired, so an adapter
+from 0.13.15 or earlier still mounts but fails every operation, and CLIs from
+0.13.15 or earlier cannot use current adapters.
 
 Native runtime prerequisites are platform-specific:
 

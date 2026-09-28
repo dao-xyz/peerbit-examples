@@ -9,9 +9,11 @@ binary frame until the negotiation below has succeeded.
 Only an adapter from the same release as the CLI is supported. `peerbit-fs
 mount` refuses a managed adapter whose install record does not pin it to the
 CLI's own release (`shared-fs-native-v<cli version>`), and
-`peerbit-fs install-adapter --force` installs the matching adapter. The
-negotiation below remains the protocol gate for adapters passed explicitly
-with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER`.
+`peerbit-fs install-adapter --force` installs the matching adapter. Adapters
+passed explicitly with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER`
+are not checked by the CLI. The negotiation below gates a v2-capable adapter;
+a v1-only adapter never negotiates, so it still mounts, and the server rejects
+each connection's first operation as described below.
 
 The normative terms MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are
 to be interpreted as described by RFC 2119 and RFC 8174.
