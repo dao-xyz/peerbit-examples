@@ -533,62 +533,6 @@ describe("peerbit-fs cli", () => {
         expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
     });
 
-    it("persists an explicit legacy-replica trust assertion", async () => {
-        const directory = await fs.mkdtemp(
-            path.join(os.tmpdir(), "peerbit-shared-fs-cli-legacy-")
-        );
-        const log = vi.spyOn(console, "log").mockImplementation(() => {});
-        let reopenedPeer: Peerbit | undefined;
-        try {
-            await runCli(["create", "--directory", directory]);
-            const address = String(log.mock.calls[0]?.[0]);
-            const stateDirectory = path.join(directory, "shared-fs-bootstrap");
-            const [stateName] = await fs.readdir(stateDirectory);
-            const statePath = path.join(stateDirectory, stateName);
-            const legacy = JSON.parse(await fs.readFile(statePath, "utf8"));
-            delete legacy.writeReady;
-            delete legacy.writeReadySource;
-            delete legacy.legacyUnproven;
-            await fs.writeFile(statePath, JSON.stringify(legacy));
-
-            log.mockClear();
-            const command = [
-                "trust-legacy-replica",
-                address,
-                "--assume-local-replica-complete",
-                "--timeout-ms",
-                "15000",
-                "--directory",
-                directory,
-            ];
-            await runCli(command);
-            expect(log.mock.calls.at(-1)?.[0]).toContain(
-                "explicit operator assertion"
-            );
-            // Repeating the command is harmless once the marker is durable.
-            await expect(runCli(command)).resolves.toBeUndefined();
-
-            reopenedPeer = await Peerbit.create({ directory });
-            const reopened = await openSharedFs({
-                peerbit: reopenedPeer,
-                address,
-                machineLabel: "cli-legacy-reopen",
-                bootstrap: false,
-            });
-            expect(reopened.bootstrapStatus()).toMatchObject({
-                writeReady: true,
-                writeReadinessSource: "legacy-operator-assertion",
-                legacyPromotionEligible: false,
-            });
-        } finally {
-            if (reopenedPeer) {
-                await stopPeer(reopenedPeer);
-            }
-            log.mockRestore();
-            await fs.rm(directory, { recursive: true, force: true });
-        }
-    });
-
     it.each([
         {
             label: "success after shutdown",

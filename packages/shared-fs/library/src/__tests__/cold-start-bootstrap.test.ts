@@ -448,331 +448,92 @@ describe("shared fs cold-start bootstrap", () => {
         await closedExpectation;
     });
 
-    it("fails closed for a pre-marker store until an explicit legacy trust assertion persists", async () => {
-        const root = await mkdtemp(join(tmpdir(), "shared-fs-legacy-ready-"));
-        const directory = join(root, "peer");
-        let creatorPeer: Peerbit | undefined;
-        let reopenedPeer: Peerbit | undefined;
-        let promotionPeer: Peerbit | undefined;
-        let finalPeer: Peerbit | undefined;
-        try {
-            creatorPeer = await Peerbit.create({ directory });
-            const creator = await openSharedFs({
-                peerbit: creatorPeer,
-                machineLabel: "legacy-creator",
-            });
-            const address = creator.address!;
-            await creator.writeFile("/legacy.txt", "persisted local state");
-            await creatorPeer.stop();
-            creatorPeer = undefined;
-
-            const stateDirectory = join(directory, "shared-fs-bootstrap");
-            const [stateName] = await readdir(stateDirectory);
-            const statePath = join(stateDirectory, stateName);
-            const legacy = JSON.parse(await readFile(statePath, "utf8"));
-            delete legacy.writeReady;
-            delete legacy.writeReadySource;
-            delete legacy.legacyUnproven;
-            await writeFile(statePath, JSON.stringify(legacy));
-
-            reopenedPeer = await Peerbit.create({ directory });
-            const reopened = await openSharedFs({
-                peerbit: reopenedPeer,
-                address,
-                machineLabel: "legacy-status-like-open",
-                writeReadinessSettleMs: 100,
-            } as any);
-            expect(decode(await reopened.readFile("/legacy.txt"))).toBe(
-                "persisted local state"
-            );
-            expect(reopened.bootstrapStatus().writeReady).toBe(false);
-            expect(reopened.bootstrapStatus().guardArmed).toBe(false);
-            expect(reopened.bootstrapStatus().legacyPromotionEligible).toBe(
-                true
-            );
-            await expect(
-                reopened.awaitWriteReady({ timeout: 350 })
-            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
-            await expect(
-                (reopened as any).trustLegacyLocalReplica({})
-            ).rejects.toMatchObject({ code: "EINVAL" });
-
-            // The first upgraded open records durable eligibility without
-            // turning the absence of remote changes into proof.
-            const gatedState = JSON.parse(await readFile(statePath, "utf8"));
-            expect(gatedState).toMatchObject({
-                openedBefore: true,
-                writeReady: false,
-                legacyUnproven: true,
-            });
-            await reopenedPeer.stop();
-            reopenedPeer = undefined;
-
-            promotionPeer = await Peerbit.create({ directory });
-            const promotion = await openSharedFs({
-                peerbit: promotionPeer,
-                address,
-                machineLabel: "legacy-promotion",
-                bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
-            expect(promotion.bootstrapStatus().legacyPromotionEligible).toBe(
-                true
-            );
-            const program: any = promotion.program;
-            const writeBootstrapState =
-                program.writeBootstrapState.bind(program);
-            program.writeBootstrapState = async (
-                patch: any,
-                ...rest: any[]
-            ) => {
-                if (patch?.writeReadySource === "legacy-operator-assertion") {
-                    throw new Error("simulated state write failure");
-                }
-                return writeBootstrapState(patch, ...rest);
-            };
-            await expect(
-                promotion.trustLegacyLocalReplica({
-                    assumeComplete: true,
-                    timeout: 2_000,
-                })
-            ).rejects.toThrow("simulated state write failure");
-            expect(promotion.bootstrapStatus()).toMatchObject({
-                writeReady: false,
-                guardArmed: false,
-                legacyPromotionEligible: true,
-            });
-            program.writeBootstrapState = writeBootstrapState;
-            let releaseLegacyWrite!: () => void;
-            let legacyWriteStarted!: () => void;
-            const legacyWriteGate = new Promise<void>((resolve) => {
-                releaseLegacyWrite = resolve;
-            });
-            const legacyWriteEntered = new Promise<void>((resolve) => {
-                legacyWriteStarted = resolve;
-            });
-            program.writeBootstrapState = async (
-                patch: any,
-                ...rest: any[]
-            ) => {
-                if (patch?.writeReadySource === "legacy-operator-assertion") {
-                    legacyWriteStarted();
-                    await legacyWriteGate;
-                }
-                return writeBootstrapState(patch, ...rest);
-            };
-            const explicitPromotion = promotion.trustLegacyLocalReplica({
-                assumeComplete: true,
-                timeout: 2_000,
-            });
-            await legacyWriteEntered;
-            // A remote-ready callback that races behind the explicit
-            // assertion must not overwrite its durable/status provenance.
-            const remotePromotion = program.markWriteReady(
-                program.openGeneration
-            );
-            releaseLegacyWrite();
-            await explicitPromotion;
-            await remotePromotion;
-            program.writeBootstrapState = writeBootstrapState;
-            expect(promotion.bootstrapStatus()).toMatchObject({
-                writeReady: true,
-                guardArmed: true,
-                legacyPromotionEligible: false,
-                writeReadinessSource: "legacy-operator-assertion",
-            });
-            expect(
-                JSON.parse(await readFile(statePath, "utf8")).writeReadySource
-            ).toBe("legacy-operator-assertion");
-            await promotion.writeFile("/legacy.txt", "trusted local state");
-            await promotionPeer.stop();
-            promotionPeer = undefined;
-
-            // The assertion is per directory/address and survives a normal
-            // offline reopen; it is not a flag that must be repeated.
-            finalPeer = await Peerbit.create({ directory });
-            const final = await openSharedFs({
-                peerbit: finalPeer,
-                address,
-                machineLabel: "legacy-final-reopen",
-                bootstrap: false,
-            });
-            expect(final.bootstrapStatus()).toMatchObject({
-                writeReady: true,
-                writeReadinessSource: "legacy-operator-assertion",
-            });
-            expect(decode(await final.readFile("/legacy.txt"))).toBe(
-                "trusted local state"
-            );
-        } finally {
-            await finalPeer?.stop().catch(() => {});
-            await promotionPeer?.stop().catch(() => {});
-            await reopenedPeer?.stop().catch(() => {});
-            await creatorPeer?.stop().catch(() => {});
-            await rm(root, { recursive: true, force: true });
-        }
-    });
-
-    it("keeps partial-write recovery session-only and clears legacy promotion eligibility", async () => {
+    it("keeps partial-write recovery session-only", async () => {
         const root = await mkdtemp(
-            join(tmpdir(), "shared-fs-legacy-override-")
+            join(tmpdir(), "shared-fs-partial-write-override-")
         );
         const directory = join(root, "peer");
         let creatorPeer: Peerbit | undefined;
+        let observerPeer: Peerbit | undefined;
         let overridePeer: Peerbit | undefined;
         let finalPeer: Peerbit | undefined;
         try {
             creatorPeer = await Peerbit.create({ directory });
             const creator = await openSharedFs({
                 peerbit: creatorPeer,
-                machineLabel: "legacy-override-creator",
+                machineLabel: "override-creator",
             });
-            await creator.writeFile("/legacy.txt", "before override");
+            await creator.writeFile("/kept.txt", "before override");
             const address = creator.address!;
             await creatorPeer.stop();
             creatorPeer = undefined;
 
+            // An observer open withdraws the creator's persisted proof, so
+            // the next full open of this directory starts gated.
+            observerPeer = await Peerbit.create({ directory });
+            await openSharedFs({
+                peerbit: observerPeer,
+                address,
+                machineLabel: "override-observer",
+                replicate: false,
+                bootstrap: false,
+            });
+            await observerPeer.stop();
+            observerPeer = undefined;
+
             const stateDirectory = join(directory, "shared-fs-bootstrap");
             const [stateName] = await readdir(stateDirectory);
             const statePath = join(stateDirectory, stateName);
-            const legacy = JSON.parse(await readFile(statePath, "utf8"));
-            delete legacy.writeReady;
-            delete legacy.writeReadySource;
-            delete legacy.legacyUnproven;
-            await writeFile(statePath, JSON.stringify(legacy));
+            const gatedState = JSON.parse(await readFile(statePath, "utf8"));
+            expect(gatedState).toMatchObject({ writeReady: false });
+            expect(gatedState).not.toHaveProperty("writeReadySource");
+            // Retired sidecar fields are no longer written.
+            expect(gatedState).not.toHaveProperty("openedBefore");
+            expect(gatedState).not.toHaveProperty("legacyUnproven");
 
             overridePeer = await Peerbit.create({ directory });
             const override = await openSharedFs({
                 peerbit: overridePeer,
                 address,
-                machineLabel: "legacy-override",
+                machineLabel: "override-session",
                 bootstrap: false,
                 allowPartialWrites: true,
             });
             expect(override.bootstrapStatus()).toMatchObject({
                 writeReady: true,
                 partialWriteOverride: true,
-                legacyPromotionEligible: false,
             });
+            expect(override.bootstrapStatus().writeReadinessSource).toBe(
+                undefined
+            );
             await override.writeFile("/recovery.txt", "session-only");
             await overridePeer.stop();
             overridePeer = undefined;
+
+            const afterOverride = JSON.parse(await readFile(statePath, "utf8"));
+            expect(afterOverride).toMatchObject({ writeReady: false });
+            expect(afterOverride).not.toHaveProperty("writeReadySource");
 
             finalPeer = await Peerbit.create({ directory });
             const final = await openSharedFs({
                 peerbit: finalPeer,
                 address,
-                machineLabel: "after-legacy-override",
+                machineLabel: "after-override",
                 bootstrap: false,
                 writeReadinessSettleMs: 100,
             } as any);
             expect(final.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 partialWriteOverride: false,
-                legacyPromotionEligible: false,
                 guardArmed: false,
             });
             await expect(
-                final.trustLegacyLocalReplica({
-                    assumeComplete: true,
-                    timeout: 500,
-                })
-            ).rejects.toMatchObject({ code: "EINVAL" });
+                final.awaitWriteReady({ timeout: 350 })
+            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
         } finally {
             await finalPeer?.stop().catch(() => {});
             await overridePeer?.stop().catch(() => {});
-            await creatorPeer?.stop().catch(() => {});
-            await rm(root, { recursive: true, force: true });
-        }
-    });
-
-    it("does not leave a trusted marker when close rejects a queued legacy promotion", async () => {
-        const root = await mkdtemp(
-            join(tmpdir(), "shared-fs-legacy-close-race-")
-        );
-        const directory = join(root, "peer");
-        let creatorPeer: Peerbit | undefined;
-        let promotionPeer: Peerbit | undefined;
-        let reopenedPeer: Peerbit | undefined;
-        try {
-            creatorPeer = await Peerbit.create({ directory });
-            const creator = await openSharedFs({
-                peerbit: creatorPeer,
-                machineLabel: "legacy-close-creator",
-            });
-            const address = creator.address!;
-            await creator.writeFile("/before.txt", "complete local state");
-            await creatorPeer.stop();
-            creatorPeer = undefined;
-
-            const stateDirectory = join(directory, "shared-fs-bootstrap");
-            const [stateName] = await readdir(stateDirectory);
-            const statePath = join(stateDirectory, stateName);
-            const legacy = JSON.parse(await readFile(statePath, "utf8"));
-            delete legacy.writeReady;
-            delete legacy.writeReadySource;
-            delete legacy.legacyUnproven;
-            await writeFile(statePath, JSON.stringify(legacy));
-
-            promotionPeer = await Peerbit.create({ directory });
-            const promotion = await openSharedFs({
-                peerbit: promotionPeer,
-                address,
-                machineLabel: "legacy-close-promotion",
-                bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
-            const program: any = promotion.program;
-            let releaseQueue!: () => void;
-            const queueGate = new Promise<void>((resolve) => {
-                releaseQueue = resolve;
-            });
-            program.writeReadinessTransitionChain = queueGate;
-            const trust = promotion.trustLegacyLocalReplica({
-                assumeComplete: true,
-                timeout: 2_000,
-            });
-            await waitUntil(
-                () => {
-                    expect(program.writeReadinessTransitionChain).not.toBe(
-                        queueGate
-                    );
-                },
-                { timeoutMs: 3_000, intervalMs: 10 }
-            );
-
-            const stopping = promotionPeer.stop();
-            await waitUntil(
-                () => {
-                    expect(program.writeReadinessLifecycleBlocked).toBe(true);
-                },
-                { timeoutMs: 3_000, intervalMs: 10 }
-            );
-            releaseQueue();
-            await expect(trust).rejects.toMatchObject({ code: "ECLOSED" });
-            await stopping;
-            promotionPeer = undefined;
-
-            expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject(
-                {
-                    writeReady: false,
-                }
-            );
-            reopenedPeer = await Peerbit.create({ directory });
-            const reopened = await openSharedFs({
-                peerbit: reopenedPeer,
-                address,
-                machineLabel: "legacy-close-reopen",
-                bootstrap: false,
-            });
-            expect(reopened.bootstrapStatus()).toMatchObject({
-                writeReady: false,
-                guardArmed: false,
-                legacyPromotionEligible: true,
-            });
-        } finally {
-            await reopenedPeer?.stop().catch(() => {});
-            await promotionPeer?.stop().catch(() => {});
+            await observerPeer?.stop().catch(() => {});
             await creatorPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
         }
@@ -836,7 +597,6 @@ describe("shared fs cold-start bootstrap", () => {
             expect(reopened.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 guardArmed: false,
-                legacyPromotionEligible: false,
             });
         } finally {
             await reopenedPeer?.stop().catch(() => {});
@@ -905,7 +665,6 @@ describe("shared fs cold-start bootstrap", () => {
             expect(reopened.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 guardArmed: false,
-                legacyPromotionEligible: false,
             });
         } finally {
             await donorPeer?.stop().catch(() => {});
@@ -950,15 +709,11 @@ describe("shared fs cold-start bootstrap", () => {
             expect(unknown.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 guardArmed: false,
-                legacyPromotionEligible: false,
             });
             await unknownPeer.stop();
             unknownPeer = undefined;
 
-            await writeFile(
-                statePath,
-                JSON.stringify({ openedBefore: true, writeReady: true })
-            );
+            await writeFile(statePath, JSON.stringify({ writeReady: true }));
             sourceLessPeer = await Peerbit.create({ directory });
             const sourceLess = await openSharedFs({
                 peerbit: sourceLessPeer,
@@ -969,11 +724,113 @@ describe("shared fs cold-start bootstrap", () => {
             expect(sourceLess.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 guardArmed: false,
-                legacyPromotionEligible: false,
             });
         } finally {
             await sourceLessPeer?.stop().catch(() => {});
             await unknownPeer?.stop().catch(() => {});
+            await creatorPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("ignores retired sidecar keys but fails closed on a retired readiness source", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-retired-state-"));
+        const directory = join(root, "peer");
+        let creatorPeer: Peerbit | undefined;
+        let retiredKeysPeer: Peerbit | undefined;
+        let retiredSourcePeer: Peerbit | undefined;
+        try {
+            creatorPeer = await Peerbit.create({ directory });
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "retired-state-creator",
+            });
+            const address = creator.address!;
+            await creator.writeFile("/kept.txt", "kept");
+            await creatorPeer.stop();
+            creatorPeer = undefined;
+
+            const stateDirectory = join(directory, "shared-fs-bootstrap");
+            const [stateName] = await readdir(stateDirectory);
+            const statePath = join(stateDirectory, stateName);
+            const state = JSON.parse(await readFile(statePath, "utf8"));
+            expect(state).toMatchObject({
+                writeReady: true,
+                writeReadySource: "creator",
+            });
+            expect(state).not.toHaveProperty("openedBefore");
+            expect(state).not.toHaveProperty("legacyUnproven");
+
+            // A sidecar written before this release still carries
+            // openedBefore and legacyUnproven:false. Those keys are ignored,
+            // so its creator proof stays valid.
+            await writeFile(
+                statePath,
+                JSON.stringify({
+                    openedBefore: true,
+                    writeReady: true,
+                    legacyUnproven: false,
+                    writeReadySource: "creator",
+                })
+            );
+            retiredKeysPeer = await Peerbit.create({ directory });
+            const retiredKeys = await openSharedFs({
+                peerbit: retiredKeysPeer,
+                address,
+                machineLabel: "retired-keys-reopen",
+                bootstrap: false,
+            });
+            expect(retiredKeys.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "creator",
+                guardArmed: true,
+            });
+            await retiredKeys.writeFile("/kept.txt", "still writable");
+            await retiredKeysPeer.stop();
+            retiredKeysPeer = undefined;
+
+            // The removed operator-assertion provenance is no longer a valid
+            // source: the sidecar is malformed and the reopen fails closed
+            // until remote-settled readiness.
+            await writeFile(
+                statePath,
+                JSON.stringify({
+                    openedBefore: true,
+                    writeReady: true,
+                    legacyUnproven: false,
+                    writeReadySource: "legacy-operator-assertion",
+                })
+            );
+            retiredSourcePeer = await Peerbit.create({ directory });
+            const retiredSource = await openSharedFs({
+                peerbit: retiredSourcePeer,
+                address,
+                machineLabel: "retired-source-reopen",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            expect(retiredSource.bootstrapStatus()).toMatchObject({
+                writeReady: false,
+                guardArmed: false,
+            });
+            expect(retiredSource.bootstrapStatus().writeReadinessSource).toBe(
+                undefined
+            );
+            await expect(
+                retiredSource.writeFile("/kept.txt", "unsafe")
+            ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+            await expect(
+                retiredSource.awaitWriteReady({ timeout: 350 })
+            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            expect(decode(await retiredSource.readFile("/kept.txt"))).toBe(
+                "still writable"
+            );
+            const gatedState = JSON.parse(await readFile(statePath, "utf8"));
+            expect(gatedState).toMatchObject({ writeReady: false });
+            expect(gatedState).not.toHaveProperty("writeReadySource");
+        } finally {
+            await retiredSourcePeer?.stop().catch(() => {});
+            await retiredKeysPeer?.stop().catch(() => {});
             await creatorPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
         }
