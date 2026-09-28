@@ -167,6 +167,16 @@ export class IgnoreAwareFs extends SharedFsHandle {
         return super.mkdir(path);
     }
 
+    async setMetadata(
+        path: string,
+        patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+        options?: { expectedNodeId?: string }
+    ) {
+        const rules = this.ignorePolicy.current();
+        this.guardWrite(rules, path, "setMetadata");
+        return super.setMetadata(path, patch, options);
+    }
+
     async rm(path: string) {
         const rules = this.ignorePolicy.current();
         const normalized = normalizeFsPath(path);

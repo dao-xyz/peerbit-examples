@@ -777,8 +777,9 @@ other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
-The shared model does not yet persist POSIX mode, owner, or explicit timestamp
-metadata. Native stat results use synthetic fixed modes (`0755` directories and
+Native mounts do not yet expose the stored exec bit, mtime, or symlinks (see
+[File metadata and symlinks](#file-metadata-and-symlinks)), and owner is not
+stored. Native stat results use synthetic fixed modes (`0755` directories and
 `0644` files on Linux/macOS, normalized to `0777`/`0666` on Windows), synthetic
 ownership, logical/synthetic mtime and ctime, and atime mirrored from mtime.
 Creation modes are not preserved. chmod, chown, and explicit timestamp changes
@@ -989,6 +990,54 @@ a deterministic display choice. Conflicting versions are listed through
 ```text
 /.peerbit-conflicts/<encoded-path>/<version-id>
 ```
+
+A file is in conflict only when its heads hold two or more different contents,
+and `conflicts()` lists one version per content. Heads that differ only in mode
+or mtime (a concurrent `chmod` or `touch`) are not a conflict: the visible head
+supplies both fields, and the next write merges the heads, so one of the two
+metadata changes is lost. `stat().headVersionIds` still lists every head.
+
+## File metadata and symlinks
+
+Every file version stores a git tree mode and a modification time:
+
+```ts
+import { SHARED_FS_MODE } from "@peerbit/shared-fs";
+
+await fs.writeFile("/bin/tool", "#!/bin/sh\n", {
+    mode: SHARED_FS_MODE.executable,
+});
+await fs.setMetadata("/bin/tool", { mtime: Date.UTC(2000, 0, 1) });
+await fs.writeFile("/latest", "releases/v2", { mode: SHARED_FS_MODE.symlink });
+```
+
+- `mode` is `0o100644`, `0o100755`, or `0o120000` (symlink); no other bits,
+  owner, or group are stored. `mtime` is in milliseconds. `stat()` reports
+  `mode`, and `updatedAt` is the mtime for files; versions carry `mode` and
+  `mtime`.
+- A write without `mode` or `mtime` keeps the best-ranked parent's mode, and
+  keeps its mtime only when the bytes are unchanged; otherwise mtime is the
+  write time. `writeBatch`, `resolveConflict()`, and naming restores keep the
+  mode too. Re-saving identical bytes and metadata is still a no-op.
+- `setMetadata(path, { mode?, mtime? }, { expectedNodeId? })` publishes one
+  version that reuses the current chunks, so it moves no chunk bytes. A write
+  of the same bytes with a new mode or mtime reuses them the same way (unless
+  it sets `chunkSize` or `dedup: "off"`). `setMetadata` rejects directories
+  with `EISDIR` and symlinks with `EINVAL`.
+- A symlink is a file node whose bytes are its target: 1-1023 bytes of UTF-8
+  without NUL. `stat()`, `list()`, and watch events report it as a file; check
+  `stat().mode`, since watch events carry no mode. `readFile()` returns the
+  target. Targets are opaque: shared-fs never follows, normalizes, or checks
+  them, so absolute and dangling targets are allowed.
+- A node never changes type. Writing a symlink requires
+  `mode: SHARED_FS_MODE.symlink` every time; plain bytes to a symlink, or a
+  symlink over a regular file, fail with `EINVAL`, and `writeBatch` rejects
+  symlinks. Use `rm` or `rename` to replace one.
+- Ignore patterns do not look at the node type, so `node_modules/` also
+  matches a symlink with that name (unlike git), and a `.artifactignore`
+  symlink is compiled from its target text.
+- Filesystems created by earlier releases do not open (the program variant
+  changed); recreate them.
 
 ## Watching for changes
 

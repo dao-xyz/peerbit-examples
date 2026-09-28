@@ -20,6 +20,8 @@ const forkVersion = (parent: FileVersion, index: number) =>
         causalDepth: parent.causalDepth + 1n,
         contentHash: parent.contentHash,
         size: parent.size,
+        mode: parent.mode,
+        mtime: parent.mtime,
         chunkIds: parent.chunkIds,
         createdAt: parent.createdAt + 1n,
         authorKey: parent.authorKey,

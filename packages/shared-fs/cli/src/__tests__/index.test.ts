@@ -102,6 +102,8 @@ const seedConflicts = async () => {
             causalDepth: deletedBase.causalDepth + 1n,
             contentHash: deletedBase.contentHash,
             size: deletedBase.size,
+            mode: deletedBase.mode,
+            mtime: deletedBase.mtime,
             chunkIds: deletedBase.chunkIds,
             createdAt: deletedBase.createdAt + 1n,
             authorKey: deletedBase.authorKey,

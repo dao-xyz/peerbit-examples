@@ -17,6 +17,19 @@ const decodeStringList = (value?: string) => {
     }
 };
 
+/**
+ * Git tree modes stored on every FileVersion. The mode is the node type: a
+ * symlink is a file node whose content bytes are its opaque target.
+ */
+export const SHARED_FS_MODE = {
+    file: 0o100644,
+    executable: 0o100755,
+    symlink: 0o120000,
+} as const;
+
+export type SharedFsFileMode =
+    (typeof SHARED_FS_MODE)[keyof typeof SHARED_FS_MODE];
+
 export type SharedFsEntryKind =
     | "naming"
     | "file-version"
@@ -87,6 +100,14 @@ export class IndexableSharedFsEntry {
     @field({ type: option("string") })
     contentHash?: string;
 
+    /** Payload only (never queried): FileVersion.mode, 0 otherwise. */
+    @field({ type: "u32" })
+    mode: number;
+
+    /** Payload only (never queried): FileVersion.mtime, 0 otherwise. */
+    @field({ type: "u64" })
+    mtime: bigint;
+
     @field({ type: option("string") })
     authorKey?: string;
 
@@ -103,6 +124,8 @@ export class IndexableSharedFsEntry {
         this.causalRefs = [];
         this.causalDepth = 0n;
         this.size = 0n;
+        this.mode = 0;
+        this.mtime = 0n;
         if (!value) {
             this.id = "";
             this.kind = "";
@@ -132,6 +155,8 @@ export class IndexableSharedFsEntry {
             this.causalDepth = value.causalDepth;
             this.size = value.size;
             this.contentHash = value.contentHash;
+            this.mode = value.mode;
+            this.mtime = value.mtime;
             this.authorKey = value.authorKey;
             this.machineLabel = value.machineLabel;
             this.changesetId = value.changesetId;
@@ -332,6 +357,14 @@ export class FileVersion extends SharedFsEntry {
     @field({ type: "u64" })
     size: bigint;
 
+    /** A SHARED_FS_MODE value; chmod keeps only the exec bit. */
+    @field({ type: "u32" })
+    mode: number;
+
+    /** User-settable modification time (ms); never used for ordering. */
+    @field({ type: "u64" })
+    mtime: bigint;
+
     @field({ type: "string" })
     chunkIdsJson: string;
 
@@ -363,6 +396,8 @@ export class FileVersion extends SharedFsEntry {
         causalDepth: bigint | number;
         contentHash: string;
         size: bigint | number;
+        mode: number;
+        mtime: bigint | number;
         chunkIds: string[];
         createdAt: bigint | number;
         authorKey: string;
@@ -378,6 +413,8 @@ export class FileVersion extends SharedFsEntry {
             this.causalDepth = BigInt(properties.causalDepth);
             this.contentHash = properties.contentHash;
             this.size = BigInt(properties.size);
+            this.mode = properties.mode;
+            this.mtime = BigInt(properties.mtime);
             this.chunkIds = properties.chunkIds;
             this.createdAt = BigInt(properties.createdAt);
             this.authorKey = properties.authorKey;

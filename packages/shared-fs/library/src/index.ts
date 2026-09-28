@@ -51,7 +51,9 @@ import {
     IndexableSharedFsEntry,
     NamingEvent,
     SegmentRef,
+    SHARED_FS_MODE,
     SharedFsEntry,
+    type SharedFsFileMode,
     SnapshotCounts,
     SnapshotManifestPayload,
     SnapshotSegment,
@@ -974,6 +976,12 @@ export type SharedFsEntryInfo = {
     /** Content hash of the visible head version for files. */
     contentHash?: string;
     /**
+     * SHARED_FS_MODE of the visible head version for files. A symlink keeps
+     * kind "file"; its content bytes are the target. For files `updatedAt`
+     * is the visible version's mtime.
+     */
+    mode?: number;
+    /**
      * True when this node's naming has unresolved concurrent assertions
      * (multiple naming heads) or the path slot has shadowed claimants.
      */
@@ -992,6 +1000,8 @@ export type SharedFsVersionInfo = {
     path: string;
     size: bigint;
     contentHash?: string;
+    mode: number;
+    mtime: bigint;
     parentVersionIds: string[];
     createdAt: bigint;
     authorKey: string;
@@ -1086,6 +1096,19 @@ export type WriteFileOptions = {
      * capability input; callers must never supply or trust a content hash.
      */
     noOpIfHeadVersionIds?: string[];
+    /**
+     * Defaults to the best-ranked parent's mode (0o100644 for a new file).
+     * A symlink must pass SHARED_FS_MODE.symlink explicitly: its bytes are
+     * the target (1-1023 bytes of UTF-8 without NUL), and a node can never
+     * change between symlink and regular file (EINVAL).
+     */
+    mode?: SharedFsFileMode;
+    /**
+     * Modification time in ms (a safe integer >= 0). Defaults to the
+     * best-ranked parent's mtime when the bytes are unchanged, otherwise to
+     * the write time.
+     */
+    mtime?: number;
     chunkSize?: number;
     /**
      * "verify" (default): dedup-skip a chunk only when a fresh witness
@@ -1528,6 +1551,85 @@ const isSharedFsNamingConflict = (
 
 const compareBigint = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
+/** Visible-head order: stored causal depth descending, then id. */
+const compareVersionRank = (a: VersionLike, b: VersionLike) =>
+    compareBigint(b.causalDepth, a.causalDepth) || compareIds(a.id, b.id);
+
+/**
+ * One head per distinct content hash, in heads order. A node is a content
+ * conflict only when this returns two or more: concurrent metadata-only
+ * changes (chmod, touch) of the same bytes never fork the conflict view.
+ */
+const contentConflictHeads = <T extends VersionLike>(heads: T[]): T[] => {
+    const seen = new Set<string | undefined>();
+    return heads.filter(
+        (head) => !seen.has(head.contentHash) && !!seen.add(head.contentHash)
+    );
+};
+
+const FILE_MODES: readonly number[] = Object.values(SHARED_FS_MODE);
+
+/** The only JS-side range check of caller-supplied mode and mtime. */
+const assertFileMeta = (
+    meta: { mode?: number; mtime?: number },
+    modes: readonly number[]
+) => {
+    if (
+        (meta.mode !== undefined && !modes.includes(meta.mode)) ||
+        (meta.mtime !== undefined &&
+            !(Number.isSafeInteger(meta.mtime) && meta.mtime >= 0))
+    ) {
+        throw new SharedFsError(
+            "EINVAL",
+            `mode must be one of 0o${modes.map((mode) => mode.toString(8)).join(", 0o")} and mtime a safe integer >= 0`
+        );
+    }
+};
+
+/**
+ * Longest stored symlink target: cgofuse silently truncates a readlink
+ * result longer than the host buffer, and macOS's holds PATH_MAX - 1.
+ */
+const MAX_SYMLINK_TARGET_BYTES = 1023;
+
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+const validSymlinkTarget = (bytes: Uint8Array) => {
+    try {
+        utf8.decode(bytes);
+    } catch {
+        return false;
+    }
+    return (
+        bytes.byteLength >= 1 &&
+        bytes.byteLength <= MAX_SYMLINK_TARGET_BYTES &&
+        !bytes.includes(0)
+    );
+};
+
+/**
+ * Mode and mtime of a new version: explicit options win, else the
+ * best-ranked parent's mode, and its mtime only while the bytes are
+ * unchanged (a content change is modified at `createdAt`).
+ */
+const inheritMeta = (
+    parents: VersionLike[],
+    contentHash: string,
+    createdAt: bigint,
+    options: { mode?: number; mtime?: number }
+) => {
+    const best = [...parents].sort(compareVersionRank)[0];
+    return {
+        mode: options.mode ?? best?.mode ?? SHARED_FS_MODE.file,
+        mtime:
+            options.mtime !== undefined
+                ? BigInt(options.mtime)
+                : best?.contentHash === contentHash
+                  ? best.mtime
+                  : createdAt,
+    };
+};
+
 const maxDepth = (parents: { causalDepth: bigint }[]): bigint => {
     let max = 0n;
     for (const parent of parents) {
@@ -1588,6 +1690,8 @@ type VersionLike = {
     createdAt: bigint;
     size: bigint;
     contentHash?: string;
+    mode: number;
+    mtime: bigint;
     parentVersionIds: string[];
     authorKey?: string;
     machineLabel?: string;
@@ -1616,6 +1720,8 @@ const versionRowOf = (raw: any): VersionLike => ({
     createdAt: BigInt(raw.createdAt ?? 0),
     size: BigInt(raw.size ?? 0),
     contentHash: raw.contentHash,
+    mode: raw.mode,
+    mtime: BigInt(raw.mtime),
     // Index rows carry causalRefs; full documents carry parentVersionIds.
     parentVersionIds: raw.causalRefs ?? raw.parentVersionIds ?? [],
     authorKey: raw.authorKey,
@@ -2107,13 +2213,19 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
             value.id.startsWith("version:") &&
             value.nodeId.startsWith("file:") &&
             value.causalDepth >= 1n &&
+            FILE_MODES.includes(value.mode) &&
+            value.mtime <= BigInt(Number.MAX_SAFE_INTEGER) &&
+            // The target bytes live in a chunk; only their size is checked.
+            (value.mode !== SHARED_FS_MODE.symlink ||
+                (value.size >= 1n &&
+                    value.size <= BigInt(MAX_SYMLINK_TARGET_BYTES))) &&
             validChangesetId(value.changesetId)
         );
     }
     return true;
 };
 
-@variant("peerbit_shared_fs")
+@variant("peerbit_shared_fs_v9_1")
 export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     @field({ type: Uint8Array })
     id: Uint8Array;
@@ -2415,12 +2527,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 properties.sealedIgnoredNames ?? DEFAULT_SEALED_IGNORED_NAMES
             ),
         ].sort();
-        // v8: artifact ignores (sealed names on the program, manifest
-        // advisory patterns) — the salt bump guarantees older peers can
-        // never attach to the same log and fail confusingly
+        // v9.1: FileVersion mode and mtime — the salt bump guarantees older
+        // peers can never attach to the same log and fail confusingly
         // mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v9")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v9.1")])),
         });
     }
 
@@ -5007,10 +5118,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const heads = computeHeads(documents, (doc) => doc.parentVersionIds);
         // Stored depth, same rationale as naming winners: retiring ancestors
         // must never change the visible head.
-        return [...heads].sort((a, b) => {
-            const depthDiff = compareBigint(b.causalDepth, a.causalDepth);
-            return depthDiff !== 0 ? depthDiff : compareIds(a.id, b.id);
-        });
+        return [...heads].sort(compareVersionRank);
     }
 
     /**
@@ -5094,6 +5202,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             path,
             size: head.size,
             contentHash: head.contentHash,
+            mode: head.mode,
+            mtime: head.mtime,
             parentVersionIds: head.parentVersionIds,
             createdAt: head.createdAt,
             authorKey: head.authorKey ?? "",
@@ -5136,13 +5246,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             name: winner.name,
             kind,
             size: visible.size,
-            updatedAt: visible.createdAt,
+            updatedAt: visible.mtime,
             authorKey: winner.authorKey ?? "",
             machineLabel: winner.machineLabel ?? "",
-            conflict: (options.heads?.length ?? 0) > 1,
+            conflict: contentConflictHeads(options.heads ?? []).length > 1,
             versionId: visible.id,
             headVersionIds: options.heads?.map((head) => head.id) ?? [],
             contentHash: visible.contentHash,
+            mode: visible.mode,
             namingConflict: options.namingConflict || undefined,
         };
     }
@@ -5300,6 +5411,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 "expectedParentNodeId requires a non-empty value paired with expectedNodeId: null"
             );
         }
+        assertFileMeta(options, FILE_MODES);
         const noOpHeadVersionIds = options.noOpIfHeadVersionIds;
         if (noOpHeadVersionIds !== undefined) {
             const validIds =
@@ -5338,6 +5450,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         }
         const bytes = await toBytes(source);
+        const link = options.mode === SHARED_FS_MODE.symlink;
+        if (link && !validSymlinkTarget(bytes)) {
+            throw new SharedFsError(
+                "EINVAL",
+                `Symlink target must be 1-${MAX_SYMLINK_TARGET_BYTES} bytes of UTF-8 without NUL: ${normalized}`
+            );
+        }
         profiler?.set("bytes", bytes.byteLength);
         profiler?.enter("writeFile.resolvePath");
         const resolved = await this.resolvePath(normalized);
@@ -5382,6 +5501,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const currentHeads = existingNodeId
             ? await this.headsForNode(existingNodeId)
             : [];
+        if (
+            currentHeads.length > 0 &&
+            (currentHeads[0].mode === SHARED_FS_MODE.symlink) !== link
+        ) {
+            // The node type is fixed: bytes never retarget a symlink and a
+            // regular file never becomes one.
+            throw new SharedFsError(
+                "EINVAL",
+                `${link ? "Not a symlink" : "Path is a symlink"}: ${normalized}`
+            );
+        }
         profiler?.set("heads", currentHeads.length);
         profiler?.enter("writeFile.hash", { bytes: bytes.byteLength });
         // Keep hashing at the historical post-lookup point for every caller.
@@ -5402,13 +5532,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             options.baseVersionIds?.length === 1
                 ? options.baseVersionIds[0]
                 : undefined;
+        const sameMeta = (head: VersionLike) =>
+            (options.mode ?? head.mode) === head.mode &&
+            (options.mtime === undefined ||
+                BigInt(options.mtime) === head.mtime);
         if (
             noOpHeadVersionIds !== undefined &&
             options.chunkSize === undefined &&
             explicitBaseId !== undefined &&
             currentHeads[0]?.id === explicitBaseId &&
             exactHeadSetMatches &&
-            currentHeads[0].contentHash === contentHash
+            currentHeads[0].contentHash === contentHash &&
+            sameMeta(currentHeads[0])
         ) {
             if (expectedNodeId !== undefined) {
                 await assertExpectedNode("no-op");
@@ -5431,7 +5566,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             options.baseVersionIds === undefined &&
             options.chunkSize === undefined &&
             currentHeads.length === 1 &&
-            currentHeads[0].contentHash === contentHash
+            currentHeads[0].contentHash === contentHash &&
+            sameMeta(currentHeads[0])
         ) {
             if (expectedNodeId !== undefined) {
                 await assertExpectedNode("no-op");
@@ -5456,7 +5592,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             profiler?.enter("writeFile.loadBase", {
                 baseVersions: options.baseVersionIds.length,
             });
-            parentVersionIds = options.baseVersionIds;
+            parentVersionIds = [...options.baseVersionIds];
             parentVersions = [];
             for (const parentId of parentVersionIds) {
                 const parent = await this.getDocument<SharedFsEntry>(parentId);
@@ -5484,48 +5620,84 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     );
                 }
             }
+            // Absorb current heads holding a base's bytes (a concurrent
+            // chmod or touch), so they merge instead of forking.
+            const baseHashes = new Set(
+                parentVersions.map((parent) => parent.contentHash)
+            );
+            for (const head of currentHeads) {
+                if (
+                    baseHashes.has(head.contentHash) &&
+                    !parentVersionIds.includes(head.id)
+                ) {
+                    parentVersionIds.push(head.id);
+                    parentVersions.push(head);
+                }
+            }
         } else {
             parentVersionIds = currentHeads.map((head) => head.id);
             parentVersions = currentHeads;
         }
-        profiler?.enter("writeFile.chunk", { bytes: bytes.byteLength });
+        // Same bytes as a parent (a metadata-only write): reuse its chunk
+        // list with no chunk IO. As for resolveConflict, the parent still
+        // references those chunks and Guard D is the backstop.
+        const sameBytesParent =
+            options.chunkSize === undefined && options.dedup !== "off"
+                ? parentVersions.find(
+                      (parent) => parent.contentHash === contentHash
+                  )
+                : undefined;
+        const reused =
+            sameBytesParent &&
+            (sameBytesParent instanceof FileVersion
+                ? sameBytesParent
+                : await this.getDocument<SharedFsEntry>(sameBytesParent.id));
         const versionId = createId("version");
-        // Content-addressed chunks: identical bytes — across versions of
-        // this file or across entirely different files — share one chunk
-        // document. Only chunks the store has not seen (or cannot prove
-        // fresh) are re-put; see touchChunks for the dedup safety rules.
-        const orderedChunks = chunkBytes(bytes, options.chunkSize).map(
-            (chunk) => new FileChunk({ bytes: chunk })
-        );
-        const uniqueChunks = [
-            ...new Map(
-                orderedChunks.map((chunk) => [chunk.id, chunk])
-            ).values(),
-        ];
-        if (uniqueChunks.length > 8000) {
-            // The indexer's batched child-table insert has a bound-variable
-            // ceiling (~8191 rows). Larger files need a larger chunk size.
-            throw new SharedFsError(
-                "EINVAL",
-                `File has ${uniqueChunks.length} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version)`
+        let chunkIds: string[];
+        let uniqueChunks: FileChunk[] | undefined;
+        if (reused instanceof FileVersion) {
+            chunkIds = reused.chunkIds;
+            this.enterForegroundMutationCriticalTail(context);
+        } else {
+            profiler?.enter("writeFile.chunk", { bytes: bytes.byteLength });
+            // Content-addressed chunks: identical bytes — across versions of
+            // this file or across entirely different files — share one chunk
+            // document. Only chunks the store has not seen (or cannot prove
+            // fresh) are re-put; see touchChunks for the dedup safety rules.
+            const orderedChunks = chunkBytes(bytes, options.chunkSize).map(
+                (chunk) => new FileChunk({ bytes: chunk })
             );
+            uniqueChunks = [
+                ...new Map(
+                    orderedChunks.map((chunk) => [chunk.id, chunk])
+                ).values(),
+            ];
+            if (uniqueChunks.length > 8000) {
+                // The indexer's batched child-table insert has a bound-variable
+                // ceiling (~8191 rows). Larger files need a larger chunk size.
+                throw new SharedFsError(
+                    "EINVAL",
+                    `File has ${uniqueChunks.length} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version)`
+                );
+            }
+            profiler?.set("chunks", orderedChunks.length);
+            profiler?.set("uniqueChunks", uniqueChunks.length);
+            profiler?.enter("writeFile.touchChunks", {
+                chunks: uniqueChunks.length,
+                dedup: options.dedup ?? "verify",
+            });
+            this.enterForegroundMutationCriticalTail(context);
+            await this.touchChunks(
+                uniqueChunks,
+                options.dedup,
+                profiler?.counters(createSharedFsWriteFileChunkCounters()),
+                // The parents this write loaded (explicit base documents, or the
+                // current head rows); touchChunks re-reads each from the local
+                // index before letting it witness anything.
+                parentVersions.map((parent) => parent.id)
+            );
+            chunkIds = orderedChunks.map((chunk) => chunk.id);
         }
-        profiler?.set("chunks", orderedChunks.length);
-        profiler?.set("uniqueChunks", uniqueChunks.length);
-        profiler?.enter("writeFile.touchChunks", {
-            chunks: uniqueChunks.length,
-            dedup: options.dedup ?? "verify",
-        });
-        this.enterForegroundMutationCriticalTail(context);
-        await this.touchChunks(
-            uniqueChunks,
-            options.dedup,
-            profiler?.counters(createSharedFsWriteFileChunkCounters()),
-            // The parents this write loaded (explicit base documents, or the
-            // current head rows); touchChunks re-reads each from the local
-            // index before letting it witness anything.
-            parentVersions.map((parent) => parent.id)
-        );
         // Path lookup, base loading, hashing and chunk IO all await. Recheck
         // immediately before publishing the node-scoped version so a local
         // replacement that landed during that work cannot receive these
@@ -5535,7 +5707,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         profiler?.enter("writeFile.versionPut", {
             parents: parentVersionIds.length,
-            chunkRefs: orderedChunks.length,
+            chunkRefs: chunkIds.length,
         });
         const metadata = this.signedMetadata();
         const nodeId = existingNodeId ?? createId("file");
@@ -5546,7 +5718,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             causalDepth: maxDepth(parentVersions),
             contentHash,
             size: BigInt(bytes.byteLength),
-            chunkIds: orderedChunks.map((chunk) => chunk.id),
+            ...inheritMeta(
+                parentVersions,
+                contentHash,
+                metadata.timestamp,
+                options
+            ),
+            chunkIds,
             createdAt: metadata.timestamp,
             authorKey: metadata.authorKey,
             machineLabel: metadata.machineLabel,
@@ -5558,7 +5736,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // W2: the version now references the chunks; re-verify every chunk
         // is still present and re-put from memory any that a concurrently
         // executing collector removed inside the probe window.
-        if (options.dedup !== "off") {
+        if (uniqueChunks && options.dedup !== "off") {
             profiler?.enter("writeFile.verifyChunks", {
                 chunks: uniqueChunks.length,
             });
@@ -5908,6 +6086,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             const currentHeads = existingNodeId
                 ? await this.headsForNode(existingNodeId)
                 : [];
+            if (currentHeads[0]?.mode === SHARED_FS_MODE.symlink) {
+                // Batches write regular files only; see writeFile.
+                throw new SharedFsError(
+                    "EINVAL",
+                    `Path is a symlink: ${entry.path}`
+                );
+            }
             if (
                 entry.chunkSize === undefined &&
                 currentHeads.length === 1 &&
@@ -5951,6 +6136,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 causalDepth: maxDepth(currentHeads),
                 contentHash,
                 size: BigInt(bytes.byteLength),
+                ...inheritMeta(
+                    currentHeads,
+                    contentHash,
+                    metadata.timestamp,
+                    {}
+                ),
                 chunkIds: orderedChunks.map((chunk) => chunk.id),
                 createdAt: metadata.timestamp,
                 authorKey: metadata.authorKey,
@@ -6604,14 +6795,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             const target = await this.resolvePath(path);
             if (target?.kind === "file") {
                 const heads = await this.headsForNode(target.nodeId);
-                if (heads.length <= 1) {
+                const distinct = contentConflictHeads(heads);
+                if (distinct.length <= 1) {
                     return [];
                 }
                 return [
                     {
                         path: target.path,
                         nodeId: target.nodeId,
-                        versions: heads.map((head) =>
+                        versions: distinct.map((head) =>
                             this.versionInfo(head, target.path, heads)
                         ),
                     },
@@ -6640,7 +6832,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const conflicts: SharedFsConflict[] = [];
         for (const [nodeId, nodeDocuments] of byNode) {
             const heads = this.contentHeads(nodeDocuments);
-            if (heads.length <= 1) {
+            const distinct = contentConflictHeads(heads);
+            if (distinct.length <= 1) {
                 continue;
             }
             const state =
@@ -6662,7 +6855,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             conflicts.push({
                 path: recordPath,
                 nodeId,
-                versions: heads.map((head) =>
+                versions: distinct.map((head) =>
                     this.versionInfo(head, recordPath, heads)
                 ),
             });
@@ -6701,24 +6894,134 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         const heads = await this.headsForNode(resolved.nodeId);
-        const metadata = this.signedMetadata();
-        const resolution = new FileVersion({
-            id: createId("version"),
-            nodeId: selected.nodeId,
-            parentVersionIds: heads.map((head) => head.id),
-            causalDepth: maxDepth(heads),
-            contentHash: selected.contentHash,
-            size: selected.size,
-            chunkIds: selected.chunkIds,
-            createdAt: metadata.timestamp,
-            authorKey: metadata.authorKey,
-            machineLabel: metadata.machineLabel,
-            conflictResolution: true,
-        });
+        const resolution = this.copyVersion(selected, heads, selected, true);
         this.enterForegroundMutationCriticalTail(context);
         await this.entries.put(resolution, { unique: true });
         this.cacheLocalWrite(resolution);
         return this.versionInfo(resolution, normalized, [resolution]);
+    }
+
+    /**
+     * Set a file's exec bit (`mode`) and/or `mtime` without touching its
+     * bytes: one version that reuses the visible head's chunks (no chunk
+     * IO) and merges every head holding the same bytes. A head with other
+     * bytes stays a content conflict. Directories give EISDIR, symlinks
+     * EINVAL, and an `expectedNodeId` mismatch
+     * SharedFsExpectedNodeMismatchError.
+     */
+    async setMetadata(
+        path: string,
+        patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+        options: { expectedNodeId?: string } = {}
+    ): Promise<SharedFsVersionInfo> {
+        this.assertWriteReady("setMetadata");
+        return this.runForegroundMutation("setMetadata", (context) =>
+            this.setMetadataInner(path, patch, options, context)
+        );
+    }
+
+    private async setMetadataInner(
+        path: string,
+        patch: { mode?: number; mtime?: number },
+        options: { expectedNodeId?: string },
+        context: ForegroundMutationContext
+    ): Promise<SharedFsVersionInfo> {
+        assertFileMeta(patch, [SHARED_FS_MODE.file, SHARED_FS_MODE.executable]);
+        const normalized = normalizeFsPath(path);
+        const resolveExpected = async (
+            checkpoint: SharedFsExpectedNodeMismatchCheckpoint
+        ) => {
+            const resolved = await this.resolvePath(normalized);
+            const actual = resolved?.nodeId ?? null;
+            if (
+                options.expectedNodeId !== undefined &&
+                actual !== options.expectedNodeId
+            ) {
+                throw new SharedFsExpectedNodeMismatchError(
+                    normalized,
+                    options.expectedNodeId,
+                    actual,
+                    checkpoint
+                );
+            }
+            return resolved;
+        };
+        const resolved = await resolveExpected("initial");
+        if (resolved && resolved.kind !== "file") {
+            throw new SharedFsError(
+                "EISDIR",
+                `Path is a directory: ${normalized}`
+            );
+        }
+        const heads = resolved ? await this.headsForNode(resolved.nodeId) : [];
+        const visible = heads[0];
+        if (!visible) {
+            throw new SharedFsError(
+                "ENOENT",
+                `Path does not exist: ${normalized}`
+            );
+        }
+        if (visible.mode === SHARED_FS_MODE.symlink) {
+            throw new SharedFsError(
+                "EINVAL",
+                `Cannot set metadata on a symlink: ${normalized}`
+            );
+        }
+        const meta = {
+            mode: patch.mode ?? visible.mode,
+            mtime:
+                patch.mtime !== undefined ? BigInt(patch.mtime) : visible.mtime,
+        };
+        if (meta.mode === visible.mode && meta.mtime === visible.mtime) {
+            return this.versionInfo(visible, normalized, heads);
+        }
+        const source = await this.getDocument<SharedFsEntry>(visible.id);
+        if (!(source instanceof FileVersion)) {
+            throw new SharedFsError(
+                "EIO",
+                `Missing version document ${visible.id} for ${normalized}`
+            );
+        }
+        const version = this.copyVersion(
+            source,
+            heads.filter((head) => head.contentHash === visible.contentHash),
+            meta,
+            false
+        );
+        this.enterForegroundMutationCriticalTail(context);
+        await resolveExpected("before-version");
+        this.throwIfForegroundMutationInactive(context);
+        await this.entries.put(version, { unique: true });
+        this.cacheLocalWrite(version);
+        return this.versionInfo(version, normalized, [version]);
+    }
+
+    /**
+     * A new version of `source`'s bytes over `parents`, reusing its chunk
+     * list: shared by setMetadata, resolveConflict and naming restore.
+     */
+    private copyVersion(
+        source: FileVersion,
+        parents: VersionLike[],
+        meta: { mode: number; mtime: bigint },
+        conflictResolution: boolean
+    ) {
+        const metadata = this.signedMetadata();
+        return new FileVersion({
+            id: createId("version"),
+            nodeId: source.nodeId,
+            parentVersionIds: parents.map((parent) => parent.id),
+            causalDepth: maxDepth(parents),
+            contentHash: source.contentHash,
+            size: source.size,
+            mode: meta.mode,
+            mtime: meta.mtime,
+            chunkIds: source.chunkIds,
+            createdAt: metadata.timestamp,
+            authorKey: metadata.authorKey,
+            machineLabel: metadata.machineLabel,
+            conflictResolution,
+        });
     }
 
     /**
@@ -8425,20 +8728,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     }
                 }
                 await this.touchChunks(chunkDocs, "off");
-                const metadata = this.signedMetadata();
-                const resolution = new FileVersion({
-                    id: createId("version"),
-                    nodeId,
-                    parentVersionIds: heads.map((head) => head.id),
-                    causalDepth: maxDepth(heads),
-                    contentHash: visible.contentHash,
-                    size: visible.size,
-                    chunkIds: visible.chunkIds,
-                    createdAt: metadata.timestamp,
-                    authorKey: metadata.authorKey,
-                    machineLabel: metadata.machineLabel,
-                    conflictResolution: true,
-                });
+                const resolution = this.copyVersion(
+                    visible,
+                    heads,
+                    visible,
+                    true
+                );
                 await this.entries.put(resolution, { unique: true });
                 this.cacheLocalWrite(resolution);
             }
@@ -14637,6 +14932,14 @@ export class SharedFsHandle {
 
     resolveConflict(path: string, versionId: string) {
         return this.program.resolveConflict(path, versionId);
+    }
+
+    setMetadata(
+        path: string,
+        patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+        options?: { expectedNodeId?: string }
+    ) {
+        return this.program.setMetadata(path, patch, options);
     }
 
     namingConflicts(path?: string, options?: { allowPartial?: boolean }) {

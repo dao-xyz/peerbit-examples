@@ -51,6 +51,8 @@ const forkVersion = (parent: FileVersion, id: string) =>
         causalDepth: parent.causalDepth + 1n,
         contentHash: parent.contentHash,
         size: parent.size,
+        mode: parent.mode,
+        mtime: parent.mtime,
         chunkIds: parent.chunkIds,
         createdAt: parent.createdAt + 1n,
         authorKey: parent.authorKey,
@@ -1070,6 +1072,8 @@ describe("shared fs library", () => {
             causalDepth: base.causalDepth + 1n,
             contentHash: base.contentHash,
             size: base.size,
+            mode: base.mode,
+            mtime: base.mtime,
             chunkIds: base.chunkIds,
             createdAt: base.createdAt + 1n,
             authorKey: base.authorKey,
@@ -1240,12 +1244,12 @@ describe("shared fs library", () => {
             program.appendNamingEvent = originalAppendNamingEvent;
         }
         expect(injected).toBe(true);
-        expect(await fs.stat("/late-restore.txt")).toBeDefined();
-        const contentConflict = (await fs.conflicts("/late-restore.txt"))[0];
-        expect(contentConflict).toBeDefined();
-        expect(contentConflict.versions.map((version) => version.id)).toContain(
+        // The late head stays concurrent; it holds the restored bytes, so
+        // it is not a content conflict.
+        expect((await fs.stat("/late-restore.txt"))?.headVersionIds).toContain(
             late.id
         );
+        expect(await fs.conflicts("/late-restore.txt")).toEqual([]);
         expect(
             (await fs.namingConflicts()).filter(
                 (conflict) => conflict.nodeId === entry.nodeId
