@@ -22,8 +22,8 @@ export type SharedFsMountProfileSource =
  * - `loadBase`: explicit base-version documents (mount writes to existing
  *   files).
  * - `chunk`: splitting and per-chunk SHA-256 ids.
- * - `touchChunks`: W1 dedup (presence probes, fresh-witness queries) and chunk
- *   puts; its `*Ns` detail is task time summed over concurrent chunk tasks.
+ * - `touchChunks`: W1 dedup (batched presence probes, fresh-witness queries)
+ *   and chunk puts; `chunkPutNs` is task time summed over concurrent puts.
  * - `guard`: one expected-node recheck (`detail.checkpoint`).
  * - `versionPut` / `namingPut`: building and `Documents.put` of the
  *   FileVersion / NamingEvent (signing, log append, indexing, and anything
@@ -215,20 +215,33 @@ export type SharedFsWriteFileProfileHook = {
 };
 
 /**
- * @internal W1 chunk I/O counters. Chunk tasks run concurrently, so the `*Ns`
- * fields are task time summed over tasks, not wall time; for a single-chunk
- * write they partition the `writeFile.touchChunks` window.
+ * @internal W1 chunk I/O counters. Presence probes and fresh-witness queries
+ * are batched index queries issued one after another, so `probeNs` and
+ * `witnessNs` are their wall time; chunk puts run concurrently, so
+ * `chunkPutNs` is put time summed over tasks. Together they partition the
+ * `writeFile.touchChunks` window when at most one chunk is put.
  */
 export type SharedFsWriteFileChunkCounters = {
-    /** Index-only presence probes. */
+    /** Chunks whose presence was probed (index-only). */
     probes: number;
+    /** Batched index queries those presence probes took. */
+    probeQueries: number;
     probeNs: number;
-    /** Fresh-witness version queries for chunks already present. */
+    /**
+     * Fresh-witness query rounds for present chunks no base witness covered.
+     * Each round is one index query over a batch of chunks, plus one by-id
+     * read of the matching rows' chunk refs when the batch has several.
+     */
     witnessQueries: number;
     witnessNs: number;
     /** Chunks skipped because a fresh witness references them. */
     dedupSkips: number;
     dedupSkipBytes: number;
+    /**
+     * Of `dedupSkips`, chunks witnessed by a fresh parent version this write
+     * loaded, re-read in the presence probe, with no witness query.
+     */
+    baseWitnessed: number;
     /** Chunk documents put (absent, unwitnessed, or dedup disabled). */
     chunkPuts: number;
     chunkPutBytes: number;
@@ -245,11 +258,13 @@ export type SharedFsWriteFileChunkCounters = {
 export const createSharedFsWriteFileChunkCounters =
     (): SharedFsWriteFileChunkCounters => ({
         probes: 0,
+        probeQueries: 0,
         probeNs: 0,
         witnessQueries: 0,
         witnessNs: 0,
         dedupSkips: 0,
         dedupSkipBytes: 0,
+        baseWitnessed: 0,
         chunkPuts: 0,
         chunkPutBytes: 0,
         chunkPutNs: 0,

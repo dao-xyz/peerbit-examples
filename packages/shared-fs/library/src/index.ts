@@ -27,6 +27,7 @@ import {
     Or,
     StringMatch,
     type Query,
+    type Shape,
 } from "@peerbit/document";
 import {
     UNKNOWN_BLOCK_STORE_SAFETY,
@@ -254,6 +255,31 @@ const REMOTE_CHUNK_FETCH_TIMEOUT_MS = 10_000;
 
 /** Number of node ids per batched history query. */
 const HEAD_QUERY_BATCH = 64;
+
+/**
+ * Ids per batched W1/W2 index query: an Or of primary-key matches for
+ * presence, or of chunkRefs matches for fresh witnesses. Far below the
+ * indexer's bound-variable ceiling; one query covers a 64 MiB file at the
+ * default chunk size.
+ */
+const CHUNK_QUERY_BATCH = 128;
+
+/**
+ * Version rows read per fresh-witness round. A round that cannot prove it
+ * read every matching row narrows its Or to the chunks still unwitnessed.
+ */
+const CHUNK_WITNESS_PAGE = 16;
+
+/** Parent versions a write offers as W1 base-witness candidates. */
+const BASE_WITNESS_LIMIT = 8;
+
+/** Index-row fields W1 presence and witness decisions read. */
+const WITNESS_ROW_SHAPE = {
+    id: true,
+    kind: true,
+    createdAt: true,
+    chunkRefs: true,
+} as const satisfies Shape;
 
 /**
  * Directory conflict merge is an explicit repair operation, not an
@@ -1663,6 +1689,17 @@ const computeNamingState = (
         sorted.length > 1 && !sorted.every((head) => samePayload(head, winner));
     return { nodeId, events, heads: sorted, winner, conflicted };
 };
+
+/**
+ * The W1 witness predicate evaluated on one local index row: a file-version
+ * row created at or after the skip-horizon floor. Its chunkRefs are the
+ * chunks it witnesses.
+ */
+const isFreshWitnessRow = (row: any, horizonFloor: bigint): boolean =>
+    row != null &&
+    row.kind === "file-version" &&
+    BigInt(row.createdAt ?? 0) >= horizonFloor &&
+    Array.isArray(row.chunkRefs);
 
 /** Time one chunk put into opt-in writeFile profile counters. */
 const profileChunkPut = async (
@@ -4599,11 +4636,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * the old entry a non-CUT child that stops an in-flight delete's
      * recursive prune. Partial replicas always re-put so keep:"self"
      * protects the writer's own content.
+     *
+     * The per-chunk decisions are made from batched index reads: one
+     * presence probe per CHUNK_QUERY_BATCH chunks, then batched fresh-witness
+     * queries for the present chunks no base witness covers. Every decision
+     * is the one a per-chunk probe and witness query would make against the
+     * same index state. `witnessVersionIds` are the ids of versions this
+     * write loaded as its causal parents; each is re-read from the local
+     * index in the presence probe itself, and only a row that satisfies the
+     * W1 predicate there (a file-version created at or after the horizon
+     * floor) witnesses the chunks its chunkRefs list — exactly the rows a
+     * per-chunk witness query would have matched. The ids select rows; they
+     * are never trusted as evidence.
      */
     private async touchChunks(
         chunks: FileChunk[],
         dedup: "verify" | "off" | undefined,
-        profile?: SharedFsWriteFileChunkCounters
+        profile?: SharedFsWriteFileChunkCounters,
+        witnessVersionIds: readonly string[] = []
     ) {
         const fullReplica = this.isFullReplica();
         const horizonFloor = BigInt(
@@ -4611,11 +4661,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         );
         // Opt-in profile counters: each timed step reads the clock only when
         // `profile` is present.
-        await mapWithConcurrency(
-            chunks,
-            CHUNK_IO_CONCURRENCY,
-            async (chunk) => {
-                if (dedup === "off" || !fullReplica) {
+        if (dedup === "off" || !fullReplica) {
+            await mapWithConcurrency(
+                chunks,
+                CHUNK_IO_CONCURRENCY,
+                async (chunk) => {
                     if (profile) {
                         await profileChunkPut(
                             profile,
@@ -4626,79 +4676,283 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         return;
                     }
                     await this.entries.put(chunk);
-                    return;
                 }
-                const probeStarted = profile && process.hrtime.bigint();
-                const present = await this.hasDocument(chunk.id);
-                if (profile) {
-                    profile.probes++;
-                    profile.probeNs += sharedFsMountProfileElapsedNs(
-                        probeStarted!
-                    );
+            );
+            return;
+        }
+        if (chunks.length === 0) {
+            return;
+        }
+        const baseIds = [...new Set(witnessVersionIds)].slice(
+            0,
+            BASE_WITNESS_LIMIT
+        );
+        const probeStarted = profile && process.hrtime.bigint();
+        const rows = await this.indexRowsById(
+            [...baseIds, ...chunks.map((chunk) => chunk.id)],
+            WITNESS_ROW_SHAPE,
+            profile && (() => profile.probeQueries++)
+        );
+        if (profile) {
+            profile.probes += chunks.length;
+            profile.probeNs += sharedFsMountProfileElapsedNs(probeStarted!);
+        }
+        const baseWitnessed = new Set<string>();
+        for (const id of baseIds) {
+            const row = rows.get(id);
+            if (isFreshWitnessRow(row, horizonFloor)) {
+                for (const ref of row.chunkRefs) {
+                    baseWitnessed.add(ref);
                 }
-                if (!present) {
-                    // Absence just verified; a fresh chain with no
-                    // existing-key lookup. Duplicate-id races are idempotent
-                    // by construction under content addressing.
-                    if (profile) {
-                        await profileChunkPut(
-                            profile,
-                            chunk,
-                            "absentPuts",
-                            () => this.entries.put(chunk, { unique: true })
-                        );
-                        return;
-                    }
-                    await this.entries.put(chunk, { unique: true });
-                    return;
-                }
-                const witnessStarted = profile && process.hrtime.bigint();
-                const iterator = this.entries.index.iterate(
-                    {
-                        query: [
-                            new StringMatch({
-                                key: "kind",
-                                value: "file-version",
-                            }),
-                            new StringMatch({
-                                key: "chunkRefs",
-                                value: chunk.id,
-                            }),
-                            new IntegerCompare({
-                                key: "createdAt",
-                                compare: Compare.GreaterOrEqual,
-                                value: horizonFloor,
-                            }),
-                        ],
-                    },
-                    { local: true, remote: false, resolve: false }
+            }
+        }
+        const unresolved: string[] = [];
+        for (const chunk of chunks) {
+            if (rows.has(chunk.id) && !baseWitnessed.has(chunk.id)) {
+                unresolved.push(chunk.id);
+            }
+        }
+        let queryWitnessed: Set<string> | undefined;
+        if (unresolved.length > 0) {
+            const witnessStarted = profile && process.hrtime.bigint();
+            queryWitnessed = await this.freshWitnessedChunkIds(
+                unresolved,
+                horizonFloor,
+                profile && (() => profile.witnessQueries++)
+            );
+            if (profile) {
+                profile.witnessNs += sharedFsMountProfileElapsedNs(
+                    witnessStarted!
                 );
-                let witnessed: boolean;
-                try {
-                    witnessed = (await iterator.next(1)).length > 0;
-                } finally {
-                    await (iterator as any).close?.();
-                }
+            }
+        }
+        const puts: {
+            chunk: FileChunk;
+            counter: "absentPuts" | "linkedPuts";
+        }[] = [];
+        for (const chunk of chunks) {
+            if (!rows.has(chunk.id)) {
+                // Absence verified; a fresh chain with no existing-key
+                // lookup. Duplicate-id races are idempotent by construction
+                // under content addressing.
+                puts.push({ chunk, counter: "absentPuts" });
+            } else if (
+                baseWitnessed.has(chunk.id) ||
+                queryWitnessed?.has(chunk.id)
+            ) {
                 if (profile) {
-                    profile.witnessQueries++;
-                    profile.witnessNs += sharedFsMountProfileElapsedNs(
-                        witnessStarted!
-                    );
+                    profile.dedupSkips++;
+                    profile.dedupSkipBytes += chunk.bytes.byteLength;
+                    if (baseWitnessed.has(chunk.id)) profile.baseWitnessed++;
                 }
-                if (witnessed) {
-                    if (profile) {
-                        profile.dedupSkips++;
-                        profile.dedupSkipBytes += chunk.bytes.byteLength;
+            } else {
+                puts.push({ chunk, counter: "linkedPuts" });
+            }
+        }
+        await mapWithConcurrency(
+            puts,
+            CHUNK_IO_CONCURRENCY,
+            async ({ chunk, counter }) => {
+                const put = () =>
+                    counter === "absentPuts"
+                        ? this.entries.put(chunk, { unique: true })
+                        : this.entries.put(chunk);
+                if (profile) {
+                    await profileChunkPut(profile, chunk, counter, put);
+                    return;
+                }
+                await put();
+            }
+        );
+    }
+
+    /**
+     * Rows read straight from the local index. A local, unresolved Documents
+     * query filters nothing on this peer (it passes no canRead), so it
+     * matches exactly these rows; it also loads each row's log head for its
+     * result envelope, which W1/W2 bookkeeping never reads. `shape` narrows
+     * the returned fields. At most `limit + 1` rows (every row without a
+     * `limit`); `complete` only when they are provably every matching row.
+     */
+    private async localIndexRows(
+        query: Query[],
+        options: { limit?: number; shape?: Shape } = {}
+    ): Promise<{ rows: any[]; complete: boolean }> {
+        this.rowQueries++;
+        const iterator = this.entries.index.index.iterate(
+            { query },
+            options.shape ? { shape: options.shape } : undefined
+        );
+        try {
+            if (options.limit === undefined) {
+                const results = await iterator.all();
+                return {
+                    rows: results.map((result) => result.value),
+                    complete: true,
+                };
+            }
+            const results = await iterator.next(options.limit + 1);
+            return {
+                rows: results.map((result) => result.value),
+                complete:
+                    results.length <= options.limit && iterator.done() === true,
+            };
+        } finally {
+            await iterator.close();
+        }
+    }
+
+    /**
+     * Index-only presence for many ids: the local rows of the present ones,
+     * keyed by id, with the `shape` fields. The same primary-key lookup as
+     * hasDocument, batched as an Or of id matches.
+     */
+    private async indexRowsById(
+        ids: readonly string[],
+        shape: Shape,
+        onQuery?: () => void
+    ): Promise<Map<string, any>> {
+        const found = new Map<string, any>();
+        const unique = [...new Set(ids)];
+        for (let i = 0; i < unique.length; i += CHUNK_QUERY_BATCH) {
+            const batch = unique.slice(i, i + CHUNK_QUERY_BATCH);
+            const { rows } = await this.localIndexRows(
+                [
+                    batch.length === 1
+                        ? new StringMatch({ key: "id", value: batch[0] })
+                        : new Or(
+                              batch.map(
+                                  (id) =>
+                                      new StringMatch({ key: "id", value: id })
+                              )
+                          ),
+                ],
+                { shape }
+            );
+            onQuery?.();
+            for (const row of rows) {
+                found.set(row.id, row);
+            }
+        }
+        return found;
+    }
+
+    /**
+     * The chunk ids a fresh witness references: some file-version row in the
+     * local index with createdAt at or after `horizonFloor` lists the id in
+     * its chunkRefs. Answers the per-chunk W1 witness query for up to
+     * CHUNK_QUERY_BATCH chunks per round: one Or over chunkRefs finds
+     * matching rows, and one by-id read of those rows lists the chunks they
+     * witness. A round that cannot prove it read every matching row narrows
+     * the Or to the ids no row has witnessed yet; every such round witnesses
+     * at least one more id, so a batch needs at most one round per id and
+     * usually one. `onQuery` counts rounds.
+     */
+    private async freshWitnessedChunkIds(
+        chunkIds: readonly string[],
+        horizonFloor: bigint,
+        onQuery?: () => void
+    ): Promise<Set<string>> {
+        const witnessQuery = (refs: string[]): Query[] => [
+            new StringMatch({ key: "kind", value: "file-version" }),
+            refs.length === 1
+                ? new StringMatch({ key: "chunkRefs", value: refs[0] })
+                : new Or(
+                      refs.map(
+                          (ref) =>
+                              new StringMatch({ key: "chunkRefs", value: ref })
+                      )
+                  ),
+            new IntegerCompare({
+                key: "createdAt",
+                compare: Compare.GreaterOrEqual,
+                value: horizonFloor,
+            }),
+        ];
+        const witnessed = new Set<string>();
+        for (let i = 0; i < chunkIds.length; i += CHUNK_QUERY_BATCH) {
+            const pending = new Set(chunkIds.slice(i, i + CHUNK_QUERY_BATCH));
+            while (pending.size > 0) {
+                const refs = [...pending];
+                const { rows: matches, complete } = await this.localIndexRows(
+                    witnessQuery(refs),
+                    { limit: CHUNK_WITNESS_PAGE, shape: { id: true } }
+                );
+                onQuery?.();
+                if (refs.length === 1) {
+                    // Exactly the per-chunk witness query and its answer.
+                    if (matches.length > 0) witnessed.add(refs[0]);
+                    break;
+                }
+                let progressed = false;
+                if (matches.length > 0) {
+                    // Which pending refs the matching rows list, re-read by
+                    // id: returning chunkRefs from the filtering query itself
+                    // multiplies its child-table join per row.
+                    const listed = await this.indexRowsById(
+                        matches.map((match) => match.id),
+                        WITNESS_ROW_SHAPE
+                    );
+                    for (const row of listed.values()) {
+                        if (!isFreshWitnessRow(row, horizonFloor)) continue;
+                        for (const ref of row.chunkRefs) {
+                            if (pending.delete(ref)) {
+                                witnessed.add(ref);
+                                progressed = true;
+                            }
+                        }
                     }
-                    return;
                 }
-                if (profile) {
-                    await profileChunkPut(profile, chunk, "linkedPuts", () =>
-                        this.entries.put(chunk)
-                    );
-                    return;
+                if (complete) {
+                    // Every matching row was read: the rest have no witness.
+                    break;
                 }
-                await this.entries.put(chunk);
+                if (!progressed) {
+                    // Unreachable unless the matching rows vanished before
+                    // their re-read; answer the rest with exact per-chunk
+                    // queries rather than risk a loop.
+                    for (const ref of pending) {
+                        const single = await this.localIndexRows(
+                            witnessQuery([ref]),
+                            { limit: 0, shape: { id: true } }
+                        );
+                        onQuery?.();
+                        if (single.rows.length > 0) {
+                            witnessed.add(ref);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        return witnessed;
+    }
+
+    /**
+     * W2: once a version references `chunks`, re-verify each is still
+     * present (one batched index-only probe) and re-put from memory any a
+     * concurrently executing collector removed inside the probe window.
+     */
+    private async reverifyChunks(
+        chunks: FileChunk[],
+        counters?: { reputs: number; reputBytes: number }
+    ) {
+        if (chunks.length === 0) {
+            return;
+        }
+        const present = await this.indexRowsById(
+            chunks.map((chunk) => chunk.id),
+            { id: true }
+        );
+        await mapWithConcurrency(
+            chunks.filter((chunk) => !present.has(chunk.id)),
+            CHUNK_IO_CONCURRENCY,
+            async (chunk) => {
+                if (counters) {
+                    counters.reputs++;
+                    counters.reputBytes += chunk.bytes.byteLength;
+                }
+                await this.putPreferLinked(chunk);
             }
         );
     }
@@ -5253,7 +5507,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await this.touchChunks(
             uniqueChunks,
             options.dedup,
-            profiler?.counters(createSharedFsWriteFileChunkCounters())
+            profiler?.counters(createSharedFsWriteFileChunkCounters()),
+            // The parents this write loaded (explicit base documents, or the
+            // current head rows); touchChunks re-reads each from the local
+            // index before letting it witness anything.
+            parentVersions.map((parent) => parent.id)
         );
         // Path lookup, base loading, hashing and chunk IO all await. Recheck
         // immediately before publishing the node-scoped version so a local
@@ -5292,19 +5550,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 chunks: uniqueChunks.length,
             });
             const verified = profiler?.counters({ reputs: 0, reputBytes: 0 });
-            await mapWithConcurrency(
-                uniqueChunks,
-                CHUNK_IO_CONCURRENCY,
-                async (chunk) => {
-                    if (!(await this.hasDocument(chunk.id))) {
-                        if (verified) {
-                            verified.reputs++;
-                            verified.reputBytes += chunk.bytes.byteLength;
-                        }
-                        await this.putPreferLinked(chunk);
-                    }
-                }
-            );
+            await this.reverifyChunks(uniqueChunks, verified);
         }
         if (!existingNodeId) {
             // Brand-new path: content first, then the naming event that
@@ -5788,15 +6034,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             await this.entries.putMany(versions, { unique: true });
         }
         if (options.dedup !== "off" && allChunks.size > 0) {
-            await mapWithConcurrency(
-                [...allChunks.values()],
-                CHUNK_IO_CONCURRENCY,
-                async (chunk) => {
-                    if (!(await this.hasDocument(chunk.id))) {
-                        await this.putPreferLinked(chunk);
-                    }
-                }
-            );
+            await this.reverifyChunks([...allChunks.values()]);
         }
         if (namingEvents.length > 0) {
             await this.withOrdinaryNamingAppend(
