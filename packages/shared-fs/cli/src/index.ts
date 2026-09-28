@@ -9,7 +9,6 @@ import type {
     SharedFsVersionInfo,
     Peerbit,
     createSharedFsIpcServer,
-    mountNativeSharedFs,
     runSharedFsBenchmark,
 } from "@peerbit/shared-fs";
 import { multiaddr } from "@multiformats/multiaddr";
@@ -366,8 +365,7 @@ const readNativeStatus = async () => {
 
 type NativeStatus = Awaited<ReturnType<typeof readNativeStatus>>;
 
-const printNativeRequirements = async (status?: NativeStatus) => {
-    const native = status ?? (await readNativeStatus());
+const printNativeRequirements = (native: NativeStatus) => {
     console.log(chalk.bold("Native mount status"));
     console.log(`platform: ${native.platform}`);
     console.log(`adapter: ${native.adapter}`);
@@ -394,11 +392,9 @@ const printNativeRequirements = async (status?: NativeStatus) => {
     console.log("");
     console.log(chalk.bold("Native mount requirements"));
     console.log(
-        "linux: libfuse/FUSE plus fuse-native or the peerbit-shared-fs-native adapter"
+        "linux: libfuse/FUSE plus the peerbit-shared-fs-native adapter"
     );
-    console.log(
-        "macOS: macFUSE plus fuse-native or the peerbit-shared-fs-native adapter"
-    );
+    console.log("macOS: macFUSE plus the peerbit-shared-fs-native adapter");
     console.log(
         "windows: WinFsp runtime plus the peerbit-shared-fs-native adapter"
     );
@@ -900,15 +896,18 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
-                // Refuse a stale managed adapter before opening Peerbit.
+                // Refuse a missing or stale adapter before opening Peerbit.
                 const externalAdapter = await resolveMountNativeAdapter(
                     argv.nativeAdapter
                 );
+                if (!externalAdapter) {
+                    throw new Error(
+                        "No native mount adapter found. Run `peerbit-fs install-adapter`, or pass --native-adapter or set PEERBIT_SHARED_FS_NATIVE_ADAPTER."
+                    );
+                }
                 const {
-                    NativeMountUnavailableError,
                     createSharedFsIpcServer,
                     createSharedFsMountBackend,
-                    mountNativeSharedFs,
                     openSharedFsMountProfileFile,
                 } = await loadSharedFsRuntime();
                 const directory = resolveDirectory(argv.directory);
@@ -917,7 +916,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | Awaited<ReturnType<typeof createSharedFsIpcServer>>
                     | undefined;
                 let mounted:
-                    | Awaited<ReturnType<typeof mountNativeSharedFs>>
                     | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
@@ -965,37 +963,25 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     const mountpoint = normalizeNativeMountpoint(
                         String(argv.mountpoint)
                     );
-                    if (externalAdapter) {
-                        ipc = await createSharedFsIpcServer(
-                            backend,
-                            "tcp://127.0.0.1:0",
-                            { profile }
-                        );
-                        mounted = await mountExternalNativeAdapter(
-                            externalAdapter.command,
-                            ipc.endpoint,
-                            mountpoint,
-                            nativeProfileFile === undefined
-                                ? {}
-                                : { profileFile: nativeProfileFile }
-                        );
-                    } else {
-                        // In-process fuse-native mounts talk to the backend
-                        // directly; a loopback IPC hop would only add
-                        // latency.
-                        mounted = await mountNativeSharedFs(backend, {
-                            mountpoint,
-                            profile,
-                        });
-                    }
+                    ipc = await createSharedFsIpcServer(
+                        backend,
+                        "tcp://127.0.0.1:0",
+                        { profile }
+                    );
+                    mounted = await mountExternalNativeAdapter(
+                        externalAdapter.command,
+                        ipc.endpoint,
+                        mountpoint,
+                        nativeProfileFile === undefined
+                            ? {}
+                            : { profileFile: nativeProfileFile }
+                    );
                     console.log(
                         chalk.green(
                             `Mounted ${fsHandle.address} at ${mounted.mountpoint}`
                         )
                     );
-                    if (ipc) {
-                        console.log(`IPC endpoint: ${ipc.endpoint}`);
-                    }
+                    console.log(`IPC endpoint: ${ipc.endpoint}`);
                     const gcSchedule = fsHandle.gcStatus();
                     console.log(
                         gcSchedule.scheduled
@@ -1020,12 +1006,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         },
                         { ignoreErrors: true }
                     );
-                    if (error instanceof NativeMountUnavailableError) {
-                        console.error(chalk.red(error.message));
-                        await printNativeRequirements();
-                        process.exitCode = 1;
-                        return;
-                    }
                     throw error;
                 }
             }
@@ -1055,12 +1035,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     if (argv.json) {
                         printJson({ nativeMount, filesystem: null });
                     } else {
-                        await printNativeRequirements(nativeMount);
+                        printNativeRequirements(nativeMount);
                     }
                     return;
                 }
                 if (!argv.json) {
-                    await printNativeRequirements(nativeMount);
+                    printNativeRequirements(nativeMount);
                 }
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);

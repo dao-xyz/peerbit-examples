@@ -862,10 +862,10 @@ release failures.
 
 The first adapter path is intentionally experimental:
 
-- Linux requires FUSE/libfuse plus `fuse-native` or the external adapter.
-- macOS requires macFUSE plus `fuse-native` or the external adapter.
+- Linux requires FUSE/libfuse plus the external adapter.
+- macOS requires macFUSE plus the external adapter.
 - Windows requires WinFsp plus the external adapter.
-- `packages/shared-fs/native` provides an experimental external native adapter
+- `packages/shared-fs/native` provides the experimental external native adapter
   binary using cgofuse for Linux FUSE, macFUSE, and WinFsp.
   `peerbit-fs install-adapter` downloads the prebuilt adapter from the CLI's
   own release and records that pin; `peerbit-fs mount` refuses a managed
@@ -874,12 +874,7 @@ The first adapter path is intentionally experimental:
 The external adapter forwards the flags supplied at its cgofuse callback
 boundary. Linux FUSE and macFUSE retain creation and status flags for `Create`;
 WinFsp translates Windows access, append, and overwrite semantics above FUSE
-and synthesizes its `Create` flags. The `fuse-native` API exposes flags for
-`open` but not for its `create` callback, so that shim conservatively requests
-read/write/create/exclusive access without truncation. It cannot preserve the
-caller's requested access mode or `O_APPEND` during creation, and an ordinary
-`O_CREAT` race may therefore return `EEXIST`. Use the external adapter when
-its platform translation is required.
+and synthesizes its `Create` flags.
 
 The adapter transport limits each request and response to 64 MiB by default.
 `createSharedFsIpcServer` speaks only binary IPC v2, which the Go adapter
@@ -912,14 +907,14 @@ backend-independent hardware cache or power-loss barrier.
 
 ### Opt-in mounted-path profiling
 
-`createSharedFsMountBackend`, `createSharedFsIpcServer`, and
-`mountNativeSharedFs` accept a `profile` sink. It receives
-`peerbit.shared-fs.mount-profile` (schema version 1) events with a decimal
-Unix-nanosecond `startUnixNs` string and a monotonic `durationNs`. Profiling is
-disabled by default; the disabled hot path only checks the absent sink. Sink
-exceptions are ignored because the sink is report-only. When
-`mountNativeSharedFs` receives an already-created backend, pass the same sink
-to `createSharedFsMountBackend` to receive its inner commit events.
+`createSharedFsMountBackend` and `createSharedFsIpcServer` accept a `profile`
+sink. It receives `peerbit.shared-fs.mount-profile` (schema version 1) events
+with a decimal Unix-nanosecond `startUnixNs` string and a monotonic
+`durationNs`. Profiling is disabled by default; the disabled hot path only
+checks the absent sink. Sink exceptions are ignored because the sink is
+report-only. `createSharedFsIpcServer` receives an already-created backend, so
+pass the same sink to `createSharedFsMountBackend` to receive its inner commit
+events.
 
 A sink runs on the mount path. Use `openSharedFsMountProfileFile(path)` or
 `createSharedFsMountProfileWriter(stream)` for output: the sink only appends to
@@ -933,9 +928,9 @@ exclusively and never overwritten.
 
 The phases are deliberately narrow and nest rather than add up:
 
-- `native.callback` (source `fuse-native`) spans userspace entry through
-  handing the result to `fuse-native`; reads and writes carry `bytes` and
-  `offset`. The external Go adapter writes the same phase to its own file.
+- `native.callback`, `ipc.queue` and `ipc.roundTrip` are written by the
+  external Go adapter to its own file (source `native-adapter`); see
+  `packages/shared-fs/native/README.md`.
 - `ipc.service` covers only the Node server's backend method, not parsing or
   response delivery. It carries the wire `requestId`, `protocol`, and the
   adapter connection's `remotePort`, which join it to the adapter's

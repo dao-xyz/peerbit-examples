@@ -5,7 +5,7 @@ describe("native mount support detection", () => {
     it("reports adapter availability without throwing", async () => {
         const support = await getNativeMountSupport();
         expect(support.platform).toBe(process.platform);
-        expect(support.adapter).toMatch(/^(fuse-native|winfsp|unsupported)$/);
+        expect(support.adapter).toMatch(/^(fuse|winfsp|unsupported)$/);
         expect(support.available).toBeTypeOf("boolean");
         expect(Array.isArray(support.missing)).toBe(true);
         expect(Array.isArray(support.notes)).toBe(true);

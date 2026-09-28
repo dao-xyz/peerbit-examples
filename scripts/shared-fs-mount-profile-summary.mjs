@@ -24,7 +24,7 @@ export const MOUNT_PROFILE_SUMMARY_SCHEMA =
 export const MOUNT_PROFILE_SUMMARY_SCHEMA_VERSION = 1;
 export const DEFAULT_JOIN_TOLERANCE_NS = 1_000_000;
 
-const SOURCES = new Set(["fuse-native", "native-adapter", "node-daemon"]);
+const SOURCES = new Set(["native-adapter", "node-daemon"]);
 const META_PHASES = new Set(["profile.start", "profile.summary"]);
 const UNIX_NS = /^[1-9][0-9]{0,18}$/u;
 const ABSENT_CODES = new Set(["ENOENT"]);
@@ -1072,7 +1072,7 @@ export const formatMountProfileSummaryMarkdown = (
     lines.push(
         `Records: ${summary.inputs.map((input) => `${input.file.split(/[\\/]/u).at(-1)}=${input.records}`).join(", ")}`,
         `Sessions: ${integrity.sessions.length} (${integrity.incompleteSessions} without a final summary); dropped=${integrity.dropped} lost=${integrity.lost} writeErrors=${integrity.writeErrors}`,
-        `Adapter records present: ${integrity.adapterRecordsPresent ? "yes" : "no (older adapter, in-process mount, or adapter profiling failed)"}`,
+        `Adapter records present: ${integrity.adapterRecordsPresent ? "yes" : "no (older adapter or adapter profiling failed)"}`,
         ""
     );
     const ignored = summary.inputs.reduce(

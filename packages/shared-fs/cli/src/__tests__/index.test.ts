@@ -420,13 +420,14 @@ describe("peerbit-fs cli", () => {
         );
     });
 
-    it("reports and refuses an unpinned managed adapter before opening Peerbit", async () => {
+    it("reports and refuses a missing or unpinned managed adapter before opening Peerbit", async () => {
         const installDir = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-adapter-pin-")
         );
         const saved = {
             adapter: process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER,
             installDir: process.env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR,
+            path: process.env.PATH,
         };
         const { version } = JSON.parse(
             await fs.readFile(
@@ -475,12 +476,29 @@ describe("peerbit-fs cli", () => {
                 ])
             ).rejects.toThrow(refusal);
             expect(createPeerbit).not.toHaveBeenCalled();
+
+            // Without any adapter, mount points at install-adapter.
+            await fs.rm(path.dirname(binaryPath), { recursive: true });
+            process.env.PATH = "";
+            await expect(
+                runCli([
+                    "mount",
+                    "zb2rh-not-opened",
+                    "/tmp/peerbit-shared-fs-not-mounted",
+                    "--directory",
+                    "",
+                ])
+            ).rejects.toThrow(
+                "No native mount adapter found. Run `peerbit-fs install-adapter`"
+            );
+            expect(createPeerbit).not.toHaveBeenCalled();
         } finally {
             log.mockRestore();
             createPeerbit.mockRestore();
             for (const [name, value] of [
                 ["PEERBIT_SHARED_FS_NATIVE_ADAPTER", saved.adapter],
                 ["PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR", saved.installDir],
+                ["PATH", saved.path],
             ] as const) {
                 if (value === undefined) {
                     delete process.env[name];

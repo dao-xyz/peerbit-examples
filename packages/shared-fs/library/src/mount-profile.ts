@@ -5,10 +5,7 @@ import type { Writable } from "node:stream";
 export const SHARED_FS_MOUNT_PROFILE_SCHEMA = "peerbit.shared-fs.mount-profile";
 export const SHARED_FS_MOUNT_PROFILE_SCHEMA_VERSION = 1;
 
-export type SharedFsMountProfileSource =
-    | "fuse-native"
-    | "native-adapter"
-    | "node-daemon";
+export type SharedFsMountProfileSource = "native-adapter" | "node-daemon";
 
 /**
  * Sequential sub-phases of one library `writeFile` call made by a profiled
