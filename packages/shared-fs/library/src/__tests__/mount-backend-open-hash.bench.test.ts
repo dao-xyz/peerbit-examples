@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 const enabled = process.env.PEERBIT_SHARED_FS_MOUNT_OPEN_BENCH === "1";
 const manualDescribe = enabled ? describe : describe.skip;
 const SIZES_MIB = [4, 64, 256] as const;
-const MODES = ["fallback", "verified"] as const;
 const SAMPLES = 5;
 const CHILD_TIMEOUT_MS = 5 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
@@ -13,10 +12,7 @@ const workerPath = fileURLToPath(
     new URL("./mount-backend-open-hash.bench.worker.ts", import.meta.url)
 );
 
-type BenchmarkMode = (typeof MODES)[number];
-
 type OpenHashBenchmarkSample = {
-    mode: BenchmarkMode;
     sizeMiB: number;
     sizeBytes: number;
     samples: number;
@@ -24,7 +20,6 @@ type OpenHashBenchmarkSample = {
     targetCopyP50Ms: number;
     targetHashP50Ms: number;
     openP50MiBPerSecond: number;
-    legacyReadCalls: number;
     verifiedReadCalls: number;
     targetHashCalls: number;
     targetHashedBytes: number;
@@ -50,9 +45,9 @@ afterEach(() => {
     runningChildren.clear();
 });
 
-const runWorker = (sizeMiB: number, mode: BenchmarkMode) =>
+const runWorker = (sizeMiB: number) =>
     new Promise<OpenHashBenchmarkSample>((resolve, reject) => {
-        const child = fork(workerPath, [String(sizeMiB), mode], {
+        const child = fork(workerPath, [String(sizeMiB)], {
             execArgv: [
                 "--expose-gc",
                 "--enable-source-maps",
@@ -109,7 +104,7 @@ const runWorker = (sizeMiB: number, mode: BenchmarkMode) =>
         const onError = (error: Error) => {
             fail(
                 new Error(
-                    `Open-hash benchmark worker for ${mode} ${sizeMiB} MiB failed: ${error.message}${diagnostics()}`,
+                    `Open-hash benchmark worker for ${sizeMiB} MiB failed: ${error.message}${diagnostics()}`,
                     { cause: error }
                 )
             );
@@ -123,7 +118,7 @@ const runWorker = (sizeMiB: number, mode: BenchmarkMode) =>
                 fail(
                     new Error(
                         fatal ??
-                            `Open-hash benchmark worker for ${mode} ${sizeMiB} MiB exited without a result (code=${code}, signal=${signal})${diagnostics()}`
+                            `Open-hash benchmark worker for ${sizeMiB} MiB exited without a result (code=${code}, signal=${signal})${diagnostics()}`
                     )
                 );
                 return;
@@ -135,7 +130,7 @@ const runWorker = (sizeMiB: number, mode: BenchmarkMode) =>
         const timeout = setTimeout(() => {
             fail(
                 new Error(
-                    `Open-hash benchmark worker for ${mode} ${sizeMiB} MiB exceeded ${CHILD_TIMEOUT_MS} ms${diagnostics()}`
+                    `Open-hash benchmark worker for ${sizeMiB} MiB exceeded ${CHILD_TIMEOUT_MS} ms${diagnostics()}`
                 )
             );
         }, CHILD_TIMEOUT_MS);
@@ -151,18 +146,12 @@ const expectFiniteNumbers = (values: Record<string, number>) => {
     }
 };
 
-const validateSample = (
-    sample: OpenHashBenchmarkSample,
-    sizeMiB: number,
-    mode: BenchmarkMode
-) => {
+const validateSample = (sample: OpenHashBenchmarkSample, sizeMiB: number) => {
     expect(sample).toMatchObject({
-        mode,
         sizeMiB,
         sizeBytes: sizeMiB * 1024 * 1024,
         samples: SAMPLES,
-        legacyReadCalls: mode === "fallback" ? SAMPLES : 0,
-        verifiedReadCalls: mode === "verified" ? SAMPLES : 0,
+        verifiedReadCalls: SAMPLES,
         targetHashCalls: SAMPLES,
         targetHashedBytes: SAMPLES * sizeMiB * 1024 * 1024,
         statCalls: SAMPLES * 2,
@@ -189,46 +178,15 @@ const roundedJson = (value: unknown) =>
 
 manualDescribe("mount backend writable-open hash benchmark (manual)", () => {
     it(
-        "compares fallback and target-verified exact-version opens",
-        {
-            timeout:
-                SIZES_MIB.length * MODES.length * CHILD_TIMEOUT_MS + 60_000,
-        },
+        "measures target-verified exact-version opens",
+        { timeout: SIZES_MIB.length * CHILD_TIMEOUT_MS + 60_000 },
         async () => {
             for (const sizeMiB of SIZES_MIB) {
-                const fallback = await runWorker(sizeMiB, "fallback");
-                validateSample(fallback, sizeMiB, "fallback");
+                const sample = await runWorker(sizeMiB);
+                validateSample(sample, sizeMiB);
                 console.log(
                     "mount-backend-open-hash-bench-sample:",
-                    roundedJson(fallback)
-                );
-
-                const verified = await runWorker(sizeMiB, "verified");
-                validateSample(verified, sizeMiB, "verified");
-                console.log(
-                    "mount-backend-open-hash-bench-sample:",
-                    roundedJson(verified)
-                );
-
-                const observedOpenDeltaMs =
-                    verified.openP50Ms - fallback.openP50Ms;
-                const fallbackToVerifiedRatio =
-                    fallback.openP50Ms / verified.openP50Ms;
-                expectFiniteNumbers({
-                    observedOpenDeltaMs,
-                    fallbackToVerifiedRatio,
-                });
-                // No timing budget: allocator, CPU-frequency and scheduler
-                // noise can reverse a paired observation on a busy host.
-                console.log(
-                    "mount-backend-open-hash-bench-pair:",
-                    roundedJson({
-                        sizeMiB,
-                        fallbackOpenP50Ms: fallback.openP50Ms,
-                        verifiedOpenP50Ms: verified.openP50Ms,
-                        observedOpenDeltaMs,
-                        fallbackToVerifiedRatio,
-                    })
+                    roundedJson(sample)
                 );
             }
         }

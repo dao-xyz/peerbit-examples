@@ -167,19 +167,8 @@ export { Peerbit } from "peerbit";
 
 export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
-export const SHARED_FS_MOUNT_WRITE_SEMANTICS =
-    "self-hashed-exact-head-noop-v1" as const;
-export const SHARED_FS_MOUNT_READ_SEMANTICS =
-    "verified-exact-version-snapshot-v1" as const;
-export const SHARED_FS_MOUNT_NAMESPACE_SEMANTICS =
-    "node-guarded-namespace-v1" as const;
 
-export type SharedFsMountWriteSemantics =
-    typeof SHARED_FS_MOUNT_WRITE_SEMANTICS;
 export type SharedFsMountWriteOutcome = "unchanged" | "created";
-export type SharedFsMountReadSemantics = typeof SHARED_FS_MOUNT_READ_SEMANTICS;
-export type SharedFsMountNamespaceSemantics =
-    typeof SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
 export type SharedFsMountOpenDescendant = { path: string; nodeId: string };
 export type SharedFsMountNamespaceMutation =
     | {
@@ -1115,7 +1104,7 @@ export type WriteFileOptions = {
 };
 
 export type SharedFsWriteFileResult = SharedFsVersionInfo & {
-    /** Present only for the versioned native-mount write capability. */
+    /** Present only when the write supplied `noOpIfHeadVersionIds`. */
     mountWriteOutcome?: SharedFsMountWriteOutcome;
 };
 
@@ -6733,24 +6722,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Versioned capability for native mounts that must bind unlink/rename to
-     * the exact visible nodes opened by the kernel-facing adapter. This is a
-     * visible-state CAS fence, serialized only within this program instance;
-     * it is not a linearizable/global no-resurrection guarantee. An unseen
-     * concurrent delete or rename can still conflict after publication, and
-     * the naming CRDT's existing non-delete preference remains unchanged.
+     * Native-mount unlink/rename bound to the exact visible nodes opened by
+     * the kernel-facing adapter. This is a visible-state CAS fence,
+     * serialized only within this program instance; it is not a
+     * linearizable/global no-resurrection guarantee. An unseen concurrent
+     * delete or rename can still conflict after publication, and the naming
+     * CRDT's existing non-delete preference remains unchanged.
      */
-    mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
-        // A subclass that changes legacy namespace behavior must explicitly
-        // override and re-advertise a coherent guarded implementation.
-        return this.rm === SharedFileSystem.prototype.rm &&
-            this.rename === SharedFileSystem.prototype.rename &&
-            this.mutateNamespaceForMount ===
-                SharedFileSystem.prototype.mutateNamespaceForMount
-            ? SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-            : undefined;
-    }
-
     mutateNamespaceForMount(
         mutation: SharedFsMountNamespaceMutation
     ): Promise<SharedFsMountNamespaceMutationResult> {
@@ -14584,15 +14562,6 @@ export class SharedFsHandle {
     }
 
     /**
-     * Versioned native-mount handshake. The implementation hashes write input
-     * itself, uses `noOpIfHeadVersionIds` only for a conditional exact-head
-     * no-op (mismatch still writes), and returns an explicit outcome.
-     */
-    mountWriteSemantics(): SharedFsMountWriteSemantics {
-        return SHARED_FS_MOUNT_WRITE_SEMANTICS;
-    }
-
-    /**
      * @internal Private mount-profile opt-in: true only while `writeFile`
      * hands its options, including the live `mountProfile` hook, unchanged
      * to SharedFileSystem.writeFile. A subclass that overrides `writeFile`
@@ -14608,53 +14577,6 @@ export class SharedFsHandle {
     /** @internal The delegated program runs the profiled library write. */
     protected programAcceptsWriteFileProfile(): boolean {
         return this.program.writeFile === SharedFileSystem.prototype.writeFile;
-    }
-
-    /**
-     * Versioned native-mount read handshake. Exact-version reads exposed by
-     * `readVersionForMount` have already passed chunk and whole-file hash
-     * verification, and return that same verified allocation with its bound
-     * version metadata.
-     */
-    mountReadSemantics(): SharedFsMountReadSemantics | undefined {
-        // An inherited capability must not bypass a wrapper's overridden
-        // exact-read semantics or an overridden reader on its delegated
-        // program. Such wrappers retain the legacy mount path unless they
-        // explicitly override and re-advertise this capability.
-        const usesDefaultHandleReaders =
-            this.readVersion === SharedFsHandle.prototype.readVersion &&
-            this.readVersionForMount ===
-                SharedFsHandle.prototype.readVersionForMount;
-        const usesDefaultProgramReaders =
-            this.program.readVersion ===
-                SharedFileSystem.prototype.readVersion &&
-            this.program.readVersionForMount ===
-                SharedFileSystem.prototype.readVersionForMount;
-        return usesDefaultHandleReaders && usesDefaultProgramReaders
-            ? SHARED_FS_MOUNT_READ_SEMANTICS
-            : undefined;
-    }
-
-    /** Advertise guarded namespace mutation only when delegation is exact. */
-    mountNamespaceSemantics(): SharedFsMountNamespaceSemantics | undefined {
-        const usesDefaultHandleMutations =
-            this.rm === SharedFsHandle.prototype.rm &&
-            this.rename === SharedFsHandle.prototype.rename &&
-            this.mutateNamespaceForMount ===
-                SharedFsHandle.prototype.mutateNamespaceForMount;
-        const usesDefaultProgramMutations =
-            this.program.rm === SharedFileSystem.prototype.rm &&
-            this.program.rename === SharedFileSystem.prototype.rename &&
-            this.program.mutateNamespaceForMount ===
-                SharedFileSystem.prototype.mutateNamespaceForMount &&
-            this.program.mountNamespaceSemantics ===
-                SharedFileSystem.prototype.mountNamespaceSemantics;
-        return usesDefaultHandleMutations &&
-            usesDefaultProgramMutations &&
-            this.program.mountNamespaceSemantics() ===
-                SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-            ? SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-            : undefined;
     }
 
     mutateNamespaceForMount(mutation: SharedFsMountNamespaceMutation) {

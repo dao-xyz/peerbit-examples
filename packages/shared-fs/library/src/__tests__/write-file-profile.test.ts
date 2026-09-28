@@ -79,28 +79,25 @@ const phaseSequence = (children: SharedFsMountProfileEvent[]) =>
 const byPhase = (children: SharedFsMountProfileEvent[], phase: string) =>
     children.find((child) => child.phase === phase)?.detail;
 
-/** Capability-advertising target whose writeFile calls are observable. */
-const spiedTarget = (fs: SharedFsHandle, capable: boolean) => {
+/** Custom mount target whose writeFile calls are observable. */
+const spiedTarget = (fs: SharedFsHandle) => {
     const options: (WriteFileOptions | undefined)[] = [];
     const target: SharedFsMountBackendTarget = {
-        readFile: (path) => fs.readFile(path),
-        readVersion: (path, versionId) => fs.readVersion(path, versionId),
+        readVersionForMount: (path, versionId) =>
+            fs.readVersionForMount(path, versionId),
         writeFile: (path, source, writeOptions) => {
             options.push(writeOptions);
             return fs.writeFile(path, source, writeOptions);
         },
         mkdir: (path) => fs.mkdir(path),
-        rm: (path) => fs.rm(path),
-        rename: (from, to) => fs.rename(from, to),
+        mutateNamespaceForMount: (mutation) =>
+            fs.mutateNamespaceForMount(mutation),
         list: (path) => fs.list(path),
         versions: (path) => fs.versions(path),
         conflicts: (path, conflictOptions) =>
             fs.conflicts(path, conflictOptions),
         stat: (path) => fs.stat(path),
         bootstrapStatus: () => fs.bootstrapStatus(),
-        ...(capable
-            ? { mountWriteSemantics: () => fs.mountWriteSemantics() }
-            : {}),
     };
     return { target, options };
 };
@@ -122,7 +119,7 @@ describe("opt-in writeFile sub-phase profiling", () => {
         await peer.stop();
     });
 
-    it("never hands the live hook to a capable target that is not a SharedFs handle", async () => {
+    it("never hands the live hook to a target that is not a SharedFs handle", async () => {
         const commit = async (
             target: SharedFsMountBackendTarget,
             path: string,
@@ -141,14 +138,12 @@ describe("opt-in writeFile sub-phase profiling", () => {
             return events;
         };
 
-        // A third-party target that advertises the public mount write
-        // handshake but clones its options (as a worker or IPC proxy would):
+        // A third-party target that implements the public mount target
+        // contract but clones its options (as a worker or IPC proxy would):
         // a function-valued hook would make every profiled commit fail.
         const cloned: (WriteFileOptions | undefined)[] = [];
-        const capable = spiedTarget(fs, true).target;
-        expect(capable.mountWriteSemantics?.()).toBe(fs.mountWriteSemantics());
         const cloning: SharedFsMountBackendTarget = {
-            ...capable,
+            ...spiedTarget(fs).target,
             writeFile: (path, source, writeOptions) => {
                 const copy = structuredClone(writeOptions);
                 cloned.push(copy);
@@ -217,10 +212,10 @@ describe("opt-in writeFile sub-phase profiling", () => {
         }
     });
 
-    it("passes no hook without profiling or to a target without the write handshake", async () => {
-        const unprofiled = spiedTarget(fs, true);
+    it("passes no hook without profiling", async () => {
+        const unprofiled = spiedTarget(fs);
         const plain = createSharedFsMountBackend(unprofiled.target);
-        let handle = await plain.open("/plain.txt", {
+        const handle = await plain.open("/plain.txt", {
             write: true,
             create: true,
         });
@@ -228,36 +223,12 @@ describe("opt-in writeFile sub-phase profiling", () => {
         await plain.release(handle);
         expect(unprofiled.options).toHaveLength(1);
         expect(unprofiled.options[0]).not.toHaveProperty("mountProfile");
-
-        // A profiled backend over a custom target without the versioned
-        // write capability passes exactly the unprofiled options.
-        const events: SharedFsMountProfileEvent[] = [];
-        const custom = spiedTarget(fs, false);
-        const legacy = createSharedFsMountBackend(custom.target, {
-            profile: (event) => events.push(event),
-        });
-        handle = await legacy.open("/legacy.txt", {
-            write: true,
-            create: true,
-        });
-        await legacy.write(handle, encode("legacy"), 0);
-        await legacy.release(handle);
-        expect(custom.options).toHaveLength(1);
-        expect(custom.options[0]).not.toHaveProperty("mountProfile");
-        expect(events.filter(isSubPhase)).toEqual([]);
-        expect(events.map((event) => event.phase)).toEqual([
-            "mount.target.writeFile",
-            "mount.localCommit",
-        ]);
-        expect(events[0].detail).toMatchObject({ writeId: 1 });
-        expect(decode(await fs.readFile("/legacy.txt"))).toBe("legacy");
     });
 
     it("keeps profiled and unprofiled writes observably identical", async () => {
         const run = async (target: SharedFsHandle, profiled: boolean) => {
             const events: SharedFsMountProfileEvent[] = [];
             const backend = createSharedFsMountBackend(target, {
-                writeFileInput: "immutable-borrowed",
                 ...(profiled ? { profile: (event) => events.push(event) } : {}),
             });
             const write = async (

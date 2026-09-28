@@ -277,9 +277,9 @@ export const createSharedFsWriteFileChunkCounters =
  * @internal Private opt-in, not exported from the package: a mount target
  * whose method under this key returns true hands
  * `WriteFileOptions.mountProfile` (a live function) to
- * `SharedFileSystem.writeFile` unchanged. The public `mountWriteSemantics`
- * handshake does not imply this, because a capable third-party target may
- * clone, serialize, or validate its options.
+ * `SharedFileSystem.writeFile` unchanged. Implementing the public mount target
+ * contract does not imply this, because a third-party target may clone,
+ * serialize, or validate its options.
  */
 export const SHARED_FS_WRITE_FILE_PROFILE_TARGET = Symbol(
     "peerbit.shared-fs.writeFileProfileTarget"

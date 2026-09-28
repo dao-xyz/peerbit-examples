@@ -3,17 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     ROOT_NODE_ID,
     NamingEvent,
-    SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
-    SHARED_FS_MOUNT_READ_SEMANTICS,
     SharedFsError,
     SharedFsExpectedNamespaceMismatchError,
-    SharedFsHandle,
     createSharedFsMountBackend,
     openSharedFs,
     type SharedFsHandle as SharedFsHandleType,
     type SharedFsMountBackendTarget,
 } from "../index.js";
-import { IgnoreAwareFs } from "../ignore/ignore-fs.js";
 
 const deferred = () => {
     let resolve!: () => void;
@@ -46,16 +42,10 @@ const exactTarget = (
     fs: SharedFsHandleType,
     overrides: Partial<SharedFsMountBackendTarget> = {}
 ): SharedFsMountBackendTarget => ({
-    mountNamespaceSemantics: () => SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
     mutateNamespaceForMount: (mutation) => fs.mutateNamespaceForMount(mutation),
-    mountReadSemantics: () => SHARED_FS_MOUNT_READ_SEMANTICS,
     readVersionForMount: (path, id) => fs.readVersionForMount(path, id),
-    readFile: (path) => fs.readFile(path),
-    readVersion: (path, id) => fs.readVersion(path, id),
     writeFile: (path, content, options) => fs.writeFile(path, content, options),
     mkdir: (path) => fs.mkdir(path),
-    rm: (path) => fs.rm(path),
-    rename: (from, to) => fs.rename(from, to),
     list: (path) => fs.list(path),
     versions: (path) => fs.versions(path),
     conflicts: (path, options) => fs.conflicts(path, options),
@@ -746,25 +736,6 @@ describe("node-guarded mount namespace", () => {
         ).toBe("destination");
     });
 
-    it("fails inherited capability advertisement closed", () => {
-        class LegacyOverride extends SharedFsHandle {
-            override rm(path: string) {
-                return super.rm(path);
-            }
-        }
-        expect(
-            new LegacyOverride(fs.program).mountNamespaceSemantics()
-        ).toBeUndefined();
-        expect(fs.mountNamespaceSemantics()).toBe(
-            SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-        );
-
-        fs.program.mountNamespaceSemantics = () => undefined;
-        expect(new SharedFsHandle(fs.program).mountNamespaceSemantics()).toBe(
-            undefined
-        );
-    });
-
     it("binds a pure-read open descendant during backend directory rename", async () => {
         await fs.mkdir("/dir");
         await fs.writeFile("/dir/read.txt", "read");
@@ -772,22 +743,9 @@ describe("node-guarded mount namespace", () => {
         const mutate = vi.fn((mutation) =>
             fs.mutateNamespaceForMount(mutation)
         );
-        const target: SharedFsMountBackendTarget = {
-            mountNamespaceSemantics: () => SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
-            mutateNamespaceForMount: mutate,
-            readFile: (path) => fs.readFile(path),
-            readVersion: (path, id) => fs.readVersion(path, id),
-            writeFile: (path, content, options) =>
-                fs.writeFile(path, content, options),
-            mkdir: (path) => fs.mkdir(path),
-            rm: (path) => fs.rm(path),
-            rename: (from, to) => fs.rename(from, to),
-            list: (path) => fs.list(path),
-            versions: (path) => fs.versions(path),
-            conflicts: (path, options) => fs.conflicts(path, options),
-            stat: (path) => fs.stat(path),
-        };
-        const backend = createSharedFsMountBackend(target);
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { mutateNamespaceForMount: mutate })
+        );
         const handle = await backend.open("/dir/read.txt", { read: true });
         await backend.rename("/dir", "/moved");
         expect(mutate).toHaveBeenCalledWith(
@@ -946,7 +904,7 @@ describe("node-guarded mount namespace", () => {
         ).toBe("dirty!");
     });
 
-    it("keeps IgnoreAwareFs policy to one snapshot and delegated capability exact", async () => {
+    it("keeps IgnoreAwareFs mount namespace policy to one snapshot", async () => {
         const ignored = (await openSharedFs({
             peerbit: peer,
             machineLabel: "ignore-namespace-test",
@@ -966,69 +924,20 @@ describe("node-guarded mount namespace", () => {
             })
         ).rejects.toMatchObject({ code: "EXDEV" });
         expect(current).toHaveBeenCalledTimes(1);
-        expect(ignored.mountNamespaceSemantics()).toBe(
-            SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-        );
-
-        // Simulate a delegated program subclass changing namespace behavior.
-        ignored.program.rm = ignored.program.rm.bind(ignored.program);
-        expect(ignored.program.mountNamespaceSemantics()).toBeUndefined();
-        expect(ignored.mountNamespaceSemantics()).toBeUndefined();
-
-        // A delegated subclass/monkey patch cannot bypass the wrapper's
-        // identity checks by blindly returning the capability constant.
-        ignored.program.mountNamespaceSemantics = () =>
-            SHARED_FS_MOUNT_NAMESPACE_SEMANTICS;
-        expect(ignored.program.mountNamespaceSemantics()).toBe(
-            SHARED_FS_MOUNT_NAMESPACE_SEMANTICS
-        );
-        expect(ignored.mountNamespaceSemantics()).toBeUndefined();
     });
 
-    it("fails IgnoreAwareFs subclass inheritance closed", async () => {
-        const ignored = (await openSharedFs({
-            peerbit: peer,
-            machineLabel: "ignore-subclass-test",
-            ignore: { patterns: ["dist/"] },
-        })) as IgnoreAwareFs;
-        class IgnoreOverride extends IgnoreAwareFs {
-            override rm(path: string) {
-                return super.rm(path);
-            }
-        }
-        const wrapper = new IgnoreOverride(
-            ignored.program,
-            ignored.ignorePolicy,
-            { patterns: ["dist/"] }
-        );
-        expect(wrapper.mountNamespaceSemantics()).toBeUndefined();
-    });
-
-    it("does not call legacy rename after exact-capability malformed output", async () => {
+    it("fails closed on malformed guarded rename output", async () => {
         await fs.writeFile("/from.txt", "from");
-        const rename = vi.fn();
-        const target: SharedFsMountBackendTarget = {
-            mountNamespaceSemantics: () => SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
-            mutateNamespaceForMount: vi.fn(async () => ({}) as any),
-            readFile: (path) => fs.readFile(path),
-            readVersion: (path, id) => fs.readVersion(path, id),
-            writeFile: (path, content, options) =>
-                fs.writeFile(path, content, options),
-            mkdir: (path) => fs.mkdir(path),
-            rm: (path) => fs.rm(path),
-            rename,
-            list: (path) => fs.list(path),
-            versions: (path) => fs.versions(path),
-            conflicts: (path, options) => fs.conflicts(path, options),
-            stat: (path) => fs.stat(path),
-        };
-        const backend = createSharedFsMountBackend(target);
+        const mutate = vi.fn(async () => ({}) as any);
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { mutateNamespaceForMount: mutate })
+        );
         await expect(
             backend.rename("/from.txt", "/to.txt")
         ).rejects.toMatchObject({
             code: "EIO",
         });
-        expect(rename).not.toHaveBeenCalled();
+        expect(mutate).toHaveBeenCalledOnce();
         expect(await fs.stat("/from.txt")).toBeDefined();
     });
 
@@ -1973,24 +1882,15 @@ describe("node-guarded mount namespace", () => {
         const writeFile = vi.fn((path, content, options) =>
             fs.writeFile(path, content, options)
         );
-        const target: SharedFsMountBackendTarget = {
-            mountNamespaceSemantics: () => SHARED_FS_MOUNT_NAMESPACE_SEMANTICS,
-            mutateNamespaceForMount: async (mutation) => {
-                await fs.mutateNamespaceForMount(mutation);
-                return {} as any;
-            },
-            readFile: (path) => fs.readFile(path),
-            readVersion: (path, id) => fs.readVersion(path, id),
-            writeFile,
-            mkdir: (path) => fs.mkdir(path),
-            rm: (path) => fs.rm(path),
-            rename: (from, to) => fs.rename(from, to),
-            list: (path) => fs.list(path),
-            versions: (path) => fs.versions(path),
-            conflicts: (path, options) => fs.conflicts(path, options),
-            stat: (path) => fs.stat(path),
-        };
-        const backend = createSharedFsMountBackend(target);
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, {
+                mutateNamespaceForMount: async (mutation) => {
+                    await fs.mutateNamespaceForMount(mutation);
+                    return {} as any;
+                },
+                writeFile,
+            })
+        );
         const handle = await backend.open("/source.txt", {
             read: true,
             write: true,
@@ -2018,9 +1918,7 @@ describe("node-guarded mount namespace", () => {
                 return fs.writeFile(path, content, options);
             },
         });
-        const backend = createSharedFsMountBackend(target, {
-            writeFileInput: "immutable-borrowed",
-        });
+        const backend = createSharedFsMountBackend(target);
         const handle = await backend.open("/file.txt", {
             read: true,
             write: true,
@@ -2036,196 +1934,45 @@ describe("node-guarded mount namespace", () => {
         expect(await fs.stat("/file.txt")).toBeUndefined();
     });
 
-    it("detaches every shared sibling after a successful legacy unlink", async () => {
-        await fs.writeFile("/legacy-unlink.txt", "original");
-        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
+    it("fails closed when guarded unlink or rename mutates then rejects", async () => {
+        await fs.writeFile("/throw-unlink.txt", "unlink");
+        await fs.writeFile("/throw-source.txt", "source");
+        const writeFile = vi.fn((path, content, options) =>
+            fs.writeFile(path, content, options)
+        );
         const backend = createSharedFsMountBackend(
             exactTarget(fs, {
-                mountNamespaceSemantics: () => undefined,
-                mutateNamespaceForMount: undefined,
                 writeFile,
-            })
-        );
-        const first = await backend.open("/legacy-unlink.txt", {
-            read: true,
-            write: true,
-        });
-        const sibling = await backend.open("/legacy-unlink.txt", {
-            read: true,
-            write: true,
-        });
-        await backend.write(first, encode("local!!!"), 0);
-        expect(decode(await backend.read(sibling, 32, 0))).toBe("local!!!");
-
-        await backend.unlink("/legacy-unlink.txt");
-        await expect(
-            backend.getattr("/legacy-unlink.txt")
-        ).rejects.toMatchObject({ code: "ENOENT" });
-        expect(decode(await backend.read(first, 32, 0))).toBe("local!!!");
-        expect(decode(await backend.read(sibling, 32, 0))).toBe("local!!!");
-        await Promise.all([backend.flush(first), backend.flush(sibling)]);
-        await Promise.all([backend.release(first), backend.release(sibling)]);
-
-        expect(writeFile).not.toHaveBeenCalled();
-        expect(await fs.stat("/legacy-unlink.txt")).toBeUndefined();
-    });
-
-    it("detaches a shared legacy replacement destination before stale flush", async () => {
-        await fs.writeFile("/legacy-source.txt", "source-value");
-        await fs.writeFile("/legacy-destination.txt", "destination!");
-        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
-        const backend = createSharedFsMountBackend(
-            exactTarget(fs, {
-                mountNamespaceSemantics: () => undefined,
-                mutateNamespaceForMount: undefined,
-                writeFile,
-            })
-        );
-        const source = await backend.open("/legacy-source.txt", {
-            read: true,
-            write: true,
-        });
-        const destination = await backend.open("/legacy-destination.txt", {
-            read: true,
-            write: true,
-        });
-        const destinationSibling = await backend.open(
-            "/legacy-destination.txt",
-            { read: true, write: true }
-        );
-        await backend.write(destination, encode("stale-state!"), 0);
-
-        await backend.rename("/legacy-source.txt", "/legacy-destination.txt");
-        expect(decode(await backend.read(destinationSibling, 32, 0))).toBe(
-            "stale-state!"
-        );
-        await backend.flush(destinationSibling);
-        await Promise.all([
-            backend.release(destination),
-            backend.release(destinationSibling),
-            backend.release(source),
-        ]);
-
-        expect(writeFile).not.toHaveBeenCalled();
-        expect(await fs.stat("/legacy-source.txt")).toBeUndefined();
-        expect(decode(await fs.readFile("/legacy-destination.txt"))).toBe(
-            "source-value"
-        );
-    });
-
-    it("does not rebase a remotely replaced legacy source state", async () => {
-        await fs.writeFile("/legacy-raced-source.txt", "node-a");
-        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
-        const backend = createSharedFsMountBackend(
-            exactTarget(fs, {
-                mountNamespaceSemantics: () => undefined,
-                mutateNamespaceForMount: undefined,
-                writeFile,
-            })
-        );
-        const stale = await backend.open("/legacy-raced-source.txt", {
-            read: true,
-            write: true,
-        });
-        await backend.write(stale, encode("stale!"), 0);
-        await fs.rm("/legacy-raced-source.txt");
-        await fs.writeFile("/legacy-raced-source.txt", "node-b");
-
-        await backend.rename(
-            "/legacy-raced-source.txt",
-            "/legacy-raced-destination.txt"
-        );
-        expect(decode(await backend.read(stale, 32, 0))).toBe("stale!");
-        await backend.flush(stale);
-        await backend.release(stale);
-
-        expect(writeFile).not.toHaveBeenCalled();
-        expect(decode(await fs.readFile("/legacy-raced-destination.txt"))).toBe(
-            "node-b"
-        );
-    });
-
-    it("post-validates a legacy source replaced inside the rename delegate", async () => {
-        await fs.writeFile("/legacy-delegate-source.txt", "node-a");
-        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
-        const backend = createSharedFsMountBackend(
-            exactTarget(fs, {
-                mountNamespaceSemantics: () => undefined,
-                mutateNamespaceForMount: undefined,
-                writeFile,
-                rename: async (from, to) => {
-                    await fs.rm(from);
-                    await fs.writeFile(from, "node-b");
-                    await fs.rename(from, to);
+                mutateNamespaceForMount: async (mutation) => {
+                    await fs.mutateNamespaceForMount(mutation);
+                    throw new Error(`post-${mutation.type} failure`);
                 },
             })
         );
-        const stale = await backend.open("/legacy-delegate-source.txt", {
+        const removed = await backend.open("/throw-unlink.txt", {
             read: true,
             write: true,
         });
-        await backend.write(stale, encode("stale!"), 0);
-
-        await backend.rename(
-            "/legacy-delegate-source.txt",
-            "/legacy-delegate-destination.txt"
-        );
-        expect(decode(await backend.read(stale, 32, 0))).toBe("stale!");
-        await backend.flush(stale);
-        await backend.release(stale);
-
-        expect(writeFile).not.toHaveBeenCalled();
-        expect(
-            decode(await fs.readFile("/legacy-delegate-destination.txt"))
-        ).toBe("node-b");
-    });
-
-    it("fails closed when legacy unlink or rename mutates then rejects", async () => {
-        await fs.writeFile("/legacy-throw-unlink.txt", "unlink");
-        await fs.writeFile("/legacy-throw-source.txt", "source");
-        const writeFile = vi.fn((path, content) => fs.writeFile(path, content));
-        const backend = createSharedFsMountBackend(
-            exactTarget(fs, {
-                mountNamespaceSemantics: () => undefined,
-                mutateNamespaceForMount: undefined,
-                writeFile,
-                rm: async (path) => {
-                    await fs.rm(path);
-                    throw new Error("post-remove failure");
-                },
-                rename: async (from, to) => {
-                    await fs.rename(from, to);
-                    throw new Error("post-rename failure");
-                },
-            })
-        );
-        const removed = await backend.open("/legacy-throw-unlink.txt", {
-            read: true,
-            write: true,
-        });
-        const moved = await backend.open("/legacy-throw-source.txt", {
+        const moved = await backend.open("/throw-source.txt", {
             read: true,
             write: true,
         });
         await backend.write(removed, encode("stale!"), 0);
         await backend.write(moved, encode("stale!"), 0);
 
+        await expect(backend.unlink("/throw-unlink.txt")).rejects.toMatchObject(
+            { code: "EIO" }
+        );
         await expect(
-            backend.unlink("/legacy-throw-unlink.txt")
-        ).rejects.toMatchObject({ code: "EIO" });
-        await expect(
-            backend.rename(
-                "/legacy-throw-source.txt",
-                "/legacy-throw-destination.txt"
-            )
+            backend.rename("/throw-source.txt", "/throw-destination.txt")
         ).rejects.toMatchObject({ code: "EIO" });
         await Promise.all([backend.flush(removed), backend.flush(moved)]);
         await Promise.all([backend.release(removed), backend.release(moved)]);
 
         expect(writeFile).not.toHaveBeenCalled();
-        expect(await fs.stat("/legacy-throw-unlink.txt")).toBeUndefined();
-        expect(await fs.stat("/legacy-throw-source.txt")).toBeUndefined();
-        expect(decode(await fs.readFile("/legacy-throw-destination.txt"))).toBe(
+        expect(await fs.stat("/throw-unlink.txt")).toBeUndefined();
+        expect(await fs.stat("/throw-source.txt")).toBeUndefined();
+        expect(decode(await fs.readFile("/throw-destination.txt"))).toBe(
             "source"
         );
     });
@@ -2577,50 +2324,6 @@ describe("node-guarded mount namespace", () => {
         );
     });
 
-    it("keeps a legacy writable upgrade staged while rename admission fails", async () => {
-        await fs.writeFile("/staged-upgrade.txt", "visible");
-        const entered = deferred();
-        const allowed = deferred();
-        const readVersion = vi.fn(async (path: string, versionId: string) => {
-            entered.resolve();
-            await allowed.promise;
-            return fs.readVersion(path, versionId);
-        });
-        const mutate = vi.fn((mutation) =>
-            fs.mutateNamespaceForMount(mutation)
-        );
-        const backend = createSharedFsMountBackend(
-            exactTarget(fs, {
-                mountReadSemantics: () => undefined,
-                readFile: async () => encode("fallback"),
-                readVersion,
-                mutateNamespaceForMount: mutate,
-            })
-        );
-        const reader = await backend.open("/staged-upgrade.txt", {
-            read: true,
-        });
-        const openingWriter = backend.open("/staged-upgrade.txt", {
-            read: true,
-            write: true,
-        });
-        await entered.promise;
-
-        await expect(
-            backend.rename("/staged-upgrade.txt", "/staged-moved.txt")
-        ).rejects.toMatchObject({ code: "EAGAIN" });
-        expect(mutate).not.toHaveBeenCalled();
-        expect(decode(await backend.read(reader, 32, 0))).toBe("fallback");
-        allowed.resolve();
-        const writer = await openingWriter;
-        expect(decode(await backend.read(reader, 32, 0))).toBe("visible");
-
-        await backend.rename("/staged-upgrade.txt", "/staged-moved.txt");
-        await backend.write(writer, encode("updated"), 0);
-        await Promise.all([backend.release(reader), backend.release(writer)]);
-        expect(decode(await fs.readFile("/staged-moved.txt"))).toBe("updated");
-    });
-
     it("blocks rename while a sibling descriptor commits shared state", async () => {
         await fs.writeFile("/shared-commit.txt", "before");
         const entered = deferred();
@@ -2666,8 +2369,7 @@ describe("node-guarded mount namespace", () => {
             return fs.writeFile(path, content, options);
         });
         const backend = createSharedFsMountBackend(
-            exactTarget(fs, { writeFile }),
-            { writeFileInput: "immutable-borrowed" }
+            exactTarget(fs, { writeFile })
         );
         const first = await backend.open("/borrowed-siblings.txt", {
             read: true,
