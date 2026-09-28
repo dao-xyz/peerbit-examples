@@ -26,7 +26,8 @@ Changed:
   adapter is found, as it already did on Windows.
 - `peerbit-fs mount` with no adapter now fails before opening Peerbit with an
   error that says to run `peerbit-fs install-adapter` (or to pass
-  `--native-adapter` or set `PEERBIT_SHARED_FS_NATIVE_ADAPTER`), instead of
-  trying `fuse-native`. `peerbit-fs status` no longer lists `fuse-native` as
-  an alternative, and `nativeMount.adapter` in `status --json` follows
+  `--native-adapter` or set `PEERBIT_SHARED_FS_NATIVE_ADAPTER`) and lists the
+  native mount requirements, instead of trying `fuse-native`.
+  `peerbit-fs status` no longer lists `fuse-native` as an alternative, and
+  `nativeMount.adapter` in `status --json` follows
   `NativeMountSupport.adapter`.

@@ -189,18 +189,6 @@ export const finishSharedFsMountProfile = (
     return durationNs;
 };
 
-/** @internal Begin a callback-shaped phase after the caller opted in. */
-export const beginSharedFsMountProfile = (
-    sink: SharedFsMountProfileSink,
-    identity: ProfileEventIdentity
-) => {
-    const started = process.hrtime.bigint();
-    return (
-        ok: boolean,
-        extraDetail?: Readonly<Record<string, SharedFsMountProfileDetailValue>>
-    ) => finishSharedFsMountProfile(sink, identity, started, ok, extraDetail);
-};
-
 /**
  * @internal Opt-in request, passed by a profiled mount backend as
  * `WriteFileOptions.mountProfile`, for `writeFile` sub-phase records.

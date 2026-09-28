@@ -901,9 +901,14 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     argv.nativeAdapter
                 );
                 if (!externalAdapter) {
-                    throw new Error(
-                        "No native mount adapter found. Run `peerbit-fs install-adapter`, or pass --native-adapter or set PEERBIT_SHARED_FS_NATIVE_ADAPTER."
+                    console.error(
+                        chalk.red(
+                            "No native mount adapter found. Run `peerbit-fs install-adapter`, or pass --native-adapter or set PEERBIT_SHARED_FS_NATIVE_ADAPTER."
+                        )
                     );
+                    printNativeRequirements(await readNativeStatus());
+                    process.exitCode = 1;
+                    return;
                 }
                 const {
                     createSharedFsIpcServer,
