@@ -574,7 +574,16 @@ File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
 stored and replicated exactly once, saving an unchanged file is a no-op, and a
 small edit to a large file stores only the changed chunks (fixed-size
-chunking: in-place edits dedupe; inserts shift subsequent chunks). Chunk
+chunking: in-place edits dedupe; inserts shift subsequent chunks). A save
+skips re-putting a chunk only when the chunk is present locally and a version
+younger than the dedup skip horizon (15 days by default) references it;
+otherwise it re-puts the chunk, and after the new version lands it
+re-verifies that every chunk is still present. This bookkeeping is batched
+in slices of up to 128 chunks, each probed with one index query and put
+before the next slice is probed; a fresh parent version the save loaded
+witnesses the chunks it references without a further query, and the
+remaining chunks share batched witness queries, so a save issues a few
+index queries per 128 chunks rather than one or two per unchanged chunk. Chunk
 documents are self-certifying — peers reject any chunk whose bytes do not hash
 to its id, at replication time and again on read. Note the standard dedup
 trade-off: chunk ids reveal content equality, so anyone with the filesystem
@@ -945,9 +954,10 @@ The phases are deliberately narrow and nest rather than add up:
   `result`. Each carries the same `writeId` plus bounded detail (bytes, chunk
   counts, dedup skips, puts, outcome). They are contiguous and lie inside
   their `mount.target.writeFile` record, so they may be added to each other
-  but never to their parent. `touchChunks` also reports probe, witness and put
-  task time summed over its concurrent chunk tasks. The request is a live
-  function in the write options, so the backend passes it only to
+  but never to their parent. `touchChunks` also reports its batched presence
+  probe and witness query counts and wall time, the chunks its base version
+  witnessed, and put task time summed over its concurrent puts. The request
+  is a live function in the write options, so the backend passes it only to
   `SharedFsHandle` and the artifact-ignore wrapper while they keep their
   default `writeFile` delegation (a private opt-in). Every other target,
   including one that advertises the public mount write handshake, receives

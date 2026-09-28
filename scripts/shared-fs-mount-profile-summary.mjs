@@ -539,12 +539,16 @@ const WRITE_FILE_SUB_PHASE_PREFIX = "writeFile.";
 const WRITE_KINDS = ["newFile", "existingFile", "unchanged", "failed"];
 const FIRST_SUB_PHASE = "writeFile.prepare";
 const LAST_SUB_PHASE = "writeFile.result";
-const CHUNK_TASK_TIMES = ["probeNs", "witnessNs", "chunkPutNs"];
+// probeNs and witnessNs are wall time of batched index queries issued one
+// after another; chunkPutNs is put time summed over concurrent puts.
+const CHUNK_TIMES = ["probeNs", "witnessNs", "chunkPutNs"];
 const CHUNK_COUNTERS = [
     "probes",
+    "probeQueries",
     "witnessQueries",
     "dedupSkips",
     "dedupSkipBytes",
+    "baseWitnessed",
     "chunkPuts",
     "chunkPutBytes",
     "absentPuts",
@@ -708,7 +712,7 @@ export const summarizeWriteFileBreakdown = (records) => {
                 newFile = child.detail.newFile === true;
             }
             if (child.phase === "writeFile.touchChunks") {
-                for (const key of [...CHUNK_TASK_TIMES, ...CHUNK_COUNTERS]) {
+                for (const key of [...CHUNK_TIMES, ...CHUNK_COUNTERS]) {
                     if (typeof child.detail[key] === "number") {
                         chunkIo[key] = (chunkIo[key] ?? 0) + child.detail[key];
                     }
@@ -761,9 +765,9 @@ export const summarizeWriteFileBreakdown = (records) => {
     const withChunks = completeWrites.filter(
         (write) => write.phases.get("writeFile.touchChunks") !== undefined
     );
-    const chunkTaskNs = {};
-    for (const key of CHUNK_TASK_TIMES) {
-        chunkTaskNs[key] = durationStats(
+    const chunkTimeNs = {};
+    for (const key of CHUNK_TIMES) {
+        chunkTimeNs[key] = durationStats(
             withChunks.map((write) => write.chunkIo[key] ?? 0)
         );
     }
@@ -799,9 +803,9 @@ export const summarizeWriteFileBreakdown = (records) => {
         byKind: kinds,
         touchChunks: {
             writes: withChunks.length,
-            // Summed over concurrent chunk tasks: equal to wall time only for
-            // single-chunk writes.
-            taskNs: chunkTaskNs,
+            // Per write: probeNs and witnessNs are wall time; chunkPutNs is
+            // summed over concurrent puts (wall time when at most one put).
+            timeNs: chunkTimeNs,
             totals: chunkTotals,
         },
     };
@@ -1017,13 +1021,13 @@ export const formatWriteFileBreakdownLines = (breakdown) => {
     );
     const chunks = breakdown.touchChunks;
     if (chunks.writes > 0) {
-        const task = (key) =>
-            `${ms(chunks.taskNs[key].p50Ns)} / ${ms(chunks.taskNs[key].p95Ns)}`;
+        const time = (key) =>
+            `${ms(chunks.timeNs[key].p50Ns)} / ${ms(chunks.timeNs[key].p95Ns)}`;
         const totals = chunks.totals;
         lines.push(
             "",
-            `touchChunks task time per write, p50 / p95 (summed over concurrent chunk tasks): probe ${task("probeNs")}, witness query ${task("witnessNs")}, chunk put ${task("chunkPutNs")}.`,
-            `Chunk I/O totals: ${totals.chunkPuts} chunk puts (${totals.chunkPutBytes} bytes; absent ${totals.absentPuts}, linked ${totals.linkedPuts}, unprobed ${totals.unprobedPuts}), ${totals.dedupSkips} dedup skips (${totals.dedupSkipBytes} bytes), ${totals.probes} probes, ${totals.witnessQueries} witness queries, ${totals.reputs} W2 re-puts.`
+            `touchChunks time per write, p50 / p95: presence probe ${time("probeNs")} and witness query ${time("witnessNs")} (wall time of batched index queries), chunk put ${time("chunkPutNs")} (summed over concurrent puts).`,
+            `Chunk I/O totals: ${totals.chunkPuts} chunk puts (${totals.chunkPutBytes} bytes; absent ${totals.absentPuts}, linked ${totals.linkedPuts}, unprobed ${totals.unprobedPuts}), ${totals.dedupSkips} dedup skips (${totals.dedupSkipBytes} bytes; ${totals.baseWitnessed} base-witnessed), ${totals.probes} chunks probed in ${totals.probeQueries} probe queries, ${totals.witnessQueries} witness rounds, ${totals.reputs} W2 re-puts.`
         );
     }
     const kinds = WRITE_KINDS.filter((kind) => breakdown.byKind[kind]);
