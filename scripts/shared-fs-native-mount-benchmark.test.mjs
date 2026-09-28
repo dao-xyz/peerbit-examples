@@ -234,7 +234,7 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
     assert.match(powershell, /MOUNT_BENCH_WARMUPS[\s\S]*"3"/u);
 });
 
-test("native smoke wrappers plumb opt-in mount profiling and the overwrite base", async () => {
+test("native smoke wrappers plumb opt-in mount profiling, the overwrite base and the developer workload", async () => {
     // Windows checkouts may use CRLF (core.autocrlf); match on LF text.
     const readLf = async (relative) =>
         (await readFile(new URL(relative, import.meta.url), "utf8")).replace(
@@ -255,6 +255,10 @@ test("native smoke wrappers plumb opt-in mount profiling and the overwrite base"
             source,
             /PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES[\s\S]*--overwrite-base-bytes/u
         );
+        assert.match(
+            source,
+            /PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD[\s\S]*--dev-workload/u
+        );
     }
     // Profiling stays opt-in: without the variable the mount argv is unchanged.
     assert.match(
@@ -262,6 +266,7 @@ test("native smoke wrappers plumb opt-in mount profiling and the overwrite base"
         /if \[ -n "\$\{PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-\}" \]; then\n\s+mount_args\+=/u
     );
     assert.match(workflow, /mount_profile:[\s\S]*default: false/u);
+    assert.match(workflow, /dev_workload:[\s\S]*default: false/u);
     assert.match(
         workflow,
         /overwrite_base_bytes:[\s\S]*default: "4194304"[\s\S]*- "4194304"\n\s+- "33554432"/u
@@ -394,7 +399,7 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         assert.equal(report.schemaVersion, 4);
         assert.equal(report.run.warmupsPerScenario, 1);
         // Default runs are unchanged: the developer workload is opt-in.
-        assert.deepEqual(report.run.devWorkload, { enabled: false });
+        assert.equal(report.run.devWorkload, false);
         assert.equal(report.devWorkload, null);
         assert.doesNotMatch(
             formatNativeMountBenchmarkSummary(report),

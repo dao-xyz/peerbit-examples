@@ -113,7 +113,7 @@ jobs:
                       reports.push(report);
                       await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkSummary(report));
                     }
-                    if (reports[0].run.devWorkload.enabled) {
+                    if (reports[0].run.devWorkload) {
                       await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkComparison(reports[0], reports[1]));
                     }
                   '

@@ -18,12 +18,10 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
     DEV_WORKLOAD_MODULE_PATH,
+    devWorkloadSampleCounts,
     devWorkloadScenarioNames,
     executeDevWorkload,
     formatDevWorkloadSummaryLines,
-    isDevWorkloadGitScenario,
-    validateDevWorkloadScenario,
-    validateDevWorkloadSection,
 } from "./shared-fs-native-mount-benchmark-dev-workload.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -57,14 +55,7 @@ const integerOptions = {
     "--readdir-entries": ["readdirEntries", 1, 5000],
     "--overwrite-base-bytes": ["overwriteBaseBytes", OVERWRITE_BYTES, 32 << 20],
     "--timeout-ms": ["timeoutMs", 1000, 3_600_000],
-    "--dev-git-samples": ["devGitSamples", 1, 20],
-    "--dev-git-warmups": ["devGitWarmups", 0, 5],
 };
-const DEV_WORKLOAD_ONLY_OPTIONS = new Set([
-    "--dev-git-samples",
-    "--dev-git-warmups",
-    "--dev-git-executable",
-]);
 
 export const parseNativeMountBenchmarkArguments = (argv) => {
     const options = {
@@ -80,29 +71,21 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
         targetKind: "shared-fs-mount",
         targetLabel: "caller-supplied mounted path",
         devWorkload: false,
-        devGitSamples: 3,
-        devGitWarmups: 1,
         devGitExecutable: "git",
     };
-    const devWorkloadOnlyOptions = [];
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index];
         if (argument === "--") continue;
-        if (DEV_WORKLOAD_ONLY_OPTIONS.has(argument)) {
-            devWorkloadOnlyOptions.push(argument);
-        }
         if (argument === "--dev-workload") {
             options.devWorkload = true;
             continue;
         }
+        // Test seam: the developer workload's git executable.
         if (argument === "--dev-git-executable") {
-            const value = argv[++index];
-            if (!value || value.length > 1024 || /[\r\n]/u.test(value)) {
-                throw new Error(
-                    "--dev-git-executable requires a single-line path of at most 1024 characters"
-                );
+            options.devGitExecutable = argv[++index];
+            if (!options.devGitExecutable) {
+                throw new Error(`${argument} requires a path`);
             }
-            options.devGitExecutable = value;
             continue;
         }
         if (argument === "--mount" || argument === "--output") {
@@ -208,9 +191,6 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
         options[key] = value;
     }
     if (!options.mount) throw new Error("--mount is required");
-    if (!options.devWorkload && devWorkloadOnlyOptions.length > 0) {
-        throw new Error(`${devWorkloadOnlyOptions[0]} requires --dev-workload`);
-    }
     if (
         options.targetKind === "local-filesystem-control" &&
         options.mountOptions.length > 0
@@ -249,7 +229,7 @@ const throwIfAborted = (signal) => {
         : new Error("benchmark aborted");
 };
 
-const mixUint32 = (input) => {
+export const mixUint32 = (input) => {
     let value = input >>> 0;
     value ^= value >>> 16;
     value = Math.imul(value, 0x7feb352d);
@@ -764,17 +744,6 @@ export const expectedNativeMountBenchmarkScenarioNames = (options) => [
     ...(options.devWorkload ? devWorkloadScenarioNames(options) : []),
 ];
 
-const runDevWorkloadRecord = (options) =>
-    options.devWorkload
-        ? {
-              enabled: true,
-              gitSamplesPerScenario: options.devGitSamples,
-              gitWarmupsPerScenario: options.devGitWarmups,
-              sampleCounts:
-                  "git scenarios use gitSamplesPerScenario/gitWarmupsPerScenario; other developer-workload scenarios use samplesPerScenario/warmupsPerScenario",
-          }
-        : { enabled: false };
-
 /** The run options a report was produced with, in CLI option shape. */
 export const nativeMountBenchmarkRunOptions = (report) => ({
     samples: report?.run?.samplesPerScenario,
@@ -782,9 +751,7 @@ export const nativeMountBenchmarkRunOptions = (report) => ({
     smallFiles: report?.run?.smallFilesPerSample,
     readdirEntries: report?.run?.readdirEntries,
     overwriteBaseBytes: report?.run?.overwriteBaseBytes,
-    devWorkload: report?.run?.devWorkload?.enabled === true,
-    devGitSamples: report?.run?.devWorkload?.gitSamplesPerScenario,
-    devGitWarmups: report?.run?.devWorkload?.gitWarmupsPerScenario,
+    devWorkload: report?.run?.devWorkload === true,
 });
 
 export const validateNativeMountBenchmarkReport = (report, options) => {
@@ -894,59 +861,38 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         report.run.warmupsPerScenario !== expectedOptions.warmups ||
         report.run.smallFilesPerSample !== expectedOptions.smallFiles ||
         report.run.readdirEntries !== expectedOptions.readdirEntries ||
-        report.run.overwriteBaseBytes !== expectedOptions.overwriteBaseBytes
+        report.run.overwriteBaseBytes !== expectedOptions.overwriteBaseBytes ||
+        report.run.devWorkload !== Boolean(expectedOptions.devWorkload)
     ) {
         throw new Error("native-mount benchmark run options are invalid");
     }
+    // Developer-workload scenarios that could not run are listed once each,
+    // with a reason, instead of a record.
+    const skipped = !expectedOptions.devWorkload
+        ? report.devWorkload === null && []
+        : Array.isArray(report.devWorkload?.notMeasured) &&
+          report.devWorkload.notMeasured.map(({ scenario }) => scenario);
     if (
-        JSON.stringify(report.run.devWorkload) !==
-            JSON.stringify(runDevWorkloadRecord(expectedOptions)) ||
-        (expectedOptions.devWorkload &&
-            (!Number.isSafeInteger(expectedOptions.devGitSamples) ||
-                expectedOptions.devGitSamples < 1 ||
-                expectedOptions.devGitSamples > 20 ||
-                !Number.isSafeInteger(expectedOptions.devGitWarmups) ||
-                expectedOptions.devGitWarmups < 0 ||
-                expectedOptions.devGitWarmups > 5))
+        !skipped ||
+        new Set(skipped).size !== skipped.length ||
+        skipped.some(
+            (name) => !devWorkloadScenarioNames(expectedOptions).includes(name)
+        )
     ) {
-        throw new Error(
-            "native-mount developer-workload run options are invalid"
-        );
+        throw new Error("native-mount developer-workload section is invalid");
     }
-    // Developer-workload scenarios that could not run (missing tool, failed
-    // operation or missing dependency) are listed with a reason instead.
-    const devNames = new Set(
-        expectedOptions.devWorkload
-            ? devWorkloadScenarioNames(expectedOptions)
-            : []
-    );
-    let measuredNames =
-        expectedNativeMountBenchmarkScenarioNames(expectedOptions);
-    if (expectedOptions.devWorkload) {
-        const measuredDev = new Set(
-            validateDevWorkloadSection(report, expectedOptions)
-        );
-        measuredNames = measuredNames.filter(
-            (name) => !devNames.has(name) || measuredDev.has(name)
-        );
-    } else if (report.devWorkload !== null) {
-        throw new Error(
-            "native-mount developer-workload section requires --dev-workload"
-        );
-    }
+    const measuredNames = expectedNativeMountBenchmarkScenarioNames(
+        expectedOptions
+    ).filter((name) => !skipped.includes(name));
     if (JSON.stringify(names) !== JSON.stringify(measuredNames)) {
         throw new Error(`unexpected scenario set: ${names.join(", ")}`);
     }
     let previousEndedAt = -1n;
     for (const scenario of report.scenarios) {
-        const expectedCounts =
-            devNames.has(scenario.name) &&
-            isDevWorkloadGitScenario(scenario.name)
-                ? {
-                      samples: expectedOptions.devGitSamples,
-                      warmups: expectedOptions.devGitWarmups,
-                  }
-                : expectedOptions;
+        const expectedCounts = devWorkloadSampleCounts(
+            scenario.name,
+            expectedOptions
+        );
         if (
             scenario.samples?.length !== expectedCounts.samples ||
             scenario.warmupSamples?.length !== expectedCounts.warmups ||
@@ -1007,15 +953,10 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
             }
             if (
                 scenario.semantics?.includes("fsync") &&
-                (!Number.isSafeInteger(sample.fsyncNs) || sample.fsyncNs < 0)
+                (!Number.isSafeInteger(sample.fsyncNs) || sample.fsyncNs <= 0)
             ) {
                 throw new Error(`${scenario.name} has an invalid fsync phase`);
             }
-        }
-        if (devNames.has(scenario.name)) {
-            validateDevWorkloadScenario(scenario);
-        } else if (scenario.suite !== undefined) {
-            throw new Error(`${scenario.name} has an unexpected suite`);
         }
         const expectedSummary = summarize(
             scenario.samples,
@@ -1093,22 +1034,12 @@ export const formatNativeMountBenchmarkComparison = (mount, control) => {
     }
     const measured = (report) =>
         new Map(report.scenarios.map((scenario) => [scenario.name, scenario]));
-    const skipped = (report) =>
-        new Map(
-            (report.devWorkload?.notMeasured ?? []).map((entry) => [
-                entry.scenario,
-                entry.cause,
-            ])
-        );
     const [mountScenarios, controlScenarios] = [
         measured(mount),
         measured(control),
     ];
-    const [mountSkipped, controlSkipped] = [skipped(mount), skipped(control)];
-    const cell = (scenario, causes, name, key) =>
-        scenario
-            ? formatDuration(scenario.summary[key])
-            : `not measured (${causes.get(name)})`;
+    const cell = (scenario, key) =>
+        scenario ? formatDuration(scenario.summary[key]) : "not measured";
     const lines = [
         "## Shared FS mount vs local filesystem control (same runner)",
         "",
@@ -1125,7 +1056,7 @@ export const formatNativeMountBenchmarkComparison = (mount, control) => {
                 ? `${(onMount.summary.p50Ns / onControl.summary.p50Ns).toFixed(1)}×`
                 : "—";
         lines.push(
-            `| ${name} | ${cell(onMount, mountSkipped, name, "p50Ns")} | ${cell(onControl, controlSkipped, name, "p50Ns")} | ${ratio} | ${cell(onMount, mountSkipped, name, "p95Ns")} | ${cell(onControl, controlSkipped, name, "p95Ns")} |`
+            `| ${name} | ${cell(onMount, "p50Ns")} | ${cell(onControl, "p50Ns")} | ${ratio} | ${cell(onMount, "p95Ns")} | ${cell(onControl, "p95Ns")} |`
         );
     }
     lines.push(
@@ -1274,7 +1205,7 @@ export const runNativeMountBenchmark = async (options) => {
                 smallFilesPerSample: options.smallFiles,
                 readdirEntries: options.readdirEntries,
                 overwriteBaseBytes: options.overwriteBaseBytes,
-                devWorkload: runDevWorkloadRecord(options),
+                devWorkload: options.devWorkload,
             },
             runtime: {
                 nodeVersion: process.version,
