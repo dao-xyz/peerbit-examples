@@ -260,7 +260,8 @@ const HEAD_QUERY_BATCH = 64;
  * Ids per batched W1/W2 index query: an Or of primary-key matches for
  * presence, or of chunkRefs matches for fresh witnesses. Far below the
  * indexer's bound-variable ceiling; one query covers a 64 MiB file at the
- * default chunk size.
+ * default chunk size. W1 also works in slices of this size, putting each
+ * slice before probing the next.
  */
 const CHUNK_QUERY_BATCH = 128;
 
@@ -4637,17 +4638,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * recursive prune. Partial replicas always re-put so keep:"self"
      * protects the writer's own content.
      *
-     * The per-chunk decisions are made from batched index reads: one
-     * presence probe per CHUNK_QUERY_BATCH chunks, then batched fresh-witness
-     * queries for the present chunks no base witness covers. Every decision
-     * is the one a per-chunk probe and witness query would make against the
-     * same index state. `witnessVersionIds` are the ids of versions this
-     * write loaded as its causal parents; each is re-read from the local
-     * index in the presence probe itself, and only a row that satisfies the
-     * W1 predicate there (a file-version created at or after the horizon
-     * floor) witnesses the chunks its chunkRefs list — exactly the rows a
-     * per-chunk witness query would have matched. The ids select rows; they
-     * are never trusted as evidence.
+     * The per-chunk decisions are made from batched index reads, one slice
+     * of up to CHUNK_QUERY_BATCH chunks at a time: one presence probe for
+     * the slice, batched fresh-witness queries for its present chunks no
+     * base witness covers, then the slice's puts, all before the next slice
+     * is probed. Every decision is the one a per-chunk probe and witness
+     * query would make against the same index state, and a put follows its
+     * chunk's probe by at most one slice: an absent chunk is put unique
+     * (no existing-key lookup), so its absence verdict must not age across
+     * a whole large file while the chunk may replicate in from a peer; one
+     * probed later sees the row and takes the linked put.
+     * `witnessVersionIds` are the ids of versions this write loaded as its
+     * causal parents; each is re-read from the local index in the first
+     * slice's presence probe, and only a row that satisfies the W1 predicate
+     * there (a file-version created at or after the horizon floor) witnesses
+     * the chunks its chunkRefs list — exactly the rows a per-chunk witness
+     * query would have matched. The ids select rows; they are never trusted
+     * as evidence.
      */
     private async touchChunks(
         chunks: FileChunk[],
@@ -4687,83 +4694,100 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             0,
             BASE_WITNESS_LIMIT
         );
-        const probeStarted = profile && process.hrtime.bigint();
-        const rows = await this.indexRowsById(
-            [...baseIds, ...chunks.map((chunk) => chunk.id)],
-            WITNESS_ROW_SHAPE,
-            profile && (() => profile.probeQueries++)
-        );
-        if (profile) {
-            profile.probes += chunks.length;
-            profile.probeNs += sharedFsMountProfileElapsedNs(probeStarted!);
-        }
-        const baseWitnessed = new Set<string>();
-        for (const id of baseIds) {
-            const row = rows.get(id);
-            if (isFreshWitnessRow(row, horizonFloor)) {
-                for (const ref of row.chunkRefs) {
-                    baseWitnessed.add(ref);
-                }
-            }
-        }
-        const unresolved: string[] = [];
-        for (const chunk of chunks) {
-            if (rows.has(chunk.id) && !baseWitnessed.has(chunk.id)) {
-                unresolved.push(chunk.id);
-            }
-        }
-        let queryWitnessed: Set<string> | undefined;
-        if (unresolved.length > 0) {
-            const witnessStarted = profile && process.hrtime.bigint();
-            queryWitnessed = await this.freshWitnessedChunkIds(
-                unresolved,
-                horizonFloor,
-                profile && (() => profile.witnessQueries++)
+        // Chunks the base rows witness; read in the first slice's probe.
+        let baseWitnessed: Set<string> | undefined;
+        for (let offset = 0; offset < chunks.length; ) {
+            // The base ids ride along in the first probe, which still covers
+            // CHUNK_QUERY_BATCH ids in one query.
+            const probeBaseIds = baseWitnessed ? [] : baseIds;
+            const slice = chunks.slice(
+                offset,
+                offset + CHUNK_QUERY_BATCH - probeBaseIds.length
+            );
+            offset += slice.length;
+            const probeStarted = profile && process.hrtime.bigint();
+            const rows = await this.indexRowsById(
+                [...probeBaseIds, ...slice.map((chunk) => chunk.id)],
+                WITNESS_ROW_SHAPE,
+                profile && (() => profile.probeQueries++)
             );
             if (profile) {
-                profile.witnessNs += sharedFsMountProfileElapsedNs(
-                    witnessStarted!
+                profile.probes += slice.length;
+                profile.probeNs += sharedFsMountProfileElapsedNs(probeStarted!);
+            }
+            if (!baseWitnessed) {
+                baseWitnessed = new Set<string>();
+                for (const id of probeBaseIds) {
+                    const row = rows.get(id);
+                    if (isFreshWitnessRow(row, horizonFloor)) {
+                        for (const ref of row.chunkRefs) {
+                            baseWitnessed.add(ref);
+                        }
+                    }
+                }
+            }
+            const unresolved: string[] = [];
+            for (const chunk of slice) {
+                if (rows.has(chunk.id) && !baseWitnessed.has(chunk.id)) {
+                    unresolved.push(chunk.id);
+                }
+            }
+            let queryWitnessed: Set<string> | undefined;
+            if (unresolved.length > 0) {
+                const witnessStarted = profile && process.hrtime.bigint();
+                queryWitnessed = await this.freshWitnessedChunkIds(
+                    unresolved,
+                    horizonFloor,
+                    profile && (() => profile.witnessQueries++)
                 );
-            }
-        }
-        const puts: {
-            chunk: FileChunk;
-            counter: "absentPuts" | "linkedPuts";
-        }[] = [];
-        for (const chunk of chunks) {
-            if (!rows.has(chunk.id)) {
-                // Absence verified; a fresh chain with no existing-key
-                // lookup. Duplicate-id races are idempotent by construction
-                // under content addressing.
-                puts.push({ chunk, counter: "absentPuts" });
-            } else if (
-                baseWitnessed.has(chunk.id) ||
-                queryWitnessed?.has(chunk.id)
-            ) {
                 if (profile) {
-                    profile.dedupSkips++;
-                    profile.dedupSkipBytes += chunk.bytes.byteLength;
-                    if (baseWitnessed.has(chunk.id)) profile.baseWitnessed++;
+                    profile.witnessNs += sharedFsMountProfileElapsedNs(
+                        witnessStarted!
+                    );
                 }
-            } else {
-                puts.push({ chunk, counter: "linkedPuts" });
             }
+            const puts: {
+                chunk: FileChunk;
+                counter: "absentPuts" | "linkedPuts";
+            }[] = [];
+            for (const chunk of slice) {
+                if (!rows.has(chunk.id)) {
+                    // Absence verified by this slice's probe; a fresh chain
+                    // with no existing-key lookup. Duplicate-id races are
+                    // idempotent by construction under content addressing.
+                    puts.push({ chunk, counter: "absentPuts" });
+                } else if (
+                    baseWitnessed.has(chunk.id) ||
+                    queryWitnessed?.has(chunk.id)
+                ) {
+                    if (profile) {
+                        profile.dedupSkips++;
+                        profile.dedupSkipBytes += chunk.bytes.byteLength;
+                        if (baseWitnessed.has(chunk.id)) {
+                            profile.baseWitnessed++;
+                        }
+                    }
+                } else {
+                    puts.push({ chunk, counter: "linkedPuts" });
+                }
+            }
+            // This slice's puts finish before the next slice is probed.
+            await mapWithConcurrency(
+                puts,
+                CHUNK_IO_CONCURRENCY,
+                async ({ chunk, counter }) => {
+                    const put = () =>
+                        counter === "absentPuts"
+                            ? this.entries.put(chunk, { unique: true })
+                            : this.entries.put(chunk);
+                    if (profile) {
+                        await profileChunkPut(profile, chunk, counter, put);
+                        return;
+                    }
+                    await put();
+                }
+            );
         }
-        await mapWithConcurrency(
-            puts,
-            CHUNK_IO_CONCURRENCY,
-            async ({ chunk, counter }) => {
-                const put = () =>
-                    counter === "absentPuts"
-                        ? this.entries.put(chunk, { unique: true })
-                        : this.entries.put(chunk);
-                if (profile) {
-                    await profileChunkPut(profile, chunk, counter, put);
-                    return;
-                }
-                await put();
-            }
-        );
     }
 
     /**

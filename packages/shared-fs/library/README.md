@@ -578,9 +578,10 @@ chunking: in-place edits dedupe; inserts shift subsequent chunks). A save
 skips re-putting a chunk only when the chunk is present locally and a version
 younger than the dedup skip horizon (15 days by default) references it;
 otherwise it re-puts the chunk, and after the new version lands it
-re-verifies that every chunk is still present. This bookkeeping is batched:
-one index probe covers up to 128 chunks, a fresh parent version the save
-loaded witnesses the chunks it references without a further query, and the
+re-verifies that every chunk is still present. This bookkeeping is batched
+in slices of up to 128 chunks, each probed with one index query and put
+before the next slice is probed; a fresh parent version the save loaded
+witnesses the chunks it references without a further query, and the
 remaining chunks share batched witness queries, so a save issues a few
 index queries per 128 chunks rather than one or two per unchanged chunk. Chunk
 documents are self-certifying — peers reject any chunk whose bytes do not hash

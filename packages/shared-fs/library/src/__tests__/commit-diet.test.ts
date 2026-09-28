@@ -703,4 +703,81 @@ describe("v9 commit diet: batched W1/W2 bookkeeping", () => {
             0
         );
     });
+
+    it("probes, decides and puts one slice before probing the next", async () => {
+        // 130 absent chunks: two slices (128 + 2). A second-slice chunk
+        // arrives (as if replicated from a peer) while the first slice's
+        // puts run. Its probe comes after that, so it sees the row and takes
+        // the linked put; an absence verdict from before the first slice's
+        // puts would fork it with an unlinked unique put.
+        const parts: string[] = [];
+        for (let i = 0; i < 130; i++) {
+            parts.push(`S${String(i).padStart(3, "0")}`);
+        }
+        const content = parts.join("");
+        const chunks = chunksOf(content, 4);
+        const late = chunks[129];
+        const order: string[] = [];
+        let versionPut = false;
+        const indexRowsById = program.indexRowsById.bind(program);
+        vi.spyOn(program, "indexRowsById").mockImplementation(
+            async (ids: any, shape: any, onQuery: any) => {
+                const probed = (ids as string[]).filter((docId) =>
+                    docId.startsWith("chunk:")
+                ).length;
+                if (!versionPut && probed > 0) order.push(`probe:${probed}`);
+                return indexRowsById(ids, shape, onQuery);
+            }
+        );
+        const original = program.entries.put.bind(program.entries);
+        const decisions = new Map<string, Decision>();
+        let arrived = false;
+        vi.spyOn(program.entries, "put").mockImplementation(
+            async (doc: any, options: any) => {
+                if (doc instanceof FileVersion) versionPut = true;
+                if (doc instanceof FileChunk && !versionPut) {
+                    order.push("put");
+                    decisions.set(
+                        doc.id,
+                        options?.unique === true ? "put-unique" : "put-linked"
+                    );
+                    if (!arrived) {
+                        arrived = true;
+                        await original(late, { unique: true });
+                    }
+                }
+                return original(doc, options);
+            }
+        );
+        const events: SharedFsMountProfileEvent[] = [];
+        await fs.writeFile("/sliced.txt", content, {
+            chunkSize: 4,
+            mountProfile: { sink: (event) => events.push(event), writeId: 1 },
+        });
+        vi.restoreAllMocks();
+
+        expect(decisions.get(late.id)).toBe("put-linked");
+        expect(order).toEqual([
+            "probe:128",
+            ...new Array(128).fill("put"),
+            "probe:2",
+            "put",
+            "put",
+        ]);
+        expect(
+            chunks
+                .slice(0, 129)
+                .every((chunk) => decisions.get(chunk.id) === "put-unique")
+        ).toBe(true);
+        expect(touchDetail(events)).toMatchObject({
+            chunks: 130,
+            probes: 130,
+            probeQueries: 2,
+            witnessQueries: 1,
+            dedupSkips: 0,
+            absentPuts: 129,
+            linkedPuts: 1,
+        });
+        expect(decode(await fs.readFile("/sliced.txt"))).toBe(content);
+    });
 });

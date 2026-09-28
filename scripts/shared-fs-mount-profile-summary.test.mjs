@@ -366,8 +366,10 @@ const existingWrite = (writeId, offset, versionPutNs) =>
                 "touchChunks",
                 1_000,
                 {
-                    chunks: 1,
-                    probes: 1,
+                    // An edit: the base witnesses the unchanged chunk.
+                    chunks: 2,
+                    probes: 2,
+                    probeQueries: 1,
                     probeNs: 200,
                     witnessQueries: 0,
                     witnessNs: 0,
@@ -377,8 +379,9 @@ const existingWrite = (writeId, offset, versionPutNs) =>
                     absentPuts: 1,
                     linkedPuts: 0,
                     unprobedPuts: 0,
-                    dedupSkips: 0,
-                    dedupSkipBytes: 0,
+                    dedupSkips: 1,
+                    dedupSkipBytes: 4096,
+                    baseWitnessed: 1,
                 },
             ],
             ["guard", 150, { checkpoint: "before-version" }],
@@ -407,6 +410,7 @@ const breakdownProfile = () =>
                     500,
                     {
                         probes: 1,
+                        probeQueries: 1,
                         probeNs: 100,
                         witnessQueries: 1,
                         witnessNs: 400,
@@ -560,10 +564,12 @@ test("breaks library writeFile time into sub-phases without double counting", ()
         2_000
     );
     assert.deepEqual(breakdown.touchChunks.totals, {
-        probes: 3,
+        probes: 5,
+        probeQueries: 3,
         witnessQueries: 1,
-        dedupSkips: 1,
-        dedupSkipBytes: 1024,
+        dedupSkips: 3,
+        dedupSkipBytes: 9216,
+        baseWitnessed: 2,
         chunkPuts: 2,
         chunkPutBytes: 8192,
         absentPuts: 2,
@@ -573,8 +579,8 @@ test("breaks library writeFile time into sub-phases without double counting", ()
         reputBytes: 0,
     });
     assert.equal(breakdown.touchChunks.writes, 3);
-    assert.equal(breakdown.touchChunks.taskNs.chunkPutNs.p50Ns, 780);
-    assert.equal(breakdown.touchChunks.taskNs.witnessNs.maxNs, 400);
+    assert.equal(breakdown.touchChunks.timeNs.chunkPutNs.p50Ns, 780);
+    assert.equal(breakdown.touchChunks.timeNs.witnessNs.maxNs, 400);
 
     // The per-phase table still lists sub-phases on their own.
     assert.equal(
@@ -598,6 +604,16 @@ test("breaks library writeFile time into sub-phases without double counting", ()
         /^\| \(outside sub-phases\) \| 5 \| — \| 0\.000 ms \| 0\.000 ms \| 2\.4% \|$/mu
     );
     assert.match(markdown, /2 chunk puts \(8192 bytes; absent 2/u);
+    // Batched probes and witness rounds are wall time; only puts are summed.
+    assert.match(
+        markdown,
+        /^touchChunks time per write, p50 \/ p95: presence probe .+ and witness query .+ \(wall time of batched index queries\), chunk put .+ \(summed over concurrent puts\)\.$/mu
+    );
+    assert.match(
+        markdown,
+        /3 dedup skips \(9216 bytes; 2 base-witnessed\), 5 chunks probed in 3 probe queries, 1 witness rounds, 0 W2 re-puts\./u
+    );
+    assert.doesNotMatch(markdown, /summed over concurrent chunk tasks/u);
     assert.match(
         markdown,
         /^\| Sub-phase \(p50\/write\) \| new file \(1\) \| existing file \(2\) \| unchanged \(1\) \| failed \(1\) \|$/mu
