@@ -15,8 +15,17 @@ Normal CLI users should install a prebuilt adapter:
 peerbit-fs install-adapter
 ```
 
-That command downloads the matching release asset into
-`~/.peerbit/shared-fs/bin`; `peerbit-fs mount` auto-detects it.
+That command downloads the release asset matching the CLI version into
+`~/.peerbit/shared-fs/bin/shared-fs-native-v<cli version>/` and records that
+release, target, and the binary's SHA-256 in
+`peerbit-shared-fs-native.install.json` next to it. `peerbit-fs mount`
+auto-detects the managed adapter and refuses it, naming both versions, when
+the record is missing, names another release or target, or no longer matches
+the binary. Only the adapter from the CLI's own release is supported; run
+`peerbit-fs install-adapter --force` to replace any other. An adapter passed
+with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER` is not checked:
+an adapter from 0.13.15 or earlier (IPC v1 only) still mounts, but the CLI
+rejects every operation it sends.
 
 Build a native adapter binary with:
 
@@ -44,13 +53,14 @@ session, matching cgofuse's current single-threaded mode. A transport failure
 fails the current filesystem operation and discards that connection; the next
 explicit operation reconnects. Requests are never replayed automatically
 because a lost response does not prove that a mutation was not applied.
-The adapter negotiates binary protocol v2 on a fresh connection. Read and
-write payloads then travel as raw frame bodies instead of base64 JSON, while
-metadata plus body remain bounded to 64 MiB by default. If an older server
-rejects or closes during the non-mutating negotiation, the adapter reconnects
-once and uses JSONL v1. It never retries a filesystem operation. A server may
-select v1 on the original connection, and very small configured request bounds
-that cannot hold negotiation also remain on v1.
+The adapter negotiates binary protocol v2 before it mounts, so an
+incompatible server fails the mount at startup instead of every later
+operation. Read and write payloads travel as raw frame bodies, while metadata
+plus body remain bounded to 64 MiB by default. IPC v1 is retired: if the
+server rejects or closes during the non-mutating negotiation (as a CLI from
+0.13.15 or earlier does), the adapter reports the failure and never falls back
+or retries a filesystem operation. Adapters from 0.13.15 or earlier speak only
+v1 and are refused by current servers.
 
 On Windows, the adapter reports the mounting account as the synthetic owner.
 Shared FS does not persist portable uid/gid metadata, and WinFsp otherwise
@@ -67,13 +77,12 @@ that expand heavily under JSON escaping can still exceed the fixed bound and
 need future paginated or binary directory framing. The Go adapter reconstructs
 and validates the complete stat before passing it to cgofuse; missing or
 malformed metadata lets the native host use its ordinary lookup/`getattr`
-fallback, so older servers remain compatible. cgofuse enables the actual
-readdir-plus capability on Linux with FUSE 3 when the kernel advertises it, and
-on Windows through WinFsp. Only those builds request rich entries. macOS and
-Linux FUSE 2 request the legacy compact entries because cgofuse cannot consume
-readdir-plus metadata there. The options argument and response field are both
-additive: old adapters receive compact entries from new servers, while a new
-adapter accepts a compact response from an old server.
+fallback. cgofuse enables the actual readdir-plus capability on Linux with
+FUSE 3 when the kernel advertises it, and on Windows through WinFsp. Only those
+builds request rich entries. macOS and Linux FUSE 2 request compact entries
+because cgofuse cannot consume readdir-plus metadata there. The `includeStats`
+option is optional per request: without it, and for a backend that does not
+supply stats, the server returns compact entries.
 
 The portable IPC microbenchmark exercises the real Go client without requiring
 FUSE or Peerbit networking:

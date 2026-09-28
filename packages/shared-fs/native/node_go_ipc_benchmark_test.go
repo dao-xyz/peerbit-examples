@@ -440,14 +440,10 @@ func TestNodeGoIPCExternalBenchmark(t *testing.T) {
 				}
 			}()
 			// Keep negotiation outside every measured sample, including runs with
-			// zero warmups, and prove every retained lane is v2 before timing.
+			// zero warmups; a lane that negotiates at all speaks binary v2.
 			for lane, client := range clients {
-				_, _, protocol, _, _, err := client.connect()
-				if err != nil {
+				if err := client.negotiate(); err != nil {
 					t.Fatalf("adapter width %d lane %d negotiation: %v", width, lane+1, err)
-				}
-				if protocol != ipcWireProtocolV2 {
-					t.Fatalf("adapter width %d lane %d negotiated protocol %d, want binary v2", width, lane+1, protocol)
 				}
 			}
 

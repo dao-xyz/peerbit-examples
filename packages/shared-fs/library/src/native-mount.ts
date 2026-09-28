@@ -101,7 +101,10 @@ const packageAvailable = async (specifier: string) => {
     }
 };
 
-const externalNativeAdapterAvailable = async () => {
+const externalNativeAdapterAvailable = async (resolved?: boolean) => {
+    if (resolved !== undefined) {
+        return resolved;
+    }
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER) {
         return true;
     }
@@ -111,14 +114,25 @@ const externalNativeAdapterAvailable = async () => {
 const errorMessage = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
 
-export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
+export const getNativeMountSupport = async (
+    options: {
+        /**
+         * Whether the caller already resolved an external
+         * peerbit-shared-fs-native adapter. When omitted, the adapter is
+         * looked up from PEERBIT_SHARED_FS_NATIVE_ADAPTER and PATH.
+         */
+        externalAdapter?: boolean;
+    } = {}
+): Promise<NativeMountSupport> => {
     if (process.platform === "linux") {
         const hasFuseDevice = await pathExists("/dev/fuse");
         const hasFusermount =
             (await commandExists("fusermount3")) ||
             (await commandExists("fusermount"));
         const hasFuseNative = await packageAvailable("fuse-native");
-        const hasExternalAdapter = await externalNativeAdapterAvailable();
+        const hasExternalAdapter = await externalNativeAdapterAvailable(
+            options.externalAdapter
+        );
         const missing = [
             !hasFuseDevice ? "/dev/fuse" : undefined,
             !hasFusermount ? "fusermount/fusermount3" : undefined,
@@ -140,7 +154,9 @@ export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
             (await pathExists("/Library/Filesystems/macfuse.fs")) ||
             (await commandExists("mount_macfuse"));
         const hasFuseNative = await packageAvailable("fuse-native");
-        const hasExternalAdapter = await externalNativeAdapterAvailable();
+        const hasExternalAdapter = await externalNativeAdapterAvailable(
+            options.externalAdapter
+        );
         const missing = [
             !hasMacFuse ? "macFUSE" : undefined,
             !hasFuseNative && !hasExternalAdapter
@@ -166,7 +182,9 @@ export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
             (await pathExists(
                 "C:\\Program Files (x86)\\WinFsp\\bin\\winfsp-x64.dll"
             ));
-        const hasExternalAdapter = await externalNativeAdapterAvailable();
+        const hasExternalAdapter = await externalNativeAdapterAvailable(
+            options.externalAdapter
+        );
         const missing = [
             !hasWinFsp ? "WinFsp runtime" : undefined,
             !hasExternalAdapter

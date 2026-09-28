@@ -28,14 +28,6 @@ const (
 
 var ipcV2Magic = [4]byte{'P', 'B', 'F', 'S'}
 
-type ipcWireProtocol uint8
-
-const (
-	ipcWireProtocolUnset ipcWireProtocol = iota
-	ipcWireProtocolV1
-	ipcWireProtocolV2
-)
-
 type ipcV2Limits struct {
 	maxRequestFrameBytes  int
 	maxResponseFrameBytes int
@@ -369,107 +361,108 @@ func containsNativeBytes(value interface{}) bool {
 	return false
 }
 
-func negotiateIPCV2(conn net.Conn, reader *bufio.Reader, offerLimits ipcV2Limits) (ipcWireProtocol, ipcV2Limits, bool, error) {
-	nonce, err := newIPCNonce()
-	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
-	}
-	const negotiationID uint64 = 0
-	offer := ipcNegotiationRequest{
-		ID: negotiationID,
+// ipcNegotiationOfferLine encodes the JSONL handshake line that offers IPC v2,
+// the only version this adapter speaks, including its trailing LF.
+func ipcNegotiationOfferLine(id uint64, nonce string, offerLimits ipcV2Limits) ([]byte, error) {
+	encoded, err := json.Marshal(ipcNegotiationRequest{
+		ID: id,
 		Op: ipcNegotiateOperation,
 		Args: []ipcNegotiationOffer{{
-			Protocol: ipcProtocolName, Versions: []int{2, 1}, Nonce: nonce,
+			Protocol: ipcProtocolName, Versions: []int{2}, Nonce: nonce,
 			MaxRequestFrameBytes: offerLimits.maxRequestFrameBytes, MaxResponseFrameBytes: offerLimits.maxResponseFrameBytes,
 		}},
-	}
-	encoded, err := json.Marshal(offer)
+	})
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return nil, err
 	}
 	if len(encoded) > ipcNegotiationMaxBytes {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC negotiation offer exceeds byte limit")
+		return nil, errors.New("IPC negotiation offer exceeds byte limit")
 	}
-	// Very small configured v1 request bounds may not fit the additive
-	// negotiation request. In that case the untouched connection can safely
-	// begin with the caller's ordinary v1 filesystem operation.
-	if len(encoded) > offerLimits.maxRequestFrameBytes {
-		return ipcWireProtocolV1, ipcV2Limits{}, false, nil
+	return append(encoded, '\n'), nil
+}
+
+// errIPCV2Unsupported marks a server that closed or rejected the v2 offer, as a
+// peerbit-fs CLI from before the IPC v2 handshake (0.13.15 or earlier) does.
+// IPC v1 is retired, so the adapter fails closed instead of falling back.
+var errIPCV2Unsupported = errors.New("the server does not accept IPC v2 (IPC v1 is retired); install the peerbit-fs CLI and native adapter from the same release")
+
+// negotiateIPCV2 sends the v2 offer on a fresh connection and returns the
+// negotiated limits. Any failure leaves the connection unusable.
+func negotiateIPCV2(conn net.Conn, reader *bufio.Reader, offerLimits ipcV2Limits) (ipcV2Limits, error) {
+	nonce, err := newIPCNonce()
+	if err != nil {
+		return ipcV2Limits{}, err
 	}
-	encoded = append(encoded, '\n')
-	frames := net.Buffers{encoded}
+	const negotiationID uint64 = 0
+	offer, err := ipcNegotiationOfferLine(negotiationID, nonce, offerLimits)
+	if err != nil {
+		return ipcV2Limits{}, err
+	}
+	frames := net.Buffers{offer}
 	if _, err := frames.WriteTo(conn); err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, true, err
+		return ipcV2Limits{}, fmt.Errorf("IPC negotiation failed: sending the offer: %w", err)
 	}
 	line, err := readBoundedJSONLine(reader, ipcNegotiationMaxBytes)
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, !errors.Is(err, errIPCFrameTooLarge), err
+		if errors.Is(err, errIPCFrameTooLarge) {
+			return ipcV2Limits{}, err
+		}
+		return ipcV2Limits{}, fmt.Errorf("IPC negotiation failed: the server closed the connection without an acknowledgement (%v): %w", err, errIPCV2Unsupported)
 	}
 	if reader.Buffered() != 0 {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC server sent bytes before negotiation completed")
+		return ipcV2Limits{}, errors.New("IPC server sent bytes before negotiation completed")
 	}
 	envelope, err := rawObject(line, "IPC negotiation response")
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return ipcV2Limits{}, err
 	}
 	id, err := parseSafeUint(envelope["id"], "IPC negotiation response id")
 	if err != nil || id != negotiationID {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC negotiation response id mismatch")
+		return ipcV2Limits{}, errors.New("IPC negotiation response id mismatch")
 	}
 	ok, err := parseRequiredBool(envelope["ok"], "IPC negotiation response ok")
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return ipcV2Limits{}, err
 	}
 	if !ok {
-		if _, err := parseIPCError(envelope["error"]); err != nil {
-			return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		rejection, err := parseIPCError(envelope["error"])
+		if err != nil {
+			return ipcV2Limits{}, err
 		}
-		return ipcWireProtocolUnset, ipcV2Limits{}, true, errors.New("IPC v2 negotiation rejected")
+		return ipcV2Limits{}, fmt.Errorf("IPC negotiation failed: the server rejected the offer (%v): %w", rejection, errIPCV2Unsupported)
 	}
 	result, err := rawObject(envelope["result"], "IPC negotiation result")
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return ipcV2Limits{}, err
 	}
 	protocol, err := parseRequiredString(result["protocol"], "IPC negotiation protocol")
 	if err != nil || protocol != ipcProtocolName {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC negotiation protocol mismatch")
+		return ipcV2Limits{}, errors.New("IPC negotiation protocol mismatch")
 	}
 	ackNonce, err := parseRequiredString(result["nonce"], "IPC negotiation nonce")
 	if err != nil || ackNonce != nonce {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC negotiation nonce mismatch")
+		return ipcV2Limits{}, errors.New("IPC negotiation nonce mismatch")
 	}
 	versionValue, err := parseSafeUint(result["version"], "IPC negotiation version")
-	if err != nil || (versionValue != 1 && versionValue != 2) {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC negotiation selected an unoffered version")
-	}
-	if versionValue == 1 {
-		if _, exists := result["maxRequestFrameBytes"]; exists {
-			return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC v1 acknowledgement included v2 limits")
-		}
-		if _, exists := result["maxResponseFrameBytes"]; exists {
-			return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC v1 acknowledgement included v2 limits")
-		}
-		if _, exists := result["maxMetadataBytes"]; exists {
-			return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC v1 acknowledgement included v2 limits")
-		}
-		return ipcWireProtocolV1, ipcV2Limits{}, false, nil
+	if err != nil || versionValue != 2 {
+		return ipcV2Limits{}, errors.New("IPC negotiation selected an unoffered version")
 	}
 	requestLimit, err := parsePositiveUint32(result["maxRequestFrameBytes"], "IPC negotiated request limit")
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return ipcV2Limits{}, err
 	}
 	responseLimit, err := parsePositiveUint32(result["maxResponseFrameBytes"], "IPC negotiated response limit")
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return ipcV2Limits{}, err
 	}
 	metadataLimit, err := parsePositiveUint32(result["maxMetadataBytes"], "IPC negotiated metadata limit")
 	if err != nil {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, err
+		return ipcV2Limits{}, err
 	}
 	if requestLimit > offerLimits.maxRequestFrameBytes || responseLimit > offerLimits.maxResponseFrameBytes || metadataLimit > defaultIPCMaxMetadataBytes || metadataLimit > requestLimit || metadataLimit > responseLimit {
-		return ipcWireProtocolUnset, ipcV2Limits{}, false, errors.New("IPC negotiation returned invalid limits")
+		return ipcV2Limits{}, errors.New("IPC negotiation returned invalid limits")
 	}
-	return ipcWireProtocolV2, ipcV2Limits{
+	return ipcV2Limits{
 		maxRequestFrameBytes: requestLimit, maxResponseFrameBytes: responseLimit, maxMetadataBytes: metadataLimit,
-	}, false, nil
+	}, nil
 }

@@ -25,10 +25,13 @@ if (!existsSync(installer)) {
     process.exit(0);
 }
 
+// --if-needed keeps an adapter only when its install record pins it to this
+// CLI's release; a stale or unrecorded adapter is replaced, never forced.
+// The timeout keeps a slow or stalled download from hanging `npm i -g`.
 const result = spawnSync(
     process.execPath,
     [installer, "--if-needed", "--quiet"],
-    { stdio: "inherit" }
+    { stdio: "inherit", timeout: 120_000 }
 );
 
 if (result.error || result.status !== 0) {

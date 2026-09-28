@@ -30,10 +30,17 @@ export class BoundedIpcByteReader {
      * Read one LF-delimited frame, excluding the LF.
      *
      * A clean EOF between frames returns undefined. EOF after any frame byte
-     * is a protocol error. The configured bound excludes the LF.
+     * is a protocol error. The bound excludes the LF; it defaults to the
+     * reader's configured bound, and a caller may set a per-line bound (for
+     * example a handshake limit independent of the frame limit).
      */
-    readLine(): Promise<Buffer | undefined> {
-        return this.#runExclusive(() => this.#readLine());
+    readLine(maxLineBytes = this.#maxReadBytes): Promise<Buffer | undefined> {
+        if (!Number.isSafeInteger(maxLineBytes) || maxLineBytes <= 0) {
+            return Promise.reject(
+                new TypeError("maxLineBytes must be a positive safe integer")
+            );
+        }
+        return this.#runExclusive(() => this.#readLine(maxLineBytes));
     }
 
     /**
@@ -66,7 +73,7 @@ export class BoundedIpcByteReader {
         }
     }
 
-    async #readLine(): Promise<Buffer | undefined> {
+    async #readLine(maxLineBytes: number): Promise<Buffer | undefined> {
         // Normal socket fragmentation is cheap with one final concat. The
         // fixed cap prevents adversarial one-byte chunks from growing this
         // bookkeeping without bound; beyond it, switch once to a geometric
@@ -89,10 +96,10 @@ export class BoundedIpcByteReader {
             const newline = head.chunk.indexOf(0x0a, head.offset);
             const end = newline === -1 ? head.chunk.byteLength : newline;
             const fragmentBytes = end - head.offset;
-            if (fragmentBytes > this.#maxReadBytes - frameBytes) {
+            if (fragmentBytes > maxLineBytes - frameBytes) {
                 throw new IpcFrameTooLargeError(
                     frameBytes + fragmentBytes,
-                    this.#maxReadBytes
+                    maxLineBytes
                 );
             }
             if (newline !== -1) {
@@ -110,7 +117,8 @@ export class BoundedIpcByteReader {
                     accumulator = this.#append(
                         accumulator,
                         frameBytes - fragmentBytes,
-                        finalFragment
+                        finalFragment,
+                        maxLineBytes
                     );
                     return accumulator.subarray(0, frameBytes);
                 }
@@ -130,7 +138,8 @@ export class BoundedIpcByteReader {
                     accumulator = this.#append(
                         accumulator,
                         frameBytes,
-                        fragment
+                        fragment,
+                        maxLineBytes
                     );
                 } else if (fragments.length < MAX_RETAINED_LINE_FRAGMENTS) {
                     fragments.push(fragment);
@@ -138,7 +147,8 @@ export class BoundedIpcByteReader {
                     accumulator = this.#reserve(
                         undefined,
                         0,
-                        frameBytes + fragmentBytes
+                        frameBytes + fragmentBytes,
+                        maxLineBytes
                     );
                     let copied = 0;
                     for (const retained of fragments) {
@@ -252,22 +262,32 @@ export class BoundedIpcByteReader {
         return value;
     }
 
-    #append(accumulator: Buffer | undefined, used: number, fragment: Buffer) {
+    #append(
+        accumulator: Buffer | undefined,
+        used: number,
+        fragment: Buffer,
+        maxBytes: number
+    ) {
         const required = used + fragment.byteLength;
-        const target = this.#reserve(accumulator, used, required);
+        const target = this.#reserve(accumulator, used, required, maxBytes);
         fragment.copy(target, used);
         return target;
     }
 
-    #reserve(accumulator: Buffer | undefined, used: number, required: number) {
+    #reserve(
+        accumulator: Buffer | undefined,
+        used: number,
+        required: number,
+        maxBytes: number
+    ) {
         if (accumulator === undefined || accumulator.byteLength < required) {
             const currentCapacity = accumulator?.byteLength ?? 0;
             const doubled =
                 currentCapacity === 0
-                    ? Math.min(this.#maxReadBytes, 4096)
-                    : currentCapacity <= this.#maxReadBytes / 2
+                    ? Math.min(maxBytes, 4096)
+                    : currentCapacity <= maxBytes / 2
                       ? currentCapacity * 2
-                      : this.#maxReadBytes;
+                      : maxBytes;
             const capacity = Math.max(required, doubled);
             const grown = Buffer.allocUnsafe(capacity);
             if (accumulator !== undefined && used > 0) {
