@@ -161,12 +161,26 @@ peerbit-fs status
 `--omit=peer` keeps npm from auto-installing optional browser and React Native
 peer packages that are not needed by the Node.js CLI.
 
-`peerbit-fs install-adapter` downloads a prebuilt
-`peerbit-shared-fs-native` binary into `~/.peerbit/shared-fs/bin`. The global
-package install also tries this automatically, but the explicit command is safe
-to rerun and is the easiest way to repair a missing adapter. `mount` and
-`status` auto-detect that managed adapter, a `peerbit-shared-fs-native` command
-on `PATH`, or `PEERBIT_SHARED_FS_NATIVE_ADAPTER`.
+`peerbit-fs install-adapter` downloads the prebuilt
+`peerbit-shared-fs-native` binary from this CLI's own release
+(`shared-fs-native-v<cli version>`) into `~/.peerbit/shared-fs/bin` and pins it
+there with `peerbit-shared-fs-native.install.json` (release tag and binary
+SHA-256). The global package install also tries this automatically. Both keep
+an adapter only when its pin matches this CLI and replace a stale, modified,
+or unpinned one; `--force` always reinstalls. The explicit command is safe to
+rerun and is the easiest way to repair a missing adapter.
+
+`mount` and `status` auto-detect that managed adapter, a
+`peerbit-shared-fs-native` command on `PATH`, or
+`PEERBIT_SHARED_FS_NATIVE_ADAPTER`. Only the adapter from this CLI's release is
+supported: `mount` refuses a managed adapter whose pin is missing (adapters
+installed by 0.13.18 or earlier), names another release, or no longer matches
+the binary, and its error names both versions; `status` reports the same
+check. Run `peerbit-fs install-adapter --force` to fix it. An adapter chosen
+with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER` is not pinned,
+but the IPC v2 handshake still refuses an incompatible one. IPC v1 is retired,
+so adapters and CLIs from 0.13.15 or earlier cannot mount with current
+releases.
 
 Native runtime prerequisites are platform-specific:
 

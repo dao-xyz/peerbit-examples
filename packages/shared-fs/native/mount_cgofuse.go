@@ -30,6 +30,11 @@ func runNativeMount(endpoint string, mountpoint string, debug bool, profile *mou
 	}
 	defer fs.client.close()
 	fs.debugf("starting mount endpoint=%s mountpoint=%s", endpoint, mountpoint)
+	// Negotiate before mounting: an incompatible server then fails the mount
+	// at startup instead of every later filesystem operation with EIO.
+	if err := fs.client.negotiate(); err != nil {
+		return fmt.Errorf("native adapter could not connect to %s: %w", endpoint, err)
+	}
 	if debug {
 		if err := fs.preflight(); err != nil {
 			return err

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -75,7 +76,7 @@ describe("peerbit-fs lazy runtime loading", () => {
         expect(result.stderr).not.toContain(BLOCKED_IMPORT);
     });
 
-    it("installs an existing native adapter without importing the filesystem runtime", async () => {
+    it("keeps a current native adapter without importing the filesystem runtime", async () => {
         const prefix = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-lazy-")
         );
@@ -86,6 +87,21 @@ describe("peerbit-fs lazy runtime loading", () => {
                 : "peerbit-shared-fs-native"
         );
         await fs.writeFile(binaryPath, "");
+        // --if-needed keeps the adapter only because this record pins it to
+        // the CLI's own release; otherwise it would download a replacement.
+        const { version } = JSON.parse(
+            await fs.readFile(path.join(cliDirectory, "package.json"), "utf8")
+        ) as { version: string };
+        await fs.writeFile(
+            path.join(prefix, "peerbit-shared-fs-native.install.json"),
+            JSON.stringify({
+                schema: "peerbit.shared-fs.native-adapter-install",
+                schemaVersion: 1,
+                tag: `shared-fs-native-v${version}`,
+                target: `${process.platform}-${process.arch}`,
+                sha256: createHash("sha256").update("").digest("hex"),
+            })
+        );
 
         try {
             const result = await runProbe([

@@ -22,6 +22,7 @@ type ipcV2GoldenVectors struct {
 		MaxMetadataBytes int `json:"maxMetadataBytes"`
 	} `json:"constants"`
 	Negotiation []struct {
+		Name         string `json:"name"`
 		JSONLineUTF8 string `json:"jsonLineUtf8"`
 		JSONLineHex  string `json:"jsonLineHex"`
 	} `json:"negotiation"`
@@ -59,6 +60,19 @@ func TestIPCV2GoldenVectors(t *testing.T) {
 		}
 		if string(decoded) != vector.JSONLineUTF8 {
 			t.Fatal("golden negotiation UTF-8 and hex disagree")
+		}
+		if vector.Name == "version-offer" {
+			// The adapter's own offer is byte-identical to the golden line:
+			// it offers exactly [2] with the default limits.
+			offer, err := ipcNegotiationOfferLine(1, "AAAAAAAAAAAAAAAAAAAAAA", ipcV2Limits{
+				maxRequestFrameBytes: vectors.Constants.MaxFrameBytes, maxResponseFrameBytes: vectors.Constants.MaxFrameBytes,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(offer, decoded) {
+				t.Fatalf("adapter offer %q differs from golden %q", offer, decoded)
+			}
 		}
 	}
 	for _, vector := range vectors.Frames {
@@ -193,80 +207,63 @@ func TestIPCV2ResponseSentinelAndBodyValidation(t *testing.T) {
 	}
 }
 
-func TestIPCClientFallsBackOnceBeforeFilesystemMutation(t *testing.T) {
+// expectNoFurtherConnection proves the client did not reconnect: IPC v1 is
+// retired, so a failed negotiation never falls back to another connection.
+func expectNoFurtherConnection(t *testing.T, listener net.Listener) {
+	t.Helper()
+	_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
+	if conn, err := listener.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("client opened another connection after a failed negotiation")
+	} else if !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("unexpected accept result: %v", err)
+	}
+}
+
+func TestIPCClientFailsClosedWhenServerRejectsNegotiation(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	var accepted, mutations atomic.Uint64
 	serverDone := make(chan error, 1)
 	go func() {
-		negotiationConn, err := listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			serverDone <- err
 			return
 		}
-		accepted.Add(1)
-		line, err := bufio.NewReader(negotiationConn).ReadBytes('\n')
+		defer conn.Close()
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
 		if err == nil {
 			var request ipcRequest
 			err = json.Unmarshal(line, &request)
 			if err == nil && request.Op != ipcNegotiateOperation {
-				err = errors.New("first connection did not contain negotiation")
+				err = errors.New("first line was not a negotiation")
 			}
 			if err == nil {
-				err = json.NewEncoder(negotiationConn).Encode(ipcResponse{
+				err = json.NewEncoder(conn).Encode(ipcResponse{
 					ID: request.ID, OK: false,
 					Error: &ipcErrorObject{Code: "ENOSYS", Message: "unknown operation"},
 				})
 			}
 		}
-		_ = negotiationConn.Close()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-
-		v1Conn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer v1Conn.Close()
-		accepted.Add(1)
-		line, err = bufio.NewReader(v1Conn).ReadBytes('\n')
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		var request ipcRequest
-		if err := json.Unmarshal(line, &request); err != nil {
-			serverDone <- err
-			return
-		}
-		if request.Op != "mkdir" {
-			serverDone <- errors.New("fallback did not send the original v1 operation")
-			return
-		}
-		mutations.Add(1)
-		serverDone <- json.NewEncoder(v1Conn).Encode(ipcResponse{ID: request.ID, OK: true, Result: nil})
+		serverDone <- err
 	}()
 
 	client := newIPCClient("tcp://" + listener.Addr().String())
 	defer client.close()
-	if _, err := client.request("mkdir", "/once"); err != nil {
-		t.Fatal(err)
+	_, err = client.request("mkdir", "/must-not-run")
+	if !errors.Is(err, errIPCV2Unsupported) || !strings.Contains(err.Error(), "ENOSYS: unknown operation") {
+		t.Fatalf("rejected negotiation returned %v", err)
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
 	}
-	if accepted.Load() != 2 || mutations.Load() != 1 {
-		t.Fatalf("accepted=%d mutations=%d, want 2 and 1", accepted.Load(), mutations.Load())
-	}
+	expectNoFurtherConnection(t, listener)
 }
 
-func TestIPCClientFallsBackAfterOldServerClosesNegotiation(t *testing.T) {
+func TestIPCClientFailsClosedWhenOldServerClosesNegotiation(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -274,52 +271,100 @@ func TestIPCClientFallsBackAfterOldServerClosesNegotiation(t *testing.T) {
 	defer listener.Close()
 	serverDone := make(chan error, 1)
 	go func() {
-		negotiationConn, err := listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			serverDone <- err
 			return
 		}
-		line, err := bufio.NewReader(negotiationConn).ReadBytes('\n')
+		// A pre-v2 server drops a connection whose first operation it does
+		// not know.
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
 		if err == nil && !bytes.Contains(line, []byte(ipcNegotiateOperation)) {
 			err = errors.New("old server did not receive negotiation")
 		}
-		_ = negotiationConn.Close()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		fallbackConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer fallbackConn.Close()
-		line, err = bufio.NewReader(fallbackConn).ReadBytes('\n')
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		var request ipcRequest
-		if err := json.Unmarshal(line, &request); err != nil {
-			serverDone <- err
-			return
-		}
-		serverDone <- json.NewEncoder(fallbackConn).Encode(
-			ipcResponse{ID: request.ID, OK: true, Result: float64(5)},
-		)
+		_ = conn.Close()
+		serverDone <- err
 	}()
 
 	client := newIPCClient("tcp://" + listener.Addr().String())
 	defer client.close()
-	if result, err := client.request("getattr", "/old"); err != nil || result != float64(5) {
-		t.Fatalf("fallback result = (%#v, %v), want (5, nil)", result, err)
+	if err := client.negotiate(); !errors.Is(err, errIPCV2Unsupported) || !strings.Contains(err.Error(), "closed the connection") {
+		t.Fatalf("closed negotiation returned %v", err)
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
 	}
+	expectNoFurtherConnection(t, listener)
 }
 
-func TestIPCClientRejectsMalformedAcknowledgementWithoutFallback(t *testing.T) {
+func TestIPCClientNegotiatesEagerlyAndReusesThatConnection(t *testing.T) {
+	server := startIPCEchoServer(t, func(ipcRequest) interface{} {
+		return float64(1)
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
+	defer client.close()
+	if err := client.negotiate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.negotiate(); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := client.request("getattr", "/"); err != nil || result != float64(1) {
+		t.Fatalf("request after eager negotiation = (%v, %v), want (1, nil)", result, err)
+	}
+	if got := server.accepted.Load(); got != 1 {
+		t.Fatalf("eager negotiation and request used %d connections, want one", got)
+	}
+}
+
+func TestIPCClientRejectsAcknowledgementSelectingVersionOne(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		var request ipcNegotiationRequest
+		if err := json.Unmarshal(line, &request); err != nil || len(request.Args) != 1 {
+			serverDone <- errors.New("invalid negotiation offer")
+			return
+		}
+		if len(request.Args[0].Versions) != 1 || request.Args[0].Versions[0] != 2 {
+			serverDone <- errors.New("adapter offered a version other than exactly 2")
+			return
+		}
+		serverDone <- json.NewEncoder(conn).Encode(map[string]interface{}{
+			"id": request.ID, "ok": true,
+			"result": map[string]interface{}{
+				"protocol": ipcProtocolName, "version": 1, "nonce": request.Args[0].Nonce,
+			},
+		})
+	}()
+
+	client := newIPCClient("tcp://" + listener.Addr().String())
+	defer client.close()
+	if _, err := client.request("mkdir", "/must-not-run"); err == nil || !strings.Contains(err.Error(), "unoffered version") {
+		t.Fatalf("version 1 acknowledgement returned %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	expectNoFurtherConnection(t, listener)
+}
+
+func TestIPCClientRejectsMalformedAcknowledgement(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -362,13 +407,7 @@ func TestIPCClientRejectsMalformedAcknowledgementWithoutFallback(t *testing.T) {
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
 	}
-	_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
-	if conn, err := listener.Accept(); err == nil {
-		_ = conn.Close()
-		t.Fatal("client fell back after a malformed v2 acknowledgement")
-	} else if !strings.Contains(err.Error(), "timeout") {
-		t.Fatalf("unexpected accept result: %v", err)
-	}
+	expectNoFurtherConnection(t, listener)
 }
 
 func TestIPCClientNeverReplaysMutationAfterV2Bytes(t *testing.T) {
@@ -415,13 +454,8 @@ func TestIPCClientNeverReplaysMutationAfterV2Bytes(t *testing.T) {
 	if mutations.Load() != 1 {
 		t.Fatalf("mutation dispatched %d times, want once", mutations.Load())
 	}
-	_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
-	if conn, err := listener.Accept(); err == nil {
-		_ = conn.Close()
-		t.Fatal("client opened a fallback connection after mutation bytes")
-	} else if !strings.Contains(err.Error(), "timeout") {
-		t.Fatalf("unexpected accept result: %v", err)
-	}
+	// Once mutation bytes were sent, the lost outcome is never replayed.
+	expectNoFurtherConnection(t, listener)
 }
 
 func TestIPCClientNodeV2Interop(t *testing.T) {

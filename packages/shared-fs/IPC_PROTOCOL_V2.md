@@ -1,33 +1,40 @@
 # Peerbit shared-fs IPC protocol v2
 
-Status: implemented by the Node server and Go native adapter. The Go adapter
-prefers v2 and safely falls back to v1 when an older server rejects or closes
-during the non-mutating negotiation. The Node server continues to accept old
-v1 clients. Implementations MUST NOT send a v2 binary frame until the
-negotiation below has succeeded.
+Status: implemented by the Node server and Go native adapter; v2 is the only
+supported protocol. The base64 JSONL protocol v1 is retired: servers and
+adapters no longer speak it, and adapters or CLIs from 0.13.15 or earlier
+(which speak only v1) are unsupported. Implementations MUST NOT send a v2
+binary frame until the negotiation below has succeeded.
+
+Only an adapter from the same release as the CLI is supported. `peerbit-fs
+mount` refuses a managed adapter whose install record does not pin it to the
+CLI's own release (`shared-fs-native-v<cli version>`), and
+`peerbit-fs install-adapter --force` installs the matching adapter. The
+negotiation below remains the protocol gate for adapters passed explicitly
+with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER`.
 
 The normative terms MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are
 to be interpreted as described by RFC 2119 and RFC 8174.
 
 ## Goals and scope
 
-V2 removes v1's base64 expansion and redundant copies for file payloads while
-retaining bounded memory use, request ordering, and interoperability with
-deployed v1 adapters. It is a local transport protocol; it does not provide
-authentication, authorization, encryption, compression, or an application
-checksum. Those properties remain the responsibility of the endpoint and the
-underlying transport.
+V2 carries file payloads as raw frame bodies, without base64 expansion or
+redundant copies, while retaining bounded memory use and request ordering. It
+is a local transport protocol; it does not provide authentication,
+authorization, encryption, compression, or an application checksum. Those
+properties remain the responsibility of the endpoint and the underlying
+transport.
 
 All lengths in this document are encoded-byte lengths, never JavaScript string
 lengths or Unicode code-point counts. A transport chunk has no protocol
 meaning: implementations MUST handle headers, metadata, bodies, and UTF-8 code
 units split or coalesced at arbitrary byte boundaries.
 
-## Backward-compatible negotiation
+## Negotiation
 
-Negotiation begins on a fresh connection in v1 JSONL. The client sends exactly
-one non-mutating request using the reserved operation
-`$peerbit.shared-fs.ipc.negotiate`:
+Negotiation begins on a fresh connection with one JSONL handshake line: UTF-8
+JSON followed by one LF byte. The client sends exactly one non-mutating
+request using the reserved operation `$peerbit.shared-fs.ipc.negotiate`:
 
 ```json
 {
@@ -36,7 +43,7 @@ one non-mutating request using the reserved operation
     "args": [
         {
             "protocol": "peerbit-shared-fs-ipc",
-            "versions": [2, 1],
+            "versions": [2],
             "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
             "maxRequestFrameBytes": 67108864,
             "maxResponseFrameBytes": 67108864
@@ -51,14 +58,12 @@ connection and MUST be compared as an opaque string. The literal nonce above
 is only a deterministic golden-vector value.
 
 Each negotiation request and acknowledgement is limited to 65,536 encoded
-UTF-8 bytes, excluding its trailing LF. A server MAY apply its configured v1
-request bound while reading the initial offer. A client whose configured
-request bound cannot hold its negotiation offer MAY begin the untouched
-connection directly in v1. The directional limits in the offer and
-acknowledgement apply to binary frames, not to the handshake itself.
+UTF-8 bytes, excluding its trailing LF, independent of any configured frame
+limit. The directional limits in the offer and acknowledgement apply to binary
+frames, not to the handshake itself.
 
-A v2-capable server responds in v1 JSONL and echoes the request ID, protocol,
-and nonce:
+The server responds with one JSONL handshake line that echoes the request ID,
+protocol, and nonce:
 
 ```json
 {
@@ -75,36 +80,39 @@ and nonce:
 }
 ```
 
-The selected version MUST have appeared in the offer. The returned limits are
-the effective per-direction limits for the connection and MUST NOT exceed the
-corresponding offered limits. A client MUST reject a malformed response, a
-mismatched ID/protocol/nonce, an unoffered version, or invalid limits. Neither
-side may send binary bytes before a valid version-2 acknowledgement has been
-fully received. If version 1 is selected, both sides remain in v1 JSONL on that
-connection.
+The selected version MUST have appeared in the offer, and version 2 is the
+only version a server may select. The returned limits are the effective
+per-direction limits for the connection and MUST NOT exceed the corresponding
+offered limits. A client MUST reject a malformed response, a mismatched
+ID/protocol/nonce, a version other than 2, or invalid limits. Neither side may
+send binary bytes before a valid acknowledgement has been fully received.
 
-Every offered version and the selected version MUST be an integer from 1
-through 255, and an offer MUST NOT contain duplicates. V2 request and response
-frame limits MUST be integers from 1 through 4,294,967,295; the metadata limit
-MUST be an integer in the same range and MUST NOT exceed either directional
-frame limit. An offer containing version 2 MUST include both directional frame
-limits. The three returned limits are REQUIRED when version 2 is selected. When
-version 1 is selected they MUST be absent and each endpoint retains its locally
-configured v1 JSONL bounds. Receivers MAY ignore otherwise unknown negotiation
-object members for forward-compatible extensions.
+Every offered version MUST be an integer from 1 through 255, and an offer MUST
+NOT contain duplicates. Clients offer exactly `[2]`; a server selects 2 from any
+offer that contains it, whatever its position, and MUST NOT select a retired
+version. V2 request and response frame limits MUST be integers from 1 through
+4,294,967,295; the metadata limit MUST be an integer in the same range and MUST
+NOT exceed either directional frame limit. An offer containing version 2 MUST
+include both directional frame limits, and all three returned limits are
+REQUIRED. Receivers MAY ignore otherwise unknown negotiation object members for
+forward-compatible extensions.
 
-An old server will reject the reserved operation or close the connection. The
-client MAY reconnect once and use v1 because the negotiation request cannot
-mutate filesystem state. It MUST NOT put a v1 request on a connection that may
-have switched to v2. Once any filesystem operation bytes have been sent, the
-client MUST NOT fall back, retry, or replay that operation automatically; the
-outcome may be unknown. Transport errors after negotiation therefore fail the
-operation closed.
+A server MUST answer an offer without version 2 with an `EPROTONOSUPPORT`
+error response and close the connection. A client MUST fail closed when the
+server rejects the offer or closes the connection before acknowledging it: it
+MUST NOT reconnect with another protocol, and it reports the negotiation
+failure instead. Once any filesystem operation bytes have been sent, the
+client MUST NOT retry or replay that operation automatically; the outcome may
+be unknown. Transport errors after negotiation therefore fail the operation
+closed.
 
-Old clients send ordinary v1 operations immediately and remain supported by a
-dual-protocol server. A server distinguishes them by parsing the first v1 JSONL
-operation; an ordinary operation pins that connection to v1 and negotiation is
-thereafter invalid. No binary sniffing is permitted before negotiation.
+A first line that is a JSON object but not a negotiation request, such as an
+ordinary operation from a retired v1 client, MUST NOT be dispatched. The server answers
+it with one JSONL `EPROTONOSUPPORT` error response that echoes its request ID
+when that ID is a non-negative safe integer (otherwise 0) and explains that the
+adapter must be replaced, then closes the connection. Any other malformed
+first line closes the connection without a response. No binary sniffing is
+permitted before negotiation.
 
 ## Binary frame
 
@@ -130,8 +138,10 @@ default and maximum is 1,048,576 bytes. The initial default directional frame
 limit is 67,108,864 bytes. A zero-length body is valid. Unknown flags or kinds
 MUST fail the connection closed.
 
-Metadata MUST be valid shortest-form UTF-8 and valid JSON. It uses the v1
-request or response envelope, with non-negative safe-integer IDs. Senders MUST
+Metadata MUST be valid shortest-form UTF-8 and valid JSON. It uses the JSON
+request or response envelope of the handshake (`id`, `op`, `args` for
+requests; `id`, `ok`, and `result` or `error` for responses), with
+non-negative safe-integer IDs. Senders MUST
 emit compact JSON with unique object member names. Receivers MUST validate the
 decoded envelope and MAY reject duplicate member names; a decoder that
 collapses duplicates is not required to add a separate duplicate detector.
@@ -144,7 +154,7 @@ response, `result` is exactly `{"$bytes":null}` and the raw result is the body.
 All other requests, all other successful responses, and every error response
 MUST have a zero-length body. A bytes sentinel in any other position, a missing
 sentinel when a body is required, or a non-empty unexpected body is a protocol
-error. Nested v1 base64 byte objects are not supported in v2.
+error. Base64 byte objects (`{"$bytes":"<base64>"}`) are not part of v2.
 
 ## Ordering, flow control, and failure semantics
 
@@ -194,9 +204,9 @@ size.
 
 [`protocol/ipc-v2-vectors.json`](protocol/ipc-v2-vectors.json) is normative.
 Its lowercase hexadecimal strings are byte-exact valid examples of complete
-frames (or complete v1 negotiation lines, including LF). Every v2 decoder MUST
+frames (or complete JSONL handshake lines, including LF). Every v2 decoder MUST
 accept them and recover the recorded fields and bodies. JSON member order and
 escaping are not canonical, so conforming encoders need not reproduce these
 exact bytes unless a future protocol revision defines canonical JSON. Node and
-Go protocol tests MUST consume this shared vector file when their v2 runtimes
-are implemented rather than maintaining separate copies.
+Go protocol tests MUST consume this shared vector file rather than maintaining
+separate copies.

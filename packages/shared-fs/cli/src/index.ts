@@ -21,8 +21,13 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { mountExternalNativeAdapter } from "./external-native-adapter.js";
 import {
+    describeNativeAdapterInstall,
+    inspectNativeAdapterInstall,
     installNativeAdapter,
-    resolveExternalNativeAdapter,
+    nativeAdapterReleaseTag,
+    readCliPackageVersion,
+    resolveMountNativeAdapter,
+    resolveNativeAdapter,
 } from "./native-adapter.js";
 
 type SharedFsRuntime = typeof import("@peerbit/shared-fs");
@@ -312,22 +317,39 @@ const waitForTermination = async (stop: () => Promise<void>) => {
 };
 
 const configureExternalNativeAdapterEnv = async () => {
-    const adapter = await resolveExternalNativeAdapter();
+    const adapter = await resolveNativeAdapter();
     if (adapter && !process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER) {
-        process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER = adapter;
+        process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER = adapter.command;
     }
     return adapter;
 };
 
+/** Pin state of the managed adapter; null for explicit or PATH adapters. */
+const readManagedAdapterRelease = async (
+    adapter: Awaited<ReturnType<typeof resolveNativeAdapter>>
+) => {
+    if (adapter?.source !== "managed") {
+        return null;
+    }
+    const expectedTag = nativeAdapterReleaseTag(await readCliPackageVersion());
+    return {
+        expectedTag,
+        ...(await inspectNativeAdapterInstall(adapter.command, expectedTag)),
+    };
+};
+
 const readNativeStatus = async () => {
     const externalAdapter = await configureExternalNativeAdapterEnv();
+    const externalAdapterRelease =
+        await readManagedAdapterRelease(externalAdapter);
     const { getNativeMountSupport } = await loadSharedFsRuntime();
     const support = await getNativeMountSupport();
     const windows = support.platform === "win32";
     return {
         platform: support.platform,
         adapter: support.adapter,
-        externalAdapter: externalAdapter ?? null,
+        externalAdapter: externalAdapter?.command ?? null,
+        externalAdapterRelease,
         available: support.available,
         missing: [...support.missing],
         notes: [...support.notes],
@@ -362,6 +384,18 @@ const printNativeRequirements = async (status?: NativeStatus) => {
     console.log(`platform: ${native.platform}`);
     console.log(`adapter: ${native.adapter}`);
     console.log(`external adapter: ${native.externalAdapter ?? "not found"}`);
+    const release = native.externalAdapterRelease;
+    if (release) {
+        console.log(
+            release.state === "current"
+                ? `external adapter release: ${release.tag} (matches this CLI)`
+                : `external adapter release: ${
+                      release.state === "unrecorded"
+                          ? "unknown (no install record)"
+                          : `${release.tag} (${release.state})`
+                  }; mount requires ${release.expectedTag}, run peerbit-fs install-adapter --force`
+        );
+    }
     console.log(`available: ${native.available ? "yes" : "no"}`);
     console.log(
         `metadata modes: synthetic (directories ${native.metadata.modes.directory}, files ${native.metadata.modes.file}; creation mode not preserved)`
@@ -802,7 +836,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     .option("force", {
                         type: "boolean",
                         default: false,
-                        description: "Replace an existing installed adapter.",
+                        description:
+                            "Reinstall even when the installed adapter already matches the requested release.",
                     })
                     .option("print-path", {
                         type: "boolean",
@@ -827,18 +862,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     console.log(result.binaryPath);
                     return;
                 }
-                if (result.installed) {
-                    console.log(
-                        chalk.green(
-                            `Installed native adapter ${result.assetName} at ${result.binaryPath}`
-                        )
-                    );
-                    return;
-                }
+                const message = describeNativeAdapterInstall(result);
                 console.log(
-                    chalk.gray(
-                        `Native adapter already installed at ${result.binaryPath}`
-                    )
+                    result.installed
+                        ? chalk.green(message)
+                        : chalk.gray(message)
                 );
             }
         )
@@ -858,7 +886,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     .option("native-adapter", {
                         type: "string",
                         description:
-                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER.",
+                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Overrides the managed adapter's release pin; the IPC handshake still rejects an incompatible adapter.",
                     })
                     .option("write-ready-timeout-ms", {
                         type: "number",
@@ -885,6 +913,10 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 }
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
+                );
+                // Refuse a stale managed adapter before opening Peerbit.
+                const externalAdapter = await resolveMountNativeAdapter(
+                    argv.nativeAdapter
                 );
                 const {
                     NativeMountUnavailableError,
@@ -948,9 +980,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         writeFileInput: "immutable-borrowed",
                         profile,
                     });
-                    const externalAdapter = await resolveExternalNativeAdapter(
-                        argv.nativeAdapter
-                    );
                     const mountpoint = normalizeNativeMountpoint(
                         String(argv.mountpoint)
                     );
@@ -961,7 +990,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             { profile }
                         );
                         mounted = await mountExternalNativeAdapter(
-                            externalAdapter,
+                            externalAdapter.command,
                             ipc.endpoint,
                             mountpoint,
                             nativeProfileFile === undefined
@@ -970,8 +999,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         );
                     } else {
                         // In-process fuse-native mounts talk to the backend
-                        // directly; a loopback JSON hop would only add
-                        // latency and base64 CPU.
+                        // directly; a loopback IPC hop would only add
+                        // latency.
                         mounted = await mountNativeSharedFs(backend, {
                             mountpoint,
                             profile,

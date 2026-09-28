@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import chalk from "chalk";
-import { installNativeAdapter } from "./native-adapter.js";
+import {
+    describeNativeAdapterInstall,
+    installNativeAdapter,
+} from "./native-adapter.js";
 
 const takeValue = (args: string[], name: string) => {
     const index = args.indexOf(name);
@@ -30,16 +33,9 @@ installNativeAdapter({
         if (hasFlag(args, "--quiet")) {
             return;
         }
-        if (result.installed) {
-            console.log(
-                chalk.green(`Installed native adapter at ${result.binaryPath}`)
-            );
-            return;
-        }
+        const message = describeNativeAdapterInstall(result);
         console.log(
-            chalk.gray(
-                `Native adapter already installed at ${result.binaryPath}`
-            )
+            result.installed ? chalk.green(message) : chalk.gray(message)
         );
     })
     .catch((error) => {

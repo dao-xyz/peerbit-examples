@@ -420,6 +420,60 @@ describe("peerbit-fs cli", () => {
         );
     });
 
+    it("refuses a managed adapter from another release before opening Peerbit", async () => {
+        const installDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-adapter-pin-")
+        );
+        const saved = {
+            adapter: process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER,
+            installDir: process.env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR,
+        };
+        const binaryPath = path.join(
+            installDir,
+            process.platform === "win32"
+                ? "peerbit-shared-fs-native.exe"
+                : "peerbit-shared-fs-native"
+        );
+        // An adapter installed before pinning has no install record.
+        await fs.writeFile(binaryPath, "adapter from an older CLI");
+        const { version } = JSON.parse(
+            await fs.readFile(
+                new URL("../../package.json", import.meta.url),
+                "utf8"
+            )
+        ) as { version: string };
+        const createPeerbit = vi.spyOn(Peerbit, "create");
+        try {
+            delete process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER;
+            process.env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR = installDir;
+            await expect(
+                runCli([
+                    "mount",
+                    "zb2rh-not-opened",
+                    "/tmp/peerbit-shared-fs-not-mounted",
+                    "--directory",
+                    "",
+                ])
+            ).rejects.toThrow(
+                `Installed native adapter ${binaryPath} is of unknown version: it has no install record (installed before adapter version pinning, copied manually, or left by an interrupted install), but @peerbit/shared-fs-cli ${version} requires shared-fs-native-v${version}. Run \`peerbit-fs install-adapter --force\``
+            );
+            expect(createPeerbit).not.toHaveBeenCalled();
+        } finally {
+            createPeerbit.mockRestore();
+            for (const [name, value] of [
+                ["PEERBIT_SHARED_FS_NATIVE_ADAPTER", saved.adapter],
+                ["PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR", saved.installDir],
+            ] as const) {
+                if (value === undefined) {
+                    delete process.env[name];
+                } else {
+                    process.env[name] = value;
+                }
+            }
+            await fs.rm(installDir, { recursive: true, force: true });
+        }
+    });
+
     it("never reuses or truncates an existing mount profile", async () => {
         const directory = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-profile-")

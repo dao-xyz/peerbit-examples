@@ -25,6 +25,8 @@ if (!existsSync(installer)) {
     process.exit(0);
 }
 
+// --if-needed keeps an adapter only when its install record pins it to this
+// CLI's release; a stale or unrecorded adapter is replaced, never forced.
 const result = spawnSync(
     process.execPath,
     [installer, "--if-needed", "--quiet"],

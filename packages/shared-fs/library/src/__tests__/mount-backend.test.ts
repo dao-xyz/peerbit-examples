@@ -1,9 +1,7 @@
 import { Peerbit } from "peerbit";
-import { createConnection } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     CONFLICTS_DIR,
-    createSharedFsIpcClient,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
     encodeConflictPathName,
@@ -18,6 +16,17 @@ import {
     type SharedFsMountProfileEvent,
     type WriteFileOptions,
 } from "../index.js";
+import {
+    encodeIpcV2Frame,
+    IpcV2FrameKind,
+    writeIpcV2Frame,
+} from "../ipc-v2.js";
+import {
+    connectIpcEndpoint,
+    createIpcV2TestClient,
+    negotiateIpcV2,
+    readIpcV2Response,
+} from "./ipc-v2-test-client.js";
 
 const encode = (value: string) => new TextEncoder().encode(value);
 const decode = (value: Uint8Array | undefined) =>
@@ -916,12 +925,13 @@ describe("shared fs mount backend", () => {
             backend,
             "tcp://127.0.0.1:0"
         );
+        const client = createIpcV2TestClient(server.endpoint);
         try {
-            const client = createSharedFsIpcClient(server.endpoint);
             await expect(
                 client.open("/settling.txt", { read: true, write: true })
             ).rejects.toMatchObject({ code: "EAGAIN" });
         } finally {
+            await client.close();
             await server.close();
         }
     });
@@ -3370,8 +3380,8 @@ describe("shared fs mount backend", () => {
     it("round-trips backend calls through local IPC", async () => {
         const backend = createSharedFsMountBackend(fs);
         const server = await createSharedFsIpcServer(backend);
+        const client = createIpcV2TestClient(server.endpoint);
         try {
-            const client = createSharedFsIpcClient(server.endpoint);
             await client.mkdir("/ipc");
             const handle = await client.open("/ipc/file.txt", {
                 write: true,
@@ -3404,8 +3414,9 @@ describe("shared fs mount backend", () => {
             });
             expect(decode(await fs.readFile("/ipc/file.txt"))).toBe("over ipc");
 
-            // Decoded Buffers may use a pooled backing allocation. Re-encoding
-            // a subarray must honor its view bounds and never leak slab bytes.
+            // A v2 read body is a view into a larger socket chunk. Writing a
+            // subarray back must honor its view bounds and never leak the
+            // surrounding bytes.
             const readHandle = await client.open("/ipc/file.txt", {
                 read: true,
             });
@@ -3420,6 +3431,7 @@ describe("shared fs mount backend", () => {
             await client.release(copyHandle);
             expect(decode(await fs.readFile("/ipc/copy.txt"))).toBe("er i");
         } finally {
+            await client.close();
             await server.close();
         }
     });
@@ -4052,9 +4064,9 @@ describe("shared fs mount backend", () => {
             backend,
             "tcp://127.0.0.1:0"
         );
+        const client = createIpcV2TestClient(server.endpoint);
         try {
             expect(server.endpoint).toMatch(/^tcp:\/\/127\.0\.0\.1:\d+$/);
-            const client = createSharedFsIpcClient(server.endpoint);
             await client.mkdir("/tcp");
             const handle = await client.open("/tcp/file.txt", {
                 write: true,
@@ -4082,6 +4094,7 @@ describe("shared fs mount backend", () => {
                 decode(await fs.readFile("/tcp/numeric-exclusive-append.txt"))
             ).toBe("numeric");
         } finally {
+            await client.close();
             await server.close();
         }
     });
@@ -4092,32 +4105,24 @@ describe("shared fs mount backend", () => {
             backend,
             "tcp://127.0.0.1:0"
         );
-        const endpoint = new URL(server.endpoint);
-        const socket = createConnection({
-            host: endpoint.hostname,
-            port: Number(endpoint.port),
-        });
+        const socket = await connectIpcEndpoint(server.endpoint);
+        socket.on("error", () => {});
         try {
-            await new Promise<void>((resolve, reject) => {
-                const onError = (error: Error) => {
-                    socket.off("connect", onConnect);
-                    reject(error);
-                };
-                const onConnect = () => {
-                    socket.off("error", onError);
-                    resolve();
-                };
-                socket.once("error", onError);
-                socket.once("connect", onConnect);
-            });
-            const response = new Promise<void>((resolve, reject) => {
-                socket.once("data", () => resolve());
-                socket.once("error", reject);
-            });
-            socket.write(
-                `${JSON.stringify({ id: 1, op: "getattr", args: ["/"] })}\n`
+            // A negotiated adapter connection stays open between requests.
+            const { reader, limits } = await negotiateIpcV2(socket);
+            await writeIpcV2Frame(
+                socket,
+                encodeIpcV2Frame(
+                    IpcV2FrameKind.Request,
+                    { id: 1, op: "getattr", args: ["/"] },
+                    Buffer.alloc(0),
+                    limits.maxRequestFrameBytes,
+                    limits.maxMetadataBytes
+                )
             );
-            await response;
+            await expect(
+                readIpcV2Response(reader, limits)
+            ).resolves.toMatchObject({ metadata: { id: 1, ok: true } });
 
             const disconnected = new Promise<void>((resolve) => {
                 socket.once("close", () => resolve());

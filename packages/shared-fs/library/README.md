@@ -855,8 +855,9 @@ The first adapter path is intentionally experimental:
 - Windows requires WinFsp plus the external adapter.
 - `packages/shared-fs/native` provides an experimental external native adapter
   binary using cgofuse for Linux FUSE, macFUSE, and WinFsp.
-  `peerbit-fs install-adapter` downloads the matching prebuilt adapter when a
-  release asset exists.
+  `peerbit-fs install-adapter` downloads the prebuilt adapter from the CLI's
+  own release and records that pin; `peerbit-fs mount` refuses a managed
+  adapter from any other release.
 
 The external adapter forwards the flags supplied at its cgofuse callback
 boundary. Linux FUSE and macFUSE retain creation and status flags for `Create`;
@@ -869,20 +870,22 @@ caller's requested access mode or `O_APPEND` during creation, and an ordinary
 its platform translation is required.
 
 The adapter transport limits each request and response to 64 MiB by default.
-The Go adapter offers binary v2 through one reserved, non-mutating JSONL
-request on each fresh connection. In v2, metadata plus the raw read/write body
-count toward the bound, avoiding v1 base64 expansion. Old clients may send an
-ordinary JSONL v1 operation first and remain supported; the Go adapter safely
-reconnects once to v1 only when an old server rejects or closes during
-negotiation, before any filesystem operation is sent.
-`createSharedFsIpcServer` and `createSharedFsIpcClient` accept optional
-`maxRequestFrameBytes` and `maxResponseFrameBytes` overrides. Normal mount I/O
-is chunked well below this ceiling; the bound protects the daemon and adapter
-from an unterminated or unexpectedly large local frame rather than setting a
-filesystem file-size limit. Negotiated v2 uses the lower offered/server
-directional limits and caps metadata at 1 MiB. V1 connections retain their
-locally configured JSONL bounds. The complete binary format and failure
-semantics are specified in `packages/shared-fs/IPC_PROTOCOL_V2.md`. Custom
+`createSharedFsIpcServer` speaks only binary IPC v2, which the Go adapter
+negotiates through one reserved, non-mutating JSONL handshake line on each
+fresh connection; metadata plus the raw read/write body count toward the
+bound. IPC v1 is retired: the server answers an un-negotiated first operation
+(from an adapter of 0.13.15 or earlier) with an `EPROTONOSUPPORT` error and
+closes the connection without dispatching it, and the Go adapter fails closed
+instead of falling back when a server does not accept v2. Only the adapter
+from the CLI's own release is supported (see `peerbit-fs install-adapter`).
+`createSharedFsIpcServer` accepts optional `maxRequestFrameBytes` and
+`maxResponseFrameBytes` overrides. Normal mount I/O is chunked well below this
+ceiling; the bound protects the daemon and adapter from an unexpectedly large
+local frame rather than setting a filesystem file-size limit. Each connection
+uses the lower offered/server directional limits and caps metadata at 1 MiB;
+the handshake line has its own fixed 64 KiB bound. The complete binary format
+and failure semantics are specified in
+`packages/shared-fs/IPC_PROTOCOL_V2.md`. Custom
 mount backends transfer ownership of each returned read view to the caller and
 must not later mutate or reuse it; this lets the server retain the view until
 its socket write completes without an additional file-sized copy.

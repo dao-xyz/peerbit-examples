@@ -61,6 +61,35 @@ describe("bounded IPC byte reader", () => {
         await expect(reader.readLine()).resolves.toEqual(Buffer.from("1234"));
     });
 
+    it("applies a per-line bound independent of the reader bound", async () => {
+        // A handshake line may exceed a small frame bound, and a large frame
+        // bound must not let an unterminated handshake line grow past its own.
+        const payload = Buffer.alloc(100, 0x61);
+        const wider = new BoundedIpcByteReader(
+            oneByteSource(Buffer.concat([payload, Buffer.from("\nabcd")])),
+            4
+        );
+        await expect(wider.readLine(100)).resolves.toEqual(payload);
+        await expect(wider.readExactly(4)).resolves.toEqual(
+            Buffer.from("abcd")
+        );
+
+        const narrower = new BoundedIpcByteReader(
+            byteSource(Buffer.from("12345\n")),
+            1024
+        );
+        await expect(narrower.readLine(4)).rejects.toEqual(
+            expect.objectContaining<IpcFrameTooLargeError>({
+                name: "IpcFrameTooLargeError",
+                actualBytes: 5,
+                maxBytes: 4,
+            })
+        );
+        await expect(
+            new BoundedIpcByteReader(byteSource(), 4).readLine(0)
+        ).rejects.toThrow("maxLineBytes must be a positive safe integer");
+    });
+
     it("rejects a line at the first byte beyond its bound", async () => {
         const reader = new BoundedIpcByteReader(
             byteSource(

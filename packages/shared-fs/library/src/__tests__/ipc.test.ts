@@ -4,19 +4,24 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { createConnection, createServer, type Socket } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
-import { createSharedFsIpcClient, createSharedFsIpcServer } from "../ipc.js";
+import { createSharedFsIpcServer } from "../ipc.js";
 import { BoundedIpcByteReader } from "../ipc-byte-reader.js";
 import {
     encodeIpcV2Frame,
     IpcV2FrameKind,
-    readIpcV2Frame,
     SHARED_FS_IPC_NEGOTIATE_OP,
+    SHARED_FS_IPC_NEGOTIATION_MAX_BYTES,
     SHARED_FS_IPC_PROTOCOL,
     SHARED_FS_IPC_V2_MAX_METADATA_BYTES,
     writeIpcV2Frame,
 } from "../ipc-v2.js";
+import {
+    createIpcV2TestClient,
+    negotiateIpcV2 as negotiateV2,
+    readIpcV2Response as decodeV2Response,
+} from "./ipc-v2-test-client.js";
 import {
     SharedFsBackendError,
     type SharedFsMountBackend,
@@ -98,100 +103,22 @@ const deferred = () => {
     return { promise, resolve };
 };
 
-const negotiateV2 = async (
-    socket: Socket,
-    offer: Record<string, unknown> = {}
+const requestFrame = (
+    limits: { maxRequestFrameBytes: number; maxMetadataBytes: number },
+    metadata: Record<string, unknown>,
+    body: Uint8Array = Buffer.alloc(0)
 ) => {
-    const reader = new BoundedIpcByteReader(socket, 64 * 1024 * 1024);
-    const request = {
-        id: 0,
-        op: SHARED_FS_IPC_NEGOTIATE_OP,
-        args: [
-            {
-                protocol: SHARED_FS_IPC_PROTOCOL,
-                versions: [2, 1],
-                nonce: "test-nonce",
-                maxRequestFrameBytes: 64 * 1024 * 1024,
-                maxResponseFrameBytes: 64 * 1024 * 1024,
-                ...offer,
-            },
-        ],
-    };
-    socket.write(`${JSON.stringify(request)}\n`);
-    const line = await reader.readLine();
-    if (!line) throw new Error("IPC server omitted negotiation response");
-    const response = JSON.parse(line.toString("utf8"));
-    if (!response.ok || response.result?.version !== 2) {
-        throw new Error(`IPC server rejected v2: ${line.toString("utf8")}`);
-    }
-    return {
-        reader,
-        limits: {
-            maxRequestFrameBytes: response.result.maxRequestFrameBytes,
-            maxResponseFrameBytes: response.result.maxResponseFrameBytes,
-            maxMetadataBytes: response.result.maxMetadataBytes,
-        },
-    };
-};
-
-const decodeV2Response = async (
-    reader: BoundedIpcByteReader,
-    limits: {
-        maxResponseFrameBytes: number;
-        maxMetadataBytes: number;
-    }
-) => {
-    const response = await readIpcV2Frame(
-        reader,
-        IpcV2FrameKind.Response,
-        limits.maxResponseFrameBytes,
+    const frame = encodeIpcV2Frame(
+        IpcV2FrameKind.Request,
+        metadata,
+        body,
+        limits.maxRequestFrameBytes,
         limits.maxMetadataBytes
     );
-    return {
-        metadata: JSON.parse(response.metadata.toString("utf8")),
-        body: response.body,
-    };
+    return Buffer.concat([frame.header, frame.metadata, frame.body]);
 };
 
-describe("shared-fs IPC framing", () => {
-    it("profiles only the backend service boundary with its connection key", async () => {
-        const events: SharedFsMountProfileEvent[] = [];
-        const server = await createSharedFsIpcServer(
-            backendWith({ getattr: async (path) => ({ path }) as any }),
-            "tcp://127.0.0.1:0",
-            { profile: (event) => events.push(event) }
-        );
-        const socket = await connect(server.endpoint);
-        try {
-            socket.write(
-                `${JSON.stringify({ id: 1, op: "getattr", args: ["/profiled"] })}\n`
-            );
-            await expect(readJsonLines(socket, 1)).resolves.toEqual([
-                { id: 1, ok: true, result: { path: "/profiled" } },
-            ]);
-            expect(events).toHaveLength(1);
-            expect(events[0]).toMatchObject({
-                schema: "peerbit.shared-fs.mount-profile",
-                schemaVersion: 1,
-                source: "node-daemon",
-                phase: "ipc.service",
-                operation: "getattr",
-                ok: true,
-                detail: {
-                    requestId: 1,
-                    protocol: "v1",
-                    remotePort: socket.localPort,
-                },
-            });
-            expect(events[0].startUnixNs).toMatch(/^[1-9][0-9]{0,18}$/u);
-            expect(events[0].detail).not.toHaveProperty("framingNs");
-            expect(events[0].detail).not.toHaveProperty("code");
-        } finally {
-            socket.destroy();
-            await server.close();
-        }
-    });
-
+describe("shared-fs IPC v2 server", () => {
     it("profiles failed service calls with the code the adapter receives", async () => {
         const events: SharedFsMountProfileEvent[] = [];
         const server = await createSharedFsIpcServer(
@@ -211,8 +138,8 @@ describe("shared-fs IPC framing", () => {
             "tcp://127.0.0.1:0",
             { profile: (event) => events.push(event) }
         );
+        const client = createIpcV2TestClient(server.endpoint);
         try {
-            const client = createSharedFsIpcClient(server.endpoint);
             for (const path of ["/absent", "/settling", "/uncoded"]) {
                 await expect(client.getattr(path)).rejects.toBeDefined();
             }
@@ -226,64 +153,63 @@ describe("shared-fs IPC framing", () => {
                 [false, "EIO"],
             ]);
         } finally {
+            await client.close();
             await server.close();
         }
     });
 
-    it("keeps additive readdir options compatible with legacy backends", async () => {
+    it("passes additive readdir options to backends that ignore them", async () => {
         const readdir = vi.fn(async (_path: string) => [
-            { name: "legacy.txt", kind: "file" as const },
+            { name: "compact.txt", kind: "file" as const },
         ]);
         const server = await createSharedFsIpcServer(
             backendWith({ readdir }),
             "tcp://127.0.0.1:0"
         );
+        const client = createIpcV2TestClient(server.endpoint);
         try {
-            const client = createSharedFsIpcClient(server.endpoint);
             await expect(client.readdir("/")).resolves.toEqual([
-                { name: "legacy.txt", kind: "file" },
+                { name: "compact.txt", kind: "file" },
             ]);
             await expect(
                 client.readdir("/", { includeStats: true })
-            ).resolves.toEqual([{ name: "legacy.txt", kind: "file" }]);
+            ).resolves.toEqual([{ name: "compact.txt", kind: "file" }]);
 
             expect(readdir.mock.calls[0]).toEqual(["/"]);
-            // JavaScript legacy implementations ignore this extra argument.
+            // A custom backend without stat support ignores this argument.
             expect(readdir.mock.calls[1]).toEqual([
                 "/",
                 { includeStats: true },
             ]);
         } finally {
+            await client.close();
             await server.close();
         }
     });
 
-    it("reassembles a UTF-8 request split inside a multibyte character", async () => {
+    it("reassembles metadata split inside a multibyte UTF-8 character", async () => {
         const getattr = vi.fn(async (path: string) => ({ path }));
-        const backend = backendWith({ getattr });
-        const payload = Buffer.from(
-            JSON.stringify({ id: 1, op: "getattr", args: ["/😀.txt"] }),
-            "utf8"
-        );
         const server = await createSharedFsIpcServer(
-            backend,
-            "tcp://127.0.0.1:0",
-            { maxRequestFrameBytes: payload.byteLength }
+            backendWith({ getattr }),
+            "tcp://127.0.0.1:0"
         );
         const socket = await connect(server.endpoint);
         try {
-            const response = readJsonLines(socket, 1);
-            const emoji = Buffer.from("😀", "utf8");
-            const splitAt = payload.indexOf(emoji) + 1;
-            socket.write(payload.subarray(0, splitAt));
+            const { reader, limits } = await negotiateV2(socket);
+            const frame = requestFrame(limits, {
+                id: 1,
+                op: "getattr",
+                args: ["/😀.txt"],
+            });
+            const splitAt = frame.indexOf(Buffer.from("😀", "utf8")) + 1;
+            socket.write(frame.subarray(0, splitAt));
             await new Promise<void>((resolve) => setImmediate(resolve));
-            socket.write(
-                Buffer.concat([payload.subarray(splitAt), Buffer.from("\n")])
-            );
+            socket.write(frame.subarray(splitAt));
 
-            await expect(response).resolves.toEqual([
-                { id: 1, ok: true, result: { path: "/😀.txt" } },
-            ]);
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: { id: 1, ok: true, result: { path: "/😀.txt" } },
+                body: Buffer.alloc(0),
+            });
             expect(getattr).toHaveBeenCalledWith("/😀.txt");
         } finally {
             socket.destroy();
@@ -291,121 +217,68 @@ describe("shared-fs IPC framing", () => {
         }
     });
 
-    it("accepts default-size binary frames and enforces the exact encoded request limit", async () => {
+    it("round-trips default-size bodies and enforces the exact negotiated request limit", async () => {
         const write = vi.fn(
             async (_handle: number, data: Uint8Array) => data.byteLength
         );
         const data = Buffer.alloc(1024 * 1024, 0xa5);
         const read = vi.fn(async () => data);
-        const backend = backendWith({ write, read });
-        const payload = Buffer.from(
-            JSON.stringify({
-                id: 1,
-                op: "write",
-                args: [7, { $bytes: data.toString("base64") }, 0],
-            })
-        );
-        const server = await createSharedFsIpcServer(
-            backend,
+        const metadata = { id: 1, op: "write", args: [7, { $bytes: null }, 0] };
+        const exactFrameBytes =
+            Buffer.byteLength(JSON.stringify(metadata)) + data.byteLength;
+
+        const defaults = await createSharedFsIpcServer(
+            backendWith({ read }),
             "tcp://127.0.0.1:0"
         );
+        const client = createIpcV2TestClient(defaults.endpoint);
         try {
-            const defaultClient = createSharedFsIpcClient(server.endpoint);
-            const roundTrip = await defaultClient.read(7, data.byteLength, 0);
+            const roundTrip = await client.read(7, data.byteLength, 0);
             expect(roundTrip.byteLength).toBe(data.byteLength);
             expect(roundTrip[0]).toBe(0xa5);
             expect(roundTrip.at(-1)).toBe(0xa5);
-
-            const exactClient = createSharedFsIpcClient(server.endpoint, {
-                maxRequestFrameBytes: payload.byteLength,
-            });
-            await expect(exactClient.write(7, data, 0)).resolves.toBe(
-                data.byteLength
-            );
-
-            const undersizedClient = createSharedFsIpcClient(server.endpoint, {
-                maxRequestFrameBytes: payload.byteLength - 1,
-            });
-            await expect(undersizedClient.write(7, data, 0)).rejects.toThrow(
-                `IPC request exceeds ${payload.byteLength - 1} byte limit`
-            );
-            expect(write).toHaveBeenCalledTimes(1);
-            expect(read).toHaveBeenCalledTimes(1);
         } finally {
-            await server.close();
+            await client.close();
+            await defaults.close();
         }
-    });
 
-    it("accepts an exact response limit and rejects one extra byte", async () => {
-        const result = { path: "/😀.txt" };
-        const payload = Buffer.from(
-            JSON.stringify({ id: 1, ok: true, result }),
-            "utf8"
+        const server = await createSharedFsIpcServer(
+            backendWith({ write }),
+            "tcp://127.0.0.1:0",
+            { maxRequestFrameBytes: exactFrameBytes }
         );
-        const listener = createServer((socket) => {
-            socket.once("data", () => {
-                socket.write(Buffer.concat([payload, Buffer.from("\n")]));
-            });
-        });
-        await new Promise<void>((resolve, reject) => {
-            listener.once("error", reject);
-            listener.listen(0, "127.0.0.1", () => resolve());
-        });
-        const address = listener.address();
-        if (address == null || typeof address === "string") {
-            throw new Error("test IPC server did not expose a TCP address");
-        }
-        const endpoint = `tcp://127.0.0.1:${address.port}`;
+        const exact = await connect(server.endpoint);
+        const oversized = await connect(server.endpoint);
         try {
-            const exactClient = createSharedFsIpcClient(endpoint, {
-                maxResponseFrameBytes: payload.byteLength,
+            const { reader, limits } = await negotiateV2(exact);
+            expect(limits.maxRequestFrameBytes).toBe(exactFrameBytes);
+            exact.write(requestFrame(limits, metadata, data));
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: { id: 1, ok: true, result: data.byteLength },
+                body: Buffer.alloc(0),
             });
-            await expect(exactClient.getattr("/exact")).resolves.toEqual(
-                result
-            );
 
-            const undersizedClient = createSharedFsIpcClient(endpoint, {
-                maxResponseFrameBytes: payload.byteLength - 1,
-            });
-            await expect(
-                undersizedClient.getattr("/oversized")
-            ).rejects.toThrow(
-                `IPC response exceeds ${payload.byteLength - 1} byte limit`
+            const negotiated = await negotiateV2(oversized);
+            const didClose = closed(oversized);
+            const header = Buffer.alloc(16);
+            header.write("PBFS", 0, "ascii");
+            header[4] = 2;
+            header[5] = IpcV2FrameKind.Request;
+            header.writeUInt32BE(
+                Buffer.byteLength(JSON.stringify(metadata)),
+                8
             );
+            header.writeUInt32BE(data.byteLength + 1, 12);
+            expect(negotiated.limits.maxRequestFrameBytes).toBe(
+                exactFrameBytes
+            );
+            oversized.write(header);
+            await didClose;
+            expect(write).toHaveBeenCalledTimes(1);
         } finally {
-            await new Promise<void>((resolve, reject) => {
-                listener.close((error) => (error ? reject(error) : resolve()));
-            });
-        }
-    });
-
-    it("rejects trailing bytes in the response chunk", async () => {
-        const listener = createServer((socket) => {
-            socket.once("data", () => {
-                socket.write(
-                    `${JSON.stringify({ id: 1, ok: true, result: { path: "/" } })}\ntrailing`
-                );
-            });
-        });
-        await new Promise<void>((resolve, reject) => {
-            listener.once("error", reject);
-            listener.listen(0, "127.0.0.1", () => resolve());
-        });
-        const address = listener.address();
-        if (address == null || typeof address === "string") {
-            throw new Error("test IPC server did not expose a TCP address");
-        }
-        try {
-            const client = createSharedFsIpcClient(
-                `tcp://127.0.0.1:${address.port}`
-            );
-            await expect(client.getattr("/")).rejects.toThrow(
-                "IPC server sent trailing bytes after its response"
-            );
-        } finally {
-            await new Promise<void>((resolve, reject) => {
-                listener.close((error) => (error ? reject(error) : resolve()));
-            });
+            exact.destroy();
+            oversized.destroy();
+            await server.close();
         }
     });
 
@@ -429,19 +302,34 @@ describe("shared-fs IPC framing", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const responses = readJsonLines(socket, 2);
+            const { reader, limits } = await negotiateV2(socket);
             socket.write(
-                `${JSON.stringify({ id: 1, op: "getattr", args: ["/first"] })}\n${JSON.stringify({ id: 2, op: "getattr", args: ["/second"] })}\n`
+                Buffer.concat([
+                    requestFrame(limits, {
+                        id: 1,
+                        op: "getattr",
+                        args: ["/first"],
+                    }),
+                    requestFrame(limits, {
+                        id: 2,
+                        op: "getattr",
+                        args: ["/second"],
+                    }),
+                ])
             );
             await firstStarted.promise;
             await new Promise<void>((resolve) => setImmediate(resolve));
             expect(calls).toEqual(["/first"]);
 
             releaseFirst.resolve();
-            await expect(responses).resolves.toEqual([
-                { id: 1, ok: true, result: { path: "/first" } },
-                { id: 2, ok: true, result: { path: "/second" } },
-            ]);
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: { id: 1, ok: true, result: { path: "/first" } },
+                body: Buffer.alloc(0),
+            });
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: { id: 2, ok: true, result: { path: "/second" } },
+                body: Buffer.alloc(0),
+            });
             expect(calls).toEqual(["/first", "/second"]);
         } finally {
             socket.destroy();
@@ -449,54 +337,32 @@ describe("shared-fs IPC framing", () => {
         }
     });
 
-    it("closes an oversized unterminated peer while continuing to serve others", async () => {
+    it("bounds the handshake line independently of the frame limits", async () => {
         const getattr = vi.fn(async (path: string) => ({ path }));
-        const backend = backendWith({ getattr });
+        // A request limit far below the negotiation offer still negotiates:
+        // the handshake has its own fixed bound.
         const server = await createSharedFsIpcServer(
-            backend,
+            backendWith({ getattr }),
             "tcp://127.0.0.1:0",
             { maxRequestFrameBytes: 64 }
         );
         const offender = await connect(server.endpoint);
+        const client = createIpcV2TestClient(server.endpoint);
         try {
             const offenderClosed = closed(offender);
-            offender.write(Buffer.alloc(65, 0x61));
+            offender.write(
+                Buffer.alloc(SHARED_FS_IPC_NEGOTIATION_MAX_BYTES + 1, 0x61)
+            );
             await offenderClosed;
+            expect(getattr).not.toHaveBeenCalled();
 
-            const client = createSharedFsIpcClient(server.endpoint);
             await expect(client.getattr("/healthy")).resolves.toEqual({
                 path: "/healthy",
             });
             expect(getattr).toHaveBeenCalledTimes(1);
         } finally {
             offender.destroy();
-            await server.close();
-        }
-    });
-
-    it("drops malformed pipelines without executing a later mutation", async () => {
-        const getattr = vi.fn(async (path: string) => ({ path }));
-        const mkdir = vi.fn(async () => {});
-        const backend = backendWith({ getattr, mkdir });
-        const server = await createSharedFsIpcServer(
-            backend,
-            "tcp://127.0.0.1:0"
-        );
-        const offender = await connect(server.endpoint);
-        try {
-            const offenderClosed = closed(offender);
-            offender.write(
-                `${JSON.stringify({ id: "bad", op: "getattr", args: ["/"] })}\n${JSON.stringify({ id: 2, op: "mkdir", args: ["/must-not-run"] })}\n`
-            );
-            await offenderClosed;
-            expect(mkdir).not.toHaveBeenCalled();
-
-            const client = createSharedFsIpcClient(server.endpoint);
-            await expect(client.getattr("/healthy")).resolves.toEqual({
-                path: "/healthy",
-            });
-        } finally {
-            offender.destroy();
+            await client.close();
             await server.close();
         }
     });
@@ -514,24 +380,88 @@ describe("shared-fs IPC framing", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const responses = readJsonLines(socket, 2);
+            const { reader, limits } = await negotiateV2(socket);
+            expect(limits.maxResponseFrameBytes).toBe(maxResponseFrameBytes);
             socket.write(
-                `${JSON.stringify({ id: 1, op: "getattr", args: ["/large"] })}\n${JSON.stringify({ id: 2, op: "getattr", args: ["/small"] })}\n`
+                Buffer.concat([
+                    requestFrame(limits, {
+                        id: 1,
+                        op: "getattr",
+                        args: ["/large"],
+                    }),
+                    requestFrame(limits, {
+                        id: 2,
+                        op: "getattr",
+                        args: ["/small"],
+                    }),
+                ])
             );
-            const [bounded, following] = await responses;
-            expect(
-                Buffer.byteLength(JSON.stringify(bounded))
-            ).toBeLessThanOrEqual(maxResponseFrameBytes);
-            expect(bounded).toMatchObject({
+            // decodeV2Response enforces the negotiated response limit.
+            const bounded = await decodeV2Response(reader, limits);
+            expect(bounded.metadata).toMatchObject({
                 id: 1,
                 ok: false,
-                error: { code: "EIO" },
+                error: {
+                    code: "EIO",
+                    message: `IPC response exceeds ${maxResponseFrameBytes} byte limit`,
+                },
             });
-            expect(following).toEqual({
-                id: 2,
-                ok: true,
-                result: { path: "/small" },
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: { id: 2, ok: true, result: { path: "/small" } },
+                body: Buffer.alloc(0),
             });
+        } finally {
+            socket.destroy();
+            await server.close();
+        }
+    });
+
+    it("rejects an un-negotiated IPC v1 operation with an upgrade hint and never dispatches it", async () => {
+        const mkdir = vi.fn(async () => {});
+        const server = await createSharedFsIpcServer(
+            backendWith({ mkdir }),
+            "tcp://127.0.0.1:0"
+        );
+        const socket = await connect(server.endpoint);
+        try {
+            const didClose = closed(socket);
+            const response = readJsonLines(socket, 1);
+            // What an adapter built before IPC v2 sends: base64 JSONL ops.
+            socket.write(
+                `${JSON.stringify({ id: 4, op: "mkdir", args: ["/must-not-run"] })}\n${JSON.stringify({ id: 5, op: "write", args: [1, { $bytes: "YWJj" }, 0] })}\n`
+            );
+            const [rejection] = await response;
+            expect(rejection).toMatchObject({
+                id: 4,
+                ok: false,
+                error: { code: "EPROTONOSUPPORT" },
+            });
+            const message = (rejection.error as { message: string }).message;
+            expect(message).toContain("IPC v1 is retired");
+            expect(message).toContain("peerbit-fs install-adapter --force");
+            await didClose;
+            expect(mkdir).not.toHaveBeenCalled();
+        } finally {
+            socket.destroy();
+            await server.close();
+        }
+    });
+
+    it("closes a malformed handshake line without a response", async () => {
+        const server = await createSharedFsIpcServer(
+            backendWith({}),
+            "tcp://127.0.0.1:0"
+        );
+        const socket = await connect(server.endpoint);
+        try {
+            let received = 0;
+            socket.on("data", (chunk) => {
+                received += chunk.byteLength;
+            });
+            const didClose = closed(socket);
+            socket.write("not json\n");
+            await didClose;
+            expect(received).toBe(0);
         } finally {
             socket.destroy();
             await server.close();
@@ -577,6 +507,9 @@ describe("shared-fs negotiated IPC v2", () => {
                     remotePort: socket.localPort,
                 },
             });
+            expect(events[0].startUnixNs).toMatch(/^[1-9][0-9]{0,18}$/u);
+            expect(events[0].detail).not.toHaveProperty("framingNs");
+            expect(events[0].detail).not.toHaveProperty("code");
         } finally {
             socket.destroy();
             await server.close();
@@ -883,7 +816,7 @@ describe("shared-fs negotiated IPC v2", () => {
         }
     });
 
-    it("honors a version 1 preference and pins the connection to JSONL", async () => {
+    it("selects v2 even when an offer prefers a retired version", async () => {
         const getattr = vi.fn(async (path: string) => ({ path }));
         const server = await createSharedFsIpcServer(
             backendWith({ getattr }),
@@ -891,91 +824,69 @@ describe("shared-fs negotiated IPC v2", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const reader = new BoundedIpcByteReader(socket, 64 * 1024);
+            // Released 0.13.16-0.13.18 adapters offer [2, 1]; order is only
+            // a preference, and this server speaks v2 alone.
+            const { reader, limits } = await negotiateV2(socket, {
+                versions: [1, 2],
+            });
             socket.write(
-                `${JSON.stringify({
-                    id: 3,
-                    op: SHARED_FS_IPC_NEGOTIATE_OP,
-                    args: [
-                        {
-                            protocol: SHARED_FS_IPC_PROTOCOL,
-                            versions: [1, 2],
-                            nonce: "v1-only",
-                            maxRequestFrameBytes: 64 * 1024 * 1024,
-                            maxResponseFrameBytes: 64 * 1024 * 1024,
-                        },
-                    ],
-                })}\n`
+                requestFrame(limits, { id: 4, op: "getattr", args: ["/v2"] })
             );
-            await expect(reader.readLine()).resolves.toEqual(
-                Buffer.from(
-                    JSON.stringify({
-                        id: 3,
-                        ok: true,
-                        result: {
-                            protocol: SHARED_FS_IPC_PROTOCOL,
-                            version: 1,
-                            nonce: "v1-only",
-                        },
-                    })
-                )
-            );
-            socket.write(
-                `${JSON.stringify({ id: 4, op: "getattr", args: ["/v1"] })}\n`
-            );
-            await expect(reader.readLine()).resolves.toEqual(
-                Buffer.from(
-                    JSON.stringify({
-                        id: 4,
-                        ok: true,
-                        result: { path: "/v1" },
-                    })
-                )
-            );
+            await expect(decodeV2Response(reader, limits)).resolves.toEqual({
+                metadata: { id: 4, ok: true, result: { path: "/v2" } },
+                body: Buffer.alloc(0),
+            });
         } finally {
             socket.destroy();
             await server.close();
         }
     });
 
-    it("rejects an unsupported offer without dispatching a filesystem operation", async () => {
-        const getattr = vi.fn(async () => ({ path: "/" }));
-        const server = await createSharedFsIpcServer(
-            backendWith({ getattr }),
-            "tcp://127.0.0.1:0"
-        );
-        const socket = await connect(server.endpoint);
-        try {
-            const response = readJsonLines(socket, 1);
-            socket.write(
-                `${JSON.stringify({
-                    id: 9,
-                    op: SHARED_FS_IPC_NEGOTIATE_OP,
-                    args: [
-                        {
-                            protocol: SHARED_FS_IPC_PROTOCOL,
-                            versions: [3],
-                            nonce: "unsupported",
-                        },
-                    ],
-                })}\n`
+    it.each([
+        { name: "a future version", versions: [3] },
+        { name: "only retired v1", versions: [1] },
+    ])(
+        "rejects an offer of $name without dispatching a filesystem operation",
+        async ({ versions }) => {
+            const getattr = vi.fn(async () => ({ path: "/" }));
+            const server = await createSharedFsIpcServer(
+                backendWith({ getattr }),
+                "tcp://127.0.0.1:0"
             );
-            await expect(response).resolves.toEqual([
-                {
-                    id: 9,
-                    ok: false,
-                    error: {
-                        code: "EPROTONOSUPPORT",
-                        message: "No offered IPC protocol version is supported",
+            const socket = await connect(server.endpoint);
+            try {
+                const response = readJsonLines(socket, 1);
+                socket.write(
+                    `${JSON.stringify({
+                        id: 9,
+                        op: SHARED_FS_IPC_NEGOTIATE_OP,
+                        args: [
+                            {
+                                protocol: SHARED_FS_IPC_PROTOCOL,
+                                versions,
+                                nonce: "unsupported",
+                            },
+                        ],
+                    })}\n`
+                );
+                await expect(response).resolves.toEqual([
+                    {
+                        id: 9,
+                        ok: false,
+                        error: {
+                            code: "EPROTONOSUPPORT",
+                            message:
+                                "No offered IPC protocol version is supported",
+                        },
                     },
-                },
-            ]);
-            expect(getattr).not.toHaveBeenCalled();
-        } finally {
-            socket.destroy();
-            await server.close();
+                ]);
+                expect(getattr).not.toHaveBeenCalled();
+            } finally {
+                socket.destroy();
+                await server.close();
+            }
         }
-    });
+    );
 
     it.each([
         {
@@ -1022,7 +933,7 @@ describe("shared-fs negotiated IPC v2", () => {
             },
         },
         {
-            name: "v1 base64 bytes inside v2 metadata",
+            name: "base64 byte objects inside v2 metadata",
             build: (limits: {
                 maxRequestFrameBytes: number;
                 maxMetadataBytes: number;
