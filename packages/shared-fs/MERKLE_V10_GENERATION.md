@@ -10,6 +10,13 @@ domains, golden vectors, validation and read session. This document says how
 those codecs become the only storage format of `@peerbit/shared-fs`, and what
 is deleted to get there.
 
+> **Status 2026-09-29: paused at M1 kill point 1.** The put probe (CI 36609796359, Linux) measured a churn-free
+> 512 KiB put at 8.85 ms p50 and four concurrent 256 KiB puts at 19.94 ms p50. Neither fits section 2.5, so M1
+> stops. The projection with measured terms is about 7.5x for 512 KiB leaves, against an 8x gate. The dominant term is
+> upstream `Documents.put` cost (asks #18/#23): a 4 KiB put takes 3.0 ms. Rerun the probe once that changes. Also fix
+> `isAllZero` in merkle-v1.ts before any kill point 2 run (3.0 ms per 512 KiB leaf today). Evidence:
+> `~/git/shared-fs-evidence/v10-put-probe-20260929/RESULT.md`.
+
 ## Decision memo
 
 **Problem.** Editing a large file in place costs time proportional to the file,
