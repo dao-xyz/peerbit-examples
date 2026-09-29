@@ -589,10 +589,14 @@ describe("snapshot segment reclamation", () => {
         await seedFiles(4);
         const program: any = fs.program;
         const manifestId = `bootstrap:${program.authorKey()}`;
+        // The creator's genesis manifest is the live one; the admitted
+        // snapshot must never replace it.
+        const genesis = await program.getDocument(manifestId);
+        expect(genesis).toBeDefined();
         const blocksAny: any = program.node.services.blocks;
         const originalPut = blocksAny.put.bind(blocksAny);
         const originalSave = program.saveSegmentLedgerCas.bind(program);
-        const originalPublish = program.putPreferLinked.bind(program);
+        const originalPublish = program.entries.put.bind(program.entries);
         const intentEntered = deferred();
         const intentAllowed = deferred();
         const putCids: string[] = [];
@@ -625,7 +629,7 @@ describe("snapshot segment reclamation", () => {
                 return result;
             }
         );
-        vi.spyOn(program, "putPreferLinked").mockImplementation(
+        vi.spyOn(program.entries, "put").mockImplementation(
             async (...args: any[]) => {
                 if (closeReturned) staleMutations.push("manifest");
                 return originalPublish(...args);
@@ -696,14 +700,18 @@ describe("snapshot segment reclamation", () => {
         for (const cid of putCids) {
             expect(recorded.has(cid)).toBe(true);
         }
-        expect(await program.getDocument(manifestId)).toBeUndefined();
+        expect((await program.getDocument(manifestId))?.payloadBytes).toEqual(
+            genesis.payloadBytes
+        );
         await sleep(20);
         const ledgerAfterWait = await loadLedger(program);
         expect(JSON.stringify(ledgerAfterWait)).toBe(ledgerBeforeWait);
         for (const cid of putCids) {
             expect(recordedCids(ledgerAfterWait).has(cid)).toBe(true);
         }
-        expect(await program.getDocument(manifestId)).toBeUndefined();
+        expect((await program.getDocument(manifestId))?.payloadBytes).toEqual(
+            genesis.payloadBytes
+        );
         expect(staleMutations).toEqual([]);
     });
 

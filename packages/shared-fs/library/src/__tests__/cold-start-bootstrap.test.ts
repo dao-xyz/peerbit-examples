@@ -1,16 +1,20 @@
+import { deserialize } from "@dao-xyz/borsh";
 import { Peerbit } from "peerbit";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { Documents } from "@peerbit/document";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     BootstrapPendingError,
+    SharedFileSystem,
     SharedFsWritePendingError,
     createSharedFsMountBackend,
+    encodePublicSignKey,
     openSharedFs,
     type SharedFsHandle,
 } from "../index.js";
-import { FileVersion } from "../model.js";
+import { FileVersion, SnapshotManifestPayload } from "../model.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -838,7 +842,7 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
-    it("uses a verified empty snapshot as remote write-readiness evidence", async () => {
+    it("counts a replicated empty snapshot as evidence without bootstrapping from it", async () => {
         const donorPeer = await createPeer();
         const donor = await openSharedFs({
             peerbit: donorPeer,
@@ -859,12 +863,611 @@ describe("shared fs cold-start bootstrap", () => {
 
         expect(await joiner.list("/")).toEqual([]);
         await joiner.awaitWriteReady({ timeout: 10_000 });
+        expect(joiner.bootstrapStatus().manifest).toBeUndefined();
         await joiner.writeFile("/first.txt", "first safe write");
         await waitUntil(async () => {
             expect(decode(await donor.readFile("/first.txt"))).toBe(
                 "first safe write"
             );
         });
+    });
+
+    it("makes joiners of a never-written filesystem write-ready", async () => {
+        // The most basic onboarding flow: create, share the address, other
+        // machines join. Nothing was ever written, so the creator's genesis
+        // manifest is the only entry whose replication can prove sync.
+        const creatorPeer = await createPeer();
+        const creator = await openSharedFs({
+            peerbit: creatorPeer,
+            machineLabel: "never-written-creator",
+        });
+        const join = async (machineLabel: string, bootstrap?: unknown) => {
+            const peer = await createPeer();
+            await peer.dial(creatorPeer);
+            return openSharedFs({
+                peerbit: peer,
+                address: creator.address,
+                machineLabel,
+                bootstrap,
+                writeReadinessSettleMs: 100,
+            } as any);
+        };
+        const joiners = [
+            await join("never-written-joiner"),
+            await join("never-written-plain", false),
+        ];
+        for (const joiner of joiners) {
+            expect(await joiner.list("/")).toEqual([]);
+            await joiner.awaitWriteReady({ timeout: 20_000 });
+            // The genesis is replication evidence, not a snapshot to
+            // bootstrap from.
+            expect(joiner.bootstrapStatus()).toMatchObject({ phase: "off" });
+            expect(joiner.bootstrapStatus().manifest).toBeUndefined();
+        }
+        await joiners[0].writeFile("/first.txt", "first safe write");
+        await waitUntil(async () => {
+            expect(decode(await creator.readFile("/first.txt"))).toBe(
+                "first safe write"
+            );
+        });
+    });
+
+    it("keeps a joiner of an empty filesystem gated until a replicator is reachable", async () => {
+        const creatorPeer = await createPeer();
+        const creator = await openSharedFs({
+            peerbit: creatorPeer,
+            machineLabel: "unreachable-creator",
+        });
+        // The joiner resolves the program locally and opens before it can
+        // reach any replicator: nothing proves what exists, so it stays
+        // closed.
+        const joinerPeer = await createPeer();
+        await creator.program.save(joinerPeer.services.blocks);
+        const joiner = await openSharedFs({
+            peerbit: joinerPeer,
+            address: creator.address,
+            machineLabel: "early-joiner",
+            writeReadinessSettleMs: 100,
+        } as any);
+        await expect(
+            joiner.writeFile("/too-early.txt", "unsafe")
+        ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+        await expect(
+            joiner.awaitWriteReady({ timeout: 1_000 })
+        ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+        expect(joiner.bootstrapStatus()).toMatchObject({
+            writeReady: false,
+            guardArmed: false,
+        });
+
+        // Reaching the creator replicates its genesis manifest, the evidence
+        // that opens the gate.
+        await joinerPeer.dial(creatorPeer);
+        await joiner.awaitWriteReady({ timeout: 20_000 });
+        await joiner.writeFile("/after-join.txt", "safe");
+        await waitUntil(async () => {
+            expect(decode(await creator.readFile("/after-join.txt"))).toBe(
+                "safe"
+            );
+        });
+    });
+
+    it("never bootstraps from a zero-document manifest or counts finding one as evidence", async () => {
+        const root = await mkdtemp(
+            join(tmpdir(), "shared-fs-genesis-discovery-")
+        );
+        const directory = join(root, "joiner");
+        let joinerPeer: Peerbit | undefined;
+        try {
+            // The genesis manifest is older than the data and describes none
+            // of it; an overlay from it would retire without any log
+            // coverage. A joiner that holds it locally, from an earlier
+            // session that never became ready, must not use or count it.
+            const creatorPeer = await createPeer();
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "genesis-creator",
+            });
+            await creator.writeFile("/data.txt", "written after genesis");
+            const manifestId = `bootstrap:${encodePublicSignKey(
+                creatorPeer.identity.publicKey
+            )}`;
+
+            joinerPeer = await Peerbit.create({ directory });
+            await joinerPeer.dial(creatorPeer);
+            const first = await openSharedFs({
+                peerbit: joinerPeer,
+                address: creator.address,
+                machineLabel: "genesis-joiner",
+                bootstrap: false,
+                writeReadinessSettleMs: 60_000,
+            } as any);
+            await waitUntil(async () => {
+                expect(decode(await first.readFile("/data.txt"))).toBe(
+                    "written after genesis"
+                );
+                expect(
+                    await (first.program as any).getDocument(manifestId)
+                ).toBeDefined();
+            });
+            expect(first.bootstrapStatus().writeReady).toBe(false);
+            await joinerPeer.stop();
+
+            joinerPeer = await Peerbit.create({ directory });
+            const reopened = await openSharedFs({
+                peerbit: joinerPeer,
+                address: creator.address,
+                machineLabel: "genesis-joiner-reopen",
+                writeReadinessSettleMs: 100,
+            } as any);
+            await (reopened.program as any).bootstrapDecision;
+            expect(reopened.bootstrapStatus().manifest).toBeUndefined();
+            expect((reopened.program as any).writeReadinessRemoteEvidence).toBe(
+                false
+            );
+            await expect(
+                reopened.awaitWriteReady({ timeout: 500 })
+            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+        } finally {
+            await joinerPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("replaces its snapshot manifest without leaving a delete entry", async () => {
+        const peer = await createPeer();
+        const fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "manifest-replacer",
+        });
+        const log = (fs.program as any).entries.log.log;
+        // The genesis manifest is the never-written filesystem's only entry.
+        expect(log.length).toBe(1);
+        const snapshot = await fs.snapshotWrite();
+        expect(snapshot.snapshotSeq).toBe(2n);
+        // The replacement CUTs the genesis head in the same entry. A separate
+        // delete entry could stay pending in a joiner's sync indefinitely.
+        expect(log.length).toBe(1);
+    });
+
+    it("returns a creating open with its genesis published, even when asked to bootstrap", async () => {
+        // A script that creates, prints the address and stops must leave the
+        // genesis behind. A creating open has nothing to bootstrap from, so
+        // it never waits on discovery, whichever API opens it.
+        const creatorPeer = await createPeer();
+        await creatorPeer.dial(await createPeer());
+        const created: any = await creatorPeer.open(new SharedFileSystem(), {
+            args: {
+                replicate: { factor: 1 },
+                bootstrap: { discoveryTimeoutMs: 60_000 },
+            },
+        });
+        expect(created.bootstrapStatus()).toMatchObject({
+            phase: "off",
+            writeReady: true,
+            writeReadinessSource: "creator",
+        });
+        expect(
+            await created.getDocument(
+                `bootstrap:${encodePublicSignKey(creatorPeer.identity.publicKey)}`
+            )
+        ).toBeDefined();
+    });
+
+    it("gates a program loaded from an address, whichever API opens it", async () => {
+        // Only the constructor marks a creation. A program loaded from an
+        // address has seen none of the data: it settles a remote view before
+        // it may write, and never publishes a manifest of its own.
+        const creatorPeer = await createPeer();
+        const creator = await openSharedFs({
+            peerbit: creatorPeer,
+            machineLabel: "loaded-creator",
+        });
+        await creator.writeBatch(
+            Array.from({ length: 50 }, (_, i) => ({
+                path: `/data/file-${i}.txt`,
+                content: `content ${i}`,
+            }))
+        );
+        const loadedPeer = await createPeer();
+        await loadedPeer.dial(creatorPeer);
+        const loaded = await SharedFileSystem.open(
+            creator.address,
+            loadedPeer as any,
+            {
+                args: {
+                    replicate: { factor: 1 },
+                    bootstrap: false,
+                    writeReadinessSettleMs: 100,
+                } as any,
+            }
+        );
+        expect(loaded.bootstrapStatus()).toMatchObject({
+            writeReady: false,
+            guardArmed: false,
+        });
+        expect(loaded.bootstrapStatus().writeReadinessSource).toBeUndefined();
+        await expect(
+            loaded.writeFile("/unsafe.txt", "before any view")
+        ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+        await loaded.awaitWriteReady({ timeout: 20_000 });
+        expect(loaded.bootstrapStatus().writeReadinessSource).toBe(
+            "remote-settled"
+        );
+        await waitUntil(async () => {
+            expect(decode(await loaded.readFile("/data/file-49.txt"))).toBe(
+                "content 49"
+            );
+        });
+        expect(
+            await (loaded as any).getDocument(
+                `bootstrap:${encodePublicSignKey(loadedPeer.identity.publicKey)}`
+            )
+        ).toBeUndefined();
+    });
+
+    it("lets a join of a never-written filesystem that ended before it was ready be retried", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-empty-retry-"));
+        const start = async (directory: string) => {
+            const peer = await Peerbit.create({
+                directory: join(root, directory),
+            });
+            peers.push(peer);
+            return peer;
+        };
+        const stop = (peer: Peerbit) => {
+            peers.splice(peers.indexOf(peer), 1);
+            return peer.stop();
+        };
+        const logOf = (fs: SharedFsHandle) =>
+            (fs.program as any).entries.log.log;
+        const heads = async (fs: SharedFsHandle) =>
+            (await logOf(fs).getHeads().all()).map(
+                (entry: any) => entry.hash as string
+            );
+        try {
+            let creatorPeer = await start("creator");
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "retry-creator",
+            });
+            const [genesis] = await heads(creator);
+            const address = creator.address;
+            const join = async (directory: string, settleMs: number) => {
+                const peer = await start(directory);
+                await peer.dial(creatorPeer);
+                const fs = await openSharedFs({
+                    peerbit: peer,
+                    address,
+                    machineLabel: directory,
+                    bootstrap: { discoveryTimeoutMs: 500 },
+                    writeReadinessSettleMs: settleMs,
+                } as any);
+                return { peer, fs };
+            };
+            // Each first join ends inside its quiet window (Ctrl-C, a crash,
+            // a mount timeout) holding everything the creator has, including
+            // the re-publication for its own session. Nothing is written, so
+            // a retry has nothing new to replicate but a re-publication.
+            const interrupt = async (directory: string, crash: boolean) => {
+                const before = logOf(creator).length;
+                const { peer, fs } = await join(directory, 60_000);
+                await waitUntil(async () => {
+                    expect(logOf(creator).length).toBe(before + 1);
+                    for (const hash of await heads(creator)) {
+                        expect(await logOf(fs).has(hash)).toBe(true);
+                    }
+                });
+                expect(fs.bootstrapStatus().writeReady).toBe(false);
+                if (crash) {
+                    // The network goes first, so nothing announces the
+                    // departure: shared-log emits no replicator:join for the
+                    // returning key.
+                    await (peer as any).libp2p.stop();
+                }
+                await stop(peer);
+            };
+            await interrupt("joiner-a", true);
+
+            // Retried while the creator stays online: its re-publication for
+            // the joiner's new session is the new evidence. A linked put, so
+            // the chain stays whole for the first real snapshot to CUT.
+            const retried = await join("joiner-a", 100);
+            await retried.fs.awaitWriteReady({ timeout: 20_000 });
+            expect(await logOf(creator).has(genesis)).toBe(true);
+            expect(await heads(creator)).toHaveLength(1);
+            expect(logOf(creator).length).toBe(3);
+            await stop(retried.peer);
+
+            // A creator reopen that finds nobody subscribed adds nothing.
+            await interrupt("joiner-b", false);
+            const before = await heads(creator);
+            await stop(creatorPeer);
+            creatorPeer = await start("creator");
+            const alone = await openSharedFs({
+                peerbit: creatorPeer,
+                address,
+                machineLabel: "retry-creator-alone",
+                bootstrap: false,
+            });
+            expect(await heads(alone)).toEqual(before);
+            await stop(creatorPeer);
+
+            // Retried across a creator restart: the joiner waits, gated, and
+            // the creator's reopen re-publishes for it. The reopen's store is
+            // held open a moment, so the joiner's subscription lands before
+            // the reopen listens for new ones.
+            const waitingPeer = await start("joiner-b");
+            creatorPeer = await start("creator");
+            await waitingPeer.dial(creatorPeer);
+            const waiting = await openSharedFs({
+                peerbit: waitingPeer,
+                address,
+                machineLabel: "joiner-b-waiting",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            const documentsOpen = Documents.prototype.open;
+            const heldOpen = vi
+                .spyOn(Documents.prototype, "open")
+                .mockImplementationOnce(async function (
+                    this: Documents<any, any>,
+                    ...args: any[]
+                ) {
+                    const result = await documentsOpen.apply(this, args as any);
+                    await new Promise((resolve) => setTimeout(resolve, 1_000));
+                    return result;
+                });
+            let reopened: SharedFsHandle;
+            try {
+                reopened = await openSharedFs({
+                    peerbit: creatorPeer,
+                    address,
+                    machineLabel: "retry-creator-mount",
+                    bootstrap: false,
+                });
+            } finally {
+                heldOpen.mockRestore();
+            }
+            await waiting.awaitWriteReady({ timeout: 20_000 });
+            expect(logOf(reopened).length).toBe(5);
+            await waiting.writeFile("/first.txt", "after retry");
+            await waitUntil(async () => {
+                expect(decode(await reopened.readFile("/first.txt"))).toBe(
+                    "after retry"
+                );
+            });
+        } finally {
+            await Promise.allSettled(
+                peers.splice(0).map((peer) => peer.stop())
+            );
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("never lets a repeated genesis supersede a real snapshot", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-fence",
+        });
+        const program: any = fs.program;
+        const manifestId = `bootstrap:${program.authorKey()}`;
+        const genesis = await program.getDocument(manifestId);
+        // Hold a repeated genesis between its decision (nothing written) and
+        // its put, while data and a real snapshot land.
+        let reached!: () => void;
+        let release!: () => void;
+        const atPut = new Promise<void>((resolve) => (reached = resolve));
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const put = program.entries.put.bind(program.entries);
+        vi.spyOn(program.entries, "put").mockImplementationOnce(
+            async (...args: any[]) => {
+                reached();
+                await held;
+                return put(...args);
+            }
+        );
+        const repeated = program.publishEmptyManifest(false);
+        await atPut;
+        await fs.writeFile("/data.txt", "written meanwhile");
+        const snapshot = fs.snapshotWrite();
+        await Promise.race([
+            snapshot,
+            new Promise((resolve) => setTimeout(resolve, 500)),
+        ]);
+        release();
+        await Promise.all([repeated, snapshot]);
+        expect(
+            (await program.getDocument(manifestId)).payloadBytes
+        ).not.toEqual(genesis.payloadBytes);
+    });
+
+    it("never re-publishes the genesis from a partial view", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-partial",
+        });
+        const program: any = fs.program;
+        const heads = async () =>
+            (await program.entries.log.log.getHeads().all()).map(
+                (entry: any) => entry.hash as string
+            );
+        const before = await heads();
+        // An unverified or overlay view cannot vouch that nothing is written.
+        for (const phase of ["unverified", "overlay-active"]) {
+            program.bootstrapPhase = phase;
+            await program.publishEmptyManifest(false);
+            expect(await heads()).toEqual(before);
+        }
+        program.bootstrapPhase = "off";
+        // Requests that arrive while one is queued share its put.
+        const length = program.entries.log.log.length;
+        await Promise.all([
+            program.publishEmptyManifest(false),
+            program.publishEmptyManifest(false),
+            program.publishEmptyManifest(false),
+        ]);
+        expect(await heads()).not.toEqual(before);
+        expect(program.entries.log.log.length).toBe(length + 1);
+    });
+
+    it("never lets a gated genesis author re-publish its genesis", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-gated-genesis-"));
+        const directory = join(root, "creator");
+        let creatorPeer: Peerbit | undefined;
+        try {
+            creatorPeer = await Peerbit.create({ directory });
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "gated-author",
+            });
+            const address = creator.address!;
+            await creatorPeer.stop();
+            // An observer open of the same directory clears the readiness
+            // proof, so the author's next full open is gated.
+            creatorPeer = await Peerbit.create({ directory });
+            await openSharedFs({
+                peerbit: creatorPeer,
+                address,
+                machineLabel: "gated-author-observer",
+                replicate: false,
+                bootstrap: false,
+            });
+            await creatorPeer.stop();
+            creatorPeer = await Peerbit.create({ directory });
+            const gated = await openSharedFs({
+                peerbit: creatorPeer,
+                address,
+                machineLabel: "gated-author-full",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            expect(gated.bootstrapStatus().writeReady).toBe(false);
+            const log = (gated.program as any).entries.log.log;
+            const heads = async () =>
+                (await log.getHeads().all()).map(
+                    (entry: any) => entry.hash as string
+                );
+            const before = await heads();
+
+            // A fresh peer opens it and settles from the author's genesis. It
+            // brings nothing new, and the author may not re-publish: its own
+            // put would count as an arrival and open its gate on no evidence.
+            const joinerPeer = await createPeer();
+            await joinerPeer.dial(creatorPeer);
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "gated-author-joiner",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            await joiner.awaitWriteReady({ timeout: 20_000 });
+            await expect(
+                gated.awaitWriteReady({ timeout: 1_000 })
+            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            expect(await heads()).toEqual(before);
+            expect((gated.program as any).writeReadinessRemoteEvidence).toBe(
+                false
+            );
+        } finally {
+            await creatorPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("listens for peer sessions only while its genesis is needed", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-genesis-listen-"));
+        let creatorPeer: Peerbit | undefined;
+        try {
+            creatorPeer = await Peerbit.create({
+                directory: join(root, "creator"),
+            });
+            const pubsub: any = creatorPeer.services.pubsub;
+            const listeners = () => pubsub.listenerCount("subscribe");
+            const listening = (fs: SharedFsHandle) =>
+                (fs.program as any).emptyManifestListener !== undefined;
+            const before = listeners();
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "listener-creator",
+            });
+            const address = creator.address;
+            expect(listening(creator)).toBe(true);
+            // Close unregisters it (pubsub used to keep it, and with it the
+            // closed program).
+            await creator.program.close();
+            expect(listeners()).toBe(before);
+
+            // The author of a zero-document manifest listens again on reopen.
+            const reopen = (machineLabel: string) =>
+                openSharedFs({
+                    peerbit: creatorPeer!,
+                    address,
+                    machineLabel,
+                    bootstrap: false,
+                });
+            const reopened = await reopen("listener-reopen");
+            expect(listening(reopened)).toBe(true);
+            // Once something is written, the next peer session drops it.
+            await reopened.writeFile("/data.txt", "data");
+            const joinerPeer = await createPeer();
+            await joinerPeer.dial(creatorPeer);
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "listener-joiner",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            await waitUntil(() => expect(listening(reopened)).toBe(false));
+            // Neither a peer without its own genesis nor the author of a
+            // snapshot with documents listens.
+            expect(listening(joiner)).toBe(false);
+            await reopened.snapshotWrite();
+            await reopened.program.close();
+            expect(listening(await reopen("listener-populated"))).toBe(false);
+        } finally {
+            await creatorPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("drops the genesis listener once written, whatever its bootstrap phase", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-converged",
+        });
+        const program: any = fs.program;
+        await fs.writeFile("/data.txt", "data");
+        // A genesis author that reconverged from another replica's snapshot
+        // stays "converged" for the whole open.
+        program.bootstrapPhase = "converged";
+        await program.publishEmptyManifest(false);
+        expect(program.emptyManifestListener).toBeUndefined();
+    });
+
+    it("replaces the genesis at the first publisher check after a write", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-publisher",
+            snapshot: { publishIntervalMs: 100 },
+        });
+        const program: any = fs.program;
+        const manifestId = `bootstrap:${program.authorKey()}`;
+        // One write is far below minChangesBetween and the genesis is fresh,
+        // but a zero-document manifest counts as no snapshot at all.
+        await fs.writeFile("/data.txt", "data");
+        await waitUntil(
+            async () => {
+                const manifest = await program.getDocument(manifestId);
+                expect(
+                    deserialize(manifest.payloadBytes, SnapshotManifestPayload)
+                        .counts.docs
+                ).toBeGreaterThan(0n);
+            },
+            { timeoutMs: 10_000 }
+        );
     });
 
     it("keeps normal remote readiness gated until its durable marker succeeds", async () => {

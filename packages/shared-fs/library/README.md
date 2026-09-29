@@ -228,10 +228,34 @@ lower log's successful network-commit phase. Local replay has no such phase, so
 a populated store whose sidecar was lost cannot certify itself merely by
 reopening. If that store and its donor are already identical, it remains gated
 until a later normal donor mutation or verified snapshot supplies new evidence.
-A truly empty remote filesystem likewise has no namespace evidence, so a fresh
-join remains closed unless it receives a verified empty snapshot or the caller
-consciously uses the unsafe override. Protocol-grade empty-log and
-no-late-arrival proofs require an upstream shared-log frontier/barrier API.
+A never-written filesystem has no namespace evidence either, so a creating
+open publishes a signed zero-document genesis manifest (unless
+`snapshot: { disabled: true }`) before it returns, and a replicated snapshot
+manifest counts like replicated metadata. A creating open never bootstraps.
+Only a program constructed locally creates; one loaded from an address is an
+address open whichever API opens it: gated until it settles a remote view, and
+it never publishes a genesis. Until something is written, the creator puts
+the manifest again whenever a peer session subscribes (also after a crash), so
+a joiner whose earlier join ended before it was ready gets a new arrival when
+it retries with the creator online. That adds one small entry per peer session
+while the filesystem stays never-written. The first real snapshot CUTs that
+chain, but a peer that was offline across it can bring older entries back as
+orphan log heads, which cost a little log space and nothing else (removing
+them needs upstream log support). A zero-document manifest is never a
+bootstrap snapshot: it covers no log entry, so finding one by discovery is not
+evidence, and a `mode: "require"` join of a never-written filesystem fails with
+that reason. A joiner that reaches no replicator stays closed.
+
+The genesis proves only that sync with some replica started, and a replica
+vouches from its own view. One that missed writes while it was offline, such
+as a creator restarting after another machine wrote and left, still serves the
+genesis and no data, so a joiner that reaches only that replica becomes
+write-ready on an empty view. Nothing is lost: the missed writes merge when a
+peer holding them, such as their author, comes back, and clashing paths become
+conflict copies. This is the same exposure as settling on any donor's partial
+view; closing it needs a per-peer sync frontier from Peerbit upstream.
+Protocol-grade empty-log and no-late-arrival proofs likewise require an
+upstream shared-log frontier/barrier API.
 
 Access-controlled filesystems have an additional upstream limitation: write
 readiness fences the namespace log, not an authoritative trusted-writer
@@ -244,11 +268,11 @@ reports `isTrustedWriter(key) === false`, and retain at least one already
 converged durable replica before disposal. A signed trust frontier plus
 entry-bound authorization epochs is required upstream to close this gap.
 
-`peerbit-fs create` publishes a signed zero-document snapshot so the normal
-empty create/mount/share flow has that evidence. `bootstrapStatus()` reports
-`writeReadinessSource` (`creator` or `remote-settled`) for audit and diagnosis.
-`allowPartialWrites` is for exporting or repairing data during one session; it
-never restores durable readiness.
+The genesis gives the normal empty create/mount/share flow that evidence.
+`bootstrapStatus()` reports `writeReadinessSource` (`creator` or
+`remote-settled`) for audit and diagnosis. `allowPartialWrites` is for
+exporting or repairing data during one session; it never restores durable
+readiness.
 
 ## Cold-join telemetry
 

@@ -645,13 +645,20 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             ? peerbit.identity.publicKey
                             : undefined,
                     });
-                    // Publish an authenticated zero-document frontier. The
-                    // normal empty create -> local mount path uses persisted
-                    // creator continuity; once that mount is online, remote
-                    // peers can use this manifest as positive empty-state
-                    // bootstrap evidence instead of waiting forever for a
-                    // namespace event that does not exist.
-                    await fsHandle.snapshotWrite();
+                    // Opening as the creator published the signed
+                    // zero-document genesis manifest. Without it, remote
+                    // peers could not join this still-empty filesystem.
+                    const { encodePublicSignKey } = await loadSharedFsRuntime();
+                    if (
+                        !(await fsHandle.program.entries.index.get(
+                            `bootstrap:${encodePublicSignKey(peerbit.identity.publicKey)}`,
+                            { local: true, remote: false }
+                        ))
+                    ) {
+                        throw new Error(
+                            "create could not publish the genesis manifest, so no other peer could join the new filesystem"
+                        );
+                    }
                     console.log(fsHandle.address);
                 } finally {
                     await stopPeerbitForCli(peerbit);

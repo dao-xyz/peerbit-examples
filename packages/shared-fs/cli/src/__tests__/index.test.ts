@@ -5,7 +5,9 @@ import {
     FileVersion,
     Peerbit,
     PrepareForDisposalError,
+    SharedFileSystem,
     SharedFsHandle,
+    encodePublicSignKey,
     openSharedFs,
 } from "@peerbit/shared-fs";
 import { describe, expect, it, vi } from "vitest";
@@ -307,12 +309,36 @@ describe("peerbit-fs cli", () => {
             await expect(
                 reopened.awaitWriteReady({ timeout: 100 })
             ).resolves.toBeUndefined();
+            // The still-empty filesystem carries the creator's genesis
+            // manifest, whose replication lets remote peers become ready.
+            expect(
+                await (reopened.program as any).getDocument(
+                    `bootstrap:${encodePublicSignKey(reopenedPeer.identity.publicKey)}`
+                )
+            ).toBeDefined();
         } finally {
             if (reopenedPeer) {
                 await stopPeer(reopenedPeer);
             }
             log.mockRestore();
             await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("fails create when the genesis manifest was not published", async () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const genesis = vi
+            .spyOn(SharedFileSystem.prototype, "snapshotWrite")
+            .mockRejectedValueOnce(new Error("genesis put failed"));
+        try {
+            await expect(runCli(["create", "--directory", ""])).rejects.toThrow(
+                "create could not publish the genesis manifest, so no other peer could join the new filesystem"
+            );
+            expect(genesis).toHaveBeenCalledTimes(1);
+            expect(log).not.toHaveBeenCalled();
+        } finally {
+            genesis.mockRestore();
+            log.mockRestore();
         }
     });
 

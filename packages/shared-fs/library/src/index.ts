@@ -748,7 +748,11 @@ export type SnapshotPublishOptions = {
     publishIntervalMs?: number;
     /** Skip a scheduled publication when fewer documents changed (default 50). */
     minChangesBetween?: number;
-    /** Disable automatic publication (snapshotWrite() stays available). */
+    /**
+     * Disable automatic publication (snapshotWrite() stays available),
+     * including a creator's genesis manifest: joiners of a never-written
+     * filesystem then have no readiness evidence.
+     */
     disabled?: boolean;
     /**
      * Reclaim this author's own superseded snapshot segment blocks after a
@@ -1901,6 +1905,8 @@ const SNAPSHOT_MAX_SEGMENT_COUNT = 256;
 const SNAPSHOT_TARGET_SEGMENT_BYTES = 384_000;
 const SNAPSHOT_EST_DOC_BYTES = 384;
 const MANIFEST_PAYLOAD_CAP_BYTES = 100_000;
+/** @peerbit/log EntryType.CUT (not re-exported by @peerbit/document). */
+const ENTRY_TYPE_CUT = 1;
 /** Members per changeset manifest, versions+naming combined. 12k x 36B is
  *  ~432KB payload — under the 512KiB chunk envelope, the largest document
  *  the store demonstrably ships. A manifest:true batch above this throws
@@ -2175,6 +2181,28 @@ const RETIRE_DOUBLE_CHECK_MS = 300;
  */
 const WRITE_READINESS_SETTLE_MS = 5_000;
 const WRITE_READINESS_MIN_CHECK_MS = 100;
+/**
+ * Replicated documents that prove a fresh join's log sync started: namespace
+ * metadata, or a signed snapshot manifest. A creator publishes a
+ * zero-document genesis manifest, so even a never-written filesystem has one
+ * (two empty logs exchange nothing).
+ */
+const isWriteReadinessEvidence = (value: unknown) =>
+    value instanceof NamingEvent ||
+    value instanceof FileVersion ||
+    value instanceof BootstrapManifest;
+/** A zero-document manifest, such as a creator's genesis. */
+const isEmptyManifest = (value: unknown): value is BootstrapManifest => {
+    try {
+        return (
+            value instanceof BootstrapManifest &&
+            deserialize(value.payloadBytes, SnapshotManifestPayload).segments
+                .length === 0
+        );
+    } catch {
+        return false;
+    }
+};
 /** Post-timeout arming: no arrivals for this long counts as quiescent... */
 const QUIESCENCE_WINDOW_MS = 60_000;
 /** ...on two consecutive checks this far apart. */
@@ -2504,6 +2532,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * bootstrap window until /.artifactignore is readable.
      */
     bootstrapAdvisoryIgnorePatterns: string[] | undefined;
+    /**
+     * Set only by the constructor, which borsh bypasses: a program loaded
+     * from an address never has it, whichever API opens it, so every such
+     * open is an address open (fail-closed write readiness, no genesis).
+     */
+    private constructedLocally?: boolean;
+    /** A genesis refresh is queued and has not reached its put yet. */
+    private emptyManifestRefreshQueued?: boolean;
+    /** Re-publishes the genesis per peer session (see publishEmptyManifest). */
+    private emptyManifestListener?: (event: any) => void;
 
     constructor(
         properties: {
@@ -2537,6 +2575,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.entries = new Documents({
             id: sha256Sync(concat([this.id, fromString("/shared-fs/v9.1")])),
         });
+        this.constructedLocally = true;
     }
 
     async beforeOpen(
@@ -2548,6 +2587,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // the handler cache or enters partially initialized cleanup.
         validateBlockStoreAccess(options?.args, localBlockStoreSafety(node));
         await super.beforeOpen(node, options);
+    }
+
+    private detachEmptyManifestListener() {
+        if (this.emptyManifestListener) {
+            // main-event's removeEventListener drops only its own record of
+            // the listener (which kept closed programs alive). The wrapper it
+            // registered goes with the maintenance abort signal; until then
+            // the listener ignores events once it is no longer current.
+            this.node.services.pubsub.removeEventListener(
+                "subscribe",
+                this.emptyManifestListener
+            );
+            this.emptyManifestListener = undefined;
+        }
     }
 
     private detachTrustChangeListener() {
@@ -2595,6 +2648,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
+        this.detachEmptyManifestListener();
         // Trust invalidation remains active while admitted appends drain.
         // Detach it only when the owning open generation actually retires.
         if (this.guardFlushTimer) {
@@ -2678,7 +2732,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     ): Promise<void> {
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         const internalArgs = args as SharedFsInternalOpenArgs | undefined;
-        const addressOpen = internalArgs?.addressOpen === true;
+        // A program loaded from an address has seen none of the data,
+        // whichever API opens it: never a creator.
+        const addressOpen =
+            internalArgs?.addressOpen === true ||
+            this.constructedLocally !== true;
         const partialWriteOverride =
             addressOpen && args?.allowPartialWrites === true;
         // A previous generation may still be inside remote snapshot discovery.
@@ -3003,8 +3061,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // readiness below.
             this.setGuardArmed(false);
         }
+        // A creating open has nothing to bootstrap from, and returns with its
+        // genesis published (see publishEmptyManifest).
         const bootstrapCandidate =
-            this.bootstrapConfig.mode !== "off" && this.isFullReplica();
+            addressOpen &&
+            this.bootstrapConfig.mode !== "off" &&
+            this.isFullReplica();
         const preOpenCrashMarker =
             addressOpen &&
             !trustedWarmWriteReady &&
@@ -3055,9 +3117,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ? (event: any) => {
                   const added = event?.detail?.added ?? [];
                   duringOpenChangeHadMetadata = added.some(
-                      (value: unknown) =>
-                          value instanceof NamingEvent ||
-                          value instanceof FileVersion
+                      isWriteReadinessEvidence
                   );
               }
             : undefined;
@@ -3191,17 +3251,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
             for (const value of added) {
-                const remoteMetadata =
-                    value instanceof NamingEvent ||
-                    value instanceof FileVersion;
-                if (this.writeReadinessRequired && remoteMetadata) {
+                if (
+                    this.writeReadinessRequired &&
+                    isWriteReadinessEvidence(value)
+                ) {
                     // Positive evidence is mandatory before a fresh join can
-                    // leave the write gate. Public mutations are closed while
-                    // gated, so any such arrival came from replication even
-                    // when two machines intentionally share one writer key.
-                    // Every later metadata arrival restarts the quiet window,
-                    // including the post-snapshot gap overlay coverage cannot
-                    // prove.
+                    // leave the write gate. Public mutations (snapshotWrite
+                    // included) are closed while gated, so any such arrival
+                    // came from replication even when two machines
+                    // intentionally share one writer key. Every later
+                    // arrival restarts the quiet window, including the
+                    // post-snapshot gap overlay coverage cannot prove.
                     this.writeReadinessRemoteEvidence = true;
                     this.writeReadinessQuietChecks = 0;
                     this.lastRemoteArrivalMs = this.clock();
@@ -3377,6 +3437,53 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessLifecycleBlocked = false;
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
+        }
+        // Only a creating open, or the author of a zero-document manifest,
+        // publishes one (see publishEmptyManifest).
+        const genesisAuthor =
+            this.isFullReplica() &&
+            !this.snapshotConfig.disabled &&
+            (!addressOpen ||
+                isEmptyManifest(
+                    await this.getDocument(`bootstrap:${this.authorKey()}`)
+                ));
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        if (genesisAuthor) {
+            const ownKey = this.node.identity.publicKey;
+            const topic = this.entries.log.topic;
+            const isRemote = (key: PublicSignKey) => !key.equals(ownKey);
+            // Every session that opens this filesystem subscribes anew, even
+            // one returning after a crash, for which shared-log may emit no
+            // replicator:join. Detached once something is written.
+            const listener = (event: any) => {
+                if (
+                    this.emptyManifestListener === listener &&
+                    event.detail.topics.includes(topic) &&
+                    isRemote(event.detail.from)
+                ) {
+                    void this.publishEmptyManifest(false);
+                }
+            };
+            this.emptyManifestListener = listener;
+            this.node.services.pubsub.addEventListener("subscribe", listener, {
+                signal: this.maintenanceAbortController!.signal,
+            });
+            // A creating open publishes the genesis. A reopen refreshes it
+            // only for peers that subscribed before the listener above (they
+            // may be waiting): one that finds nobody adds nothing.
+            const subscribers =
+                (await this.node.services.pubsub.getSubscribers(topic)) ?? [];
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+            const published =
+                !addressOpen || subscribers.some(isRemote)
+                    ? this.publishEmptyManifest(!addressOpen)
+                    : Promise.resolve();
+            if (!bootstrapCandidate) {
+                // No bootstrap to wait for: a creator returns with its
+                // genesis published (`peerbit-fs create` stops right after).
+                await published;
+                this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+            }
         }
         this.startSnapshotPublisher();
         this.startGcScheduler();
@@ -9207,10 +9314,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * Fail-closed readiness for a fresh address-open. Positive remote
-     * metadata proves synchronization actually started; bootstrap retirement,
-     * synchronizer idleness, and two post-arrival quiet checks provide a
-     * settled initial view. This deliberately does not call the result a
-     * verified log frontier: Peerbit does not expose one yet.
+     * evidence (a replicated metadata or manifest document, or a verified
+     * non-empty snapshot) proves synchronization actually started; bootstrap
+     * retirement, synchronizer idleness, and two post-arrival quiet checks
+     * provide a settled initial view. This deliberately does not call the
+     * result a verified log frontier: Peerbit does not expose one yet.
      */
     private startWriteReadinessTracking(generation: number) {
         if (
@@ -10061,6 +10169,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // instead of a silent fallback.
         let invalid = 0;
         let stale = 0;
+        let empty = 0;
         const candidates: Candidate[] = [];
         for (const raw of results) {
             if (!(raw instanceof BootstrapManifest)) {
@@ -10090,6 +10199,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 invalid++;
                 continue;
             }
+            if (payload.segments.length === 0) {
+                // A zero-document manifest (a creator's genesis) installs
+                // nothing, and its overlay would retire at once, counting as
+                // verified coverage and readiness evidence without covering
+                // any log entry, though a genesis can be older than the data.
+                // Plain-join instead: its replication is the evidence.
+                empty++;
+                continue;
+            }
             const age = this.clock() - Number(payload.createdAtWallMs);
             if (age > config.maxSnapshotAgeMs) {
                 stale++;
@@ -10110,9 +10228,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 stale
             );
             this.bootstrapFailure =
-                invalid + stale === 0
-                    ? "no snapshot manifest candidates were discovered in time"
-                    : `no usable snapshot manifest (${invalid} invalid, ${stale} older than the staleness cap — check clock skew if unexpected)`;
+                invalid + stale > 0
+                    ? `no usable snapshot manifest (${invalid} invalid, ${stale} older than the staleness cap — check clock skew if unexpected)`
+                    : empty > 0
+                      ? "only zero-document snapshot manifests were found (nothing was written when they were published)"
+                      : "no snapshot manifest candidates were discovered in time";
             return false;
         }
         // Trust-race tolerance: the trust graph may still be replicating,
@@ -11975,13 +12095,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             payloadBytes,
             signatureBytes: serialize(signature),
         });
-        // CUT the superseded manifest chain before publishing the new one
-        // so manifest history never accumulates in the replicated log
-        // (Guard D never matches manifests, so the delete is final).
+        // Publish as a CUT of the superseded manifest's head so manifest
+        // history never accumulates in the replicated log (Guard D never
+        // matches manifests). One entry, not a delete then a put: a joiner
+        // that never held the old manifest could leave the delete entry
+        // pending in its sync indefinitely, and never become write-ready.
         if (previous) {
-            await this.entries.del(manifestId).catch(() => {});
+            await this.entries.put(manifest, {
+                meta: { type: ENTRY_TYPE_CUT },
+            });
+        } else {
+            await this.putPreferLinked(manifest);
         }
-        await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
         return {
             snapshotSeq,
@@ -12025,6 +12150,91 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
+    private async hasLocalNamingRow() {
+        const probe = this.entries.index.iterate(
+            { query: [new StringMatch({ key: "kind", value: "naming" })] },
+            { local: true, remote: false, resolve: false }
+        );
+        try {
+            return (await probe.next(1)).length > 0;
+        } finally {
+            await (probe as any).close?.();
+        }
+    }
+
+    /**
+     * A never-written filesystem has no metadata whose replication proves a
+     * joiner's sync started, so its creator publishes a zero-document
+     * manifest (the genesis). While nothing is written, it puts that
+     * manifest again whenever a peer session subscribes: a joiner whose
+     * earlier join ended before it was ready already holds the old entry,
+     * and the new one is still an arrival. A plain linked put, never a CUT:
+     * a returning peer that still holds an entry an earlier CUT removed puts
+     * it back for good (the log only rejects entries the current CUT head
+     * names). The first real snapshot CUTs the chain, though a peer offline
+     * across it can put back the old entries it holds, as orphan heads (the
+     * index keeps the newest manifest). Only a creating open, or the author
+     * of a zero-document manifest, publishes: never a peer that merely has
+     * not synced yet. Once something is written, the listener goes. Failures
+     * leave joiners gated.
+     */
+    private publishEmptyManifest(creating: boolean): Promise<void> {
+        const context = this.maintenanceContextIfActive();
+        if (!context) {
+            return Promise.resolve();
+        }
+        if (!creating) {
+            // A queued refresh that has not reached its put serves this
+            // request too.
+            if (this.emptyManifestRefreshQueued) {
+                return Promise.resolve();
+            }
+            this.emptyManifestRefreshQueued = true;
+        }
+        const decision = this.bootstrapDecision;
+        const run = async () => {
+            // Only from a whole view: a bootstrap still deciding is partial.
+            await decision.catch(() => {});
+            // Inside the snapshot fence: a real snapshot published meanwhile
+            // is never superseded by the stale zero-document manifest.
+            const genesis = await this.queueSnapshotBlockStoreTask(async () => {
+                if (!creating) {
+                    this.emptyManifestRefreshQueued = false;
+                }
+                this.throwIfMaintenanceInactive(context);
+                if (await this.hasLocalNamingRow()) {
+                    // Written: nothing needs the genesis any more, whatever
+                    // the bootstrap phase (a converged one lasts the open).
+                    this.throwIfMaintenanceInactive(context);
+                    this.detachEmptyManifestListener();
+                    return false;
+                }
+                if (
+                    !this.writesReady ||
+                    this.partialWriteOverride ||
+                    this.bootstrapPhase !== "off"
+                ) {
+                    return false;
+                }
+                const own = await this.getDocument<SharedFsEntry>(
+                    `bootstrap:${this.authorKey()}`
+                );
+                this.throwIfMaintenanceInactive(context);
+                if (!(own instanceof BootstrapManifest)) {
+                    return creating;
+                }
+                if (isEmptyManifest(own)) {
+                    await this.entries.put(own);
+                }
+                return false;
+            });
+            if (genesis) {
+                await this.snapshotWrite();
+            }
+        };
+        return this.trackMaintenanceTask(run()).catch(() => {});
+    }
+
     private startSnapshotPublisher() {
         if (this.snapshotConfig.disabled || !this.isFullReplica()) {
             return;
@@ -12065,9 +12275,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             previous.payloadBytes,
                             SnapshotManifestPayload
                         );
+                        // A zero-document manifest (the genesis) counts as
+                        // missing: the populated check below still applies.
                         due =
+                            payload.segments.length === 0 ||
                             this.clock() - Number(payload.createdAtWallMs) >
-                            BOOTSTRAP_DEFAULTS.maxSnapshotAgeMs / 2;
+                                BOOTSTRAP_DEFAULTS.maxSnapshotAgeMs / 2;
                     } catch {
                         due = true;
                     }
@@ -12080,18 +12293,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             // Never publish an empty view (an unreachable network or a
             // brand-new store): require at least one naming row.
-            const probe = this.entries.index.iterate(
-                {
-                    query: [new StringMatch({ key: "kind", value: "naming" })],
-                },
-                { local: true, remote: false, resolve: false }
-            );
-            let populated: boolean;
-            try {
-                populated = (await probe.next(1)).length > 0;
-            } finally {
-                await (probe as any).close?.();
-            }
+            const populated = await this.hasLocalNamingRow();
             this.throwIfMaintenanceInactive(context);
             if (!populated) {
                 return;
@@ -13640,10 +13842,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (expired.length === 0) {
             return zero;
         }
-        // Liveness re-verification at deletion time. Own manifest absent
-        // (a crash between CUT and publish): SKIP entirely — fail-safe, the
-        // next successful publish restores it. Any parse failure: ABORT —
-        // never delete on a corrupt view.
+        // Liveness re-verification at deletion time. Own manifest absent:
+        // SKIP entirely — fail-safe, the next successful publish restores
+        // it. Any parse failure: ABORT — never delete on a corrupt view.
         const own = await this.getDocument<SharedFsEntry>(
             `bootstrap:${this.authorKey()}`
         );

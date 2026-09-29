@@ -78,6 +78,9 @@ describe("shared fs partial disposal receipt failure", () => {
             replicate: { factor: 1 },
             bootstrap: false,
             gc: false,
+            // No genesis manifest: the receiver's join would put it again,
+            // possibly after `before` below captures the local refs.
+            snapshot: { disabled: true },
         });
         await openSharedFs({
             peerbit: receiverPeer,
