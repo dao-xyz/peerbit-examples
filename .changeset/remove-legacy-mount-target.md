@@ -32,8 +32,7 @@ on-disk formats are unchanged. The CLI already used the remaining path.
 - `writeFile` may retain its input `Uint8Array` indefinitely but must never
   mutate it or transfer/detach its `ArrayBuffer`. Mounts now always lend their
   exact-size handle buffer instead of copying it (an oversized buffer is still
-  copied to its logical length). This also applies to targets passed to
-  `mountNativeSharedFs`.
+  copied to its logical length).
 - A lost `O_CREAT|O_EXCL` commit race is always reported as `EEXIST` (custom
   targets previously got `EAGAIN`).
 

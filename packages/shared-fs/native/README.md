@@ -268,8 +268,7 @@ Linux and macOS; WinFsp normalizes those to `0777` and `0666`. Modes passed to
 create, mknod, and mkdir are not persisted.
 
 The external adapter rejects chmod, chown, and explicit timestamp updates with
-`ENOSYS` instead of falsely reporting that unrepresented state was saved. The
-optional in-process adapter does not implement these mutations either.
+`ENOSYS` instead of falsely reporting that unrepresented state was saved.
 Ownership is adapter-synthetic and is not a replicated permission boundary.
 The external adapter's access callback checks path existence but does not
 enforce its requested read/write/execute mask, so `access(2)` and tools such as

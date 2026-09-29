@@ -420,13 +420,15 @@ describe("peerbit-fs cli", () => {
         );
     });
 
-    it("reports and refuses an unpinned managed adapter before opening Peerbit", async () => {
+    it("reports and refuses a missing or unpinned managed adapter before opening Peerbit", async () => {
         const installDir = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-adapter-pin-")
         );
         const saved = {
             adapter: process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER,
             installDir: process.env.PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR,
+            path: process.env.PATH,
+            exitCode: process.exitCode,
         };
         const { version } = JSON.parse(
             await fs.readFile(
@@ -446,6 +448,7 @@ describe("peerbit-fs cli", () => {
         await fs.writeFile(binaryPath, "adapter from an older CLI");
         const refusal = `Installed native adapter ${binaryPath} is of unknown version: it has no install record (installed before adapter version pinning, copied manually, or left by an interrupted install), but @peerbit/shared-fs-cli ${version} requires shared-fs-native-v${version}. Run \`peerbit-fs install-adapter --force\``;
         const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
         const createPeerbit = vi.spyOn(Peerbit, "create");
         try {
             delete process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER;
@@ -475,12 +478,37 @@ describe("peerbit-fs cli", () => {
                 ])
             ).rejects.toThrow(refusal);
             expect(createPeerbit).not.toHaveBeenCalled();
+
+            // Without any adapter, mount points at install-adapter and lists
+            // the platform requirements instead of dumping usage.
+            await fs.rm(path.dirname(binaryPath), { recursive: true });
+            process.env.PATH = "";
+            error.mockClear();
+            await runCli([
+                "mount",
+                "zb2rh-not-opened",
+                "/tmp/peerbit-shared-fs-not-mounted",
+                "--directory",
+                "",
+            ]);
+            expect(process.exitCode).toBe(1);
+            expect(error).toHaveBeenCalledTimes(1);
+            expect(String(error.mock.calls[0]?.[0])).toContain(
+                "No native mount adapter found. Run `peerbit-fs install-adapter`"
+            );
+            expect(log).toHaveBeenCalledWith(
+                "  - peerbit-shared-fs-native adapter binary"
+            );
+            expect(createPeerbit).not.toHaveBeenCalled();
         } finally {
+            process.exitCode = saved.exitCode;
             log.mockRestore();
+            error.mockRestore();
             createPeerbit.mockRestore();
             for (const [name, value] of [
                 ["PEERBIT_SHARED_FS_NATIVE_ADAPTER", saved.adapter],
                 ["PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR", saved.installDir],
+                ["PATH", saved.path],
             ] as const) {
                 if (value === undefined) {
                     delete process.env[name];

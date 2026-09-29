@@ -5,10 +5,7 @@ import type { Writable } from "node:stream";
 export const SHARED_FS_MOUNT_PROFILE_SCHEMA = "peerbit.shared-fs.mount-profile";
 export const SHARED_FS_MOUNT_PROFILE_SCHEMA_VERSION = 1;
 
-export type SharedFsMountProfileSource =
-    | "fuse-native"
-    | "native-adapter"
-    | "node-daemon";
+export type SharedFsMountProfileSource = "native-adapter" | "node-daemon";
 
 /**
  * Sequential sub-phases of one library `writeFile` call made by a profiled
@@ -190,18 +187,6 @@ export const finishSharedFsMountProfile = (
     if (detail) event.detail = detail;
     emitSharedFsMountProfile(sink, event);
     return durationNs;
-};
-
-/** @internal Begin a callback-shaped phase after the caller opted in. */
-export const beginSharedFsMountProfile = (
-    sink: SharedFsMountProfileSink,
-    identity: ProfileEventIdentity
-) => {
-    const started = process.hrtime.bigint();
-    return (
-        ok: boolean,
-        extraDetail?: Readonly<Record<string, SharedFsMountProfileDetailValue>>
-    ) => finishSharedFsMountProfile(sink, identity, started, ok, extraDetail);
 };
 
 /**

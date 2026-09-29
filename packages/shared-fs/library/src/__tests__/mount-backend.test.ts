@@ -7,7 +7,6 @@ import {
     encodeConflictPathName,
     openSharedFs,
     parseFlags,
-    sharedFsBackendErrno,
     SharedFsError,
     SharedFsExpectedNodeMismatchError,
     SharedFsHandle,
@@ -150,12 +149,6 @@ describe("shared fs mount backend", () => {
 
     afterEach(async () => {
         await peer.stop();
-    });
-
-    it("maps retryable mount errors to the host-specific errno", () => {
-        expect(sharedFsBackendErrno("EAGAIN", "linux")).toBe(-11);
-        expect(sharedFsBackendErrno("EAGAIN", "win32")).toBe(-11);
-        expect(sharedFsBackendErrno("EAGAIN", "darwin")).toBe(-35);
     });
 
     it("commits buffered writes on release", async () => {

@@ -34,10 +34,6 @@ macFUSE in macOS System Settings > Privacy & Security and reboot after the first
 installation. Scaleway's kernel-extension flag only allows the approved host to
 load kernel extensions; it cannot perform that interactive approval.
 
-The macOS and Windows native smoke jobs use the external Go adapter path. The
-optional Node `fuse-native` adapter is not part of the required cross-platform
-mount path.
-
 ## Required GitHub Secrets
 
 Set these repository secrets before running the workflow:
