@@ -12202,17 +12202,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.emptyManifestRefreshQueued = false;
                 }
                 this.throwIfMaintenanceInactive(context);
+                if (await this.hasLocalNamingRow()) {
+                    // Written: nothing needs the genesis any more, whatever
+                    // the bootstrap phase (a converged one lasts the open).
+                    this.throwIfMaintenanceInactive(context);
+                    this.detachEmptyManifestListener();
+                    return false;
+                }
                 if (
                     !this.writesReady ||
                     this.partialWriteOverride ||
                     this.bootstrapPhase !== "off"
                 ) {
-                    return false;
-                }
-                if (await this.hasLocalNamingRow()) {
-                    // Written: nothing needs the genesis any more.
-                    this.throwIfMaintenanceInactive(context);
-                    this.detachEmptyManifestListener();
                     return false;
                 }
                 const own = await this.getDocument<SharedFsEntry>(

@@ -1433,6 +1433,20 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
+    it("drops the genesis listener once written, whatever its bootstrap phase", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-converged",
+        });
+        const program: any = fs.program;
+        await fs.writeFile("/data.txt", "data");
+        // A genesis author that reconverged from another replica's snapshot
+        // stays "converged" for the whole open.
+        program.bootstrapPhase = "converged";
+        await program.publishEmptyManifest(false);
+        expect(program.emptyManifestListener).toBeUndefined();
+    });
+
     it("replaces the genesis at the first publisher check after a write", async () => {
         const fs = await openSharedFs({
             peerbit: await createPeer(),
