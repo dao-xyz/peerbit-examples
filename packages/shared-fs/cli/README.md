@@ -202,6 +202,12 @@ fields are not an authorization boundary. The external adapter's OS access
 callback checks only existence and the exec bit, so `test -w` is advisory.
 Use the Shared FS trusted-writer model for write authorization.
 
+A Linux mount caches which file a name leads to for at most 0.1 s and never
+caches file metadata or missing names, so other peers' changes appear as soon
+as they replicate. macOS caches names and metadata for 1 s.
+`packages/shared-fs/native/README.md` describes each platform's caching and
+its edge cases.
+
 Path names have no portable cross-platform policy yet. The library compares
 case-sensitive strings without Unicode normalization or Windows reserved-name
 mapping/rejection, so mixed-platform deployments must enforce a common naming

@@ -31,7 +31,9 @@ export const DEFAULT_JOIN_TOLERANCE_NS = 1_000_000;
 const SOURCES = new Set(["native-adapter", "node-daemon"]);
 const META_PHASES = new Set(["profile.start", "profile.summary"]);
 const UNIX_NS = /^[1-9][0-9]{0,18}$/u;
-const ABSENT_CODES = new Set(["ENOENT"]);
+// A Linux adapter's Open answers ESTALE for the daemon's ENOENT, so the
+// kernel retries a name it cached for up to 0.1 s with a fresh lookup.
+const ABSENT_CODES = new Set(["ENOENT", "ESTALE"]);
 // Failures that mean "not available right now" rather than a caller error:
 // readiness gating, transport or storage failure, and shutdown.
 const UNAVAILABLE_CODES = new Set([
@@ -43,7 +45,7 @@ const UNAVAILABLE_CODES = new Set([
     "ECLOSED",
 ]);
 
-/** absent (ENOENT), unavailable (EAGAIN/EIO/...), or error (anything else). */
+/** absent (ENOENT/ESTALE), unavailable (EAGAIN/EIO/...), or error (anything else). */
 export const classifyMountProfileFailure = (code) =>
     ABSENT_CODES.has(code)
         ? "absent"
@@ -969,7 +971,7 @@ export const summarizeMountProfile = ({
             "Phases nest (native.callback > ipc.roundTrip > ipc.service > mount.localCommit > mount.target.writeFile > writeFile.*); never add a phase to its parent.",
             "writeFile.* sub-phases are sequential and partition the library writeFile behind one mount.target.writeFile (joined by writeId); they may be added to each other. versionPut and namingPut include everything inside the upstream Documents.put (signing, log append, indexing).",
             "transportNs = joined ipc.roundTrip - ipc.service (framing, loopback, adapter encode/decode).",
-            "Failures: absent = ENOENT; unavailable = EAGAIN/EIO/EBUSY/ENOLCK/ETIMEDOUT/ECLOSED or no code; error = any other code.",
+            "Failures: absent = ENOENT or ESTALE (Linux open of a name removed within the 0.1 s name cache); unavailable = EAGAIN/EIO/EBUSY/ENOLCK/ETIMEDOUT/ECLOSED or no code; error = any other code.",
             "Kernel time outside userspace callbacks and cached operations that never reach userspace are not observable.",
         ],
     };

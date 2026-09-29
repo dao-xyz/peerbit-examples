@@ -196,7 +196,9 @@ test("parses only valid schema records and counts every skipped line", () => {
 });
 
 test("classifies absent, unavailable, and other failures", () => {
-    assert.equal(classifyMountProfileFailure("ENOENT"), "absent");
+    for (const code of ["ENOENT", "ESTALE"]) {
+        assert.equal(classifyMountProfileFailure(code), "absent");
+    }
     for (const code of ["EAGAIN", "EIO", "EBUSY", "ETIMEDOUT", undefined]) {
         assert.equal(classifyMountProfileFailure(code), "unavailable");
     }

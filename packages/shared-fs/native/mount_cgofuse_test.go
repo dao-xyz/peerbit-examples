@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -70,6 +71,73 @@ func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	})
 	if got != -fuse.EAGAIN {
 		t.Fatalf("expected %d, got %d", -fuse.EAGAIN, got)
+	}
+}
+
+// Linux caches names for up to 0.1 s, so Open can see ENOENT for a name
+// another peer just removed. Only Linux answers ESTALE, which makes the
+// kernel retry the open with a fresh lookup (and create the file for O_CREAT).
+func TestOpenAnswersESTALEForMissingPathOnLinuxOnly(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		code int
+		want int
+	}{
+		{"linux", -fuse.ENOENT, -linuxESTALE},
+		{"linux", -fuse.EISDIR, -fuse.EISDIR},
+		{"linux", -fuse.EACCES, -fuse.EACCES},
+		{"linux", -fuse.EAGAIN, -fuse.EAGAIN},
+		{"linux", -fuse.EIO, -fuse.EIO},
+		{"darwin", -fuse.ENOENT, -fuse.ENOENT},
+		{"windows", -fuse.ENOENT, -fuse.ENOENT},
+	} {
+		if got := openErrno(test.code, test.goos); got != test.want {
+			t.Fatalf("openErrno(%d, %s) = %d, want %d", test.code, test.goos, got, test.want)
+		}
+	}
+	if runtime.GOOS == "linux" && linuxESTALE != int(syscall.ESTALE) {
+		t.Fatalf("linuxESTALE = %d, but syscall.ESTALE is %d", linuxESTALE, int(syscall.ESTALE))
+	}
+
+	server := startIPCResponseServer(t, func(request ipcRequest) ipcResponse {
+		return ipcResponse{ID: request.ID, OK: false, Error: &ipcErrorObject{Code: "ENOENT", Message: "missing"}}
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
+	defer client.close()
+	var output bytes.Buffer
+	profile := newMountProfiler(&output, 8)
+	fs := &peerbitFS{client: client, profile: profile}
+
+	wantOpen, wantName := -fuse.ENOENT, "ENOENT"
+	if runtime.GOOS == "linux" {
+		wantOpen, wantName = -linuxESTALE, "ESTALE"
+	}
+	if code, handle := fs.Open("/removed.txt", fuse.O_WRONLY|fuse.O_TRUNC); code != wantOpen || handle != ^uint64(0) {
+		t.Fatalf("open = (%d, %#x), want (%d, no handle)", code, handle, wantOpen)
+	}
+	// Getattr also answers LOOKUP, and Create follows a negative lookup, so
+	// both keep ENOENT on every platform.
+	var stat fuse.Stat_t
+	if code := fs.Getattr("/removed.txt", &stat, ^uint64(0)); code != -fuse.ENOENT {
+		t.Fatalf("getattr = %d, want ENOENT", code)
+	}
+	if code, _ := fs.Create("/missing/new.txt", fuse.O_WRONLY|fuse.O_CREAT, 0o644); code != -fuse.ENOENT {
+		t.Fatalf("create = %d, want ENOENT", code)
+	}
+	profile.close()
+
+	records, _ := splitProfile(t, decodeMountProfileRecords(t, output.String()))
+	if len(records) != 3 {
+		t.Fatalf("got %d callback records, want three: %#v", len(records), records)
+	}
+	open := records[0]
+	if open.Operation != "open" || open.OK || detailNumber(t, open, "errno") != int64(wantOpen) || open.Detail["code"] != wantName {
+		t.Fatalf("unexpected open record: %#v", open)
+	}
+	for _, record := range records[1:] {
+		if record.OK || record.Detail["code"] != "ENOENT" {
+			t.Fatalf("unexpected %s record: %#v", record.Operation, record)
+		}
 	}
 }
 
