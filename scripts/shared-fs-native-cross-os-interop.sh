@@ -298,6 +298,12 @@ done
 mount_ready_end_ms="$(now_ms)"
 mount_ready_ms=$((mount_ready_end_ms - mount_start_ms))
 
+# An executable and a symlink to it, written before the file peers wait for.
+mkdir "$mountpoint/$machine-bin"
+printf '#!/bin/sh\necho "%s tool"\n' "$machine" > "$mountpoint/$machine-bin/tool"
+chmod +x "$mountpoint/$machine-bin/tool"
+ln -s "$machine-bin/tool" "$mountpoint/$machine-tool-link"
+
 local_write_start_ms="$(now_ms)"
 printf "%s" "$local_contents" > "$local_file"
 test "$(cat "$local_file")" = "$local_contents"
@@ -347,6 +353,30 @@ wait_for_path_absent() {
   done
 }
 
+# A POSIX peer's exec bit and symlink: the link reads back verbatim and runs
+# its target.
+wait_for_exec_link() {
+  expected_machine="$1"
+  link="$mountpoint/$expected_machine-tool-link"
+  wait_start_ms="$(now_ms)"
+
+  while true; do
+    if [ -x "$mountpoint/$expected_machine-bin/tool" ] &&
+      [ "$(readlink "$link" 2>/dev/null || true)" = "$expected_machine-bin/tool" ] &&
+      [ "$("$link" 2>/dev/null || true)" = "$expected_machine tool" ]; then
+      wait_end_ms="$(now_ms)"
+      record_observation "execLinkVisible" "$expected_machine" "$((wait_end_ms - wait_start_ms))"
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "Timed out waiting for $expected_machine's executable and symlink"
+      ls -la "$mountpoint" "$mountpoint/$expected_machine-bin" || true
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
 deadline=$((SECONDS + timeout_seconds))
 IFS=',' read -r -a expected_machines <<< "$expected"
 for expected_machine in "${expected_machines[@]}"; do
@@ -357,6 +387,10 @@ for expected_machine in "${expected_machines[@]}"; do
   expected_file="$mountpoint/$expected_machine.txt"
   expected_contents="hello from $expected_machine via native mount"
   wait_for_file_contents "fileVisible" "$expected_machine" "$expected_file" "$expected_contents"
+  # Windows peers neither set the exec bit nor create links.
+  if [ "$expected_machine" != "windows" ]; then
+    wait_for_exec_link "$expected_machine"
+  fi
 done
 
 ack_write_start_ms="$(now_ms)"

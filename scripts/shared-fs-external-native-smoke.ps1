@@ -167,19 +167,11 @@ try {
   if ($RewrittenLength -ne 7) {
     throw "replacement write did not truncate the file: length is $RewrittenLength"
   }
-  $LastWriteBefore = (Get-Item -LiteralPath $MetadataPath).LastWriteTimeUtc
-  $TimestampMutationFailed = $false
-  try {
-    [System.IO.File]::SetLastWriteTimeUtc($MetadataPath, [DateTime]::Parse("2000-01-01T00:00:00Z").ToUniversalTime())
-  } catch {
-    $TimestampMutationFailed = $true
-  }
-  if (-not $TimestampMutationFailed) {
-    throw "explicit timestamp update unexpectedly succeeded for synthetic Shared FS metadata"
-  }
+  $Y2K = [DateTime]::Parse("2000-01-01T00:00:00Z").ToUniversalTime()
+  [System.IO.File]::SetLastWriteTimeUtc($MetadataPath, $Y2K)
   $LastWriteAfter = (Get-Item -LiteralPath $MetadataPath).LastWriteTimeUtc
-  if ($LastWriteAfter -ne $LastWriteBefore) {
-    throw "failed timestamp update changed Shared FS metadata from $LastWriteBefore to $LastWriteAfter"
+  if ($LastWriteAfter -ne $Y2K) {
+    throw "SetLastWriteTimeUtc stored $LastWriteAfter, expected $Y2K"
   }
 
   Rename-Item -Path (Join-Path $MountRoot "docs\hello.txt") -NewName "renamed.txt"
@@ -196,6 +188,25 @@ try {
   Remove-Item -Force -Path $DocsPath
   if (Test-Path -LiteralPath $DocsPath) {
     throw "docs directory still exists after removal"
+  }
+
+  # Non-gating: a file link is expected to fail and a directory link is
+  # unverified (see packages/shared-fs/native/README.md), so only record what
+  # happens.
+  $ProbeRoot = Join-Path $MountRoot "link-probe"
+  New-Item -ItemType Directory -Force -Path (Join-Path $ProbeRoot "dir") | Out-Null
+  Set-Content -NoNewline -Path (Join-Path $ProbeRoot "target.txt") -Value "link target"
+  foreach ($Probe in @(@("file link", "file-link", "target.txt"), @("directory link", "dir-link", "dir"))) {
+    try {
+      $Link = New-Item -ItemType SymbolicLink -Path (Join-Path $ProbeRoot $Probe[1]) -Target (Join-Path $ProbeRoot $Probe[2])
+      $Outcome = "created, target $($Link.Target)"
+    } catch {
+      $Outcome = "failed: $($_.Exception.Message)"
+    }
+    Write-Host "symlink probe ($($Probe[0])): $Outcome"
+    if ($env:GITHUB_STEP_SUMMARY) {
+      Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- symlink probe ($($Probe[0])): $Outcome"
+    }
   }
 
   # Opt-in, report-only filesystem-path benchmarks. Each owns and removes only

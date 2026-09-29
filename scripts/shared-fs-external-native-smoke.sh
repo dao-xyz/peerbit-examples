@@ -209,20 +209,27 @@ mkdir "$mountpoint/docs"
 printf "hello external native" > "$mountpoint/docs/hello.txt"
 test "$(cat "$mountpoint/docs/hello.txt")" = "hello external native"
 
+# Only the exec bit and the mtime are stored.
 metadata_path="$mountpoint/docs/hello.txt"
-mode_before="$(stat_mode "$metadata_path")"
-if chmod 600 "$metadata_path" 2>/dev/null; then
-  echo "chmod unexpectedly succeeded for synthetic Shared FS metadata" >&2
-  exit 1
-fi
-test "$(stat_mode "$metadata_path")" = "$mode_before"
+chmod 600 "$metadata_path"
+test "$(stat_mode "$metadata_path")" = "644"
+TZ=UTC touch -t 200001010000 "$metadata_path"
+test "$(stat_mtime "$metadata_path")" = "946684800"
+touch -a "$metadata_path"
+test "$(stat_mtime "$metadata_path")" = "946684800"
 
-mtime_before="$(stat_mtime "$metadata_path")"
-if touch -t 200001010000 "$metadata_path" 2>/dev/null; then
-  echo "explicit timestamp update unexpectedly succeeded for synthetic Shared FS metadata" >&2
-  exit 1
-fi
-test "$(stat_mtime "$metadata_path")" = "$mtime_before"
+printf '#!/bin/sh\necho tool ok\n' > "$mountpoint/docs/tool.sh"
+chmod +x "$mountpoint/docs/tool.sh"
+test "$(stat_mode "$mountpoint/docs/tool.sh")" = "755"
+test "$(cd "$mountpoint/docs" && ./tool.sh)" = "tool ok"
+ln -s tool.sh "$mountpoint/docs/tool-link"
+test -L "$mountpoint/docs/tool-link"
+test "$(readlink "$mountpoint/docs/tool-link")" = "tool.sh"
+test "$(cd "$mountpoint/docs" && ./tool-link)" = "tool ok"
+rm "$mountpoint/docs/tool-link"
+test ! -L "$mountpoint/docs/tool-link"
+test -x "$mountpoint/docs/tool.sh"
+rm "$mountpoint/docs/tool.sh"
 
 mv "$mountpoint/docs/hello.txt" "$mountpoint/docs/renamed.txt"
 test "$(cat "$mountpoint/docs/renamed.txt")" = "hello external native"

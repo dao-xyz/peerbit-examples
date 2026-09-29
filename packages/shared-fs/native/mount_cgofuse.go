@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -160,13 +161,20 @@ func (fs *peerbitFS) Access(path string, mask uint32) (code int) {
 	if finish := fs.beginCallback("access"); finish != nil {
 		defer func() { finish(code) }()
 	}
-	_ = mask
 	result, err := fs.client.request("getattr", path)
 	if err != nil {
 		return errno(err)
 	}
-	if _, ok := result.(map[string]interface{}); !ok {
+	mapped, ok := result.(map[string]interface{})
+	if !ok {
 		return -fuse.EIO
+	}
+	// The mount runs without default_permissions, so access(2) (test -x)
+	// lands here; agree with the kernel's execve check on the exec bit.
+	mode := uint32(uint64Field(mapped, "mode"))
+	if runtime.GOOS != "windows" && mask&fuse.X_OK != 0 &&
+		mode&statModeTypeMask == statModeRegular && mode&0o111 == 0 {
+		return -fuse.EACCES
 	}
 	return 0
 }
@@ -276,14 +284,13 @@ func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) (code int) {
 	if finish := fs.beginCallback("mknod"); finish != nil {
 		defer func() { finish(code) }()
 	}
-	_ = mode
 	_ = dev
-	result, err := fs.client.request("open", path, map[string]interface{}{
+	result, err := fs.openCreate(path, map[string]interface{}{
 		"write":          true,
 		"create":         true,
 		"exclusive":      true,
 		"releaseFailure": "discard",
-	})
+	}, mode)
 	if err != nil {
 		return errno(err)
 	}
@@ -295,12 +302,21 @@ func (fs *peerbitFS) Create(path string, flags int, mode uint32) (code int, hand
 	if finish := fs.beginCallback("create"); finish != nil {
 		defer func() { finish(code) }()
 	}
-	_ = mode
-	result, err := fs.client.request("open", path, flags)
+	result, err := fs.openCreate(path, flags, mode)
 	if err != nil {
 		return errno(err), ^uint64(0)
 	}
 	return 0, uint64FromResult(result)
+}
+
+// openCreate passes the create mode (the backend keeps its exec bit) as
+// open's third argument. WinFsp derives create modes from ACLs, so Windows
+// sends none and files created there are never executable.
+func (fs *peerbitFS) openCreate(path string, flags interface{}, mode uint32) (interface{}, error) {
+	if runtime.GOOS == "windows" {
+		return fs.client.request("open", path, flags)
+	}
+	return fs.client.request("open", path, flags, mode&0o777)
 }
 
 func (fs *peerbitFS) Truncate(path string, size int64, fh uint64) (code int) {
@@ -384,15 +400,20 @@ func (fs *peerbitFS) Mkdir(path string, mode uint32) (code int) {
 	return code
 }
 
+// Chmod keeps only the exec bit (in the backend). On Windows it is a no-op,
+// so an ACL edit (SetSecurity) cannot clear a POSIX peer's exec bit.
 func (fs *peerbitFS) Chmod(path string, mode uint32) (code int) {
 	if finish := fs.beginCallback("chmod"); finish != nil {
 		defer func() { finish(code) }()
 	}
-	_ = path
-	_ = mode
-	return -fuse.ENOSYS
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	_, err := fs.client.request("setattr", path, map[string]interface{}{"mode": mode & 0o7777})
+	return errno(err)
 }
 
+// Chown succeeds without storing anything: shared-fs has no owners.
 func (fs *peerbitFS) Chown(path string, uid uint32, gid uint32) (code int) {
 	if finish := fs.beginCallback("chown"); finish != nil {
 		defer func() { finish(code) }()
@@ -400,16 +421,64 @@ func (fs *peerbitFS) Chown(path string, uid uint32, gid uint32) (code int) {
 	_ = path
 	_ = uid
 	_ = gid
-	return -fuse.ENOSYS
+	return 0
 }
 
+// Utimens stores mtime in milliseconds and ignores atime. cgofuse maps only a
+// both-NOW pair and compares against the Linux sentinels on every OS, so the
+// macOS UTIME_NOW (-1) and UTIME_OMIT (-2) arrive raw: -1 is the clock, and
+// any other nanosecond value out of range is an omitted mtime (touch -a).
 func (fs *peerbitFS) Utimens(path string, tmsp []fuse.Timespec) (code int) {
 	if finish := fs.beginCallback("utimens"); finish != nil {
 		defer func() { finish(code) }()
 	}
-	_ = path
-	_ = tmsp
-	return -fuse.ENOSYS
+	if len(tmsp) < 2 {
+		return 0
+	}
+	t := tmsp[1]
+	if t.Nsec == fuse.UTIME_NOW || t.Nsec == -1 {
+		t = fuse.Now()
+	} else if t.Nsec < 0 || t.Nsec >= int64(time.Second) {
+		return 0
+	}
+	ms := t.Sec*1000 + t.Nsec/int64(time.Millisecond)
+	if t.Sec < 0 || t.Sec > int64(maxSafeJSONInteger/1000) || ms > int64(maxSafeJSONInteger) {
+		return -fuse.EINVAL
+	}
+	_, err := fs.client.request("setattr", path, map[string]interface{}{"mtimeMs": ms})
+	return errno(err)
+}
+
+func (fs *peerbitFS) Symlink(target string, newpath string) (code int) {
+	if finish := fs.beginCallback("symlink"); finish != nil {
+		defer func() { finish(code) }()
+	}
+	// Go's JSON encoder would store U+FFFD for invalid UTF-8; the library
+	// validates everything else about the target.
+	if !utf8.ValidString(target) {
+		return -fuse.EINVAL
+	}
+	_, err := fs.client.request("symlink", target, newpath)
+	return errno(err)
+}
+
+func (fs *peerbitFS) Readlink(path string) (code int, target string) {
+	if finish := fs.beginCallback("readlink"); finish != nil {
+		defer func() { finish(code) }()
+	}
+	// WinFsp probes readlink("/") at mount to enable symlinks.
+	if path == "/" {
+		return -fuse.EINVAL, ""
+	}
+	result, err := fs.client.request("readlink", path)
+	if err != nil {
+		return errno(err), ""
+	}
+	target, ok := result.(string)
+	if !ok {
+		return -fuse.EIO, ""
+	}
+	return 0, target
 }
 
 func (fs *peerbitFS) Rmdir(path string) (code int) {
@@ -443,8 +512,8 @@ func statFromResult(result map[string]interface{}) fuse.Stat_t {
 	return fuse.Stat_t{
 		Mode:    mode,
 		Nlink:   uint32(uint64Field(result, "nlink")),
-		Uid:     uint32(uint64Field(result, "uid")),
-		Gid:     uint32(uint64Field(result, "gid")),
+		Uid:     ownerField(result, "uid", mountUID),
+		Gid:     ownerField(result, "gid", mountGID),
 		Size:    int64(uint64Field(result, "size")),
 		Atim:    mtime,
 		Mtim:    mtime,
@@ -452,6 +521,18 @@ func statFromResult(result map[string]interface{}) fuse.Stat_t {
 		Blksize: 4096,
 		Blocks:  int64(math.Ceil(float64(uint64Field(result, "size")) / 512)),
 	}
+}
+
+// The mounting user owns every file off Windows (git refuses a repository
+// owned by another user). On Windows the uid=-1,gid=-1 mount option names
+// the owner instead.
+var mountUID, mountGID = uint32(os.Getuid()), uint32(os.Getgid())
+
+func ownerField(result map[string]interface{}, key string, fallback uint32) uint32 {
+	if _, exists := result[key]; !exists && runtime.GOOS != "windows" {
+		return fallback
+	}
+	return uint32(uint64Field(result, key))
 }
 
 const maxSafeJSONInteger = uint64(1<<53 - 1)
@@ -476,8 +557,16 @@ func validatedDirentStat(parent string, name string, entry map[string]interface{
 		return nil
 	}
 
-	kind, ok := entry["kind"].(string)
-	if !ok || (kind != "directory" && kind != "file") {
+	kind, _ := entry["kind"].(string)
+	var expectedType uint32
+	switch kind {
+	case "directory":
+		expectedType = statModeDirectory
+	case "file":
+		expectedType = statModeRegular
+	case "symlink":
+		expectedType = statModeSymlink
+	default:
 		return nil
 	}
 	expectedPath := childPath(parent, name)
@@ -495,16 +584,12 @@ func validatedDirentStat(parent string, name string, entry map[string]interface{
 	if !ok {
 		return nil
 	}
-	expectedType := uint32(statModeRegular)
-	if kind == "directory" {
-		expectedType = uint32(statModeDirectory)
-	}
 	if uint32(mode)&statModeTypeMask != expectedType {
 		return nil
 	}
 
 	size, ok := boundedUint64Field(result, "size", maxSafeJSONInteger)
-	if !ok || (kind == "directory" && size != 0) {
+	if !ok || (kind == "directory" && size != 0) || (kind == "symlink" && size == 0) {
 		return nil
 	}
 	if _, ok := boundedUint64Field(result, "mtimeMs", maxSafeJSONInteger); !ok {

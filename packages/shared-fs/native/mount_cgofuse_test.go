@@ -4,6 +4,9 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"reflect"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,14 +35,14 @@ func TestIOCallbackProfileCarriesSizeOffsetAndErrno(t *testing.T) {
 	fs := &peerbitFS{profile: profile}
 	fs.beginIOCallback("read", 4096, 1<<20)(-fuse.ENOENT)
 	fs.beginIOCallback("write", 131072, 0)(131072)
-	fs.beginCallback("chmod")(-fuse.ENOSYS)
+	fs.beginCallback("link")(-fuse.ENOSYS)
 	profile.close()
 
 	records, _ := splitProfile(t, decodeMountProfileRecords(t, output.String()))
 	if len(records) != 3 {
 		t.Fatalf("got %d records, want three", len(records))
 	}
-	read, write, chmod := records[0], records[1], records[2]
+	read, write, link := records[0], records[1], records[2]
 	if read.Operation != "read" || read.OK || detailNumber(t, read, "bytes") != 4096 || detailNumber(t, read, "offset") != 1<<20 ||
 		detailNumber(t, read, "errno") != int64(-fuse.ENOENT) || read.Detail["code"] != "ENOENT" {
 		t.Fatalf("unexpected read record: %#v", read)
@@ -48,8 +51,8 @@ func TestIOCallbackProfileCarriesSizeOffsetAndErrno(t *testing.T) {
 		write.Detail["errno"] != nil || write.Detail["code"] != nil {
 		t.Fatalf("unexpected write record: %#v", write)
 	}
-	if chmod.OK || chmod.Detail["code"] != "ENOSYS" || chmod.Detail["bytes"] != nil {
-		t.Fatalf("unexpected chmod record: %#v", chmod)
+	if link.OK || link.Detail["code"] != "ENOSYS" || link.Detail["bytes"] != nil {
+		t.Fatalf("unexpected link record: %#v", link)
 	}
 }
 
@@ -95,6 +98,15 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 					"nlink": 1,
 				},
 			},
+			map[string]interface{}{
+				"name": "link",
+				"kind": "symlink",
+				"stat": map[string]interface{}{
+					"size": 8, "mode": 0o120777,
+					"mtimeMs": 1_725_000_002_000, "ctimeMs": 1_725_000_002_000,
+					"nlink": 1,
+				},
+			},
 		}
 	})
 	client := newIPCClient("tcp://" + server.listener.Addr().String())
@@ -119,8 +131,8 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 		t.Fatalf("expected exactly one readdir request and no getattr requests, got %d", count)
 	}
 	assertReaddirRequest(t, <-observedRequests, "/workspace")
-	if fillCalls != 4 {
-		t.Fatalf("expected dot entries plus two children, got %d callbacks", fillCalls)
+	if fillCalls != 5 {
+		t.Fatalf("expected dot entries plus three children, got %d callbacks", fillCalls)
 	}
 	directory := stats["child"]
 	if directory == nil || directory.Mode != nativeStatMode(0o040755) || directory.Size != 0 || directory.Nlink != 2 {
@@ -135,6 +147,9 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 	}
 	if file.Mtim != msToTimespec(1_725_000_001_375) || file.Ctim != msToTimespec(1_725_000_001_500) {
 		t.Fatalf("unexpected file timestamps: mtime=%#v ctime=%#v", file.Mtim, file.Ctim)
+	}
+	if link := stats["link"]; link == nil || link.Mode != nativeStatMode(0o120777) || link.Size != 8 {
+		t.Fatalf("unexpected symlink stat: %#v", link)
 	}
 }
 
@@ -166,6 +181,15 @@ func TestReaddirFallsBackForLegacyAndMalformedStats(t *testing.T) {
 		map[string]interface{}{"name": "fractional-time.txt", "kind": "file", "stat": map[string]interface{}{
 			"path": "/fractional-time.txt", "kind": "file", "size": 1,
 			"mode": 0o100644, "mtimeMs": 1.5, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "empty-link", "kind": "symlink", "stat": map[string]interface{}{
+			"size": 0, "mode": 0o120777, "mtimeMs": 1, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "regular-link", "kind": "symlink", "stat": map[string]interface{}{
+			"size": 1, "mode": 0o100644, "mtimeMs": 1, "ctimeMs": 1, "nlink": 1,
+		}},
+		map[string]interface{}{"name": "link-mode-file", "kind": "file", "stat": map[string]interface{}{
+			"size": 1, "mode": 0o120777, "mtimeMs": 1, "ctimeMs": 1, "nlink": 1,
 		}},
 		map[string]interface{}{"name": "valid.txt", "kind": "file", "stat": valid},
 	}
@@ -235,41 +259,146 @@ func assertReaddirRequest(t *testing.T, request ipcRequest, expectedPath string)
 	}
 }
 
-func TestUnsupportedMetadataMutationsFailClosed(t *testing.T) {
-	// A nil IPC client makes an accidental request fail loudly. Metadata is not
-	// represented by the Shared FS model, so the adapter must reject these
-	// operations before it can report false success for any path.
-	fs := &peerbitFS{}
-	requestedTimes := []fuse.Timespec{
-		fuse.NewTimespec(time.Unix(946684800, 0)),
-		fuse.NewTimespec(time.Unix(946684801, 0)),
+// recordingFS answers every request with result and records it.
+func recordingFS(t *testing.T, result interface{}) (*peerbitFS, chan ipcRequest) {
+	t.Helper()
+	requests := make(chan ipcRequest, 8)
+	server := startIPCEchoServer(t, func(request ipcRequest) interface{} {
+		requests <- request
+		return result
+	})
+	client := newIPCClient("tcp://" + server.listener.Addr().String())
+	t.Cleanup(client.close)
+	return &peerbitFS{client: client}, requests
+}
+
+func expectRequest(t *testing.T, requests chan ipcRequest, op string, args ...interface{}) {
+	t.Helper()
+	request := <-requests
+	if request.Op != op || !reflect.DeepEqual(request.Args, args) {
+		t.Fatalf("got %s %#v, want %s %#v", request.Op, request.Args, op, args)
 	}
-	tests := []struct {
+}
+
+func TestMetadataMutations(t *testing.T) {
+	fs, requests := recordingFS(t, nil)
+	// A nil IPC client fails loudly on any request, so these cases prove the
+	// adapter answers them without IPC.
+	local := &peerbitFS{}
+	mtime := func(sec, nsec int64) []fuse.Timespec {
+		return []fuse.Timespec{{Sec: 1, Nsec: 5}, {Sec: sec, Nsec: nsec}}
+	}
+	maxSec := int64(maxSafeJSONInteger / 1000)
+	for _, test := range []struct {
 		name string
 		run  func() int
+		want int
 	}{
-		{
-			name: "chmod",
-			run:  func() int { return fs.Chmod("/missing", 0o755) },
-		},
-		{
-			name: "chown",
-			run:  func() int { return fs.Chown("/missing", 1000, 1000) },
-		},
-		{
-			name: "utimens",
-			run: func() int {
-				return fs.Utimens("/missing", requestedTimes)
-			},
-		},
+		{"chown", func() int { return local.Chown("/f", 1000, 1000) }, 0},
+		{"utimens without times", func() int { return local.Utimens("/f", nil) }, 0},
+		{"utimens UTIME_OMIT", func() int { return local.Utimens("/f", mtime(0, fuse.UTIME_OMIT)) }, 0},
+		{"utimens macOS UTIME_OMIT", func() int { return local.Utimens("/f", mtime(0, -2)) }, 0},
+		{"utimens nsec out of range", func() int { return local.Utimens("/f", mtime(0, 1e9)) }, 0},
+		{"utimens before 1970", func() int { return local.Utimens("/f", mtime(-1, 0)) }, -fuse.EINVAL},
+		{"utimens seconds too large", func() int { return local.Utimens("/f", mtime(maxSec+1, 0)) }, -fuse.EINVAL},
+		{"utimens ms too large", func() int { return local.Utimens("/f", mtime(maxSec, 999e6)) }, -fuse.EINVAL},
+	} {
+		if got := test.run(); got != test.want {
+			t.Fatalf("%s returned %d, want %d", test.name, got, test.want)
+		}
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := test.run(); got != -fuse.ENOSYS {
-				t.Fatalf("expected %d, got %d", -fuse.ENOSYS, got)
-			}
-		})
+	if runtime.GOOS == "windows" {
+		if got := local.Chmod("/f", fuse.S_IFREG|0o755); got != 0 {
+			t.Fatalf("Windows chmod returned %d, want a local no-op", got)
+		}
+	} else {
+		if got := fs.Chmod("/f", fuse.S_IFREG|0o4755); got != 0 {
+			t.Fatalf("chmod returned %d", got)
+		}
+		expectRequest(t, requests, "setattr", "/f", map[string]interface{}{"mode": float64(0o4755)})
+	}
+	if got := fs.Utimens("/f", mtime(946684800, 123_456_789)); got != 0 {
+		t.Fatalf("utimens returned %d", got)
+	}
+	expectRequest(t, requests, "setattr", "/f", map[string]interface{}{"mtimeMs": float64(946684800123)})
+	if got := fs.Utimens("/f", mtime(maxSec, 991e6)); got != 0 {
+		t.Fatalf("utimens at the JSON bound returned %d", got)
+	}
+	expectRequest(t, requests, "setattr", "/f", map[string]interface{}{"mtimeMs": float64(maxSafeJSONInteger)})
+	for _, nsec := range []int64{fuse.UTIME_NOW, -1} {
+		before := time.Now().UnixMilli()
+		if got := fs.Utimens("/f", mtime(0, nsec)); got != 0 {
+			t.Fatalf("utimens now (%d) returned %d", nsec, got)
+		}
+		after := time.Now().UnixMilli()
+		request := <-requests
+		attrs, _ := request.Args[1].(map[string]interface{})
+		ms, _ := attrs["mtimeMs"].(float64)
+		if request.Op != "setattr" || int64(ms) < before || int64(ms) > after {
+			t.Fatalf("utimens now (%d) sent %s %#v, want mtimeMs in [%d, %d]", nsec, request.Op, request.Args, before, after)
+		}
+	}
+}
+
+func TestSymlinkAndReadlink(t *testing.T) {
+	fs, requests := recordingFS(t, "../lib/tool.js")
+	if got := fs.Symlink("../lib/tool.js", "/bin/tool"); got != 0 {
+		t.Fatalf("symlink returned %d", got)
+	}
+	expectRequest(t, requests, "symlink", "../lib/tool.js", "/bin/tool")
+	if got, target := fs.Readlink("/bin/tool"); got != 0 || target != "../lib/tool.js" {
+		t.Fatalf("readlink = (%d, %q)", got, target)
+	}
+	expectRequest(t, requests, "readlink", "/bin/tool")
+
+	local := &peerbitFS{}
+	if got := local.Symlink("bad\xff", "/bad"); got != -fuse.EINVAL {
+		t.Fatalf("invalid UTF-8 target returned %d, want EINVAL", got)
+	}
+	if got, _ := local.Readlink("/"); got != -fuse.EINVAL {
+		t.Fatalf("readlink / returned %d, want EINVAL", got)
+	}
+	numeric, _ := recordingFS(t, float64(3))
+	if got, _ := numeric.Readlink("/bin/tool"); got != -fuse.EIO {
+		t.Fatalf("non-string readlink result returned %d, want EIO", got)
+	}
+}
+
+func TestAccessChecksExecBit(t *testing.T) {
+	for _, test := range []struct {
+		mode uint32
+		mask uint32
+		want int
+	}{
+		{0o100644, fuse.X_OK, -fuse.EACCES},
+		{0o100644, fuse.R_OK | fuse.W_OK, 0},
+		{0o100755, fuse.X_OK, 0},
+		{0o040755, fuse.X_OK, 0},
+		{0o120777, fuse.X_OK, 0},
+	} {
+		fs, _ := recordingFS(t, map[string]interface{}{"mode": float64(test.mode)})
+		want := test.want
+		if runtime.GOOS == "windows" {
+			want = 0
+		}
+		if got := fs.Access("/f", test.mask); got != want {
+			t.Fatalf("access(mode %#o, mask %d) = %d, want %d", test.mode, test.mask, got, want)
+		}
+	}
+}
+
+func TestStatOwnerDefaultsToMountingUser(t *testing.T) {
+	stat := statFromResult(map[string]interface{}{"mode": float64(0o100644)})
+	wantUID, wantGID := uint32(os.Getuid()), uint32(os.Getgid())
+	if runtime.GOOS == "windows" {
+		wantUID, wantGID = 0, 0
+	}
+	if stat.Uid != wantUID || stat.Gid != wantGID {
+		t.Fatalf("owner = %d:%d, want %d:%d", stat.Uid, stat.Gid, wantUID, wantGID)
+	}
+	if stat := statFromResult(map[string]interface{}{"uid": float64(7), "gid": float64(8)}); stat.Uid != 7 || stat.Gid != 8 {
+		t.Fatalf("explicit owner = %d:%d, want 7:8", stat.Uid, stat.Gid)
 	}
 }
 
@@ -286,7 +415,7 @@ func TestCreateForwardsCgofuseCallbackFlags(t *testing.T) {
 	fs := &peerbitFS{client: client}
 	flags := fuse.O_WRONLY | fuse.O_CREAT | fuse.O_EXCL | fuse.O_APPEND
 
-	errno, handle := fs.Create("/exclusive-append.txt", flags, 0o640)
+	errno, handle := fs.Create("/exclusive-append.txt", flags, fuse.S_IFREG|0o4751)
 	if errno != 0 {
 		t.Fatalf("expected create success, got errno %d", errno)
 	}
@@ -298,14 +427,22 @@ func TestCreateForwardsCgofuseCallbackFlags(t *testing.T) {
 	if request.Op != "open" {
 		t.Fatalf("expected open request, got %q", request.Op)
 	}
-	if len(request.Args) != 2 {
-		t.Fatalf("expected two open arguments, got %#v", request.Args)
+	// WinFsp derives create modes from ACLs, so Windows forwards none.
+	wantArgs := 3
+	if runtime.GOOS == "windows" {
+		wantArgs = 2
+	}
+	if len(request.Args) != wantArgs {
+		t.Fatalf("expected %d open arguments, got %#v", wantArgs, request.Args)
 	}
 	if path, ok := request.Args[0].(string); !ok || path != "/exclusive-append.txt" {
 		t.Fatalf("expected forwarded path, got %#v", request.Args[0])
 	}
 	if forwarded, ok := request.Args[1].(float64); !ok || int(forwarded) != flags {
 		t.Fatalf("expected flags %#x, got %#v", flags, request.Args[1])
+	}
+	if wantArgs == 3 && request.Args[2] != float64(0o751) {
+		t.Fatalf("expected create mode 0751, got %#v", request.Args[2])
 	}
 }
 
@@ -319,13 +456,21 @@ func TestMknodUsesExclusiveCreateWithoutTruncate(t *testing.T) {
 	defer client.close()
 	fs := &peerbitFS{client: client}
 
-	if got := fs.Mknod("/new-node.txt", 0o640, 0); got != 0 {
+	// cgofuse's create fallback passes S_IFREG|mode.
+	if got := fs.Mknod("/new-node.txt", fuse.S_IFREG|0o750, 0); got != 0 {
 		t.Fatalf("expected mknod success, got errno %d", got)
 	}
 
 	openRequest := <-requests
-	if openRequest.Op != "open" || len(openRequest.Args) != 2 {
-		t.Fatalf("expected open(path, flags), got %#v", openRequest)
+	wantArgs := 3
+	if runtime.GOOS == "windows" {
+		wantArgs = 2
+	}
+	if openRequest.Op != "open" || len(openRequest.Args) != wantArgs {
+		t.Fatalf("expected open(path, flags[, mode]), got %#v", openRequest)
+	}
+	if wantArgs == 3 && openRequest.Args[2] != float64(0o750) {
+		t.Fatalf("expected create mode 0750, got %#v", openRequest.Args[2])
 	}
 	if path, ok := openRequest.Args[0].(string); !ok || path != "/new-node.txt" {
 		t.Fatalf("expected mknod path, got %#v", openRequest.Args[0])
