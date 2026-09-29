@@ -708,7 +708,7 @@ suites pass unchanged.
    earlier releases no longer open and must be recreated, as 0.14's did. The
    integration branch then merges to `master`.
 
-## 9. Open questions
+## 9. Owner decisions (2026-09-29)
 
 1. **R1's head clause changes D15.** D15 kept v9's rule (reuse only a young
    base). With the head clause, the first in-place edit of a file idle for more
@@ -723,11 +723,11 @@ suites pass unchanged.
    the base (after `keepVersions`, grace and retention) and sweep blocks that
    the new version reuses before it arrives. Guard D and heal restore them only
    while a replica that still holds them, normally the writer, is online.
-   _Recommendation:_ accept the head clause with the root probe. The fallback is
+   _Decided:_ accept the head clause with the root probe. The fallback was
    D15 as written, which re-puts every idle file on its first in-place edit.
 2. **Trust replay (D22).** Shipping before upstream U2 means filesystems created
    before it keep v9's cross-filesystem grant replay until they are recreated.
-   _Recommendation:_ option (b): ship without waiting, relay U2, and recreate
+   _Decided:_ option (b): ship without waiting, relay U2, and recreate
    filesystems once it lands; there are no users to move.
 
 ## Review notes
