@@ -69,6 +69,11 @@ const seedConflicts = async () => {
         const selected = await shared.writeFile("/content.txt", "left", {
             baseVersionIds,
         });
+        // A third head with selected's bytes: conflicts() lists only one.
+        const twin = await shared.writeFile("/content.txt", "left", {
+            baseVersionIds,
+            mtime: 7,
+        });
         const other = await shared.writeFile("/content.txt", "right", {
             baseVersionIds,
         });
@@ -102,6 +107,8 @@ const seedConflicts = async () => {
             causalDepth: deletedBase.causalDepth + 1n,
             contentHash: deletedBase.contentHash,
             size: deletedBase.size,
+            mode: deletedBase.mode,
+            mtime: deletedBase.mtime,
             chunkIds: deletedBase.chunkIds,
             createdAt: deletedBase.createdAt + 1n,
             authorKey: deletedBase.authorKey,
@@ -124,6 +131,7 @@ const seedConflicts = async () => {
             directory,
             address: shared.address,
             selectedVersionId: selected.id,
+            twinVersionId: twin.id,
             otherVersionId: other.id,
             duplicate,
             shadowedNodeId: duplicate.shadowedNodeIds[0],
@@ -925,13 +933,17 @@ describe("peerbit-fs cli", () => {
                 path: "/content.txt",
                 versions: expect.arrayContaining([
                     expect.objectContaining({
-                        id: fixture.selectedVersionId,
+                        id: expect.toBeOneOf([
+                            fixture.selectedVersionId,
+                            fixture.twinVersionId,
+                        ]),
                         size: expect.stringMatching(/^\d+$/),
                         createdAt: expect.stringMatching(/^\d+$/),
                     }),
                     expect.objectContaining({ id: fixture.otherVersionId }),
                 ]),
             });
+            expect(content[0].versions).toHaveLength(2);
             expect(
                 content[0].versions.map((version: { id: string }) => version.id)
             ).toContain(content[0].visibleVersionId);
@@ -1124,14 +1136,16 @@ describe("peerbit-fs cli", () => {
                 address: fixture.address,
                 path: "/content.txt",
                 selectedVersionId: fixture.selectedVersionId,
-                observedHeadVersionIds: expect.arrayContaining([
+                observedHeadVersionIds: [
                     fixture.selectedVersionId,
+                    fixture.twinVersionId,
                     fixture.otherVersionId,
-                ]),
-                supersededHeadVersionIds: expect.arrayContaining([
+                ].sort(),
+                supersededHeadVersionIds: [
                     fixture.selectedVersionId,
+                    fixture.twinVersionId,
                     fixture.otherVersionId,
-                ]),
+                ].sort(),
                 headSetChangedDuringResolution: false,
                 resolution: {
                     size: expect.stringMatching(/^\d+$/),

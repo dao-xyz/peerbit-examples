@@ -219,6 +219,8 @@ describe("shared fs cold-start bootstrap", () => {
                 causalDepth: 1n,
                 contentHash: "empty",
                 size: 0n,
+                mode: 0o100644,
+                mtime: 1n,
                 chunkIds: [],
                 createdAt: 1n,
                 authorKey: "test-author",

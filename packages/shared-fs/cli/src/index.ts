@@ -1407,21 +1407,22 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     );
                     const normalizedPath = await normalizeCliFsPath(argv.path);
                     const visible = await fsHandle.conflicts(normalizedPath);
-                    const selectedConflict = visible.find(
-                        (conflict) =>
-                            conflict.path === normalizedPath &&
-                            conflict.versions.some(
-                                (version) => version.id === argv.versionId
-                            )
-                    );
-                    if (!selectedConflict) {
+                    // conflicts() lists one version per content; every head
+                    // is selectable and becomes a parent of the resolution.
+                    const observedHeadVersionIds = [
+                        ...((await fsHandle.stat(normalizedPath))
+                            ?.headVersionIds ?? []),
+                    ].sort();
+                    if (
+                        !visible.some(
+                            (conflict) => conflict.path === normalizedPath
+                        ) ||
+                        !observedHeadVersionIds.includes(argv.versionId)
+                    ) {
                         throw new Error(
                             `Version ${argv.versionId} is not a current conflict head for ${normalizedPath}; rerun peerbit-fs conflicts before retrying`
                         );
                     }
-                    const observedHeadVersionIds = selectedConflict.versions
-                        .map((version) => version.id)
-                        .sort();
                     const resolution = await fsHandle.resolveConflict(
                         normalizedPath,
                         argv.versionId

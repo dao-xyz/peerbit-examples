@@ -48,8 +48,7 @@ The implementation should therefore use both:
 
 The exact generation number may advance before implementation, but the
 top-level variant must still change. An old client must fail before attaching
-to the new log. A new client may open the legacy generation read-only for
-migration.
+to the new log.
 
 ## Canonical content model
 
@@ -158,6 +157,10 @@ MerkleFileVersionV1 {
     legacyWholeSha256?: Hash32
 }
 ```
+
+v9.1 added `mode: u32` (git tree mode) and `mtime: u64` (ms) to `FileVersion`.
+V10 carries both here and in the index projection, and the no-op tuple below
+gains `mode, mtime`; the validators and golden vectors follow.
 
 `rootLevel` is the minimum level capable of addressing `size`; level 0 means a
 direct data root. `rootHash` may be absent only to describe an entirely
