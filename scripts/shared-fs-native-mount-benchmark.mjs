@@ -29,6 +29,10 @@ const REPOSITORY_ROOT = resolve(HERE, "..");
 const HARNESS_PATH = fileURLToPath(import.meta.url);
 const BINARY_SIZES = [4 << 10, 1 << 20];
 const OVERWRITE_BYTES = 4 << 10;
+// Overwrite offsets are 4 KiB aligned and seeded across the whole base file;
+// the report records how many 512 KiB leaves (v9 chunks) they touched.
+const OVERWRITE_OFFSET_SEED_UINT32 = 0x4f1bbcdc;
+const OVERWRITE_LEAF_BYTES = 512 << 10;
 const CORPUS_SEED_UINT32 = 0x6d2b79f5;
 const CORPUS_WORD_STEP_UINT32 = 0x9e3779b9;
 const MAX_IMPLEMENTATION_INPUT_FILES = 4096;
@@ -39,7 +43,7 @@ const REQUIRED_IMPLEMENTATION_DETAILS = [
     "mount.runtime",
 ];
 const TARGET_KINDS = new Set(["shared-fs-mount", "local-filesystem-control"]);
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export const nativeMountBenchmarkCorpus = Object.freeze({
     id: "counter-mix32-v1",
@@ -63,7 +67,7 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
         warmups: 1,
         smallFiles: 16,
         readdirEntries: 128,
-        overwriteBaseBytes: 4 << 20,
+        overwriteBaseBytes: [4 << 20],
         timeoutMs: 180_000,
         implementationInputs: [],
         implementationDetails: [],
@@ -177,18 +181,26 @@ export const parseNativeMountBenchmarkArguments = (argv) => {
         }
         const definition = integerOptions[argument];
         if (!definition) throw new Error(`Unknown argument: ${argument}`);
-        const value = Number(argv[++index]);
         const [key, minimum, maximum] = definition;
+        // An array-valued option takes a comma-separated list.
+        const list = Array.isArray(options[key]);
+        const text = String(argv[++index]);
+        const values = (list ? text.split(",") : [text]).map(Number);
         if (
-            !Number.isSafeInteger(value) ||
-            value < minimum ||
-            value > maximum
+            values.some(
+                (value) =>
+                    !Number.isSafeInteger(value) ||
+                    value < minimum ||
+                    value > maximum
+            )
         ) {
             throw new Error(
-                `${argument} must be an integer from ${minimum} through ${maximum}`
+                `${argument} must be ${list ? "a comma-separated list of integers" : "an integer"} from ${minimum} through ${maximum}`
             );
         }
-        options[key] = value;
+        options[key] = list
+            ? [...new Set(values)].sort((left, right) => left - right)
+            : values[0];
     }
     if (!options.mount) throw new Error("--mount is required");
     if (
@@ -238,6 +250,22 @@ export const mixUint32 = (input) => {
     value ^= value >>> 16;
     return value >>> 0;
 };
+
+/** The 4 KiB-aligned offset of run `index` (warmups first) in a base file. */
+export const nativeMountBenchmarkOverwriteOffset = (baseBytes, index) =>
+    (mixUint32(
+        OVERWRITE_OFFSET_SEED_UINT32 + Math.imul(index, CORPUS_WORD_STEP_UINT32)
+    ) %
+        Math.floor(baseBytes / OVERWRITE_BYTES)) *
+    OVERWRITE_BYTES;
+
+const overwriteOffsets = (samples) => ({
+    seedUint32: OVERWRITE_OFFSET_SEED_UINT32,
+    leafBytes: OVERWRITE_LEAF_BYTES,
+    leavesTouched: new Set(
+        samples.map(({ offset }) => Math.floor(offset / OVERWRITE_LEAF_BYTES))
+    ).size,
+});
 
 export const createNativeMountBenchmarkPayload = (size, variant) => {
     const payload = Buffer.allocUnsafe(size);
@@ -342,12 +370,12 @@ const durableWrite = (path, bytes, position = 0, flags = "w") =>
         io: (handle) => writeAll(handle, bytes, position),
     });
 
-const timedRead = (path, destination) =>
+const timedRead = (path, destination, position = 0) =>
     timedHandleOperation({
         path,
         flags: "r",
         sync: false,
-        io: (handle) => readAll(handle, destination),
+        io: (handle) => readAll(handle, destination, position),
     });
 
 const percentile = (sorted, fraction) =>
@@ -673,45 +701,52 @@ const executeWorkload = async (root, options, signal) => {
         summary: summarize(readdirSamples.samples, 0, options.readdirEntries),
     });
 
-    const overwritePath = join(root, "overwrite-base.bin");
-    const expectedBase = deterministicPayload(
-        options.overwriteBaseBytes,
-        40_000
-    );
-    await durableWrite(overwritePath, expectedBase);
     const patches = Array.from({ length: totalRuns }, (_, index) =>
         deterministicPayload(OVERWRITE_BYTES, 50_000 + index)
     );
-    const overwriteSamples = await collect(options, signal, async (index) => {
-        const slots = Math.max(
-            1,
-            Math.floor(options.overwriteBaseBytes / OVERWRITE_BYTES)
+    for (const baseBytes of options.overwriteBaseBytes) {
+        const overwritePath = join(root, `overwrite-${baseBytes}.bin`);
+        const expectedBase = deterministicPayload(baseBytes, 40_000);
+        await durableWrite(overwritePath, expectedBase);
+        const overwriteSamples = await collect(
+            options,
+            signal,
+            async (index) => {
+                const offset = nativeMountBenchmarkOverwriteOffset(
+                    baseBytes,
+                    index
+                );
+                const sample = await durableWrite(
+                    overwritePath,
+                    patches[index],
+                    offset,
+                    "r+"
+                );
+                patches[index].copy(expectedBase, offset);
+                throwIfAborted(signal);
+                // Only the written range; the whole file once after the loop.
+                const written = Buffer.allocUnsafe(OVERWRITE_BYTES);
+                await timedRead(overwritePath, written, offset);
+                assertBytes(written, patches[index], "in-place overwrite");
+                return { ...sample, offset };
+            }
         );
-        const offset = (index % slots) * OVERWRITE_BYTES;
-        const sample = await durableWrite(
-            overwritePath,
-            patches[index],
-            offset,
-            "r+"
-        );
-        patches[index].copy(expectedBase, offset);
-        throwIfAborted(signal);
         assertBytes(
             await readFile(overwritePath),
             expectedBase,
             "in-place overwrite"
         );
-        return { ...sample, offset };
-    });
-    scenarios.push({
-        name: `overwrite-4096-in-${options.overwriteBaseBytes}`,
-        operation: "overwrite",
-        logicalBytes: OVERWRITE_BYTES,
-        baseFileBytes: options.overwriteBaseBytes,
-        semantics: "open-r+/positional-write/fsync/close",
-        ...overwriteSamples,
-        summary: summarize(overwriteSamples.samples, OVERWRITE_BYTES),
-    });
+        scenarios.push({
+            name: `overwrite-4096-in-${baseBytes}`,
+            operation: "overwrite",
+            logicalBytes: OVERWRITE_BYTES,
+            baseFileBytes: baseBytes,
+            semantics: "open-r+/positional-write/fsync/close",
+            offsets: overwriteOffsets(overwriteSamples.samples),
+            ...overwriteSamples,
+            summary: summarize(overwriteSamples.samples, OVERWRITE_BYTES),
+        });
+    }
 
     return scenarios;
 };
@@ -740,7 +775,7 @@ export const expectedNativeMountBenchmarkScenarioNames = (options) => [
     "write-1048576",
     `small-files-${options.smallFiles}`,
     `readdir-${options.readdirEntries}`,
-    `overwrite-4096-in-${options.overwriteBaseBytes}`,
+    ...options.overwriteBaseBytes.map((bytes) => `overwrite-4096-in-${bytes}`),
     ...(options.devWorkload ? devWorkloadScenarioNames(options) : []),
 ];
 
@@ -778,6 +813,8 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         report.scope?.performanceGate !== false ||
         typeof report.scope?.implementationDetailSemantics !== "string" ||
         report.run?.concurrency !== 1 ||
+        !Array.isArray(report.run.overwriteBaseBytes) ||
+        report.run.overwriteBaseBytes.length === 0 ||
         !Array.isArray(report.implementation?.details)
     ) {
         throw new Error("native-mount benchmark report envelope is invalid");
@@ -861,7 +898,8 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
         report.run.warmupsPerScenario !== expectedOptions.warmups ||
         report.run.smallFilesPerSample !== expectedOptions.smallFiles ||
         report.run.readdirEntries !== expectedOptions.readdirEntries ||
-        report.run.overwriteBaseBytes !== expectedOptions.overwriteBaseBytes ||
+        JSON.stringify(report.run.overwriteBaseBytes) !==
+            JSON.stringify(expectedOptions.overwriteBaseBytes) ||
         report.run.devWorkload !== Boolean(expectedOptions.devWorkload)
     ) {
         throw new Error("native-mount benchmark run options are invalid");
@@ -958,6 +996,21 @@ export const validateNativeMountBenchmarkReport = (report, options) => {
                 throw new Error(`${scenario.name} has an invalid fsync phase`);
             }
         }
+        if (
+            scenario.operation === "overwrite" &&
+            ([...scenario.warmupSamples, ...scenario.samples].some(
+                (sample, index) =>
+                    sample.offset !==
+                    nativeMountBenchmarkOverwriteOffset(
+                        scenario.baseFileBytes,
+                        index
+                    )
+            ) ||
+                JSON.stringify(scenario.offsets) !==
+                    JSON.stringify(overwriteOffsets(scenario.samples)))
+        ) {
+            throw new Error(`${scenario.name} has invalid overwrite offsets`);
+        }
         const expectedSummary = summarize(
             scenario.samples,
             scenario.logicalBytes,
@@ -999,6 +1052,15 @@ export const formatNativeMountBenchmarkSummary = (report) => {
             `| ${scenario.name} | ${formatDuration(scenario.summary.p50Ns)} | ${formatDuration(scenario.summary.p95Ns)} | ${throughput == null ? "—" : `${throughput.toFixed(2)} MiB/s`} |`
         );
     }
+    lines.push(
+        "",
+        ...report.scenarios
+            .filter(({ offsets }) => offsets)
+            .map(
+                ({ name, baseFileBytes, offsets }) =>
+                    `- ${name}: offsets from seed ${offsets.seedUint32} touched ${offsets.leavesTouched} of ${Math.ceil(baseFileBytes / offsets.leafBytes)} ${offsets.leafBytes >> 10} KiB leaves.`
+            )
+    );
     lines.push(...formatDevWorkloadSummaryLines(report));
     lines.push(
         "",

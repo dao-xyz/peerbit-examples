@@ -160,14 +160,19 @@ pnpm shared-fs:benchmark:native-mount -- \
 
 It records raw monotonic samples and p50/p95 summaries for metadata, 4 KiB and
 1 MiB sequential reads and writes, sequential 1 KiB small-file creation,
-directory listing, and a 4 KiB in-place overwrite of a configurable base file.
-Every timed write uses `open`, complete positional writes, `fsync`, then
+directory listing, and a 4 KiB in-place overwrite of each configurable base
+file. Every timed write uses `open`, complete positional writes, `fsync`, then
 `close`; the report preserves those phase timings. Deterministic contents are
-fully read and checked after each timer. The recorded `counter-mix32-v1` corpus
-uses a fixed seed and produces distinct 512 KiB regions so content-addressed
-chunk deduplication does not turn ordinary binary cases into duplicate-block
-microbenchmarks. `--overwrite-base-bytes`,
-`--small-files`, and `--readdir-entries` have conservative bounded ranges.
+fully read and checked after each timer, except that an overwrite checks only
+the 4 KiB it wrote and the whole base once after its last sample. Overwrite
+offsets are 4 KiB aligned and pseudo-random across the whole base, from a fixed
+seed per sample index; the report records the seed and how many 512 KiB leaves
+the measured samples touched. The recorded `counter-mix32-v1` corpus uses a
+fixed seed and produces distinct 512 KiB regions so content-addressed chunk
+deduplication does not turn ordinary binary cases into duplicate-block
+microbenchmarks. `--overwrite-base-bytes` takes a comma-separated list, for
+example `4194304,33554432`; it, `--small-files`, and `--readdir-entries` have
+conservative bounded ranges.
 
 These are warm, default-platform-cache timings. The harness neither evicts
 kernel/application caches nor requests direct I/O, and it does not instrument
@@ -218,11 +223,11 @@ performance threshold. The Linux native smoke workflow can collect its FUSE
 report and same-runner control directly; the native-OS workflow can collect
 paired macFUSE and WinFsp reports from its real provisioned mounts.
 
-The mounted-benchmark report (schema version 4) also records each sample's
+The mounted-benchmark report (schema version 5) also records each sample's
 `startedAtUnixNs`/`endedAtUnixNs` window and keeps warmups in a separate
 `warmupSamples` list flagged `warmup: true`, so mount profile records can be
 attributed to exact samples. `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES`
-selects the in-place overwrite base size in the smoke wrappers.
+selects the in-place overwrite base sizes in the smoke wrappers.
 
 `--dev-workload` (`PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD=1` in the
 smoke wrappers, or the Linux smoke workflow's `dev_workload` input) adds
@@ -231,10 +236,10 @@ default to a 30-minute workload timeout. Nothing is downloaded.
 
 - `edit-save-20480`: an editor-style atomic save (temporary file, `fsync`,
   rename over the original).
-- `jsonl-append-1024-at-4194304` and `-at-33554432`: `fsync`'d 1 KiB appends
-  to 4 MiB and 32 MiB logs.
-- `sqlite-insert-txn-in-<overwrite base>`: one-row `node:sqlite` transactions
-  in a database of the overwrite base size.
+- `jsonl-append-1024-at-4194304` and `-at-33816576`: `fsync`'d 1 KiB appends
+  to a 4 MiB log and to a 32 MiB + 256 KiB log, whose appends start mid-leaf.
+- `sqlite-insert-txn-in-<largest overwrite base>`: one-row `node:sqlite`
+  transactions in a database of the largest overwrite base size.
 - `git-clone-checkout-2000` and `git-status-2000`: `git clone --no-local` of a
   pinned synthetic 2,000-file tree from a local `git fast-import` origin, then
   `git status --porcelain` after ten untimed edits, once the index is settled.

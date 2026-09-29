@@ -39,7 +39,7 @@ const skipRun =
 const DEV_NAMES = [
     "edit-save-20480",
     "jsonl-append-1024-at-4194304",
-    "jsonl-append-1024-at-33554432",
+    "jsonl-append-1024-at-33816576",
     "sqlite-insert-txn-in-65536",
     "git-clone-checkout-2000",
     "git-status-2000",
@@ -65,7 +65,7 @@ const runInTemporaryMount = async (prefix, prepare) => {
             "--readdir-entries",
             "1",
             "--overwrite-base-bytes",
-            "65536",
+            "8192,65536",
             "--timeout-ms",
             "120000",
             "--dev-workload",
@@ -153,7 +153,8 @@ test(
             name.startsWith("sqlite-")
         ).sqlite;
         assert.equal(sqlite.journalMode, "delete");
-        assert.ok(sqlite.prefillBytes >= options.overwriteBaseBytes);
+        // The database grows to the largest overwrite base.
+        assert.ok(sqlite.prefillBytes >= 65536);
         validateNativeMountBenchmarkReport(report, options);
 
         const summary = formatNativeMountBenchmarkSummary(report);
