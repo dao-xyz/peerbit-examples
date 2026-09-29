@@ -352,9 +352,14 @@ every stat, and names other peers create appear at once.
 
 - Other peers' edits, deletes and renames are visible as soon as they
   replicate. A two-mount probe measured no added delay.
-- For up to 0.1 s after another peer replaces a file with a directory (or the
-  reverse), one operation on that path can fail with `EIO`. The next call is
-  correct.
+- For up to 0.1 s after another peer changes a path's type (file, directory
+  or symlink), calls that use the old cached name can fail. A stat of the name
+  fails once with `EIO` and drops the cached name, so the next call is
+  correct; a two-mount probe measured this for a file replaced by a directory.
+  Opening the name, following it as a link, or walking a path through it (for
+  example `foo/bar` after `foo` became a directory) does not drop the cached
+  name. Those calls can fail with `ENOTDIR`, `EISDIR` or `EINVAL` on every try
+  until the cached name expires. These cases are not measured.
 - Creating a file right after another peer deleted it works. The kernel still
   has the old name cached and opens it without `O_CREAT`, so the adapter
   answers that open's `ENOENT` with `ESTALE`, and the kernel retries once with
@@ -362,8 +367,10 @@ every stat, and names other peers create appear at once.
   such creates failed with `ENOENT`, with a 0.1 s name cache as well as a 1 s
   one. With the shipped settings, 0 of 10 failed. No concurrent appends were
   lost.
-- Cost: a stat of a two-component path takes one adapter callback instead of
-  three. On a GitHub Linux runner, the benchmark's 2,000-file tree ran
+- Cost: a stat of a two-component path repeated within 0.1 s of the path's
+  last lookup takes one adapter callback instead of three. Once the cached
+  names expire, the next stat again costs one callback per path component plus
+  one. On a GitHub Linux runner, the benchmark's 2,000-file tree ran
   `git status` in 1.23 s instead of 2.91 s and `git clone` in 27.0 s instead of
   35.6 s.
 - cgofuse v1.6.0 clears libfuse's parsed configuration when a FUSE 3 mount
