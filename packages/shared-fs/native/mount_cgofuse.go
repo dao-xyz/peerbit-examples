@@ -23,6 +23,13 @@ type peerbitFS struct {
 	ready   sync.Once
 }
 
+// requestReaddirStats enables readdir-plus and per-entry listing stats only on
+// Windows, where WinFsp consumes them. libfuse 3.14's high-level API hands the
+// Linux kernel those stats with node ID 0, which it ignores, while pinning a
+// lookup per entry; FUSE 2 (macOS) has no readdir-plus. Elsewhere Readdir
+// passes only the type bits, which the host needs for d_type.
+const requestReaddirStats = runtime.GOOS == "windows"
+
 func runNativeMount(endpoint string, mountpoint string, debug bool, profile *mountProfiler) error {
 	fs := &peerbitFS{
 		client:  newIPCClient(endpoint, ipcClientOptions{profile: profile}),
@@ -43,9 +50,6 @@ func runNativeMount(endpoint string, mountpoint string, debug bool, profile *mou
 	}
 	host := fuse.NewFileSystemHost(fs)
 	host.SetCapOpenTrunc(true)
-	// On FUSE 3/Linux and WinFsp, ask the kernel to consume the complete stat
-	// records supplied by Readdir. Other builds keep both this capability and
-	// their IPC listing shape compact.
 	host.SetCapReaddirPlus(requestReaddirStats)
 	options := nativeMountOptions(runtime.GOOS, debug)
 	fs.debugf("mount options=%v", append(options, mountpoint))
@@ -243,7 +247,11 @@ func (fs *peerbitFS) Readdir(path string, fill func(name string, stat *fuse.Stat
 		if name == "" {
 			continue
 		}
-		if !fill(name, validatedDirentStat(path, name, mapped), 0) {
+		stat := &fuse.Stat_t{Mode: direntType(mapped)}
+		if requestReaddirStats {
+			stat = validatedDirentStat(path, name, mapped)
+		}
+		if !fill(name, stat, 0) {
 			break
 		}
 	}
@@ -566,6 +574,20 @@ func childPath(parent string, name string) string {
 	return strings.TrimSuffix(parent, "/") + "/" + name
 }
 
+// direntType returns the stat type bits of a listed entry's kind, or 0 for an
+// unknown kind.
+func direntType(entry map[string]interface{}) uint32 {
+	switch entry["kind"] {
+	case "directory":
+		return statModeDirectory
+	case "file":
+		return statModeRegular
+	case "symlink":
+		return statModeSymlink
+	}
+	return 0
+}
+
 // validatedDirentStat accepts only a complete, internally consistent stat
 // record. Missing or malformed metadata returns nil so the native host can use
 // its ordinary lookup/getattr behavior.
@@ -580,15 +602,8 @@ func validatedDirentStat(parent string, name string, entry map[string]interface{
 	}
 
 	kind, _ := entry["kind"].(string)
-	var expectedType uint32
-	switch kind {
-	case "directory":
-		expectedType = statModeDirectory
-	case "file":
-		expectedType = statModeRegular
-	case "symlink":
-		expectedType = statModeSymlink
-	default:
+	expectedType := direntType(entry)
+	if expectedType == 0 {
 		return nil
 	}
 	expectedPath := childPath(parent, name)

@@ -202,6 +202,15 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 	if fillCalls != 5 {
 		t.Fatalf("expected dot entries plus three children, got %d callbacks", fillCalls)
 	}
+	if !requestReaddirStats {
+		// Without readdir-plus the host gets only the type bits, for d_type.
+		for name, mode := range map[string]uint32{"child": statModeDirectory, "note.txt": statModeRegular, "link": statModeSymlink} {
+			if stat := stats[name]; stat == nil || *stat != (fuse.Stat_t{Mode: mode}) {
+				t.Fatalf("%s: stat = %#v, expected only the type bits %o", name, stat, mode)
+			}
+		}
+		return
+	}
 	directory := stats["child"]
 	if directory == nil || directory.Mode != nativeStatMode(0o040755) || directory.Size != 0 || directory.Nlink != 2 {
 		t.Fatalf("unexpected directory stat: %#v", directory)
@@ -221,13 +230,13 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 	}
 }
 
-func TestReaddirFallsBackForLegacyAndMalformedStats(t *testing.T) {
+func TestValidatedDirentStatRejectsLegacyAndMalformedStats(t *testing.T) {
 	valid := map[string]interface{}{
 		"path": "/valid.txt", "kind": "file", "size": 5,
 		"mode": 0o100644, "mtimeMs": 1_725_000_000_000,
 		"ctimeMs": 1_725_000_000_000, "nlink": 1,
 	}
-	entries := []interface{}{
+	entries := []map[string]interface{}{
 		map[string]interface{}{"name": "legacy.txt", "kind": "file"},
 		map[string]interface{}{"name": "not-an-object.txt", "kind": "file", "stat": "invalid"},
 		map[string]interface{}{"name": "missing-field.txt", "kind": "file", "stat": map[string]interface{}{
@@ -261,44 +270,10 @@ func TestReaddirFallsBackForLegacyAndMalformedStats(t *testing.T) {
 		}},
 		map[string]interface{}{"name": "valid.txt", "kind": "file", "stat": valid},
 	}
-	observedRequests := make(chan ipcRequest, 16)
-	server := startIPCEchoServer(t, func(request ipcRequest) interface{} {
-		observedRequests <- request
-		// Model an older JavaScript server: extra function arguments are
-		// ignored and its compact legacy response remains valid.
-		return entries
-	})
-	client := newIPCClient("tcp://" + server.listener.Addr().String())
-	defer client.close()
-	fs := &peerbitFS{client: client}
-	seen := make(map[string]bool)
-
-	got := fs.Readdir("/", func(name string, stat *fuse.Stat_t, _ int64) bool {
-		if name != "." && name != ".." {
-			seen[name] = stat != nil
-		}
-		return true
-	}, 0, 0)
-
-	if got != 0 {
-		t.Fatalf("expected readdir success, got errno %d", got)
-	}
-	assertReaddirRequest(t, <-observedRequests, "/")
-	if got := len(observedRequests); got != 0 {
-		t.Fatalf("readdir made %d unexpected follow-up requests", got)
-	}
-	if len(seen) != len(entries) {
-		t.Fatalf("expected %d child callbacks, got %d", len(entries), len(seen))
-	}
-	for name, hadStat := range seen {
-		if name == "valid.txt" {
-			if !hadStat {
-				t.Fatal("complete metadata did not reach fill")
-			}
-			continue
-		}
-		if hadStat {
-			t.Fatalf("legacy or malformed metadata for %q must fall back to nil", name)
+	for _, entry := range entries {
+		name := entry["name"].(string)
+		if hasStat := validatedDirentStat("/", name, entry) != nil; hasStat != (name == "valid.txt") {
+			t.Fatalf("validatedDirentStat(%q) returned a stat: %v", name, hasStat)
 		}
 	}
 }

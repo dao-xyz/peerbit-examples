@@ -74,15 +74,16 @@ path and kind because the parent request, name, and entry kind already carry
 them. This keeps representative short-name and maximum-length unescaped
 100,000-entry listings below the 64 MiB response limit. Pathological names
 that expand heavily under JSON escaping can still exceed the fixed bound and
-need future paginated or binary directory framing. The Go adapter reconstructs
-and validates the complete stat before passing it to cgofuse; missing or
-malformed metadata lets the native host use its ordinary lookup/`getattr`
-fallback. cgofuse enables the actual readdir-plus capability on Linux with
-FUSE 3 when the kernel advertises it, and on Windows through WinFsp. Only those
-builds request rich entries. macOS and Linux FUSE 2 request compact entries
-because cgofuse cannot consume readdir-plus metadata there. The `includeStats`
-option is optional per request: without it, and for a backend that does not
-supply stats, the server returns compact entries.
+need future paginated or binary directory framing. Only the Windows adapter
+requests these stats (`includeStats`) and enables readdir-plus, because WinFsp
+consumes them. It reconstructs and validates each complete stat before passing
+it to cgofuse; missing or malformed metadata lets WinFsp use its ordinary
+`getattr` fallback. Linux and macOS request compact entries and pass the host
+only each entry's type, for `d_type`: macOS (FUSE 2) has no readdir-plus, and
+libfuse 3.14's high-level API replays a listing with node ID 0, so the Linux
+kernel would discard the stats. The `includeStats` option is optional per
+request: without it, and for a backend that does not supply stats, the server
+returns compact entries.
 
 The portable IPC microbenchmark exercises the real Go client without requiring
 FUSE or Peerbit networking:
