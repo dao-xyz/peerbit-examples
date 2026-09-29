@@ -12,10 +12,17 @@ joiner of a freshly created one stayed read-only, and
 safe initial write view".
 
 - Creating a filesystem now publishes a signed zero-document genesis
-  manifest when the creator is a trusted full replica, automatic snapshots
-  are enabled and the log is empty. `peerbit-fs create` no longer publishes
-  its own; the library does it for every creator.
-  `snapshot: { disabled: true }` skips it.
+  manifest when the creator is a trusted full replica and automatic
+  snapshots are enabled. It waits for any bootstrap the creating open runs,
+  so it never fails the open. Only a program constructed locally creates:
+  one loaded from an address publishes nothing, whichever API opens it.
+  `peerbit-fs create` no longer publishes its own; the library does it for
+  every creator. `snapshot: { disabled: true }` skips it.
+- Until something is written, the creator puts that manifest again (a
+  linked put, not a CUT) at each open and whenever a replicator joins. A
+  joiner whose first join ended before it was ready (Ctrl-C, a crash, a
+  mount timeout) already holds the genesis, so without a new entry every
+  retry stayed gated until someone wrote. Retrying needs the creator online.
 - A replicated snapshot manifest now counts as readiness evidence, like
   replicated metadata. A gated joiner cannot publish one, so it came from
   another peer.

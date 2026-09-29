@@ -2520,6 +2520,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * bootstrap window until /.artifactignore is readable.
      */
     bootstrapAdvisoryIgnorePatterns: string[] | undefined;
+    /**
+     * Set only by the constructor, which borsh bypasses: a program loaded
+     * from an address never has it, whichever API opens it. Marks the open
+     * that may publish a genesis manifest (see publishEmptyManifest).
+     */
+    private constructedLocally?: boolean;
 
     constructor(
         properties: {
@@ -2553,6 +2559,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.entries = new Documents({
             id: sha256Sync(concat([this.id, fromString("/shared-fs/v9.1")])),
         });
+        this.constructedLocally = true;
     }
 
     async beforeOpen(
@@ -3392,20 +3399,27 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
         }
-        if (
-            !addressOpen &&
-            this.isFullReplica() &&
-            !this.snapshotConfig.disabled &&
-            this.entries.log.log.length === 0 &&
-            (!this.trustGraph ||
-                (await this.isTrustedWriter(this.node.identity.publicKey)))
-        ) {
-            // Genesis: a signed zero-document manifest, so a filesystem that
-            // is never written still has a log entry whose replication is a
-            // joiner's positive write-readiness evidence. The creator's first
-            // real snapshot replaces it.
-            await this.snapshotWrite();
-            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        if (this.isFullReplica() && !this.snapshotConfig.disabled) {
+            const ownKey = this.node.identity.publicKey;
+            this.entries.log.events.addEventListener(
+                "replicator:join",
+                (event) => {
+                    if (!event.detail.publicKey.equals(ownKey)) {
+                        void this.publishEmptyManifest(false);
+                    }
+                },
+                { signal: this.maintenanceAbortController!.signal }
+            );
+            // Also covers replicators that joined while this open ran.
+            const published = this.publishEmptyManifest(
+                !addressOpen && this.constructedLocally === true
+            );
+            if (!bootstrapCandidate) {
+                // No bootstrap to wait for: a creator returns with its
+                // genesis published (`peerbit-fs create` stops right after).
+                await published;
+                this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+            }
         }
         this.startSnapshotPublisher();
         this.startGcScheduler();
@@ -12068,6 +12082,73 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
+    private async hasLocalNamingRow() {
+        const probe = this.entries.index.iterate(
+            { query: [new StringMatch({ key: "kind", value: "naming" })] },
+            { local: true, remote: false, resolve: false }
+        );
+        try {
+            return (await probe.next(1)).length > 0;
+        } finally {
+            await (probe as any).close?.();
+        }
+    }
+
+    /**
+     * A never-written filesystem has no metadata whose replication proves a
+     * joiner's sync started, so its creator publishes a zero-document
+     * manifest (the genesis). While nothing is written, it puts that
+     * manifest again at each open and whenever a replicator joins: a joiner
+     * whose earlier join ended before it was ready already holds the old
+     * entry, and the new one is still an arrival. A plain linked put, never
+     * a CUT: a joiner may be fetching the old entry, and cutting it strands
+     * that fetch. The first real snapshot CUTs the chain. Only a creating
+     * open, or the author of a zero-document manifest, publishes: never a
+     * peer that merely has not synced yet. Failures leave joiners gated.
+     */
+    private publishEmptyManifest(creating: boolean): Promise<void> {
+        const context = this.maintenanceContextIfActive();
+        if (!context) {
+            return Promise.resolve();
+        }
+        const decision = this.bootstrapDecision;
+        const run = async () => {
+            // Only from a whole view: a bootstrap still deciding is partial.
+            await decision.catch(() => {});
+            // Inside the snapshot fence: a real snapshot published meanwhile
+            // is never superseded by the stale zero-document manifest.
+            const genesis = await this.queueSnapshotBlockStoreTask(async () => {
+                this.throwIfMaintenanceInactive(context);
+                if (
+                    !this.writesReady ||
+                    this.partialWriteOverride ||
+                    this.bootstrapPhase !== "off" ||
+                    (await this.hasLocalNamingRow())
+                ) {
+                    return false;
+                }
+                const own = await this.getDocument<SharedFsEntry>(
+                    `bootstrap:${this.authorKey()}`
+                );
+                this.throwIfMaintenanceInactive(context);
+                if (!(own instanceof BootstrapManifest)) {
+                    return creating;
+                }
+                if (
+                    deserialize(own.payloadBytes, SnapshotManifestPayload)
+                        .segments.length === 0
+                ) {
+                    await this.entries.put(own);
+                }
+                return false;
+            });
+            if (genesis) {
+                await this.snapshotWrite();
+            }
+        };
+        return this.trackMaintenanceTask(run()).catch(() => {});
+    }
+
     private startSnapshotPublisher() {
         if (this.snapshotConfig.disabled || !this.isFullReplica()) {
             return;
@@ -12123,18 +12204,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             // Never publish an empty view (an unreachable network or a
             // brand-new store): require at least one naming row.
-            const probe = this.entries.index.iterate(
-                {
-                    query: [new StringMatch({ key: "kind", value: "naming" })],
-                },
-                { local: true, remote: false, resolve: false }
-            );
-            let populated: boolean;
-            try {
-                populated = (await probe.next(1)).length > 0;
-            } finally {
-                await (probe as any).close?.();
-            }
+            const populated = await this.hasLocalNamingRow();
             this.throwIfMaintenanceInactive(context);
             if (!populated) {
                 return;
