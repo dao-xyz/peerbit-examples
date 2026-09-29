@@ -228,18 +228,22 @@ lower log's successful network-commit phase. Local replay has no such phase, so
 a populated store whose sidecar was lost cannot certify itself merely by
 reopening. If that store and its donor are already identical, it remains gated
 until a later normal donor mutation or verified snapshot supplies new evidence.
-A never-written filesystem has no namespace evidence either, so a creator
-publishes a signed zero-document genesis manifest (unless
-`snapshot: { disabled: true }`) once any bootstrap of its own has settled, and
-a replicated snapshot manifest counts like replicated metadata. Only a program
-constructed locally creates; one loaded from an address never publishes a
-genesis, whichever API opens it. Until something is written, the creator puts
-the manifest again at each open and whenever a replicator joins, so a joiner
-whose earlier join ended before it was ready gets a new arrival when it retries
-with the creator online. A zero-document manifest is never a bootstrap
-snapshot: it covers no log entry, so finding one by discovery is not evidence.
-A joiner that reaches no replicator stays closed. Protocol-grade empty-log and
-no-late-arrival proofs require an upstream shared-log frontier/barrier API.
+A never-written filesystem has no namespace evidence either, so a creating
+open publishes a signed zero-document genesis manifest (unless
+`snapshot: { disabled: true }`) before it returns, and a replicated snapshot
+manifest counts like replicated metadata. A creating open never bootstraps.
+Only a program constructed locally creates; one loaded from an address is an
+address open whichever API opens it: gated until it settles a remote view, and
+it never publishes a genesis. Until something is written, the creator puts
+the manifest again whenever a peer session subscribes (also after a crash), so
+a joiner whose earlier join ended before it was ready gets a new arrival when
+it retries with the creator online. That adds one small entry per peer session
+while the filesystem stays never-written; the first real snapshot CUTs the
+chain. A zero-document manifest is never a bootstrap snapshot: it covers no log
+entry, so finding one by discovery is not evidence, and a `mode: "require"`
+join of a never-written filesystem fails. A joiner that reaches no replicator
+stays closed. Protocol-grade empty-log and no-late-arrival proofs require an
+upstream shared-log frontier/barrier API.
 
 Access-controlled filesystems have an additional upstream limitation: write
 readiness fences the namespace log, not an authoritative trusted-writer

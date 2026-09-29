@@ -324,8 +324,9 @@ epoch are still needed upstream for protocol-grade revocation.
 `create` requires a full replica and publishes a signed zero-document genesis
 manifest, so a newly created empty filesystem can be mounted locally, and its
 replication gives a connected joiner the evidence it needs to become
-write-ready. Until something is written, the creator publishes it again when it
-mounts and whenever a replicator joins. `create --no-replicate` is rejected.
+write-ready. Until something is written, the creator publishes it again
+whenever another peer opens the filesystem. `create --no-replicate` is
+rejected.
 `mount` waits up to 120 seconds by default; tune this with
 `--write-ready-timeout-ms`. A timeout is not permission to write: keep a
 complete replicator for this filesystem connected and retry. Retrying a mount

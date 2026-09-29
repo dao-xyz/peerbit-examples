@@ -2,6 +2,7 @@ import { Peerbit } from "peerbit";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Documents } from "@peerbit/document";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     BootstrapPendingError,
@@ -840,7 +841,7 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
-    it("uses a verified empty snapshot as remote write-readiness evidence", async () => {
+    it("counts a replicated empty snapshot as evidence without bootstrapping from it", async () => {
         const donorPeer = await createPeer();
         const donor = await openSharedFs({
             peerbit: donorPeer,
@@ -861,6 +862,7 @@ describe("shared fs cold-start bootstrap", () => {
 
         expect(await joiner.list("/")).toEqual([]);
         await joiner.awaitWriteReady({ timeout: 10_000 });
+        expect(joiner.bootstrapStatus().manifest).toBeUndefined();
         await joiner.writeFile("/first.txt", "first safe write");
         await waitUntil(async () => {
             expect(decode(await donor.readFile("/first.txt"))).toBe(
@@ -1027,58 +1029,80 @@ describe("shared fs cold-start bootstrap", () => {
         expect(log.length).toBe(1);
     });
 
-    it("publishes the genesis only from a creating open, once its bootstrap settles", async () => {
-        const root = await mkdtemp(join(tmpdir(), "shared-fs-genesis-open-"));
-        try {
-            // A persisted creator is still bootstrapping (a partial view)
-            // when its open finishes. The genesis waits for the bootstrap
-            // instead of failing the open.
-            const creatorPeer = await Peerbit.create({ directory: root });
-            peers.push(creatorPeer);
-            await creatorPeer.dial(await createPeer());
-            const creator = await openSharedFs({
-                peerbit: creatorPeer,
-                machineLabel: "bootstrapping-creator",
-                bootstrap: { discoveryTimeoutMs: 500 },
-            });
-            const joinerPeer = await createPeer();
-            await joinerPeer.dial(creatorPeer);
-            const joiner = await openSharedFs({
-                peerbit: joinerPeer,
-                address: creator.address,
-                machineLabel: "genesis-joiner",
-                bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
-            await joiner.awaitWriteReady({ timeout: 20_000 });
+    it("returns a creating open with its genesis published, even when asked to bootstrap", async () => {
+        // A script that creates, prints the address and stops must leave the
+        // genesis behind. A creating open has nothing to bootstrap from, so
+        // it never waits on discovery, whichever API opens it.
+        const creatorPeer = await createPeer();
+        await creatorPeer.dial(await createPeer());
+        const created: any = await creatorPeer.open(new SharedFileSystem(), {
+            args: {
+                replicate: { factor: 1 },
+                bootstrap: { discoveryTimeoutMs: 60_000 },
+            },
+        });
+        expect(created.bootstrapStatus()).toMatchObject({
+            phase: "off",
+            writeReady: true,
+            writeReadinessSource: "creator",
+        });
+        expect(
+            await created.getDocument(
+                `bootstrap:${encodePublicSignKey(creatorPeer.identity.publicKey)}`
+            )
+        ).toBeDefined();
+    });
 
-            // A program loaded from an address is never a creation, however
-            // it is opened: it has seen none of the data, so it publishes no
-            // manifest of its own.
-            await creator.writeBatch(
-                Array.from({ length: 50 }, (_, i) => ({
-                    path: `/data/file-${i}.txt`,
-                    content: `content ${i}`,
-                }))
+    it("gates a program loaded from an address, whichever API opens it", async () => {
+        // Only the constructor marks a creation. A program loaded from an
+        // address has seen none of the data: it settles a remote view before
+        // it may write, and never publishes a manifest of its own.
+        const creatorPeer = await createPeer();
+        const creator = await openSharedFs({
+            peerbit: creatorPeer,
+            machineLabel: "loaded-creator",
+        });
+        await creator.writeBatch(
+            Array.from({ length: 50 }, (_, i) => ({
+                path: `/data/file-${i}.txt`,
+                content: `content ${i}`,
+            }))
+        );
+        const loadedPeer = await createPeer();
+        await loadedPeer.dial(creatorPeer);
+        const loaded = await SharedFileSystem.open(
+            creator.address,
+            loadedPeer as any,
+            {
+                args: {
+                    replicate: { factor: 1 },
+                    bootstrap: false,
+                    writeReadinessSettleMs: 100,
+                } as any,
+            }
+        );
+        expect(loaded.bootstrapStatus()).toMatchObject({
+            writeReady: false,
+            guardArmed: false,
+        });
+        expect(loaded.bootstrapStatus().writeReadinessSource).toBeUndefined();
+        await expect(
+            loaded.writeFile("/unsafe.txt", "before any view")
+        ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+        await loaded.awaitWriteReady({ timeout: 20_000 });
+        expect(loaded.bootstrapStatus().writeReadinessSource).toBe(
+            "remote-settled"
+        );
+        await waitUntil(async () => {
+            expect(decode(await loaded.readFile("/data/file-49.txt"))).toBe(
+                "content 49"
             );
-            const loadedPeer = await createPeer();
-            await loadedPeer.dial(creatorPeer);
-            const loaded = await SharedFileSystem.open(
-                creator.address,
-                loadedPeer as any,
-                { args: { replicate: { factor: 1 }, bootstrap: false } }
-            );
-            expect(
-                await (loaded as any).getDocument(
-                    `bootstrap:${encodePublicSignKey(loadedPeer.identity.publicKey)}`
-                )
-            ).toBeUndefined();
-        } finally {
-            await Promise.allSettled(
-                peers.splice(0).map((peer) => peer.stop())
-            );
-            await rm(root, { recursive: true, force: true });
-        }
+        });
+        expect(
+            await (loaded as any).getDocument(
+                `bootstrap:${encodePublicSignKey(loadedPeer.identity.publicKey)}`
+            )
+        ).toBeUndefined();
     });
 
     it("lets a join of a never-written filesystem that ended before it was ready be retried", async () => {
@@ -1094,8 +1118,10 @@ describe("shared fs cold-start bootstrap", () => {
             peers.splice(peers.indexOf(peer), 1);
             return peer.stop();
         };
+        const logOf = (fs: SharedFsHandle) =>
+            (fs.program as any).entries.log.log;
         const heads = async (fs: SharedFsHandle) =>
-            (await (fs.program as any).entries.log.log.getHeads().all()).map(
+            (await logOf(fs).getHeads().all()).map(
                 (entry: any) => entry.hash as string
             );
         try {
@@ -1106,9 +1132,6 @@ describe("shared fs cold-start bootstrap", () => {
             });
             const [genesis] = await heads(creator);
             const address = creator.address;
-            const manifestId = `bootstrap:${encodePublicSignKey(
-                creatorPeer.identity.publicKey
-            )}`;
             const join = async (directory: string, settleMs: number) => {
                 const peer = await start(directory);
                 await peer.dial(creatorPeer);
@@ -1121,48 +1144,98 @@ describe("shared fs cold-start bootstrap", () => {
                 } as any);
                 return { peer, fs };
             };
-            // Each first join receives the genesis but ends inside its quiet
-            // window (Ctrl-C, a crash, a mount timeout). Nothing is written,
-            // so a retry has nothing new to replicate but a re-publication.
-            const interrupt = async (directory: string) => {
+            // Each first join ends inside its quiet window (Ctrl-C, a crash,
+            // a mount timeout) holding everything the creator has, including
+            // the re-publication for its own session. Nothing is written, so
+            // a retry has nothing new to replicate but a re-publication.
+            const interrupt = async (directory: string, crash: boolean) => {
+                const before = logOf(creator).length;
                 const { peer, fs } = await join(directory, 60_000);
                 await waitUntil(async () => {
-                    expect(
-                        await (fs.program as any).getDocument(manifestId)
-                    ).toBeDefined();
+                    expect(logOf(creator).length).toBe(before + 1);
+                    for (const hash of await heads(creator)) {
+                        expect(await logOf(fs).has(hash)).toBe(true);
+                    }
                 });
                 expect(fs.bootstrapStatus().writeReady).toBe(false);
+                if (crash) {
+                    // The network goes first, so nothing announces the
+                    // departure: shared-log emits no replicator:join for the
+                    // returning key.
+                    await (peer as any).libp2p.stop();
+                }
                 await stop(peer);
             };
-            await interrupt("joiner-a");
-            await interrupt("joiner-b");
+            await interrupt("joiner-a", true);
 
-            // Retried while the creator stays online: its re-publication on
-            // the joiner's arrival as a replicator is the new evidence.
+            // Retried while the creator stays online: its re-publication for
+            // the joiner's new session is the new evidence. A linked put, so
+            // the chain stays whole for the first real snapshot to CUT.
             const retried = await join("joiner-a", 100);
             await retried.fs.awaitWriteReady({ timeout: 20_000 });
-            // A linked put keeps the entries it follows: a joiner may be
-            // fetching one, and a CUT would strand that fetch.
-            expect(
-                await (creator.program as any).entries.log.log.has(genesis)
-            ).toBe(true);
-
-            // Retried across a creator restart. Its reopen puts the manifest
-            // again too, covering replicators that join while it opens.
-            const before = await heads(creator);
+            expect(await logOf(creator).has(genesis)).toBe(true);
+            expect(await heads(creator)).toHaveLength(1);
+            expect(logOf(creator).length).toBe(3);
             await stop(retried.peer);
+
+            // A creator reopen that finds nobody subscribed adds nothing.
+            await interrupt("joiner-b", false);
+            const before = await heads(creator);
             await stop(creatorPeer);
             creatorPeer = await start("creator");
-            const reopened = await openSharedFs({
+            const alone = await openSharedFs({
                 peerbit: creatorPeer,
                 address,
-                machineLabel: "retry-creator-mount",
+                machineLabel: "retry-creator-alone",
                 bootstrap: false,
             });
-            expect(await heads(reopened)).not.toEqual(before);
-            const retriedAgain = await join("joiner-b", 100);
-            await retriedAgain.fs.awaitWriteReady({ timeout: 20_000 });
-            await retriedAgain.fs.writeFile("/first.txt", "after retry");
+            expect(await heads(alone)).toEqual(before);
+            await stop(creatorPeer);
+
+            // Retried across a creator restart: the joiner waits, gated, and
+            // the creator's reopen re-publishes for it. The reopen's store is
+            // held open a moment, so the joiner's subscription lands before
+            // the reopen listens for new ones.
+            const waitingPeer = await start("joiner-b");
+            creatorPeer = await start("creator");
+            await waitingPeer.dial(creatorPeer);
+            const waiting = await openSharedFs({
+                peerbit: waitingPeer,
+                address,
+                machineLabel: "joiner-b-waiting",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            const documentsOpen = Documents.prototype.open;
+            const heldOpen = vi
+                .spyOn(Documents.prototype, "open")
+                .mockImplementationOnce(async function (
+                    this: Documents<any, any>,
+                    ...args: any[]
+                ) {
+                    const result = await documentsOpen.apply(this, args as any);
+                    await new Promise((resolve) => setTimeout(resolve, 1_000));
+                    return result;
+                });
+            let reopened: SharedFsHandle;
+            try {
+                reopened = await openSharedFs({
+                    peerbit: creatorPeer,
+                    address,
+                    machineLabel: "retry-creator-mount",
+                    bootstrap: false,
+                });
+            } finally {
+                heldOpen.mockRestore();
+            }
+            await waiting.awaitWriteReady({ timeout: 20_000 });
+            expect(logOf(reopened).length).toBe(5);
+            await waiting.writeFile("/first.txt", "after retry");
+            await waitUntil(async () => {
+                expect(decode(await reopened.readFile("/first.txt"))).toBe(
+                    "after retry"
+                );
+            });
         } finally {
             await Promise.allSettled(
                 peers.splice(0).map((peer) => peer.stop())
@@ -1206,6 +1279,100 @@ describe("shared fs cold-start bootstrap", () => {
         expect(
             (await program.getDocument(manifestId)).payloadBytes
         ).not.toEqual(genesis.payloadBytes);
+    });
+
+    it("never re-publishes the genesis from a partial view", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-partial",
+        });
+        const program: any = fs.program;
+        const heads = async () =>
+            (await program.entries.log.log.getHeads().all()).map(
+                (entry: any) => entry.hash as string
+            );
+        const before = await heads();
+        // An unverified or overlay view cannot vouch that nothing is written.
+        for (const phase of ["unverified", "overlay-active"]) {
+            program.bootstrapPhase = phase;
+            await program.publishEmptyManifest(false);
+            expect(await heads()).toEqual(before);
+        }
+        program.bootstrapPhase = "off";
+        // Requests that arrive while one is queued share its put.
+        const length = program.entries.log.log.length;
+        await Promise.all([
+            program.publishEmptyManifest(false),
+            program.publishEmptyManifest(false),
+            program.publishEmptyManifest(false),
+        ]);
+        expect(await heads()).not.toEqual(before);
+        expect(program.entries.log.log.length).toBe(length + 1);
+    });
+
+    it("never lets a gated genesis author re-publish its genesis", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-gated-genesis-"));
+        const directory = join(root, "creator");
+        let creatorPeer: Peerbit | undefined;
+        try {
+            creatorPeer = await Peerbit.create({ directory });
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "gated-author",
+            });
+            const address = creator.address!;
+            await creatorPeer.stop();
+            // An observer open of the same directory clears the readiness
+            // proof, so the author's next full open is gated.
+            creatorPeer = await Peerbit.create({ directory });
+            await openSharedFs({
+                peerbit: creatorPeer,
+                address,
+                machineLabel: "gated-author-observer",
+                replicate: false,
+                bootstrap: false,
+            });
+            await creatorPeer.stop();
+            creatorPeer = await Peerbit.create({ directory });
+            const gated = await openSharedFs({
+                peerbit: creatorPeer,
+                address,
+                machineLabel: "gated-author-full",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            expect(gated.bootstrapStatus().writeReady).toBe(false);
+            const log = (gated.program as any).entries.log.log;
+            const heads = async () =>
+                (await log.getHeads().all()).map(
+                    (entry: any) => entry.hash as string
+                );
+            const before = await heads();
+
+            // A fresh peer opens it and settles from the author's genesis. It
+            // brings nothing new, and the author may not re-publish: its own
+            // put would count as an arrival and open its gate on no evidence.
+            const joinerPeer = await createPeer();
+            await joinerPeer.dial(creatorPeer);
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "gated-author-joiner",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            await joiner.awaitWriteReady({ timeout: 20_000 });
+            await expect(
+                gated.awaitWriteReady({ timeout: 1_000 })
+            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            expect(await heads()).toEqual(before);
+            expect((gated.program as any).writeReadinessRemoteEvidence).toBe(
+                false
+            );
+        } finally {
+            await creatorPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
     });
 
     it("keeps normal remote readiness gated until its durable marker succeeds", async () => {

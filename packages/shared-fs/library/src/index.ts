@@ -2522,10 +2522,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     bootstrapAdvisoryIgnorePatterns: string[] | undefined;
     /**
      * Set only by the constructor, which borsh bypasses: a program loaded
-     * from an address never has it, whichever API opens it. Marks the open
-     * that may publish a genesis manifest (see publishEmptyManifest).
+     * from an address never has it, whichever API opens it, so every such
+     * open is an address open (fail-closed write readiness, no genesis).
      */
     private constructedLocally?: boolean;
+    /** A genesis refresh is queued and has not reached its put yet. */
+    private emptyManifestRefreshQueued?: boolean;
 
     constructor(
         properties: {
@@ -2701,7 +2703,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     ): Promise<void> {
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         const internalArgs = args as SharedFsInternalOpenArgs | undefined;
-        const addressOpen = internalArgs?.addressOpen === true;
+        // A program loaded from an address has seen none of the data,
+        // whichever API opens it: never a creator.
+        const addressOpen =
+            internalArgs?.addressOpen === true ||
+            this.constructedLocally !== true;
         const partialWriteOverride =
             addressOpen && args?.allowPartialWrites === true;
         // A previous generation may still be inside remote snapshot discovery.
@@ -3026,8 +3032,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // readiness below.
             this.setGuardArmed(false);
         }
+        // A creating open has nothing to bootstrap from, and returns with its
+        // genesis published (see publishEmptyManifest).
         const bootstrapCandidate =
-            this.bootstrapConfig.mode !== "off" && this.isFullReplica();
+            addressOpen &&
+            this.bootstrapConfig.mode !== "off" &&
+            this.isFullReplica();
         const preOpenCrashMarker =
             addressOpen &&
             !trustedWarmWriteReady &&
@@ -3401,19 +3411,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         if (this.isFullReplica() && !this.snapshotConfig.disabled) {
             const ownKey = this.node.identity.publicKey;
-            this.entries.log.events.addEventListener(
-                "replicator:join",
+            const topic = this.entries.log.topic;
+            const isRemote = (key: PublicSignKey) => !key.equals(ownKey);
+            // Every session that opens this filesystem subscribes anew, even
+            // one returning after a crash, for which shared-log may emit no
+            // replicator:join.
+            this.node.services.pubsub.addEventListener(
+                "subscribe",
                 (event) => {
-                    if (!event.detail.publicKey.equals(ownKey)) {
+                    if (
+                        event.detail.topics.includes(topic) &&
+                        isRemote(event.detail.from)
+                    ) {
                         void this.publishEmptyManifest(false);
                     }
                 },
                 { signal: this.maintenanceAbortController!.signal }
             );
-            // Also covers replicators that joined while this open ran.
-            const published = this.publishEmptyManifest(
-                !addressOpen && this.constructedLocally === true
-            );
+            // A creating open publishes the genesis. A reopen refreshes it
+            // only for peers that subscribed before the listener above (they
+            // may be waiting): one that finds nobody adds nothing.
+            const subscribers =
+                (await this.node.services.pubsub.getSubscribers(topic)) ?? [];
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+            const published =
+                !addressOpen || subscribers.some(isRemote)
+                    ? this.publishEmptyManifest(!addressOpen)
+                    : Promise.resolve();
             if (!bootstrapCandidate) {
                 // No bootstrap to wait for: a creator returns with its
                 // genesis published (`peerbit-fs create` stops right after).
@@ -12098,18 +12122,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * A never-written filesystem has no metadata whose replication proves a
      * joiner's sync started, so its creator publishes a zero-document
      * manifest (the genesis). While nothing is written, it puts that
-     * manifest again at each open and whenever a replicator joins: a joiner
-     * whose earlier join ended before it was ready already holds the old
-     * entry, and the new one is still an arrival. A plain linked put, never
-     * a CUT: a joiner may be fetching the old entry, and cutting it strands
-     * that fetch. The first real snapshot CUTs the chain. Only a creating
-     * open, or the author of a zero-document manifest, publishes: never a
-     * peer that merely has not synced yet. Failures leave joiners gated.
+     * manifest again whenever a peer session subscribes: a joiner whose
+     * earlier join ended before it was ready already holds the old entry,
+     * and the new one is still an arrival. A plain linked put, never a CUT:
+     * a returning peer that still holds an entry an earlier CUT removed puts
+     * it back for good (the log only rejects entries the current CUT head
+     * names), while one linear chain is CUT whole by the first real
+     * snapshot. Only a creating open, or the author of a zero-document
+     * manifest, publishes: never a peer that merely has not synced yet.
+     * Failures leave joiners gated.
      */
     private publishEmptyManifest(creating: boolean): Promise<void> {
         const context = this.maintenanceContextIfActive();
         if (!context) {
             return Promise.resolve();
+        }
+        if (!creating) {
+            // A queued refresh that has not reached its put serves this
+            // request too.
+            if (this.emptyManifestRefreshQueued) {
+                return Promise.resolve();
+            }
+            this.emptyManifestRefreshQueued = true;
         }
         const decision = this.bootstrapDecision;
         const run = async () => {
@@ -12118,6 +12152,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Inside the snapshot fence: a real snapshot published meanwhile
             // is never superseded by the stale zero-document manifest.
             const genesis = await this.queueSnapshotBlockStoreTask(async () => {
+                if (!creating) {
+                    this.emptyManifestRefreshQueued = false;
+                }
                 this.throwIfMaintenanceInactive(context);
                 if (
                     !this.writesReady ||
