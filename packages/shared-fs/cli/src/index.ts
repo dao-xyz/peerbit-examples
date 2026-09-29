@@ -645,13 +645,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             ? peerbit.identity.publicKey
                             : undefined,
                     });
-                    // Publish an authenticated zero-document frontier. The
-                    // normal empty create -> local mount path uses persisted
-                    // creator continuity; once that mount is online, remote
-                    // peers can use this manifest as positive empty-state
-                    // bootstrap evidence instead of waiting forever for a
-                    // namespace event that does not exist.
-                    await fsHandle.snapshotWrite();
+                    // Opening as the creator already published the signed
+                    // zero-document genesis manifest that lets remote peers
+                    // join this still-empty filesystem.
                     console.log(fsHandle.address);
                 } finally {
                     await stopPeerbitForCli(peerbit);

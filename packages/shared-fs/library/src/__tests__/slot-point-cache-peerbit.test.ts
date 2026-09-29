@@ -66,7 +66,14 @@ describe("shared fs slot point cache (real index)", () => {
 
     beforeEach(async () => {
         peer = await Peerbit.create();
-        fs = await openSharedFs({ peerbit: peer, machineLabel: "slot-point" });
+        fs = await openSharedFs({
+            peerbit: peer,
+            machineLabel: "slot-point",
+            // No genesis manifest: publishing it reads /.artifactignore,
+            // which would warm the root's whole-directory tier before
+            // forcePointTier below.
+            snapshot: { disabled: true },
+        });
         // Most cases target the point tier; the width-gate case undoes this.
         undoPointTier = forcePointTier(fs.program);
     });

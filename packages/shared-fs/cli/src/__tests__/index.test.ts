@@ -6,6 +6,7 @@ import {
     Peerbit,
     PrepareForDisposalError,
     SharedFsHandle,
+    encodePublicSignKey,
     openSharedFs,
 } from "@peerbit/shared-fs";
 import { describe, expect, it, vi } from "vitest";
@@ -307,6 +308,13 @@ describe("peerbit-fs cli", () => {
             await expect(
                 reopened.awaitWriteReady({ timeout: 100 })
             ).resolves.toBeUndefined();
+            // The still-empty filesystem carries the creator's genesis
+            // manifest, whose replication lets remote peers become ready.
+            expect(
+                await (reopened.program as any).getDocument(
+                    `bootstrap:${encodePublicSignKey(reopenedPeer.identity.publicKey)}`
+                )
+            ).toBeDefined();
         } finally {
             if (reopenedPeer) {
                 await stopPeer(reopenedPeer);

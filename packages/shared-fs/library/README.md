@@ -228,9 +228,12 @@ lower log's successful network-commit phase. Local replay has no such phase, so
 a populated store whose sidecar was lost cannot certify itself merely by
 reopening. If that store and its donor are already identical, it remains gated
 until a later normal donor mutation or verified snapshot supplies new evidence.
-A truly empty remote filesystem likewise has no namespace evidence, so a fresh
-join remains closed unless it receives a verified empty snapshot or the caller
-consciously uses the unsafe override. Protocol-grade empty-log and
+A never-written filesystem has no namespace evidence either, so a creator
+publishes a signed zero-document genesis manifest (unless
+`snapshot: { disabled: true }`) and a replicated snapshot manifest counts like
+replicated metadata. A zero-document manifest is never a bootstrap snapshot: it
+covers no log entry, so finding one by discovery is not evidence. A joiner that
+reaches no replicator stays closed. Protocol-grade empty-log and
 no-late-arrival proofs require an upstream shared-log frontier/barrier API.
 
 Access-controlled filesystems have an additional upstream limitation: write
@@ -244,11 +247,11 @@ reports `isTrustedWriter(key) === false`, and retain at least one already
 converged durable replica before disposal. A signed trust frontier plus
 entry-bound authorization epochs is required upstream to close this gap.
 
-`peerbit-fs create` publishes a signed zero-document snapshot so the normal
-empty create/mount/share flow has that evidence. `bootstrapStatus()` reports
-`writeReadinessSource` (`creator` or `remote-settled`) for audit and diagnosis.
-`allowPartialWrites` is for exporting or repairing data during one session; it
-never restores durable readiness.
+The genesis gives the normal empty create/mount/share flow that evidence.
+`bootstrapStatus()` reports `writeReadinessSource` (`creator` or
+`remote-settled`) for audit and diagnosis. `allowPartialWrites` is for
+exporting or repairing data during one session; it never restores durable
+readiness.
 
 ## Cold-join telemetry
 

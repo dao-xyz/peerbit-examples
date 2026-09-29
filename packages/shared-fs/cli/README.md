@@ -321,9 +321,10 @@ every serving replica to report it untrusted, and keep an already-converged
 durable replica online. A signed trust frontier and entry-bound authorization
 epoch are still needed upstream for protocol-grade revocation.
 
-`create` requires a full replica and publishes a signed empty snapshot, so a
-newly created empty filesystem can be mounted locally and later prove its empty
-starting view to a connected joiner. `create --no-replicate` is rejected.
+`create` requires a full replica and publishes a signed zero-document genesis
+manifest, so a newly created empty filesystem can be mounted locally, and its
+replication gives a connected joiner the evidence it needs to become
+write-ready. `create --no-replicate` is rejected.
 `mount` waits up to 120 seconds by default; tune this with
 `--write-ready-timeout-ms`. A timeout is not permission to write: keep a
 complete replicator for this filesystem connected and retry. An unrelated

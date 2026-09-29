@@ -748,7 +748,11 @@ export type SnapshotPublishOptions = {
     publishIntervalMs?: number;
     /** Skip a scheduled publication when fewer documents changed (default 50). */
     minChangesBetween?: number;
-    /** Disable automatic publication (snapshotWrite() stays available). */
+    /**
+     * Disable automatic publication (snapshotWrite() stays available),
+     * including a creator's genesis manifest: joiners of a never-written
+     * filesystem then have no readiness evidence.
+     */
     disabled?: boolean;
     /**
      * Reclaim this author's own superseded snapshot segment blocks after a
@@ -1901,6 +1905,8 @@ const SNAPSHOT_MAX_SEGMENT_COUNT = 256;
 const SNAPSHOT_TARGET_SEGMENT_BYTES = 384_000;
 const SNAPSHOT_EST_DOC_BYTES = 384;
 const MANIFEST_PAYLOAD_CAP_BYTES = 100_000;
+/** @peerbit/log EntryType.CUT (not re-exported by @peerbit/document). */
+const ENTRY_TYPE_CUT = 1;
 /** Members per changeset manifest, versions+naming combined. 12k x 36B is
  *  ~432KB payload — under the 512KiB chunk envelope, the largest document
  *  the store demonstrably ships. A manifest:true batch above this throws
@@ -2175,6 +2181,16 @@ const RETIRE_DOUBLE_CHECK_MS = 300;
  */
 const WRITE_READINESS_SETTLE_MS = 5_000;
 const WRITE_READINESS_MIN_CHECK_MS = 100;
+/**
+ * Replicated documents that prove a fresh join's log sync started: namespace
+ * metadata, or a signed snapshot manifest. A creator publishes a
+ * zero-document genesis manifest, so even a never-written filesystem has one
+ * (two empty logs exchange nothing).
+ */
+const isWriteReadinessEvidence = (value: unknown) =>
+    value instanceof NamingEvent ||
+    value instanceof FileVersion ||
+    value instanceof BootstrapManifest;
 /** Post-timeout arming: no arrivals for this long counts as quiescent... */
 const QUIESCENCE_WINDOW_MS = 60_000;
 /** ...on two consecutive checks this far apart. */
@@ -3055,9 +3071,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             ? (event: any) => {
                   const added = event?.detail?.added ?? [];
                   duringOpenChangeHadMetadata = added.some(
-                      (value: unknown) =>
-                          value instanceof NamingEvent ||
-                          value instanceof FileVersion
+                      isWriteReadinessEvidence
                   );
               }
             : undefined;
@@ -3191,17 +3205,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
             for (const value of added) {
-                const remoteMetadata =
-                    value instanceof NamingEvent ||
-                    value instanceof FileVersion;
-                if (this.writeReadinessRequired && remoteMetadata) {
+                if (
+                    this.writeReadinessRequired &&
+                    isWriteReadinessEvidence(value)
+                ) {
                     // Positive evidence is mandatory before a fresh join can
-                    // leave the write gate. Public mutations are closed while
-                    // gated, so any such arrival came from replication even
-                    // when two machines intentionally share one writer key.
-                    // Every later metadata arrival restarts the quiet window,
-                    // including the post-snapshot gap overlay coverage cannot
-                    // prove.
+                    // leave the write gate. Public mutations (snapshotWrite
+                    // included) are closed while gated, so any such arrival
+                    // came from replication even when two machines
+                    // intentionally share one writer key. Every later
+                    // arrival restarts the quiet window, including the
+                    // post-snapshot gap overlay coverage cannot prove.
                     this.writeReadinessRemoteEvidence = true;
                     this.writeReadinessQuietChecks = 0;
                     this.lastRemoteArrivalMs = this.clock();
@@ -3377,6 +3391,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessLifecycleBlocked = false;
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
+        }
+        if (
+            !addressOpen &&
+            this.isFullReplica() &&
+            !this.snapshotConfig.disabled &&
+            this.entries.log.log.length === 0 &&
+            (!this.trustGraph ||
+                (await this.isTrustedWriter(this.node.identity.publicKey)))
+        ) {
+            // Genesis: a signed zero-document manifest, so a filesystem that
+            // is never written still has a log entry whose replication is a
+            // joiner's positive write-readiness evidence. The creator's first
+            // real snapshot replaces it.
+            await this.snapshotWrite();
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         }
         this.startSnapshotPublisher();
         this.startGcScheduler();
@@ -9207,10 +9236,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * Fail-closed readiness for a fresh address-open. Positive remote
-     * metadata proves synchronization actually started; bootstrap retirement,
-     * synchronizer idleness, and two post-arrival quiet checks provide a
-     * settled initial view. This deliberately does not call the result a
-     * verified log frontier: Peerbit does not expose one yet.
+     * evidence (a replicated metadata or manifest document, or a verified
+     * non-empty snapshot) proves synchronization actually started; bootstrap
+     * retirement, synchronizer idleness, and two post-arrival quiet checks
+     * provide a settled initial view. This deliberately does not call the
+     * result a verified log frontier: Peerbit does not expose one yet.
      */
     private startWriteReadinessTracking(generation: number) {
         if (
@@ -10088,6 +10118,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 !(await verify(signature, raw.payloadBytes))
             ) {
                 invalid++;
+                continue;
+            }
+            if (payload.segments.length === 0) {
+                // A zero-document manifest (a creator's genesis) installs
+                // nothing, and its overlay would retire at once, counting as
+                // verified coverage and readiness evidence without covering
+                // any log entry, though a genesis can be older than the data.
+                // Plain-join instead: its replication is the evidence.
                 continue;
             }
             const age = this.clock() - Number(payload.createdAtWallMs);
@@ -11975,13 +12013,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             payloadBytes,
             signatureBytes: serialize(signature),
         });
-        // CUT the superseded manifest chain before publishing the new one
-        // so manifest history never accumulates in the replicated log
-        // (Guard D never matches manifests, so the delete is final).
+        // Publish as a CUT of the superseded manifest's head so manifest
+        // history never accumulates in the replicated log (Guard D never
+        // matches manifests). One entry, not a delete then a put: a joiner
+        // that never held the old manifest could leave the delete entry
+        // pending in its sync indefinitely, and never become write-ready.
         if (previous) {
-            await this.entries.del(manifestId).catch(() => {});
+            await this.entries.put(manifest, {
+                meta: { type: ENTRY_TYPE_CUT },
+            });
+        } else {
+            await this.putPreferLinked(manifest);
         }
-        await this.putPreferLinked(manifest);
         this.docsSinceSnapshot = 0;
         return {
             snapshotSeq,
@@ -13640,10 +13683,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (expired.length === 0) {
             return zero;
         }
-        // Liveness re-verification at deletion time. Own manifest absent
-        // (a crash between CUT and publish): SKIP entirely — fail-safe, the
-        // next successful publish restores it. Any parse failure: ABORT —
-        // never delete on a corrupt view.
+        // Liveness re-verification at deletion time. Own manifest absent:
+        // SKIP entirely — fail-safe, the next successful publish restores
+        // it. Any parse failure: ABORT — never delete on a corrupt view.
         const own = await this.getDocument<SharedFsEntry>(
             `bootstrap:${this.authorKey()}`
         );
