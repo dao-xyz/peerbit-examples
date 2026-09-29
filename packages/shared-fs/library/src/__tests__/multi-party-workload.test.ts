@@ -309,18 +309,70 @@ describe("shared fs multi-party propagation", () => {
             const c = await Peerbit.create();
             peers.push(c);
             await c.dial(a);
+            const coldJoinBudgetMs = process.env.CI ? 90_000 : 45_000;
             const joinStart = performance.now();
             const fsC = await openSharedFs({
                 peerbit: c,
                 address: fsA.address,
                 machineLabel: "party-c",
             });
-            await waitUntil(async () => {
-                expect((await fsC.list("/tree")).length).toBe(500);
-                expect(decode(await fsC.readFile("/tree/f-499.txt"))).toBe(
-                    "payload 499"
+            const openMs = performance.now() - joinStart;
+            try {
+                await waitUntil(
+                    async () => {
+                        expect((await fsC.list("/tree")).length).toBe(500);
+                        expect(
+                            decode(await fsC.readFile("/tree/f-499.txt"))
+                        ).toBe("payload 499");
+                    },
+                    { timeoutMs: coldJoinBudgetMs }
                 );
-            });
+            } catch (error) {
+                // Name the stalled layer: pubsub discovery, replication
+                // membership, or entry sync.
+                const names = new Map(
+                    [a, b, c].map((peer, i) => [
+                        peer.identity.publicKey.hashcode(),
+                        "ABC"[i],
+                    ])
+                );
+                const name = (hash: string) => names.get(hash) ?? "other";
+                const topic = fsC.program.entries.log.topic;
+                const probe = async <T>(fn: () => Promise<T> | T) => {
+                    try {
+                        return await fn();
+                    } catch (probeError) {
+                        return `error: ${(probeError as Error)?.message}`;
+                    }
+                };
+                const party = (peer: Peerbit, fs: SharedFsHandle) =>
+                    probe(async () => ({
+                        subscribers: (
+                            (await peer.services.pubsub.getSubscribers(
+                                topic
+                            )) ?? []
+                        ).map((key) => name(key.hashcode())),
+                        replicators: [
+                            ...(await fs.program.entries.log.getReplicators()),
+                        ].map(name),
+                        logLength: fs.program.entries.log.log.length,
+                    }));
+                const evidence = {
+                    openMs: Math.round(openMs),
+                    waitedMs: Math.round(performance.now() - joinStart),
+                    lastError: (error as Error)?.message,
+                    bootstrapPhase: await probe(
+                        () => fsC.bootstrapStatus().phase
+                    ),
+                    A: await party(a, fsA),
+                    B: await party(b, fsB),
+                    C: await party(c, fsC),
+                };
+                throw new Error(
+                    `cold join did not converge: ${JSON.stringify(evidence)}`,
+                    { cause: error }
+                );
+            }
             const coldJoin = performance.now() - joinStart;
             report("propagation", {
                 medianWriteToVisibleMs: propagation,
@@ -329,7 +381,7 @@ describe("shared fs multi-party propagation", () => {
             // Edits between live parties must land sub-second on a local
             // link; a 500-file cold join must complete within the budget.
             expect(propagation).toBeLessThan(process.env.CI ? 5_000 : 1_500);
-            expect(coldJoin).toBeLessThan(process.env.CI ? 90_000 : 45_000);
+            expect(coldJoin).toBeLessThan(coldJoinBudgetMs);
         }
     );
 });
