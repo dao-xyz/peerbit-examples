@@ -209,6 +209,36 @@ mkdir "$mountpoint/docs"
 printf "hello external native" > "$mountpoint/docs/hello.txt"
 test "$(cat "$mountpoint/docs/hello.txt")" = "hello external native"
 
+# Profiled Linux runs check the kernel cache policy: names cached for 0.1 s,
+# attributes never. The second of two stats 20 ms apart must then cost exactly
+# one getattr: 3 means the -o timeouts did not reach the kernel (a cgofuse that
+# clears libfuse's config again), 0 means attributes are cached. The probe
+# prints the second stat's wall-clock window; the count is checked after
+# unmount, when the adapter has flushed its profile.
+getattr_guard_window=""
+if [ "$(uname -s)" = "Linux" ] && [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-}" ]; then
+  getattr_guard_window="$(node --input-type=module -e '
+    import { lstatSync } from "node:fs";
+    const nowNs = () => BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6));
+    const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      sleep(200); // cached names expire, so the first stat looks them up
+      const first = nowNs();
+      lstatSync(process.argv[1]);
+      sleep(20); // attributes from the first stat expire at any kernel tick rate
+      const from = nowNs();
+      lstatSync(process.argv[1]);
+      const to = nowNs();
+      if (to - first < 80_000_000n) {
+        console.log(`${from} ${to}`);
+        process.exit(0);
+      }
+    }
+    console.error("Could not run two stats within 80 ms of each other.");
+    process.exit(1);
+  ' "$mountpoint/docs/hello.txt")"
+fi
+
 # Only the exec bit and the mtime are stored.
 metadata_path="$mountpoint/docs/hello.txt"
 chmod 600 "$metadata_path"
@@ -291,6 +321,10 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ]; then
     --mount-option "-s"
     "${benchmark_common_args[@]}"
   )
+  if [ "$(uname -s)" = "Linux" ]; then
+    # Mirrors nativeMountOptions in packages/shared-fs/native/mount_options.go.
+    benchmark_args+=(--mount-option "-o" --mount-option "entry_timeout=0.1,attr_timeout=0,negative_timeout=0")
+  fi
   if [ "${PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG:-}" = "1" ]; then
     benchmark_args+=(--mount-option "-d")
   fi
@@ -312,4 +346,35 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT:-}" ]; then
     --target-label "local filesystem control ($(uname -s))" \
     "${benchmark_common_args[@]}"
   assert_mount_ready
+fi
+
+if [ -n "$getattr_guard_window" ]; then
+  # The adapter flushes its profile on unmount, so stop the mount first.
+  trap - EXIT
+  if ! cleanup; then
+    cat "$log" || true
+    exit 1
+  fi
+  # shellcheck disable=SC2086 # the window is two decimal numbers
+  node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const [file, from, to] = process.argv.slice(1);
+    const records = readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    if (!records.some((record) => record.phase === "profile.summary")) {
+      console.error(`${file} has no profile.summary record, so the adapter did not flush its profile.`);
+      process.exit(1);
+    }
+    const count = records.filter(
+      (record) =>
+        record.phase === "native.callback" &&
+        record.operation === "getattr" &&
+        BigInt(record.startUnixNs) >= BigInt(from) &&
+        BigInt(record.startUnixNs) <= BigInt(to)
+    ).length;
+    if (count !== 1) {
+      console.error(`The second of two stats cost ${count} getattr callbacks, expected exactly 1 on Linux (3: the mount options did not reach the kernel; 0: attributes are cached).`);
+      process.exit(1);
+    }
+    console.log("Linux kernel cache check: the second stat cost exactly 1 getattr.");
+  ' "$PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR/native-adapter.ndjson" $getattr_guard_window
 fi
