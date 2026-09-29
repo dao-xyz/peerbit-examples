@@ -1,5 +1,320 @@
 # @peerbit/shared-fs-cli
 
+## 0.14.0
+
+### Minor Changes
+
+- daf9d6c: The native adapter stores the exec bit and mtime and supports symlinks through
+  a mount. It needs the IPC ops of this release, so use the managed adapter
+  pinned to it (`peerbit-fs install-adapter --force`).
+    - `chmod` keeps only the exec bit, and is a no-op on Windows so an ACL edit
+      cannot clear a POSIX peer's exec bit. `chown` succeeds without storing
+      anything.
+    - `utimens` sets mtime in milliseconds. `UTIME_NOW` (also macOS's -1) takes
+      the adapter's clock, an omitted mtime (`touch -a`, also macOS's -2) changes
+      nothing, and a time before 1970 or above 2^53-1 ms fails with `EINVAL`.
+    - `open(O_CREAT)` and `mknod` pass the create mode, so a new file created
+      `0755` is executable; Windows passes none.
+    - `symlink` and `readlink`: a target that is not valid UTF-8 fails with
+      `EINVAL`, and `readlink("/")` (WinFsp's symlink probe) answers `EINVAL`
+      without IPC. Directory listings accept symlink entries.
+    - `access(2)` with `X_OK` on a regular file without an exec bit fails with
+      `EACCES` off Windows, so `test -x` agrees with `execve`.
+    - Files and directories report the mounting user as owner off Windows instead
+      of root, so git no longer reports dubious ownership.
+    - Breaking: `peerbit-fs status` drops the synthetic `nativeMount.metadata`
+      JSON contract and its printed `metadata ...` lines. The READMEs document the
+      mount semantics instead.
+
+- 2612110: The mount backend and its IPC protocol expose the exec bit, mtime and
+  symlinks.
+    - `getattr` and `readdir` stats report each file's stored mode (`0o100644` or
+      `0o100755`) and mtime; atime and ctime equal mtime. A symlink has kind
+      `"symlink"`, mode `S_IFLNK|0777` and its target's byte length. Entries
+      without a mode, and conflict copies of any version (links included), are
+      regular `0644` files. `/` and the conflict directories report one time
+      captured when the backend is created instead of the current time.
+    - New backend and IPC ops `setattr(path, { mode?, mtimeMs? })`,
+      `symlink(target, path)` and `readlink(path)`, and `open` takes the create
+      mode as a third argument. chmod keeps only the exec bit (any x bit gives
+      `0o100755`); chmod and utimens of a directory, `/` or a symlink are no-ops,
+      and modes outside `0..0o7777` fail with `EINVAL`. On a file with buffered
+      writes, including a new `O_CREAT` file, `setattr` folds into the next
+      commit, so git's lock-file chmod or `cp -p` mints one version; otherwise it
+      calls the target's `setMetadata` and moves no bytes. `open` of a symlink
+      fails with `EINVAL`, and `readlink` fails with `EIO` while the link's
+      version is not readable locally.
+    - A write or truncate sets mtime to its own time, and a dirty handle's stat
+      equals the stat after its commit. A commit always sends the handle's mtime,
+      so a `utimens` before close (`cp -p`) is kept even when it equals the stored
+      time, and sends the mode only when it changed locally, so another peer's
+      chmod survives a local edit.
+    - `SharedFsMountBackendTarget` requires `setMetadata`, and `writeFile` results
+      must carry `mode` and `mtime`; a commit fails with `EIO` otherwise.
+    - Breaking: saving identical bytes through a mount is no longer a no-op. Any
+      write, including `> file` and in-place editor saves, advances mtime and
+      publishes one version that reuses the stored chunks, with one `modified`
+      watch event and one `keepVersions` slot. A flush, fsync or close without a
+      write still mints nothing.
+
+- 7c74a2c: Store the exec bit and mtime on every file version, and add symlinks. This is
+  a store break: the program variant is now `peerbit_shared_fs_v9_1` and new
+  filesystems use the entries salt `/shared-fs/v9.1`, so filesystems created by
+  earlier releases no longer open. Recreate them; shared-fs has no production
+  users, so no migration path is kept.
+    - `FileVersion` gains the required `mode` (`SHARED_FS_MODE.file`,
+      `.executable` or `.symlink`: `0o100644`, `0o100755`, `0o120000`) and `mtime`
+      (ms) fields, mirrored on index rows. Ingest rejects other modes, an mtime
+      above `2^53 - 1`, and a symlink version whose size is outside 1-1023 bytes.
+    - `WriteFileOptions.mode` and `mtime`. Without them a write keeps the
+      best-ranked parent's mode, and its mtime only when the bytes are unchanged
+      (otherwise the write time). `writeBatch` and naming restores keep the mode;
+      `resolveConflict()` keeps the selected mode, and its mtime only for the
+      visible bytes. Both no-op saves also require unchanged metadata, and a write
+      of a current head's bytes with new metadata reuses its locally stored chunks
+      without chunk IO (unless it sets `chunkSize` or `dedup: "off"`).
+    - New `setMetadata(path, { mode?, mtime? }, { expectedNodeId? })` on
+      `SharedFileSystem`, `SharedFsHandle` and `IgnoreAwareFs` (which rejects
+      ignored paths with `EIGNORED`): one chunk-reusing version that merges every
+      head with the same bytes.
+    - A symlink is a file node written with `mode: SHARED_FS_MODE.symlink` whose
+      bytes are its target (1-1023 bytes of UTF-8 without NUL; never followed).
+      A node never changes between symlink and regular file, nor builds on a base
+      version of the other type (`EINVAL`), and `writeBatch` and `setMetadata`
+      reject symlinks.
+    - A content conflict now needs heads with different bytes. Heads that differ
+      only in mode or mtime are not a conflict: `conflicts()` lists one version
+      per content and `SharedFsEntryInfo.conflict` follows it, while
+      `headVersionIds` still lists every head. An explicit-base write also merges
+      current heads that hold a base's bytes.
+    - `SharedFsEntryInfo.mode`, and `updatedAt` is the visible version's mtime for
+      files. `SharedFsVersionInfo.mode` and `mtime`, which the CLI's
+      `conflicts --json` and `resolve-conflict --json` now print.
+
+    Mounts expose these fields; see the mount backend changeset.
+
+- 2126c15: Remove pre-release compatibility machinery. This is a breaking change made
+  before 1.0; shared-fs has no production users, so no migration path is kept.
+
+    Library API removals:
+    - `SharedFileSystem.trustLegacyLocalReplica()` and
+      `SharedFsHandle.trustLegacyLocalReplica()`, and the exported
+      `TrustLegacyLocalReplicaOptions` type.
+    - `BootstrapStatus.legacyPromotionEligible`.
+    - The `"legacy-operator-assertion"` value of
+      `BootstrapStatus.writeReadinessSource` and of the cold-join telemetry
+      `write-ready` event `source`. Both are now `"creator" | "remote-settled"`.
+    - `SharedFsVersionInfo.deleted` (deprecated and always `false`). It also
+      disappears from `writeFile()`, `writeBatch().results`, `versions()`,
+      `conflicts()` and `versionsByChangeset()` results. Deletion is reported by
+      naming events.
+    - The exported `FileHead` type and `isFileHead()` guard. Use `FileVersion` and
+      `instanceof FileVersion`.
+
+    CLI removals:
+    - The `peerbit-fs trust-legacy-replica` command.
+    - `filesystem.bootstrap.legacyPromotionEligible` in `status --json`, and the
+      `legacy promotion eligible:` line in text `status`.
+    - The `deleted` key in version objects printed by `conflicts --json`,
+      `status --include-conflicts --json` and `resolve-conflict --json`.
+    - The mount write-readiness timeout message no longer suggests
+      `trust-legacy-replica`.
+
+    Local readiness sidecar (`<directory>/shared-fs-bootstrap/<address>.json`):
+    - New writes contain only `writeReady`, `writeReadySource` and `bootstrap`.
+      The `openedBefore` and `legacyUnproven` keys are no longer written.
+    - The reader ignores those keys, so an existing sidecar that still contains
+      `openedBefore` or `legacyUnproven: false` stays valid, and its readiness
+      proof is kept.
+    - A sidecar whose `writeReadySource` is `"legacy-operator-assertion"` is now
+      malformed. The store fails closed: it reopens gated (not write-ready, guard
+      disarmed) until remote-settled readiness, with no data loss. Missing,
+      unreadable and malformed sidecars are still fail-closed.
+    - Downgrading to an older release after this change makes warm reopens gated,
+      because older readers require `openedBefore`. That costs availability, not
+      safety.
+
+    Write-readiness donor check: a transport without the DirectStream route API
+    (`routes.isReachable` and `routes.getBestRouteHint`) and the live `peers` map
+    can no longer prove a donor, so readiness fails closed. The pinned Peerbit
+    transports provide both, so current behavior is unchanged.
+
+    There is no wire-format change.
+
+- 673320d: Retire the in-process `fuse-native` mount fallback. The Go cgofuse adapter
+  (`peerbit-shared-fs-native`, installed with `peerbit-fs install-adapter`) is
+  now the only native mount path on Linux, macOS and Windows. `fuse-native` was
+  never a declared dependency, and its callbacks implemented none of chmod,
+  chown, utimens, symlink or readlink. shared-fs has no production users, so no
+  replacement is kept.
+
+    Removed from `@peerbit/shared-fs`:
+    - `mountNativeSharedFs` and its `NativeMountOptions` and `NativeMountSession`
+      types.
+    - `sharedFsBackendErrno`, the errno mapping only that adapter used. The Go
+      adapter maps error codes itself.
+    - The `"fuse-native"` member of `SharedFsMountProfileSource`.
+
+    Changed:
+    - `NativeMountSupport.adapter` is `"fuse"` instead of `"fuse-native"` on Linux
+      and macOS. `getNativeMountSupport` no longer probes for `fuse-native` and
+      lists the `peerbit-shared-fs-native adapter binary` as missing when no
+      adapter is found, as it already did on Windows.
+    - `peerbit-fs mount` with no adapter now fails before opening Peerbit with an
+      error that says to run `peerbit-fs install-adapter` (or to pass
+      `--native-adapter` or set `PEERBIT_SHARED_FS_NATIVE_ADAPTER`) and lists the
+      native mount requirements, instead of trying `fuse-native`.
+      `peerbit-fs status` no longer lists `fuse-native` as an alternative, and
+      `nativeMount.adapter` in `status --json` follows
+      `NativeMountSupport.adapter`.
+
+- ab2f1b9: Retire the shared-fs native IPC protocol v1 and pin the managed native adapter
+  to the CLI's own release. This is a deliberate wire break between releases:
+  old adapters and CLIs are refused, not supported.
+
+    Wire break (IPC v1 retired):
+    - The Node IPC server (`createSharedFsIpcServer`) speaks only negotiated binary
+      IPC v2. It no longer serves base64 JSONL v1: an un-negotiated first operation
+      is answered with an `EPROTONOSUPPORT` error that says to run
+      `peerbit-fs install-adapter --force`, and the connection is closed without
+      dispatching it. An offer is only accepted if it includes version 2, and v2 is
+      always selected. Native adapters from 0.13.15 or earlier (v1 only) no longer
+      work with this CLI: used through `--native-adapter`,
+      `PEERBIT_SHARED_FS_NATIVE_ADAPTER`, or `PATH`, they still mount, but every
+      operation fails.
+    - The Go native adapter offers only `[2]` and fails closed when a server rejects
+      or closes the negotiation. It no longer falls back to v1 or starts in v1
+      under a tiny request limit, so it cannot serve a CLI from 0.13.15 or earlier.
+      It now negotiates before mounting, so an incompatible server fails the mount
+      at startup instead of returning EIO on every operation.
+    - The IPC handshake line has its own fixed 64 KiB bound, independent of the
+      server's `maxRequestFrameBytes`. The `ipc.service` profile records always
+      report `protocol: "v2"`. The golden negotiation vector now offers `[2]`.
+
+    Public API break: the v1-only `createSharedFsIpcClient` export is removed from
+    `@peerbit/shared-fs`. It had no non-test caller; embedders that drove a mount
+    backend over IPC need a v2 client (see `IPC_PROTOCOL_V2.md`).
+    `getNativeMountSupport` accepts `{ externalAdapter }` so a caller that already
+    resolved an adapter does not have to publish it through the environment.
+
+    Adapter version pin:
+    - `peerbit-fs install-adapter` (and the global-install postinstall, which runs
+      it with `--if-needed`) installs into one directory per release,
+      `~/.peerbit/shared-fs/bin/shared-fs-native-v<version>/`, and writes
+      `peerbit-shared-fs-native.install.json` next to the binary, recording its
+      release tag, target, and SHA-256. CLIs of different versions (for example
+      under two Node versions) therefore keep their own adapters side by side.
+      Adapters that CLI 0.13.18 or earlier installed directly in
+      `~/.peerbit/shared-fs/bin` are no longer used and can be deleted. An
+      existing adapter in the release directory is kept only when its record names
+      that release and this platform and still matches the binary; a stale,
+      modified, or unrecorded adapter is replaced. `--force` always reinstalls. A
+      failed download or replacement leaves the previous adapter and its record in
+      place.
+    - Downloads give up after 30 seconds without data, and the postinstall
+      auto-install gives up after two minutes, so a stalled connection no longer
+      hangs `npm install -g`.
+    - `peerbit-fs mount` refuses the managed adapter before opening Peerbit when
+      its record is missing, names another release or platform, or no longer
+      matches the binary. The error names the installed and required versions and
+      says to run `peerbit-fs install-adapter --force`. `peerbit-fs status`
+      resolves the adapter the same way and reports the mount as unavailable,
+      with that reason under `missing`, when mount would refuse it.
+    - An adapter chosen with `--native-adapter` or
+      `PEERBIT_SHARED_FS_NATIVE_ADAPTER`, or found on `PATH`, is not checked and is
+      the user's responsibility: an adapter from 0.13.15 or earlier (IPC v1 only)
+      still mounts, but every operation fails.
+    - The undocumented `PEERBIT_SHARED_FS_NATIVE_VERSION` environment variable and
+      the standalone installer's `--version` flag are removed.
+      `install-adapter --adapter-version` remains for release validation and now
+      warns that mount uses only the CLI's own adapter release.
+
+    Release note: this CLI requires the native adapter built from this change. The
+    release script dispatches the `shared-fs-native-v<cli version>` adapter release
+    when the CLI version is unpublished. Users upgrading from an earlier CLI must
+    run `peerbit-fs install-adapter` if the postinstall did not already install
+    this release's adapter.
+
+### Patch Changes
+
+- c1e3e70: Break the library `writeFile` behind each profiled mount commit into
+  sequential sub-phases. With `--mount-profile` (or a backend `profile` sink),
+  `node-daemon.ndjson` now also holds `writeFile.*` records: `prepare`,
+  `resolvePath`, `readHeads`, `hash`, `loadBase`, `chunk`, `touchChunks` (W1
+  dedup probes, witness queries and chunk puts, with counts, bytes and dedup
+  skips), `guard`, `versionPut`, `cacheApply`, `verifyChunks` (W2),
+  `resolveParent`, `namingPut` and `result`. They carry a `writeId` that joins
+  them to their `mount.target.writeFile` record, lie inside it, and are
+  contiguous, so they partition the call instead of adding to it. `versionPut`,
+  `namingPut` and each chunk put time one whole `Documents.put`; signing, log
+  append and indexing inside it are not separated. The summary script adds a
+  "writeFile breakdown" table (per sub-phase p50/p95 per write and share of
+  `writeFile` time).
+
+    The request is a live function in the write options, so the backend passes it
+    only to `SharedFsHandle` and the artifact-ignore wrapper while they keep their
+    default `writeFile` delegation (a private opt-in). Every other target,
+    including a third-party custom mount target, sees exactly the unprofiled
+    options. The summary counts sub-phase
+    gaps and incomplete chains (for example records dropped by a full profile
+    writer) and keeps those writes out of its tables. Profiling stays off by
+    default: an unprofiled write only checks that the internal option is absent and
+    reads no clock.
+
+- d2f9e69: Remove the mount backend's fallback path for custom mount targets that lack
+  the verified read, guarded namespace and self-hashing write capabilities, and
+  the `writeFileInput` commit-copy option. This is a breaking change made before
+  1.0; shared-fs has no production users, so no migration path is kept. Wire and
+  on-disk formats are unchanged. The CLI already used the remaining path.
+
+    `SharedFsMountBackendTarget` changes:
+    - `readVersionForMount`, `mutateNamespaceForMount` and `stat` are required.
+      For files, `stat` must include `versionId`, `contentHash`, `size` and
+      `headVersionIds` matching `readVersionForMount`.
+      Mounts read file contents only through `readVersionForMount` (including
+      `.peerbit-conflicts` version files), remove and rename only through
+      `mutateNamespaceForMount`, and look paths up only through `stat`.
+    - `readFile`, `readVersion`, `rm` and `rename` are no longer part of the
+      target type; mounts never call them. A `SharedFsHandle` or
+      `SharedFileSystem` subclass (or any delegating wrapper) that customizes
+      read, remove or rename policy must apply it in `readVersionForMount` and
+      `mutateNamespaceForMount` at the layer it overrides, as `IgnoreAwareFs`
+      does. Overriding `rm`, `rename` or `readVersion` no longer switches a mount
+      to a slower path that honours the override.
+    - `writeFile` must resolve to `{ id, nodeId, contentHash, mountWriteOutcome }`.
+      A `void` result or a missing or unknown `mountWriteOutcome` now fails the
+      commit with `EIO`. Mounts always pass `noOpIfHeadVersionIds`, and the target
+      must hash its input itself; the mount no longer hashes commits or opened
+      bytes locally.
+    - `writeFile` may retain its input `Uint8Array` indefinitely but must never
+      mutate it or transfer/detach its `ArrayBuffer`. Mounts now always lend their
+      exact-size handle buffer instead of copying it (an oversized buffer is still
+      copied to its logical length).
+    - A lost `O_CREAT|O_EXCL` commit race is always reported as `EEXIST` (custom
+      targets previously got `EAGAIN`).
+
+    Removed exports and methods:
+    - `SHARED_FS_MOUNT_READ_SEMANTICS`, `SHARED_FS_MOUNT_WRITE_SEMANTICS` and
+      `SHARED_FS_MOUNT_NAMESPACE_SEMANTICS`, and the `SharedFsMountReadSemantics`,
+      `SharedFsMountWriteSemantics` and `SharedFsMountNamespaceSemantics` types.
+      `SharedFsMountWriteOutcome` stays.
+    - `SharedFileSystem.mountNamespaceSemantics()`,
+      `SharedFsHandle.mountReadSemantics()`, `mountWriteSemantics()` and
+      `mountNamespaceSemantics()`, and `IgnoreAwareFs.mountNamespaceSemantics()`.
+    - The optional `mountReadSemantics`, `mountWriteSemantics` and
+      `mountNamespaceSemantics` members of `SharedFsMountBackendTarget`.
+    - `SharedFsMountBackendOptions.writeFileInput`.
+
+- Updated dependencies [90768cc]
+- Updated dependencies [2612110]
+- Updated dependencies [7c74a2c]
+- Updated dependencies [c1e3e70]
+- Updated dependencies [d2f9e69]
+- Updated dependencies [2126c15]
+- Updated dependencies [673320d]
+- Updated dependencies [ab2f1b9]
+    - @peerbit/shared-fs@0.14.0
+
 ## 0.13.18
 
 ### Patch Changes
