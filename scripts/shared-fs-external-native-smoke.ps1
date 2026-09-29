@@ -217,7 +217,13 @@ try {
     }
     $BenchmarkSamples = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES } else { "30" }
     $BenchmarkWarmups = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS } else { "3" }
-    $BenchmarkTimeoutMs = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS } else { "600000" }
+    # Opt-in developer-machine workload (git clone/status, editor save, JSONL
+    # appends, SQLite) on both targets. It needs a longer default deadline.
+    $DevWorkload = $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD
+    if ($DevWorkload -and $DevWorkload -ne "1") {
+      throw "PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD must be 1 or unset"
+    }
+    $BenchmarkTimeoutMs = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS) { $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS } elseif ($DevWorkload -eq "1") { "1800000" } else { "600000" }
     $BenchmarkCommonArgs = @(
       "--samples",
       $BenchmarkSamples,
@@ -240,6 +246,10 @@ try {
     )
     if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES) {
       $BenchmarkCommonArgs += @("--overwrite-base-bytes", $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES)
+    }
+    # Without the variable the benchmark argv is unchanged.
+    if ($DevWorkload -eq "1") {
+      $BenchmarkCommonArgs += @("--dev-workload")
     }
   }
 

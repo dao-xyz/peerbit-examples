@@ -182,10 +182,11 @@ seconds; it starts before provenance hashing and includes owned-directory
 cleanup, report publication, and stdout flushing. A syscall that stalls until
 that deadline causes exit status 124, and cleanup is only best-effort. Reports
 are written through an adjacent temporary file and atomically renamed. The
-harness hashes itself, the lockfile, and each repeated `--implementation-input`
-file or directory before and after the run. Directory inputs are traversed
-recursively while `.git` and `node_modules` are excluded, allowing callers to
-fingerprint built runtime trees without hashing dependency stores.
+harness hashes itself, its developer-workload module, the lockfile, and each
+repeated `--implementation-input` file or directory before and after the run.
+Directory inputs are traversed recursively while `.git` and `node_modules` are
+excluded, allowing callers to fingerprint built runtime trees without hashing
+dependency stores.
 
 The real-mount wrappers also record the adapter build tags, exact `go version`
 output, and the detected fuse3, macFUSE, or WinFsp runtime version as bounded
@@ -217,11 +218,30 @@ performance threshold. The Linux native smoke workflow can collect its FUSE
 report and same-runner control directly; the native-OS workflow can collect
 paired macFUSE and WinFsp reports from its real provisioned mounts.
 
-The mounted-benchmark report (schema version 3) also records each sample's
+The mounted-benchmark report (schema version 4) also records each sample's
 `startedAtUnixNs`/`endedAtUnixNs` window and keeps warmups in a separate
 `warmupSamples` list flagged `warmup: true`, so mount profile records can be
 attributed to exact samples. `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES`
 selects the in-place overwrite base size in the smoke wrappers.
+
+`--dev-workload` (`PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD=1` in the
+smoke wrappers, or the Linux smoke workflow's `dev_workload` input) adds
+report-only developer-machine scenarios to both reports; the wrappers then
+default to a 30-minute workload timeout. Nothing is downloaded.
+
+- `edit-save-20480`: an editor-style atomic save (temporary file, `fsync`,
+  rename over the original).
+- `jsonl-append-1024-at-4194304` and `-at-33554432`: `fsync`'d 1 KiB appends
+  to 4 MiB and 32 MiB logs.
+- `sqlite-insert-txn-in-<overwrite base>`: one-row `node:sqlite` transactions
+  in a database of the overwrite base size.
+- `git-clone-checkout-2000` and `git-status-2000`: `git clone --no-local` of a
+  pinned synthetic 2,000-file tree from a local `git fast-import` origin, then
+  `git status --porcelain` after ten untimed edits, once the index is settled.
+
+Git scenarios take at most three samples after one warmup. A failed operation
+is listed in `devWorkload.notMeasured` with its reason instead of failing the
+run.
 
 ### Live callback and IPC profiling
 

@@ -102,7 +102,7 @@ jobs:
               run: pnpm --filter @peerbit/shared-fs-cli exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
 
             - name: Test mounted-path benchmark harness
-              run: node --test scripts/shared-fs-native-mount-benchmark.test.mjs
+              run: node --test scripts/shared-fs-native-mount-benchmark.test.mjs scripts/shared-fs-native-mount-benchmark-dev-workload.test.mjs
 
             - name: Test Node-Go IPC benchmark harness
               run: node --test scripts/shared-fs-node-go-ipc-benchmark.test.mjs

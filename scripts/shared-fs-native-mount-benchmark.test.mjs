@@ -234,7 +234,7 @@ test("native smoke wrappers pass bounded benchmark provenance and sample default
     assert.match(powershell, /MOUNT_BENCH_WARMUPS[\s\S]*"3"/u);
 });
 
-test("native smoke wrappers plumb opt-in mount profiling and the overwrite base", async () => {
+test("native smoke wrappers plumb opt-in mount profiling, the overwrite base and the developer workload", async () => {
     // Windows checkouts may use CRLF (core.autocrlf); match on LF text.
     const readLf = async (relative) =>
         (await readFile(new URL(relative, import.meta.url), "utf8")).replace(
@@ -256,12 +256,22 @@ test("native smoke wrappers plumb opt-in mount profiling and the overwrite base"
             /PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES[\s\S]*--overwrite-base-bytes/u
         );
     }
-    // Profiling stays opt-in: without the variable the mount argv is unchanged.
+    // Profiling and the developer workload stay opt-in: without the variable
+    // the argv is unchanged.
     assert.match(
         posix,
         /if \[ -n "\$\{PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-\}" \]; then\n\s+mount_args\+=/u
     );
+    assert.match(
+        posix,
+        /if \[ "\$\{PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD:-\}" = "1" \]; then\n\s+benchmark_common_args\+=\(--dev-workload\)/u
+    );
+    assert.match(
+        powershell,
+        /\$DevWorkload = \$env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD\n[\s\S]*if \(\$DevWorkload -eq "1"\) \{\n\s+\$BenchmarkCommonArgs \+= @\("--dev-workload"\)/u
+    );
     assert.match(workflow, /mount_profile:[\s\S]*default: false/u);
+    assert.match(workflow, /dev_workload:[\s\S]*default: false/u);
     assert.match(
         workflow,
         /overwrite_base_bytes:[\s\S]*default: "4194304"[\s\S]*- "4194304"\n\s+- "33554432"/u
@@ -391,8 +401,15 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             expectedNativeMountBenchmarkScenarioNames(options)
         );
         assert.equal(report.scope.performanceGate, false);
-        assert.equal(report.schemaVersion, 3);
+        assert.equal(report.schemaVersion, 4);
         assert.equal(report.run.warmupsPerScenario, 1);
+        // Default runs are unchanged: the developer workload is opt-in.
+        assert.equal(report.run.devWorkload, false);
+        assert.equal(report.devWorkload, null);
+        assert.doesNotMatch(
+            formatNativeMountBenchmarkSummary(report),
+            /Developer workload/u
+        );
         assert.equal(report.target.kind, "shared-fs-mount");
         assert.equal(
             report.scope.cacheSemantics.mode,
@@ -407,7 +424,9 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             },
             { key: "mount.runtime", value: "test-fuse 1.2.3" },
         ]);
-        assert.equal(report.inputs.files.length, 5);
+        // The harness, its developer-workload module, the lockfile, two
+        // package manifests and the built implementation input.
+        assert.equal(report.inputs.files.length, 6);
         assert.deepEqual(report.inputs.roots, [...report.inputs.roots].sort());
         assert.match(report.inputs.combinedSha256, /^[0-9a-f]{64}$/u);
         assert.match(
@@ -477,7 +496,7 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             /incomplete sample set/u
         );
         const oldSchema = structuredClone(report);
-        oldSchema.schemaVersion = 2;
+        oldSchema.schemaVersion = 3;
         assert.throws(
             () => validateNativeMountBenchmarkReport(oldSchema),
             /envelope is invalid/u

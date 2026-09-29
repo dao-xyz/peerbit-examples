@@ -247,10 +247,21 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ] ||
     echo "Mounted and control benchmark outputs must be different files." >&2
     exit 1
   fi
+  # Opt-in developer-machine workload (git clone/status, editor save, JSONL
+  # appends, SQLite) on both targets. It needs a longer default deadline.
+  benchmark_timeout_ms=600000
+  case "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD:-}" in
+    "") ;;
+    1) benchmark_timeout_ms=1800000 ;;
+    *)
+      echo "PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD must be 1 or unset." >&2
+      exit 1
+      ;;
+  esac
   benchmark_common_args=(
     --samples "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_SAMPLES:-30}"
     --warmups "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS:-3}"
-    --timeout-ms "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS:-600000}"
+    --timeout-ms "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS:-$benchmark_timeout_ms}"
     --implementation-detail "adapter.buildTags=$tags"
     --implementation-detail "adapter.goVersion=$go_version"
     --implementation-detail "mount.runtime=$mount_runtime"
@@ -262,6 +273,10 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ] ||
     benchmark_common_args+=(
       --overwrite-base-bytes "$PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES"
     )
+  fi
+  # Without the variable the benchmark argv is unchanged.
+  if [ "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD:-}" = "1" ]; then
+    benchmark_common_args+=(--dev-workload)
   fi
 fi
 
