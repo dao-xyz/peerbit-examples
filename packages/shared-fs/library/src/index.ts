@@ -3319,6 +3319,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         };
         this.entries.events.addEventListener("change", this.changeListener);
+        this.askNeighboursForLogSubscribers(
+            this.maintenanceAbortController!.signal
+        );
         this.bootstrapDecision = Promise.resolve();
         if (bootstrapCandidate) {
             const bootstrapAbortController = new AbortController();
@@ -9205,6 +9208,75 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Ask each direct pubsub neighbour whether it subscribes to the log
+     * topic: every neighbour writable at open, then each new neighbour once
+     * its outbound stream is ready.
+     *
+     * Otherwise a joiner learns its peers from a single Subscribe
+     * announcement, routed through the topic's shard overlay. If that
+     * announcement is lost, the joiner can sit next to a replicator and
+     * never see a subscriber. CI saw this as "Path does not exist" on a
+     * cold join for the whole 90 s budget. A direct GetSubscribers does not
+     * use the shard root. The neighbour answers with a direct Subscribe, and
+     * shared-log's capability exchange then makes the neighbour ask back.
+     * Repeating the request is harmless: a Subscribe from the same session
+     * replaces nothing.
+     *
+     * Only direct neighbours are asked; a routed target would fall back to
+     * the same overlay. New neighbours are found through "stream:outbound",
+     * the event DirectStream.waitFor uses for neighbours: pubsub's
+     * "peer:reachable" is skipped when another service on the node added
+     * the shared route first. Drop this once pubsub recovers a lost
+     * announcement by itself (upstream ask, dao-xyz/peerbit).
+     */
+    private askNeighboursForLogSubscribers(signal: AbortSignal) {
+        const pubsub = this.node.services.pubsub;
+        const streams = pubsub as unknown as {
+            peers?: Map<
+                string,
+                { publicKey?: PublicSignKey; isWritable?: boolean }
+            >;
+            addEventListener?: (
+                type: "stream:outbound",
+                listener: () => void,
+                options: { signal: AbortSignal }
+            ) => unknown;
+        };
+        const peers = streams.peers;
+        if (
+            typeof peers?.values !== "function" ||
+            typeof streams.addEventListener !== "function"
+        ) {
+            return;
+        }
+        const topic = this.entries.log.topic;
+        // Keyed by stream object, so a reconnected neighbour is asked again.
+        const asked = new WeakSet<object>();
+        const askWritableNeighbours = () => {
+            if (signal.aborted) {
+                return;
+            }
+            for (const stream of [...peers.values()]) {
+                const key = stream.publicKey;
+                if (!key || stream.isWritable === false || asked.has(stream)) {
+                    continue;
+                }
+                asked.add(stream);
+                void Promise.resolve()
+                    .then(() => pubsub.requestSubscribers(topic, key))
+                    .catch(() => {});
+            }
+        };
+        streams.addEventListener.call(
+            pubsub,
+            "stream:outbound",
+            askWritableNeighbours,
+            { signal }
+        );
+        askWritableNeighbours();
     }
 
     private async hasConnectedRemoteReplicator() {
