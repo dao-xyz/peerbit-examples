@@ -41,10 +41,7 @@ byte verification are excluded.
 available on the host, and any missing pieces before optionally opening an
 address. Address status also reports write readiness and its durable source.
 Add `--json` for one JSON document containing `nativeMount` and either a
-`filesystem` object or `null`. `nativeMount.metadata` reports the synthetic
-fixed file/directory modes, non-persisted creation mode, synthetic ownership,
-existence-only OS access checks, logical timestamps, and unsupported
-chmod/chown/utimens mutations. Routine status does not scan retained conflict
+`filesystem` object or `null`. Routine status does not scan retained conflict
 metadata; add `--include-conflicts` to include the current local content and
 naming records plus separate `contentCount` and `namingCount` fields. Those
 whole-store scans are deliberately opt-in because they can dominate status
@@ -196,14 +193,13 @@ Native runtime prerequisites are platform-specific:
   macFUSE in System Settings and reboot if macOS requires it.
 - Windows: WinFsp runtime must be installed before mounting.
 
-Native metadata is intentionally limited while the shared model persists only
-names and file content. Linux/macOS stat reports synthetic `0755` directories
-and `0644` files; Windows normalizes them to `0777` and `0666`. Creation modes
-are not persisted, ownership is adapter-synthetic, and atime mirrors the
-logical/synthetic mtime. chmod, chown, and explicit timestamp updates are
-unsupported and fail instead of claiming success. These fields are not an
-authorization boundary. The external adapter checks only path existence in its
-OS access callback, so `access(2)` and `test -w` are advisory. Use the Shared FS
+Mounts keep each file's exec bit and mtime and support symlinks: `chmod`
+keeps only the exec bit, `touch` sets mtime, and `ln -s` creates a link.
+`chown` succeeds without storing an owner; files report the mounting user.
+Windows neither shows nor sets the exec bit and is not expected to create
+links, but reads links made on Linux or macOS. These fields are not an
+authorization boundary. The external adapter's OS access callback checks only
+existence and the exec bit, so `test -w` is advisory. Use the Shared FS
 trusted-writer model for write authorization.
 
 Path names have no portable cross-platform policy yet. The library compares

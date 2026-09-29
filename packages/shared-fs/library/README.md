@@ -779,19 +779,18 @@ other conflict heads remain preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
-Native mounts report a file's stored mtime but do not yet expose its exec bit
-or symlinks (see [File metadata and symlinks](#file-metadata-and-symlinks)): a
-symlink appears as a regular file holding its target, and writing it through a
-mount fails with `EINVAL`. Owner is not stored. Native stat results use
-synthetic fixed modes (`0755` directories and `0644` files on Linux/macOS,
-normalized to `0777`/`0666` on Windows), synthetic ownership, logical/synthetic
-directory mtime and ctime, and atime mirrored from mtime. Creation modes are
-not preserved. chmod, chown, and explicit timestamp changes are unsupported and fail rather than falsely claiming persistence. These
-fields are not an authorization boundary; use Shared FS writer authorization.
-The external adapter's OS access callback checks path existence but not its
-requested mask, so `access(2)` and `test -w` are advisory.
-The machine-readable contract is available at
-`peerbit-fs status --json` under `nativeMount.metadata`.
+Native mounts expose the exec bit, mtime and symlinks (see
+[File metadata and symlinks](#file-metadata-and-symlinks)): `chmod` keeps only
+the exec bit, `utimens` sets mtime (atime and ctime report it), an `O_CREAT`
+mode keeps its exec bit, and `symlink` and `readlink` create and read links.
+`chown` succeeds without storing an owner; files report the mounting user.
+Directories report `0755` and their creation time. Conflict copies, links
+included, are read-only regular `0644` files. Modes and owners are not an
+authorization boundary; use Shared FS writer authorization. The external
+adapter's OS access callback checks existence and the exec bit but not read or
+write masks, so `test -w` is advisory. Windows neither shows nor sets the exec
+bit and is not expected to create links; `packages/shared-fs/native/README.md`
+lists the per-platform limits.
 
 Open access modes are enforced per handle: wrong-direction reads, writes, and
 handle truncates return `EBADF`; missing writable opens require `O_CREAT`; and

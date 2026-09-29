@@ -259,28 +259,56 @@ profiling off the only added work is a nil check.
 Kernel time before callback entry, cached operations that never enter
 userspace, and time after callback return are not observable here.
 
-## POSIX metadata limits
+## POSIX metadata
 
-The shared model currently persists names and file content, not POSIX mode,
-ownership, or explicitly assigned timestamps. Native stat results therefore
-use synthetic fixed modes: directories are `0755` and files are `0644` on
-Linux and macOS; WinFsp normalizes those to `0777` and `0666`. Modes passed to
-create, mknod, and mkdir are not persisted.
+Shared FS stores a git tree mode (`0644`, `0755` or symlink) and a millisecond
+mtime on every file version. The adapter maps the POSIX calls onto them:
 
-The external adapter rejects chmod, chown, and explicit timestamp updates with
-`ENOSYS` instead of falsely reporting that unrepresented state was saved.
-Ownership is adapter-synthetic and is not a replicated permission boundary.
-The external adapter's access callback checks path existence but does not
-enforce its requested read/write/execute mask, so `access(2)` and tools such as
-`test -w` are advisory. Mount mode and owner fields are not an authorization
-boundary; use Shared FS trusted-writer authorization for write access.
+- `chmod` keeps only the exec bit: any x bit gives `0755`, otherwise `0644`.
+  On a directory, `/` or a symlink it succeeds and stores nothing. `chown`
+  always succeeds and stores nothing; files report the mounting user as owner
+  (on Windows through `-o uid=-1,gid=-1`), so git does not report dubious
+  ownership.
+- The create mode of `open(O_CREAT)` and `mknod` keeps its exec bit.
+- `utimens` sets mtime, floored to the millisecond, and ignores atime. atime
+  and ctime report mtime. `UTIME_NOW` takes the adapter's clock, an omitted
+  mtime (`touch -a`) changes nothing, and a time before 1970 or above 2^53-1 ms
+  fails with `EINVAL`. A write sets mtime to its own time, even when it writes
+  identical bytes. Directories report their creation time, which does not move
+  when children change, so keep git's `core.untrackedCache` off (the default
+  unless `feature.manyFiles` is set).
+- `symlink` stores the target as given, never following or resolving it:
+  1-1023 bytes of UTF-8 without NUL, otherwise `EINVAL`. 1023 bytes is the
+  longest target every host's readlink buffer returns untruncated, so Linux
+  targets of 1024-4095 bytes are refused. `readlink` fails with `EIO` while the
+  link's version is not stored locally. Hard links stay `ENOSYS`.
+- `access(2)` checks that the path exists and, off Windows, that `X_OK` on a
+  regular file finds an exec bit, so `test -x` agrees with `execve`. It does
+  not check read or write masks. Modes and owners are not an authorization
+  boundary; use Shared FS trusted-writer authorization for write access.
 
-Reported mtime/ctime values are logical or synthetic filesystem times, not
-user-settable POSIX metadata. File mtime normally follows the visible content
-version, while directory mtime follows its naming event rather than child
-changes. Reported atime mirrors mtime and is not persisted separately.
-`peerbit-fs status --json` exposes these limits under
-`nativeMount.metadata`.
+Per platform:
+
+- Linux (FUSE 3) supports all of it. The mount runs without
+  `default_permissions`, so the stored exec bit is what lets the kernel run
+  scripts and hooks. cgofuse does not cache symlinks, so each traversal of a
+  link costs one `readlink` round trip. Inode numbers are libfuse node ids that
+  change after the kernel forgets an inode; git's default `core.checkStat`
+  compares them, so `git status` can re-hash such files (correct, but slower).
+- macOS (macFUSE) supports the same operations; `chflags` and creation-time
+  updates succeed without storing anything. FUSE-T is untested.
+- Windows (WinFsp) shows files as `0666` and never sets the exec bit: `chmod`
+  (an ACL edit) and the create mode are ignored there. Editing a POSIX peer's
+  executable in place keeps its exec bit; an editor that saves through a
+  temporary file and a rename drops it. mtime round-trips through
+  `SetLastWriteTime`. Symlinks created by POSIX peers are readable with
+  Developer Mode or `SeCreateSymbolicLinkPrivilege`; absolute POSIX targets
+  fail with access denied, and directory links are best effort. Creating a
+  symlink from Windows is expected to fail: `CreateSymbolicLinkW` creates a
+  file and turns it into a link while its handle is still open, which the
+  mount rejects as an overlapping namespace change. The Windows smoke records
+  the outcome without gating on it. git for Windows defaults to
+  `core.symlinks=false`.
 
 ## Why Go?
 

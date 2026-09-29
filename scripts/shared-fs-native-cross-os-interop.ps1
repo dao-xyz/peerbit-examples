@@ -306,6 +306,14 @@ try {
     $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine.txt"
     $ExpectedContents = "hello from $ExpectedMachine via native mount"
     Wait-FileContents -Kind "fileVisible" -Machine $ExpectedMachine -Path $ExpectedFile -Contents $ExpectedContents
+    # Non-gating: record how WinFsp reads the POSIX peer's symlink.
+    $LinkPath = Join-Path $MountRoot "$ExpectedMachine-tool-link"
+    try {
+      $LinkOutcome = "target $((Get-Item -LiteralPath $LinkPath).Target), content $([System.IO.File]::ReadAllText($LinkPath).Trim())"
+    } catch {
+      $LinkOutcome = "failed: $($_.Exception.Message)"
+    }
+    Write-Host "POSIX symlink probe ($ExpectedMachine): $LinkOutcome"
   }
 
   $AckWriteStartMs = Get-NowMs

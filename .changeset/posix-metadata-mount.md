@@ -34,6 +34,3 @@ symlinks.
   publishes one version that reuses the stored chunks, with one `modified`
   watch event and one `keepVersions` slot. A flush, fsync or close without a
   write still mints nothing.
-
-Until the native adapter calls the new ops, chmod, utimens and `ln -s`
-through a mount keep failing and symlinks cannot be read there.

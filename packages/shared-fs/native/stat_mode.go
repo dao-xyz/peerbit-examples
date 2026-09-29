@@ -6,6 +6,7 @@ const (
 	statModeTypeMask  = 0o170000
 	statModeDirectory = 0o040000
 	statModeRegular   = 0o100000
+	statModeSymlink   = 0o120000
 )
 
 func nativeStatMode(mode uint32) uint32 {
