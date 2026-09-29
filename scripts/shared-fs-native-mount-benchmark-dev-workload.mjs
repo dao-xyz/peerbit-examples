@@ -33,9 +33,9 @@ const COMMIT_SIGNATURE =
 const COMMIT_MESSAGE = "synthetic-source-tree-v1\n";
 const EDIT_SAVE_BYTES = 20 << 10;
 const JSONL_LINE_BYTES = 1024;
-// Log sizes before the first append: 4 MiB, and 32 MiB plus half a 512 KiB
-// leaf, so the larger log's appends start mid-leaf.
-const JSONL_CHECKPOINT_BYTES = [4 << 20, (32 << 20) + (256 << 10)];
+// Log sizes before the first append: 4 MiB, and 32 MiB + 384 KiB, so the
+// larger log's appends start mid-leaf for 512 KiB and 256 KiB leaves alike.
+const JSONL_CHECKPOINT_BYTES = [4 << 20, (32 << 20) + (384 << 10)];
 const SQLITE_PAYLOAD_BYTES = 256;
 const STATUS_MODIFIED_FILES = 10;
 const CHECKOUT_SPOT_CHECKS = 16;

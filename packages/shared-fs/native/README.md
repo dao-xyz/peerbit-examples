@@ -236,8 +236,9 @@ default to a 30-minute workload timeout. Nothing is downloaded.
 
 - `edit-save-20480`: an editor-style atomic save (temporary file, `fsync`,
   rename over the original).
-- `jsonl-append-1024-at-4194304` and `-at-33816576`: `fsync`'d 1 KiB appends
-  to a 4 MiB log and to a 32 MiB + 256 KiB log, whose appends start mid-leaf.
+- `jsonl-append-1024-at-4194304` and `-at-33947648`: `fsync`'d 1 KiB appends
+  to a 4 MiB log and to a 32 MiB + 384 KiB log, whose appends start mid-leaf
+  for 512 KiB and 256 KiB leaves alike.
 - `sqlite-insert-txn-in-<largest overwrite base>`: one-row `node:sqlite`
   transactions in a database of the largest overwrite base size.
 - `git-clone-checkout-2000` and `git-status-2000`: `git clone --no-local` of a

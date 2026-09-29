@@ -39,7 +39,7 @@ const skipRun =
 const DEV_NAMES = [
     "edit-save-20480",
     "jsonl-append-1024-at-4194304",
-    "jsonl-append-1024-at-33816576",
+    "jsonl-append-1024-at-33947648",
     "sqlite-insert-txn-in-65536",
     "git-clone-checkout-2000",
     "git-status-2000",

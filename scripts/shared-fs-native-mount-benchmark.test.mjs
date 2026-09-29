@@ -445,24 +445,39 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         "30000",
     ]);
     try {
-        // Spy on the harness's whole-file reads.
+        // Spy on the harness's whole-file reads and handle opens.
         const readFileSpy = mock.method(fsPromises, "readFile");
+        const openSpy = mock.method(fsPromises, "open");
         syncBuiltinESMExports();
         let report;
         try {
             report = await runNativeMountBenchmark(options);
         } finally {
             readFileSpy.mock.restore();
+            openSpy.mock.restore();
             syncBuiltinESMExports();
         }
-        // After each sample an overwrite reads back only the range it wrote;
-        // it reads its whole base once, after the last sample.
-        assert.deepEqual(
-            readFileSpy.mock.calls
+        const overwriteFiles = (calls) =>
+            calls
                 .map(({ arguments: [path] }) => basename(String(path)))
-                .filter((name) => name.startsWith("overwrite-")),
-            ["overwrite-8192.bin", "overwrite-65536.bin"]
+                .filter((name) => name.startsWith("overwrite-"));
+        // After each of the 3 runs an overwrite opens its base to read back
+        // the range it wrote; it reads the whole base once, after the last.
+        assert.deepEqual(
+            overwriteFiles(
+                openSpy.mock.calls.filter(
+                    ({ arguments: [, flags] }) => flags === "r"
+                )
+            ),
+            [
+                ...Array(3).fill("overwrite-8192.bin"),
+                ...Array(3).fill("overwrite-65536.bin"),
+            ]
         );
+        assert.deepEqual(overwriteFiles(readFileSpy.mock.calls), [
+            "overwrite-8192.bin",
+            "overwrite-65536.bin",
+        ]);
         assert.deepEqual(
             report.scenarios.map(({ name }) => name),
             expectedNativeMountBenchmarkScenarioNames(options)
