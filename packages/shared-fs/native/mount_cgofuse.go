@@ -275,9 +275,31 @@ func (fs *peerbitFS) Open(path string, flags int) (code int, handle uint64) {
 	}
 	result, err := fs.client.request("open", path, flags)
 	if err != nil {
-		return errno(err), ^uint64(0)
+		return openErrno(errno(err), runtime.GOOS), ^uint64(0)
 	}
 	return 0, uint64FromResult(result)
+}
+
+// linuxESTALE is ESTALE on Linux; cgofuse defines no constant for it.
+const linuxESTALE = 116
+
+// openErrno answers ESTALE on Linux where the daemon says ENOENT. The kernel
+// sends OPEN only for a name its dentry cache still binds to a file, and names
+// stay cached for up to 0.1 s (linuxKernelCacheOptions), so ENOENT here means
+// another peer removed or renamed the path within that window. An open with
+// O_CREAT but without O_EXCL reaches Open with O_CREAT stripped; ESTALE makes
+// the kernel repeat the open once with a fresh LOOKUP, which then creates the
+// file (or fails with ENOENT when there is no O_CREAT). Only a second removal
+// racing that retry surfaces ESTALE to the caller. Every other callback keeps
+// ENOENT: Getattr also answers LOOKUP, where ENOENT is the negative answer;
+// Create runs only after a negative lookup, so ENOENT there is a missing
+// parent; and for the rest (access, opendir, truncate, unlink, rename, ...)
+// a removed path is exactly what ENOENT reports.
+func openErrno(code int, goos string) int {
+	if goos == "linux" && code == -fuse.ENOENT {
+		return -linuxESTALE
+	}
+	return code
 }
 
 func (fs *peerbitFS) Mknod(path string, mode uint32, dev uint64) (code int) {
@@ -711,6 +733,9 @@ func errno(err error) int {
 // errnoName names a negative FUSE result portably, so profile consumers can
 // classify failures without platform-specific errno numbers.
 func errnoName(result int) string {
+	if runtime.GOOS == "linux" && -result == linuxESTALE {
+		return "ESTALE"
+	}
 	switch -result {
 	case fuse.ENOENT:
 		return "ENOENT"

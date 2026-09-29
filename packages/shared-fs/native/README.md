@@ -258,7 +258,8 @@ Records use schema `peerbit.shared-fs.mount-profile` version 1 with a decimal
 
 - `native.callback` spans cgofuse callback entry through return. Read and
   write callbacks carry the requested `bytes` and `offset`; failures carry the
-  negative FUSE `errno` and its portable `code` name (for example `ENOENT`).
+  negative FUSE `errno` and its portable `code` name (for example `ENOENT`,
+  or `ESTALE` for a Linux open of a name another peer just removed).
 - `ipc.queue` is the wait for the adapter's serialized request lane.
 - `ipc.roundTrip` covers connection setup when needed (`connected: true`),
   framing, loopback, the Node service, and response decode. Failures carry the
@@ -335,6 +336,59 @@ Per platform:
 On Linux and macOS, inode numbers are libfuse node ids that change after the
 kernel forgets an inode; git's default `core.checkStat` compares them, so
 `git status` can re-hash such files (correct, but slower).
+
+## Kernel caching and other peers' changes
+
+The adapter keeps no cache of its own. What the kernel caches decides how
+soon a mount sees changes made elsewhere: by other peers, and by the daemon's
+own conflict and naming merges. Changes made through the mount itself are
+visible at once on every platform.
+
+Linux (FUSE 3) mounts with
+`-o entry_timeout=0.1,attr_timeout=0,negative_timeout=0`. The kernel remembers
+which file a name leads to for at most 0.1 s and caches neither attributes,
+missing names nor directory listings. So Linux reads file metadata fresh on
+every stat, and names other peers create appear at once.
+
+- Other peers' edits, deletes and renames are visible as soon as they
+  replicate. A two-mount probe measured no added delay.
+- For up to 0.1 s after another peer changes a path's type (file, directory
+  or symlink), calls that use the old cached name can fail. A stat of the name
+  fails once with `EIO` and drops the cached name, so the next call is
+  correct; a two-mount probe measured this for a file replaced by a directory.
+  Opening the name, following it as a link, or walking a path through it (for
+  example `foo/bar` after `foo` became a directory) does not drop the cached
+  name. Those calls can fail with `ENOTDIR`, `EISDIR` or `EINVAL` on every try
+  until the cached name expires. These cases are not measured.
+- Creating a file right after another peer deleted it works. The kernel still
+  has the old name cached and opens it without `O_CREAT`, so the adapter
+  answers that open's `ENOENT` with `ESTALE`, and the kernel retries once with
+  a fresh lookup, which then creates the file. Without `ESTALE`, 10 of 10
+  such creates failed with `ENOENT`, with a 0.1 s name cache as well as a 1 s
+  one. With the shipped settings, 0 of 10 failed. No concurrent appends were
+  lost.
+- Cost: a stat of a two-component path repeated within 0.1 s of the path's
+  last lookup takes one adapter callback instead of three. Once the cached
+  names expire, the next stat again costs one callback per path component plus
+  one. On a GitHub Linux runner, the benchmark's 2,000-file tree ran
+  `git status` in 1.23 s instead of 2.91 s and `git clone` in 27.0 s instead of
+  35.6 s.
+- cgofuse v1.6.0 clears libfuse's parsed configuration when a FUSE 3 mount
+  starts, which silently set every timeout to 0: each `lstat` then cost one
+  round trip per path component plus one. `go.mod` therefore replaces cgofuse
+  with a fork that drops that line, until
+  [winfsp/cgofuse#110](https://github.com/winfsp/cgofuse/pull/110) is released.
+  The fork and the `-o` belong together: the fork alone would give libfuse's
+  defaults of 1 s for names and attributes.
+
+macOS (macFUSE) keeps macFUSE's defaults: names and attributes are cached for
+1 s, and missing names are not cached. Size, mtime and mode of files other
+peers change can be up to 1 s stale, and names they create appear at once. A
+create within 1 s of another peer deleting the same name may fail with
+`ENOENT`; this is not measured.
+
+Windows (WinFsp) keeps WinFsp's own caching. The adapter sets no cache options
+there, and its staleness is not measured.
 
 ## Why Go?
 
