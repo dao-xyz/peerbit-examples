@@ -120,6 +120,9 @@ const run = async (sizeMiB: number): Promise<OpenHashBenchmarkSample> => {
             writeFileCalls++;
             throw new Error("writable-open benchmark must not commit");
         },
+        setMetadata: async () => {
+            throw new Error("writable-open benchmark must not set metadata");
+        },
         mkdir: async () => undefined,
         mutateNamespaceForMount: async () => {
             throw new Error("writable-open benchmark must not mutate");

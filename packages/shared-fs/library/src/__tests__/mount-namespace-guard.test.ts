@@ -45,6 +45,7 @@ const exactTarget = (
     mutateNamespaceForMount: (mutation) => fs.mutateNamespaceForMount(mutation),
     readVersionForMount: (path, id) => fs.readVersionForMount(path, id),
     writeFile: (path, content, options) => fs.writeFile(path, content, options),
+    setMetadata: (path, patch, options) => fs.setMetadata(path, patch, options),
     mkdir: (path) => fs.mkdir(path),
     list: (path) => fs.list(path),
     versions: (path) => fs.versions(path),
