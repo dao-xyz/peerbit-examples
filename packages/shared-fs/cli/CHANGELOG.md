@@ -1,5 +1,169 @@
 # @peerbit/shared-fs-cli
 
+## 0.15.0
+
+### Minor Changes
+
+- a3fd415: Let a peer that opens a never-written filesystem by address become
+  write-ready. Readiness needs positive evidence that log sync started, and
+  until now only replicated namespace metadata (or a snapshot found by
+  discovery) counted. A filesystem nobody has written has no metadata, so a
+  joiner of a freshly created one stayed read-only, and
+  `peerbit-fs mount <address>` failed after 120 s with "did not establish a
+  safe initial write view".
+
+    Two behaviour changes make this a minor release. A program loaded from an
+    address through the Program API is now write-gated like any address open,
+    and a creating open ignores `bootstrap` options, including
+    `mode: "require"`.
+    - Creating a filesystem now publishes a signed zero-document genesis
+      manifest when the creator is a trusted full replica and automatic
+      snapshots are enabled, before the creating open returns. A creating open
+      no longer runs a cold-start bootstrap: a new filesystem has nothing to
+      bootstrap from. `peerbit-fs create` no longer publishes its own; the
+      library does it for every creator, and `create` now fails if the genesis
+      is missing instead of printing an address nobody can join.
+      `snapshot: { disabled: true }` skips it.
+    - Only a program constructed locally creates. A program loaded from an
+      address, whichever API opens it (`SharedFileSystem.open(address, ...)`,
+      `peer.open(address)`), is now an address open like `openSharedFs` with an
+      address: it stays gated until it settles a remote view, and it never
+      publishes a genesis. Before, it was write-ready at once as a "creator".
+    - Until something is written, the author of a genesis puts that manifest
+      again (a linked put) whenever a peer session subscribes to the filesystem,
+      and when it reopens while peers are subscribed. A joiner whose first join
+      ended before it was ready (Ctrl-C, a crash, a mount timeout) already holds
+      the genesis, so without a new entry every retry stayed gated until someone
+      wrote. A session subscribes even when it returns after a crash, for which
+      shared-log may emit no `replicator:join`. Retrying needs the creator
+      online. Each peer session adds one small entry while the filesystem stays
+      never-written. Only the author of a zero-document manifest listens for
+      sessions, and it stops once something is written; closing the filesystem
+      also removes the listener.
+    - The first real snapshot CUTs that chain. A zero-document manifest counts
+      as no snapshot, so the publisher replaces it at its first check after
+      something is written, as it would publish a missing manifest, instead of
+      waiting for 50 changes or an hour. A peer that was offline across that
+      snapshot can still bring older chain entries back as orphan log heads.
+      They cost a little log space and change nothing else; removing them needs
+      upstream log support. The entries are not CUT sooner: a peer that returns
+      holding an entry an earlier CUT removed would put it back for good.
+    - A replicated snapshot manifest now counts as readiness evidence, like
+      replicated metadata. A gated joiner cannot publish one, so it came from
+      another peer.
+    - A zero-document manifest is no longer a bootstrap candidate. It installs
+      nothing, and its overlay retired at once, counting as verified coverage
+      and readiness evidence without covering any log entry, though a genesis
+      can be older than the data. Such joiners now plain-join, where the
+      manifest's replication is the evidence. A join with
+      `bootstrap: { mode: "require" }` of a never-written filesystem fails and
+      says that only zero-document manifests were found. Snapshots with
+      documents are unchanged. This also stops a reopen of an empty filesystem
+      from briefly rejecting `prepareForDisposal` while it "bootstrapped" from
+      its own genesis.
+    - `snapshotWrite` replaces the previous manifest with one put that CUTs its
+      head, instead of a delete followed by a put. A joiner that never held the
+      old manifest could keep the delete entry pending in its sync and never
+      become write-ready. In a local repro this hit about half of the joins to
+      any filesystem whose author had published twice.
+
+    The rest of the gate is unchanged: a settled bootstrap, a connected
+    replicator, an idle synchronizer and the quiet window. A joiner that reaches
+    no replicator stays closed. There is no format change: the genesis is an
+    ordinary bootstrap manifest and each re-publication an ordinary put.
+
+    Known gap: the genesis proves only that sync with some replica started, and
+    a replica vouches from its own view. One that missed writes while it was
+    offline, such as a creator restarting after another machine wrote and left,
+    still vouches that the filesystem is empty, so a joiner that reaches only
+    that replica becomes write-ready on an empty view. Nothing is lost: the
+    missed writes merge when a peer holding them comes back, and clashing paths
+    become conflict copies. This is the same exposure as settling on any donor's
+    partial view. Closing it needs a per-peer sync frontier from Peerbit
+    upstream.
+
+### Patch Changes
+
+- 267dae5: Keep a peer that joins next to a replicator from missing it. A joiner used to
+  learn which peers hold a filesystem from one Subscribe announcement, sent
+  through the topic's shard overlay. When that announcement was lost, the joiner
+  could be connected directly to a replicator and still see no subscriber, so
+  `list` failed with "Path does not exist" until something else repaired
+  discovery. CI hit this once: a cold join of a 500-file tree waited out its
+  90 s budget, and the automatic retry passed in seconds.
+
+    Opening a filesystem now asks each directly connected pubsub neighbour for
+    the log topic's subscribers, and asks each new neighbour once its outbound
+    stream is ready. The request is Peerbit's `requestSubscribers(topic, peer)`,
+    sent over the neighbour's own stream, so it does not depend on the shard
+    overlay. The neighbour answers directly, and shared-log's capability exchange
+    then makes it ask back, so both sides learn each other.
+
+    A local harness drops the joiner's overlay announcement on purpose. With it,
+    17 of 50 joins without this change still saw no subscriber after 30 s.
+    With this change, 0 of 50 stalled, and the joiner could read the tree 0.35 s
+    (median) and at most 2.3 s after open started.
+
+    This covers a subscriber that is a direct neighbour: the test topology and
+    the usual `peerbit-fs mount <address> --peer <multiaddr>` join. A joiner that
+    reaches the replicators only through a relay that does not subscribe is not
+    helped, and the separate ~90 s open stall seen with several concurrent fresh
+    joiners still needs an upstream fix.
+
+- 92a0f01: Make path lookups on Linux mounts cheaper. cgofuse v1.6.0 cleared libfuse's
+  configuration when a FUSE 3 mount started, so the kernel cached nothing and
+  every `lstat` cost one adapter round trip per path component plus one. The
+  native adapter now builds against a cgofuse fork without that line
+  (`github.com/dao-xyz/cgofuse v1.6.0-peerbit.1`, until winfsp/cgofuse#110 is
+  released) and mounts Linux with
+  `-o entry_timeout=0.1,attr_timeout=0,negative_timeout=0`: the kernel caches
+  which file a name leads to for at most 0.1 s, and never caches attributes or
+  missing names. A stat of a two-component path repeated within 0.1 s of the
+  path's last lookup costs one adapter callback instead of three; once the
+  cached names expire, the next stat again costs one per path component plus
+  one. On a GitHub Linux runner, `git status` of a 2,000-file tree fell from
+  2.91 s to 1.23 s and `git clone` from 35.6 s to 27.0 s.
+
+    Other peers' edits, deletes and renames still appear with no added delay.
+    For up to 0.1 s after another peer changes a path's type (file, directory or
+    symlink), calls that use the old cached name can fail. A stat fails once with
+    `EIO` and the next call is correct (measured for a file replaced by a
+    directory). Opening the name, following it as a link or walking a path
+    through it can fail with `ENOTDIR`, `EISDIR` or `EINVAL` on every try until
+    the cached name expires (not measured). On Linux the adapter's `Open` now
+    answers `ESTALE` where the daemon reports a missing path, so the kernel
+    retries with a fresh lookup and creating a file right after another peer
+    deleted it succeeds. macOS and Windows are unchanged.
+
+    The change is in the native adapter, so it reaches users through this CLI
+    version's adapter release (`shared-fs-native-v<version>`), which the release
+    publishes automatically. Installing the CLI fetches it; otherwise run
+    `peerbit-fs install-adapter`.
+
+- 3e95367: Stop sending per-entry stats with directory listings on Linux mounts. The
+  native adapter asked the daemon for every entry's stats and enabled
+  readdir-plus, but the high-level API of libfuse 3.16 and older (the versions
+  the adapter loads) passes those stats to the kernel with node ID 0, which
+  tells the kernel to ignore them: a `stat` of each listed file cost the same
+  adapter callbacks with or without them. libfuse
+  also kept a lookup reference for every listed entry that the kernel never
+  released. Linux now requests compact listings, as macOS already did, and
+  passes the kernel only each entry's type. A 128-file listing is 4.9 KB over
+  IPC instead of 16.4 KB, and its round trip took 0.28 ms instead of 0.50 ms in
+  a local measurement. Entries still report their type (`d_type`), so
+  `readdir` with file types needs no extra `stat`. macOS listings now report
+  each entry's type too, where they reported an unknown type before. Windows
+  is unchanged: WinFsp uses the stats.
+
+    The change is in the native adapter, so it reaches users through this CLI
+    version's adapter release (`shared-fs-native-v<version>`), which the release
+    publishes automatically. Installing the CLI fetches it; otherwise run
+    `peerbit-fs install-adapter`.
+
+- Updated dependencies [267dae5]
+- Updated dependencies [a3fd415]
+    - @peerbit/shared-fs@0.15.0
+
 ## 0.14.0
 
 ### Minor Changes
