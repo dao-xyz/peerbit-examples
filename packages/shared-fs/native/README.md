@@ -80,10 +80,11 @@ consumes them. It reconstructs and validates each complete stat before passing
 it to cgofuse; missing or malformed metadata lets WinFsp use its ordinary
 `getattr` fallback. Linux and macOS request compact entries and pass the host
 only each entry's type, for `d_type`: macOS (FUSE 2) has no readdir-plus, and
-libfuse 3.14's high-level API replays a listing with node ID 0, so the Linux
-kernel would discard the stats. The `includeStats` option is optional per
-request: without it, and for a backend that does not supply stats, the server
-returns compact entries.
+the high-level API of libfuse3.so.3 (3.16 and older), which cgofuse loads,
+replays a listing with node ID 0, so the Linux kernel would discard the stats.
+libfuse3.so.4 (3.17.1+) looks the entries up; revisit this if cgofuse loads
+it. The `includeStats` option is optional per request: without it, and for a
+backend that does not supply stats, the server returns compact entries.
 
 The portable IPC microbenchmark exercises the real Go client without requiring
 FUSE or Peerbit networking:

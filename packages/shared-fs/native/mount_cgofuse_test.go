@@ -202,7 +202,7 @@ func TestReaddirPassesCompleteStatsWithoutGetattrRequests(t *testing.T) {
 	if fillCalls != 5 {
 		t.Fatalf("expected dot entries plus three children, got %d callbacks", fillCalls)
 	}
-	if !requestReaddirStats {
+	if runtime.GOOS != "windows" {
 		// Without readdir-plus the host gets only the type bits, for d_type.
 		for name, mode := range map[string]uint32{"child": statModeDirectory, "note.txt": statModeRegular, "link": statModeSymlink} {
 			if stat := stats[name]; stat == nil || *stat != (fuse.Stat_t{Mode: mode}) {
@@ -284,7 +284,7 @@ func assertReaddirRequest(t *testing.T, request ipcRequest, expectedPath string)
 		t.Fatalf("expected one readdir request, got %q", request.Op)
 	}
 	expectedArgs := 1
-	if requestReaddirStats {
+	if runtime.GOOS == "windows" {
 		expectedArgs = 2
 	}
 	if len(request.Args) != expectedArgs {
@@ -293,7 +293,7 @@ func assertReaddirRequest(t *testing.T, request ipcRequest, expectedPath string)
 	if path, ok := request.Args[0].(string); !ok || path != expectedPath {
 		t.Fatalf("readdir path = %#v, expected %q", request.Args[0], expectedPath)
 	}
-	if !requestReaddirStats {
+	if runtime.GOOS != "windows" {
 		return
 	}
 	options, ok := request.Args[1].(map[string]interface{})

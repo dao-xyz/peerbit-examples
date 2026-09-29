@@ -4,9 +4,10 @@
 
 Stop sending per-entry stats with directory listings on Linux mounts. The
 native adapter asked the daemon for every entry's stats and enabled
-readdir-plus, but libfuse 3.14's high-level API passes those stats to the
-kernel with node ID 0, which tells the kernel to ignore them: a `stat` of each
-listed file cost the same adapter callbacks with or without them. libfuse
+readdir-plus, but the high-level API of libfuse 3.16 and older (the versions
+the adapter loads) passes those stats to the kernel with node ID 0, which
+tells the kernel to ignore them: a `stat` of each listed file cost the same
+adapter callbacks with or without them. libfuse
 also kept a lookup reference for every listed entry that the kernel never
 released. Linux now requests compact listings, as macOS already did, and
 passes the kernel only each entry's type. A 128-file listing is 4.9 KB over

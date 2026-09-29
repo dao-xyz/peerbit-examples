@@ -24,10 +24,12 @@ type peerbitFS struct {
 }
 
 // requestReaddirStats enables readdir-plus and per-entry listing stats only on
-// Windows, where WinFsp consumes them. libfuse 3.14's high-level API hands the
-// Linux kernel those stats with node ID 0, which it ignores, while pinning a
-// lookup per entry; FUSE 2 (macOS) has no readdir-plus. Elsewhere Readdir
-// passes only the type bits, which the host needs for d_type.
+// Windows, where WinFsp consumes them. cgofuse loads libfuse3.so.3 (3.16 and
+// older), whose high-level API hands the Linux kernel those stats with node ID
+// 0, which it ignores, while pinning a lookup per entry; revisit this if it
+// loads libfuse3.so.4 (3.17.1+), which looks the entries up. FUSE 2 (macOS)
+// has no readdir-plus. Elsewhere Readdir passes only the type bits, which the
+// host needs for d_type.
 const requestReaddirStats = runtime.GOOS == "windows"
 
 func runNativeMount(endpoint string, mountpoint string, debug bool, profile *mountProfiler) error {
