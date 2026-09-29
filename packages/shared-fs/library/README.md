@@ -238,11 +238,23 @@ it never publishes a genesis. Until something is written, the creator puts
 the manifest again whenever a peer session subscribes (also after a crash), so
 a joiner whose earlier join ended before it was ready gets a new arrival when
 it retries with the creator online. That adds one small entry per peer session
-while the filesystem stays never-written; the first real snapshot CUTs the
-chain. A zero-document manifest is never a bootstrap snapshot: it covers no log
-entry, so finding one by discovery is not evidence, and a `mode: "require"`
-join of a never-written filesystem fails. A joiner that reaches no replicator
-stays closed. Protocol-grade empty-log and no-late-arrival proofs require an
+while the filesystem stays never-written. The first real snapshot CUTs that
+chain, but a peer that was offline across it can bring older entries back as
+orphan log heads, which cost a little log space and nothing else (removing
+them needs upstream log support). A zero-document manifest is never a
+bootstrap snapshot: it covers no log entry, so finding one by discovery is not
+evidence, and a `mode: "require"` join of a never-written filesystem fails with
+that reason. A joiner that reaches no replicator stays closed.
+
+The genesis proves only that sync with some replica started, and a replica
+vouches from its own view. One that missed writes while it was offline, such
+as a creator restarting after another machine wrote and left, still serves the
+genesis and no data, so a joiner that reaches only that replica becomes
+write-ready on an empty view. Nothing is lost: the missed writes merge when a
+peer holding them, such as their author, comes back, and clashing paths become
+conflict copies. This is the same exposure as settling on any donor's partial
+view; closing it needs a per-peer sync frontier from Peerbit upstream.
+Protocol-grade empty-log and no-late-arrival proofs likewise require an
 upstream shared-log frontier/barrier API.
 
 Access-controlled filesystems have an additional upstream limitation: write

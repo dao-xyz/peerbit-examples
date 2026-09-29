@@ -2191,6 +2191,18 @@ const isWriteReadinessEvidence = (value: unknown) =>
     value instanceof NamingEvent ||
     value instanceof FileVersion ||
     value instanceof BootstrapManifest;
+/** A zero-document manifest, such as a creator's genesis. */
+const isEmptyManifest = (value: unknown): value is BootstrapManifest => {
+    try {
+        return (
+            value instanceof BootstrapManifest &&
+            deserialize(value.payloadBytes, SnapshotManifestPayload).segments
+                .length === 0
+        );
+    } catch {
+        return false;
+    }
+};
 /** Post-timeout arming: no arrivals for this long counts as quiescent... */
 const QUIESCENCE_WINDOW_MS = 60_000;
 /** ...on two consecutive checks this far apart. */
@@ -2528,6 +2540,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private constructedLocally?: boolean;
     /** A genesis refresh is queued and has not reached its put yet. */
     private emptyManifestRefreshQueued?: boolean;
+    /** Re-publishes the genesis per peer session (see publishEmptyManifest). */
+    private emptyManifestListener?: (event: any) => void;
 
     constructor(
         properties: {
@@ -2575,6 +2589,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await super.beforeOpen(node, options);
     }
 
+    private detachEmptyManifestListener() {
+        if (this.emptyManifestListener) {
+            // main-event's removeEventListener drops only its own record of
+            // the listener (which kept closed programs alive). The wrapper it
+            // registered goes with the maintenance abort signal; until then
+            // the listener ignores events once it is no longer current.
+            this.node.services.pubsub.removeEventListener(
+                "subscribe",
+                this.emptyManifestListener
+            );
+            this.emptyManifestListener = undefined;
+        }
+    }
+
     private detachTrustChangeListener() {
         if (this.trustChangeListener && this.trustGraph) {
             this.trustGraph.trustGraph.events.removeEventListener(
@@ -2620,6 +2648,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
+        this.detachEmptyManifestListener();
         // Trust invalidation remains active while admitted appends drain.
         // Detach it only when the owning open generation actually retires.
         if (this.guardFlushTimer) {
@@ -3409,25 +3438,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (this.writeReadinessRequired && this.isFullReplica()) {
             this.startWriteReadinessTracking(openGeneration);
         }
-        if (this.isFullReplica() && !this.snapshotConfig.disabled) {
+        // Only a creating open, or the author of a zero-document manifest,
+        // publishes one (see publishEmptyManifest).
+        const genesisAuthor =
+            this.isFullReplica() &&
+            !this.snapshotConfig.disabled &&
+            (!addressOpen ||
+                isEmptyManifest(
+                    await this.getDocument(`bootstrap:${this.authorKey()}`)
+                ));
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        if (genesisAuthor) {
             const ownKey = this.node.identity.publicKey;
             const topic = this.entries.log.topic;
             const isRemote = (key: PublicSignKey) => !key.equals(ownKey);
             // Every session that opens this filesystem subscribes anew, even
             // one returning after a crash, for which shared-log may emit no
-            // replicator:join.
-            this.node.services.pubsub.addEventListener(
-                "subscribe",
-                (event) => {
-                    if (
-                        event.detail.topics.includes(topic) &&
-                        isRemote(event.detail.from)
-                    ) {
-                        void this.publishEmptyManifest(false);
-                    }
-                },
-                { signal: this.maintenanceAbortController!.signal }
-            );
+            // replicator:join. Detached once something is written.
+            const listener = (event: any) => {
+                if (
+                    this.emptyManifestListener === listener &&
+                    event.detail.topics.includes(topic) &&
+                    isRemote(event.detail.from)
+                ) {
+                    void this.publishEmptyManifest(false);
+                }
+            };
+            this.emptyManifestListener = listener;
+            this.node.services.pubsub.addEventListener("subscribe", listener, {
+                signal: this.maintenanceAbortController!.signal,
+            });
             // A creating open publishes the genesis. A reopen refreshes it
             // only for peers that subscribed before the listener above (they
             // may be waiting): one that finds nobody adds nothing.
@@ -10129,6 +10169,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // instead of a silent fallback.
         let invalid = 0;
         let stale = 0;
+        let empty = 0;
         const candidates: Candidate[] = [];
         for (const raw of results) {
             if (!(raw instanceof BootstrapManifest)) {
@@ -10164,6 +10205,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // verified coverage and readiness evidence without covering
                 // any log entry, though a genesis can be older than the data.
                 // Plain-join instead: its replication is the evidence.
+                empty++;
                 continue;
             }
             const age = this.clock() - Number(payload.createdAtWallMs);
@@ -10186,9 +10228,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 stale
             );
             this.bootstrapFailure =
-                invalid + stale === 0
-                    ? "no snapshot manifest candidates were discovered in time"
-                    : `no usable snapshot manifest (${invalid} invalid, ${stale} older than the staleness cap — check clock skew if unexpected)`;
+                invalid + stale > 0
+                    ? `no usable snapshot manifest (${invalid} invalid, ${stale} older than the staleness cap — check clock skew if unexpected)`
+                    : empty > 0
+                      ? "only zero-document snapshot manifests were found (nothing was written when they were published)"
+                      : "no snapshot manifest candidates were discovered in time";
             return false;
         }
         // Trust-race tolerance: the trust graph may still be replicating,
@@ -12127,10 +12171,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * and the new one is still an arrival. A plain linked put, never a CUT:
      * a returning peer that still holds an entry an earlier CUT removed puts
      * it back for good (the log only rejects entries the current CUT head
-     * names), while one linear chain is CUT whole by the first real
-     * snapshot. Only a creating open, or the author of a zero-document
-     * manifest, publishes: never a peer that merely has not synced yet.
-     * Failures leave joiners gated.
+     * names). The first real snapshot CUTs the chain, though a peer offline
+     * across it can put back the old entries it holds, as orphan heads (the
+     * index keeps the newest manifest). Only a creating open, or the author
+     * of a zero-document manifest, publishes: never a peer that merely has
+     * not synced yet. Once something is written, the listener goes. Failures
+     * leave joiners gated.
      */
     private publishEmptyManifest(creating: boolean): Promise<void> {
         const context = this.maintenanceContextIfActive();
@@ -12159,9 +12205,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (
                     !this.writesReady ||
                     this.partialWriteOverride ||
-                    this.bootstrapPhase !== "off" ||
-                    (await this.hasLocalNamingRow())
+                    this.bootstrapPhase !== "off"
                 ) {
+                    return false;
+                }
+                if (await this.hasLocalNamingRow()) {
+                    // Written: nothing needs the genesis any more.
+                    this.throwIfMaintenanceInactive(context);
+                    this.detachEmptyManifestListener();
                     return false;
                 }
                 const own = await this.getDocument<SharedFsEntry>(
@@ -12171,10 +12222,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (!(own instanceof BootstrapManifest)) {
                     return creating;
                 }
-                if (
-                    deserialize(own.payloadBytes, SnapshotManifestPayload)
-                        .segments.length === 0
-                ) {
+                if (isEmptyManifest(own)) {
                     await this.entries.put(own);
                 }
                 return false;
@@ -12226,9 +12274,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             previous.payloadBytes,
                             SnapshotManifestPayload
                         );
+                        // A zero-document manifest (the genesis) counts as
+                        // missing: the populated check below still applies.
                         due =
+                            payload.segments.length === 0 ||
                             this.clock() - Number(payload.createdAtWallMs) >
-                            BOOTSTRAP_DEFAULTS.maxSnapshotAgeMs / 2;
+                                BOOTSTRAP_DEFAULTS.maxSnapshotAgeMs / 2;
                     } catch {
                         due = true;
                     }

@@ -324,20 +324,25 @@ epoch are still needed upstream for protocol-grade revocation.
 `create` requires a full replica and publishes a signed zero-document genesis
 manifest, so a newly created empty filesystem can be mounted locally, and its
 replication gives a connected joiner the evidence it needs to become
-write-ready. Until something is written, the creator publishes it again
-whenever another peer opens the filesystem. `create --no-replicate` is
-rejected.
+write-ready; `create` fails if it cannot publish it. Until something is
+written, the creator publishes it again whenever another peer opens the
+filesystem. `create --no-replicate` is rejected.
 `mount` waits up to 120 seconds by default; tune this with
 `--write-ready-timeout-ms`. A timeout is not permission to write: keep a
 complete replicator for this filesystem connected and retry. Retrying a mount
 of a filesystem nobody has written yet needs its creator online, because only
-the creator publishes new evidence for it. An unrelated connected Peerbit peer
-does not count. A fresh no-snapshot join can count
-namespace rows materialized during the initial store open only when they are
-paired with the lower log's successful network-commit phase. Local replay has
-no such phase, so a populated store with a missing sidecar cannot certify
-itself; when it is already identical to its donor, one later donor mutation or
-a verified snapshot is still required.
+the creator publishes new evidence for it. A replica that missed writes while
+offline, such as a creator restarting after another machine wrote and left,
+still vouches that the filesystem is empty, so a mount that reaches only that
+replica becomes writable on an empty view. Nothing is lost: the missed writes
+merge when a peer holding them comes back, and clashing paths become conflict
+copies. Closing this gap needs a per-peer sync frontier from Peerbit upstream.
+An unrelated connected Peerbit peer does not count. A fresh no-snapshot join
+can count namespace rows materialized during the initial store open only when
+they are paired with the lower log's successful network-commit phase. Local
+replay has no such phase, so a populated store with a missing sidecar cannot
+certify itself; when it is already identical to its donor, one later donor
+mutation or a verified snapshot is still required.
 
 The `--allow-partial-writes` mount escape hatch is a session-only recovery
 bypass. It can manufacture duplicate paths or overwrite from stale state, does

@@ -1,3 +1,4 @@
+import { deserialize } from "@dao-xyz/borsh";
 import { Peerbit } from "peerbit";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,7 @@ import {
     openSharedFs,
     type SharedFsHandle,
 } from "../index.js";
-import { FileVersion } from "../model.js";
+import { FileVersion, SnapshotManifestPayload } from "../model.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -1373,6 +1374,86 @@ describe("shared fs cold-start bootstrap", () => {
             await creatorPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
         }
+    });
+
+    it("listens for peer sessions only while its genesis is needed", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-genesis-listen-"));
+        let creatorPeer: Peerbit | undefined;
+        try {
+            creatorPeer = await Peerbit.create({
+                directory: join(root, "creator"),
+            });
+            const pubsub: any = creatorPeer.services.pubsub;
+            const listeners = () => pubsub.listenerCount("subscribe");
+            const listening = (fs: SharedFsHandle) =>
+                (fs.program as any).emptyManifestListener !== undefined;
+            const before = listeners();
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "listener-creator",
+            });
+            const address = creator.address;
+            expect(listening(creator)).toBe(true);
+            // Close unregisters it (pubsub used to keep it, and with it the
+            // closed program).
+            await creator.program.close();
+            expect(listeners()).toBe(before);
+
+            // The author of a zero-document manifest listens again on reopen.
+            const reopen = (machineLabel: string) =>
+                openSharedFs({
+                    peerbit: creatorPeer!,
+                    address,
+                    machineLabel,
+                    bootstrap: false,
+                });
+            const reopened = await reopen("listener-reopen");
+            expect(listening(reopened)).toBe(true);
+            // Once something is written, the next peer session drops it.
+            await reopened.writeFile("/data.txt", "data");
+            const joinerPeer = await createPeer();
+            await joinerPeer.dial(creatorPeer);
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "listener-joiner",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            await waitUntil(() => expect(listening(reopened)).toBe(false));
+            // Neither a peer without its own genesis nor the author of a
+            // snapshot with documents listens.
+            expect(listening(joiner)).toBe(false);
+            await reopened.snapshotWrite();
+            await reopened.program.close();
+            expect(listening(await reopen("listener-populated"))).toBe(false);
+        } finally {
+            await creatorPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("replaces the genesis at the first publisher check after a write", async () => {
+        const fs = await openSharedFs({
+            peerbit: await createPeer(),
+            machineLabel: "genesis-publisher",
+            snapshot: { publishIntervalMs: 100 },
+        });
+        const program: any = fs.program;
+        const manifestId = `bootstrap:${program.authorKey()}`;
+        // One write is far below minChangesBetween and the genesis is fresh,
+        // but a zero-document manifest counts as no snapshot at all.
+        await fs.writeFile("/data.txt", "data");
+        await waitUntil(
+            async () => {
+                const manifest = await program.getDocument(manifestId);
+                expect(
+                    deserialize(manifest.payloadBytes, SnapshotManifestPayload)
+                        .counts.docs
+                ).toBeGreaterThan(0n);
+            },
+            { timeoutMs: 10_000 }
+        );
     });
 
     it("keeps normal remote readiness gated until its durable marker succeeds", async () => {
