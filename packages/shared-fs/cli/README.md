@@ -196,11 +196,11 @@ Native runtime prerequisites are platform-specific:
 Mounts keep each file's exec bit and mtime and support symlinks: `chmod`
 keeps only the exec bit, `touch` sets mtime, and `ln -s` creates a link.
 `chown` succeeds without storing an owner; files report the mounting user.
-Windows neither shows nor sets the exec bit and is not expected to create
-links, but reads links made on Linux or macOS. These fields are not an
-authorization boundary. The external adapter's OS access callback checks only
-existence and the exec bit, so `test -w` is advisory. Use the Shared FS
-trusted-writer model for write authorization.
+Windows never sets the exec bit and has limited link support;
+`packages/shared-fs/native/README.md` lists the per-platform limits. These
+fields are not an authorization boundary. The external adapter's OS access
+callback checks only existence and the exec bit, so `test -w` is advisory.
+Use the Shared FS trusted-writer model for write authorization.
 
 Path names have no portable cross-platform policy yet. The library compares
 case-sensitive strings without Unicode normalization or Windows reserved-name

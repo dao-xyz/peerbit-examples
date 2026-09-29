@@ -292,23 +292,29 @@ Per platform:
 - Linux (FUSE 3) supports all of it. The mount runs without
   `default_permissions`, so the stored exec bit is what lets the kernel run
   scripts and hooks. cgofuse does not cache symlinks, so each traversal of a
-  link costs one `readlink` round trip. Inode numbers are libfuse node ids that
-  change after the kernel forgets an inode; git's default `core.checkStat`
-  compares them, so `git status` can re-hash such files (correct, but slower).
+  link costs one `readlink` round trip.
 - macOS (macFUSE) supports the same operations; `chflags` and creation-time
   updates succeed without storing anything. FUSE-T is untested.
-- Windows (WinFsp) shows files as `0666` and never sets the exec bit: `chmod`
-  (an ACL edit) and the create mode are ignored there. Editing a POSIX peer's
-  executable in place keeps its exec bit; an editor that saves through a
-  temporary file and a rename drops it. mtime round-trips through
-  `SetLastWriteTime`. Symlinks created by POSIX peers are readable with
+- Windows (WinFsp) shows directories as `0777` and files as `0666` and never
+  sets the exec bit: `chmod` (an ACL edit) and the create mode are ignored
+  there. Editing a POSIX peer's executable in place keeps its exec bit; an
+  editor that saves through a temporary file and a rename drops it. mtime
+  round-trips through `SetLastWriteTime`, but a time before 1970 with a
+  sub-second part arrives with a negative nanosecond value and is ignored
+  instead of failing. Symlinks created by POSIX peers are readable with
   Developer Mode or `SeCreateSymbolicLinkPrivilege`; absolute POSIX targets
   fail with access denied, and directory links are best effort. Creating a
-  symlink from Windows is expected to fail: `CreateSymbolicLinkW` creates a
-  file and turns it into a link while its handle is still open, which the
-  mount rejects as an overlapping namespace change. The Windows smoke records
-  the outcome without gating on it. git for Windows defaults to
-  `core.symlinks=false`.
+  file link from Windows fails and leaves an empty file: `CreateSymbolicLinkW`
+  creates the file and turns it into a link while its handle is still open,
+  which the mount rejects as an overlapping namespace change. A directory link
+  is created as a directory first, which the mount commits at once, so it may
+  succeed with a target converted by WinFsp; this is unverified. The Windows
+  smoke records both outcomes without gating on them. git for Windows defaults
+  to `core.symlinks=false`.
+
+On Linux and macOS, inode numbers are libfuse node ids that change after the
+kernel forgets an inode; git's default `core.checkStat` compares them, so
+`git status` can re-hash such files (correct, but slower).
 
 ## Why Go?
 

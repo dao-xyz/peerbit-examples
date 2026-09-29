@@ -190,8 +190,9 @@ try {
     throw "docs directory still exists after removal"
   }
 
-  # Non-gating: creating links through WinFsp is expected to fail (see
-  # packages/shared-fs/native/README.md), so only record what happens.
+  # Non-gating: a file link is expected to fail and a directory link is
+  # unverified (see packages/shared-fs/native/README.md), so only record what
+  # happens.
   $ProbeRoot = Join-Path $MountRoot "link-probe"
   New-Item -ItemType Directory -Force -Path (Join-Path $ProbeRoot "dir") | Out-Null
   Set-Content -NoNewline -Path (Join-Path $ProbeRoot "target.txt") -Value "link target"

@@ -788,9 +788,9 @@ Directories report `0755` and their creation time. Conflict copies, links
 included, are read-only regular `0644` files. Modes and owners are not an
 authorization boundary; use Shared FS writer authorization. The external
 adapter's OS access callback checks existence and the exec bit but not read or
-write masks, so `test -w` is advisory. Windows neither shows nor sets the exec
-bit and is not expected to create links; `packages/shared-fs/native/README.md`
-lists the per-platform limits.
+write masks, so `test -w` is advisory. Windows shows directories as `0777` and
+files as `0666`, never sets the exec bit, and cannot create file links;
+`packages/shared-fs/native/README.md` lists the per-platform limits.
 
 Open access modes are enforced per handle: wrong-direction reads, writes, and
 handle truncates return `EBADF`; missing writable opens require `O_CREAT`; and
