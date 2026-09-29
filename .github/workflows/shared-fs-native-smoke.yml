@@ -14,13 +14,14 @@ on:
                 default: false
                 type: boolean
             overwrite_base_bytes:
-                description: Base file size for the mounted 4 KiB in-place overwrite scenario.
+                description: Base file size(s) for the mounted 4 KiB in-place overwrite scenario; a comma-separated pair runs both.
                 required: false
                 default: "4194304"
                 type: choice
                 options:
                     - "4194304"
                     - "33554432"
+                    - "4194304,33554432"
             dev_workload:
                 description: Also run the report-only developer-machine workload (git clone and status of a synthetic 2,000-file repo, editor saves, JSONL appends, SQLite transactions) on the mount and the local control. Implies the mounted benchmark.
                 required: false

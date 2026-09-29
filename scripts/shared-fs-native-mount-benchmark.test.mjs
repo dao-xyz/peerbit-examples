@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
+import fsPromises, {
     mkdir,
     mkdtemp,
     readFile,
@@ -8,15 +8,17 @@ import {
     rm,
     writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
+import { basename, join } from "node:path";
+import test, { mock } from "node:test";
 import {
     createNativeMountBenchmarkPayload,
     expectedNativeMountBenchmarkScenarioNames,
     formatNativeMountBenchmarkSummary,
     hashNativeMountBenchmarkInputs,
     nativeMountBenchmarkCorpus,
+    nativeMountBenchmarkOverwriteOffset,
     parseNativeMountBenchmarkArguments,
     runNativeMountBenchmark,
     validateNativeMountBenchmarkReport,
@@ -45,7 +47,26 @@ test("native-mount benchmark validates bounded CLI arguments", () => {
         "adapter.buildTags=native_mount test",
     ]);
     assert.equal(options.samples, 2);
-    assert.equal(options.overwriteBaseBytes, 8192);
+    assert.deepEqual(options.overwriteBaseBytes, [8192]);
+    assert.deepEqual(
+        parseNativeMountBenchmarkArguments([
+            "--mount",
+            ".",
+            "--overwrite-base-bytes",
+            "33554432,4194304,4194304",
+        ]).overwriteBaseBytes,
+        [4 << 20, 32 << 20]
+    );
+    assert.throws(
+        () =>
+            parseNativeMountBenchmarkArguments([
+                "--mount",
+                ".",
+                "--overwrite-base-bytes",
+                "4194304,4095",
+            ]),
+        /--overwrite-base-bytes must be a comma-separated list of integers/u
+    );
     assert.equal(options.targetKind, "local-filesystem-control");
     assert.deepEqual(options.mountOptions, []);
     assert.deepEqual(options.implementationDetails, [
@@ -129,6 +150,35 @@ test("native-mount corpus is reproducible and unique across 512 KiB chunks", () 
         wordStepUint32: 2654435769,
         wordByteOrder: "little-endian",
     });
+});
+
+test("overwrite offsets are seeded, 4 KiB aligned and spread across the base", () => {
+    // Pinned: reports stay comparable only while the offsets do.
+    assert.deepEqual(
+        [0, 1, 2].map((index) =>
+            nativeMountBenchmarkOverwriteOffset(32 << 20, index)
+        ),
+        [19566592, 3104768, 10354688]
+    );
+    for (const [baseBytes, leaves] of [
+        [4096, 1],
+        [(3 << 12) + 100, 1],
+        [4 << 20, 8],
+        [32 << 20, 24],
+    ]) {
+        const offsets = Array.from({ length: 33 }, (_, index) =>
+            nativeMountBenchmarkOverwriteOffset(baseBytes, index)
+        );
+        for (const offset of offsets) {
+            assert.equal(offset % 4096, 0);
+            assert.ok(offset >= 0 && offset + 4096 <= baseBytes);
+        }
+        // CI's 30 samples after 3 warmups, in distinct 512 KiB leaves.
+        const touched = offsets
+            .slice(3)
+            .map((offset) => Math.floor(offset / (512 << 10)));
+        assert.equal(new Set(touched).size, leaves);
+    }
 });
 
 test("native-mount provenance recursively fingerprints built inputs", async () => {
@@ -274,7 +324,7 @@ test("native smoke wrappers plumb opt-in mount profiling, the overwrite base and
     assert.match(workflow, /dev_workload:[\s\S]*default: false/u);
     assert.match(
         workflow,
-        /overwrite_base_bytes:[\s\S]*default: "4194304"[\s\S]*- "4194304"\n\s+- "33554432"/u
+        /overwrite_base_bytes:[\s\S]*default: "4194304"[\s\S]*- "4194304"\n\s+- "33554432"\n\s+- "4194304,33554432"/u
     );
     assert.match(
         workflow,
@@ -390,18 +440,54 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         "--readdir-entries",
         "3",
         "--overwrite-base-bytes",
-        "8192",
+        "65536,8192",
         "--timeout-ms",
         "30000",
     ]);
     try {
-        const report = await runNativeMountBenchmark(options);
+        // Spy on the harness's whole-file reads and handle opens.
+        const readFileSpy = mock.method(fsPromises, "readFile");
+        const openSpy = mock.method(fsPromises, "open");
+        syncBuiltinESMExports();
+        let report;
+        try {
+            report = await runNativeMountBenchmark(options);
+        } finally {
+            readFileSpy.mock.restore();
+            openSpy.mock.restore();
+            syncBuiltinESMExports();
+        }
+        const overwriteFiles = (calls) =>
+            calls
+                .map(({ arguments: [path] }) => basename(String(path)))
+                .filter((name) => name.startsWith("overwrite-"));
+        // After each of the 3 runs an overwrite opens its base to read back
+        // the range it wrote; it reads the whole base once, after the last.
+        assert.deepEqual(
+            overwriteFiles(
+                openSpy.mock.calls.filter(
+                    ({ arguments: [, flags] }) => flags === "r"
+                )
+            ),
+            [
+                ...Array(3).fill("overwrite-8192.bin"),
+                ...Array(3).fill("overwrite-65536.bin"),
+            ]
+        );
+        assert.deepEqual(overwriteFiles(readFileSpy.mock.calls), [
+            "overwrite-8192.bin",
+            "overwrite-65536.bin",
+        ]);
         assert.deepEqual(
             report.scenarios.map(({ name }) => name),
             expectedNativeMountBenchmarkScenarioNames(options)
         );
+        assert.match(
+            formatNativeMountBenchmarkSummary(report),
+            /- overwrite-4096-in-65536: offsets from seed 1327217884 touched 1 of 1 512 KiB leaves\./u
+        );
         assert.equal(report.scope.performanceGate, false);
-        assert.equal(report.schemaVersion, 4);
+        assert.equal(report.schemaVersion, 5);
         assert.equal(report.run.warmupsPerScenario, 1);
         // Default runs are unchanged: the developer workload is opt-in.
         assert.equal(report.run.devWorkload, false);
@@ -496,7 +582,7 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
             /incomplete sample set/u
         );
         const oldSchema = structuredClone(report);
-        oldSchema.schemaVersion = 3;
+        oldSchema.schemaVersion = 4;
         assert.throws(
             () => validateNativeMountBenchmarkReport(oldSchema),
             /envelope is invalid/u
@@ -506,6 +592,12 @@ test("native-mount benchmark emits a validated report and cleans its owned root"
         assert.throws(
             () => validateNativeMountBenchmarkReport(tampered, options),
             /invalid p50Ns summary/u
+        );
+        const shifted = structuredClone(report);
+        shifted.scenarios.at(-1).samples[0].offset ^= 4096;
+        assert.throws(
+            () => validateNativeMountBenchmarkReport(shifted, options),
+            /overwrite-4096-in-65536 has invalid overwrite offsets/u
         );
         const provenanceTampered = structuredClone(report);
         provenanceTampered.implementation.details[0].value = "other-tags";

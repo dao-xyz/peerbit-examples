@@ -33,9 +33,9 @@ const COMMIT_SIGNATURE =
 const COMMIT_MESSAGE = "synthetic-source-tree-v1\n";
 const EDIT_SAVE_BYTES = 20 << 10;
 const JSONL_LINE_BYTES = 1024;
-// The two base sizes offered by the workflow's overwrite_base_bytes input, so
-// the append scenarios cover both regardless of which one a run selected.
-const JSONL_CHECKPOINT_BYTES = [4 << 20, 32 << 20];
+// Log sizes before the first append: 4 MiB, and 32 MiB + 384 KiB, so the
+// larger log's appends start mid-leaf for 512 KiB and 256 KiB leaves alike.
+const JSONL_CHECKPOINT_BYTES = [4 << 20, (32 << 20) + (384 << 10)];
 const SQLITE_PAYLOAD_BYTES = 256;
 const STATUS_MODIFIED_FILES = 10;
 const CHECKOUT_SPOT_CHECKS = 16;
@@ -56,12 +56,14 @@ const GIT_SCENARIOS = [
     `git-status-${devWorkloadCorpus.fileCount}`,
 ];
 
+const sqliteBaseBytes = (options) => Math.max(...options.overwriteBaseBytes);
+
 export const devWorkloadScenarioNames = (options) => [
     `edit-save-${EDIT_SAVE_BYTES}`,
     ...JSONL_CHECKPOINT_BYTES.map(
         (bytes) => `jsonl-append-${JSONL_LINE_BYTES}-at-${bytes}`
     ),
-    `sqlite-insert-txn-in-${options.overwriteBaseBytes}`,
+    `sqlite-insert-txn-in-${sqliteBaseBytes(options)}`,
     ...GIT_SCENARIOS,
 ];
 
@@ -386,11 +388,11 @@ const measureSqlite = async (
         const insert = database.prepare(
             "INSERT INTO events (created_at, kind, payload) VALUES (?, ?, ?)"
         );
-        // Untimed: grow the database to the overwrite base size in one
+        // Untimed: grow the database to the largest overwrite base in one
         // transaction, so each timed commit rewrites pages of a large file.
         const prefill = createDevWorkloadJsonlLines(400_000, 1);
         database.exec("BEGIN");
-        while (databaseBytes() < options.overwriteBaseBytes) {
+        while (databaseBytes() < sqliteBaseBytes(options)) {
             for (let batch = 0; batch < 64; batch += 1) {
                 insert.run(rows, WORDS[rows % WORDS.length], prefill);
                 rows += 1;
@@ -402,7 +404,7 @@ const measureSqlite = async (
             {
                 operation: "sqlite-transaction",
                 itemCount: 1,
-                baseFileBytes: options.overwriteBaseBytes,
+                baseFileBytes: sqliteBaseBytes(options),
                 semantics:
                     "BEGIN/INSERT one row/COMMIT through node:sqlite with the default rollback journal and synchronous level",
                 sqlite: {
