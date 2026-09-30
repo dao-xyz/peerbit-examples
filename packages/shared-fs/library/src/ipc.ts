@@ -1,7 +1,6 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     SharedFsBackendError,
@@ -384,10 +383,12 @@ const listenServer = async (server: Server, endpoint: string) => {
 /**
  * Without an endpoint the server listens where the native adapter connects:
  * on Linux a Unix socket in a new owner-only directory that close() removes,
- * elsewhere TCP loopback. IPC v2 has no authentication; other local users can
- * connect to a loopback port but not into that directory. macOS stays on TCP:
- * its Unix sockets buffer 8 KiB per direction, which Node cannot raise, and a
- * 128 KiB read took 1.7 times as long as over TCP.
+ * elsewhere (macOS and Windows) TCP loopback. IPC v2 has no authentication:
+ * any local user can connect to a loopback port, but not into that directory.
+ * The directory is made under /tmp, not os.tmpdir(): a longer TMPDIR can push
+ * the path past sun_path's 108 bytes, and bind would silently truncate it.
+ * macOS stays on TCP: its Unix sockets buffer 8 KiB per direction, which Node
+ * cannot raise, and a 128 KiB read took 1.7 times as long as over TCP.
  */
 export const createSharedFsIpcServer = async (
     backend: SharedFsMountBackend,
@@ -397,7 +398,7 @@ export const createSharedFsIpcServer = async (
     const limits = resolveIpcOptions(options);
     const privateDirectory =
         endpoint === undefined && process.platform === "linux"
-            ? await mkdtemp(join(tmpdir(), "pbfs-"))
+            ? await mkdtemp("/tmp/pbfs-")
             : undefined;
     endpoint ??= privateDirectory
         ? join(privateDirectory, "ipc.sock")

@@ -638,17 +638,26 @@ describe("shared-fs negotiated IPC v2", () => {
     it.skipIf(process.platform !== "linux")(
         "listens by default in an owner-only directory that close removes",
         async () => {
-            const server = await createSharedFsIpcServer(backendWith({}));
-            const directory = dirname(server.endpoint);
+            // Under this TMPDIR the socket path would exceed sun_path (108
+            // bytes), and bind would create a truncated name instead.
+            const longTmpdir = await mkdtemp(join(tmpdir(), "t".repeat(100)));
+            vi.stubEnv("TMPDIR", longTmpdir);
             try {
-                expect((await stat(directory)).mode & 0o777).toBe(0o700);
-                expect((await stat(server.endpoint)).isSocket()).toBe(true);
+                const server = await createSharedFsIpcServer(backendWith({}));
+                const directory = dirname(server.endpoint);
+                try {
+                    expect((await stat(directory)).mode & 0o777).toBe(0o700);
+                    expect((await stat(server.endpoint)).isSocket()).toBe(true);
+                } finally {
+                    await server.close();
+                }
+                await expect(stat(directory)).rejects.toMatchObject({
+                    code: "ENOENT",
+                });
             } finally {
-                await server.close();
+                vi.unstubAllEnvs();
+                await rm(longTmpdir, { recursive: true, force: true });
             }
-            await expect(stat(directory)).rejects.toMatchObject({
-                code: "ENOENT",
-            });
         }
     );
 

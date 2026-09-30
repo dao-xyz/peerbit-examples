@@ -906,9 +906,11 @@ WinFsp translates Windows access, append, and overwrite semantics above FUSE
 and synthesizes its `Create` flags.
 
 Without an endpoint argument, `createSharedFsIpcServer` listens where the
-adapter connects: on Linux a Unix socket in a new owner-only directory that
-`close()` removes, elsewhere TCP loopback. IPC v2 has no authentication, so a
-loopback port is reachable by other local users; the Linux socket is not.
+adapter connects: on Linux a Unix socket in a new owner-only directory under
+`/tmp` that `close()` removes, on macOS and Windows TCP loopback. IPC v2 has
+no authentication, so any local user can connect to the macOS or Windows
+loopback port, but not to the Linux socket. Pass a socket path in a private
+directory to keep a macOS daemon private.
 
 The adapter transport limits each request and response to 64 MiB by default.
 `createSharedFsIpcServer` speaks only binary IPC v2, which the Go adapter
