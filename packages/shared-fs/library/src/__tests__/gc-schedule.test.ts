@@ -200,7 +200,7 @@ describe("scheduled garbage collection", () => {
                     intervalMs: 50,
                     initialDelayMs: 10,
                     testOverrides: { noFloors: true },
-                },
+                } as any,
             });
             expect(observer.gcStatus().scheduled).toBe(false);
             expect(observer.gcStatus().nextRunAtMs).toBeUndefined();
@@ -567,9 +567,7 @@ describe("scheduled garbage collection", () => {
         } finally {
             planningAllowed.resolve();
             await Promise.allSettled(
-                [scheduled, closing].filter(
-                    (task): task is Promise<unknown> => task !== undefined
-                )
+                [scheduled, closing].filter((task) => task !== undefined)
             );
             eventTarget.removeEventListener("gc:run", onRun);
             eventTarget.removeEventListener("gc:error", onError);

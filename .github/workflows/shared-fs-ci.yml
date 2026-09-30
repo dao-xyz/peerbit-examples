@@ -90,6 +90,9 @@ jobs:
               id: build
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
+            - name: Typecheck shared-fs tests
+              run: pnpm exec tsc -p packages/shared-fs/tsconfig.test.json
+
             - name: Test first-attempt diagnostics and strict retry gate
               id: diagnostics
               run: node --test scripts/shared-fs-strict-tests/regression.test.mjs scripts/shared-fs-strict-tests/error-evidence.test.mjs

@@ -447,7 +447,7 @@ describe("shared fs durable machine disposal", () => {
                         { query: { kind: "naming" } },
                         { local: true, remote: false, resolve: true }
                     )
-                    .all()) as NamingEvent[]
+                    .all()) as unknown as NamingEvent[]
             ).find((event) => event.name === "deleted.txt" && event.deleted);
             expect(expectedTombstone).toBeDefined();
             await waitUntil(async () => {
@@ -577,7 +577,7 @@ describe("shared fs durable machine disposal", () => {
                         { query: { kind: "naming" } },
                         { local: true, remote: false, resolve: true }
                     )
-                    .all()) as NamingEvent[]
+                    .all()) as unknown as NamingEvent[]
             ).find((event) => event.id === expectedTombstone!.id);
             expect(reopenedTombstone).toMatchObject({
                 id: expectedTombstone!.id,
@@ -942,7 +942,7 @@ describe("shared fs durable machine disposal", () => {
                     { query: { kind: "naming" } },
                     { local: true, remote: false, resolve: true }
                 )
-                .all()) as NamingEvent[]
+                .all()) as unknown as NamingEvent[]
         )[0];
         expect(naming).toBeDefined();
 
@@ -1488,7 +1488,7 @@ describe("shared fs durable machine disposal", () => {
                     })
                 );
 
-            const closeOutcome = await closing;
+            const closeOutcome = (await closing)!;
             expect(closeOutcome.status).toBe("rejected");
             if (closeOutcome.status !== "rejected") {
                 throw new Error("close unexpectedly discarded guard work");
@@ -1499,7 +1499,7 @@ describe("shared fs durable machine disposal", () => {
                 message: expect.stringContaining("resurrection guard"),
             });
 
-            const openOutcome = await queuedOpen;
+            const openOutcome = (await queuedOpen)!;
             expect(openOutcome.status).toBe("rejected");
             if (openOutcome.status !== "rejected") {
                 throw new Error("queued open ran after a failed close");
@@ -1519,9 +1519,7 @@ describe("shared fs durable machine disposal", () => {
             program.startGuardFlush = originalStartGuardFlush;
             program.events.removeEventListener("open", onOpen);
             await Promise.allSettled(
-                [closing, queuedOpen].filter(
-                    (task): task is Promise<unknown> => task !== undefined
-                )
+                [closing, queuedOpen].filter((task) => task !== undefined)
             );
             // The assertions above prove failed-close ownership. Clear the
             // synthetic batch so teardown can perform the required retry.
@@ -1707,7 +1705,7 @@ describe("shared fs durable machine disposal", () => {
                 "stale-open-rejected",
                 "close",
             ]);
-            const staleManagedOpen = await staleOpenTask;
+            const staleManagedOpen = (await staleOpenTask)!;
             expect(staleManagedOpen.status).toBe("rejected");
 
             entries.open = originalEntriesOpen;
@@ -1749,7 +1747,7 @@ describe("shared fs durable machine disposal", () => {
             releaseOpenStage();
             await Promise.allSettled(
                 [localOpenTask, staleOpenTask, closeTask].filter(
-                    (task): task is Promise<unknown> => task !== undefined
+                    (task) => task !== undefined
                 )
             );
             entries.open = originalEntriesOpen;
@@ -2084,9 +2082,7 @@ describe("shared fs durable machine disposal", () => {
         } finally {
             releaseBootstrapTail();
             await Promise.allSettled(
-                [barrier, closing].filter(
-                    (task): task is Promise<unknown> => task !== undefined
-                )
+                [barrier, closing].filter((task) => task !== undefined)
             );
             program.bootstrapDecision = originalBootstrapDecision;
         }

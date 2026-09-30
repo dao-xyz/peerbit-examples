@@ -218,7 +218,7 @@ describe("Merkle v1 canonical codecs", () => {
 
         const rootHash = merkleTreeHashV1(1, bitmap, children);
         const presentInput = encodeMerkleContentRootHashInputV1({
-            leafSize: 256 * 1024,
+            leafSize: 262_144,
             size: 524_289n,
             rootLevel: 1,
             rootHash,
@@ -231,7 +231,7 @@ describe("Merkle v1 canonical codecs", () => {
             )
         );
         const sparseInput = encodeMerkleContentRootHashInputV1({
-            leafSize: 64 * 1024,
+            leafSize: 65_536,
             size: 1_048_577n,
             rootLevel: 1,
         });
@@ -308,7 +308,7 @@ describe("Merkle v1 canonical codecs", () => {
         );
 
         const sparse = {
-            leafSize: (64 * 1024) as const,
+            leafSize: 65_536 as const,
             size: 1_048_577n,
             rootLevel: 1,
         };
@@ -518,7 +518,7 @@ describe("Merkle v1 canonical codecs", () => {
         expect(() => assertMerkleChildLevelV1(3, levelOne)).toThrow(/level-2/);
 
         const descriptor = {
-            leafSize: (64 * 1024) as const,
+            leafSize: 65_536 as const,
             size: 64n * 1024n * 257n,
             rootLevel: 2,
             rootHash: merkleTreeHashV1(
@@ -541,7 +541,7 @@ describe("Merkle v1 canonical codecs", () => {
         expect(() =>
             assertMerkleRootBlockV1(
                 {
-                    leafSize: 64 * 1024,
+                    leafSize: 65_536,
                     size: 4n,
                     rootLevel: 0,
                     rootHash: merkleDataHashV1(data.bytes),
@@ -551,7 +551,7 @@ describe("Merkle v1 canonical codecs", () => {
         ).not.toThrow();
         expect(() =>
             assertMerkleRootBlockV1({
-                leafSize: 64 * 1024,
+                leafSize: 65_536,
                 size: 4n,
                 rootLevel: 0,
             })
@@ -559,7 +559,7 @@ describe("Merkle v1 canonical codecs", () => {
         expect(() =>
             assertMerkleRootBlockV1(
                 {
-                    leafSize: 64 * 1024,
+                    leafSize: 65_536,
                     size: 4n,
                     rootLevel: 0,
                 },
@@ -569,7 +569,7 @@ describe("Merkle v1 canonical codecs", () => {
         expect(() =>
             assertMerkleRootBlockV1(
                 {
-                    leafSize: 64 * 1024,
+                    leafSize: 65_536,
                     size: 5n,
                     rootLevel: 0,
                     rootHash: merkleDataHashV1(data.bytes),
@@ -586,7 +586,7 @@ describe("Merkle v1 canonical codecs", () => {
         expect(() =>
             assertMerkleRootBlockV1(
                 {
-                    leafSize: 64 * 1024,
+                    leafSize: 65_536,
                     size: 64n * 1024n + 1n,
                     rootLevel: 1,
                     rootHash: merkleTreeHashV1(

@@ -1062,7 +1062,7 @@ describe("shared fs library", () => {
             local: true,
             remote: false,
             resolve: true,
-        })) as FileVersion;
+        })) as unknown as FileVersion;
 
         await fs.rm("/deleted-race.txt");
         const concurrent = new FileVersion({
@@ -1146,7 +1146,7 @@ describe("shared fs library", () => {
             local: true,
             remote: false,
             resolve: true,
-        })) as FileVersion;
+        })) as unknown as FileVersion;
         await fs.rm("/late-delete.txt");
         const concurrent = forkVersion(
             base,
@@ -1207,7 +1207,7 @@ describe("shared fs library", () => {
             local: true,
             remote: false,
             resolve: true,
-        })) as FileVersion;
+        })) as unknown as FileVersion;
         await fs.rm("/late-restore.txt");
         const concurrent = forkVersion(
             base,

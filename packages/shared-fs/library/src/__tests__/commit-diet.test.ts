@@ -1,10 +1,5 @@
 import { Peerbit } from "peerbit";
-import {
-    Compare,
-    IntegerCompare,
-    StringMatch,
-    type Query,
-} from "@peerbit/document";
+import { Compare, IntegerCompare, StringMatch } from "@peerbit/document";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     DEFAULT_FILE_CHUNK_SIZE,
@@ -371,7 +366,7 @@ describe("v9 commit diet: batched W1/W2 bookkeeping", () => {
         const expected = await referenceDecisions(program, chunks, undefined);
         const localIndexRows = program.localIndexRows.bind(program);
         vi.spyOn(program, "localIndexRows").mockImplementation(
-            async (query: Query[], options: any) => {
+            async (query: unknown, options: any) => {
                 const result = await localIndexRows(query, options);
                 const isWitnessPage =
                     options?.limit !== undefined &&
@@ -594,7 +589,6 @@ describe("v9 commit diet: batched W1/W2 bookkeeping", () => {
         await fs.writeFile("/big.bin", expected);
         const events: SharedFsMountProfileEvent[] = [];
         const backend = createSharedFsMountBackend(fs, {
-            writeFileInput: "immutable-borrowed",
             profile: (event) => events.push(event),
         });
         const handle = await backend.open("/big.bin", {

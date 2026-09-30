@@ -32,8 +32,11 @@ import {
     type SharedFsMountProfileEvent,
 } from "../mount-profile.js";
 
+// Stubbed getattr results are arbitrary JSON: the IPC layer only relays them.
 const backendWith = (
-    methods: Partial<SharedFsMountBackend>
+    methods: Omit<Partial<SharedFsMountBackend>, "getattr"> & {
+        getattr?: (path: string) => Promise<unknown>;
+    }
 ): SharedFsMountBackend => methods as SharedFsMountBackend;
 
 const execFileAsync = promisify(execFile);

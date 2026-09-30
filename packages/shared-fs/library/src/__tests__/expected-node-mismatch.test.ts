@@ -82,7 +82,7 @@ describe("expected-node mismatch discriminator", () => {
         const headsForNode = program.headsForNode.bind(program);
         const headsSpy = vi
             .spyOn(program, "headsForNode")
-            .mockImplementationOnce(async (nodeId: string) => {
+            .mockImplementationOnce(async (nodeId: unknown) => {
                 const heads = await headsForNode(nodeId);
                 noOpEntered.resolve();
                 await noOpAllowed.promise;
