@@ -1,5 +1,7 @@
 ---
 ---
 
-Pin the cold-start safety-posture stall with a snapshot document that can never
-arrive instead of racing a donor stop. Test-only; no package change.
+Pin the cold-start stall with a snapshot document that can never arrive, cover
+the retirement timeout with its own timer-ordered test instead of a donor stop
+and a rebuild loop, and seed the deep GC history as version rows instead of
+6,000 writes. Test-only; no package change.
