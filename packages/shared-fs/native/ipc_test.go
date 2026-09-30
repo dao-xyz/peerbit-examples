@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -324,13 +327,95 @@ func TestIPCClientSerializesConcurrentRequests(t *testing.T) {
 	}
 }
 
-func TestIPCClientCloseInterruptsStalledRequest(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
+// runOnIPCNetworks runs test against a TCP and a Unix socket listener. Outside
+// Windows the adapter uses blocking I/O on both, so close must shut a socket
+// down to interrupt a stalled request (see closeConn).
+func runOnIPCNetworks(t *testing.T, test func(t *testing.T, listener net.Listener, endpoint string)) {
+	t.Run("tcp", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		test(t, listener, "tcp://"+listener.Addr().String())
+	})
+	t.Run("unix", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("the Windows daemon listens on TCP loopback")
+		}
+		directory, err := os.MkdirTemp("", "pbfs-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(directory)
+		path := filepath.Join(directory, "ipc.sock")
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		test(t, listener, path)
+	})
+}
 
+func TestIPCClientCloseInterruptsStalledRequest(t *testing.T) {
+	runOnIPCNetworks(t, testIPCClientCloseInterruptsStalledRequest)
+}
+
+func TestIPCClientCloseInterruptsStalledWrite(t *testing.T) {
+	runOnIPCNetworks(t, func(t *testing.T, listener net.Listener, endpoint string) {
+		requestStarted := make(chan net.Conn, 1)
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			reader, _, err := acknowledgeTestIPCV2(conn)
+			var header [ipcV2HeaderBytes]byte
+			if err == nil {
+				_, err = io.ReadFull(reader, header[:])
+			}
+			if err != nil {
+				conn.Close()
+				return
+			}
+			// Stop reading: the rest of the request fills the socket buffers.
+			requestStarted <- conn
+		}()
+		client := newIPCClient(endpoint)
+		requestDone := make(chan error, 1)
+		go func() {
+			_, err := client.request("write", uint64(1), make([]byte, 32<<20), 0)
+			requestDone <- err
+		}()
+		select {
+		case conn := <-requestStarted:
+			defer conn.Close()
+		case <-time.After(2 * time.Second):
+			t.Fatal("server did not receive the write request")
+		}
+		closeDone := make(chan struct{})
+		go func() {
+			client.close()
+			close(closeDone)
+		}()
+		select {
+		case <-closeDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("client close did not interrupt stalled write")
+		}
+		select {
+		case err := <-requestDone:
+			if err == nil {
+				t.Fatal("stalled write unexpectedly succeeded")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("stalled write did not unblock after close")
+		}
+	})
+}
+
+func testIPCClientCloseInterruptsStalledRequest(t *testing.T, listener net.Listener, endpoint string) {
 	connectionReady := make(chan net.Conn, 1)
 	go func() {
 		conn, err := listener.Accept()
@@ -339,7 +424,7 @@ func TestIPCClientCloseInterruptsStalledRequest(t *testing.T) {
 		}
 	}()
 
-	client := newIPCClient("tcp://" + listener.Addr().String())
+	client := newIPCClient(endpoint)
 	requestDone := make(chan error, 1)
 	go func() {
 		_, err := client.request("getattr", "/stalled")

@@ -412,7 +412,7 @@ func TestNodeGoIPCExternalBenchmark(t *testing.T) {
 
 	report := nodeGoIPCReport{SchemaVersion: 2, Benchmark: "shared-fs-node-go-ipc-concurrency", Protocol: "binary-v2-raw-bytes", Corpus: nodeGoIPCCorpus}
 	report.Scope.Boundary = "real Go ipcClient pool to real Node createSharedFsIpcServer"
-	report.Scope.Transport = "serialized TCP loopback per retained client connection; concurrent across independent lanes"
+	report.Scope.Transport = "serialized daemon default endpoint (private Unix socket on Linux, TCP loopback elsewhere) per retained client connection; concurrent across independent lanes"
 	report.Scope.Backend = "deterministic immediate in-memory benchmark backend with per-handle write state"
 	report.Scope.Measurement = "wall-clock concurrent batch: Go scheduling/encode/write/wait/decode plus Node decode/backend/encode/write"
 	report.Scope.Verification = "distinct paths/handles and complete read/result checks after timers; per-handle write bytes checked by untimed fsync"
