@@ -2047,11 +2047,8 @@ describe("shared fs cold-start bootstrap", () => {
         async () => {
             const { chunkIdForBytes } = await import("../model.js");
             // Deep-history donor: a SMALL snapshot (heads only) over a LARGE
-            // log (superseded versions). The joiner's overlay activates after
-            // a few segment fetches while the log still has thousands of
-            // history entries to stream — so stranding it mid-sync is
-            // structural, not a timing race a fast runner can dissolve
-            // (both fixed-size 1,000- and 3,000-file trees raced on CI).
+            // log (superseded versions), so a stop usually leaves history
+            // chunks the joiner has not received (W1 below needs one).
             const buildDonor = async () => {
                 const peer = await createPeer();
                 const fs = await openSharedFs({
@@ -2081,13 +2078,15 @@ describe("shared fs cold-start bootstrap", () => {
                 const snapshot = await fs.snapshotWrite();
                 return { peer, fs, snapshot };
             };
-            // Stranding a joiner mid-sync is inherently a race against the
-            // replication engine; the deep-history donor makes the stall
-            // window wide, and a bounded retry makes the setup reliable on
-            // any runner speed. Assertions run on the first stranded join.
+            // A donor stop is not a stall: on a loaded runner the log can
+            // finish streaming before the overlay activates, and entries the
+            // joiner already received keep landing after the stop, so the
+            // snapshot could still be covered and retire VERIFIED. Pin the
+            // stall instead: one snapshot document that can never arrive.
+            // The default retirement timeout (15 min) cannot fire during the
+            // test; it is elapsed explicitly after the partial-view checks.
             let donor!: Awaited<ReturnType<typeof buildDonor>>;
             let joiner!: Awaited<ReturnType<typeof openSharedFs>>;
-            let stranded = false;
             // Overlay heads carry the final round's content; scan back
             // through history rounds for an absent-but-referenced chunk.
             const findAbsentHistoryChunk = async (program: any) => {
@@ -2105,7 +2104,11 @@ describe("shared fs cold-start bootstrap", () => {
                 return undefined;
             };
             let absentHistoryChunk: { content: string; id: string } | undefined;
-            for (let attempt = 0; attempt < 4 && !stranded; attempt++) {
+            for (
+                let attempt = 0;
+                attempt < 4 && !absentHistoryChunk;
+                attempt++
+            ) {
                 donor = await buildDonor();
                 const joinerPeer = await createPeer();
                 await joinerPeer.dial(donor.peer);
@@ -2113,7 +2116,6 @@ describe("shared fs cold-start bootstrap", () => {
                     peerbit: joinerPeer,
                     address: donor.fs.address,
                     machineLabel: "joiner",
-                    bootstrap: { retirementTimeoutMs: 3_000 },
                     // This test intentionally exercises W1 while the view is
                     // partial; production callers must not opt in casually.
                     allowPartialWrites: true,
@@ -2126,25 +2128,35 @@ describe("shared fs cold-start bootstrap", () => {
                     },
                     { intervalMs: 2 }
                 );
-                // Strand the joiner mid-sync: the overlay must keep
-                // serving, and retirement must take the unverified path.
+                // Verified retirement needs every pending id covered; this
+                // one has no row anywhere, so the overlay stays active.
+                (joiner.program as any).overlayPending.set("stalled", {
+                    nodeId: "stalled",
+                    kind: "file-version",
+                });
+                // W1 also needs a history chunk the joiner has not received
+                // and now cannot; the stream may have delivered every chunk
+                // before the stop, so rebuild when there is none.
                 await donor.peer.stop();
-                // The W1 check below also needs a history chunk the joiner
-                // has not fetched yet; pending documents alone do not imply
-                // one (the stream may have delivered every chunk first).
-                absentHistoryChunk =
-                    joiner.bootstrapStatus().pendingDocs > 0
-                        ? await findAbsentHistoryChunk(joiner.program)
-                        : undefined;
-                if (absentHistoryChunk) {
-                    stranded = true;
-                } else {
-                    // The engine outran the stop; rebuild and try again.
+                absentHistoryChunk = await findAbsentHistoryChunk(
+                    joiner.program
+                );
+                if (!absentHistoryChunk) {
                     await joinerPeer.stop().catch(() => {});
                 }
             }
-            expect(stranded).toBe(true);
+            expect(absentHistoryChunk).toBeDefined();
             expect(joiner.bootstrapStatus().partialWriteOverride).toBe(true);
+
+            // W1 pin: a write whose content matches an overlay-referenced
+            // chunk must still PUT the chunk — overlay references are
+            // invisible to dedup witness probes, so nothing may be skipped
+            // on their account. The scan found it absent just now.
+            const program: any = joiner.program;
+            const { content: sharedContent, id: sharedChunkId } =
+                absentHistoryChunk!;
+            await joiner.writeFile("/dup-of-overlay.txt", sharedContent);
+            expect(await program.hasDocument(sharedChunkId)).toBe(true);
 
             // Gating asymmetry: the per-file branch is overlay-consistent
             // and stays available; whole-store scans are gated. The probe
@@ -2155,28 +2167,15 @@ describe("shared fs cold-start bootstrap", () => {
             ).resolves.toEqual([]);
             await expect(joiner.conflicts()).rejects.toThrow(/bootstrap/);
 
-            // W1 pin: a write whose content matches an overlay-referenced
-            // chunk must still PUT the chunk — overlay references are
-            // invisible to dedup witness probes, so nothing may be skipped
-            // on their account.
-            const program: any = joiner.program;
-            // Found while stranding; the donor is gone, so it is still absent.
-            const sharedContent: string | undefined =
-                absentHistoryChunk?.content;
-            const sharedChunkId: string | undefined = absentHistoryChunk?.id;
-            expect(sharedContent).toBeDefined();
-            expect(await program.hasDocument(sharedChunkId!)).toBe(false);
-            await joiner.writeFile("/dup-of-overlay.txt", sharedContent!);
-            expect(await program.hasDocument(sharedChunkId!)).toBe(true);
-
-            // Retirement times out (the donor is gone) into the
-            // unverified posture: overlay retired, guard still down, GC
-            // and snapshots refused, whole-store scans available again,
-            // and awaitBootstrapConverged resolves instead of hanging.
-            await waitUntil(() => {
-                expect(joiner.bootstrapStatus().phase).toBe("unverified");
-            });
+            // Elapse the retirement timeout (what its timer runs) with the
+            // stalled document still pending: the unverified posture —
+            // overlay retired, guard still down, GC and snapshots refused,
+            // whole-store scans available again, and
+            // awaitBootstrapConverged resolves instead of hanging.
+            expect(joiner.bootstrapStatus().phase).toBe("overlay-active");
+            program.retireOverlay(false);
             const status = joiner.bootstrapStatus();
+            expect(status.phase).toBe("unverified");
             expect(status.snapshotCoverageVerified).toBe(false);
             expect(status.guardArmed).toBe(false);
             await expect(joiner.awaitBootstrapConverged()).resolves.toEqual({
