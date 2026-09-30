@@ -191,7 +191,7 @@ manualDescribe("shared fs exact slot point-lookup benchmark", () => {
             }
         };
 
-        const report = [];
+        const report: Awaited<ReturnType<typeof run>>[] = [];
         for (const width of widths) report.push(await run(width));
         console.log(
             "slot point-lookup benchmark:",

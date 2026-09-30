@@ -131,6 +131,10 @@ jobs:
                     throw "PowerShell smoke wrapper has parser errors"
                   }
 
+            - name: Typecheck shared-fs tests
+              if: ${{ !cancelled() && steps.build.outcome == 'success' && runner.os == 'Linux' }}
+              run: pnpm exec tsc -p packages/shared-fs/tsconfig.test.json
+
     format:
         name: Shared-fs formatting
         runs-on: ubuntu-latest

@@ -48,7 +48,7 @@ const forceGc = async () => {
         "function",
         "open-hash benchmark worker must run with --expose-gc"
     );
-    gc();
+    gc!();
     await new Promise<void>((resolve) => setImmediate(resolve));
 };
 

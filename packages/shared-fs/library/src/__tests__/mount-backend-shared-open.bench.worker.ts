@@ -56,9 +56,9 @@ const forceGc = async () => {
         "function",
         "shared-open benchmark worker must run with --expose-gc"
     );
-    gc();
+    gc!();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    gc();
+    gc!();
     await new Promise<void>((resolve) => setImmediate(resolve));
 };
 

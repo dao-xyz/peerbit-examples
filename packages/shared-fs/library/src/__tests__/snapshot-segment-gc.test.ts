@@ -400,9 +400,7 @@ describe("snapshot segment reclamation", () => {
         } finally {
             allowPutReturn.resolve();
             await Promise.allSettled(
-                [publishing, reaping].filter(
-                    (task): task is Promise<unknown> => task !== undefined
-                )
+                [publishing, reaping].filter((task) => task !== undefined)
             );
             putSpy.mockRestore();
         }
@@ -803,9 +801,7 @@ describe("snapshot segment reclamation", () => {
         } finally {
             ledgerCasAllowed.resolve();
             await Promise.allSettled(
-                [reaping, closing].filter(
-                    (task): task is Promise<unknown> => task !== undefined
-                )
+                [reaping, closing].filter((task) => task !== undefined)
             );
         }
 

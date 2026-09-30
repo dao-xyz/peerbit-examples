@@ -79,7 +79,7 @@ describe("bounded IPC byte reader", () => {
             1024
         );
         await expect(narrower.readLine(4)).rejects.toEqual(
-            expect.objectContaining<IpcFrameTooLargeError>({
+            expect.objectContaining({
                 name: "IpcFrameTooLargeError",
                 actualBytes: 5,
                 maxBytes: 4,
@@ -101,7 +101,7 @@ describe("bounded IPC byte reader", () => {
         );
 
         await expect(reader.readLine()).rejects.toEqual(
-            expect.objectContaining<IpcFrameTooLargeError>({
+            expect.objectContaining({
                 name: "IpcFrameTooLargeError",
                 actualBytes: 5,
                 maxBytes: 4,

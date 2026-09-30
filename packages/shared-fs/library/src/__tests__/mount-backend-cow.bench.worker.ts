@@ -70,9 +70,9 @@ const forceGc = async () => {
         "function",
         "COW benchmark worker must run with --expose-gc"
     );
-    gc();
+    gc!();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    gc();
+    gc!();
 };
 
 const memorySnapshot = (): MemorySnapshot => {

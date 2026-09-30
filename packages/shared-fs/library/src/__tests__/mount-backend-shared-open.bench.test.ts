@@ -72,6 +72,7 @@ const runWorker = (handles: number) =>
             ],
             env: { ...process.env, NODE_ENV: "test" },
             stdio: ["ignore", "pipe", "pipe", "ipc"],
+            // @ts-expect-error fork forwards it to spawn; @types/node omits it
             windowsHide: true,
         });
         runningChildren.add(child);
