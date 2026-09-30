@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { createConnection, type Socket } from "node:net";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createSharedFsIpcServer } from "../ipc.js";
 import { BoundedIpcByteReader } from "../ipc-byte-reader.js";
 import {
@@ -506,6 +506,39 @@ describe("shared-fs IPC v2 server", () => {
 });
 
 describe("shared-fs negotiated IPC v2", () => {
+    // Build and first launch the real Go client once, under their own budget:
+    // a cold runner's toolchain and new-executable scan must not count against
+    // the interop tests that run it. A hung interop panics with Go's goroutine
+    // dump before Vitest's timeout.
+    const nativeDirectory = new URL("../../../native/", import.meta.url);
+    let goTestDirectory: string;
+    let goTestBinary: string;
+    beforeAll(async () => {
+        goTestDirectory = await mkdtemp(join(tmpdir(), "peerbit-go-interop-"));
+        goTestBinary = join(
+            goTestDirectory,
+            process.platform === "win32" ? "native.test.exe" : "native.test"
+        );
+        try {
+            await execFileAsync("go", ["test", "-c", "-o", goTestBinary, "."], {
+                cwd: nativeDirectory,
+            });
+            await execFileAsync(goTestBinary, ["-test.run=^$"]);
+        } catch (error) {
+            throw new Error(
+                `Could not prepare the Go interop test binary: ${(error as Error).message}`
+            );
+        }
+    }, 300_000);
+    afterAll(() =>
+        rm(goTestDirectory, {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 100,
+        })
+    );
+
     it("profiles the v2 backend service with its wire request id", async () => {
         const events: SharedFsMountProfileEvent[] = [];
         const server = await createSharedFsIpcServer(
@@ -612,16 +645,10 @@ describe("shared-fs negotiated IPC v2", () => {
         );
         try {
             await execFileAsync(
-                "go",
-                [
-                    "test",
-                    "-run",
-                    "^TestIPCClientNodeV2Interop$",
-                    "-count=1",
-                    ".",
-                ],
+                goTestBinary,
+                ["-test.run=^TestIPCClientNodeV2Interop$", "-test.timeout=60s"],
                 {
-                    cwd: new URL("../../../native/", import.meta.url),
+                    cwd: nativeDirectory,
                     env: {
                         ...process.env,
                         PEERBIT_SHARED_FS_NODE_V2_TEST_ENDPOINT:
@@ -683,16 +710,13 @@ describe("shared-fs negotiated IPC v2", () => {
         );
         try {
             await execFileAsync(
-                "go",
+                goTestBinary,
                 [
-                    "test",
-                    "-run",
-                    "^TestMountProfileNodeInterop$",
-                    "-count=1",
-                    ".",
+                    "-test.run=^TestMountProfileNodeInterop$",
+                    "-test.timeout=60s",
                 ],
                 {
-                    cwd: new URL("../../../native/", import.meta.url),
+                    cwd: nativeDirectory,
                     env: {
                         ...process.env,
                         PEERBIT_SHARED_FS_NODE_PROFILE_TEST_ENDPOINT:

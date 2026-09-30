@@ -5,6 +5,7 @@ import {
     openSharedFs,
     type SharedFsHandle,
 } from "../index.js";
+import { FileVersion, chunkIdForBytes } from "../model.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -172,10 +173,35 @@ describe("shared fs garbage collection", () => {
             // A recursive ancestor walk overflowed at a few thousand
             // levels. Planning (a dry run) is what must stay iterative;
             // deleting thousands of rows would only slow the test down.
+            // Each write computes heads over the node's whole history, so
+            // 6,000 writes cost O(depth²): seed the chain between two real
+            // writes as version rows instead.
             const depth = 6_000;
-            for (let i = 0; i < depth; i++) {
-                await fs.writeFile("/deep.txt", `revision ${i}`);
+            const first = await fs.writeFile("/deep.txt", "revision 0");
+            let parentId = first.id;
+            for (let i = 1; i < depth - 1; i++) {
+                const version = new FileVersion({
+                    // keepVersions keeps the newest by createdAt, then id:
+                    // the last write, then (tied, zero-padded) the tip.
+                    id: `version:deep-${String(i).padStart(4, "0")}`,
+                    nodeId: first.nodeId,
+                    parentVersionIds: [parentId],
+                    causalDepth: i + 1,
+                    contentHash: first.contentHash!,
+                    size: first.size,
+                    mode: first.mode,
+                    mtime: first.mtime,
+                    chunkIds: [
+                        chunkIdForBytes(new TextEncoder().encode("revision 0")),
+                    ],
+                    createdAt: first.createdAt + 1n,
+                    authorKey: first.authorKey,
+                    machineLabel: first.machineLabel,
+                });
+                await fs.program.entries.put(version, { unique: true });
+                parentId = version.id;
             }
+            await fs.writeFile("/deep.txt", `revision ${depth - 1}`);
             fakeNow += 40 * DAY_MS;
             const report = await fastGc({ keepVersions: 2, dryRun: true });
             expect(report.retiredVersions).toBe(depth - 2);
