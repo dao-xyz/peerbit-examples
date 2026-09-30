@@ -12,9 +12,8 @@ had to hand the wakeup over.
 On Linux, `peerbit-fs mount` now serves the adapter on a Unix socket in a new
 owner-only directory under `/tmp`, removed on exit, instead of TCP loopback. A
 round trip skips the TCP stack, and other local users can no longer connect to
-the daemon, which IPC v2 does not authenticate. macOS and Windows keep TCP
-loopback: macOS Unix sockets buffer only 8 KiB, which Node cannot raise, and
-made 128 KiB reads 1.7 times slower.
+the daemon. macOS and Windows keep TCP loopback: macOS Unix sockets buffer
+only 8 KiB, which Node cannot raise, and made 128 KiB reads 1.7 times slower.
 
 The gains were measured on macOS only, from a C thread as FUSE calls the
 adapter, in four runs of 5,000 getattr-shaped round trips per transport. Over
@@ -26,8 +25,7 @@ there. Linux itself has not been measured yet.
 `createSharedFsIpcServer` without an endpoint uses the same transport, and
 `defaultSharedFsIpcEndpoint` is removed. On macOS the default therefore moves
 from a Unix socket under `/tmp`, which other users could not connect to, to
-TCP loopback, which they can. Pass a socket path in a private directory to
-keep a macOS daemon private.
+TCP loopback, which they can.
 
 The adapter change reaches users through this CLI version's adapter release
 (`shared-fs-native-v<version>`), which the release publishes automatically.

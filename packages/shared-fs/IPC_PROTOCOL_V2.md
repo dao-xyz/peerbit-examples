@@ -141,9 +141,19 @@ response MUST NOT contain either token. A client MUST treat the rejection like
 any other rejected offer: it fails closed and does not reconnect.
 
 The token is sent as is, not bound to the nonce: the client picks the nonce,
-so it gives the server no freshness, and anyone who can read loopback traffic
-or the adapter's environment already has the user's privileges. The token
-authenticates the adapter to the server, not the server to the adapter.
+so it gives the server no freshness. The token authenticates the adapter to
+the server, not the server to the adapter. It keeps out local users who can
+connect to the endpoint but cannot read the adapter's environment, which only
+the same user or an administrator can.
+
+The protocol does not defend against a local user who can capture loopback
+traffic, for example a non-administrator on Windows when Npcap was installed
+without its administrators-only restriction, or a member of a group granted
+BPF access on macOS. The token and all file data cross the connection in
+plaintext, so such a user can read files as they pass and present the token,
+which stays valid until the server closes. Binding the token to a server
+challenge would not close this either: the same capture access often also
+allows injecting into an established connection.
 
 ## Binary frame
 
