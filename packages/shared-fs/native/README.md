@@ -46,9 +46,14 @@ also be run directly:
 peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shared
 ```
 
-The endpoint is provided by the TypeScript Peerbit daemon. TCP loopback is used
-for external adapters so the same IPC transport works on Linux, macOS, and
-Windows. The adapter keeps one serialized connection open for the mount
+The endpoint is provided by the TypeScript Peerbit daemon: on Linux a Unix
+socket in a new owner-only directory, which other local users cannot reach and
+which skips the TCP stack; on macOS and Windows TCP loopback (macOS Unix
+sockets buffer only 8 KiB, which made 128 KiB reads 1.7 times slower). The
+adapter reads and writes with blocking system calls (except on Windows), so a
+response wakes the FUSE callback's own thread instead of a Go poller thread
+that must hand the wakeup over; that cut a getattr round trip by a fifth on
+macOS. The adapter keeps one serialized connection open for the mount
 session, matching cgofuse's current single-threaded mode. A transport failure
 fails the current filesystem operation and discards that connection; the next
 explicit operation reconnects. Requests are never replayed automatically
@@ -118,7 +123,7 @@ pnpm shared-fs:benchmark:node-go-ipc -- \
 ```
 
 It compiles the real Go `ipcClient`, starts the real Node
-`createSharedFsIpcServer` on a fresh TCP loopback port, performs untimed
+`createSharedFsIpcServer` on the endpoint the CLI mounts with, performs untimed
 warmups, and emits raw monotonic wall-clock batch samples plus p50/p95 summaries
 for `getattr` and 4 KiB and 1 MiB reads/writes. Widths execute sequentially in
 the requested order against the same Node process and host. Every retained lane
@@ -273,8 +278,8 @@ Records use schema `peerbit.shared-fs.mount-profile` version 1 with a decimal
   framing, loopback, the Node service, and response decode. Failures carry the
   daemon's `code`, or `EIO` with `transport: true` when the daemon never
   answered.
-- Queue and round-trip records carry `requestId` and the TCP `localPort`,
-  which equal the daemon's `requestId` and `remotePort`.
+- Queue and round-trip records carry `requestId` and, over TCP, the
+  `localPort`, which equal the daemon's `requestId` and `remotePort`.
 
 Emitting never blocks a callback. Records are copied into a bounded queue after
 the request lane is released and written by one background goroutine; when the

@@ -11,7 +11,7 @@ import {
 const scope = {
     boundary: "real Go ipcClient pool to real Node createSharedFsIpcServer",
     transport:
-        "serialized TCP loopback per retained client connection; concurrent across independent lanes",
+        "serialized daemon default endpoint (private Unix socket on Linux, TCP loopback elsewhere) per retained client connection; concurrent across independent lanes",
     backend:
         "deterministic immediate in-memory benchmark backend with per-handle write state",
     measurement:

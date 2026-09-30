@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -326,7 +327,7 @@ func (c *ipcClient) discard(conn net.Conn) {
 		c.v2Limits = ipcV2Limits{}
 	}
 	c.transportMu.Unlock()
-	_ = conn.Close()
+	closeConn(conn)
 }
 
 func (c *ipcClient) close() {
@@ -338,7 +339,7 @@ func (c *ipcClient) close() {
 	c.v2Limits = ipcV2Limits{}
 	c.transportMu.Unlock()
 	if conn != nil {
-		_ = conn.Close()
+		closeConn(conn)
 	}
 }
 
@@ -386,19 +387,42 @@ func readBoundedJSONLine(reader *bufio.Reader, maxBytes int) ([]byte, error) {
 }
 
 func dialEndpoint(endpoint string) (net.Conn, error) {
-	if strings.HasPrefix(endpoint, "tcp://") {
+	network, address := "unix", endpoint
+	if strings.HasPrefix(endpoint, "tcp://") || strings.HasPrefix(endpoint, "unix://") {
 		parsed, err := url.Parse(endpoint)
 		if err != nil {
 			return nil, err
 		}
-		return net.Dial("tcp", parsed.Host)
+		network, address = parsed.Scheme, parsed.Host+parsed.Path
 	}
-	if strings.HasPrefix(endpoint, "unix://") {
-		parsed, err := url.Parse(endpoint)
-		if err != nil {
-			return nil, err
+	conn, err := net.Dial(network, address)
+	if err != nil {
+		return nil, err
+	}
+	// Use blocking system calls, so a response wakes the FUSE callback's own
+	// thread. cgo locks a callback to its thread, and a wait in Go's network
+	// poller makes another thread take the wakeup and hand it over, a fifth of
+	// a getattr round trip on macOS. Fd switches the duplicate, and with it the
+	// shared socket, to blocking mode; Windows cannot duplicate a socket and
+	// keeps the poller.
+	if socket, ok := conn.(interface{ File() (*os.File, error) }); ok {
+		if file, err := socket.File(); err == nil {
+			file.Fd()
+			_ = file.Close()
 		}
-		return net.Dial("unix", parsed.Path)
 	}
-	return net.Dial("unix", endpoint)
+	return conn, nil
+}
+
+// closeConn shuts the socket down first, which wakes a read or write blocked
+// in the kernel; Close alone would wait for it.
+func closeConn(conn net.Conn) {
+	if socket, ok := conn.(interface {
+		CloseRead() error
+		CloseWrite() error
+	}); ok {
+		_ = socket.CloseRead()
+		_ = socket.CloseWrite()
+	}
+	_ = conn.Close()
 }

@@ -945,11 +945,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     const mountpoint = normalizeNativeMountpoint(
                         String(argv.mountpoint)
                     );
-                    ipc = await createSharedFsIpcServer(
-                        backend,
-                        "tcp://127.0.0.1:0",
-                        { profile }
-                    );
+                    ipc = await createSharedFsIpcServer(backend, undefined, {
+                        profile,
+                    });
                     mounted = await mountExternalNativeAdapter(
                         externalAdapter.command,
                         ipc.endpoint,

@@ -1,8 +1,8 @@
 import { EventEmitter, once } from "node:events";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { createConnection, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
@@ -602,13 +602,13 @@ describe("shared-fs negotiated IPC v2", () => {
             expect(Buffer.from(data)).toEqual(expectedWrite);
             return data.byteLength;
         });
+        // The default endpoint is the one the CLI mounts with.
         const server = await createSharedFsIpcServer(
             backendWith({
                 getattr: async (path) => ({ path }) as any,
                 read: async () => readPayload,
                 write,
-            }),
-            "tcp://127.0.0.1:0"
+            })
         );
         try {
             await execFileAsync(
@@ -634,6 +634,23 @@ describe("shared-fs negotiated IPC v2", () => {
             await server.close();
         }
     });
+
+    it.skipIf(process.platform !== "linux")(
+        "listens by default in an owner-only directory that close removes",
+        async () => {
+            const server = await createSharedFsIpcServer(backendWith({}));
+            const directory = dirname(server.endpoint);
+            try {
+                expect((await stat(directory)).mode & 0o777).toBe(0o700);
+                expect((await stat(server.endpoint)).isSocket()).toBe(true);
+            } finally {
+                await server.close();
+            }
+            await expect(stat(directory)).rejects.toMatchObject({
+                code: "ENOENT",
+            });
+        }
+    );
 
     it("joins real Go adapter and Node daemon profiles by connection and request id", async () => {
         const directory = await mkdtemp(

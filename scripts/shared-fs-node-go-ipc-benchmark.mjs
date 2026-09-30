@@ -27,7 +27,7 @@ const CORPUS = "linear-handle-v2:(index*131+size*17+handle*31+29)%256";
 const EXPECTED_SCOPE = {
     boundary: "real Go ipcClient pool to real Node createSharedFsIpcServer",
     transport:
-        "serialized TCP loopback per retained client connection; concurrent across independent lanes",
+        "serialized daemon default endpoint (private Unix socket on Linux, TCP loopback elsewhere) per retained client connection; concurrent across independent lanes",
     backend:
         "deterministic immediate in-memory benchmark backend with per-handle write state",
     measurement:
@@ -685,8 +685,7 @@ export const runNodeGoIPCBenchmark = async (options) => {
             pathToFileURL(IPC_MODULE)
         );
         server = await createSharedFsIpcServer(
-            createImmediateBackend(options.parallelism),
-            "tcp://127.0.0.1:0"
+            createImmediateBackend(options.parallelism)
         );
         await runChild(
             executable,

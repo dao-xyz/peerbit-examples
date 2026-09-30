@@ -1,7 +1,8 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import {
     SharedFsBackendError,
     type SharedFsMountBackend,
@@ -339,13 +340,6 @@ const writeFrame = async (socket: Socket, frame: Buffer) => {
     await drained;
 };
 
-export const defaultSharedFsIpcEndpoint = (name = randomUUID()) => {
-    if (process.platform === "win32") {
-        return `\\\\.\\pipe\\peerbit-shared-fs-${name}`;
-    }
-    return join("/tmp", `pbfs-${name.slice(0, 8)}.sock`);
-};
-
 const parseTcpEndpoint = (endpoint: string) => {
     if (!endpoint.startsWith("tcp://")) {
         return undefined;
@@ -387,12 +381,32 @@ const listenServer = async (server: Server, endpoint: string) => {
     return `tcp://${address.address}:${address.port}`;
 };
 
+/**
+ * Without an endpoint the server listens where the native adapter connects:
+ * on Linux a Unix socket in a new owner-only directory that close() removes,
+ * elsewhere TCP loopback. IPC v2 has no authentication; other local users can
+ * connect to a loopback port but not into that directory. macOS stays on TCP:
+ * its Unix sockets buffer 8 KiB per direction, which Node cannot raise, and a
+ * 128 KiB read took 1.7 times as long as over TCP.
+ */
 export const createSharedFsIpcServer = async (
     backend: SharedFsMountBackend,
-    endpoint = defaultSharedFsIpcEndpoint(),
+    endpoint?: SharedFsIpcEndpoint,
     options: SharedFsIpcServerOptions = {}
 ): Promise<SharedFsIpcServer> => {
     const limits = resolveIpcOptions(options);
+    const privateDirectory =
+        endpoint === undefined && process.platform === "linux"
+            ? await mkdtemp(join(tmpdir(), "pbfs-"))
+            : undefined;
+    endpoint ??= privateDirectory
+        ? join(privateDirectory, "ipc.sock")
+        : "tcp://127.0.0.1:0";
+    const removePrivateDirectory = async () => {
+        if (privateDirectory) {
+            await rm(privateDirectory, { recursive: true, force: true });
+        }
+    };
     const profile = options.profile;
     const sockets = new Set<Socket>();
     const server: Server = createServer((socket) => {
@@ -405,7 +419,12 @@ export const createSharedFsIpcServer = async (
         });
     });
 
-    const resolvedEndpoint = await listenServer(server, endpoint);
+    const resolvedEndpoint = await listenServer(server, endpoint).catch(
+        async (error: unknown) => {
+            await removePrivateDirectory();
+            throw error;
+        }
+    );
     let closing: Promise<void> | undefined;
 
     return {
@@ -425,7 +444,7 @@ export const createSharedFsIpcServer = async (
                 for (const socket of sockets) {
                     socket.destroy();
                 }
-            });
+            }).finally(removePrivateDirectory);
             return closing;
         },
     };
