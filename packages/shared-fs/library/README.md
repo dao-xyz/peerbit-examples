@@ -907,10 +907,13 @@ and synthesizes its `Create` flags.
 
 Without an endpoint argument, `createSharedFsIpcServer` listens where the
 adapter connects: on Linux a Unix socket in a new owner-only directory under
-`/tmp` that `close()` removes, on macOS and Windows TCP loopback. IPC v2 has
-no authentication, so any local user can connect to the macOS or Windows
-loopback port, but not to the Linux socket. Pass a socket path in a private
-directory to keep a macOS daemon private.
+`/tmp` that `close()` removes, on macOS and Windows TCP loopback, which any
+local user can connect to. On every endpoint, a connection runs no operation
+until it presents the server's `token`, a random 256-bit secret the returned
+server exposes; the server answers any other offer with `EACCES` and closes
+it. Give the token to the adapter in its environment, as `peerbit-fs mount`
+does in `PEERBIT_SHARED_FS_IPC_TOKEN`, not in its arguments, which other local
+users can list.
 
 The adapter transport limits each request and response to 64 MiB by default.
 `createSharedFsIpcServer` speaks only binary IPC v2, which the Go adapter

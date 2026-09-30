@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -63,8 +64,8 @@ func TestIPCV2GoldenVectors(t *testing.T) {
 		}
 		if vector.Name == "version-offer" {
 			// The adapter's own offer is byte-identical to the golden line:
-			// it offers exactly [2] with the default limits.
-			offer, err := ipcNegotiationOfferLine(1, "AAAAAAAAAAAAAAAAAAAAAA", ipcV2Limits{
+			// it offers exactly [2] with the default limits and the token.
+			offer, err := ipcNegotiationOfferLine(1, "AAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ipcV2Limits{
 				maxRequestFrameBytes: vectors.Constants.MaxFrameBytes, maxResponseFrameBytes: vectors.Constants.MaxFrameBytes,
 			})
 			if err != nil {
@@ -256,6 +257,49 @@ func TestIPCClientFailsClosedWhenServerRejectsNegotiation(t *testing.T) {
 	_, err = client.request("mkdir", "/must-not-run")
 	if !errors.Is(err, errIPCV2Unsupported) || !strings.Contains(err.Error(), "ENOSYS: unknown operation") {
 		t.Fatalf("rejected negotiation returned %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	expectNoFurtherConnection(t, listener)
+}
+
+func TestIPCClientPresentsTokenAndFailsClosedWhenServerRejectsIt(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
+		var request ipcNegotiationRequest
+		if err == nil {
+			err = json.Unmarshal(line, &request)
+		}
+		if err == nil && (len(request.Args) != 1 || request.Args[0].Token != "presented-token") {
+			err = fmt.Errorf("offer %q did not present the token", line)
+		}
+		if err == nil {
+			err = json.NewEncoder(conn).Encode(ipcResponse{
+				ID: request.ID, OK: false,
+				Error: &ipcErrorObject{Code: "EACCES", Message: "IPC authentication failed"},
+			})
+		}
+		serverDone <- err
+	}()
+
+	client := newIPCClient("tcp://"+listener.Addr().String(), ipcClientOptions{token: "presented-token"})
+	defer client.close()
+	err = client.negotiate()
+	if err == nil || errors.Is(err, errIPCV2Unsupported) || !strings.Contains(err.Error(), "rejected this adapter's token (EACCES: IPC authentication failed)") {
+		t.Fatalf("rejected token returned %v", err)
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
@@ -463,7 +507,7 @@ func TestIPCClientNodeV2Interop(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("run by the Node IPC v2 integration test")
 	}
-	client := newIPCClient(endpoint)
+	client := newIPCClient(endpoint, ipcClientOptions{token: os.Getenv(ipcTokenEnv)})
 	defer client.close()
 	result, err := client.request("getattr", "/interop.bin")
 	if err != nil {

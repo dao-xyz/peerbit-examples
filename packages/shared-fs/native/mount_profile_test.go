@@ -402,7 +402,7 @@ func TestMountProfileNodeInterop(t *testing.T) {
 	if profile == nil {
 		t.Fatalf("%s did not enable profiling", nativeProfileFileEnv)
 	}
-	client := newIPCClient(endpoint, ipcClientOptions{profile: profile})
+	client := newIPCClient(endpoint, ipcClientOptions{token: os.Getenv(ipcTokenEnv), profile: profile})
 	if _, err := client.request("getattr", "/present"); err != nil {
 		t.Fatal(err)
 	}

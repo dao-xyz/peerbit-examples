@@ -28,30 +28,28 @@ export const NATIVE_ADAPTER_PROFILE_FILE_ENV =
     "PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE";
 
 /**
- * The adapter profiles only when this mount asked for it: an explicit file is
- * set, and a value inherited from the CLI's own environment is removed.
- * Otherwise the adapter inherits the environment unchanged.
+ * Carries the IPC server's token to the adapter. The environment, unlike
+ * argv, is readable only by the same user.
+ */
+export const NATIVE_ADAPTER_IPC_TOKEN_ENV = "PEERBIT_SHARED_FS_IPC_TOKEN";
+
+/**
+ * The adapter inherits the environment plus the IPC token. It profiles only
+ * when this mount asked for it: an explicit file is set, and a value
+ * inherited from the CLI's own environment is removed.
  */
 export const adapterSpawnOptions = (
+    token: string,
     profileFile: string | undefined,
     environment: NodeJS.ProcessEnv = process.env
 ): AdapterSpawnOptions => {
-    const stdio: AdapterSpawnOptions["stdio"] = ["ignore", "pipe", "pipe"];
-    if (profileFile !== undefined) {
-        return {
-            stdio,
-            env: {
-                ...environment,
-                [NATIVE_ADAPTER_PROFILE_FILE_ENV]: profileFile,
-            },
-        };
+    const env = { ...environment, [NATIVE_ADAPTER_IPC_TOKEN_ENV]: token };
+    if (profileFile === undefined) {
+        delete env[NATIVE_ADAPTER_PROFILE_FILE_ENV];
+    } else {
+        env[NATIVE_ADAPTER_PROFILE_FILE_ENV] = profileFile;
     }
-    if (environment[NATIVE_ADAPTER_PROFILE_FILE_ENV] === undefined) {
-        return { stdio };
-    }
-    const env = { ...environment };
-    delete env[NATIVE_ADAPTER_PROFILE_FILE_ENV];
-    return { stdio, env };
+    return { stdio: ["ignore", "pipe", "pipe"], env };
 };
 
 const childExited = (child: ChildProcess) =>
@@ -157,18 +155,18 @@ const stopChild = async (child: ChildProcess, timeoutMs: number) => {
 
 export const mountExternalNativeAdapter = async (
     command: string,
-    endpoint: string,
+    ipc: { endpoint: string; token: string },
     mountpoint: string,
     options: ExternalNativeAdapterOptions = {}
 ) => {
-    const args = ["--endpoint", endpoint, "--mountpoint", mountpoint];
+    const args = ["--endpoint", ipc.endpoint, "--mountpoint", mountpoint];
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
     }
     const child = (options.spawnAdapter ?? spawn)(
         command,
         args,
-        adapterSpawnOptions(options.profileFile)
+        adapterSpawnOptions(ipc.token, options.profileFile)
     );
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 

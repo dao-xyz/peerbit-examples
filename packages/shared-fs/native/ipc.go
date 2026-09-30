@@ -16,9 +16,15 @@ import (
 
 const defaultIPCMaxFrameBytes = 64 * 1024 * 1024
 
+// ipcTokenEnv carries the IPC server's token from the CLI that starts the
+// adapter. The environment, unlike argv, is private to the user.
+const ipcTokenEnv = "PEERBIT_SHARED_FS_IPC_TOKEN"
+
 var errIPCFrameTooLarge = errors.New("IPC frame exceeds configured byte limit")
 
 type ipcClientOptions struct {
+	// token is the server's secret, presented in every negotiation.
+	token                 string
 	maxRequestFrameBytes  int
 	maxResponseFrameBytes int
 	profile               *mountProfiler
@@ -26,6 +32,7 @@ type ipcClientOptions struct {
 
 type ipcClient struct {
 	endpoint              string
+	token                 string
 	nextID                uint64
 	maxRequestFrameBytes  int
 	maxResponseFrameBytes int
@@ -79,10 +86,12 @@ func newIPCClient(endpoint string, provided ...ipcClientOptions) *ipcClient {
 		if provided[0].maxResponseFrameBytes > 0 {
 			options.maxResponseFrameBytes = provided[0].maxResponseFrameBytes
 		}
+		options.token = provided[0].token
 		options.profile = provided[0].profile
 	}
 	return &ipcClient{
 		endpoint:              endpoint,
+		token:                 options.token,
 		maxRequestFrameBytes:  options.maxRequestFrameBytes,
 		maxResponseFrameBytes: options.maxResponseFrameBytes,
 		profile:               options.profile,
@@ -275,7 +284,7 @@ func (c *ipcClient) connect() (conn net.Conn, reader *bufio.Reader, limits ipcV2
 	if uint64(offerLimits.maxResponseFrameBytes) > maxV2FrameBytes {
 		offerLimits.maxResponseFrameBytes = int(maxV2FrameBytes)
 	}
-	negotiated, err := negotiateIPCV2(conn, reader, offerLimits)
+	negotiated, err := negotiateIPCV2(conn, reader, c.token, offerLimits)
 	if err != nil {
 		c.discard(conn)
 		return nil, nil, ipcV2Limits{}, true, err

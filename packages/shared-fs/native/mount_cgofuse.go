@@ -32,9 +32,9 @@ type peerbitFS struct {
 // host needs for d_type.
 const requestReaddirStats = runtime.GOOS == "windows"
 
-func runNativeMount(endpoint string, mountpoint string, debug bool, profile *mountProfiler) error {
+func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mountProfiler) error {
 	fs := &peerbitFS{
-		client:  newIPCClient(endpoint, ipcClientOptions{profile: profile}),
+		client:  newIPCClient(endpoint, ipcClientOptions{token: token, profile: profile}),
 		debug:   debug,
 		profile: profile,
 	}

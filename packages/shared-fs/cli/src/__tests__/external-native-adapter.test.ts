@@ -5,8 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
     adapterSpawnOptions,
     mountExternalNativeAdapter,
+    NATIVE_ADAPTER_IPC_TOKEN_ENV,
     NATIVE_ADAPTER_PROFILE_FILE_ENV,
 } from "../external-native-adapter.js";
+
+const ipc = { endpoint: "tcp://127.0.0.1:1", token: "ipc-token-secret" };
 
 class FakeChild extends EventEmitter {
     readonly stdout = new PassThrough();
@@ -65,7 +68,7 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "profiled-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             {
                 exitTimeoutMs: 100,
@@ -83,6 +86,7 @@ describe("external native adapter lifecycle", () => {
             {
                 stdio: ["ignore", "pipe", "pipe"],
                 env: expect.objectContaining({
+                    [NATIVE_ADAPTER_IPC_TOKEN_ENV]: ipc.token,
                     [NATIVE_ADAPTER_PROFILE_FILE_ENV]:
                         "/profiles/native-adapter.ndjson",
                 }),
@@ -93,7 +97,7 @@ describe("external native adapter lifecycle", () => {
         );
     });
 
-    it("leaves the adapter environment untouched when profiling is off", async () => {
+    it("passes the IPC token through the environment, never argv", async () => {
         const child = new FakeChild();
         const spawnAdapter = vi.fn(
             () => child as unknown as ChildProcess
@@ -104,45 +108,60 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "plain-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             { exitTimeoutMs: 100, spawnAdapter }
         );
         await mounted.unmount();
 
+        // Other local users can list a process's arguments, but not its
+        // environment.
         expect(spawnAdapter).toHaveBeenCalledWith(
             "plain-adapter",
             ["--endpoint", "tcp://127.0.0.1:1", "--mountpoint", "/unused"],
-            { stdio: ["ignore", "pipe", "pipe"] }
+            {
+                stdio: ["ignore", "pipe", "pipe"],
+                env: expect.objectContaining({
+                    [NATIVE_ADAPTER_IPC_TOKEN_ENV]: ipc.token,
+                }),
+            }
+        );
+        const [, args] = vi.mocked(spawnAdapter).mock.calls[0];
+        expect(JSON.stringify(args)).not.toContain(ipc.token);
+        expect(NATIVE_ADAPTER_IPC_TOKEN_ENV).toBe(
+            "PEERBIT_SHARED_FS_IPC_TOKEN"
         );
     });
 
-    it("does not let an inherited profile variable enable adapter profiling", () => {
+    it("does not let inherited variables enable profiling or replace the token", () => {
         const inherited = {
             PATH: "/bin",
             [NATIVE_ADAPTER_PROFILE_FILE_ENV]: "/stale/native-adapter.ndjson",
+            [NATIVE_ADAPTER_IPC_TOKEN_ENV]: "stale-token",
         };
-        const options = adapterSpawnOptions(undefined, inherited);
+        const options = adapterSpawnOptions(ipc.token, undefined, inherited);
         expect(options).toEqual({
             stdio: ["ignore", "pipe", "pipe"],
-            env: { PATH: "/bin" },
+            env: { PATH: "/bin", [NATIVE_ADAPTER_IPC_TOKEN_ENV]: ipc.token },
         });
         // The caller's environment object is not mutated.
-        expect(inherited[NATIVE_ADAPTER_PROFILE_FILE_ENV]).toBe(
-            "/stale/native-adapter.ndjson"
-        );
+        expect(inherited).toEqual({
+            PATH: "/bin",
+            [NATIVE_ADAPTER_PROFILE_FILE_ENV]: "/stale/native-adapter.ndjson",
+            [NATIVE_ADAPTER_IPC_TOKEN_ENV]: "stale-token",
+        });
         // An explicit profile file replaces the inherited value.
         expect(
-            adapterSpawnOptions("/profiles/native-adapter.ndjson", inherited)
-                .env
+            adapterSpawnOptions(
+                ipc.token,
+                "/profiles/native-adapter.ndjson",
+                inherited
+            ).env
         ).toEqual({
             PATH: "/bin",
             [NATIVE_ADAPTER_PROFILE_FILE_ENV]:
                 "/profiles/native-adapter.ndjson",
-        });
-        // Without the variable the common path passes no env at all.
-        expect(adapterSpawnOptions(undefined, { PATH: "/bin" })).toEqual({
-            stdio: ["ignore", "pipe", "pipe"],
+            [NATIVE_ADAPTER_IPC_TOKEN_ENV]: ipc.token,
         });
     });
 
@@ -157,7 +176,7 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "ready-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             { exitTimeoutMs: 100, spawnAdapter }
         );
@@ -175,16 +194,11 @@ describe("external native adapter lifecycle", () => {
         ) as unknown as typeof spawn;
 
         await expect(
-            mountExternalNativeAdapter(
-                "stalled-adapter",
-                "tcp://127.0.0.1:1",
-                "/unused",
-                {
-                    readinessTimeoutMs: 10,
-                    exitTimeoutMs: 100,
-                    spawnAdapter,
-                }
-            )
+            mountExternalNativeAdapter("stalled-adapter", ipc, "/unused", {
+                readinessTimeoutMs: 10,
+                exitTimeoutMs: 100,
+                spawnAdapter,
+            })
         ).rejects.toThrow(
             "Native adapter did not report readiness within 10 ms"
         );
@@ -206,7 +220,7 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "stubborn-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             { exitTimeoutMs: 5, spawnAdapter }
         );
@@ -234,7 +248,7 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "rejecting-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             { exitTimeoutMs: 100, spawnAdapter }
         );
@@ -260,7 +274,7 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "rejecting-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             { exitTimeoutMs: 5, spawnAdapter }
         );
@@ -287,7 +301,7 @@ describe("external native adapter lifecycle", () => {
 
         const mounted = await mountExternalNativeAdapter(
             "erroring-adapter",
-            "tcp://127.0.0.1:1",
+            ipc,
             "/unused",
             { exitTimeoutMs: 100, spawnAdapter }
         );
@@ -307,16 +321,11 @@ describe("external native adapter lifecycle", () => {
         ) as unknown as typeof spawn;
 
         await expect(
-            mountExternalNativeAdapter(
-                "unkillable-adapter",
-                "tcp://127.0.0.1:1",
-                "/unused",
-                {
-                    readinessTimeoutMs: 5,
-                    exitTimeoutMs: 5,
-                    spawnAdapter,
-                }
-            )
+            mountExternalNativeAdapter("unkillable-adapter", ipc, "/unused", {
+                readinessTimeoutMs: 5,
+                exitTimeoutMs: 5,
+                spawnAdapter,
+            })
         ).rejects.toMatchObject({
             name: "AggregateError",
             message:
