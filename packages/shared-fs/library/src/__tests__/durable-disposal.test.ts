@@ -118,43 +118,22 @@ describe("shared fs durable machine disposal", () => {
     const waitForRemoteReceiptReadiness = async (
         source: SharedFsHandle,
         remote: Peerbit | Peerbit[],
-        log: any = source.program.entries.log,
-        // Optional failure diagnostics: the same log as opened on the single
-        // remote peer, read only after the wait has already failed.
-        diagnostics?: { name: string; remoteLog: any }
+        log: any = source.program.entries.log
     ) => {
         const remotes = Array.isArray(remote) ? remote : [remote];
-        if (diagnostics !== undefined && remotes.length !== 1) {
-            throw new Error("diagnostics pair with exactly one remote peer");
-        }
         const entries = await log.log.toArray();
         const replicas = log.replicas.min.getValue(log);
         await Promise.all(
-            remotes.map((peer) => {
-                const wait = () =>
-                    log.waitForPersistedReceiptPeerReadiness(
-                        peer.identity.publicKey,
-                        {
-                            entries,
-                            replicas,
-                            timeout: WAIT_TIMEOUT_MS,
-                        }
-                    );
-                return diagnostics === undefined
-                    ? wait()
-                    : withReceiptDiagnostics(
-                          wait,
-                          log.node.identity.publicKey,
-                          peer.identity.publicKey,
-                          [
-                              {
-                                  name: diagnostics.name,
-                                  source: log,
-                                  remote: diagnostics.remoteLog,
-                              },
-                          ]
-                      );
-            })
+            remotes.map((peer) =>
+                log.waitForPersistedReceiptPeerReadiness(
+                    peer.identity.publicKey,
+                    {
+                        entries,
+                        replicas,
+                        timeout: WAIT_TIMEOUT_MS,
+                    }
+                )
+            )
         );
     };
 
@@ -532,15 +511,20 @@ describe("shared fs durable machine disposal", () => {
                 },
             ];
             await Promise.all(
-                receiptLogs.map(async ({ name, source: log, remote }) => {
-                    await waitForRemoteReceiptReadiness(
-                        source,
-                        receiverPeer,
-                        log,
-                        { name, remoteLog: remote }
+                receiptLogs.map(async (pair) => {
+                    await withReceiptDiagnostics(
+                        () =>
+                            waitForRemoteReceiptReadiness(
+                                source,
+                                receiverPeer,
+                                pair.source
+                            ),
+                        sourcePeer.identity.publicKey,
+                        receiverKey,
+                        [pair]
                     );
                     await waitUntil(async () => {
-                        const replicators = await log.getReplicators();
+                        const replicators = await pair.source.getReplicators();
                         expect(replicators.has(receiverHash)).toBe(true);
                         expect(replicators.has(writerHash)).toBe(false);
                     });
