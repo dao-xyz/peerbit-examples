@@ -9,6 +9,7 @@ import {
     SHARED_FS_IPC_PROTOCOL,
     writeIpcV2Frame,
 } from "../ipc-v2.js";
+import type { SharedFsIpcServer } from "../ipc.js";
 import {
     SharedFsBackendError,
     type SharedFsMountBackend,
@@ -36,9 +37,13 @@ export const connectIpcEndpoint = async (endpoint: string) => {
     return socket;
 };
 
-/** Send the v2 offer on a fresh socket and return the negotiated limits. */
+/**
+ * Send the v2 offer, presenting the server's token, on a fresh socket and
+ * return the negotiated limits.
+ */
 export const negotiateIpcV2 = async (
     socket: Socket,
+    token: string,
     offer: Record<string, unknown> = {}
 ) => {
     const reader = new BoundedIpcByteReader(socket, DEFAULT_LIMIT);
@@ -51,6 +56,7 @@ export const negotiateIpcV2 = async (
                     protocol: SHARED_FS_IPC_PROTOCOL,
                     versions: [2],
                     nonce: "test-nonce",
+                    token,
                     maxRequestFrameBytes: DEFAULT_LIMIT,
                     maxResponseFrameBytes: DEFAULT_LIMIT,
                     ...offer,
@@ -93,7 +99,10 @@ export const readIpcV2Response = async (
  * mirrors the Go adapter's wire behavior (serialized requests, raw write and
  * read bodies, backend error codes) so tests can drive a real server.
  */
-export const createIpcV2TestClient = (endpoint: string) => {
+export const createIpcV2TestClient = ({
+    endpoint,
+    token,
+}: Pick<SharedFsIpcServer, "endpoint" | "token">) => {
     let nextId = 1;
     let session:
         | Promise<{
@@ -108,7 +117,7 @@ export const createIpcV2TestClient = (endpoint: string) => {
         (session ??= (async () => {
             const socket = await connectIpcEndpoint(endpoint);
             socket.on("error", () => {});
-            return { socket, ...(await negotiateIpcV2(socket)) };
+            return { socket, ...(await negotiateIpcV2(socket, token)) };
         })());
 
     const call = async (

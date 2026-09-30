@@ -432,7 +432,7 @@ func TestNodeGoIPCExternalBenchmark(t *testing.T) {
 		widthReport := func() nodeGoIPCWidthReport {
 			clients := make([]*ipcClient, width)
 			for index := range clients {
-				clients[index] = newIPCClient(endpoint)
+				clients[index] = newIPCClient(endpoint, ipcClientOptions{token: os.Getenv(ipcTokenEnv)})
 			}
 			defer func() {
 				for _, client := range clients {

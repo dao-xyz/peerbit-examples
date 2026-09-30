@@ -18,6 +18,7 @@ import {
     writeIpcV2Frame,
 } from "../ipc-v2.js";
 import {
+    connectIpcEndpoint,
     createIpcV2TestClient,
     negotiateIpcV2 as negotiateV2,
     readIpcV2Response as decodeV2Response,
@@ -138,7 +139,7 @@ describe("shared-fs IPC v2 server", () => {
             "tcp://127.0.0.1:0",
             { profile: (event) => events.push(event) }
         );
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             for (const path of ["/absent", "/settling", "/uncoded"]) {
                 await expect(client.getattr(path)).rejects.toBeDefined();
@@ -166,7 +167,7 @@ describe("shared-fs IPC v2 server", () => {
             backendWith({ readdir }),
             "tcp://127.0.0.1:0"
         );
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             await expect(client.readdir("/")).resolves.toEqual([
                 { name: "compact.txt", kind: "file" },
@@ -196,7 +197,7 @@ describe("shared-fs IPC v2 server", () => {
             backendWith({ open, setattr, symlink, readlink }),
             "tcp://127.0.0.1:0"
         );
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             await expect(client.open("/a.sh", 0o1101, 0o755)).resolves.toBe(7);
             await expect(
@@ -230,7 +231,7 @@ describe("shared-fs IPC v2 server", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const { reader, limits } = await negotiateV2(socket);
+            const { reader, limits } = await negotiateV2(socket, server.token);
             const frame = requestFrame(limits, {
                 id: 1,
                 op: "getattr",
@@ -266,7 +267,7 @@ describe("shared-fs IPC v2 server", () => {
             backendWith({ read }),
             "tcp://127.0.0.1:0"
         );
-        const client = createIpcV2TestClient(defaults.endpoint);
+        const client = createIpcV2TestClient(defaults);
         try {
             const roundTrip = await client.read(7, data.byteLength, 0);
             expect(roundTrip.byteLength).toBe(data.byteLength);
@@ -285,7 +286,7 @@ describe("shared-fs IPC v2 server", () => {
         const exact = await connect(server.endpoint);
         const oversized = await connect(server.endpoint);
         try {
-            const { reader, limits } = await negotiateV2(exact);
+            const { reader, limits } = await negotiateV2(exact, server.token);
             expect(limits.maxRequestFrameBytes).toBe(exactFrameBytes);
             exact.write(requestFrame(limits, metadata, data));
             await expect(decodeV2Response(reader, limits)).resolves.toEqual({
@@ -293,7 +294,7 @@ describe("shared-fs IPC v2 server", () => {
                 body: Buffer.alloc(0),
             });
 
-            const negotiated = await negotiateV2(oversized);
+            const negotiated = await negotiateV2(oversized, server.token);
             const didClose = closed(oversized);
             const header = Buffer.alloc(16);
             header.write("PBFS", 0, "ascii");
@@ -337,7 +338,7 @@ describe("shared-fs IPC v2 server", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const { reader, limits } = await negotiateV2(socket);
+            const { reader, limits } = await negotiateV2(socket, server.token);
             socket.write(
                 Buffer.concat([
                     requestFrame(limits, {
@@ -382,7 +383,7 @@ describe("shared-fs IPC v2 server", () => {
             { maxRequestFrameBytes: 64 }
         );
         const offender = await connect(server.endpoint);
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             const offenderClosed = closed(offender);
             offender.write(
@@ -415,7 +416,7 @@ describe("shared-fs IPC v2 server", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const { reader, limits } = await negotiateV2(socket);
+            const { reader, limits } = await negotiateV2(socket, server.token);
             expect(limits.maxResponseFrameBytes).toBe(maxResponseFrameBytes);
             socket.write(
                 Buffer.concat([
@@ -503,6 +504,81 @@ describe("shared-fs IPC v2 server", () => {
             await server.close();
         }
     });
+
+    it("gives each server its own 256-bit token", async () => {
+        const first = await createSharedFsIpcServer(backendWith({}));
+        const second = await createSharedFsIpcServer(backendWith({}));
+        try {
+            expect(first.token).toMatch(/^[\w-]{43}$/u);
+            expect(second.token).not.toBe(first.token);
+        } finally {
+            await first.close();
+            await second.close();
+        }
+    });
+
+    it.each([
+        { name: "without a token", present: () => undefined },
+        { name: "with a non-string token", present: () => 1 },
+        {
+            name: "with a token that differs in one character",
+            present: (token: string) =>
+                `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`,
+        },
+    ])(
+        "rejects a connection $name before any operation runs",
+        async ({ present }) => {
+            const mkdir = vi.fn(async () => {});
+            // The default endpoint is the one the CLI mounts with.
+            const server = await createSharedFsIpcServer(
+                backendWith({ mkdir })
+            );
+            const socket = await connectIpcEndpoint(server.endpoint);
+            try {
+                const didClose = closed(socket);
+                const response = readJsonLines(socket, 1);
+                socket.write(
+                    `${JSON.stringify({
+                        id: 3,
+                        op: SHARED_FS_IPC_NEGOTIATE_OP,
+                        args: [
+                            {
+                                protocol: SHARED_FS_IPC_PROTOCOL,
+                                versions: [2],
+                                nonce: "unauthenticated",
+                                token: present(server.token),
+                                maxRequestFrameBytes: 1024,
+                                maxResponseFrameBytes: 1024,
+                            },
+                        ],
+                    })}\n`
+                );
+                const [rejection] = await response;
+                expect(rejection).toMatchObject({
+                    id: 3,
+                    ok: false,
+                    error: { code: "EACCES" },
+                });
+                const message = (rejection.error as { message: string })
+                    .message;
+                expect(message).toContain("PEERBIT_SHARED_FS_IPC_TOKEN");
+                expect(message).toContain("peerbit-fs install-adapter --force");
+                expect(message).not.toContain(server.token);
+                // A mutation sent after the rejection is never read.
+                socket.write(
+                    requestFrame(
+                        { maxRequestFrameBytes: 1024, maxMetadataBytes: 1024 },
+                        { id: 4, op: "mkdir", args: ["/must-not-run"] }
+                    )
+                );
+                await didClose;
+                expect(mkdir).not.toHaveBeenCalled();
+            } finally {
+                socket.destroy();
+                await server.close();
+            }
+        }
+    );
 });
 
 describe("shared-fs negotiated IPC v2", () => {
@@ -548,7 +624,7 @@ describe("shared-fs negotiated IPC v2", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const { reader, limits } = await negotiateV2(socket);
+            const { reader, limits } = await negotiateV2(socket, server.token);
             const request = encodeIpcV2Frame(
                 IpcV2FrameKind.Request,
                 { id: 37, op: "getattr", args: ["/profiled-v2"] },
@@ -653,6 +729,7 @@ describe("shared-fs negotiated IPC v2", () => {
                         ...process.env,
                         PEERBIT_SHARED_FS_NODE_V2_TEST_ENDPOINT:
                             server.endpoint,
+                        PEERBIT_SHARED_FS_IPC_TOKEN: server.token,
                     },
                 }
             );
@@ -721,6 +798,7 @@ describe("shared-fs negotiated IPC v2", () => {
                         ...process.env,
                         PEERBIT_SHARED_FS_NODE_PROFILE_TEST_ENDPOINT:
                             server.endpoint,
+                        PEERBIT_SHARED_FS_IPC_TOKEN: server.token,
                         PEERBIT_SHARED_FS_NATIVE_PROFILE_FILE: nativeProfile,
                     },
                 }
@@ -806,11 +884,18 @@ describe("shared-fs negotiated IPC v2", () => {
         const socket = await connect(server.endpoint);
         const reader = new BoundedIpcByteReader(socket, 64 * 1024 * 1024);
         try {
-            const negotiation = Buffer.from(
+            const offer = Buffer.from(
                 vectors.negotiation.find(
                     ({ name }) => name === "version-offer"
                 )!.jsonLineHex,
                 "hex"
+            ).toString("utf8");
+            // Present this server's token in place of the golden one, which
+            // has the same length, so no other offer byte changes.
+            const goldenToken = "A".repeat(server.token.length);
+            expect(offer).toContain(`"token":"${goldenToken}"`);
+            const negotiation = Buffer.from(
+                offer.replace(goldenToken, server.token)
             );
             for (const byte of negotiation) {
                 socket.write(Buffer.from([byte]));
@@ -874,7 +959,7 @@ describe("shared-fs negotiated IPC v2", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const { reader, limits } = await negotiateV2(socket);
+            const { reader, limits } = await negotiateV2(socket, server.token);
             const request = encodeIpcV2Frame(
                 IpcV2FrameKind.Request,
                 { id: 7, op: "read", args: [1, payload.byteLength, 0] },
@@ -912,7 +997,7 @@ describe("shared-fs negotiated IPC v2", () => {
         try {
             // Released 0.13.16-0.13.18 adapters offer [2, 1]; order is only
             // a preference, and this server speaks v2 alone.
-            const { reader, limits } = await negotiateV2(socket, {
+            const { reader, limits } = await negotiateV2(socket, server.token, {
                 versions: [1, 2],
             });
             socket.write(
@@ -951,6 +1036,7 @@ describe("shared-fs negotiated IPC v2", () => {
                                 protocol: SHARED_FS_IPC_PROTOCOL,
                                 versions,
                                 nonce: "unsupported",
+                                token: server.token,
                             },
                         ],
                     })}\n`
@@ -1078,7 +1164,7 @@ describe("shared-fs negotiated IPC v2", () => {
         );
         const socket = await connect(server.endpoint);
         try {
-            const { limits } = await negotiateV2(socket);
+            const { limits } = await negotiateV2(socket, server.token);
             const didClose = closed(socket);
             socket.write(build(limits));
             await didClose;

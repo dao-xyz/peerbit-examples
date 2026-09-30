@@ -930,7 +930,7 @@ describe("shared fs mount backend", () => {
             backend,
             "tcp://127.0.0.1:0"
         );
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             await expect(
                 client.open("/settling.txt", { read: true, write: true })
@@ -3006,7 +3006,7 @@ describe("shared fs mount backend", () => {
     it("round-trips backend calls through local IPC", async () => {
         const backend = createSharedFsMountBackend(fs);
         const server = await createSharedFsIpcServer(backend);
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             await client.mkdir("/ipc");
             const handle = await client.open(
@@ -4184,7 +4184,7 @@ describe("shared fs mount backend", () => {
             backend,
             "tcp://127.0.0.1:0"
         );
-        const client = createIpcV2TestClient(server.endpoint);
+        const client = createIpcV2TestClient(server);
         try {
             expect(server.endpoint).toMatch(/^tcp:\/\/127\.0\.0\.1:\d+$/);
             await client.mkdir("/tcp");
@@ -4229,7 +4229,10 @@ describe("shared fs mount backend", () => {
         socket.on("error", () => {});
         try {
             // A negotiated adapter connection stays open between requests.
-            const { reader, limits } = await negotiateIpcV2(socket);
+            const { reader, limits } = await negotiateIpcV2(
+                socket,
+                server.token
+            );
             await writeIpcV2Frame(
                 socket,
                 encodeIpcV2Frame(

@@ -49,6 +49,7 @@ type ipcNegotiationOffer struct {
 	Protocol              string `json:"protocol"`
 	Versions              []int  `json:"versions"`
 	Nonce                 string `json:"nonce"`
+	Token                 string `json:"token"`
 	MaxRequestFrameBytes  int    `json:"maxRequestFrameBytes"`
 	MaxResponseFrameBytes int    `json:"maxResponseFrameBytes"`
 }
@@ -363,12 +364,12 @@ func containsNativeBytes(value interface{}) bool {
 
 // ipcNegotiationOfferLine encodes the JSONL handshake line that offers IPC v2,
 // the only version this adapter speaks, including its trailing LF.
-func ipcNegotiationOfferLine(id uint64, nonce string, offerLimits ipcV2Limits) ([]byte, error) {
+func ipcNegotiationOfferLine(id uint64, nonce, token string, offerLimits ipcV2Limits) ([]byte, error) {
 	encoded, err := json.Marshal(ipcNegotiationRequest{
 		ID: id,
 		Op: ipcNegotiateOperation,
 		Args: []ipcNegotiationOffer{{
-			Protocol: ipcProtocolName, Versions: []int{2}, Nonce: nonce,
+			Protocol: ipcProtocolName, Versions: []int{2}, Nonce: nonce, Token: token,
 			MaxRequestFrameBytes: offerLimits.maxRequestFrameBytes, MaxResponseFrameBytes: offerLimits.maxResponseFrameBytes,
 		}},
 	})
@@ -386,15 +387,16 @@ func ipcNegotiationOfferLine(id uint64, nonce string, offerLimits ipcV2Limits) (
 // IPC v1 is retired, so the adapter fails closed instead of falling back.
 var errIPCV2Unsupported = errors.New("the server does not accept IPC v2 (IPC v1 is retired); install the peerbit-fs CLI and native adapter from the same release")
 
-// negotiateIPCV2 sends the v2 offer on a fresh connection and returns the
-// negotiated limits. Any failure leaves the connection unusable.
-func negotiateIPCV2(conn net.Conn, reader *bufio.Reader, offerLimits ipcV2Limits) (ipcV2Limits, error) {
+// negotiateIPCV2 sends the v2 offer, which presents the server's token, on a
+// fresh connection and returns the negotiated limits. Any failure leaves the
+// connection unusable.
+func negotiateIPCV2(conn net.Conn, reader *bufio.Reader, token string, offerLimits ipcV2Limits) (ipcV2Limits, error) {
 	nonce, err := newIPCNonce()
 	if err != nil {
 		return ipcV2Limits{}, err
 	}
 	const negotiationID uint64 = 0
-	offer, err := ipcNegotiationOfferLine(negotiationID, nonce, offerLimits)
+	offer, err := ipcNegotiationOfferLine(negotiationID, nonce, token, offerLimits)
 	if err != nil {
 		return ipcV2Limits{}, err
 	}
@@ -428,6 +430,9 @@ func negotiateIPCV2(conn net.Conn, reader *bufio.Reader, offerLimits ipcV2Limits
 		rejection, err := parseIPCError(envelope["error"])
 		if err != nil {
 			return ipcV2Limits{}, err
+		}
+		if rejection.Code == "EACCES" {
+			return ipcV2Limits{}, fmt.Errorf("IPC negotiation failed: the server rejected this adapter's token (%v)", rejection)
 		}
 		return ipcV2Limits{}, fmt.Errorf("IPC negotiation failed: the server rejected the offer (%v): %w", rejection, errIPCV2Unsupported)
 	}

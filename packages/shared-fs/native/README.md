@@ -24,8 +24,9 @@ the record is missing, names another release or target, or no longer matches
 the binary. Only the adapter from the CLI's own release is supported; run
 `peerbit-fs install-adapter --force` to replace any other. An adapter passed
 with `--native-adapter` or `PEERBIT_SHARED_FS_NATIVE_ADAPTER` is not checked:
-an adapter from 0.13.15 or earlier (IPC v1 only) still mounts, but the CLI
-rejects every operation it sends.
+an adapter from before IPC authentication does not present the daemon's token
+and fails at mount startup, and one from 0.13.15 or earlier (IPC v1 only)
+still mounts, but the CLI rejects every operation it sends.
 
 Build a native adapter binary with:
 
@@ -43,8 +44,16 @@ The adapter is normally launched by `peerbit-fs mount --native-adapter`, but can
 also be run directly:
 
 ```bash
-peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shared
+PEERBIT_SHARED_FS_IPC_TOKEN=<token> peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shared
 ```
+
+The daemon (`createSharedFsIpcServer`) provides the endpoint and a token, a
+random secret. The adapter presents the token when it negotiates each
+connection, and the daemon closes a connection without it before running any
+operation, on every platform. `peerbit-fs mount` passes the token in the
+adapter's environment, which only the same user can read, never in its
+arguments, which other local users can list; the adapter unsets it, so no
+process it starts inherits it.
 
 The endpoint is provided by the TypeScript Peerbit daemon: on Linux a Unix
 socket in a new owner-only directory, which other local users cannot reach and

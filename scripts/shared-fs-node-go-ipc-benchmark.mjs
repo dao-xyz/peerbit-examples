@@ -696,6 +696,7 @@ export const runNodeGoIPCBenchmark = async (options) => {
                 env: {
                     ...process.env,
                     PEERBIT_SHARED_FS_NODE_GO_IPC_ENDPOINT: server.endpoint,
+                    PEERBIT_SHARED_FS_IPC_TOKEN: server.token,
                     PEERBIT_SHARED_FS_NODE_GO_IPC_OUTPUT: rawReport,
                     PEERBIT_SHARED_FS_NODE_GO_IPC_SAMPLES: String(
                         options.samples

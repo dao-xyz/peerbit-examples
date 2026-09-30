@@ -1,3 +1,4 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -27,6 +28,13 @@ export type SharedFsIpcEndpoint = string;
 
 export type SharedFsIpcServer = {
     endpoint: SharedFsIpcEndpoint;
+    /**
+     * The secret each connection must present in its negotiation offer. Pass
+     * it to the adapter in its environment, as `peerbit-fs mount` does in
+     * PEERBIT_SHARED_FS_IPC_TOKEN, never in its arguments, which other local
+     * users can list.
+     */
+    token: string;
     close(): Promise<void>;
 };
 
@@ -40,6 +48,7 @@ type IpcNegotiationOffer = {
     protocol: string;
     versions: number[];
     nonce: string;
+    token?: unknown;
     maxRequestFrameBytes?: number;
     maxResponseFrameBytes?: number;
 };
@@ -380,13 +389,24 @@ const listenServer = async (server: Server, endpoint: string) => {
     return `tcp://${address.address}:${address.port}`;
 };
 
+const sha256 = (value: string) => createHash("sha256").update(value).digest();
+
+/**
+ * Compares digests, so the time taken reveals nothing about the token,
+ * whatever the length of the presented value.
+ */
+const presentsToken = (offer: IpcNegotiationOffer, tokenDigest: Buffer) =>
+    typeof offer.token === "string" &&
+    timingSafeEqual(sha256(offer.token), tokenDigest);
+
 /**
  * Without an endpoint the server listens where the native adapter connects:
  * on Linux a Unix socket in a new owner-only directory that close() removes,
- * elsewhere (macOS and Windows) TCP loopback. IPC v2 has no authentication:
- * any local user can connect to a loopback port, but not into that directory.
- * The directory is made under /tmp, not os.tmpdir(): a longer TMPDIR can push
- * the path past sun_path's 108 bytes, and bind would silently truncate it.
+ * elsewhere (macOS and Windows) TCP loopback, which any local user can reach.
+ * On every endpoint a connection must present the server's `token` before it
+ * can run an operation. The directory is made under /tmp, not os.tmpdir(): a
+ * longer TMPDIR can push the path past sun_path's 108 bytes, and bind would
+ * silently truncate it.
  * macOS stays on TCP: its Unix sockets buffer 8 KiB per direction, which Node
  * cannot raise, and a 128 KiB read took 1.7 times as long as over TCP.
  */
@@ -396,6 +416,8 @@ export const createSharedFsIpcServer = async (
     options: SharedFsIpcServerOptions = {}
 ): Promise<SharedFsIpcServer> => {
     const limits = resolveIpcOptions(options);
+    const token = randomBytes(32).toString("base64url");
+    const tokenDigest = sha256(token);
     const privateDirectory =
         endpoint === undefined && process.platform === "linux"
             ? await mkdtemp("/tmp/pbfs-")
@@ -413,11 +435,13 @@ export const createSharedFsIpcServer = async (
     const server: Server = createServer((socket) => {
         sockets.add(socket);
         socket.once("close", () => sockets.delete(socket));
-        void serveSocket(socket, backend, limits, profile).catch(() => {
-            // A client abort (ECONNRESET/EPIPE), malformed frame, or local
-            // response failure must never take the mount daemon down.
-            socket.destroy();
-        });
+        void serveSocket(socket, backend, limits, tokenDigest, profile).catch(
+            () => {
+                // A client abort (ECONNRESET/EPIPE), malformed frame, or local
+                // response failure must never take the mount daemon down.
+                socket.destroy();
+            }
+        );
     });
 
     const resolvedEndpoint = await listenServer(server, endpoint).catch(
@@ -430,6 +454,7 @@ export const createSharedFsIpcServer = async (
 
     return {
         endpoint: resolvedEndpoint,
+        token,
         close() {
             closing ??= new Promise<void>((resolve, reject) => {
                 // Stop admission first, then terminate retained adapter
@@ -455,6 +480,7 @@ const serveSocket = async (
     socket: Socket,
     backend: SharedFsMountBackend,
     limits: ResolvedSharedFsIpcOptions,
+    tokenDigest: Buffer,
     profile?: SharedFsMountProfileSink
 ) => {
     const reader = new BoundedIpcByteReader(
@@ -510,6 +536,7 @@ const serveSocket = async (
                 (initialValue.id as number) >= 0
                 ? (initialValue.id as number)
                 : 0,
+            "EPROTONOSUPPORT",
             SHARED_FS_IPC_V1_RETIRED_MESSAGE
         );
         return;
@@ -523,10 +550,20 @@ const serveSocket = async (
     }
 
     const offer = negotiation.args[0];
+    if (!presentsToken(offer, tokenDigest)) {
+        await rejectConnection(
+            socket,
+            negotiation.id,
+            "EACCES",
+            SHARED_FS_IPC_TOKEN_REJECTED_MESSAGE
+        );
+        return;
+    }
     if (!offer.versions.includes(2)) {
         await rejectConnection(
             socket,
             negotiation.id,
+            "EPROTONOSUPPORT",
             "No offered IPC protocol version is supported"
         );
         return;
@@ -576,16 +613,21 @@ const serveSocket = async (
 const SHARED_FS_IPC_V1_RETIRED_MESSAGE =
     "IPC v1 is retired: this server requires the IPC v2 negotiation before any filesystem operation. The native adapter is too old (shared-fs-native 0.13.15 or earlier); install the adapter release matching this CLI with `peerbit-fs install-adapter --force`, and stop passing an older adapter with --native-adapter or PEERBIT_SHARED_FS_NATIVE_ADAPTER.";
 
+/** Sent, as a JSONL error, to a peer whose offer lacks the server's token. */
+const SHARED_FS_IPC_TOKEN_REJECTED_MESSAGE =
+    "IPC authentication failed: the negotiation did not present this server's token. `peerbit-fs mount` passes it to the native adapter it starts in PEERBIT_SHARED_FS_IPC_TOKEN, and an adapter from an older release does not send it; install the adapter release matching this CLI with `peerbit-fs install-adapter --force`, and stop passing an older adapter with --native-adapter or PEERBIT_SHARED_FS_NATIVE_ADAPTER.";
+
 const rejectConnection = async (
     socket: Socket,
     id: number,
+    code: "EACCES" | "EPROTONOSUPPORT",
     message: string
 ) => {
     const rejection = serializeJsonFrame(
         {
             id,
             ok: false,
-            error: { code: "EPROTONOSUPPORT", message },
+            error: { code, message },
         } satisfies IpcResponse,
         SHARED_FS_IPC_NEGOTIATION_MAX_BYTES
     );

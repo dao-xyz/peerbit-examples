@@ -950,7 +950,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     });
                     mounted = await mountExternalNativeAdapter(
                         externalAdapter.command,
-                        ipc.endpoint,
+                        ipc,
                         mountpoint,
                         nativeProfileFile === undefined
                             ? {}
