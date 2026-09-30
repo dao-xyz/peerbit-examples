@@ -236,24 +236,25 @@ describe("opt-in writeFile sub-phase profiling", () => {
             const write = async (
                 path: string,
                 content: string,
-                flags: Parameters<typeof backend.open>[1]
+                flags: Parameters<typeof backend.open>[1],
+                mtimeMs?: number
             ) => {
                 const handle = await backend.open(path, flags);
                 await backend.write(handle, encode(content), 0);
+                if (mtimeMs !== undefined) {
+                    await backend.setattr(path, { mtimeMs });
+                }
                 await backend.fsync(handle);
                 await backend.release(handle);
             };
             await backend.mkdir("/d");
             await write("/d/a.txt", "hello", { write: true, create: true });
-            await write("/d/a.txt", "hello world", {
-                write: true,
-                truncate: true,
-            });
-            // Same bytes over the same single head: an exact-head no-op.
-            await write("/d/a.txt", "hello world", {
-                write: true,
-                truncate: true,
-            });
+            const rewrite = { write: true, truncate: true };
+            await write("/d/a.txt", "hello world", rewrite, 1000);
+            // Same bytes and mtime over the same single head: an exact-head
+            // no-op. An unpinned mtime is the write's clock reading, so the
+            // two runs diverged whenever only one wrote both in the same ms.
+            await write("/d/a.txt", "hello world", rewrite, 1000);
             // Same content elsewhere: a deduplicated chunk.
             await write("/d/b.txt", "hello world", {
                 write: true,
@@ -335,6 +336,7 @@ describe("opt-in writeFile sub-phase profiling", () => {
             const profiled = await run(fs, true);
             const plain = await run(other, false);
             expect(profiled.observed).toEqual(plain.observed);
+            expect(plain.observed.versions).toHaveLength(2);
             expect(plain.events).toEqual([]);
             expect(profiled.events.filter(isSubPhase).length).toBeGreaterThan(
                 0
