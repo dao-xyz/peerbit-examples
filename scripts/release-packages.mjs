@@ -240,10 +240,41 @@ const dispatchNativeWorkflow = async (tag) => {
     );
 };
 
+// The releases API lists an asset before its public download URL serves it,
+// and the pack-install smoke downloads through that URL (as users do). Wait
+// for every asset URL to answer 200 so a fresh release cannot fail the smoke
+// with a transient 404.
+const waitForPublicNativeAssets = async (tag) => {
+    const pending = new Set(expectedNativeAssets());
+    for (let attempt = 0; attempt < 30 && pending.size > 0; attempt += 1) {
+        for (const asset of [...pending]) {
+            const url = `https://github.com/${repo}/releases/download/${tag}/${asset}`;
+            const response = await fetch(url, {
+                method: "HEAD",
+                redirect: "follow",
+            }).catch(() => undefined);
+            if (response?.ok) {
+                pending.delete(asset);
+            }
+        }
+        if (pending.size > 0) {
+            await sleep(10_000);
+        }
+    }
+    if (pending.size > 0) {
+        throw new Error(
+            `Native adapter release ${tag} assets are not downloadable: ${[
+                ...pending,
+            ].join(", ")}`
+        );
+    }
+};
+
 const ensureNativeAdapterRelease = async (tag) => {
     const release = await getNativeRelease(tag);
     const missing = missingNativeAssets(release);
     if (missing.length === 0) {
+        await waitForPublicNativeAssets(tag);
         console.log(`Native adapter release ${tag} has all expected assets.`);
         return;
     }
@@ -265,6 +296,7 @@ const ensureNativeAdapterRelease = async (tag) => {
         const updatedRelease = await getNativeRelease(tag);
         const stillMissing = missingNativeAssets(updatedRelease);
         if (stillMissing.length === 0) {
+            await waitForPublicNativeAssets(tag);
             console.log(`Native adapter release ${tag} is ready.`);
             return;
         }
