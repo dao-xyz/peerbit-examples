@@ -13,6 +13,8 @@ import { FileChunk, FileVersion, NamingEvent } from "../model.js";
 // Fixed across platforms: timeout is a protocol result, not a CI retry budget.
 const WAIT_TIMEOUT_MS = 30_000;
 
+type PeerKey = Peerbit["identity"]["publicKey"];
+
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
 
@@ -50,6 +52,67 @@ describe("shared fs durable machine disposal", () => {
         peers.delete(peer);
         // Successful disposal validation includes an error-free peer shutdown.
         await peer.stop();
+    };
+
+    // The same shared log as opened on the source and on one remote replica.
+    type ReceiptLogPair = { name: string; source: any; remote: any };
+
+    const inspectReceiptReadiness = async (log: any, peer: PeerKey) => {
+        try {
+            const readiness = await log.getPersistedReceiptPeerReadiness(peer, {
+                diagnostics: true,
+            });
+            const replicators: Set<string> = await log.getReplicators();
+            return {
+                ...readiness,
+                replicator: replicators.has(peer.hashcode()),
+            };
+        } catch (error) {
+            return {
+                unavailable:
+                    error instanceof Error ? error.message : String(error),
+            };
+        }
+    };
+
+    // Failure-only evidence for a persisted-receipt stall. Only after the
+    // operation has already failed, read the public, payload-free readiness
+    // diagnostic from both ends of each log pair, so a passing run keeps its
+    // outcome and timing. The sender-side error only shows the source's view.
+    // The remote's view of the source separates the two known upstream
+    // stalls: a remote whose session, capability or replicator entry for the
+    // source is gone points at a one-sided session rotation, while healthy
+    // views on both ends point at a stalled receipt exchange. An in-memory
+    // source cannot issue receipts, so the remote's status for it reads
+    // "unsupported"; its diagnostic fields still show the remote's state.
+    const withReceiptDiagnostics = async <T>(
+        operation: () => Promise<T>,
+        sourceKey: PeerKey,
+        remoteKey: PeerKey,
+        pairs: ReceiptLogPair[]
+    ): Promise<T> => {
+        try {
+            return await operation();
+        } catch (error) {
+            const views = await Promise.all(
+                pairs.map(async ({ name, source, remote }) => ({
+                    log: name,
+                    sourceViewOfRemote: await inspectReceiptReadiness(
+                        source,
+                        remoteKey
+                    ),
+                    remoteViewOfSource: await inspectReceiptReadiness(
+                        remote,
+                        sourceKey
+                    ),
+                }))
+            );
+            throw new Error(
+                `${error instanceof Error ? error.message : String(error)}\n` +
+                    `persisted-receipt readiness at failure: ${JSON.stringify(views)}`,
+                { cause: error }
+            );
+        }
     };
 
     const waitForRemoteReceiptReadiness = async (
@@ -435,28 +498,49 @@ describe("shared fs durable machine disposal", () => {
             const receiverKey = receiverPeer.identity.publicKey;
             const receiverHash = receiverKey.hashcode();
             const writerHash = writerKey.hashcode();
+            const receiptLogs: ReceiptLogPair[] = [
+                {
+                    name: "entries",
+                    source: source.program.entries.log,
+                    remote: receiver.program.entries.log,
+                },
+                {
+                    name: "trust",
+                    source: source.program.trustGraph!.trustGraph.log,
+                    remote: receiver.program.trustGraph!.trustGraph.log,
+                },
+            ];
             await Promise.all(
-                [
-                    source.program.entries.log,
-                    source.program.trustGraph!.trustGraph.log,
-                ].map(async (log) => {
-                    await waitForRemoteReceiptReadiness(
-                        source,
-                        receiverPeer,
-                        log
+                receiptLogs.map(async (pair) => {
+                    await withReceiptDiagnostics(
+                        () =>
+                            waitForRemoteReceiptReadiness(
+                                source,
+                                receiverPeer,
+                                pair.source
+                            ),
+                        sourcePeer.identity.publicKey,
+                        receiverKey,
+                        [pair]
                     );
                     await waitUntil(async () => {
-                        const replicators = await log.getReplicators();
+                        const replicators = await pair.source.getReplicators();
                         expect(replicators.has(receiverHash)).toBe(true);
                         expect(replicators.has(writerHash)).toBe(false);
                     });
                 })
             );
 
-            const disposal = await source.prepareForDisposal({
-                minAcks: 1,
-                timeout: WAIT_TIMEOUT_MS,
-            });
+            const disposal = await withReceiptDiagnostics(
+                () =>
+                    source.prepareForDisposal({
+                        minAcks: 1,
+                        timeout: WAIT_TIMEOUT_MS,
+                    }),
+                sourcePeer.identity.publicKey,
+                receiverKey,
+                receiptLogs
+            );
             expect(disposal).toMatchObject({
                 safeToDispose: true,
                 minAcksPerEntry: 1,
