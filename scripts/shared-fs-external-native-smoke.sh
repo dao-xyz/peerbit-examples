@@ -274,6 +274,36 @@ mv "$mountpoint/docs/hello.txt" "$mountpoint/docs/renamed.txt"
 test "$(cat "$mountpoint/docs/renamed.txt")" = "hello external native"
 rm -f "$mountpoint/docs/renamed.txt"
 test ! -e "$mountpoint/docs/renamed.txt"
+
+# Directory mtime and ctime are per-mount change stamps (required on Linux
+# only). Two stats with no change in between agree, and git's untracked-cache
+# self-test passes: a create, mkdir, rm and rmdir change the directory, while a
+# write and a nested create do not. It sleeps 1 s between steps (about 6 s).
+if [ "$(uname -s)" = "Linux" ]; then
+  first_times="$(stat -c '%y|%z' "$mountpoint/docs")"
+  second_times="$(stat -c '%y|%z' "$mountpoint/docs")"
+  if [ "$first_times" != "$second_times" ]; then
+    echo "Directory times changed without a change: $first_times, then $second_times" >&2
+    exit 1
+  fi
+  git init -q "$mountpoint/docs/repo"
+  if ! untracked_report="$(
+    cd "$mountpoint/docs/repo" && git update-index --test-untracked-cache 2>&1
+  )"; then
+    printf '%s\n' "$untracked_report" >&2
+    echo "git's untracked-cache self-test failed on the mount" >&2
+    exit 1
+  fi
+  printf '%s\n' "$untracked_report"
+  case "$untracked_report" in
+    *" OK"*) ;;
+    *)
+      echo "git's untracked-cache self-test did not report OK" >&2
+      exit 1
+      ;;
+  esac
+  rm -rf "$mountpoint/docs/repo"
+fi
 rmdir "$mountpoint/docs"
 test ! -e "$mountpoint/docs"
 

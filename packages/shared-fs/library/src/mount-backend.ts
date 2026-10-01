@@ -9,9 +9,11 @@ import {
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
     type SharedFsMountWriteOutcome,
+    type SharedFsNamespaceChange,
     type SharedFsVersionInfo,
     type WriteFileOptions,
 } from "./index.js";
+import { CONFLICTS_STAMP_KEY, DirectoryStamps } from "./directory-stamps.js";
 import {
     CONFLICTS_DIR,
     ROOT_NODE_ID,
@@ -146,6 +148,17 @@ export type SharedFsMountBackendTarget = {
         phase?: string;
         writeReady?: boolean;
     };
+    /**
+     * Optional namespace-change feed (SharedFsHandle and SharedFileSystem
+     * provide it; see SharedFileSystem.onNamespaceChange). Directory mtime
+     * and ctime move with it on every visible name change, whoever made it.
+     * Without it they move only on this backend's own mkdir, rmdir, unlink,
+     * rename, symlink and creates, so other writers' changes stay invisible
+     * to tools that trust directory times (degraded mode).
+     */
+    onNamespaceChange?(
+        listener: (change: SharedFsNamespaceChange) => void
+    ): () => void;
 };
 
 export type SharedFsMountBackendOptions = {
@@ -154,6 +167,15 @@ export type SharedFsMountBackendOptions = {
      * sink failures are ignored and cannot change filesystem results.
      */
     profile?: SharedFsMountProfileSink;
+    /** Clock for directory change stamps (directory mtime and ctime). */
+    clock?: () => number;
+    /**
+     * Served placements remembered: where a listing or lookup showed each
+     * node, so its later move or delete also changes that directory's time.
+     * Forgetting the oldest changes its directory's time instead. Default
+     * 262,144.
+     */
+    servedLimit?: number;
 };
 
 export type SharedFsOpenFlags =
@@ -243,6 +265,12 @@ export type SharedFsMountBackend = {
     ): Promise<void>;
     symlink(target: string, path: string): Promise<void>;
     readlink(path: string): Promise<string>;
+    /**
+     * Unsubscribe from the target's namespace feed. Idempotent. Optional, so
+     * existing implementations stay valid; createSharedFsMountBackend's
+     * backends always have it.
+     */
+    dispose?(): void;
 };
 
 export type SharedFsBackendErrorCode =
@@ -305,6 +333,30 @@ type OpenFileState = {
     openedNodeId?: string | null;
     /** Exact non-root parent directory observed for an absent nested create. */
     openedParentNodeId?: string;
+    /**
+     * Stamp key of the directory this state's name was observed in (`root`
+     * for `/`); undefined when the target reports no `parentId`.
+     */
+    parentKey?: string;
+    /**
+     * A namespace event may have put another directory node at this state's
+     * parent path since `parentKey` was observed.
+     */
+    parentUncertain?: boolean;
+    /**
+     * A namespace event touched this node, its name's slot or an ancestor
+     * since the library last proved it lists the name (open, or a commit no
+     * event raced), so the library may no longer list it: overlay changes
+     * then move the directory time.
+     */
+    namespaceUncertain?: boolean;
+    /** Counts the events that set `namespaceUncertain`. */
+    namespaceMarks?: number;
+    /**
+     * While a create commit is in flight: nodes that namespace events moved
+     * or deleted, so a commit whose new node is among them was raced.
+     */
+    createRaces?: Set<string>;
     /** Exact version whose bytes seeded the writable buffer / last commit. */
     baseVersionIds?: string[];
     /** All content heads observed in the coherent writable-open snapshot. */
@@ -415,6 +467,16 @@ const bigintToSize = (value: bigint) => {
         : Number(value);
 };
 
+/** Served placements kept by default; evicting one bumps its directory. */
+const SERVED_NODE_LIMIT = 262_144;
+/** Directory paths whose stamped node is remembered (path reuse). */
+const STAMPED_PATH_LIMIT = 65_536;
+/** Directory paths awaiting a deferred bump; overflow bumps everything. */
+const PATH_MARK_LIMIT = 4096;
+/** Namespace reads redone while events race them; see settledRead. */
+const NAMESPACE_READ_PASSES = 3;
+
+/** Directory mtime and ctime are both the directory's change stamp. */
 const directoryDirentStat = (mtimeMs: number): SharedFsDirentStat => ({
     size: 0,
     mode: S_IFDIR | 0o755,
@@ -762,7 +824,7 @@ const rebaseMeta = (
 export const createSharedFsMountBackend = (
     target: SharedFsMountBackendTarget,
     options: SharedFsMountBackendOptions = {}
-): SharedFsMountBackend => {
+): SharedFsMountBackend & { dispose(): void } => {
     const handles = new Map<number, OpenHandle>();
     const activeStates = new Set<OpenFileState>();
     const statesByPath = new Map<string, OpenFileState>();
@@ -773,9 +835,44 @@ export const createSharedFsMountBackend = (
     const namespaceTransitions = new Map<symbol, readonly string[]>();
     const openAdmissions = new Map<symbol, string>();
     let nextHandle = 1;
-    // `/` and the conflict directories report one stable time, so tar and
-    // friends never see them change while they read.
-    const mountedAtMs = Date.now();
+    const clock = options.clock ?? Date.now;
+    // Read-only conflict copies need some state time; stat never reports it.
+    const mountedAtMs = clock();
+    // Directory mtime and ctime: per-mount change stamps that move exactly
+    // when a directory's visible names may have changed (see DirectoryStamps).
+    const stamps = new DirectoryStamps({ now: clock });
+    /**
+     * Where this mount's consumers may have seen each node's name (node id ->
+     * parent stamp key), refreshed on every serve. A move or delete of a
+     * served node also bumps that directory, even when the library has lost
+     * the old placement (cold or compacted history, a concurrent winner
+     * flip). Names never served cannot be cached by a consumer, and every
+     * key's first read follows the mount start.
+     */
+    const served = new Map<string, string>();
+    const servedLimit = Math.max(1, options.servedLimit ?? SERVED_NODE_LIMIT);
+    /**
+     * The directory node last stamped at each path. A different node at a
+     * path (a directory replaced, here or by another peer) starts above the
+     * time handed out for the one it replaced.
+     */
+    const stampedPaths = new Map<string, string>();
+    /**
+     * Directory paths whose node is bumped when next stamped: listings merge
+     * overlays by path, and another directory node may hold the path now.
+     */
+    const pathMarks = new Set<string>();
+    /** Live provisional creates by `${parentKey}\0${name}`. */
+    const provisionalSlots = new Map<string, OpenFileState>();
+    /** Path segments of open states, rebuilt after their paths change. */
+    let openSegments: Set<string> | undefined;
+    /** Provisional creates whose commit is in flight; see `createRaces`. */
+    const createCommits = new Set<OpenFileState>();
+    // Advanced for every namespace batch that may move a listed name; reads
+    // whose result could predate such a batch are redone (settledRead).
+    let nsSeq = 0;
+    // Advanced whenever the conflict directories' stamp moves.
+    let conflictsSeq = 0;
     const profile = options.profile;
     // Joins a `mount.target.writeFile` record to the target's own sub-phase
     // records; advanced only while profiling.
@@ -868,6 +965,313 @@ export const createSharedFsMountBackend = (
             : undefined;
     };
 
+    const slotKey = (parentKey: string, name: string) =>
+        `${parentKey}\0${name}`;
+
+    const serve = (nodeId: string, parentKey: string | undefined) => {
+        if (parentKey === undefined) return;
+        served.delete(nodeId);
+        served.set(nodeId, parentKey);
+        if (served.size > servedLimit) {
+            for (const [oldest, oldestParent] of served) {
+                served.delete(oldest);
+                // A consumer may still hold the name: make it re-read.
+                stamps.bump(oldestParent);
+                break;
+            }
+        }
+    };
+
+    /** Bump the directory at `path` when it is next stamped. */
+    const markPath = (path: string) => {
+        if (path === "/") {
+            stamps.bump(ROOT_NODE_ID);
+            return;
+        }
+        pathMarks.add(path);
+        if (pathMarks.size > PATH_MARK_LIMIT) {
+            pathMarks.clear();
+            stamps.bumpAll();
+        }
+    };
+
+    /**
+     * A directory's stamp as getattr and readdir-plus report it: a pending
+     * path mark bumps it first, and a node new at its path starts above the
+     * time handed out for the node it replaced there.
+     */
+    const directoryStamp = (path: string, nodeId: string) => {
+        if (pathMarks.size > 0 && pathMarks.delete(path)) stamps.bump(nodeId);
+        const previous = stampedPaths.get(path);
+        if (previous !== nodeId) {
+            stampedPaths.delete(path);
+            stampedPaths.set(path, nodeId);
+            if (stampedPaths.size > STAMPED_PATH_LIMIT) {
+                for (const oldest of stampedPaths.keys()) {
+                    stampedPaths.delete(oldest);
+                    break;
+                }
+            }
+        }
+        return stamps.read(nodeId, previous);
+    };
+
+    /** Whether readdir of the state's directory lists it (dirty overlay). */
+    const overlayVisible = (state: OpenFileState) =>
+        activeStates.has(state) &&
+        !state.readOnly &&
+        !state.terminal &&
+        !state.namespaceDetached &&
+        state.dirty;
+
+    /**
+     * Bump the directory a backend-local overlay entry (a dirty or provisional
+     * open file) appeared in or left. Listings merge overlays by path: when
+     * another directory node may hold the state's parent path now, that
+     * directory is bumped as well when next stamped.
+     */
+    const bumpOverlayParent = (state: OpenFileState) => {
+        const parentPath = dirname(state.path);
+        if (parentPath === "/") {
+            stamps.bump(ROOT_NODE_ID);
+            return;
+        }
+        if (state.parentKey !== undefined) stamps.bump(state.parentKey);
+        if (state.parentKey === undefined || state.parentUncertain) {
+            markPath(parentPath);
+        }
+    };
+
+    /** A clean state turned dirty; see `namespaceUncertain`. */
+    const noteDirtied = (state: OpenFileState) => {
+        if (state.namespaceUncertain && overlayVisible(state)) {
+            bumpOverlayParent(state);
+        }
+    };
+
+    const resize = (state: OpenFileState, size: number) => {
+        const wasDirty = state.dirty;
+        resizeState(state, size);
+        if (!wasDirty) noteDirtied(state);
+    };
+
+    const setProvisional = (state: OpenFileState) => {
+        provisionalStatesByPath.set(state.path, state);
+        provisionalSlots.set(
+            slotKey(state.parentKey ?? ROOT_NODE_ID, basename(state.path)),
+            state
+        );
+    };
+
+    const deleteProvisional = (state: OpenFileState) => {
+        if (provisionalStatesByPath.get(state.path) === state) {
+            provisionalStatesByPath.delete(state.path);
+        }
+        const key = slotKey(
+            state.parentKey ?? ROOT_NODE_ID,
+            basename(state.path)
+        );
+        if (provisionalSlots.get(key) === state) {
+            provisionalSlots.delete(key);
+        }
+    };
+
+    const markOpenState = (state: OpenFileState, ancestor: boolean) => {
+        state.namespaceUncertain = true;
+        state.namespaceMarks = (state.namespaceMarks ?? 0) + 1;
+        if (ancestor) state.parentUncertain = true;
+    };
+
+    /**
+     * A namespace change placed or moved `nodeId` at slots named `names`:
+     * mark every open state whose name the library may now list differently.
+     * That is its own node, a slot on its path (a competing claimant, or
+     * another node at an ancestor's name), or any moved directory, which may
+     * be an ancestor. Provisional creates have no node yet: their commits
+     * collect moved nodes in `createRaces` instead, and only an ancestor
+     * change marks them (another directory may hold their parent path now).
+     */
+    const markOpenStates = (
+        nodeId: string,
+        names: readonly string[],
+        moved: boolean
+    ) => {
+        if (activeStates.size === 0) return;
+        if (moved) {
+            for (const state of createCommits) state.createRaces?.add(nodeId);
+        }
+        const own = statesByNodeId.get(nodeId);
+        if (own) markOpenState(own, false);
+        const directoryMoved = moved && nodeId.startsWith("dir:");
+        if (!directoryMoved) {
+            openSegments ??= new Set(
+                [...activeStates].flatMap((state) => pathSegments(state.path))
+            );
+            if (!names.some((name) => openSegments!.has(name))) return;
+        }
+        for (const state of activeStates) {
+            if (state === own) continue;
+            const segments = pathSegments(state.path);
+            const ancestor =
+                directoryMoved ||
+                names.some((name) => segments.slice(0, -1).includes(name));
+            const slot =
+                typeof state.nodeId === "string" &&
+                names.includes(segments.at(-1)!);
+            if (ancestor || slot) markOpenState(state, ancestor);
+        }
+    };
+
+    /**
+     * Turn one feed batch into directory bumps: each slot an event names,
+     * the slots a winner left or took, where its node was served, a moved
+     * directory itself (its `..`), the directories a hidden file appeared in
+     * or disappeared from, and the conflict directories.
+     */
+    const onNamespaceChange = (change: SharedFsNamespaceChange) => {
+        const keys = new Set<string>();
+        let naming = false;
+        const unserve = (nodeId: string, parentId: string | undefined) => {
+            const servedParent = served.get(nodeId);
+            if (servedParent === undefined) return;
+            keys.add(servedParent);
+            // Safe to forget: the bump makes consumers re-read, which serves
+            // the node again wherever it is still listed.
+            if (parentId !== servedParent) served.delete(nodeId);
+        };
+        for (const item of change.naming) {
+            // A non-head event (a late ancestor, compacted history) cannot
+            // change which placement of its node wins.
+            if (item.head === false) continue;
+            naming = true;
+            markOpenStates(
+                item.nodeId,
+                [item.name],
+                item.supersedes || item.deleted || item.removed
+            );
+            unserve(item.nodeId, item.deleted ? undefined : item.parentId);
+            // The commit of a create this mount already lists changes no
+            // name (Documents reports it before writeFile resolves).
+            if (!provisionalSlots.has(slotKey(item.parentId, item.name))) {
+                keys.add(item.parentId);
+            }
+            if (
+                item.supersedes &&
+                !item.deleted &&
+                !item.removed &&
+                item.nodeId.startsWith("dir:")
+            ) {
+                keys.add(item.nodeId);
+            }
+        }
+        for (const move of change.moves) {
+            naming = true;
+            const names = [move.from, move.to].flatMap((slot) =>
+                slot ? [slot.name] : []
+            );
+            markOpenStates(move.nodeId, names, true);
+            unserve(move.nodeId, move.to?.parentId);
+            if (move.from) keys.add(move.from.parentId);
+            if (
+                move.to &&
+                !provisionalSlots.has(slotKey(move.to.parentId, move.to.name))
+            ) {
+                keys.add(move.to.parentId);
+            }
+            // A directory that changed parents changed its `..`.
+            if (
+                move.nodeId.startsWith("dir:") &&
+                move.from?.parentId !== move.to?.parentId
+            ) {
+                keys.add(move.nodeId);
+            }
+        }
+        for (const item of change.firstContent) {
+            if (served.has(item.nodeId)) continue; // already listed
+            for (const parentId of item.parentIds) keys.add(parentId);
+        }
+        for (const nodeId of change.contentLost) {
+            // Hidden now: wherever it was listed loses the name, and its
+            // next first content is reported again.
+            markOpenStates(nodeId, [], false);
+            unserve(nodeId, undefined);
+        }
+        if (
+            naming ||
+            change.reset ||
+            change.firstContent.length > 0 ||
+            change.contentLost.length > 0
+        ) {
+            nsSeq++;
+        }
+        if (change.reset) {
+            stamps.bumpAll();
+            // Every consumer re-reads, which serves each node again where it
+            // is still listed. A node the old view showed may be hidden now,
+            // and its later first content must move its directory.
+            served.clear();
+            for (const state of activeStates) markOpenState(state, true);
+        }
+        // A forked file without a live winner, or on an ignored path, is not
+        // listed there, so any placement change may add or remove a conflict
+        // directory; an empty listing proves nothing about hidden forks.
+        if (change.reset || change.versionForkOrMerge || naming) {
+            conflictsSeq++;
+            keys.add(CONFLICTS_STAMP_KEY);
+        }
+        for (const key of keys) stamps.bump(key);
+    };
+    const feed = typeof target.onNamespaceChange === "function";
+    let unsubscribe = target.onNamespaceChange?.(onNamespaceChange);
+
+    /**
+     * Run a namespace read until no batch lands while it is in flight (at
+     * most `passes`), then hand the result to `settle` in the same
+     * continuation as that check: it records served placements and reads
+     * stamps before any later batch can run, so that batch sees them. An
+     * unsettled result may predate an event: `settle` then bumps the
+     * directory it served, which invalidates whatever a consumer recorded
+     * before.
+     */
+    const settledRead = async <T, R>(
+        read: () => Promise<T>,
+        sequence: () => number,
+        settle: (value: T, settled: boolean) => R,
+        passes = NAMESPACE_READ_PASSES
+    ): Promise<R> => {
+        for (let pass = 1; ; pass++) {
+            const before = sequence();
+            const value = await read();
+            if (sequence() === before) return settle(value, true);
+            if (pass >= passes) return settle(value, false);
+        }
+    };
+
+    /**
+     * Degraded mode (a target without a namespace feed): this backend's own
+     * namespace syscalls move the parent directory's time.
+     */
+    const bumpOwnParent = async (path: string, parentKey?: string) => {
+        if (feed) return;
+        const parentPath = dirname(path);
+        if (parentPath === "/") {
+            stamps.bump(ROOT_NODE_ID);
+            return;
+        }
+        if (parentKey !== undefined) {
+            stamps.bump(parentKey);
+            return;
+        }
+        const parent = await findEntry(target, parentPath).catch(
+            () => undefined
+        );
+        if (parent?.kind === "directory") {
+            stamps.bump(parent.nodeId);
+        } else {
+            stamps.bumpAll();
+        }
+    };
+
     const removeStatePathIndex = (state: OpenFileState) => {
         if (statesByPath.get(state.path) === state) {
             statesByPath.delete(state.path);
@@ -921,11 +1325,13 @@ export const createSharedFsMountBackend = (
         }
         removeStatePathIndex(state);
         state.path = path;
+        openSegments = undefined;
         indexStatePath(state);
     };
 
     const detachNamespaceState = (state: OpenFileState) => {
         if (state.namespaceDetached) return;
+        const listed = overlayVisible(state);
         removeStatePathIndex(state);
         state.namespaceDetached = true;
         if (
@@ -934,10 +1340,9 @@ export const createSharedFsMountBackend = (
         ) {
             statesByNodeId.delete(state.nodeId);
         }
-        if (provisionalStatesByPath.get(state.path) === state) {
-            provisionalStatesByPath.delete(state.path);
-        }
+        deleteProvisional(state);
         clearStateCreateIntent(state);
+        if (listed) bumpOverlayParent(state);
     };
 
     const namespaceStates = (path: string, descendants: boolean) => {
@@ -1211,6 +1616,7 @@ export const createSharedFsMountBackend = (
         state: OpenFileState,
         error: SharedFsBackendError
     ) => {
+        const listed = overlayVisible(state);
         removeStatePathIndex(state);
         state.terminal = error;
         state.dirty = false;
@@ -1220,10 +1626,9 @@ export const createSharedFsMountBackend = (
         ) {
             statesByNodeId.delete(state.nodeId);
         }
-        if (provisionalStatesByPath.get(state.path) === state) {
-            provisionalStatesByPath.delete(state.path);
-        }
+        deleteProvisional(state);
         clearStateCreateIntent(state);
+        if (listed) bumpOverlayParent(state);
     };
 
     const registerState = (state: OpenFileState) => {
@@ -1249,16 +1654,22 @@ export const createSharedFsMountBackend = (
             );
         }
         activeStates.add(state);
+        openSegments = undefined;
         indexStatePath(state);
         if (typeof state.nodeId === "string") {
             indexStateNode(state);
         } else if (state.nodeId === null) {
-            provisionalStatesByPath.set(state.path, state);
+            setProvisional(state);
+            // The new name is listed from now on.
+            bumpOverlayParent(state);
         }
     };
 
     const unregisterState = (state: OpenFileState) => {
+        // An abandoned create or a discarded dirty buffer leaves the listing.
+        const listed = overlayVisible(state);
         activeStates.delete(state);
+        openSegments = undefined;
         removeStatePathIndex(state);
         if (
             typeof state.nodeId === "string" &&
@@ -1266,11 +1677,10 @@ export const createSharedFsMountBackend = (
         ) {
             statesByNodeId.delete(state.nodeId);
         }
-        if (provisionalStatesByPath.get(state.path) === state) {
-            provisionalStatesByPath.delete(state.path);
-        }
+        deleteProvisional(state);
         clearStateCreateIntent(state);
         state.borrowedCommitSnapshot = undefined;
+        if (listed) bumpOverlayParent(state);
     };
 
     const attachHandle = (
@@ -1397,25 +1807,39 @@ export const createSharedFsMountBackend = (
             throw notFound(path);
         }
         if (parsed.kind === "root") {
-            return directoryStat(joinFsPath("/", CONFLICTS_DIR), mountedAtMs);
+            return directoryStat(
+                joinFsPath("/", CONFLICTS_DIR),
+                stamps.read(CONFLICTS_STAMP_KEY)
+            );
         }
-        const conflict = await conflictForPath(parsed.filePath);
-        if (!conflict) {
-            throw notFound(path);
-        }
-        if (parsed.kind === "path") {
-            return directoryStat(path, mountedAtMs);
-        }
-        const version = conflict.versions.find(
-            (candidate) => candidate.id === parsed.versionId
-        );
-        if (!version) {
-            throw notFound(path);
-        }
-        return fileStat(
-            path,
-            bigintToSize(version.size),
-            Number(version.mtime)
+        return settledRead(
+            () => conflictForPath(parsed.filePath),
+            () => conflictsSeq,
+            (conflict, settled) => {
+                let stat: SharedFsStat | undefined;
+                if (parsed.kind === "path") {
+                    stat =
+                        conflict &&
+                        directoryStat(path, stamps.read(CONFLICTS_STAMP_KEY));
+                } else {
+                    const version = conflict?.versions.find(
+                        (candidate) => candidate.id === parsed.versionId
+                    );
+                    stat =
+                        version &&
+                        fileStat(
+                            path,
+                            bigintToSize(version.size),
+                            Number(version.mtime)
+                        );
+                }
+                // A raced answer may predate a fork or merge: the conflict
+                // directories' time moves past whatever a consumer pairs
+                // with it.
+                if (!settled) stamps.bump(CONFLICTS_STAMP_KEY);
+                if (!stat) throw notFound(path);
+                return stat;
+            }
         );
     };
 
@@ -1481,12 +1905,33 @@ export const createSharedFsMountBackend = (
             mode: state.mode,
             mtimeMs: state.mtimeMs,
         };
+        const commitMarks = state.namespaceMarks ?? 0;
+        const creating = state.nodeId === null;
+        if (creating) {
+            state.createRaces = new Set();
+            createCommits.add(state);
+        }
         const markSnapshotPersisted = () => {
+            const listed = overlayVisible(state);
             state.persistedGeneration = Math.max(
                 state.persistedGeneration,
                 snapshot.mutationGeneration
             );
             state.dirty = state.persistedGeneration < state.mutationGeneration;
+            // The commit's compare-and-set found this node at the path, so the
+            // library lists the name, unless an event touching it raced the
+            // commit (for a create: moved or deleted its new node).
+            const raced =
+                (state.namespaceMarks ?? 0) !== commitMarks ||
+                (typeof state.nodeId === "string" &&
+                    state.createRaces?.has(state.nodeId) === true);
+            if (!raced) {
+                state.namespaceUncertain = false;
+                return;
+            }
+            state.namespaceUncertain = true;
+            // Leaving the overlay may then drop the name from the listing.
+            if (listed && !overlayVisible(state)) bumpOverlayParent(state);
         };
         // A subarray would retain unused geometric-growth capacity forever in
         // targets that keep chunk views. Borrow only exact-sized buffers;
@@ -1717,13 +2162,14 @@ export const createSharedFsMountBackend = (
             rebaseMeta(state, committed, snapshot);
             // The first successful create commit makes the path visible in
             // the target, so the backend-local absent-path reservation is no
-            // longer needed. Later writes use the committed node id.
+            // longer needed. Later writes use the committed node id. The name
+            // was already listed: the directory time does not move, and the
+            // node counts as served where the provisional entry was listed.
             if (state.nodeId === null) {
-                if (provisionalStatesByPath.get(state.path) === state) {
-                    provisionalStatesByPath.delete(state.path);
-                }
+                deleteProvisional(state);
                 state.nodeId = committed.nodeId;
                 indexStateNode(state);
+                serve(committed.nodeId, state.parentKey);
             }
             clearStateCreateIntent(state);
             markSnapshotPersisted();
@@ -1735,6 +2181,10 @@ export const createSharedFsMountBackend = (
         } finally {
             if (state.borrowedCommitSnapshot === snapshot && !inputExposed) {
                 state.borrowedCommitSnapshot = undefined;
+            }
+            if (creating) {
+                state.createRaces = undefined;
+                createCommits.delete(state);
             }
         }
     };
@@ -1992,13 +2442,14 @@ export const createSharedFsMountBackend = (
                     );
                 }
                 if (parsedFlags.truncate) {
-                    resizeState(provisional, 0);
+                    resize(provisional, 0);
                 }
                 return attachHandle(provisional, parsedFlags);
             }
 
             let createIntent: symbol | undefined;
             let openedParentNodeId: string | undefined;
+            const openSeq = nsSeq;
             try {
                 let entry = await findEntry(target, normalized);
                 assertNoNamespaceTransition(normalized);
@@ -2032,6 +2483,7 @@ export const createSharedFsMountBackend = (
                         parsedFlags.exclusive
                     );
                     const parentPath = dirname(normalized);
+                    const parentSeq = nsSeq;
                     if (parentPath !== "/") {
                         const parent = await findEntry(target, parentPath);
                         if (!parent) {
@@ -2066,6 +2518,8 @@ export const createSharedFsMountBackend = (
                         // an exec bit.
                         state.mode = regularMode(createMode);
                         state.mtimeMs = Date.now();
+                        state.parentKey = openedParentNodeId ?? ROOT_NODE_ID;
+                        state.parentUncertain = nsSeq !== parentSeq;
                         registerState(state);
                         createIntent = undefined;
                         return attachHandle(state, parsedFlags);
@@ -2110,7 +2564,7 @@ export const createSharedFsMountBackend = (
                         );
                     }
                     if (parsedFlags.truncate) {
-                        resizeState(state, 0);
+                        resize(state, 0);
                     }
                     return attachHandle(state, parsedFlags);
                 };
@@ -2171,9 +2625,17 @@ export const createSharedFsMountBackend = (
                     }
                     detachNamespaceState(raced);
                 }
+                state.parentKey = loaded.entry.parentId;
+                // A namespace event that raced this open may already have
+                // unlisted the name the snapshot shows.
+                if (nsSeq !== openSeq) {
+                    state.namespaceUncertain = true;
+                    state.parentUncertain = true;
+                }
                 registerState(state);
+                serve(loaded.entry.nodeId, loaded.entry.parentId);
                 if (parsedFlags.truncate) {
-                    resizeState(state, 0);
+                    resize(state, 0);
                 }
                 return attachHandle(state, parsedFlags);
             } catch (error) {
@@ -2200,12 +2662,12 @@ export const createSharedFsMountBackend = (
         }
     };
 
-    const backend: SharedFsMountBackend = {
+    const backend: SharedFsMountBackend & { dispose(): void } = {
         async getattr(path: string) {
             return wrap(async () => {
                 const normalized = normalizeFsPath(path);
                 if (normalized === "/") {
-                    return directoryStat("/", mountedAtMs);
+                    return directoryStat("/", stamps.read(ROOT_NODE_ID));
                 }
                 if (isConflictPath(normalized)) {
                     return getattrConflict(normalized);
@@ -2221,18 +2683,35 @@ export const createSharedFsMountBackend = (
                         pending.mode
                     );
                 }
-                const entry = await findEntry(target, normalized);
-                if (!entry) {
-                    throw notFound(normalized);
-                }
-                return entry.kind === "directory"
-                    ? directoryStat(normalized, Number(entry.updatedAt))
-                    : fileStat(
-                          normalized,
-                          bigintToSize(entry.size),
-                          Number(entry.updatedAt),
-                          entry.mode
-                      );
+                return settledRead(
+                    () => findEntry(target, normalized),
+                    () => nsSeq,
+                    (entry, settled) => {
+                        if (!entry) {
+                            // A raced ENOENT may miss a name just created:
+                            // a parent time read meanwhile must not stay.
+                            if (!settled) markPath(dirname(normalized));
+                            throw notFound(normalized);
+                        }
+                        serve(entry.nodeId, entry.parentId);
+                        const stat =
+                            entry.kind === "directory"
+                                ? directoryStat(
+                                      normalized,
+                                      directoryStamp(normalized, entry.nodeId)
+                                  )
+                                : fileStat(
+                                      normalized,
+                                      bigintToSize(entry.size),
+                                      Number(entry.updatedAt),
+                                      entry.mode
+                                  );
+                        if (!settled && entry.parentId !== undefined) {
+                            stamps.bump(entry.parentId);
+                        }
+                        return stat;
+                    }
+                );
             });
         },
 
@@ -2254,119 +2733,176 @@ export const createSharedFsMountBackend = (
                     }
                     if (parsed.kind === "root") {
                         // A mount listing tolerates partial results while
-                        // a cold-start bootstrap overlay is active.
-                        return (
-                            await target.conflicts(undefined, {
-                                allowPartial: true,
-                            })
-                        ).map((conflict) => {
-                            const name = encodeConflictPathName(conflict.path);
-                            if (!includeStats) {
-                                return {
-                                    name,
-                                    kind: "directory" as const,
-                                };
-                            }
-                            return {
-                                name,
-                                kind: "directory" as const,
-                                stat: directoryDirentStat(mountedAtMs),
-                            };
-                        });
-                    }
-                    const conflict = await conflictForPath(parsed.filePath);
-                    if (!conflict) {
-                        throw notFound(normalized);
-                    }
-                    return conflict.versions.map((version) => {
-                        if (!includeStats) {
-                            return {
-                                name: version.id,
-                                kind: "file" as const,
-                            };
-                        }
-                        return {
-                            name: version.id,
-                            kind: "file" as const,
-                            stat: fileDirentStat(
-                                bigintToSize(version.size),
-                                Number(version.mtime)
-                            ),
-                        };
-                    });
-                }
-                const byName = new Map<string, SharedFsDirent>(
-                    (await target.list(normalized)).map((entry) => {
-                        const kind =
-                            entry.mode === S_IFLNK
-                                ? ("symlink" as const)
-                                : entry.kind;
-                        if (!includeStats) {
-                            return [
-                                entry.name,
-                                { name: entry.name, kind },
-                            ] as const;
-                        }
-                        return [
-                            entry.name,
-                            {
-                                name: entry.name,
-                                kind,
-                                stat:
-                                    entry.kind === "directory"
-                                        ? directoryDirentStat(
-                                              Number(entry.updatedAt)
-                                          )
-                                        : fileDirentStat(
-                                              bigintToSize(entry.size),
-                                              Number(entry.updatedAt),
-                                              entry.mode
-                                          ),
+                        // a cold-start bootstrap overlay is active. The scan
+                        // reads every file version, and any fork, merge or
+                        // removal may land during it: it runs once, and
+                        // a raced listing moves the time instead.
+                        return settledRead(
+                            () =>
+                                target.conflicts(undefined, {
+                                    allowPartial: true,
+                                }),
+                            () => conflictsSeq,
+                            (conflicts, settled) => {
+                                const entries = conflicts.map((conflict) => {
+                                    const name = encodeConflictPathName(
+                                        conflict.path
+                                    );
+                                    if (!includeStats) {
+                                        return {
+                                            name,
+                                            kind: "directory" as const,
+                                        };
+                                    }
+                                    return {
+                                        name,
+                                        kind: "directory" as const,
+                                        stat: directoryDirentStat(
+                                            stamps.read(CONFLICTS_STAMP_KEY)
+                                        ),
+                                    };
+                                });
+                                if (!settled) {
+                                    stamps.bump(CONFLICTS_STAMP_KEY);
+                                }
+                                return entries;
                             },
-                        ] as const;
-                    })
-                );
-                for (const state of activeStates) {
-                    if (
-                        !state.readOnly &&
-                        !state.terminal &&
-                        !state.namespaceDetached &&
-                        state.dirty &&
-                        dirname(state.path) === normalized
-                    ) {
-                        const name = basename(state.path);
-                        byName.set(
-                            name,
-                            includeStats
-                                ? {
-                                      name,
-                                      kind: "file" as const,
-                                      stat: fileDirentStat(
-                                          state.length,
-                                          state.mtimeMs,
-                                          state.mode
-                                      ),
-                                  }
-                                : { name, kind: "file" as const }
+                            1
                         );
                     }
-                }
-                const entries = [...byName.values()];
-                if (normalized === "/") {
-                    entries.push(
-                        includeStats
-                            ? {
-                                  name: CONFLICTS_DIR,
-                                  kind: "directory",
-                                  stat: directoryDirentStat(mountedAtMs),
-                              }
-                            : {
-                                  name: CONFLICTS_DIR,
-                                  kind: "directory",
-                              }
+                    return settledRead(
+                        () => conflictForPath(parsed.filePath),
+                        () => conflictsSeq,
+                        (conflict, settled) => {
+                            if (!settled) {
+                                stamps.bump(CONFLICTS_STAMP_KEY);
+                            }
+                            if (!conflict) {
+                                throw notFound(normalized);
+                            }
+                            return conflict.versions.map((version) => {
+                                if (!includeStats) {
+                                    return {
+                                        name: version.id,
+                                        kind: "file" as const,
+                                    };
+                                }
+                                return {
+                                    name: version.id,
+                                    kind: "file" as const,
+                                    stat: fileDirentStat(
+                                        bigintToSize(version.size),
+                                        Number(version.mtime)
+                                    ),
+                                };
+                            });
+                        }
                     );
                 }
-                return entries;
+                return settledRead(
+                    () => target.list(normalized),
+                    () => nsSeq,
+                    (listed, settled) => {
+                        let listedKey: string | undefined =
+                            normalized === "/" ? ROOT_NODE_ID : undefined;
+                        const byName = new Map<string, SharedFsDirent>(
+                            listed.map((entry) => {
+                                listedKey ??= entry.parentId;
+                                serve(entry.nodeId, entry.parentId);
+                                const kind =
+                                    entry.mode === S_IFLNK
+                                        ? ("symlink" as const)
+                                        : entry.kind;
+                                if (!includeStats) {
+                                    return [
+                                        entry.name,
+                                        { name: entry.name, kind },
+                                    ] as const;
+                                }
+                                return [
+                                    entry.name,
+                                    {
+                                        name: entry.name,
+                                        kind,
+                                        // Equal to getattr: list once, stat
+                                        // never.
+                                        stat:
+                                            entry.kind === "directory"
+                                                ? directoryDirentStat(
+                                                      directoryStamp(
+                                                          joinFsPath(
+                                                              normalized,
+                                                              entry.name
+                                                          ),
+                                                          entry.nodeId
+                                                      )
+                                                  )
+                                                : fileDirentStat(
+                                                      bigintToSize(entry.size),
+                                                      Number(entry.updatedAt),
+                                                      entry.mode
+                                                  ),
+                                    },
+                                ] as const;
+                            })
+                        );
+                        for (const state of activeStates) {
+                            if (
+                                !state.readOnly &&
+                                !state.terminal &&
+                                !state.namespaceDetached &&
+                                state.dirty &&
+                                dirname(state.path) === normalized
+                            ) {
+                                const name = basename(state.path);
+                                if (typeof state.nodeId === "string") {
+                                    serve(state.nodeId, listedKey);
+                                }
+                                byName.set(
+                                    name,
+                                    includeStats
+                                        ? {
+                                              name,
+                                              kind: "file" as const,
+                                              stat: fileDirentStat(
+                                                  state.length,
+                                                  state.mtimeMs,
+                                                  state.mode
+                                              ),
+                                          }
+                                        : { name, kind: "file" as const }
+                                );
+                            }
+                        }
+                        const entries = [...byName.values()];
+                        if (normalized === "/") {
+                            entries.push(
+                                includeStats
+                                    ? {
+                                          name: CONFLICTS_DIR,
+                                          kind: "directory",
+                                          stat: directoryDirentStat(
+                                              stamps.read(CONFLICTS_STAMP_KEY)
+                                          ),
+                                      }
+                                    : {
+                                          name: CONFLICTS_DIR,
+                                          kind: "directory",
+                                      }
+                            );
+                        }
+                        if (!settled) {
+                            if (listedKey !== undefined) {
+                                stamps.bump(listedKey);
+                            } else {
+                                // An empty listing does not name its
+                                // directory: bump whichever is stamped there.
+                                markPath(normalized);
+                            }
+                        }
+                        return entries;
+                    }
+                );
             });
         },
 
@@ -2442,8 +2978,10 @@ export const createSharedFsMountBackend = (
             state.buffer.set(data, writeOffset);
             state.length = Math.max(state.length, end);
             state.mtimeMs = Date.now();
+            const wasDirty = state.dirty;
             state.dirty = true;
             state.mutationGeneration++;
+            if (!wasDirty) noteDirtied(state);
             return data.byteLength;
         },
 
@@ -2461,7 +2999,7 @@ export const createSharedFsMountBackend = (
                         );
                     }
                     assertWriteReady(`Truncate on handle ${targetRef}`);
-                    resizeState(openHandle.state, size);
+                    resize(openHandle.state, size);
                     return;
                 }
                 const normalized = normalizeFsPath(targetRef);
@@ -2482,7 +3020,7 @@ export const createSharedFsMountBackend = (
                 });
                 const openHandle = requireHandle(handle);
                 try {
-                    resizeState(openHandle.state, size);
+                    resize(openHandle.state, size);
                     const cutoff = openHandle.state.mutationGeneration;
                     await localCommit(openHandle.state, cutoff, "truncate");
                 } finally {
@@ -2594,6 +3132,7 @@ export const createSharedFsMountBackend = (
                         for (const state of staleStates) {
                             detachNamespaceState(state);
                         }
+                        await bumpOwnParent(normalized);
                     }
                 );
             });
@@ -2654,6 +3193,7 @@ export const createSharedFsMountBackend = (
                         for (const state of affected) {
                             detachNamespaceState(state);
                         }
+                        await bumpOwnParent(normalized, entry.parentId);
                     }
                 );
             });
@@ -2760,6 +3300,9 @@ export const createSharedFsMountBackend = (
                             target,
                             toPath
                         );
+                        // The move's event names only the destination; the
+                        // source directory is bumped through this placement.
+                        serve(source.nodeId, source.parentId);
                         try {
                             const result = await target.mutateNamespaceForMount(
                                 {
@@ -2808,12 +3351,23 @@ export const createSharedFsMountBackend = (
                         }
                         for (const state of sourceStates) {
                             if (state.namespaceDetached) continue;
-                            rebaseStatePath(
-                                state,
-                                state.path === fromPath
-                                    ? toPath
-                                    : toPath + state.path.slice(fromPath.length)
-                            );
+                            if (state.path === fromPath) {
+                                rebaseStatePath(state, toPath);
+                                state.parentKey = parentNodeId;
+                                state.parentUncertain = false;
+                            } else {
+                                // Descendants keep their parent directory.
+                                rebaseStatePath(
+                                    state,
+                                    toPath + state.path.slice(fromPath.length)
+                                );
+                            }
+                        }
+                        serve(source.nodeId, parentNodeId);
+                        await bumpOwnParent(fromPath, source.parentId);
+                        await bumpOwnParent(toPath, parentNodeId);
+                        if (!feed && source.kind === "directory") {
+                            stamps.bump(source.nodeId); // its `..` moved
                         }
                     }
                 );
@@ -2888,6 +3442,7 @@ export const createSharedFsMountBackend = (
                         for (const state of affected) {
                             detachNamespaceState(state);
                         }
+                        await bumpOwnParent(normalized, entry.parentId);
                     }
                 );
             });
@@ -3046,6 +3601,7 @@ export const createSharedFsMountBackend = (
                                     ? alreadyExists(normalized)
                                     : error;
                             });
+                        await bumpOwnParent(normalized, expectedParentNodeId);
                     }
                 );
             });
@@ -3087,6 +3643,11 @@ export const createSharedFsMountBackend = (
                     }
                 }
             });
+        },
+
+        dispose() {
+            unsubscribe?.();
+            unsubscribe = undefined;
         },
     };
 

@@ -304,6 +304,8 @@ export const stopMountSession = async (
     session: {
         mounted?: { unmount(): Promise<void> };
         ipc?: { close(): Promise<void> };
+        /** Detached from the filesystem's namespace feed before Peerbit stops. */
+        backend?: { dispose(): void };
         profileWriter?: SharedFsMountProfileWriter;
         stopPeerbit(): Promise<void>;
     },
@@ -319,6 +321,11 @@ export const stopMountSession = async (
         await step(() => session.mounted?.unmount());
         await step(() => session.ipc?.close());
     } finally {
+        try {
+            session.backend?.dispose();
+        } catch {
+            // Unsubscribing cannot leave anything to clean up.
+        }
         await closeMountProfile(session.profileWriter).catch(() => {});
     }
     await step(() => session.stopPeerbit());
@@ -932,6 +939,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 let mounted:
                     | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
+                let backend:
+                    | ReturnType<typeof createSharedFsMountBackend>
+                    | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
                 try {
                     await connectMountToNetwork(peerbit, argv.peer);
@@ -971,7 +981,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         );
                     }
                     const profile = profileWriter?.sink;
-                    const backend = createSharedFsMountBackend(fsHandle, {
+                    backend = createSharedFsMountBackend(fsHandle, {
                         profile,
                     });
                     const mountpoint = normalizeNativeMountpoint(
@@ -1004,6 +1014,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         stopMountSession({
                             mounted,
                             ipc,
+                            backend,
                             profileWriter,
                             stopPeerbit: () => stopPeerbitForCli(peerbit),
                         })
@@ -1013,6 +1024,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         {
                             mounted,
                             ipc,
+                            backend,
                             profileWriter,
                             stopPeerbit: () => stopPeerbitForCli(peerbit),
                         },

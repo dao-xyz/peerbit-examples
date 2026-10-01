@@ -6,6 +6,7 @@ import {
     type ResolveNamingConflictOptions,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
+    type SharedFsNamespaceChange,
     type WriteBatchEntry,
     type WriteBatchOptions,
     type WriteFileOptions,
@@ -122,6 +123,37 @@ export class IgnoreAwareFs extends SharedFsHandle {
             // baseline itself; seeding first would double-count it.
             { seedBaseline: options?.initial !== "snapshot" }
         );
+    }
+
+    /**
+     * The program's namespace feed, plus a reset whenever this handle's
+     * rules change: list() and stat() visibility then moves without any
+     * document traffic.
+     */
+    onNamespaceChange(
+        listener: (change: SharedFsNamespaceChange) => void
+    ): () => void {
+        const unsubscribe = super.onNamespaceChange(listener);
+        const onRulesChanged = () => {
+            try {
+                listener({
+                    naming: [],
+                    moves: [],
+                    firstContent: [],
+                    contentLost: [],
+                    versionForkOrMerge: false,
+                    reset: true,
+                });
+            } catch {
+                // Same contract as the program feed: failures are ignored.
+            }
+        };
+        const events = this.program.events as any;
+        events.addEventListener("ignore:rules-changed", onRulesChanged);
+        return () => {
+            unsubscribe();
+            events.removeEventListener("ignore:rules-changed", onRulesChanged);
+        };
     }
 
     private guardWrite(

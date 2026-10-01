@@ -966,6 +966,8 @@ export type OpenSharedFsOptions = SharedFsOpenArgs & {
 export type SharedFsEntryInfo = {
     path: string;
     nodeId: string;
+    /** Node id of the directory holding this entry; absent for the root. */
+    parentId?: string;
     name: string;
     kind: "directory" | "file";
     size: bigint;
@@ -999,6 +1001,78 @@ export type SharedFsEntryInfo = {
      * by a peer without the rule, or before the rule existed).
      */
     ignoredLeak?: boolean;
+};
+
+/** One naming event that entered or left this replica's local index. */
+export type SharedFsNamespaceNamingChange = {
+    /** Naming event id. */
+    id: string;
+    nodeId: string;
+    parentId: string;
+    name: string;
+    deleted: boolean;
+    /** The event left the local index (GC compaction or a replicated delete). */
+    removed: boolean;
+    /**
+     * The event supersedes earlier naming events of its node: a move, rename
+     * or delete rather than the node's first placement.
+     */
+    supersedes: boolean;
+    /**
+     * Whether the event is (for a removal: was) a naming head of its node.
+     * Undefined when this replica had no warm naming rows for the node, so
+     * the effect on the node's visible placement is unknown.
+     */
+    head?: boolean;
+};
+
+/** A slot a node's visible placement left or took. */
+export type SharedFsNamespacePlacement = { parentId: string; name: string };
+
+/**
+ * A node's winning placement changed: `from` is the slot its winner left
+ * and `to` the slot it took; each is absent when the winner was or is
+ * deleted (or unknown).
+ */
+export type SharedFsNamespaceMove = {
+    nodeId: string;
+    from?: SharedFsNamespacePlacement;
+    to?: SharedFsNamespacePlacement;
+};
+
+/**
+ * One batch of namespace-relevant local index changes, delivered by
+ * `onNamespaceChange` synchronously after the read caches applied them.
+ * Every item is a possible change of some directory's visible names; items
+ * may over-report, but a visible change is never left out.
+ */
+export type SharedFsNamespaceChange = {
+    naming: SharedFsNamespaceNamingChange[];
+    /**
+     * Winner changes of nodes whose naming rows this replica knew, including
+     * slots no item names: the directory a hidden slot winner moved out of,
+     * or a placement a removed head re-exposes.
+     */
+    moves: SharedFsNamespaceMove[];
+    /**
+     * File nodes that may have just become visible because their first
+     * content arrived after their naming: `parentIds` are the directories of
+     * the node's non-deleted naming heads.
+     */
+    firstContent: { nodeId: string; parentIds: string[] }[];
+    /**
+     * File nodes whose last content version may have left the local index,
+     * which hides them until content returns.
+     */
+    contentLost: string[];
+    /** Content heads may have forked or merged, so conflicts may have changed. */
+    versionForkOrMerge: boolean;
+    /**
+     * The whole view may have changed without per-document traffic: a
+     * bootstrap overlay switch or retirement, a reopen, or an ignore-rules
+     * change on an artifact-ignore handle.
+     */
+    reset: boolean;
 };
 
 export type SharedFsVersionInfo = {
@@ -1794,6 +1868,140 @@ const computeNamingState = (
     return { nodeId, events, heads: sorted, winner, conflicted };
 };
 
+/** Added ids remembered to skip a local write's second cache delivery. */
+const NAMESPACE_REPORTED_ID_LIMIT = 4096;
+/** Naming or version buckets a removal dropped, kept for the feed. */
+const NAMESPACE_DROPPED_NODE_LIMIT = 16_384;
+/** Possibly hidden nodes kept for attribution before the feed resets. */
+const NAMESPACE_UNSETTLED_NODE_LIMIT = 50_000;
+/**
+ * Rows of one node the feed re-indexes for each change: a longer history
+ * keeps its RowGraph from one change to the next.
+ */
+const NAMESPACE_KEPT_GRAPH_ROWS = 16;
+
+/**
+ * One node's rows (a warm cache bucket, or the rows the namespace feed kept
+ * after a removal dropped it) and their heads as computeHeads finds them,
+ * kept current as rows enter and leave through `add` and `remove`: each
+ * costs O(parents), never a pass over the node's history.
+ */
+class RowGraph<T extends { id: string }> {
+    /** How many present rows list each id as a parent. */
+    private readonly references = new Map<string, number>();
+    private readonly headIds = new Set<string>();
+    /** Rows accounted for; the map changed elsewhere when it differs. */
+    size: number;
+
+    constructor(
+        public rows: Map<string, T>,
+        private readonly parentsOf: (row: T) => readonly string[]
+    ) {
+        for (const row of rows.values()) {
+            for (const parent of parentsOf(row)) {
+                this.references.set(
+                    parent,
+                    (this.references.get(parent) ?? 0) + 1
+                );
+            }
+        }
+        for (const id of rows.keys()) {
+            if (!this.references.has(id)) {
+                this.headIds.add(id);
+            }
+        }
+        this.size = rows.size;
+    }
+
+    /**
+     * Continue on a private copy of the rows. Removals then never edit a map
+     * the cache handed to readers, which may still hold it across awaits.
+     */
+    detach() {
+        this.rows = new Map(this.rows);
+    }
+
+    /** Whether a present row lists `id` as a parent. */
+    referenced(id: string) {
+        return this.references.has(id);
+    }
+
+    heads(): T[] {
+        return [...this.headIds].map((id) => this.rows.get(id)!);
+    }
+
+    add(row: T) {
+        const known = this.rows.has(row.id);
+        this.rows.set(row.id, row);
+        if (known) {
+            return;
+        }
+        this.size++;
+        for (const parent of this.parentsOf(row)) {
+            this.references.set(parent, (this.references.get(parent) ?? 0) + 1);
+            this.headIds.delete(parent);
+        }
+        if (!this.references.has(row.id)) {
+            this.headIds.add(row.id);
+        }
+    }
+
+    remove(id: string) {
+        const row = this.rows.get(id);
+        if (!row) {
+            return;
+        }
+        this.rows.delete(id);
+        this.size--;
+        this.headIds.delete(id);
+        for (const parent of this.parentsOf(row)) {
+            const count = (this.references.get(parent) ?? 1) - 1;
+            if (count > 0) {
+                this.references.set(parent, count);
+                continue;
+            }
+            this.references.delete(parent);
+            if (this.rows.has(parent)) {
+                this.headIds.add(parent);
+            }
+        }
+    }
+}
+
+const namingParents = (row: NamingLike) => row.parentNamingIds;
+const versionParents = (row: VersionLike) => row.parentVersionIds;
+
+/** One node's rows as the namespace feed tracks them through one change. */
+type NamespaceTrack<T extends { id: string }> = {
+    graph: RowGraph<T>;
+    /** The change adds or removes rows of the node. */
+    changed: boolean;
+    /** The change removes rows: the cache drops the node's whole bucket. */
+    removed: boolean;
+    /** For naming rows: the node's placement before the change. */
+    from?: SharedFsNamespacePlacement;
+};
+
+/**
+ * A naming event as the namespace feed reports it. With known rows an
+ * event some row supersedes is not a head: a late ancestor or a compacted
+ * row cannot change the node's winner.
+ */
+const namespaceNamingChange = (
+    event: NamingEvent,
+    removed: boolean,
+    graph: RowGraph<NamingLike> | undefined
+): SharedFsNamespaceNamingChange => ({
+    id: event.id,
+    nodeId: event.nodeId,
+    parentId: event.parentId,
+    name: event.name,
+    deleted: event.deleted,
+    removed,
+    supersedes: event.parentNamingIds.length > 0,
+    head: graph ? !graph.referenced(event.id) : undefined,
+});
+
 /**
  * The W1 witness predicate evaluated on one local index row: a file-version
  * row created at or after the skip-horizon floor. Its chunkRefs are the
@@ -2325,6 +2533,53 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private slotPointCache = new BoundedSlotPointCache();
     private changeListener: ((event: any) => void) | undefined;
+    /** onNamespaceChange subscribers; dropped on close. */
+    private namespaceListeners:
+        | Set<(change: SharedFsNamespaceChange) => void>
+        | undefined;
+    /**
+     * Recently reported added document ids. Local writes reach
+     * applyCacheChanges twice (change event, then cacheLocalWrite); only the
+     * first delivery is reported.
+     */
+    private namespaceReportedIds = new Set<string>();
+    /**
+     * The naming rows of nodes whose warm bucket a removal dropped (the
+     * removal branch drops whole buckets), kept current by later events for
+     * the node while its bucket stays cold. Read only by the namespace feed:
+     * a later GC removal stays a known non-head, and a hidden node a listing
+     * saw keeps its parents for first-content attribution.
+     */
+    private namespaceDroppedRows = new Map<string, Map<string, NamingLike>>();
+    /** The same for version buckets: later removals stay exact. */
+    private namespaceDroppedVersions = new Map<
+        string,
+        Map<string, VersionLike>
+    >();
+    /**
+     * The RowGraph of each row map the feed tracks (warm buckets and the
+     * dropped rows above), kept for histories longer than
+     * NAMESPACE_KEPT_GRAPH_ROWS. A graph whose map grew without it (the cache
+     * upserts while nobody listens) is rebuilt.
+     */
+    private namespaceGraphs = new WeakMap<
+        Map<string, unknown>,
+        RowGraph<any>
+    >();
+    /**
+     * File nodes a view may show hidden (a live naming winner without
+     * content) whose naming rows the feed lost: an evicted bucket, a fill
+     * that skipped its install, or dropped rows that overflowed. A change for
+     * one of them with cold rows is attributed by an index lookup. Any other
+     * cold bucket proves that no listing saw the node since its last reported
+     * change, since listings warm the buckets of every node they show.
+     */
+    private namespaceUnsettled = new Set<string>();
+    /** File nodes awaiting an attribution lookup, by what they need. */
+    private namespaceLookupQueue = new Map<
+        string,
+        { content: boolean; placement: boolean }
+    >();
     /** Memoized isTrusted verdicts; see canPerformEntry. */
     private trustVerdicts = new Map<string, { ok: boolean; at: number }>();
     /** Invalidates verdicts still being computed when the trust graph changes. */
@@ -2892,6 +3147,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.cacheGlobalEpoch = (this.cacheGlobalEpoch ?? 0) + 1;
         this.slotSweepCache = new Map();
         this.slotPointCache = new BoundedSlotPointCache();
+        // Subscribers survive an open-on-open; the reset tells them the
+        // cleared caches may now serve a different view.
+        this.namespaceListeners ??= new Set();
+        this.namespaceReportedIds = new Set();
+        this.resetNamespaceTracking();
+        this.namespaceLookupQueue = new Map();
+        this.emitNamespaceReset();
         this.writeBatchChain = Promise.resolve();
         this.mountNamespaceMutationChain = Promise.resolve();
         this.mountNamespaceFenceActive = false;
@@ -4096,7 +4358,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
-    /** Evict the oldest ~10% (Map iteration order) instead of thrashing. */
+    /**
+     * Evict the oldest ~10% (Map iteration order) instead of thrashing. The
+     * global epoch advance makes every fill in flight skip its install; the
+     * namespace feed notes those nodes there (namingStatesForNodes).
+     */
     private boundCache(cache: Map<string, unknown>) {
         if (cache.size <= SharedFileSystem.CACHE_NODE_LIMIT) {
             return;
@@ -4104,8 +4370,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.cacheGlobalEpoch++;
         const evict = Math.ceil(cache.size / 10);
         let count = 0;
-        for (const key of cache.keys()) {
+        for (const [key, value] of cache) {
             cache.delete(key);
+            if (cache === this.namingRowCache) {
+                this.noteNamespaceUnsettled(
+                    key,
+                    (value as Map<string, NamingLike>).values()
+                );
+            }
             if (++count >= evict) {
                 break;
             }
@@ -4113,6 +4385,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private applyCacheChanges(added: unknown[], removed: unknown[]) {
+        // Judged item by item against the caches as the change reaches them
+        // (the feed applies it to warm buckets first, the same way), and
+        // reported after it applied, so a subscriber's re-read sees it.
+        const namespaceChange = this.namespaceChangeOf(added, removed);
         for (const value of added) {
             if (value instanceof FileVersion) {
                 this.bumpEpoch(value.nodeId);
@@ -4151,11 +4427,626 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.boundCache(this.versionRowCache);
         this.boundCache(this.namingRowCache);
         this.boundCache(this.slotSweepCache);
+        if (namespaceChange) {
+            this.emitNamespaceChange(namespaceChange);
+        }
     }
 
     /** Upsert a locally written document into a warm cache immediately. */
     private cacheLocalWrite(value: SharedFsEntry) {
         this.applyCacheChanges([value], []);
+    }
+
+    /**
+     * Subscribe to namespace-relevant changes of this replica's local index
+     * (see SharedFsNamespaceChange). Listeners run synchronously inside
+     * change delivery, after the read caches applied the change, so they must
+     * be cheap; a throwing listener is ignored. Native mounts derive directory
+     * times from this feed. Listeners are dropped on close. Returns an
+     * unsubscribe function.
+     */
+    onNamespaceChange(
+        listener: (change: SharedFsNamespaceChange) => void
+    ): () => void {
+        const listeners = (this.namespaceListeners ??= new Set());
+        listeners.add(listener);
+        return () => {
+            listeners.delete(listener);
+        };
+    }
+
+    private emitNamespaceChange(change: SharedFsNamespaceChange) {
+        const listeners = this.namespaceListeners;
+        if (!listeners?.size) {
+            return;
+        }
+        for (const listener of [...listeners]) {
+            try {
+                listener(change);
+            } catch {
+                // A subscriber must never break cache maintenance.
+            }
+        }
+    }
+
+    private emitNamespaceReset() {
+        // Every view is invalidated: no earlier sighting needs attribution.
+        this.namespaceUnsettled?.clear();
+        this.emitNamespaceChange({
+            naming: [],
+            moves: [],
+            firstContent: [],
+            contentLost: [],
+            versionForkOrMerge: false,
+            reset: true,
+        });
+    }
+
+    /** Forget the feed's knowledge of cold buckets (no listener, or a reopen). */
+    private resetNamespaceTracking() {
+        this.namespaceDroppedRows = new Map();
+        this.namespaceDroppedVersions = new Map();
+        this.namespaceUnsettled = new Set();
+        this.namespaceGraphs = new WeakMap();
+    }
+
+    /**
+     * The namespace feed's view of one change, computed only while someone
+     * listens and before the caches apply it. Each item is judged against
+     * its node's rows as the earlier items left them, which the feed updates
+     * in place with their heads (RowGraph): an item costs O(parents), never
+     * a pass over the node's history. The rows are the node's warm bucket,
+     * which this applies the change to just ahead of the cache, or the rows
+     * the feed kept after a removal dropped it. Beyond that, only the rare
+     * attribution lookup below costs anything.
+     */
+    private namespaceChangeOf(
+        added: unknown[],
+        removed: unknown[]
+    ): SharedFsNamespaceChange | undefined {
+        if (!this.namespaceListeners?.size) {
+            if (
+                this.namespaceDroppedRows?.size ||
+                this.namespaceDroppedVersions?.size ||
+                this.namespaceUnsettled?.size
+            ) {
+                // Unmaintained while nobody listens.
+                this.resetNamespaceTracking();
+            }
+            return undefined;
+        }
+        const naming: SharedFsNamespaceNamingChange[] = [];
+        const firstContent: SharedFsNamespaceChange["firstContent"] = [];
+        let versionForkOrMerge = false;
+        // Each node's tracked rows; an undefined entry is a cold bucket.
+        const namingNodes = new Map<
+            string,
+            NamespaceTrack<NamingLike> | undefined
+        >();
+        const versionNodes = new Map<
+            string,
+            NamespaceTrack<VersionLike> | undefined
+        >();
+        const namingTrack = (nodeId: string) => {
+            if (!namingNodes.has(nodeId)) {
+                const rows = this.namespaceNamingRows(nodeId);
+                namingNodes.set(
+                    nodeId,
+                    rows && {
+                        graph: this.namespaceGraph(rows, namingParents),
+                        changed: false,
+                        removed: false,
+                    }
+                );
+            }
+            return namingNodes.get(nodeId);
+        };
+        const versionTrack = (nodeId: string) => {
+            if (!versionNodes.has(nodeId)) {
+                const rows = this.namespaceVersionRows(nodeId);
+                versionNodes.set(
+                    nodeId,
+                    rows && {
+                        graph: this.namespaceGraph(rows, versionParents),
+                        changed: false,
+                        removed: false,
+                    }
+                );
+            }
+            return versionNodes.get(nodeId);
+        };
+        // The placement a node's winner leaves, taken before its first
+        // naming change: exact winner diffs where the rows are known.
+        const changeNaming = (
+            nodeId: string,
+            track: NamespaceTrack<NamingLike>
+        ) => {
+            if (!track.changed) {
+                track.from = this.namingPlacement(nodeId, track.graph);
+                track.changed = true;
+            }
+        };
+        const contentChecked = new Set<string>();
+        for (const value of added) {
+            if (
+                !(value instanceof NamingEvent) &&
+                !(value instanceof FileVersion)
+            ) {
+                continue;
+            }
+            if (this.namespaceReportedIds.has(value.id)) {
+                continue; // the second delivery of a local write
+            }
+            this.noteNamespaceReported(value.id);
+            if (value instanceof NamingEvent) {
+                const track = namingTrack(value.nodeId);
+                naming.push(namespaceNamingChange(value, false, track?.graph));
+                if (track) {
+                    changeNaming(value.nodeId, track);
+                    track.graph.add(namingRowOf(value));
+                } else if (this.namespaceUnsettled.delete(value.nodeId)) {
+                    // A view may show the node hidden where it was, so its
+                    // move may reveal a name it shadowed there.
+                    this.queueNamespaceAttribution(value.nodeId, "placement");
+                }
+                continue;
+            }
+            const parents = value.parentVersionIds;
+            const track = versionTrack(value.nodeId);
+            const overlay = this.overlayHasVersions(value.nodeId);
+            // A cold bucket cannot rule a fork out, nor can rows the
+            // bootstrap overlay adds. Siblings delivered in one change fork
+            // against each other: earlier ones are in the rows.
+            if (
+                !track ||
+                overlay ||
+                parents.length > 1 ||
+                track.graph
+                    .heads()
+                    .some(
+                        (head) =>
+                            head.id !== value.id && !parents.includes(head.id)
+                    )
+            ) {
+                versionForkOrMerge = true;
+            }
+            const contentKnown =
+                track !== undefined && (track.graph.size > 0 || overlay);
+            if (track) {
+                track.graph.add(versionRowOf(value));
+                track.changed = true;
+            }
+            if (contentKnown || contentChecked.has(value.nodeId)) {
+                continue;
+            }
+            contentChecked.add(value.nodeId);
+            // No content was known for the node: if its naming arrived first,
+            // it was hidden and becomes visible now.
+            const placements = namingTrack(value.nodeId);
+            if (placements) {
+                const parentIds = this.liveNamingParents(
+                    value.nodeId,
+                    this.namingHeads(value.nodeId, placements.graph)
+                );
+                if (parentIds.length > 0) {
+                    firstContent.push({ nodeId: value.nodeId, parentIds });
+                }
+            } else if (this.namespaceUnsettled.delete(value.nodeId)) {
+                // A listing may have seen the hidden node although its bucket
+                // is cold now. Any other cold bucket means no listing did
+                // since its naming arrival was reported, so a brand-new node
+                // (writeFile puts content before naming) never queries.
+                this.queueNamespaceAttribution(value.nodeId, "content");
+            }
+        }
+        // Removals leave the rows that survive them tracked: the removal
+        // branch below drops the whole warm bucket, and the feed keeps it.
+        const coldContentRemovals = new Set<string>();
+        for (const value of removed) {
+            if (value instanceof NamingEvent) {
+                this.namespaceReportedIds.delete(value.id);
+                const track = namingTrack(value.nodeId);
+                naming.push(namespaceNamingChange(value, true, track?.graph));
+                if (track) {
+                    changeNaming(value.nodeId, track);
+                    this.detachNamespaceRows(
+                        track.graph,
+                        this.namingRowCache.get(value.nodeId)
+                    );
+                    track.graph.remove(value.id);
+                    track.removed = true;
+                } else if (this.namespaceUnsettled.delete(value.nodeId)) {
+                    // A removed head can move a hidden node off a slot it
+                    // shadowed in a view, or onto another.
+                    this.queueNamespaceAttribution(value.nodeId, "placement");
+                }
+            } else if (value instanceof FileVersion) {
+                this.namespaceReportedIds.delete(value.id);
+                versionForkOrMerge = true;
+                const track = versionTrack(value.nodeId);
+                if (track) {
+                    this.detachNamespaceRows(
+                        track.graph,
+                        this.versionRowCache.get(value.nodeId)
+                    );
+                    track.graph.remove(value.id);
+                    track.changed = track.removed = true;
+                } else {
+                    coldContentRemovals.add(value.nodeId);
+                }
+            }
+        }
+        // A removed head can re-expose an older placement, and a hidden slot
+        // winner can leave a slot no item of this change names.
+        const moves: SharedFsNamespaceMove[] = [];
+        for (const [nodeId, track] of namingNodes) {
+            if (!track?.changed) continue;
+            const from = track.from;
+            const to = this.namingPlacement(nodeId, track.graph);
+            if (from?.parentId !== to?.parentId || from?.name !== to?.name) {
+                moves.push({
+                    nodeId,
+                    ...(from ? { from } : {}),
+                    ...(to ? { to } : {}),
+                });
+            }
+            if (track.removed || !this.namingRowCache.has(nodeId)) {
+                this.keepDroppedNamingRows(nodeId, track.graph.rows);
+            }
+        }
+        // A file without content is hidden: losing the last version hides
+        // it. A cold bucket cannot rule that out.
+        const contentLost = [...coldContentRemovals];
+        for (const [nodeId, track] of versionNodes) {
+            if (!track?.changed) continue;
+            if (
+                track.removed &&
+                track.graph.size === 0 &&
+                !this.overlayHasVersions(nodeId)
+            ) {
+                contentLost.push(nodeId);
+            }
+            if (track.removed || !this.versionRowCache.has(nodeId)) {
+                this.keepDroppedVersionRows(nodeId, track.graph.rows);
+            }
+        }
+        if (
+            naming.length === 0 &&
+            moves.length === 0 &&
+            firstContent.length === 0 &&
+            contentLost.length === 0 &&
+            !versionForkOrMerge
+        ) {
+            return undefined;
+        }
+        return {
+            naming,
+            moves,
+            firstContent,
+            contentLost,
+            versionForkOrMerge,
+            reset: false,
+        };
+    }
+
+    /**
+     * The RowGraph of a row map the feed tracks: kept with a long history,
+     * else built for this change (at most NAMESPACE_KEPT_GRAPH_ROWS rows).
+     */
+    /**
+     * Before the feed removes a row from a node's live cache bucket, move
+     * its graph to a copy: the cache drops that bucket for the removal, and
+     * readers may still hold it. One copy per dropped bucket.
+     */
+    private detachNamespaceRows<T extends { id: string }>(
+        graph: RowGraph<T>,
+        live: Map<string, T> | undefined
+    ) {
+        if (graph.rows !== live) {
+            return;
+        }
+        this.namespaceGraphs.delete(live);
+        graph.detach();
+        if (graph.rows.size > NAMESPACE_KEPT_GRAPH_ROWS) {
+            this.namespaceGraphs.set(graph.rows, graph);
+        }
+    }
+
+    private namespaceGraph<T extends { id: string }>(
+        rows: Map<string, T>,
+        parentsOf: (row: T) => readonly string[]
+    ): RowGraph<T> {
+        const kept = this.namespaceGraphs.get(rows) as RowGraph<T> | undefined;
+        if (kept?.size === rows.size) {
+            return kept;
+        }
+        const graph = new RowGraph(rows, parentsOf);
+        if (rows.size > NAMESPACE_KEPT_GRAPH_ROWS) {
+            this.namespaceGraphs.set(rows, graph);
+        } else {
+            this.namespaceGraphs.delete(rows);
+        }
+        return graph;
+    }
+
+    /**
+     * A node's naming heads, with the rows the bootstrap overlay adds while
+     * it serves any (naming histories are short).
+     */
+    private namingHeads(
+        nodeId: string,
+        graph: RowGraph<NamingLike>
+    ): NamingLike[] {
+        if (
+            this.bootstrapPhase === "overlay-active" &&
+            this.overlayNaming.get(nodeId)?.size
+        ) {
+            return computeHeads(
+                this.overlayUnionNaming(nodeId, [...graph.rows.values()]),
+                namingParents
+            );
+        }
+        return graph.heads();
+    }
+
+    /** Whether the bootstrap overlay adds version rows of the node. */
+    private overlayHasVersions(nodeId: string) {
+        return (
+            this.bootstrapPhase === "overlay-active" &&
+            (this.overlayVersions.get(nodeId)?.size ?? 0) > 0
+        );
+    }
+
+    /** Where the node's naming winner places it; undefined when deleted. */
+    private namingPlacement(
+        nodeId: string,
+        graph: RowGraph<NamingLike>
+    ): SharedFsNamespacePlacement | undefined {
+        const winner = computeNamingState(
+            nodeId,
+            this.namingHeads(nodeId, graph)
+        )?.winner;
+        return winner && !winner.deleted
+            ? { parentId: winner.parentId, name: winner.name }
+            : undefined;
+    }
+
+    private noteNamespaceReported(id: string) {
+        const reported = this.namespaceReportedIds;
+        reported.add(id);
+        if (reported.size > NAMESPACE_REPORTED_ID_LIMIT) {
+            for (const oldest of reported) {
+                reported.delete(oldest);
+                break;
+            }
+        }
+    }
+
+    /**
+     * A node's naming rows as the feed knows them: the warm bucket, else the
+     * rows kept when a removal dropped it. A warm bucket supersedes them.
+     */
+    private namespaceNamingRows(
+        nodeId: string
+    ): Map<string, NamingLike> | undefined {
+        const bucket = this.namingRowCache.get(nodeId);
+        if (bucket) {
+            this.namespaceDroppedRows.delete(nodeId);
+            return bucket;
+        }
+        return this.namespaceDroppedRows.get(nodeId);
+    }
+
+    /** The same for a node's version rows. */
+    private namespaceVersionRows(
+        nodeId: string
+    ): Map<string, VersionLike> | undefined {
+        const bucket = this.versionRowCache.get(nodeId);
+        if (bucket) {
+            this.namespaceDroppedVersions.delete(nodeId);
+            return bucket;
+        }
+        return this.namespaceDroppedVersions.get(nodeId);
+    }
+
+    /**
+     * Keep a dropped bucket's surviving rows for the feed (bounded FIFO): the
+     * feed's own copy (see detachNamespaceRows), updated in place from then
+     * on.
+     */
+    private keepDroppedNamingRows(
+        nodeId: string,
+        kept: Map<string, NamingLike>
+    ) {
+        const dropped = this.namespaceDroppedRows;
+        dropped.delete(nodeId);
+        dropped.set(nodeId, kept);
+        if (dropped.size > NAMESPACE_DROPPED_NODE_LIMIT) {
+            for (const [oldest, rows] of dropped) {
+                dropped.delete(oldest);
+                this.noteNamespaceUnsettled(oldest, rows.values());
+                break;
+            }
+        }
+    }
+
+    /**
+     * Keep a dropped version bucket's surviving rows, the same way. Losing
+     * one only makes the feed conservative: a cold bucket reports possible
+     * forks and content loss.
+     */
+    private keepDroppedVersionRows(
+        nodeId: string,
+        kept: Map<string, VersionLike>
+    ) {
+        const dropped = this.namespaceDroppedVersions;
+        dropped.delete(nodeId);
+        dropped.set(nodeId, kept);
+        if (dropped.size > NAMESPACE_DROPPED_NODE_LIMIT) {
+            for (const oldest of dropped.keys()) {
+                dropped.delete(oldest);
+                break;
+            }
+        }
+    }
+
+    /**
+     * The feed lost a file node's naming rows (`rows`, as last known). Only
+     * a live node without known content can be hidden in a view; remember
+     * it for attribution. Too many to remember resets every view instead.
+     */
+    private noteNamespaceUnsettled(
+        nodeId: string,
+        rows: Iterable<NamingLike> | undefined
+    ) {
+        if (
+            !this.namespaceListeners?.size ||
+            nodeKindOf(nodeId) !== "file" ||
+            (this.namespaceVersionRows(nodeId)?.size ?? 0) > 0
+        ) {
+            return;
+        }
+        const winner = computeNamingState(nodeId, [...(rows ?? [])])?.winner;
+        if (!winner || winner.deleted) {
+            return;
+        }
+        const unsettled = this.namespaceUnsettled;
+        unsettled.delete(nodeId);
+        unsettled.add(nodeId);
+        if (unsettled.size > NAMESPACE_UNSETTLED_NODE_LIMIT) {
+            this.emitNamespaceReset();
+        }
+    }
+
+    /** Directories of the node's non-deleted naming heads among `rows`. */
+    private liveNamingParents(nodeId: string, rows: NamingLike[]): string[] {
+        const state = computeNamingState(nodeId, rows);
+        if (!state) {
+            return [];
+        }
+        return [
+            ...new Set(
+                state.heads
+                    .filter((head) => !head.deleted)
+                    .map((head) => head.parentId)
+            ),
+        ];
+    }
+
+    /**
+     * Batch attribution lookups for unsettled nodes per microtask:
+     * `content` reports where a first content makes the node visible,
+     * `placement` every live slot its history names (where a view may have
+     * seen it before it moved).
+     */
+    private queueNamespaceAttribution(
+        nodeId: string,
+        need: "content" | "placement"
+    ) {
+        const queue = this.namespaceLookupQueue;
+        const scheduled = queue.size > 0;
+        const entry = queue.get(nodeId) ?? {
+            content: false,
+            placement: false,
+        };
+        entry[need] = true;
+        queue.set(nodeId, entry);
+        if (scheduled) {
+            return;
+        }
+        const generation = this.openGeneration;
+        queueMicrotask(() => {
+            if (this.namespaceLookupQueue !== queue) {
+                return; // reopened: the reopen reset covers it
+            }
+            const nodes = [...queue];
+            queue.clear();
+            void this.attributeNamespace(nodes, generation);
+        });
+    }
+
+    private async attributeNamespace(
+        nodes: [string, { content: boolean; placement: boolean }][],
+        generation: number
+    ) {
+        for (let i = 0; i < nodes.length; i += HEAD_QUERY_BATCH) {
+            const batch = nodes.slice(i, i + HEAD_QUERY_BATCH);
+            let rows: NamingLike[];
+            try {
+                rows = (
+                    await this.queryRows([
+                        new StringMatch({ key: "kind", value: "naming" }),
+                        batch.length === 1
+                            ? new StringMatch({
+                                  key: "nodeId",
+                                  value: batch[0][0],
+                              })
+                            : new Or(
+                                  batch.map(
+                                      ([nodeId]) =>
+                                          new StringMatch({
+                                              key: "nodeId",
+                                              value: nodeId,
+                                          })
+                                  )
+                              ),
+                    ])
+                ).map(namingRowOf);
+            } catch {
+                // Unattributable: the whole view may have changed.
+                if (generation === this.openGeneration) {
+                    this.emitNamespaceReset();
+                }
+                return;
+            }
+            if (generation !== this.openGeneration) {
+                return;
+            }
+            const byNode = new Map<string, NamingLike[]>();
+            for (const row of rows) {
+                const bucket = byNode.get(row.nodeId) ?? [];
+                bucket.push(row);
+                byNode.set(row.nodeId, bucket);
+            }
+            const firstContent: SharedFsNamespaceChange["firstContent"] = [];
+            const moves: SharedFsNamespaceMove[] = [];
+            for (const [nodeId, need] of batch) {
+                const nodeRows = this.overlayUnionNaming(
+                    nodeId,
+                    byNode.get(nodeId) ?? []
+                );
+                if (need.content) {
+                    const parentIds = this.liveNamingParents(nodeId, nodeRows);
+                    if (parentIds.length > 0) {
+                        firstContent.push({ nodeId, parentIds });
+                    }
+                }
+                if (need.placement) {
+                    const slots = new Map<string, SharedFsNamespacePlacement>();
+                    for (const row of nodeRows) {
+                        if (!row.deleted) {
+                            slots.set(`${row.parentId}\0${row.name}`, {
+                                parentId: row.parentId,
+                                name: row.name,
+                            });
+                        }
+                    }
+                    for (const from of slots.values()) {
+                        moves.push({ nodeId, from });
+                    }
+                }
+            }
+            if (firstContent.length > 0 || moves.length > 0) {
+                this.emitNamespaceChange({
+                    naming: [],
+                    moves,
+                    firstContent,
+                    contentLost: [],
+                    versionForkOrMerge: false,
+                    reset: false,
+                });
+            }
+        }
     }
 
     /** Index-only rows for a query; never resolves documents. */
@@ -4235,12 +5126,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // access re-queries (a stale install would drop a just-arrived
             // superseding event for as long as the bucket stays warm).
             if (this.epochOf(nodeId) !== fillEpochs.get(nodeId)) {
+                // This caller's view may still show the node hidden.
+                this.noteNamespaceUnsettled(nodeId, byNode.get(nodeId));
                 continue;
             }
             this.namingRowCache.set(
                 nodeId,
                 new Map((byNode.get(nodeId) ?? []).map((row) => [row.id, row]))
             );
+            this.namespaceUnsettled?.delete(nodeId);
         }
         this.boundCache(this.namingRowCache);
         const states = new Map<string, NodeNamingState>();
@@ -5339,6 +6233,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return {
                 path,
                 nodeId: winner.nodeId,
+                parentId: winner.parentId,
                 name: winner.name,
                 kind,
                 size: 0n,
@@ -5357,6 +6252,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return {
             path,
             nodeId: winner.nodeId,
+            parentId: winner.parentId,
             name: winner.name,
             kind,
             size: visible.size,
@@ -9603,6 +10499,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.changeListener = undefined;
         }
+        this.namespaceListeners?.clear();
+        this.namespaceLookupQueue?.clear();
         this.clearBootstrapTimers();
         const readinessError = new SharedFsError(
             "ECLOSED",
@@ -10125,6 +11023,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // attached earlier must re-snapshot or they serve a near-empty view
         // for the whole overlay window.
         this.watchHub?.resyncAll("snapshot", "bootstrap:ready");
+        this.emitNamespaceReset();
         this.startRetirementTracking(generation, signal);
     }
 
@@ -11005,6 +11904,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Verified retirement is view-neutral by the coverage rules;
             // the resync is insurance against the outright cache clear.
             this.watchHub?.resyncAll("data", "bootstrap:end");
+            this.emitNamespaceReset();
             this.changesetHub?.overlayRetired();
         } else {
             // Timeout: the local store is a valid lagging-replica view —
@@ -11026,6 +11926,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // Honest view shrink: unproven overlay docs left the served
             // tree. Latched — the quiescence path dispatches this too.
             this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
+            this.emitNamespaceReset();
             this.changesetHub?.overlayRetired();
         }
     }
@@ -11089,6 +11990,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
                 this.resolveBootstrapWaiters({ verified: false });
                 this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
+                this.emitNamespaceReset();
                 this.changesetHub?.overlayRetired();
             }
         }, QUIESCENCE_CHECK_INTERVAL_MS);
@@ -15177,6 +16079,13 @@ export class SharedFsHandle {
 
     mutateNamespaceForMount(mutation: SharedFsMountNamespaceMutation) {
         return this.program.mutateNamespaceForMount(mutation);
+    }
+
+    /** Namespace-change feed (see SharedFileSystem.onNamespaceChange). */
+    onNamespaceChange(
+        listener: (change: SharedFsNamespaceChange) => void
+    ): () => void {
+        return this.program.onNamespaceChange(listener);
     }
 
     stat(path: string) {
