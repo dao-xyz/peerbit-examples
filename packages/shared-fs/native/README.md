@@ -235,9 +235,10 @@ second hard command deadline. The
 `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_WARMUPS`, and
 `PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_TIMEOUT_MS` environment variables can
 select other harness-validated values. The integration is opt-in and has no
-performance threshold. The Linux native smoke workflow can collect its FUSE
-report and same-runner control directly; the native-OS workflow can collect
-paired macFUSE and WinFsp reports from its real provisioned mounts.
+performance threshold. The native smoke workflow can collect Linux FUSE and
+Windows WinFsp reports, each with a same-runner control, on GitHub-hosted
+runners; the native-OS workflow can collect a paired macFUSE report from its
+Scaleway Mac. Hosted-runner numbers are not comparable with the Scaleway Mac's.
 
 The mounted-benchmark report (schema version 5) also records each sample's
 `startedAtUnixNs`/`endedAtUnixNs` window and keeps warmups in a separate
@@ -409,6 +410,11 @@ peers change can be up to 1 s stale, and names they create appear at once. A
 create within 1 s of another peer deleting the same name may fail with
 `ENOENT`; this is not measured.
 
+When macFUSE is absent, cgofuse loads FUSE-T instead. Shared-fs does not test
+FUSE-T. FUSE-T serves the mount through a local NFS server whose client caches
+attributes for 5 to 60 s, which in a one-off probe hid other peers' changes for
+up to 18 s, so the adapter mounts it with `-o noattrcache`.
+
 Windows (WinFsp) keeps WinFsp's own caching. The adapter sets no cache options
 there, and its staleness is not measured.
 
@@ -433,5 +439,5 @@ peerbit-fs status
 This builds the TypeScript CLI and this adapter, installs wrappers in
 `~/.local/bin`, and configures the wrapper to launch the external adapter.
 
-See [ci.md](./ci.md) for the optional Scaleway-backed macOS/Windows native
-mount CI setup.
+See [ci.md](./ci.md) for the native mount CI: hosted Linux and Windows mounts on
+every shared-fs pull request, and the optional Scaleway Mac for macFUSE.

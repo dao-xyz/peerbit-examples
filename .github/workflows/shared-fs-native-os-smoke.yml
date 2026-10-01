@@ -1,5 +1,10 @@
 name: Shared FS Native OS Smoke
 
+# The macOS macFUSE mount smoke on a physical Scaleway Mac. macFUSE needs a
+# kernel extension approved in System Settings, which GitHub-hosted runners
+# cannot load. Hosted Linux and Windows (WinFsp) mounts run in Shared FS
+# Native Smoke. The janitor still covers the pooled Scaleway Windows
+# host that Shared FS Native Cross-OS Interop uses.
 on:
     workflow_dispatch:
         inputs:
@@ -11,15 +16,6 @@ on:
                 options:
                     - smoke
                     - janitor
-            platform:
-                description: Native OS platform to test.
-                required: true
-                default: all
-                type: choice
-                options:
-                    - all
-                    - macos
-                    - windows
             mounted_benchmark:
                 description: Collect report-only mounted and local-control filesystem benchmarks during smoke runs.
                 required: true
@@ -73,7 +69,7 @@ jobs:
 
     provision-macos:
         name: Provision reusable physical macOS host + ephemeral GitHub runner
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos') }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' }}
         runs-on: ubuntu-latest
         timeout-minutes: 30
         outputs:
@@ -132,7 +128,7 @@ jobs:
                   retention-days: 2
 
     macos-native-smoke:
-        name: macOS macFUSE native smoke
+        name: macOS macFUSE native smoke (Scaleway)
         needs: provision-macos
         runs-on: ${{ fromJSON(needs.provision-macos.outputs.runs_on) }}
         timeout-minutes: 45
@@ -246,249 +242,12 @@ jobs:
                   fi
                   node scripts/github-scaleway-runner.mjs stop
 
-    provision-windows:
-        name: Provision reusable Windows runner
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows') }}
-        runs-on: ubuntu-latest
-        timeout-minutes: 45
-        outputs:
-            runs_on: ${{ steps.labels.outputs.runs_on }}
-        steps:
-            - name: Checkout
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-            - name: Compute runner labels
-              id: labels
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  label="peerbit-shared-fs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-windows"
-                  echo "unique_label=$label" >> "$GITHUB_OUTPUT"
-                  node -e 'console.log("runs_on=" + JSON.stringify(["self-hosted","Windows","scaleway",process.argv[1]]))' "$label" >> "$GITHUB_OUTPUT"
-
-            - name: Prepare SSH key
-              shell: bash
-              env:
-                  PEERBIT_SCALEWAY_SSH_PRIVATE_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PRIVATE_KEY }}
-              run: |
-                  set -euo pipefail
-                  if [ -z "${PEERBIT_SCALEWAY_SSH_PRIVATE_KEY:-}" ]; then
-                    echo "Missing PEERBIT_SCALEWAY_SSH_PRIVATE_KEY secret."
-                    exit 1
-                  fi
-                  printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
-                  chmod 600 "$RUNNER_TEMP/scaleway_ssh"
-                  ssh-keygen -y -f "$RUNNER_TEMP/scaleway_ssh" > "$RUNNER_TEMP/scaleway_ssh.pub"
-
-            - name: Start runner
-              env:
-                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
-                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
-                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
-                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
-                  SCALEWAY_WINDOWS_SERVER_TYPE: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_SERVER_TYPE || 'POP2-2C-8G-WIN' }}
-                  SCALEWAY_WINDOWS_IMAGE: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_IMAGE }}
-                  SCALEWAY_WINDOWS_ROOT_GB: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_ROOT_GB || '100' }}
-                  PEERBIT_SCALEWAY_SSH_PUBLIC_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PUBLIC_KEY }}
-                  PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
-                  PEERBIT_RUNNER_EPHEMERAL: "1"
-                  PEERBIT_RUNNER_REPLACE: "1"
-                  PEERBIT_SCALEWAY_WINDOWS_REUSE_SERVER: "1"
-                  PEERBIT_SCALEWAY_WINDOWS_REUSE_POOL: shared-fs
-                  PEERBIT_WINDOWS_SKIP_DEPENDENCIES: "0"
-                  PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES: "1"
-                  PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
-              run: node scripts/github-scaleway-windows-runner.mjs start
-
-            - name: Preserve runner state
-              if: always()
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: scaleway-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
-                  path: tmp/processes/github-scaleway-windows-runner.json
-                  if-no-files-found: warn
-                  retention-days: 2
-
-    windows-native-smoke:
-        name: Windows WinFsp native smoke
-        needs: provision-windows
-        runs-on: ${{ fromJSON(needs.provision-windows.outputs.runs_on) }}
-        timeout-minutes: 45
-        steps:
-            - name: Checkout
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-            - name: Setup Node
-              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-              with:
-                  node-version: 22
-                  package-manager-cache: false
-
-            - name: Setup pnpm
-              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-              with:
-                  run_install: false
-
-            - name: Setup Go
-              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-              with:
-                  go-version: "1.24.x"
-                  cache: false
-
-            - name: Use Bash for pnpm scripts
-              run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
-
-            - name: Configure persistent pnpm store
-              shell: powershell
-              run: |
-                  $Store = $env:PEERBIT_WINDOWS_PNPM_STORE_DIR
-                  if ([string]::IsNullOrWhiteSpace($Store)) {
-                    $Store = "C:\peerbit-cache\pnpm-store"
-                  }
-                  New-Item -ItemType Directory -Force -Path $Store | Out-Null
-                  "npm_config_store_dir=$Store" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-                  $env:npm_config_store_dir = $Store
-                  Write-Host "pnpm store path: $(pnpm store path)"
-
-            - name: Install WinFsp
-              shell: powershell
-              run: |
-                  $WinFspDlls = @(
-                    "C:\Program Files\WinFsp\bin\winfsp-x64.dll",
-                    "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
-                  )
-                  if (-not ($WinFspDlls | Where-Object { Test-Path $_ })) {
-                    choco install winfsp -y --no-progress
-                  }
-                  if (-not ($WinFspDlls | Where-Object { Test-Path $_ })) {
-                    Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "winfsp*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-                    throw "WinFsp is not installed or loadable."
-                  }
-                  $WinFspDll = $WinFspDlls | Where-Object { Test-Path $_ } | Select-Object -First 1
-                  $WinFspBin = Split-Path -Parent $WinFspDll
-                  $WinFspBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-                  Write-Host "WinFsp bin: $WinFspBin"
-
-            - name: Install dependencies
-              run: |
-                  $env:PEERBIT_SKIP_ROOT_POSTINSTALL = "1"
-                  pnpm install --prefer-offline --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
-
-            - name: Report pnpm store size
-              if: always()
-              shell: powershell
-              run: |
-                  if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-                    Write-Host "pnpm is unavailable; no store size to report."
-                    return
-                  }
-                  $StorePath = pnpm store path
-                  Write-Host "pnpm store path: $StorePath"
-                  if (Test-Path -LiteralPath $StorePath) {
-                    $Measure = Get-ChildItem -LiteralPath $StorePath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
-                    $Bytes = 0
-                    if ($null -ne $Measure.Sum) {
-                      $Bytes = [int64]$Measure.Sum
-                    }
-                    $MiB = [Math]::Round($Bytes / 1MB, 2)
-                    Write-Host "pnpm store size: $MiB MiB ($($Measure.Count) files)"
-                  } else {
-                    Write-Host "pnpm store path does not exist yet."
-                  }
-
-            - name: Build shared-fs packages
-              run: node scripts/shared-fs-build-packages.mjs
-
-            - name: Run external native adapter smoke
-              shell: powershell
-              env:
-                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: ${{ inputs.mounted_benchmark && '0' || '1' }}
-                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-windows-winfsp-benchmark.json', runner.temp) || '' }}
-                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ inputs.mounted_benchmark && format('{0}/shared-fs-windows-control-benchmark.json', runner.temp) || '' }}
-              run: scripts/shared-fs-external-native-smoke.ps1
-
-            - name: Add filesystem benchmark summaries
-              if: ${{ always() && inputs.mounted_benchmark }}
-              shell: powershell
-              env:
-                  MOUNT_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-windows-winfsp-benchmark.json
-                  CONTROL_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-windows-control-benchmark.json
-              run: |
-                  foreach ($Report in @($env:MOUNT_BENCHMARK_REPORT, $env:CONTROL_BENCHMARK_REPORT)) {
-                    if (-not (Test-Path -LiteralPath $Report)) {
-                      "## Shared FS filesystem-path benchmark" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-                      "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-                      "A requested Windows benchmark report was not produced: $Report" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-                      throw "requested benchmark report was not produced"
-                    }
-                  }
-                  $SummaryScript = @'
-                  import { appendFile, readFile } from "node:fs/promises";
-                  import { formatNativeMountBenchmarkSummary, validateNativeMountBenchmarkReport } from "./scripts/shared-fs-native-mount-benchmark.mjs";
-                  for (const path of [process.env.MOUNT_BENCHMARK_REPORT, process.env.CONTROL_BENCHMARK_REPORT]) {
-                    const report = JSON.parse(await readFile(path, "utf8"));
-                    validateNativeMountBenchmarkReport(report);
-                    await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkSummary(report));
-                  }
-                  '@
-                  $SummaryScript | node --input-type=module
-                  if ($LASTEXITCODE -ne 0) {
-                    throw "mounted benchmark report validation failed with exit code $LASTEXITCODE"
-                  }
-
-            - name: Upload filesystem benchmark reports
-              if: ${{ always() && inputs.mounted_benchmark }}
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-              with:
-                  name: shared-fs-windows-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
-                  path: |
-                      ${{ runner.temp }}/shared-fs-windows-winfsp-benchmark.json
-                      ${{ runner.temp }}/shared-fs-windows-control-benchmark.json
-                  if-no-files-found: error
-                  retention-days: 14
-
-    cleanup-windows:
-        name: Cleanup Windows runner
-        if: ${{ always() && needs.provision-windows.result != 'skipped' }}
-        needs:
-            - provision-windows
-            - windows-native-smoke
-        runs-on: ubuntu-latest
-        timeout-minutes: 20
-        steps:
-            - name: Checkout
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-            - name: Restore runner state
-              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-              continue-on-error: true
-              with:
-                  name: scaleway-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
-                  path: tmp/processes
-
-            - name: Stop runner
-              shell: bash
-              env:
-                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
-                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
-                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
-                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
-                  PEERBIT_FORCE: "1"
-              run: |
-                  set -euo pipefail
-                  if [ ! -f tmp/processes/github-scaleway-windows-runner.json ]; then
-                    echo "No Windows runner state artifact found."
-                    exit 0
-                  fi
-                  node scripts/github-scaleway-windows-runner.mjs stop
-
     resource-sanity:
         name: Check Scaleway resource cleanup
         if: ${{ always() && (github.event_name == 'schedule' || github.event.inputs.operation != 'janitor') }}
         needs:
             - janitor
             - cleanup-macos
-            - cleanup-windows
         runs-on: ubuntu-latest
         timeout-minutes: 10
         steps:

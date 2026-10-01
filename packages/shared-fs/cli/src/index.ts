@@ -163,6 +163,38 @@ const connectToNetwork = async (
     await peerbit.bootstrap();
 };
 
+/**
+ * A mount is long-running and serves its local replica, so unreachable
+ * bootstrap nodes must not stop it from starting. Peerbit's bootstrap
+ * recovery then redials with backoff whenever the mount has no connections,
+ * at startup and after later network loss. Joining a remote filesystem still
+ * waits for the write-readiness fence, so an offline join fails safely.
+ * Explicit --peer addresses keep the mount off the public network.
+ */
+export const connectMountToNetwork = async (
+    peerbit: Pick<Peerbit, "bootstrap" | "dial" | "enableBootstrapRecovery">,
+    peer?: string | string[],
+    warn: (message: string) => void = (message) =>
+        console.warn(chalk.yellow(message))
+) => {
+    if (peer) {
+        for (const address of coerceAddresses(peer)) {
+            await peerbit.dial(address);
+        }
+        return;
+    }
+    try {
+        await peerbit.bootstrap();
+    } catch (error) {
+        warn(
+            `Could not reach the Peerbit bootstrap network (${
+                error instanceof Error ? error.message : String(error)
+            }); mounting from local state and reconnecting in the background.`
+        );
+    }
+    peerbit.enableBootstrapRecovery();
+};
+
 const stopPeerbitForCli = async (
     peerbit: Peerbit,
     options?: { timeoutMs?: number }
@@ -902,7 +934,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
                 try {
-                    await connectToNetwork(peerbit, argv.peer);
+                    await connectMountToNetwork(peerbit, argv.peer);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
