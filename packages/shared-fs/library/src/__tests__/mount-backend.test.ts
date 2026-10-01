@@ -8,12 +8,14 @@ import {
     openSharedFs,
     parseFlags,
     SharedFsError,
+    SharedFsExpectedNamespaceMismatchError,
     SharedFsExpectedNodeMismatchError,
     SharedFsHandle,
     type SharedFsEntryInfo,
     type SharedFsMountBackendTarget,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountProfileEvent,
+    type SharedFsNamespaceNamingChange,
     type WriteFileOptions,
 } from "../index.js";
 import {
@@ -73,6 +75,72 @@ const deferred = () => {
         resolve = resolvePromise;
     });
     return { promise, resolve };
+};
+
+/**
+ * Resolves once `ready` holds. It is checked at once and again after each
+ * change to `fs`'s local index, so replication wakes it, never a timer.
+ */
+const indexed = (fs: SharedFsHandle, ready: () => Promise<boolean>) =>
+    new Promise<void>((resolve, reject) => {
+        const events = fs.program.entries.events;
+        let checking = false;
+        let changed = false;
+        const check = async () => {
+            if (checking) {
+                changed = true;
+                return;
+            }
+            checking = true;
+            try {
+                do {
+                    changed = false;
+                    if (await ready()) {
+                        events.removeEventListener("change", check);
+                        resolve();
+                        return;
+                    }
+                } while (changed);
+            } catch (error) {
+                events.removeEventListener("change", check);
+                reject(error);
+            } finally {
+                checking = false;
+            }
+        };
+        events.addEventListener("change", check);
+        void check();
+    });
+
+/** A mount target whose commits and namespace mutations are spies. */
+const recordingTarget = (
+    fs: SharedFsHandle,
+    overrides: Partial<SharedFsMountBackendTarget> = {}
+) => {
+    const writeFile = vi.fn(
+        (
+            path: string,
+            content: Uint8Array | string | AsyncIterable<Uint8Array>,
+            options?: WriteFileOptions
+        ) => fs.writeFile(path, content, options)
+    );
+    const setMetadata = vi.fn(
+        (
+            path: string,
+            patch: { mode?: 0o100644 | 0o100755; mtime?: number },
+            options?: { expectedNodeId?: string }
+        ) => fs.setMetadata(path, patch, options)
+    );
+    const mutate = vi.fn((mutation: SharedFsMountNamespaceMutation) =>
+        fs.mutateNamespaceForMount(mutation)
+    );
+    const target = mountTarget(fs, {
+        writeFile,
+        setMetadata,
+        mutateNamespaceForMount: mutate,
+        ...overrides,
+    });
+    return { target, writeFile, setMetadata, mutate };
 };
 
 const gatedBorrowingBackend = (
@@ -1709,16 +1777,13 @@ describe("shared fs mount backend", () => {
         expect(decode(await fs.readFile("/moved/pending.txt"))).toBe("pending");
     });
 
-    it("gates exact and descendant create intents at rename destinations", async () => {
+    it("replaces an exact pending create at a rename destination but gates descendant create intents", async () => {
         await fs.writeFile("/source.txt", "source");
         await fs.mkdir("/source-dir");
         await fs.mkdir("/destination-dir");
-        const mutate = vi.fn((mutation: SharedFsMountNamespaceMutation) =>
-            fs.mutateNamespaceForMount(mutation)
-        );
-        const backend = createSharedFsMountBackend(
-            mountTarget(fs, { mutateNamespaceForMount: mutate })
-        );
+        const sourceNodeId = (await fs.stat("/source.txt"))!.nodeId;
+        const { target, writeFile, mutate } = recordingTarget(fs);
+        const backend = createSharedFsMountBackend(target);
 
         const exact = await backend.open("/destination.txt", {
             write: true,
@@ -1727,21 +1792,17 @@ describe("shared fs mount backend", () => {
         });
         await backend.write(exact, encode("pending"), 0);
 
-        await expect(
-            backend.rename("/source.txt", "/destination.txt")
-        ).rejects.toMatchObject({ code: "EAGAIN" });
-        await expect(backend.unlink("/destination.txt")).rejects.toMatchObject({
-            code: "EAGAIN",
-        });
-        expect(mutate).not.toHaveBeenCalled();
-        expect(decode(await fs.readFile("/source.txt"))).toBe("source");
-
-        // Once the pending create publishes, its old handle cannot recreate
-        // the path after an ordinary unlink.
+        // As in POSIX, the rename replaces the file the pending create holds.
+        await backend.rename("/source.txt", "/destination.txt");
+        expect(mutate).toHaveBeenCalledOnce();
+        expect((await fs.stat("/destination.txt"))?.nodeId).toBe(sourceNodeId);
+        expect(await fs.stat("/source.txt")).toBeUndefined();
+        // The replaced create's handle never publishes, however often it is
+        // released.
         await backend.release(exact);
-        await backend.unlink("/destination.txt");
         await backend.release(exact);
-        expect(await fs.stat("/destination.txt")).toBeUndefined();
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(decode(await fs.readFile("/destination.txt"))).toBe("source");
 
         const descendant = await backend.open("/destination-dir/pending.txt", {
             write: true,
@@ -1751,11 +1812,505 @@ describe("shared fs mount backend", () => {
         await expect(
             backend.rename("/source-dir", "/destination-dir")
         ).rejects.toMatchObject({ code: "EAGAIN" });
-        // Only the earlier unlink reached the target.
+        // Only the earlier rename reached the target.
         expect(mutate.mock.calls.map(([mutation]) => mutation.type)).toEqual([
-            "remove",
+            "rename",
         ]);
         await backend.release(descendant);
+    });
+
+    it("renames onto its own pending create without ever publishing it", async () => {
+        await fs.writeFile("/source.txt", "source");
+        const source = (await fs.stat("/source.txt"))!;
+        const { target, writeFile, mutate } = recordingTarget(fs);
+        const backend = createSharedFsMountBackend(target);
+        const pending = await backend.open("/destination.txt", {
+            read: true,
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await backend.write(pending, encode("pending"), 0);
+
+        await backend.rename("/source.txt", "/destination.txt");
+
+        // The destination shows the renamed node, and only it.
+        expect(await backend.getattr("/destination.txt")).toMatchObject({
+            kind: "file",
+            size: "source".length,
+        });
+        expect((await backend.readdir("/")).map(({ name }) => name)).toEqual([
+            "destination.txt",
+            CONFLICTS_DIR,
+        ]);
+        const renamed = await backend.open("/destination.txt", { read: true });
+        expect(decode(await backend.read(renamed, 64, 0))).toBe("source");
+        await backend.release(renamed);
+
+        // The replaced create's descriptor keeps its own bytes and stays
+        // writable, but no fence commits them.
+        expect(decode(await backend.read(pending, 64, 0))).toBe("pending");
+        await backend.write(pending, encode("ignored"), 0);
+        await backend.fsync(pending);
+        await backend.release(pending);
+        expect(writeFile).not.toHaveBeenCalled();
+        expect(mutate).toHaveBeenCalledOnce();
+        expect(await fs.stat("/destination.txt")).toMatchObject({
+            nodeId: source.nodeId,
+            versionId: source.versionId,
+        });
+        expect((await fs.list("/")).map(({ name }) => name)).toEqual([
+            "destination.txt",
+        ]);
+        expect(await fs.conflicts()).toEqual([]);
+
+        // A directory cannot replace the pending file.
+        await fs.mkdir("/directory");
+        const file = await backend.open("/file.txt", {
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await expect(
+            backend.rename("/directory", "/file.txt")
+        ).rejects.toMatchObject({ code: "ENOTDIR" });
+        expect(mutate).toHaveBeenCalledOnce();
+        await backend.release(file);
+        expect((await fs.stat("/file.txt"))?.kind).toBe("file");
+    });
+
+    it("keeps its pending create when the rename onto it fails", async () => {
+        await fs.writeFile("/source.txt", "source");
+        const failures: [string, string, (path: string) => Error][] = [
+            ["untyped", "EIO", () => new Error("namespace append failed")],
+            [
+                "typed",
+                "EAGAIN",
+                (path) =>
+                    new SharedFsExpectedNamespaceMismatchError(
+                        "rename",
+                        "destination",
+                        path,
+                        null,
+                        "file:elsewhere",
+                        "initial"
+                    ),
+            ],
+        ];
+        for (const [label, code, failure] of failures) {
+            const path = `/${label}.txt`;
+            const mutate = vi.fn(async () => {
+                throw failure(path);
+            });
+            const { target, writeFile } = recordingTarget(fs, {
+                mutateNamespaceForMount: mutate,
+            });
+            const backend = createSharedFsMountBackend(target);
+            const pending = await backend.open(path, {
+                write: true,
+                create: true,
+                exclusive: true,
+            });
+            await backend.write(pending, encode("pending"), 0);
+
+            await expect(
+                backend.rename("/source.txt", path),
+                label
+            ).rejects.toMatchObject({ code });
+            expect(mutate, label).toHaveBeenCalledOnce();
+            // The failed move replaced nothing: the create still holds its
+            // name, and its release publishes it.
+            expect((await backend.getattr(path)).size, label).toBe(
+                "pending".length
+            );
+            await backend.release(pending);
+            expect(
+                writeFile.mock.calls.map(([written]) => written),
+                label
+            ).toEqual([path]);
+            expect(decode(await fs.readFile(path)), label).toBe("pending");
+            expect(decode(await fs.readFile("/source.txt")), label).toBe(
+                "source"
+            );
+        }
+    });
+
+    it("drops only its own pending create when another writer took the name", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        const flags = { write: true, create: true, exclusive: true };
+        const unlinked = await backend.open("/unlinked.txt", flags);
+        const replaced = await backend.open("/replaced.txt", flags);
+        await backend.write(unlinked, encode("local"), 0);
+        await backend.write(replaced, encode("local"), 0);
+        // Another writer creates both names before either create commits.
+        await fs.writeFile("/unlinked.txt", "other writer");
+        await fs.writeFile("/replaced.txt", "other writer");
+        const other = (await fs.stat("/unlinked.txt"))!;
+        await fs.writeFile("/source.txt", "source");
+
+        // The unlink removes the file this mount was creating, not the one
+        // it never showed.
+        expect((await backend.getattr("/unlinked.txt")).size).toBe(
+            "local".length
+        );
+        await backend.unlink("/unlinked.txt");
+        expect(await fs.stat("/unlinked.txt")).toMatchObject({
+            nodeId: other.nodeId,
+        });
+        expect((await backend.getattr("/unlinked.txt")).size).toBe(
+            "other writer".length
+        );
+        // A rename replaces whatever holds the name.
+        await backend.rename("/source.txt", "/replaced.txt");
+        await backend.release(unlinked);
+        await backend.release(replaced);
+        expect(decode(await fs.readFile("/unlinked.txt"))).toBe("other writer");
+        expect(decode(await fs.readFile("/replaced.txt"))).toBe("source");
+        expect(await fs.conflicts()).toEqual([]);
+    });
+
+    it("moves an open, edited file onto its own pending create", async () => {
+        await fs.writeFile("/draft.txt", "draft");
+        const backend = createSharedFsMountBackend(fs);
+        const editor = await backend.open("/draft.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(editor, encode("edited"), 0);
+        const pending = await backend.open("/final.txt", {
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await backend.write(pending, encode("pending"), 0);
+
+        // The editor's state takes the name over from the replaced create.
+        await backend.rename("/draft.txt", "/final.txt");
+        expect((await backend.getattr("/final.txt")).size).toBe(
+            "edited".length
+        );
+        await backend.release(pending);
+        await backend.release(editor);
+        expect(decode(await fs.readFile("/final.txt"))).toBe("edited");
+        expect(await fs.stat("/draft.txt")).toBeUndefined();
+    });
+
+    it("replaces its own pending create with a symlink like WinFsp's CreateSymbolicLinkW", async () => {
+        await fs.writeFile("/target.txt", "link target");
+        const { target, writeFile } = recordingTarget(fs);
+        const backend = createSharedFsMountBackend(target);
+        // CreateSymbolicLinkW creates the file and then sets a reparse point
+        // on its handle. WinFsp's FUSE layer runs that as a symlink to a
+        // hidden name, a rename over the still-open new file and a release.
+        const created = await backend.open("/link", {
+            read: true,
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        expect((await backend.getattr("/link")).kind).toBe("file");
+        const hidden = "/.fuse_hidden0123456789abcdef";
+        await backend.symlink("target.txt", hidden);
+        await backend.rename(hidden, "/link");
+        await backend.release(created);
+
+        expect(await backend.readlink("/link")).toBe("target.txt");
+        expect((await backend.getattr("/link")).kind).toBe("symlink");
+        expect(
+            (await backend.readdir("/")).map(({ name, kind }) => [name, kind])
+        ).toEqual([
+            ["link", "symlink"],
+            ["target.txt", "file"],
+            [CONFLICTS_DIR, "directory"],
+        ]);
+        // Only the link was written: no empty file ever published.
+        expect(writeFile.mock.calls.map(([path]) => path)).toEqual([hidden]);
+    });
+
+    it("unlinks its own pending create like an anonymous temporary file", async () => {
+        await fs.mkdir("/tmp");
+        const { target, writeFile, mutate } = recordingTarget(fs);
+        const backend = createSharedFsMountBackend(target);
+        // open(O_CREAT|O_EXCL), unlink, write, close; Windows delete-on-close
+        // runs the same calls.
+        const temporary = await backend.open("/tmp/scratch", {
+            read: true,
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await backend.write(temporary, encode("before"), 0);
+        await backend.unlink("/tmp/scratch");
+        await expect(backend.getattr("/tmp/scratch")).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+        expect(await backend.readdir("/tmp")).toEqual([]);
+        await expect(backend.unlink("/tmp/scratch")).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+        await backend.write(temporary, encode("after!"), 0);
+        expect(decode(await backend.read(temporary, 64, 0))).toBe("after!");
+
+        // The name is free again, for a new file of its own.
+        const fresh = await backend.open("/tmp/scratch", {
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await backend.write(fresh, encode("fresh"), 0);
+        await backend.release(temporary);
+        expect(writeFile).not.toHaveBeenCalled();
+        await backend.release(fresh);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/tmp/scratch"))).toBe("fresh");
+        expect(mutate).not.toHaveBeenCalled();
+    });
+
+    it("keeps gating a pending create once a rejected commit may have published it", async () => {
+        await fs.writeFile("/source.txt", "source");
+        let calls = 0;
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                const result = await fs.writeFile(path, source, options);
+                // The first commit publishes and then fails, as a lost
+                // acknowledgement would.
+                if (++calls === 1) throw new Error("acknowledgement lost");
+                return result;
+            }
+        );
+        const { target, mutate } = recordingTarget(fs, { writeFile });
+        const backend = createSharedFsMountBackend(target);
+        const handle = await backend.open("/scratch", {
+            read: true,
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await backend.write(handle, encode("published"), 0);
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+        });
+        const published = (await fs.stat("/scratch"))!;
+
+        // Neither call may drop the create as if only this mount knew it.
+        const pendingCreator = {
+            code: "EAGAIN",
+            message: expect.stringContaining("pending creator"),
+        };
+        await expect(backend.unlink("/scratch")).rejects.toMatchObject(
+            pendingCreator
+        );
+        await expect(
+            backend.rename("/source.txt", "/scratch")
+        ).rejects.toMatchObject(pendingCreator);
+        expect(mutate).not.toHaveBeenCalled();
+        expect((await backend.getattr("/scratch")).size).toBe(
+            "published".length
+        );
+
+        // The next commit's compare-and-set finds the published node and
+        // closes the create; an ordinary unlink then removes the node.
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EEXIST",
+        });
+        expect(writeFile).toHaveBeenCalledTimes(2);
+        expect((await fs.stat("/scratch"))?.nodeId).toBe(published.nodeId);
+        await backend.unlink("/scratch");
+        expect(await fs.stat("/scratch")).toBeUndefined();
+        await expect(backend.getattr("/scratch")).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
+    it("still gates an opening create, a pending rename source and creates below a path", async () => {
+        await fs.writeFile("/source.txt", "source");
+        await fs.mkdir("/directory");
+        const confirmEntered = deferred();
+        const confirmAllowed = deferred();
+        let lookups = 0;
+        const stat = vi.fn(async (path: string) => {
+            // An absent create's second lookup confirms the absence after
+            // its intent is reserved and before its state is registered.
+            if (path === "/opening.txt" && ++lookups === 2) {
+                confirmEntered.resolve();
+                await confirmAllowed.promise;
+            }
+            return fs.stat(path);
+        });
+        const { target, mutate } = recordingTarget(fs, { stat });
+        const backend = createSharedFsMountBackend(target);
+
+        const opening = backend.open("/opening.txt", {
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await confirmEntered.promise;
+        const pendingCreator = {
+            code: "EAGAIN",
+            message: expect.stringContaining("pending creator"),
+        };
+        await expect(
+            backend.rename("/source.txt", "/opening.txt")
+        ).rejects.toMatchObject(pendingCreator);
+        await expect(backend.unlink("/opening.txt")).rejects.toMatchObject(
+            pendingCreator
+        );
+        confirmAllowed.resolve();
+        const opened = await opening;
+
+        const below = await backend.open("/directory/pending.txt", {
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await expect(
+            backend.rename("/source.txt", "/directory")
+        ).rejects.toMatchObject(pendingCreator);
+        await expect(backend.unlink("/directory")).rejects.toMatchObject(
+            pendingCreator
+        );
+        expect(mutate).not.toHaveBeenCalled();
+        await backend.release(below);
+        await expect(backend.unlink("/directory")).rejects.toMatchObject({
+            code: "EISDIR",
+        });
+
+        // Once registered, the create is replaceable but cannot move.
+        await expect(
+            backend.rename("/opening.txt", "/elsewhere.txt")
+        ).rejects.toMatchObject(pendingCreator);
+        await backend.rename("/source.txt", "/opening.txt");
+        await backend.release(opened);
+        expect(mutate).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/opening.txt"))).toBe("source");
+    });
+
+    it("still gates a pending create while its first commit is in flight", async () => {
+        await fs.writeFile("/source.txt", "source");
+        const commitEntered = deferred();
+        const commitAllowed = deferred();
+        const writeFile = vi.fn(
+            async (
+                path: string,
+                source: Uint8Array | string | AsyncIterable<Uint8Array>,
+                options?: WriteFileOptions
+            ) => {
+                commitEntered.resolve();
+                await commitAllowed.promise;
+                return fs.writeFile(path, source, options);
+            }
+        );
+        const { target, mutate } = recordingTarget(fs, { writeFile });
+        const backend = createSharedFsMountBackend(target);
+        const handle = await backend.open("/pending.txt", {
+            write: true,
+            create: true,
+            exclusive: true,
+        });
+        await backend.write(handle, encode("pending"), 0);
+        const fsync = backend.fsync(handle);
+        await commitEntered.promise;
+
+        // The commit may publish the file at any moment, so the create is
+        // no longer only this mount's to replace or drop.
+        const pendingCreator = {
+            code: "EAGAIN",
+            message: expect.stringContaining("pending creator"),
+        };
+        await expect(
+            backend.rename("/source.txt", "/pending.txt")
+        ).rejects.toMatchObject(pendingCreator);
+        await expect(backend.unlink("/pending.txt")).rejects.toMatchObject(
+            pendingCreator
+        );
+        expect(mutate).not.toHaveBeenCalled();
+
+        commitAllowed.resolve();
+        await fsync;
+        await backend.release(handle);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(decode(await fs.readFile("/pending.txt"))).toBe("pending");
+        expect(decode(await fs.readFile("/source.txt"))).toBe("source");
+    });
+
+    it("never lets another peer observe a replaced or unlinked pending create", async () => {
+        await fs.writeFile("/source.txt", "source");
+        const source = (await fs.stat("/source.txt"))!;
+        const remotePeer = await Peerbit.create();
+        try {
+            await peer.dial(remotePeer);
+            const remote = await openSharedFs({
+                peerbit: remotePeer,
+                address: fs.address,
+                machineLabel: "mount-test-remote",
+                bootstrap: false,
+            });
+            const named: SharedFsNamespaceNamingChange[] = [];
+            remote.onNamespaceChange((change) => named.push(...change.naming));
+            await indexed(
+                remote,
+                async () =>
+                    (await remote.stat("/source.txt"))?.nodeId === source.nodeId
+            );
+
+            const { target, writeFile, setMetadata, mutate } =
+                recordingTarget(fs);
+            const backend = createSharedFsMountBackend(target);
+            const flags = {
+                read: true,
+                write: true,
+                create: true,
+                exclusive: true,
+            };
+            const replaced = await backend.open("/destination.txt", flags);
+            const temporary = await backend.open("/temporary.txt", flags);
+            await backend.write(replaced, encode("replaced"), 0);
+            await backend.write(temporary, encode("temporary"), 0);
+            await backend.rename("/source.txt", "/destination.txt");
+            await backend.unlink("/temporary.txt");
+            for (const handle of [replaced, temporary]) {
+                await backend.write(handle, encode("late"), 0);
+                await backend.release(handle);
+            }
+            // Only the rename left this peer.
+            expect(writeFile).not.toHaveBeenCalled();
+            expect(setMetadata).not.toHaveBeenCalled();
+            expect(mutate).toHaveBeenCalledOnce();
+
+            await indexed(
+                remote,
+                async () =>
+                    (await remote.stat("/destination.txt"))?.nodeId ===
+                    source.nodeId
+            );
+            expect(decode(await remote.readFile("/destination.txt"))).toBe(
+                "source"
+            );
+            expect((await remote.list("/")).map(({ name }) => name)).toEqual([
+                "destination.txt",
+            ]);
+            expect(
+                (await remote.versions("/destination.txt")).map(({ id }) => id)
+            ).toEqual([source.versionId]);
+            // Every name the other peer saw at either path was the renamed
+            // node's.
+            expect(
+                new Set(
+                    named
+                        .filter(({ name }) =>
+                            ["destination.txt", "temporary.txt"].includes(name)
+                        )
+                        .map(({ name, nodeId }) => `${name} ${nodeId}`)
+                )
+            ).toEqual(new Set([`destination.txt ${source.nodeId}`]));
+        } finally {
+            await remotePeer.stop();
+        }
     });
 
     it("serializes overlapping renames so an open handle follows the retry", async () => {

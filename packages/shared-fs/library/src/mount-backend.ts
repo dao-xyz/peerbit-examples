@@ -322,6 +322,11 @@ type OpenFileState = {
     exclusiveCreate: boolean;
     /** Backend-local reservation for an initially absent O_CREAT open. */
     createIntent?: symbol;
+    /**
+     * A commit of this create reached the target. Even a rejected one may
+     * have published the node, so the name is no longer only local.
+     */
+    createCommitAttempted?: boolean;
     /** Confirmed CAS loss; this state can never publish again. */
     terminal?: SharedFsBackendError;
     /** Namespace no longer names this node; buffered fd state is local-only. */
@@ -1730,23 +1735,66 @@ export const createSharedFsMountBackend = (
         }
     };
 
-    const hasCreateIntentAtOrBelow = (path: string) => {
+    /** A create intent at or below `path`; only below it with `belowOnly`. */
+    const hasCreateIntentAtOrBelow = (path: string, belowOnly = false) => {
         for (const intentPath of createIntents.keys()) {
-            if (isAtOrBelow(intentPath, path)) {
+            if (
+                isAtOrBelow(intentPath, path) &&
+                !(belowOnly && intentPath === path)
+            ) {
                 return true;
             }
         }
         return false;
     };
 
+    /**
+     * The local create at `path` that a rename onto that path or an unlink of
+     * it replaces, as POSIX does with a name that is already created: a
+     * registered state that holds the path's only create intent and that no
+     * commit has sent to the target. Once one has, whether still in flight or
+     * rejected, the file may be published, so the create keeps blocking until
+     * a later commit settles its name. An intent without such a state belongs
+     * to an open still in flight and keeps blocking.
+     */
+    const replaceableProvisional = (path: string) => {
+        const state = provisionalStatesByPath.get(path);
+        if (
+            !state ||
+            !activeStates.has(state) ||
+            state.nodeId !== null ||
+            state.createIntent === undefined ||
+            state.createCommitAttempted ||
+            state.terminal ||
+            state.namespaceDetached
+        ) {
+            return undefined;
+        }
+        const intents = createIntents.get(path);
+        return intents?.size === 1 && intents.has(state.createIntent)
+            ? state
+            : undefined;
+    };
+
+    /**
+     * `replaceablePath` names the path a rename replaces or an unlink
+     * removes. When it holds a replaceable provisional create, that create's
+     * own intent passes the preflight and `fn` receives the state to detach
+     * once the operation succeeds; intents below the path still block.
+     */
     const withNamespaceTransition = async <T>(
         operation: string,
         paths: readonly string[],
-        fn: () => Promise<T>
+        fn: (provisional: OpenFileState | undefined) => Promise<T>,
+        replaceablePath?: string
     ): Promise<T> => {
         const uniquePaths = [...new Set(paths)];
+        const provisional =
+            replaceablePath === undefined
+                ? undefined
+                : replaceableProvisional(replaceablePath);
         for (const path of uniquePaths) {
-            if (hasCreateIntentAtOrBelow(path)) {
+            if (hasCreateIntentAtOrBelow(path, provisional?.path === path)) {
                 throw new SharedFsBackendError(
                     "EAGAIN",
                     `${operation} conflicts with a pending creator at or below: ${path}`
@@ -1795,7 +1843,7 @@ export const createSharedFsMountBackend = (
         const token = Symbol(operation);
         namespaceTransitions.set(token, uniquePaths);
         try {
-            return await fn();
+            return await fn(provisional);
         } finally {
             namespaceTransitions.delete(token);
         }
@@ -1984,6 +2032,9 @@ export const createSharedFsMountBackend = (
                 noOpIfHeadVersionIds: [...(state.openedHeadVersionIds ?? [])],
             };
             inputExposed = borrowInput;
+            // Once invoked, the target may publish the new node and still
+            // reject: the create is no longer only local.
+            if (creating) state.createCommitAttempted = true;
             let result: Awaited<
                 ReturnType<SharedFsMountBackendTarget["writeFile"]>
             >;
@@ -3216,15 +3267,18 @@ export const createSharedFsMountBackend = (
                 return withNamespaceTransition(
                     `rename ${fromPath} to ${toPath}`,
                     [fromPath, toPath],
-                    async () => {
+                    async (provisional) => {
                         const sourceScopeStates = namespaceStates(
                             fromPath,
                             true
                         );
+                        // A replaced local create never joined the namespace,
+                        // so no binding of it is reconciled or guarded. It is
+                        // detached only once the move succeeds.
                         const destinationScopeStates = namespaceStates(
                             toPath,
                             true
-                        );
+                        ).filter((state) => state !== provisional);
                         const source = await findEntry(target, fromPath);
                         const sourceObservedMismatch =
                             reconcileObservedNamespaceScope(
@@ -3233,6 +3287,12 @@ export const createSharedFsMountBackend = (
                                 sourceScopeStates
                             );
                         if (!source) throw notFound(fromPath);
+                        if (provisional && source.kind === "directory") {
+                            throw new SharedFsBackendError(
+                                "ENOTDIR",
+                                `Cannot replace a file with a directory: ${toPath}`
+                            );
+                        }
                         const destination = await findEntry(target, toPath);
                         const destinationObservedMismatch =
                             reconcileObservedNamespaceScope(
@@ -3349,6 +3409,9 @@ export const createSharedFsMountBackend = (
                         for (const state of destinationStates) {
                             detachNamespaceState(state);
                         }
+                        // Its descriptors keep an anonymous file that never
+                        // commits (see commitNow).
+                        if (provisional) detachNamespaceState(provisional);
                         for (const state of sourceStates) {
                             if (state.namespaceDetached) continue;
                             if (state.path === fromPath) {
@@ -3369,7 +3432,8 @@ export const createSharedFsMountBackend = (
                         if (!feed && source.kind === "directory") {
                             stamps.bump(source.nodeId); // its `..` moved
                         }
-                    }
+                    },
+                    toPath
                 );
             });
         },
@@ -3387,7 +3451,17 @@ export const createSharedFsMountBackend = (
                 return withNamespaceTransition(
                     `unlink ${normalized}`,
                     [normalized],
-                    async () => {
+                    async (provisional) => {
+                        if (provisional) {
+                            // Unlinking a file this mount is still creating
+                            // (a temporary file, or delete-on-close on
+                            // Windows) touches nothing published: its
+                            // descriptors keep an anonymous file that never
+                            // commits. A node another peer created there
+                            // meanwhile stays.
+                            detachNamespaceState(provisional);
+                            return;
+                        }
                         const affected = namespaceStates(normalized, false);
                         const entry = await findEntry(target, normalized);
                         reconcileObservedNamespaceScope(
@@ -3443,7 +3517,8 @@ export const createSharedFsMountBackend = (
                             detachNamespaceState(state);
                         }
                         await bumpOwnParent(normalized, entry.parentId);
-                    }
+                    },
+                    normalized
                 );
             });
         },

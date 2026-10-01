@@ -821,7 +821,8 @@ included, are read-only regular `0644` files. Modes and owners are not an
 authorization boundary; use Shared FS writer authorization. The external
 adapter's OS access callback checks existence and the exec bit but not read or
 write masks, so `test -w` is advisory. Windows shows directories as `0777` and
-files as `0666`, never sets the exec bit, and cannot create file links;
+files as `0666`, never sets the exec bit, and creates file and directory
+symlinks but not junctions or hard links;
 `packages/shared-fs/native/README.md` lists the per-platform limits.
 
 Open access modes are enforced per handle: wrong-direction reads, writes, and
@@ -897,16 +898,30 @@ file, or is replaced by another directory node before the naming fence, the
 structured terminal `ENOENT`/`ENOTDIR`/`EAGAIN` result closes the old handle;
 generic custom-target failures with those codes remain retryable.
 
-Backend-local pending or in-flight absent-path creates temporarily gate
+As in POSIX, a file this backend is still creating (an absent-path `O_CREAT`
+open that no flush, fsync or release has tried to commit) already holds its
+name: `unlink` of that path and a `rename` of a file onto it succeed and detach
+it without publishing anything (a directory cannot replace it: `ENOTDIR`). Its
+descriptors keep reading and writing an anonymous file that no flush, fsync or
+release commits. So a temporary file that is created, unlinked, written and
+closed is never published, and neither is a Windows delete-on-close file or the
+new file that WinFsp's `CreateSymbolicLinkW` renames a link over. Linux and
+macOS mounts do not reach this path: libfuse renames a file that is still open
+to a hidden `.fuse_hidden` name when it is unlinked or replaced, and that
+rename of a pending create fails with `EAGAIN` as before. Otherwise
+backend-local pending or in-flight absent-path creates temporarily gate
 `mkdir`, `rmdir`, `unlink`, and both the source and destination namespaces of
-`rename` with `EAGAIN`. This prevents a buffered creator from resurrecting a
-path after a competing namespace operation; retry the namespace operation after
-the create fence settles. Overlapping backend-local namespace transitions are
-also serialized with temporary `EAGAIN`, so chained renames cannot leave open
-handle paths behind. An external-adapter `Mknod` whose one-shot release fails is
-discarded so its unreachable exclusive reservation cannot block a later retry.
-Normal open handles retain buffered data and reservations across transient
-release failures.
+`rename` with `EAGAIN`: an open still in flight, a create below the path, a
+pending create as a rename source, and a create whose commit is in flight or
+failed (a failed commit may still have published the file). This prevents a
+buffered creator from resurrecting a path after a competing namespace
+operation; retry the namespace operation after the create fence settles.
+Overlapping backend-local namespace transitions are also serialized with
+temporary `EAGAIN`, so chained renames cannot leave open handle paths behind.
+An external-adapter `Mknod` whose one-shot release fails is discarded so its
+unreachable exclusive reservation cannot block a later retry. Normal open
+handles retain buffered data and reservations across transient release
+failures.
 
 The first adapter path is intentionally experimental:
 

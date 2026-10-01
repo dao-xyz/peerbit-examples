@@ -344,11 +344,12 @@ mtime on every file version. The adapter maps the POSIX calls onto them:
   `.git` that several peers use, set it to `false` explicitly, not `keep`:
   directory times and inode numbers are per mount, so one peer's cache must not
   be reused on another.
-- `symlink` stores the target as given, never following or resolving it:
-  1-1023 bytes of UTF-8 without NUL, otherwise `EINVAL`. 1023 bytes is the
-  longest target every host's readlink buffer returns untruncated, so Linux
-  targets of 1024-4095 bytes are refused. `readlink` fails with `EIO` while the
-  link's version is not stored locally. Hard links stay `ENOSYS`.
+- `symlink` stores the target as given, never following or resolving it
+  (Windows first makes an absolute target relative; see below): 1-1023 bytes
+  of UTF-8 without NUL, otherwise `EINVAL`. 1023 bytes is the longest target
+  every host's readlink buffer returns untruncated, so Linux targets of
+  1024-4095 bytes are refused. `readlink` fails with `EIO` while the link's
+  version is not stored locally. Hard links stay `ENOSYS`.
 - `access(2)` checks that the path exists and, off Windows, that `X_OK` on a
   regular file finds an exec bit, so `test -x` agrees with `execve`. It does
   not check read or write masks. Modes and owners are not an authorization
@@ -368,16 +369,39 @@ Per platform:
   editor that saves through a temporary file and a rename drops it. mtime
   round-trips through `SetLastWriteTime`, but a time before 1970 with a
   sub-second part arrives with a negative nanosecond value and is ignored
-  instead of failing. Symlinks created by POSIX peers are readable with
-  Developer Mode or `SeCreateSymbolicLinkPrivilege`; absolute POSIX targets
-  fail with access denied, and directory links are best effort. Creating a
-  file link from Windows fails and leaves an empty file: `CreateSymbolicLinkW`
-  creates the file and turns it into a link while its handle is still open,
-  which the mount rejects as an overlapping namespace change. A directory link
-  is created as a directory first, which the mount commits at once, so it may
-  succeed with a target converted by WinFsp; this is unverified. The Windows
-  smoke records both outcomes without gating on them. git for Windows defaults
-  to `core.symlinks=false`.
+  instead of failing. A delete-on-close file (`FILE_FLAG_DELETE_ON_CLOSE`,
+  .NET `FileOptions.DeleteOnClose`) is gone once its handle closes. The mount
+  deletes a file it is still creating without committing it, so such a file
+  is never published unless something committed it first: a
+  `FlushFileBuffers`, or another handle to it closing. If that commit failed,
+  it may still have published the file, so the delete fails and the file
+  stays.
+- Windows (WinFsp) symlinks: `mklink`, `mklink /D`,
+  `New-Item -ItemType SymbolicLink` and `CreateSymbolicLinkW` create file and
+  directory links, with a relative target or an absolute target on the same
+  mount. WinFsp passes an absolute target without its drive, and the adapter
+  stores it relative to the link, so `P:\a\b` linked from `P:\a\x\l` is stored
+  as `../b` and resolves inside every peer's mount. A rooted target (`\a\b`,
+  which git for Windows writes with `core.symlinks=true` for a POSIX link to
+  `/a/b`) is made relative the same way, so POSIX peers then see different link
+  text. Links that POSIX peers create with relative targets read and follow. A
+  link to a directory has the Directory attribute: Windows lists through it and
+  removes it as a directory (`rmdir`). WinFsp derives that from the target on
+  every query (a stat of a link also reads it and stats its target), so a
+  dangling link shows as a file link. Not supported: targets off the mount
+  (another drive or a UNC path), which WinFsp refuses with access denied;
+  junctions (`mklink /J`, Node's `fs.symlink` type `junction`, and the
+  directory links npm and pnpm make on Windows) and hard links, which WinFsp's
+  FUSE layer cannot create; and reading a link a POSIX peer created with an
+  absolute target (`/usr/bin/x`), which WinFsp refuses with access denied
+  because the mount does not use its `rellinks` option. WinFsp creates a link
+  under a hidden `.fuse_hidden<hex>` name in the link's directory and renames
+  it into place, so other peers can see that name briefly and a crash can leave
+  it behind. The hosted Windows smoke gates on file and directory links, an
+  absolute target, delete-on-close and no hidden names left behind. Hosted
+  runners run elevated, so whether an account without administrator rights or
+  Developer Mode can create or follow links is not verified. git for Windows
+  defaults to `core.symlinks=false`.
 
 On Linux and macOS, inode numbers are libfuse node ids that change after the
 kernel forgets an inode; git's default `core.checkStat` compares them, so
@@ -438,8 +462,12 @@ FUSE-T. FUSE-T serves the mount through a local NFS server whose client caches
 attributes for 5 to 60 s, which in a one-off probe hid other peers' changes for
 up to 18 s, so the adapter mounts it with `-o noattrcache`.
 
-Windows (WinFsp) keeps WinFsp's own caching. The adapter sets no cache options
-there, and its staleness is not measured.
+Windows (WinFsp) keeps WinFsp's own caching; the adapter sets no cache options
+there. A two-mount probe on hosted `windows-2025` and `windows-2022` runners
+measured no added staleness: other peers' size changes, deletes, renames and
+file-to-directory replacements were visible as soon as they replicated (about
+60-85 ms), 0 of 10 creates right after another peer deleted the name failed,
+and no appends were lost.
 
 ## Why Go?
 
