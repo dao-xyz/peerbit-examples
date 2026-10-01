@@ -318,9 +318,32 @@ mtime on every file version. The adapter maps the POSIX calls onto them:
   and ctime report mtime. `UTIME_NOW` takes the adapter's clock, an omitted
   mtime (`touch -a`) changes nothing, and a time before 1970 or above 2^53-1 ms
   fails with `EINVAL`. A write sets mtime to its own time, even when it writes
-  identical bytes. Directories report their creation time, which does not move
-  when children change, so keep git's `core.untrackedCache` off (the default
-  unless `feature.manyFiles` is set).
+  identical bytes.
+- Directory mtime and ctime are change stamps kept by each mount, not stored
+  times. They change when a name in the directory appears, disappears or is
+  renamed, through this mount or from another peer, and when the directory
+  itself moves. They do not change when a file in it is written, chmodded or
+  touched, or when something changes deeper in the tree. A directory shows the
+  time this mount first read it or last saw its names change, not its creation
+  time. A mount's times start in the second after it starts, past those of a
+  mount that stopped at least a second earlier, so git's untracked cache
+  rescans once after each remount. A changed directory's time moves to the
+  next whole second when that is at most 1 s ahead of the clock, so tools that
+  compare whole seconds still see a change in the second they read. If the
+  directory changes again within that second after a tool read it, its time
+  stays in that second (1 ms later); git still rescans it while its index is
+  no newer than that second. A time never runs more than 1 s ahead of the
+  clock: a change that would need more keeps the time a tool read until the
+  clock moves on, and the next stat after that shows it. Some events move a
+  directory's time without changing its names, such as garbage collection of
+  history this mount never read or a bootstrap view switch, and
+  `.peerbit-conflicts` moves with every name change, since one can reveal or
+  hide a conflicted file; tools then rescan once. `utimens` on a directory
+  succeeds and changes nothing.
+- git's `core.untrackedCache` is safe for a `.git` that one peer uses. For a
+  `.git` that several peers use, set it to `false` explicitly, not `keep`:
+  directory times and inode numbers are per mount, so one peer's cache must not
+  be reused on another.
 - `symlink` stores the target as given, never following or resolving it:
   1-1023 bytes of UTF-8 without NUL, otherwise `EINVAL`. 1023 bytes is the
   longest target every host's readlink buffer returns untruncated, so Linux

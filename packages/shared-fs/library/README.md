@@ -808,7 +808,15 @@ Native mounts expose the exec bit, mtime and symlinks (see
 the exec bit, `utimens` sets mtime (atime and ctime report it), an `O_CREAT`
 mode keeps its exec bit, and `symlink` and `readlink` create and read links.
 `chown` succeeds without storing an owner; files report the mounting user.
-Directories report `0755` and their creation time. Conflict copies, links
+Directories report `0755`. Their mtime and ctime are change stamps kept by
+each mount: they change when a name in the directory appears, disappears or is
+renamed (locally or by another peer) and stay put for file writes, chmod,
+utimens and deeper changes. They show when this mount first read the directory
+or last saw its names change, not its creation time, so a remount makes git's
+untracked cache rescan once; `utimens` on a directory is ignored. git's
+`core.untrackedCache` is safe for a `.git` one peer uses; set it to `false`,
+not `keep`, for a `.git` several peers use. `list()` and `stat()` still report
+a directory's creation time in `updatedAt`. Conflict copies, links
 included, are read-only regular `0644` files. Modes and owners are not an
 authorization boundary; use Shared FS writer authorization. The external
 adapter's OS access callback checks existence and the exec bit but not read or
@@ -866,6 +874,17 @@ return the committed version with its `mode`, `mtime` and a
 `mountWriteOutcome`. It may retain the input `Uint8Array` indefinitely but must
 never mutate it or transfer/detach its `ArrayBuffer`: the mount lends its
 buffer without copying.
+
+Directory times come from the target's optional `onNamespaceChange()` feed,
+which `SharedFsHandle`, `IgnoreAwareFs` and `SharedFileSystem` provide (and
+from `parentId` on `stat()` and `list()` entries). A target without it runs in
+a degraded mode: directory times then move only on the mount's own creates,
+`mkdir`, `rmdir`, `unlink`, `rename` and `symlink`, never for other peers'
+changes. Call the backend's `dispose()` to unsubscribe when the mount stops
+(it is optional on the `SharedFsMountBackend` type, so existing
+implementations stay valid). The `servedLimit` option bounds how many listed
+names the mount remembers for that (default 262,144); forgetting one moves
+its directory's time instead.
 
 Custom targets that implement `expectedNodeId` compare-and-set should
 throw the exported `SharedFsExpectedNodeMismatchError` for an atomic mismatch.
@@ -1117,6 +1136,19 @@ hold on removal-caused losses while the resurrection guard settles), and
 policy (rule changes reconcile with `cause: "policy"` events);
 `includeIgnored: true` bypasses. Watchers are in-memory; a reopened process
 re-subscribes (use `initial: "snapshot"` as the recovery idiom).
+
+`onNamespaceChange(listener)` is a lower-level, synchronous feed for native
+mounts: each batch lists the naming events that entered or left the local
+index (with `head: false` for history that cannot change a winner), `moves`
+for nodes whose winning placement changed (including slots no event names,
+such as one a hidden winner left or a removed head re-exposed), file nodes
+whose first content just made them visible or whose last content left
+(`contentLost`), whether content heads may have forked or merged, and a
+`reset` when the whole view may have changed (overlay switch, reopen,
+ignore-rules change). Items may over-report but never miss a visible name
+change; a rare index lookup attributes a change to a node whose rows a listing
+saw but the caches have since lost, and is reported in a later batch. It
+returns an unsubscribe function, and close drops all listeners.
 
 ## Write-set barriers
 

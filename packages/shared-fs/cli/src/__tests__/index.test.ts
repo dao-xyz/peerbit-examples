@@ -624,7 +624,7 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("closes the mount profile before stopping Peerbit", async () => {
+    it("detaches the backend and closes the mount profile before stopping Peerbit", async () => {
         const order: string[] = [];
         const profileWriter = {
             sink: () => {},
@@ -656,6 +656,11 @@ describe("peerbit-fs cli", () => {
                     order.push("ipc");
                 },
             },
+            backend: {
+                dispose: () => {
+                    order.push("dispose");
+                },
+            },
             profileWriter,
             stopPeerbit: async () => {
                 order.push("peerbit");
@@ -664,7 +669,13 @@ describe("peerbit-fs cli", () => {
         });
 
         await stopMountSession(session());
-        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+        expect(order).toEqual([
+            "unmount",
+            "ipc",
+            "dispose",
+            "profile",
+            "peerbit",
+        ]);
 
         // A failing Peerbit shutdown no longer loses the profile summary.
         order.length = 0;
@@ -672,15 +683,22 @@ describe("peerbit-fs cli", () => {
         await expect(
             stopMountSession(session({ peerbit: stopFailure }))
         ).rejects.toBe(stopFailure);
-        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+        expect(order).toEqual([
+            "unmount",
+            "ipc",
+            "dispose",
+            "profile",
+            "peerbit",
+        ]);
 
-        // A failing unmount still closes the profile before rethrowing.
+        // A failing unmount still detaches the backend and closes the
+        // profile before rethrowing.
         order.length = 0;
         const unmountFailure = new Error("unmount failed");
         await expect(
             stopMountSession(session({ unmount: unmountFailure }))
         ).rejects.toBe(unmountFailure);
-        expect(order).toEqual(["unmount", "profile"]);
+        expect(order).toEqual(["unmount", "dispose", "profile"]);
 
         // The error path runs every step and swallows failures.
         order.length = 0;
@@ -688,7 +706,13 @@ describe("peerbit-fs cli", () => {
             session({ unmount: unmountFailure, peerbit: stopFailure }),
             { ignoreErrors: true }
         );
-        expect(order).toEqual(["unmount", "ipc", "profile", "peerbit"]);
+        expect(order).toEqual([
+            "unmount",
+            "ipc",
+            "dispose",
+            "profile",
+            "peerbit",
+        ]);
     });
 
     it.each([

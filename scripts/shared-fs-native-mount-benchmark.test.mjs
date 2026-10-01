@@ -255,6 +255,27 @@ test("POSIX smoke unmounts before removing an empty mountpoint", async () => {
     );
 });
 
+test("POSIX smoke requires git's untracked-cache self-test on Linux only", async () => {
+    const source = (
+        await readFile(
+            new URL("./shared-fs-external-native-smoke.sh", import.meta.url),
+            "utf8"
+        )
+    ).replace(/\r\n/gu, "\n");
+    const end = source.indexOf('\nrmdir "$mountpoint/docs"\n');
+    const start = source.lastIndexOf(
+        '\nif [ "$(uname -s)" = "Linux" ]; then\n',
+        end
+    );
+    assert.ok(start >= 0 && end > start, "a Linux block precedes the rmdir");
+    const block = source.slice(start, end);
+    assert.ok(block.trimEnd().endsWith("\nfi"), "the block ends at the rmdir");
+    assert.match(block, /stat -c '%y\|%z' "\$mountpoint\/docs"/u);
+    assert.match(block, /git update-index --test-untracked-cache/u);
+    assert.match(block, /\*" OK"\*\)/u);
+    assert.match(block, /exit 1/u);
+});
+
 test("native smoke wrappers pass bounded benchmark provenance and sample defaults", async () => {
     const [posix, powershell] = await Promise.all([
         readFile(

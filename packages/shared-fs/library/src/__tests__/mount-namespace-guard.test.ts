@@ -52,6 +52,7 @@ const exactTarget = (
     conflicts: (path, options) => fs.conflicts(path, options),
     stat: (path) => fs.stat(path),
     bootstrapStatus: () => fs.bootstrapStatus(),
+    onNamespaceChange: (listener) => fs.onNamespaceChange(listener),
     ...overrides,
 });
 
