@@ -214,9 +214,9 @@ adapter_build_ms=$((adapter_build_end_ms - adapter_build_start_ms))
 
 address_start_ms="$(now_ms)"
 if [ "$role" = "seed" ]; then
+  # The address is published once the seed is mounted (below), so joiners
+  # never race a seed that is not yet reachable.
   address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state" --no-auth)"
-  mkdir -p "$(dirname "$address_file")"
-  printf "%s\n" "$address" > "$address_file"
 else
   address="$(tr -d '\r\n' < "$address_file")"
 fi
@@ -297,6 +297,11 @@ while true; do
 done
 mount_ready_end_ms="$(now_ms)"
 mount_ready_ms=$((mount_ready_end_ms - mount_start_ms))
+
+if [ "$role" = "seed" ]; then
+  mkdir -p "$(dirname "$address_file")"
+  printf "%s\n" "$address" > "$address_file"
+fi
 
 # An executable and a symlink to it, written before the file peers wait for.
 mkdir "$mountpoint/$machine-bin"

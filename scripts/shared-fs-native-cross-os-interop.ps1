@@ -143,11 +143,20 @@ function Stop-MountProcess {
 }
 
 $AdapterBuildStartMs = Get-NowMs
+# Build the adapter the way releases do: cgofuse's pure-Go WinFsp binding. A
+# host with a C compiler would otherwise build the cgo binding, which needs
+# WinFsp's FUSE headers.
+$PreviousCgoEnabled = $env:CGO_ENABLED
+$env:CGO_ENABLED = "0"
 Push-Location "packages/shared-fs/native"
 try {
   go build -tags "native_mount" -o $Adapter .
+  if ($LASTEXITCODE -ne 0) {
+    throw "go build failed with exit code $LASTEXITCODE"
+  }
 } finally {
   Pop-Location
+  $env:CGO_ENABLED = $PreviousCgoEnabled
 }
 $AdapterBuildEndMs = Get-NowMs
 Add-Phase -Name "adapterBuild" -StartMs $AdapterBuildStartMs -EndMs $AdapterBuildEndMs

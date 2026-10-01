@@ -16,16 +16,19 @@ runners cannot load. Its smoke (`Shared FS Native OS Smoke`) is opt-in and runs
 on a physical Scaleway Apple Silicon host with kernel extensions enabled and
 macFUSE installed.
 
-The `Shared FS Native Cross-OS Interop` workflow starts a Linux FUSE seed and
-can join `windows`, `macos`, or `all` native peers on Scaleway hosts. The `all`
-mode waits for Linux, macOS, and Windows to each write a file through its
-native mount, read the other platforms' files, then write and observe ack files.
+The `Shared FS Native Cross-OS Interop` workflow (manual) also runs on
+GitHub-hosted runners. A Linux fuse3 seed mounts a new filesystem and publishes
+its address once mounted; WinFsp joiners on `windows-2025` and `windows-2022`
+(or one of them) mount it. Each peer writes, renames and acknowledges files
+through its own mount, then waits for every other peer's. Hosted runners accept
+no inbound connections, so the peers reach each other only through the public
+Peerbit bootstrap relay in `bootstrap-5.env`, and the workflow fails while that
+relay is down. A macOS join would need macFUSE; the library-level
+`Shared FS Cross-OS Interop` covers macOS.
 
 The Scaleway macOS host is reused while warm because those machines have a
 minimum allocation period. Each workflow run still creates a fresh ephemeral
-GitHub runner registration, token, and unique label. The interop's Windows host
-is likewise pooled and powered off between runs, with a fresh ephemeral runner
-registration every run.
+GitHub runner registration, token, and unique label.
 
 A pristine macOS host requires a one-time manual bootstrap before it can run the
 macFUSE smoke test. The check script can attempt the Homebrew cask installation
@@ -83,9 +86,9 @@ pnpm scaleway:windows:stop
 The runners are registered with `--ephemeral`, so GitHub de-registers each
 runner after it accepts one job.
 
-The native smoke and cross-OS interop workflows share one concurrency group so
-only one Scaleway native run provisions or reconfigures runners at a time.
-Both workflows also run a resource sanity check after cleanup. The check allows
+The Scaleway workflow's concurrency group lets only one Scaleway native run
+provision or reconfigure runners at a time. It also runs a resource sanity
+check after cleanup. The check allows
 at most one matching pooled physical host per platform; ephemeral GitHub runner
 registrations are still expected to be removed after their one job.
 
@@ -94,10 +97,8 @@ physical Scaleway host warm. The scheduled janitor runs every six hours and
 deletes pool hosts once they are at least 26 hours old by default. A healthy
 schedule therefore normally reclaims a host about 26–32 hours after creation.
 
-For Windows (used by the interop only), the workflow releases the ephemeral runner registration,
-power off the reusable physical instance in an `always()` cleanup job, and keep
-it in the pool for a later run. The janitor eventually deletes stale Windows
-pool hosts.
+No workflow provisions a Scaleway Windows host any more. The janitor still
+deletes any Windows pool host left from earlier runs.
 
 There is also a scheduled janitor in the same workflow:
 
