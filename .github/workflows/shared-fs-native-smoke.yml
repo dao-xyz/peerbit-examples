@@ -302,8 +302,8 @@ jobs:
             - name: Run external native adapter smoke
               shell: powershell
               env:
-                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-${{ matrix.os }}-winfsp-mount-benchmark.json', runner.temp) || '' }}
-                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-${{ matrix.os }}-winfsp-control-benchmark.json', runner.temp) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-{1}-winfsp-mount-benchmark.json', runner.temp, matrix.os) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-{1}-winfsp-control-benchmark.json', runner.temp, matrix.os) || '' }}
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD: ${{ inputs.dev_workload && '1' || '' }}
                   # Adapter debug output is printed only when the smoke fails.
