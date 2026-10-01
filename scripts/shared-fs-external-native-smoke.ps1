@@ -66,11 +66,20 @@ function Stop-MountProcess {
   throw "WinFsp mount remained attached after process-tree teardown: $MountRoot"
 }
 
+# Build the adapter the way releases do: cgofuse's pure-Go WinFsp binding. A
+# host with a C compiler would otherwise build the cgo binding, which needs
+# WinFsp's FUSE headers.
+$PreviousCgoEnabled = $env:CGO_ENABLED
+$env:CGO_ENABLED = "0"
 Push-Location "packages/shared-fs/native"
 try {
   go build -tags $AdapterBuildTags -o $Adapter .
+  if ($LASTEXITCODE -ne 0) {
+    throw "go build failed with exit code $LASTEXITCODE"
+  }
 } finally {
   Pop-Location
+  $env:CGO_ENABLED = $PreviousCgoEnabled
 }
 
 $GoVersion = ConvertTo-ImplementationDetailValue ((& go version 2>$null | Out-String).Trim())
@@ -91,8 +100,13 @@ if (-not $WinFspVersion -and $WinFspBin) {
 $WinFspVersion = ConvertTo-ImplementationDetailValue $WinFspVersion
 $MountRuntime = ConvertTo-ImplementationDetailValue "WinFsp $WinFspVersion"
 
-$Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State).Trim()
-$Args = @(
+$Address = node packages/shared-fs/cli/lib/esm/bin.js create --directory $State
+if ($LASTEXITCODE -ne 0) {
+  throw "peerbit-fs create failed with exit code $LASTEXITCODE"
+}
+$Address = ([string]$Address).Trim()
+# Not $Args, which is a PowerShell automatic variable.
+$MountArgs = @(
   "packages/shared-fs/cli/lib/esm/bin.js",
   "mount",
   $Address,
@@ -106,10 +120,12 @@ $Args = @(
 # process-tree teardown below cannot let the CLI or adapter write their final
 # summary records, so Windows profiles are reported as incomplete sessions.
 if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR) {
-  $Args += @("--mount-profile", $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR)
+  $MountArgs += @("--mount-profile", $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR)
 }
 
-$Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
+$Process = Start-Process -FilePath "node" -ArgumentList $MountArgs -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
+# Holding the handle keeps ExitCode readable after the process exits.
+$null = $Process.Handle
 
 function Assert-MountReady {
   $Process.Refresh()

@@ -1,6 +1,29 @@
 name: Shared FS Native Smoke
 
+# Real kernel mounts on GitHub-hosted runners: Linux FUSE (fuse3) and Windows
+# WinFsp. Pull requests and pushes run the smoke only; the benchmarks are
+# opt-in on manual runs. macFUSE needs an approved kernel extension, which
+# hosted runners cannot load; see Shared FS Native OS Smoke.
 on:
+    pull_request:
+        paths:
+            - ".github/workflows/shared-fs-native-smoke.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "packages/shared-fs/**"
+            - "scripts/shared-fs-external-native-smoke.ps1"
+            - "scripts/shared-fs-external-native-smoke.sh"
+            - "scripts/shared-fs-native-mount-benchmark*.mjs"
+    push:
+        branches: [master]
+        paths:
+            - ".github/workflows/shared-fs-native-smoke.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "packages/shared-fs/**"
+            - "scripts/shared-fs-external-native-smoke.ps1"
+            - "scripts/shared-fs-external-native-smoke.sh"
+            - "scripts/shared-fs-native-mount-benchmark*.mjs"
     workflow_dispatch:
         inputs:
             mounted_benchmark:
@@ -9,7 +32,7 @@ on:
                 default: false
                 type: boolean
             mount_profile:
-                description: Also run alternating unprofiled/profiled mounted benchmark passes (A-B-B-A) and publish the mount profile summary.
+                description: Also run alternating unprofiled/profiled mounted benchmark passes (A-B-B-A) on Linux and publish the mount profile summary.
                 required: false
                 default: false
                 type: boolean
@@ -218,5 +241,112 @@ jobs:
               with:
                   name: shared-fs-linux-mount-profile-${{ github.run_id }}-${{ github.run_attempt }}
                   path: ${{ runner.temp }}/shared-fs-mount-profile
+                  if-no-files-found: error
+                  retention-days: 14
+
+    windows-winfsp:
+        name: Windows WinFsp native smoke (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: ${{ inputs.dev_workload && 120 || (inputs.mounted_benchmark && 60 || 30) }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os:
+                    - windows-2025
+                    - windows-2022
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Setup Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Use Bash for pnpm scripts
+              run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
+
+            - name: Install WinFsp
+              shell: powershell
+              run: |
+                  choco install winfsp -y --no-progress --version=2.1.25156
+                  $WinFspDll = @(
+                    "C:\Program Files\WinFsp\bin\winfsp-x64.dll",
+                    "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
+                  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+                  if (-not $WinFspDll) {
+                    throw "WinFsp is not installed."
+                  }
+                  Split-Path -Parent $WinFspDll | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Run external native adapter smoke
+              shell: powershell
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-{1}-winfsp-mount-benchmark.json', runner.temp, matrix.os) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && format('{0}/shared-fs-{1}-winfsp-control-benchmark.json', runner.temp, matrix.os) || '' }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
+                  PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD: ${{ inputs.dev_workload && '1' || '' }}
+                  # Adapter debug output is printed only when the smoke fails.
+                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && '0' || '1' }}
+              run: scripts/shared-fs-external-native-smoke.ps1
+
+            - name: Add filesystem benchmark summaries
+              if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}
+              shell: bash
+              env:
+                  MOUNT_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-${{ matrix.os }}-winfsp-mount-benchmark.json
+                  CONTROL_BENCHMARK_REPORT: ${{ runner.temp }}/shared-fs-${{ matrix.os }}-winfsp-control-benchmark.json
+              run: |
+                  for report in "$MOUNT_BENCHMARK_REPORT" "$CONTROL_BENCHMARK_REPORT"; do
+                    if [ ! -f "$report" ]; then
+                      echo "## Shared FS filesystem-path benchmark" >> "$GITHUB_STEP_SUMMARY"
+                      echo >> "$GITHUB_STEP_SUMMARY"
+                      echo "A requested benchmark report was not produced: $report" >> "$GITHUB_STEP_SUMMARY"
+                      exit 1
+                    fi
+                  done
+                  node --input-type=module -e '
+                    import { appendFile, readFile } from "node:fs/promises";
+                    import { formatNativeMountBenchmarkComparison, formatNativeMountBenchmarkSummary, validateNativeMountBenchmarkReport } from "./scripts/shared-fs-native-mount-benchmark.mjs";
+                    const reports = [];
+                    for (const path of [process.env.MOUNT_BENCHMARK_REPORT, process.env.CONTROL_BENCHMARK_REPORT]) {
+                      const report = JSON.parse(await readFile(path, "utf8"));
+                      validateNativeMountBenchmarkReport(report);
+                      reports.push(report);
+                      await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkSummary(report));
+                    }
+                    if (reports[0].run.devWorkload) {
+                      await appendFile(process.env.GITHUB_STEP_SUMMARY, formatNativeMountBenchmarkComparison(reports[0], reports[1]));
+                    }
+                  '
+
+            - name: Upload filesystem benchmark reports
+              if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: shared-fs-${{ matrix.os }}-winfsp-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: |
+                      ${{ runner.temp }}/shared-fs-${{ matrix.os }}-winfsp-mount-benchmark.json
+                      ${{ runner.temp }}/shared-fs-${{ matrix.os }}-winfsp-control-benchmark.json
                   if-no-files-found: error
                   retention-days: 14

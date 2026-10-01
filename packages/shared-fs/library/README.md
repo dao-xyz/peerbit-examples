@@ -1014,10 +1014,10 @@ replication, so the profiler does not invent them.
 
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
-shared filesystem address and read each other's files. The native Linux FUSE
-smoke can be run manually with the `Shared FS Native Smoke` workflow. Native
-adapter compile checks run in CI for Linux and Windows; macOS native mount smoke
-still needs a runner with macFUSE installed.
+shared filesystem address and read each other's files. The `Shared FS Native
+Smoke` workflow mounts for real on every shared-fs pull request: Linux FUSE and
+Windows WinFsp on GitHub-hosted runners. The macFUSE mount smoke needs a Mac
+with its kernel extension approved, so it runs on demand on a Scaleway Mac.
 
 ## Conflicts
 

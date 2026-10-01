@@ -432,6 +432,8 @@ Homebrew is available, but macOS may still require one-time approval in System
 Settings > Privacy & Security and a reboot.
 
 The external `packages/shared-fs/native` adapter uses cgofuse for Linux FUSE,
-macFUSE, and WinFsp. The repo includes a manual `Shared FS Native Smoke` GitHub
-workflow for Linux FUSE. Portable CI still runs the backend and cross-OS
-shared-store checks on Linux, macOS, and Windows.
+macFUSE, and WinFsp. The `Shared FS Native Smoke` GitHub workflow mounts for
+real on every shared-fs pull request: Linux FUSE and Windows WinFsp on
+GitHub-hosted runners. macFUSE cannot load on hosted runners, so its smoke runs
+on demand on a Scaleway Mac (`Shared FS Native OS Smoke`). Portable CI still
+runs the backend and cross-OS shared-store checks on Linux, macOS, and Windows.

@@ -13,6 +13,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import {
     conflictScanIsPartial,
+    connectMountToNetwork,
     normalizeNativeMountpoint,
     openMountProfileFiles,
     resolveMountProfileDirectory,
@@ -190,6 +191,50 @@ const mockCliBootstrap = () => {
         return peer;
     });
 };
+
+describe("mount network connection", () => {
+    const fakePeer = (bootstrap: () => Promise<unknown>) => ({
+        bootstrap: vi.fn(bootstrap),
+        dial: vi.fn(async () => true),
+        enableBootstrapRecovery: vi.fn(),
+    });
+
+    it("mounts from local state when bootstrap nodes are unreachable", async () => {
+        const peer = fakePeer(async () => {
+            throw new Error("Failed to succefully dial any bootstrap node");
+        });
+        const warn = vi.fn();
+        await connectMountToNetwork(peer as never, undefined, warn);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain(
+            "Failed to succefully dial any bootstrap node"
+        );
+        expect(peer.enableBootstrapRecovery).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps reconnecting after a successful bootstrap", async () => {
+        const peer = fakePeer(async () => ({
+            connectedPeerIds: [],
+            failures: [],
+        }));
+        const warn = vi.fn();
+        await connectMountToNetwork(peer as never, undefined, warn);
+        expect(warn).not.toHaveBeenCalled();
+        expect(peer.enableBootstrapRecovery).toHaveBeenCalledTimes(1);
+    });
+
+    it("dials explicit peers without the public bootstrap network", async () => {
+        const peer = fakePeer(async () => {
+            throw new Error("unexpected bootstrap");
+        });
+        const address =
+            "/ip4/127.0.0.1/tcp/8002/p2p/12D3KooWKj1J1hHxrYyB37qDDGCi9aU2vcHzDZhtMk7te7dEmqqT";
+        await connectMountToNetwork(peer as never, [address], vi.fn());
+        expect(peer.dial).toHaveBeenCalledWith(address);
+        expect(peer.bootstrap).not.toHaveBeenCalled();
+        expect(peer.enableBootstrapRecovery).not.toHaveBeenCalled();
+    });
+});
 
 describe("peerbit-fs cli", () => {
     it("exports the CLI entry point", () => {

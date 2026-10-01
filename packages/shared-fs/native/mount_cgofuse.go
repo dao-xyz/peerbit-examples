@@ -21,6 +21,7 @@ type peerbitFS struct {
 	debug   bool
 	profile *mountProfiler
 	ready   sync.Once
+	mounted *mountWatcher
 }
 
 // requestReaddirStats enables readdir-plus and per-entry listing stats only on
@@ -50,10 +51,16 @@ func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mou
 			return err
 		}
 	}
+	mounted, err := newMountWatcher(mountpoint)
+	if err != nil {
+		return fmt.Errorf("native mount could not watch %s: %w", mountpoint, err)
+	}
+	fs.mounted = mounted
 	host := fuse.NewFileSystemHost(fs)
 	host.SetCapOpenTrunc(true)
 	host.SetCapReaddirPlus(requestReaddirStats)
-	options := nativeMountOptions(runtime.GOOS, debug)
+	fuseT := runtime.GOOS == "darwin" && darwinLoadsFuseT(pathExists)
+	options := nativeMountOptions(runtime.GOOS, fuseT, debug)
 	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
@@ -142,7 +149,14 @@ func (fs *peerbitFS) Init() {
 	fs.profile.holdShutdownSignals()
 	fs.debugf("fuse init")
 	fs.ready.Do(func() {
-		fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")
+		// Report ready only once the mount is attached, off the callback
+		// thread: FUSE-T may attach it only after Init returns.
+		go func() {
+			if err := fs.mounted.wait(); err != nil {
+				fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native could not confirm the mount is attached: %v\n", err)
+			}
+			fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")
+		}()
 	})
 }
 

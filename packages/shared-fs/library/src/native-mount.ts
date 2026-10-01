@@ -1,3 +1,5 @@
+import { detectMacFuseRuntime } from "./native-mount-runtime.js";
+
 export type NativeMountSupport = {
     platform: NodeJS.Platform;
     adapter: "fuse" | "winfsp" | "unsupported";
@@ -78,14 +80,12 @@ export const getNativeMountSupport = async (
     }
 
     if (process.platform === "darwin") {
-        const hasMacFuse =
-            (await pathExists("/Library/Filesystems/macfuse.fs")) ||
-            (await commandExists("mount_macfuse"));
+        const fuse = await detectMacFuseRuntime(pathExists);
         const hasExternalAdapter = await externalNativeAdapterAvailable(
             options.externalAdapter
         );
         const missing = [
-            !hasMacFuse ? "macFUSE" : undefined,
+            ...fuse.missing,
             !hasExternalAdapter
                 ? "peerbit-shared-fs-native adapter binary"
                 : undefined,
@@ -95,9 +95,7 @@ export const getNativeMountSupport = async (
             adapter: "fuse",
             available: missing.length === 0,
             missing,
-            notes: [
-                "macOS native mounts require macFUSE, which usually needs host-level installation and approval.",
-            ],
+            notes: fuse.notes,
         };
     }
 
