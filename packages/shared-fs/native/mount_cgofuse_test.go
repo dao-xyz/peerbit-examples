@@ -408,6 +408,47 @@ func TestSymlinkAndReadlink(t *testing.T) {
 	}
 }
 
+// WinFsp hands over a target on the mount ("P:\lp\dir") as "/lp/dir"; only
+// Windows stores it relative to the link.
+func TestSymlinkStoresWindowsAbsoluteTargetsRelative(t *testing.T) {
+	fs, requests := recordingFS(t, nil)
+	const hidden = "/lp/.fuse_hidden0123456789abcdef"
+	if got := fs.Symlink("/lp/dir", hidden); got != 0 {
+		t.Fatalf("symlink returned %d", got)
+	}
+	want := "/lp/dir"
+	if runtime.GOOS == "windows" {
+		want = "dir"
+	}
+	expectRequest(t, requests, "symlink", want, hidden)
+}
+
+// Only Windows refuses WinFsp's "/." probe, and without a request.
+func TestGetattrRefusesSlashDotProbeOnlyOnWindows(t *testing.T) {
+	fs, requests := recordingFS(t, map[string]interface{}{"kind": "directory", "mode": float64(0o040755)})
+	var stat fuse.Stat_t
+	code := fs.Getattr("/.", &stat, ^uint64(0))
+	if runtime.GOOS != "windows" {
+		if code != 0 {
+			t.Fatalf("getattr /. returned %d", code)
+		}
+		expectRequest(t, requests, "getattr", "/.")
+		return
+	}
+	if code != -fuse.ENOENT {
+		t.Fatalf("getattr /. returned %d, want ENOENT", code)
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("getattr /. sent %s %#v", request.Op, request.Args)
+	default:
+	}
+	if code := fs.Getattr("/lp/dir-link", &stat, ^uint64(0)); code != 0 {
+		t.Fatalf("getattr of a link returned %d", code)
+	}
+	expectRequest(t, requests, "getattr", "/lp/dir-link")
+}
+
 func TestAccessChecksExecBit(t *testing.T) {
 	for _, test := range []struct {
 		mode uint32

@@ -196,7 +196,13 @@ Native runtime prerequisites are platform-specific:
 Mounts keep each file's exec bit and mtime and support symlinks: `chmod`
 keeps only the exec bit, `touch` sets mtime, and `ln -s` creates a link.
 `chown` succeeds without storing an owner; files report the mounting user.
-Windows never sets the exec bit and has limited link support;
+Windows never sets the exec bit. It creates file and directory symlinks
+(`mklink`, `mklink /D`, `New-Item -ItemType SymbolicLink`) with a relative
+target, or an absolute target on the same mount, which is stored relative to
+the link, and it follows links that POSIX peers create with relative targets.
+It cannot create junctions or hard links or link to a target off the mount,
+and it cannot read a POSIX peer's link with an absolute target. A
+delete-on-close file disappears when its handle closes.
 `packages/shared-fs/native/README.md` lists the per-platform limits. These
 fields are not an authorization boundary. The external adapter's OS access
 callback checks only existence and the exec bit, so `test -w` is advisory.
@@ -204,9 +210,10 @@ Use the Shared FS trusted-writer model for write authorization.
 
 A Linux mount caches which file a name leads to for at most 0.1 s and never
 caches file metadata or missing names, so other peers' changes appear as soon
-as they replicate. macOS caches names and metadata for 1 s.
-`packages/shared-fs/native/README.md` describes each platform's caching and
-its edge cases.
+as they replicate. macOS caches names and metadata for 1 s. On Windows,
+WinFsp's own caching added no measured delay: other peers' changes appeared
+as soon as they replicated. `packages/shared-fs/native/README.md` describes
+each platform's caching and its edge cases.
 
 Path names have no portable cross-platform policy yet. The library compares
 case-sensitive strings without Unicode normalization or Windows reserved-name

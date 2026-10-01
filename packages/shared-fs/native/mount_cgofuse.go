@@ -204,6 +204,11 @@ func (fs *peerbitFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) (code in
 		defer func() { finish(code) }()
 	}
 	_ = fh
+	// Refusing WinFsp's "<link>/." probe makes it tell directory links apart
+	// by their targets.
+	if slashDotProbe(runtime.GOOS, path) {
+		return -fuse.ENOENT
+	}
 	result, err := fs.client.request("getattr", path)
 	if err != nil {
 		return errno(err)
@@ -503,6 +508,10 @@ func (fs *peerbitFS) Symlink(target string, newpath string) (code int) {
 	// validates everything else about the target.
 	if !utf8.ValidString(target) {
 		return -fuse.EINVAL
+	}
+	// WinFsp passes an absolute target on this mount without its drive.
+	if runtime.GOOS == "windows" {
+		target = linkRelativeTarget(newpath, target)
 	}
 	_, err := fs.client.request("symlink", target, newpath)
 	return errno(err)

@@ -193,6 +193,40 @@ describe("mount directory change times", () => {
         expect(await timeOf(backend, "/d")).toBeGreaterThan(listed);
     });
 
+    it("moves the directory when a provisional create is unlinked or renamed over", async () => {
+        await fs.mkdir("/d");
+        await fs.writeFile("/d/source.txt", "source");
+        const backend = createSharedFsMountBackend(fs, { clock });
+        const flags = { write: true, create: true, exclusive: true };
+        const temporary = await backend.open("/d/temporary", flags);
+        const replaced = await backend.open("/d/replaced", flags);
+        let time = await timeOf(backend, "/d");
+        expect(await namesOf(backend, "/d")).toEqual([
+            "replaced",
+            "source.txt",
+            "temporary",
+        ]);
+
+        await backend.unlink("/d/temporary");
+        expect(await namesOf(backend, "/d")).toEqual([
+            "replaced",
+            "source.txt",
+        ]);
+        expect(await timeOf(backend, "/d")).toBeGreaterThan(time);
+        time = await timeOf(backend, "/d");
+
+        await backend.rename("/d/source.txt", "/d/replaced");
+        expect(await namesOf(backend, "/d")).toEqual(["replaced"]);
+        expect(await timeOf(backend, "/d")).toBeGreaterThan(time);
+        time = await timeOf(backend, "/d");
+
+        // Their descriptors close without changing a name.
+        await backend.release(temporary);
+        await backend.release(replaced);
+        expect(await namesOf(backend, "/d")).toEqual(["replaced"]);
+        expect(await timeOf(backend, "/d")).toBe(time);
+    });
+
     it("keeps the directory for child chmod, utimens and content writes", async () => {
         await fs.mkdir("/d");
         await fs.writeFile("/d/f.txt", "f");
