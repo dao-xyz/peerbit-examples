@@ -214,9 +214,9 @@ adapter_build_ms=$((adapter_build_end_ms - adapter_build_start_ms))
 
 address_start_ms="$(now_ms)"
 if [ "$role" = "seed" ]; then
+  # The address is published once the seed is mounted (below), so joiners
+  # never race a seed that is not yet reachable.
   address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state" --no-auth)"
-  mkdir -p "$(dirname "$address_file")"
-  printf "%s\n" "$address" > "$address_file"
 else
   address="$(tr -d '\r\n' < "$address_file")"
 fi
@@ -297,6 +297,11 @@ while true; do
 done
 mount_ready_end_ms="$(now_ms)"
 mount_ready_ms=$((mount_ready_end_ms - mount_start_ms))
+
+if [ "$role" = "seed" ]; then
+  mkdir -p "$(dirname "$address_file")"
+  printf "%s\n" "$address" > "$address_file"
+fi
 
 # An executable and a symlink to it, written before the file peers wait for.
 mkdir "$mountpoint/$machine-bin"
@@ -387,10 +392,12 @@ for expected_machine in "${expected_machines[@]}"; do
   expected_file="$mountpoint/$expected_machine.txt"
   expected_contents="hello from $expected_machine via native mount"
   wait_for_file_contents "fileVisible" "$expected_machine" "$expected_file" "$expected_contents"
-  # Windows peers neither set the exec bit nor create links.
-  if [ "$expected_machine" != "windows" ]; then
-    wait_for_exec_link "$expected_machine"
-  fi
+  # Windows peers (windows, windows-2025, ...) neither set the exec bit nor
+  # create links.
+  case "$expected_machine" in
+    windows | windows-*) ;;
+    *) wait_for_exec_link "$expected_machine" ;;
+  esac
 done
 
 ack_write_start_ms="$(now_ms)"
