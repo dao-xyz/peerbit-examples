@@ -1,5 +1,60 @@
 # @peerbit/shared-fs-cli
 
+## 0.16.1
+
+### Patch Changes
+
+- f223ca7: Native mounts report directory mtime and ctime as per-mount change stamps
+  instead of the directory's creation time, so git's untracked cache, make and
+  file watchers see when a directory's names change:
+    - A directory's time changes when a name in it appears, disappears or is
+      renamed, whether through this mount or replicated from another peer
+      (including naming-conflict winner changes and directory merges), and when
+      the directory itself moves. File writes, chmod and utimens inside it, and
+      changes deeper in the tree, leave it unchanged. `/` follows the same rule
+      instead of reporting the mount time; `.peerbit-conflicts` moves when a fork
+      appears or merges and with every name change, which can reveal or hide a
+      conflicted file.
+    - The stamps live in memory, come from the mount's clock and are never
+      replicated: no format, IPC or adapter change. A directory shows the time this
+      mount first read it or last saw its names change, and a remount makes git's
+      untracked cache rescan once. A changed directory moves to the next whole
+      second when that is at most 1 s ahead of the clock; a further change within
+      that second, after a tool read the first, stays in it. A time never runs
+      more than 1 s ahead of the clock, even under bursts of changes and stats.
+      `utimens` on a directory is still ignored.
+    - The Linux mount smoke now requires `git update-index --test-untracked-cache`
+      to pass on the mount. `core.untrackedCache` is safe for a `.git` one peer
+      uses; set it to `false` for a `.git` several peers use.
+    - Library: `onNamespaceChange()` on `SharedFileSystem`, `SharedFsHandle` and
+      `IgnoreAwareFs` reports namespace-relevant index changes; `stat()` and
+      `list()` entries carry `parentId`. Mount backends accept `clock` and
+      `servedLimit` options, follow a target's optional `onNamespaceChange()` and
+      gain an optional `dispose()`, which `peerbit-fs mount` calls on shutdown.
+
+- 246161d: macOS native mounts:
+    - The adapter reports ready, and `peerbit-fs mount` prints `Mounted`, only once
+      the mountpoint is attached. It waits for the kernel's mount event (kqueue
+      `EVFILT_FS`) and checks the mount table, without polling. A FUSE runtime that
+      calls Init before macOS attaches the mount (FUSE-T does) could otherwise let a
+      write right after `Mounted` land in the bare mountpoint directory.
+    - `getNativeMountSupport` and `peerbit-fs status` look for the FUSE library the
+      adapter will load, in cgofuse's order, instead of only the macFUSE bundle.
+      When macFUSE is absent and FUSE-T is installed, the adapter falls back to
+      FUSE-T; status now says so and that shared-fs does not test FUSE-T, and the
+      adapter mounts it with `-o noattrcache` so the macOS NFS client's attribute
+      cache does not hide other peers' changes.
+
+- 246161d: `peerbit-fs mount` no longer fails when the Peerbit bootstrap nodes cannot be
+  reached. It warns, mounts from local state and turns on Peerbit's bootstrap
+  recovery, which redials with backoff whenever the mount has no connections, at
+  startup and after later network loss. Joining a remote filesystem still waits
+  for the write-readiness fence, so an offline join fails safely. `--peer` keeps
+  the mount off the public network as before.
+- Updated dependencies [f223ca7]
+- Updated dependencies [246161d]
+    - @peerbit/shared-fs@0.16.1
+
 ## 0.16.0
 
 ### Minor Changes
