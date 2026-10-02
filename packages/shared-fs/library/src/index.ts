@@ -3342,9 +3342,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // resumed (partial) bootstrap: a failed bootstrap stays gated in
             // the unverified posture instead of abandoning to a plain join,
             // and a crash before readiness leaves the on-disk marker that
-            // keeps a later reopen (even with bootstrap off) fail-closed.
-            // Successful readiness clears it through the serialized,
-            // crash-safe state update.
+            // keeps a later reopen (even with bootstrap off) of a store with
+            // content fail-closed; a store with none holds nothing partial,
+            // and that reopen is a plain join. Successful readiness clears
+            // the marker through the serialized, crash-safe state update.
             await this.writeBootstrapState(
                 { bootstrap: "active" },
                 openGeneration,
@@ -3660,10 +3661,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         } else if (bootstrapMarker !== undefined) {
             // An unfinished bootstrap on disk, but this open is not a
-            // candidate (mode off, or a partial replica): hold the
-            // unverified posture until the store settles.
-            this.bootstrapPhase = "unverified";
-            this.startQuiescenceChecker(openGeneration);
+            // candidate (mode off, or a partial replica). As in
+            // startBootstrap, an "active" marker over a store with no
+            // content left no partial doc set (typically a session stopped
+            // before its bootstrap decided): a plain join. Anything else
+            // holds the unverified posture until the store settles.
+            const partial =
+                bootstrapMarker === "unverified" ||
+                (await this.hasLocalContentRow());
+            this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+            if (partial) {
+                this.bootstrapPhase = "unverified";
+                this.startQuiescenceChecker(openGeneration);
+            } else {
+                void this.writeBootstrapState(
+                    { bootstrap: null },
+                    openGeneration
+                ).catch(() => {});
+            }
         }
         if (!bootstrapCandidate) {
             this.writeReadinessDecisionSettled = true;
@@ -10921,28 +10936,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.startQuiescenceChecker(generation, signal);
             return;
         }
-        // Content kinds only: replicated bootstrap/changeset manifests are
-        // control-plane rows (indexable since the manifest-kind fix) and
-        // must not make a cold store look warm — a store holding nothing
-        // but another author's manifest still needs the bootstrap.
-        const iterator = this.entries.index.iterate(
-            {
-                query: [
-                    new Or([
-                        new StringMatch({ key: "kind", value: "naming" }),
-                        new StringMatch({ key: "kind", value: "file-version" }),
-                        new StringMatch({ key: "kind", value: "file-chunk" }),
-                    ]),
-                ],
-            },
-            { local: true, remote: false, resolve: false }
-        );
-        let empty: boolean;
-        try {
-            empty = (await iterator.next(1)).length === 0;
-        } finally {
-            await (iterator as any).close?.();
-        }
+        // A store holding nothing but another author's manifest still needs
+        // the bootstrap.
+        const empty = !(await this.hasLocalContentRow());
         if (!active()) {
             this.emitBootstrapAbortedOnce(generation, signal);
             return;
@@ -13127,6 +13123,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async hasLocalNamingRow() {
         const probe = this.entries.index.iterate(
             { query: [new StringMatch({ key: "kind", value: "naming" })] },
+            { local: true, remote: false, resolve: false }
+        );
+        try {
+            return (await probe.next(1)).length > 0;
+        } finally {
+            await (probe as any).close?.();
+        }
+    }
+
+    /**
+     * Content kinds only: replicated bootstrap/changeset manifests are
+     * control-plane rows (indexable since the manifest-kind fix) and must
+     * not make a cold store look warm.
+     */
+    private async hasLocalContentRow() {
+        const probe = this.entries.index.iterate(
+            {
+                query: [
+                    new Or([
+                        new StringMatch({ key: "kind", value: "naming" }),
+                        new StringMatch({ key: "kind", value: "file-version" }),
+                        new StringMatch({ key: "kind", value: "file-chunk" }),
+                    ]),
+                ],
+            },
             { local: true, remote: false, resolve: false }
         );
         try {
