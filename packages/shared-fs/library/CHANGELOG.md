@@ -1,5 +1,41 @@
 # @peerbit/shared-fs
 
+## 0.16.3
+
+### Patch Changes
+
+- d3ba05e: Move to the Peerbit 5.4.10 cohort: peerbit 5.4.10, @peerbit/document 15.1.11,
+  @peerbit/program 6.0.68 and @peerbit/trusted-network 6.0.142 (with
+  @peerbit/shared-log 16.0.40, @peerbit/log 6.2.38 and @peerbit/pubsub 5.4.13).
+  It recovers interrupted replication and drains cancelled joins, and releases a
+  failed replay's resources.
+- 2bbbacb: Move to the Peerbit 5.4.9 cohort: peerbit 5.4.9, @peerbit/document 15.1.10,
+  @peerbit/program 6.0.67 and @peerbit/trusted-network 6.0.141 (with
+  @peerbit/shared-log 16.0.39, @peerbit/pubsub 5.4.12 and @peerbit/log 6.2.37).
+  Among its fixes, pubsub now exchanges subscriptions directly between neighbours
+  whether they bootstrapped or only dialled, so a peer that only dials another
+  replicates with it.
+- 450984a: A `bootstrap: false` open no longer stays write-gated for ten minutes or more
+  after an earlier join of the same directory stopped (Ctrl-C, a mount timeout, a
+  crash) while its cold-start bootstrap was still looking for a snapshot. That
+  join leaves its bootstrap marker on disk, and a bootstrap-off open took any
+  marker for a possibly partial store: it held the unverified posture, which lifts
+  only after two quiet checks five minutes apart, whatever the retry received.
+  Such an open now checks the store first, as a bootstrap-enabled open already
+  did. When the store holds no file content (no names, versions or chunks), the
+  stopped join installed nothing, so the open clears the marker and joins like a
+  fresh bootstrap-off join, gated by the usual remote evidence and quiet window.
+  A store with content, or a marker left by a bootstrap that retired unverified,
+  keeps the unverified posture. Partial replicas (such as `replicate: false`)
+  make the same check, so in that case they report phase `off` instead of
+  `unverified`.
+
+    This was the load-sensitive failure of the cold-start bootstrap test "lets a
+    join of a never-written filesystem that ended before it was ready be retried":
+    its second joiner was sometimes stopped before its bootstrap decided, and the
+    bootstrap-off retry timed out awaiting write readiness. A new test stops a join
+    at that point every time.
+
 ## 0.16.2
 
 ### Patch Changes
