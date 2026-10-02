@@ -2616,6 +2616,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writesReady = true;
     private partialWriteOverride = false;
     private writeReadinessRequired = false;
+    /**
+     * Armed by an open that holds an "active" marker: whether the store held
+     * content before this open's sync could add any (see
+     * contentStoredBeforeOpen).
+     */
+    private preOpenContent:
+        | { generation: number; probe?: Promise<boolean> }
+        | undefined;
     private writeReadinessRemoteEvidence = false;
     private writeReadinessDecisionSettled = true;
     private writeReadinessStartedAtMs = 0;
@@ -3335,17 +3343,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             marker === undefined &&
             bootstrapCandidate;
         if (preOpenCrashMarker) {
-            // entries.open() may ingest a partial prefix before it resolves,
-            // and a non-empty store without a marker would look warm to
+            // entries.open() may ingest a prefix before it resolves, and a
+            // non-empty store without a marker would look warm to
             // startBootstrap. Persist the crash marker first and hand the
-            // bootstrap an "active" marker, so any such prefix is treated as a
-            // resumed (partial) bootstrap: a failed bootstrap stays gated in
-            // the unverified posture instead of abandoning to a plain join,
-            // and a crash before readiness leaves the on-disk marker that
-            // keeps a later reopen (even with bootstrap off) of a store with
-            // content fail-closed; a store with none holds nothing partial,
-            // and that reopen is a plain join. Successful readiness clears
-            // the marker through the serialized, crash-safe state update.
+            // bootstrap an "active" marker, so the bootstrap still runs over
+            // such a prefix. Content stored before this open (this open has
+            // no warm proof, so it may be partial) makes it a resumed
+            // bootstrap: a failed bootstrap stays gated in the unverified
+            // posture instead of abandoning to a plain join. A prefix this
+            // open received is a fresh join's and does not (see
+            // contentStoredBeforeOpen). A crash before readiness leaves the
+            // on-disk marker that keeps a later reopen (even with bootstrap
+            // off) of a store with content fail-closed; a store with none
+            // holds nothing partial, and that reopen is a plain join.
+            // Successful readiness clears the marker through the serialized,
+            // crash-safe state update.
             await this.writeBootstrapState(
                 { bootstrap: "active" },
                 openGeneration,
@@ -3354,6 +3366,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         }
         const bootstrapMarker = preOpenCrashMarker ? "active" : marker;
+        this.preOpenContent =
+            bootstrapMarker === "active"
+                ? { generation: openGeneration }
+                : undefined;
         // Replication is ALWAYS announced at open. An earlier design
         // deferred the announcement until the snapshot overlay installed
         // (to keep ingest off the install's critical path), but an
@@ -3622,7 +3638,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     }
                     // startBootstrap chooses its posture on expected
                     // failures; an unexpected throw keeps the safe side:
-                    // a resumed (marker-bearing) store must stay gated.
+                    // any marker-bearing open stays gated, even one whose
+                    // store held nothing before it (judged fresh by
+                    // contentStoredBeforeOpen).
                     if (
                         this.bootstrapPhase === "fetching" ||
                         this.bootstrapPhase === "off"
@@ -3659,13 +3677,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         } else if (bootstrapMarker !== undefined) {
             // An unfinished bootstrap on disk, but this open is not a
             // candidate (mode off, or a partial replica). As in
-            // startBootstrap, an "active" marker over a store with no
-            // content left no partial doc set (typically a session stopped
-            // before its bootstrap decided): a plain join. Anything else
-            // holds the unverified posture until the store settles.
+            // startBootstrap, an "active" marker over a store that held no
+            // content before this open left no partial doc set (typically a
+            // session stopped before its bootstrap decided): a plain join.
+            // Anything else holds the unverified posture until the store
+            // settles.
             const partial =
                 bootstrapMarker === "unverified" ||
-                (await this.hasLocalContentRow());
+                (await this.contentStoredBeforeOpen(openGeneration));
             this.assertLifecycleRequestActive(lifecycleRequestGeneration);
             if (partial) {
                 this.bootstrapPhase = "unverified";
@@ -4018,6 +4037,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async canPerformEntry(operation: any) {
+        // Hold this open's first ingest until the store's pre-open content
+        // has been read (see contentStoredBeforeOpen). The hold precedes the
+        // trust fence below: a trust-graph change while the probe is pending
+        // (trust edges replicate in parallel on a fresh access-controlled
+        // join) must not reject every entry waiting on it.
+        const preOpenContent = this.preOpenContent;
+        if (preOpenContent?.generation === this.openGeneration) {
+            await this.preOpenContentProbe(preOpenContent);
+            if (this.openGeneration !== preOpenContent.generation) {
+                return false;
+            }
+        }
         const trustGraph = this.trustGraph;
         const trustCache = this.trustVerdicts;
         const trustEpoch = this.trustVerdictEpoch;
@@ -10865,8 +10896,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return;
         }
         // A store holding nothing but another author's manifest still needs
-        // the bootstrap.
-        const empty = !(await this.hasLocalContentRow());
+        // the bootstrap. Under a marker, only content stored before this open
+        // counts (see contentStoredBeforeOpen).
+        const empty = !(await this.contentStoredBeforeOpen(generation));
         if (!active()) {
             this.emitBootstrapAbortedOnce(generation, signal);
             return;
@@ -10874,8 +10906,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (!empty && !marker) {
             return;
         }
-        // A resumed bootstrap (marker, or non-empty store) holds a
-        // PARTIAL doc set: its failure path must never arm the guard.
+        // A resumed bootstrap (a marker over content stored before this
+        // open) holds a PARTIAL doc set: its failure path must never arm
+        // the guard.
         const resumed = marker !== undefined && !empty;
         this.bootstrapPhase = "fetching";
         this.setGuardArmed(false);
@@ -13083,6 +13116,43 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         } finally {
             await (probe as any).close?.();
         }
+    }
+
+    /**
+     * Whether the store held content before this open's sync could add any.
+     * An "active" marker resumes a partial bootstrap only over content an
+     * earlier session stored. A slow open (a loaded machine) can receive
+     * the donor's history before entries.open() resolves, and that is a
+     * fresh join's history, not a partial bootstrap's: judged by the store
+     * as it stands at the decision, such a join was held unverified for ten
+     * minutes or more. The probe reads the index at this open's first
+     * ingest, or at the decision if nothing arrived before it. The index
+     * opens before the log, so it already holds every row an earlier
+     * session stored; canPerformEntry holds this open's arrivals out of it
+     * until the probe settles. An unreadable index counts as content
+     * (fail-closed). Unarmed, the current store answers. The bootstrap's
+     * unexpected-throw fallback in open() deliberately stays fail-closed on
+     * any marker and does not consult this.
+     */
+    private async contentStoredBeforeOpen(generation: number) {
+        const preOpenContent = this.preOpenContent;
+        if (preOpenContent?.generation !== generation) {
+            return this.hasLocalContentRow();
+        }
+        try {
+            return await this.preOpenContentProbe(preOpenContent);
+        } finally {
+            // Decided: later ingest need not wait.
+            if (this.preOpenContent === preOpenContent) {
+                this.preOpenContent = undefined;
+            }
+        }
+    }
+
+    private preOpenContentProbe(preOpenContent: { probe?: Promise<boolean> }) {
+        return (preOpenContent.probe ??= this.hasLocalContentRow().catch(
+            () => true
+        ));
     }
 
     /**
