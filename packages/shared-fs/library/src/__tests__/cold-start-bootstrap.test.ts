@@ -1246,6 +1246,126 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
+    it("lets a join that ended before its bootstrap decision be retried with bootstrap off", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-undecided-"));
+        const directory = join(root, "joiner");
+        const logOf = (fs: SharedFsHandle) =>
+            (fs.program as any).entries.log.log;
+        let joinerPeer: Peerbit | undefined;
+        try {
+            const creatorPeer = await createPeer();
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "undecided-creator",
+            });
+            const address = creator.address;
+
+            // The first join syncs and then stops (Ctrl-C, a mount timeout)
+            // while its discovery is still deciding, so nothing clears the
+            // "active" marker written before its store opened. Discovery is
+            // held until close aborts it: the order a loaded machine only
+            // sometimes produces.
+            let reached!: () => void;
+            const deciding = new Promise<void>(
+                (resolve) => (reached = resolve)
+            );
+            const discovery = vi
+                .spyOn(
+                    SharedFileSystem.prototype as any,
+                    "fetchAndInstallOverlay"
+                )
+                .mockImplementationOnce(
+                    (signal: any) =>
+                        new Promise<boolean>((resolve) => {
+                            reached();
+                            if (signal.aborted) {
+                                return resolve(false);
+                            }
+                            signal.addEventListener(
+                                "abort",
+                                () => resolve(false),
+                                { once: true }
+                            );
+                        })
+                );
+            try {
+                joinerPeer = await Peerbit.create({ directory });
+                await joinerPeer.dial(creatorPeer);
+                const first = await openSharedFs({
+                    peerbit: joinerPeer,
+                    address,
+                    machineLabel: "undecided-first",
+                });
+                await deciding;
+                // Holding everything the creator has, including the
+                // re-publication for its own session.
+                await waitUntil(async () => {
+                    expect(logOf(creator).length).toBeGreaterThan(1);
+                    for (const entry of await logOf(creator).getHeads().all()) {
+                        expect(await logOf(first).has(entry.hash)).toBe(true);
+                    }
+                });
+                expect(first.bootstrapStatus().phase).toBe("fetching");
+                await joinerPeer.stop();
+            } finally {
+                discovery.mockRestore();
+            }
+            const stateDirectory = join(directory, "shared-fs-bootstrap");
+            const [stateName] = await readdir(stateDirectory);
+            const statePath = join(stateDirectory, stateName);
+            const state = async () =>
+                JSON.parse(await readFile(statePath, "utf8"));
+            expect(await state()).toMatchObject({ bootstrap: "active" });
+
+            // It stored no content, so a retry with bootstrap off is a plain
+            // join, not a partial store held unverified for ten minutes or
+            // more: the creator's re-publication for its session makes it
+            // write-ready.
+            joinerPeer = await Peerbit.create({ directory });
+            await joinerPeer.dial(creatorPeer);
+            const retried = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "undecided-retry",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            expect(retried.bootstrapStatus().phase).toBe("off");
+            await (retried.program as any).stateWriteChain;
+            expect(await state()).not.toHaveProperty("bootstrap");
+            await retried.awaitWriteReady({ timeout: 20_000 });
+            await retried.writeFile("/first.txt", "after retry");
+            await waitUntil(async () => {
+                expect(decode(await creator.readFile("/first.txt"))).toBe(
+                    "after retry"
+                );
+            });
+            await joinerPeer.stop();
+
+            // A marker over a store with content may be a partial bootstrap:
+            // that still holds the unverified posture.
+            await writeFile(
+                statePath,
+                JSON.stringify({ writeReady: false, bootstrap: "active" })
+            );
+            joinerPeer = await Peerbit.create({ directory });
+            const partial = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "undecided-partial",
+                bootstrap: false,
+            });
+            expect(partial.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                writeReady: false,
+                guardArmed: false,
+            });
+        } finally {
+            await joinerPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it("never lets a repeated genesis supersede a real snapshot", async () => {
         const fs = await openSharedFs({
             peerbit: await createPeer(),
