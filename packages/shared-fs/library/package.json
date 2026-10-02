@@ -42,10 +42,10 @@
         "@dao-xyz/borsh": "6.0.1",
         "@peerbit/blocks-interface": "2.2.1",
         "@peerbit/crypto": "3.1.6",
-        "@peerbit/document": "15.1.7",
-        "@peerbit/program": "6.0.64",
-        "@peerbit/trusted-network": "6.0.138",
-        "peerbit": "5.4.6",
+        "@peerbit/document": "15.1.10",
+        "@peerbit/program": "6.0.67",
+        "@peerbit/trusted-network": "6.0.141",
+        "peerbit": "5.4.9",
         "uint8arrays": "^5.1.0"
     }
 }
