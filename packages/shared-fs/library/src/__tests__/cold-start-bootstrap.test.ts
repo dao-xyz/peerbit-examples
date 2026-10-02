@@ -1,6 +1,13 @@
 import { deserialize } from "@dao-xyz/borsh";
 import { Peerbit } from "peerbit";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+    mkdir,
+    mkdtemp,
+    readFile,
+    readdir,
+    rm,
+    writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Documents } from "@peerbit/document";
@@ -15,7 +22,12 @@ import {
     type BootstrapTelemetryEvent,
     type SharedFsHandle,
 } from "../index.js";
-import { FileVersion, SnapshotManifestPayload } from "../model.js";
+import {
+    FileVersion,
+    NamingEvent,
+    SharedFsEntry,
+    SnapshotManifestPayload,
+} from "../model.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -80,6 +92,111 @@ describe("shared fs cold-start bootstrap", () => {
         await fs.rm("/tree/dir-1/file-1.txt");
         const snapshot = await fs.snapshotWrite();
         return { peer, fs, snapshot };
+    };
+
+    /**
+     * Holds `peer`'s next filesystem store open until replicated history
+     * matching `matches` has been committed to it (a slow open, as on a
+     * loaded machine), so its bootstrap decides over a store this open
+     * filled. By default the hold sits after the whole Documents open; with
+     * `inLog` it sits right after the store's log opened, before the rest of
+     * Documents.open has run.
+     *
+     * The hold releases on the batch's commit diagnostic, not its change
+     * event: shared-fs records a during-open batch's readiness evidence only
+     * at that diagnostic, and an open that resolves between the two loses
+     * that batch's evidence (a separate, known race this hold stays clear
+     * of).
+     */
+    const holdOpenUntilHistory = (
+        peer: Peerbit,
+        matches: (value: unknown) => boolean = (value) =>
+            value instanceof FileVersion,
+        options: { inLog?: boolean } = {}
+    ) => {
+        const documentsOpen = Documents.prototype.open;
+        const held = { arrived: false, restore: () => spy.mockRestore() };
+        const spy = vi
+            .spyOn(Documents.prototype, "open")
+            .mockImplementation(async function (
+                this: Documents<any, any>,
+                ...args: any[]
+            ) {
+                if (
+                    (this as any).node !== peer ||
+                    args[0]?.type !== SharedFsEntry
+                ) {
+                    return documentsOpen.apply(this, args as any);
+                }
+                let committed!: () => void;
+                const arrived = new Promise<void>(
+                    (resolve) => (committed = resolve)
+                );
+                let pending = false;
+                const onChange = (event: any) => {
+                    pending = (event?.detail?.added ?? []).some(matches);
+                };
+                const sync = args[0].sync;
+                const profile = sync.profile;
+                sync.profile = (event: { name: string }) => {
+                    profile?.(event);
+                    if (
+                        event.name !== "log.joinPreparedFacts.change" &&
+                        event.name !== "log.joinIndependent.change"
+                    ) {
+                        return;
+                    }
+                    if (pending) {
+                        committed();
+                    }
+                    pending = false;
+                };
+                let bound: ReturnType<typeof setTimeout> | undefined;
+                const hold = async () => {
+                    await Promise.race([
+                        arrived,
+                        new Promise((_, reject) => {
+                            bound = setTimeout(
+                                () =>
+                                    reject(
+                                        new Error(
+                                            "no history arrived during open"
+                                        )
+                                    ),
+                                30_000
+                            );
+                        }),
+                    ]);
+                    held.arrived = true;
+                };
+                const log = (this as any).log;
+                const logOpen = log.open;
+                const ownLogOpen = Object.hasOwn(log, "open");
+                if (options.inLog) {
+                    log.open = async function (...logArgs: any[]) {
+                        const result = await logOpen.apply(this, logArgs);
+                        await hold();
+                        return result;
+                    };
+                }
+                this.events.addEventListener("change", onChange);
+                try {
+                    const result = await documentsOpen.apply(this, args as any);
+                    if (!options.inLog) {
+                        await hold();
+                    }
+                    return result;
+                } finally {
+                    clearTimeout(bound);
+                    this.events.removeEventListener("change", onChange);
+                    if (options.inLog && ownLogOpen) {
+                        log.open = logOpen;
+                    } else if (options.inLog) {
+                        delete log.open;
+                    }
+                }
+            });
+        return held;
     };
 
     it("keeps creators and proven warm persisted reopens immediately writable", async () => {
@@ -1365,6 +1482,313 @@ describe("shared fs cold-start bootstrap", () => {
             await rm(root, { recursive: true, force: true });
         }
     });
+
+    /** A donor with history but no snapshot (only the genesis manifest). */
+    const donorWithoutSnapshot = async (
+        options: { rootKey?: boolean } = {}
+    ) => {
+        const donorPeer = await createPeer();
+        const donor = await openSharedFs({
+            peerbit: donorPeer,
+            machineLabel: "opening-donor",
+            ...(options.rootKey
+                ? { rootKey: donorPeer.identity.publicKey }
+                : {}),
+        });
+        // No snapshot: the donor's only manifest is the zero-document
+        // genesis, so a joiner's discovery finds nothing to install.
+        await donor.writeBatch(
+            Array.from({ length: 20 }, (_, i) => ({
+                path: `/f-${i}.txt`,
+                content: `content ${i}`,
+            }))
+        );
+        const joinerPeer = await createPeer();
+        await joinerPeer.dial(donorPeer);
+        return { donor, joinerPeer };
+    };
+
+    /** Opens `joinerPeer`'s join of `address` with its store held open. */
+    const joinWhileOpening = async (
+        joinerPeer: Peerbit,
+        address: string,
+        options: Record<string, unknown> = {},
+        hold: { inLog?: boolean } = {}
+    ) => {
+        const held = holdOpenUntilHistory(joinerPeer, undefined, hold);
+        try {
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address,
+                machineLabel: "opening-joiner",
+                bootstrap: { discoveryTimeoutMs: 500 },
+                writeReadinessSettleMs: 100,
+                ...options,
+            } as any);
+            expect(held.arrived).toBe(true);
+            await (joiner.program as any).bootstrapDecision;
+            return joiner;
+        } finally {
+            held.restore();
+        }
+    };
+
+    it.each([
+        ["store", false],
+        ["log", true],
+    ])(
+        "joins plainly when history arrives while its %s is still opening",
+        async (_, inLog) => {
+            const { donor, joinerPeer } = await donorWithoutSnapshot();
+            const joiner = await joinWhileOpening(
+                joinerPeer,
+                donor.address,
+                {},
+                { inLog }
+            );
+            // Nothing was stored before this open, so a failed discovery is
+            // a plain join, gated by the usual evidence and quiet window,
+            // not a resumed partial bootstrap held unverified for ten
+            // minutes or more.
+            expect(joiner.bootstrapStatus().phase).toBe("off");
+            await joiner.awaitWriteReady({ timeout: 20_000 });
+            await joiner.writeFile("/after-join.txt", "written");
+            await waitUntil(async () => {
+                expect(decode(await donor.readFile("/after-join.txt"))).toBe(
+                    "written"
+                );
+            });
+        }
+    );
+
+    it("admits history that waited on the pre-open read across a trust change", async () => {
+        const { donor, joinerPeer } = await donorWithoutSnapshot({
+            rootKey: true,
+        });
+        // A trust-graph change lands while the first ingest waits on the
+        // read of the store's pre-open content; on a fresh access-controlled
+        // join, trust edges replicate beside the content.
+        const read = (SharedFileSystem.prototype as any).hasLocalContentRow;
+        let changedTrust = false;
+        const probe = vi
+            .spyOn(SharedFileSystem.prototype as any, "hasLocalContentRow")
+            .mockImplementation(function (this: any) {
+                const result = read.call(this);
+                const trustChanged = this.trustChangeListener;
+                if (this.node === joinerPeer && trustChanged && !changedTrust) {
+                    changedTrust = true;
+                    trustChanged();
+                }
+                return result;
+            });
+        const canPerformEntry = (SharedFileSystem.prototype as any)
+            .canPerformEntry;
+        let rejected = 0;
+        const admission = vi
+            .spyOn(SharedFileSystem.prototype as any, "canPerformEntry")
+            .mockImplementation(async function (this: any, operation: any) {
+                const admitted = await canPerformEntry.call(this, operation);
+                if (this.node === joinerPeer && !admitted) {
+                    rejected++;
+                }
+                return admitted;
+            });
+        let joiner: SharedFsHandle;
+        try {
+            joiner = await joinWhileOpening(joinerPeer, donor.address);
+        } finally {
+            probe.mockRestore();
+            admission.mockRestore();
+        }
+        expect(changedTrust).toBe(true);
+        expect(rejected).toBe(0);
+        expect(joiner.bootstrapStatus().phase).toBe("off");
+    });
+
+    it("abandons a required bootstrap whose history arrived while its store was opening", async () => {
+        const { donor, joinerPeer } = await donorWithoutSnapshot();
+        const postures: string[] = [];
+        await expect(
+            joinWhileOpening(joinerPeer, donor.address, {
+                bootstrap: { mode: "require", discoveryTimeoutMs: 500 },
+                telemetry: {
+                    bootstrap: (event: BootstrapTelemetryEvent) => {
+                        if (event.type === "fallback") {
+                            postures.push(event.posture);
+                        }
+                    },
+                },
+            })
+        ).rejects.toThrow(/bootstrap/);
+        // A fresh join: the failure surfaces to the opener, as a plain
+        // join's, not as a resumed partial bootstrap's unverified posture.
+        expect(postures).toEqual(["plain-join"]);
+    });
+
+    it("treats an unreadable pre-open store as a partial bootstrap", async () => {
+        const { donor, joinerPeer } = await donorWithoutSnapshot();
+        const probe = vi
+            .spyOn(SharedFileSystem.prototype as any, "hasLocalContentRow")
+            .mockRejectedValueOnce(new Error("index unreadable"));
+        let joiner: SharedFsHandle;
+        try {
+            joiner = await joinWhileOpening(joinerPeer, donor.address);
+        } finally {
+            probe.mockRestore();
+        }
+        expect(joiner.bootstrapStatus()).toMatchObject({
+            phase: "unverified",
+            writeReady: false,
+            guardArmed: false,
+        });
+    });
+
+    it(
+        "judges an unfinished bootstrap by what was stored before the open",
+        { timeout: 240_000 },
+        async () => {
+            const root = await mkdtemp(join(tmpdir(), "shared-fs-opening-"));
+            const directory = join(root, "joiner");
+            const logOf = (fs: SharedFsHandle) =>
+                (fs.program as any).entries.log.log;
+            let joinerPeer: Peerbit | undefined;
+            try {
+                const donorPeer = await createPeer();
+                const donor = await openSharedFs({
+                    peerbit: donorPeer,
+                    machineLabel: "opening-donor",
+                });
+                await donor.writeFile("/first.txt", "first");
+                const address = donor.address;
+                const statePath = (at: string) =>
+                    join(at, "shared-fs-bootstrap", `${address}.json`);
+                const state = async (at = directory) =>
+                    JSON.parse(await readFile(statePath(at), "utf8"));
+                const writeState = async (
+                    sidecar: object = {
+                        writeReady: false,
+                        bootstrap: "active",
+                    },
+                    at = directory
+                ) => {
+                    await mkdir(join(at, "shared-fs-bootstrap"), {
+                        recursive: true,
+                    });
+                    await writeFile(statePath(at), JSON.stringify(sidecar));
+                };
+                const reopen = async (
+                    label: string,
+                    bootstrap: false | { discoveryTimeoutMs: number },
+                    at = directory
+                ) => {
+                    await donor.writeFile(`/${label}.txt`, label);
+                    joinerPeer = await Peerbit.create({ directory: at });
+                    await joinerPeer.dial(donorPeer);
+                    const held = holdOpenUntilHistory(
+                        joinerPeer,
+                        (value) =>
+                            value instanceof NamingEvent &&
+                            value.name === `${label}.txt`
+                    );
+                    let fs: SharedFsHandle;
+                    try {
+                        fs = await openSharedFs({
+                            peerbit: joinerPeer,
+                            address,
+                            machineLabel: label,
+                            bootstrap,
+                            writeReadinessSettleMs: 100,
+                        } as any);
+                    } finally {
+                        held.restore();
+                    }
+                    expect(held.arrived).toBe(true);
+                    await (fs.program as any).bootstrapDecision;
+                    return fs;
+                };
+                const joinedPlainly = async (
+                    fs: SharedFsHandle,
+                    at: string
+                ) => {
+                    expect(fs.bootstrapStatus().phase).toBe("off");
+                    // The plain join cleared the marker, so a later reopen
+                    // of the now-populated store is not held unverified.
+                    await (fs.program as any).stateWriteChain;
+                    expect(await state(at)).not.toHaveProperty("bootstrap");
+                    await fs.awaitWriteReady({ timeout: 20_000 });
+                    await waitUntil(async () => {
+                        for (const entry of await logOf(donor)
+                            .getHeads()
+                            .all()) {
+                            expect(await logOf(fs).has(entry.hash)).toBe(true);
+                        }
+                    });
+                    await joinerPeer!.stop();
+                };
+
+                // A join stopped before its bootstrap decided left an
+                // "active" marker over a store with no content (as a mount
+                // timeout does). A retry whose open receives the donor's
+                // history is still a plain join, with the bootstrap on and
+                // with it off.
+                const autoDirectory = join(root, "joiner-auto");
+                await writeState(undefined, autoDirectory);
+                await joinedPlainly(
+                    await reopen(
+                        "empty-retry-auto",
+                        { discoveryTimeoutMs: 500 },
+                        autoDirectory
+                    ),
+                    autoDirectory
+                );
+                await writeState();
+                await joinedPlainly(
+                    await reopen("empty-retry", false),
+                    directory
+                );
+
+                // The same marker over content an earlier session stored may
+                // be a partial bootstrap, whatever this open receives: it
+                // holds the unverified posture, with the bootstrap on and
+                // with it off.
+                await writeState();
+                const resumed = await reopen("resumed", {
+                    discoveryTimeoutMs: 500,
+                });
+                expect(resumed.bootstrapStatus()).toMatchObject({
+                    phase: "unverified",
+                    writeReady: false,
+                    guardArmed: false,
+                });
+                await joinerPeer!.stop();
+                await writeState();
+                const resumedOff = await reopen("resumed-off", false);
+                expect(resumedOff.bootstrapStatus()).toMatchObject({
+                    phase: "unverified",
+                    writeReady: false,
+                    guardArmed: false,
+                });
+                await joinerPeer!.stop();
+
+                // A join that abandoned to a plain join cleared its marker;
+                // stopped before it was write-ready, it left content and no
+                // marker. The next open writes its own "active" marker, and
+                // that content still makes it a resumed bootstrap.
+                await writeState({ writeReady: false });
+                const remarked = await reopen("re-marked", {
+                    discoveryTimeoutMs: 500,
+                });
+                expect(remarked.bootstrapStatus()).toMatchObject({
+                    phase: "unverified",
+                    writeReady: false,
+                    guardArmed: false,
+                });
+            } finally {
+                await joinerPeer?.stop().catch(() => {});
+                await rm(root, { recursive: true, force: true });
+            }
+        }
+    );
 
     it("never lets a repeated genesis supersede a real snapshot", async () => {
         const fs = await openSharedFs({
