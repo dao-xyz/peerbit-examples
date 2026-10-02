@@ -1,5 +1,25 @@
 # @peerbit/shared-fs-cli
 
+## 0.16.3
+
+### Patch Changes
+
+- d3ba05e: Move to the Peerbit 5.4.10 cohort: peerbit 5.4.10, @peerbit/document 15.1.11,
+  @peerbit/program 6.0.68 and @peerbit/trusted-network 6.0.142 (with
+  @peerbit/shared-log 16.0.40, @peerbit/log 6.2.38 and @peerbit/pubsub 5.4.13).
+  It recovers interrupted replication and drains cancelled joins, and releases a
+  failed replay's resources.
+- 2bbbacb: Move to the Peerbit 5.4.9 cohort: peerbit 5.4.9, @peerbit/document 15.1.10,
+  @peerbit/program 6.0.67 and @peerbit/trusted-network 6.0.141 (with
+  @peerbit/shared-log 16.0.39, @peerbit/pubsub 5.4.12 and @peerbit/log 6.2.37).
+  Among its fixes, pubsub now exchanges subscriptions directly between neighbours
+  whether they bootstrapped or only dialled, so a peer that only dials another
+  replicates with it.
+- Updated dependencies [d3ba05e]
+- Updated dependencies [2bbbacb]
+- Updated dependencies [450984a]
+    - @peerbit/shared-fs@0.16.3
+
 ## 0.16.2
 
 ### Patch Changes
