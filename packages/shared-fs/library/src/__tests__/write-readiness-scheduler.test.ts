@@ -71,6 +71,129 @@ describe("shared fs write-readiness scheduler", () => {
         expect(program.hasConnectedRemoteReplicator).toHaveBeenCalledTimes(3);
     });
 
+    it("rechecks as soon as the bootstrap decision settles", async () => {
+        // Both peers called bootstrap(): discovery waits out its deadline,
+        // so the decision settles after the quiet window already elapsed,
+        // between interval ticks (at 5 s and 6 s).
+        const program = readinessFixture();
+        program.writeReadinessDecisionSettled = false;
+        let settleDecision!: () => void;
+        program.trackBootstrapDecision(
+            new Promise<void>((resolve) => {
+                settleDecision = resolve;
+            }),
+            program.openGeneration,
+            program.lifecycleRequestGeneration
+        );
+        program.startWriteReadinessTracking(program.openGeneration);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+        expect(program.writeReadinessQuietChecks).toBe(0);
+        expect(program.hasConnectedRemoteReplicator).not.toHaveBeenCalled();
+
+        settleDecision();
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+        expect(program.writeReadinessDecisionSettled).toBe(true);
+        expect(program.writeReadinessQuietChecks).toBe(1);
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+
+        // Before the next interval tick at 6 s.
+        expect(program.writesReady).toBe(true);
+        expect(program.hasConnectedRemoteReplicator).toHaveBeenCalledTimes(2);
+    });
+
+    it("waits for the next tick when the decision settles without a recheck", async () => {
+        // The contrast for the test above: flipping only the flag leaves the
+        // check on the interval.
+        const program = readinessFixture();
+        program.writeReadinessDecisionSettled = false;
+        program.startWriteReadinessTracking(program.openGeneration);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+
+        program.writeReadinessDecisionSettled = true;
+        await vi.advanceTimersByTimeAsync(2 * CONFIRMATION_GAP_MS);
+        expect(program.writesReady).toBe(false);
+        expect(program.hasConnectedRemoteReplicator).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(300 + CONFIRMATION_GAP_MS);
+        expect(program.writesReady).toBe(true);
+    });
+
+    it("pulls the check forward when an injected clock runs ahead", async () => {
+        // The due time is on setTimeout's timebase, so a test clock moved
+        // ahead of the timers does not make the pending tick look imminent.
+        const program = readinessFixture();
+        let clockOffsetMs = 0;
+        program.clock = () => Date.now() + clockOffsetMs;
+        program.writeReadinessDecisionSettled = false;
+        program.startWriteReadinessTracking(program.openGeneration);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+
+        clockOffsetMs = 60_000;
+        program.settleWriteReadinessDecision(
+            program.openGeneration,
+            program.lifecycleRequestGeneration
+        );
+        await vi.advanceTimersByTimeAsync(2 * CONFIRMATION_GAP_MS);
+        expect(program.writesReady).toBe(true);
+    });
+
+    it("ignores a decision settled for an older lifecycle", async () => {
+        const program = readinessFixture();
+        program.writeReadinessDecisionSettled = false;
+        program.startWriteReadinessTracking(program.openGeneration);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+
+        program.settleWriteReadinessDecision(
+            program.openGeneration,
+            program.lifecycleRequestGeneration - 1
+        );
+        await vi.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(program.writeReadinessDecisionSettled).toBe(false);
+        expect(program.writesReady).toBe(false);
+        expect(program.hasConnectedRemoteReplicator).not.toHaveBeenCalled();
+        program.clearBootstrapTimers();
+    });
+
+    it("keeps a recheck that lands during a check for a prompt rerun", async () => {
+        // Scheduler contract only: today's single caller (the bootstrap
+        // decision) cannot land mid-check, since a check awaits only after
+        // the decision settled. This drives writeReadinessRecheck directly.
+        const program = readinessFixture();
+        program.writeReadinessStartedAtMs = START_MS - SETTLE_MS;
+        program.lastRemoteArrivalMs = START_MS - SETTLE_MS;
+        let releaseProbe!: (value: boolean) => void;
+        program.hasConnectedRemoteReplicator = vi
+            .fn()
+            .mockReturnValueOnce(
+                new Promise<boolean>((resolve) => {
+                    releaseProbe = resolve;
+                })
+            )
+            .mockResolvedValue(true);
+
+        program.startWriteReadinessTracking(program.openGeneration);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(program.writeReadinessCheckRunning).toBe(true);
+
+        // Two rechecks mid-await coalesce into one prompt rerun instead of
+        // being dropped until the next interval tick.
+        program.writeReadinessRecheck();
+        program.writeReadinessRecheck();
+        releaseProbe(false);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(program.writeReadinessQuietChecks).toBe(0);
+
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+        expect(program.writeReadinessQuietChecks).toBe(1);
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+        expect(program.writesReady).toBe(true);
+        expect(program.hasConnectedRemoteReplicator).toHaveBeenCalledTimes(3);
+    });
+
     it("reparks when metadata arrives during the deadline wait", async () => {
         const program = readinessFixture();
         program.startWriteReadinessTracking(program.openGeneration);
