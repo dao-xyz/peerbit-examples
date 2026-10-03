@@ -2874,10 +2874,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     private detachEmptyManifestListener() {
         if (this.emptyManifestListener) {
-            // main-event's removeEventListener drops only its own record of
-            // the listener (which kept closed programs alive). The wrapper it
-            // registered goes with the maintenance abort signal; until then
-            // the listener ignores events once it is no longer current.
+            // main-event 1.0.3-1.0.4 (still allowed by @libp2p/interface's
+            // ^1.0.1) remove only their own record of the listener here and
+            // leave the registered wrapper attached. The maintenance abort
+            // signal and the identity check keep this correct there.
             this.node.services.pubsub.removeEventListener(
                 "subscribe",
                 this.emptyManifestListener
@@ -11226,9 +11226,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 clearTimeout(retry);
                 signal.removeEventListener("abort", onAbort);
                 discovery.abort();
-                // main-event's removeEventListener drops its own record of
-                // the listener; the wrapper it registered goes with the
-                // abort above.
+                // main-event 1.0.3-1.0.4 (still allowed by @libp2p/interface's
+                // ^1.0.1) leave the registered wrapper attached on
+                // removeEventListener; there the abort above detaches it.
                 logEvents.removeEventListener("replicator:join", onEvent);
                 logEvents.removeEventListener("replication:change", onEvent);
                 pubsub.removeEventListener("subscribe", onEvent);

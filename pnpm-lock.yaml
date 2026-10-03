@@ -7284,8 +7284,8 @@ packages:
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
 
-  main-event@1.0.4:
-    resolution: {integrity: sha512-sKazUjIy2Jalv5lkQ446iOcrx8Q7TkaCuk6xfnzg5uUqMusMLDMPmRDmSNE2kjSVpSTJo4j1bQZusS+Ib7Bvrg==}
+  main-event@1.0.5:
+    resolution: {integrity: sha512-4l9z8r7Q446mhhVTwdHmfPksOYBwN2xa7ewEW2yxPVNQapIaAf57ORFLMB91SpMEMa4wXowect7fq3uMLjDnGA==}
 
   make-error@1.3.6:
     resolution: {integrity: sha512-s8UhlNe7vPKomQhC1qFelMokr/Sc3AgNbso3n74mVPA5LTZwkB9NlXf4XPamLxJE8h0gh73rM94xvwRT2CVInw==}
@@ -11251,7 +11251,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       any-signal: 4.2.0
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 14.0.4
       nanoid: 6.0.1
       progress-events: 1.1.0
@@ -11272,7 +11272,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       any-signal: 4.2.0
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 13.4.2
       nanoid: 5.1.11
       progress-events: 1.1.0
@@ -11313,7 +11313,7 @@ snapshots:
       '@multiformats/multiaddr-matcher': 3.0.2
       it-drain: 3.0.12
       it-parallel: 3.0.16
-      main-event: 1.0.4
+      main-event: 1.0.5
       protons-runtime: 7.0.0
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
@@ -11330,7 +11330,7 @@ snapshots:
       '@multiformats/multiaddr-matcher': 3.0.2
       it-drain: 3.0.12
       it-parallel: 3.0.16
-      main-event: 1.0.4
+      main-event: 1.0.5
       protons-runtime: 6.0.2
       uint8arraylist: 2.4.9
       uint8arrays: 5.1.1
@@ -11353,7 +11353,7 @@ snapshots:
     dependencies:
       '@multiformats/dns': 1.0.15
       '@multiformats/multiaddr': 13.0.3
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 14.0.4
       progress-events: 1.1.0
       uint8arraylist: 3.0.2
@@ -11362,7 +11362,7 @@ snapshots:
     dependencies:
       '@multiformats/dns': 1.0.15
       '@multiformats/multiaddr': 13.0.3
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 14.0.4
       progress-events: 1.1.0
       uint8arraylist: 3.0.2
@@ -11483,7 +11483,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       interface-datastore: 10.0.1
       it-all: 3.0.11
-      main-event: 1.0.4
+      main-event: 1.0.5
       mortice: 3.3.1
       multiformats: 14.0.4
       protons-runtime: 7.0.0
@@ -11500,7 +11500,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       interface-datastore: 10.0.1
       it-all: 3.0.11
-      main-event: 1.0.4
+      main-event: 1.0.5
       mortice: 3.3.1
       multiformats: 14.0.4
       protons-runtime: 7.0.0
@@ -11513,7 +11513,7 @@ snapshots:
       '@libp2p/utils': 7.2.3
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
-      main-event: 1.0.4
+      main-event: 1.0.5
       p-event: 7.1.0
       progress-events: 1.1.0
       uint8arraylist: 2.4.9
@@ -11524,7 +11524,7 @@ snapshots:
       '@libp2p/utils': 7.3.2
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
-      main-event: 1.0.4
+      main-event: 1.0.5
       p-event: 7.1.0
       progress-events: 1.1.0
       uint8arraylist: 3.0.2
@@ -11546,7 +11546,7 @@ snapshots:
       it-pipe: 3.0.1
       it-pushable: 3.2.4
       it-stream-types: 2.0.4
-      main-event: 1.0.4
+      main-event: 1.0.5
       netmask: 2.1.1
       p-defer: 4.0.1
       p-event: 7.1.0
@@ -11573,7 +11573,7 @@ snapshots:
       it-pipe: 3.0.1
       it-pushable: 3.2.4
       it-stream-types: 2.0.4
-      main-event: 1.0.4
+      main-event: 1.0.5
       netmask: 2.1.1
       p-defer: 4.0.1
       p-event: 7.1.0
@@ -11604,7 +11604,7 @@ snapshots:
       it-protobuf-stream: 2.0.6
       it-pushable: 3.2.4
       it-stream-types: 2.0.4
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 13.4.2
       node-datachannel: 0.32.3
       p-defer: 4.0.1
@@ -11643,7 +11643,7 @@ snapshots:
       it-protobuf-stream: 3.0.1
       it-pushable: 3.2.4
       it-stream-types: 2.0.4
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 14.0.4
       node-datachannel: 0.32.3
       p-defer: 4.0.1
@@ -11669,7 +11669,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       '@multiformats/multiaddr-to-uri': 12.0.0
-      main-event: 1.0.4
+      main-event: 1.0.5
       p-event: 7.1.0
       progress-events: 1.1.0
       uint8arraylist: 2.4.9
@@ -11686,7 +11686,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       '@multiformats/multiaddr-to-uri': 12.0.0
-      main-event: 1.0.4
+      main-event: 1.0.5
       p-event: 7.1.0
       progress-events: 1.1.0
       uint8arraylist: 3.0.2
@@ -17814,7 +17814,7 @@ snapshots:
     dependencies:
       abort-error: 1.0.2
       it-pushable: 3.2.4
-      main-event: 1.0.4
+      main-event: 1.0.5
       race-event: 1.6.1
       race-signal: 2.0.0
 
@@ -18097,7 +18097,7 @@ snapshots:
       interface-datastore: 10.0.1
       it-merge: 3.0.14
       it-parallel: 3.0.16
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 14.0.4
       p-defer: 4.0.1
       p-event: 7.1.0
@@ -18127,7 +18127,7 @@ snapshots:
       interface-datastore: 10.0.1
       it-merge: 3.0.14
       it-parallel: 3.0.16
-      main-event: 1.0.4
+      main-event: 1.0.5
       multiformats: 14.0.4
       p-defer: 4.0.1
       p-event: 7.1.0
@@ -18250,7 +18250,7 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  main-event@1.0.4: {}
+  main-event@1.0.5: {}
 
   make-error@1.3.6: {}
 
@@ -18521,7 +18521,7 @@ snapshots:
     dependencies:
       abort-error: 1.0.2
       it-queue: 1.1.3
-      main-event: 1.0.4
+      main-event: 1.0.5
 
   mri@1.1.6: {}
 
