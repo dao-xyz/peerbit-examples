@@ -352,6 +352,17 @@ describe("shared fs multi-peer", () => {
         await network[0].dial(network[1]);
         await network[0].dial(network[2]);
         await network[1].dial(network[2]);
+        // Peerbit.dial records each dialled address as a fanout bootstrap,
+        // and every block put awaits a best-effort provider announcement
+        // that dials those bootstraps again without a timeout
+        // (@peerbit/pubsub FanoutTree.ensureBootstrapPeers). While the gater
+        // refuses dials, that dial can stay pending on Windows, so b's write
+        // during the partition never returned (reported upstream). This test
+        // covers the directory merge, not provider announcements, so the
+        // partitioned peers announce to no bootstrap.
+        for (const peer of network) {
+            peer.services.fanout.setBootstraps([]);
+        }
         const handles = await openAll(network);
         const [observer, b, c] = handles;
 
