@@ -23,6 +23,7 @@ import {
     type SharedFsHandle,
 } from "../index.js";
 import {
+    BootstrapManifest,
     FileVersion,
     NamingEvent,
     SharedFsEntry,
@@ -103,19 +104,32 @@ describe("shared fs cold-start bootstrap", () => {
      * Documents.open has run.
      *
      * The hold releases on the batch's commit diagnostic, not its change
-     * event: shared-fs records a during-open batch's readiness evidence only
-     * at that diagnostic, and an open that resolves between the two loses
-     * that batch's evidence (a separate, known race this hold stays clear
-     * of).
+     * event: shared-fs records a during-open batch's readiness evidence at
+     * that diagnostic, so the open resolves with the evidence recorded. With
+     * `deferCommit` the open resolves between the two instead: the first
+     * matching batch's diagnostic is withheld and handed to shared-fs only
+     * when it registers its steady-state change listener.
      */
     const holdOpenUntilHistory = (
         peer: Peerbit,
         matches: (value: unknown) => boolean = (value) =>
             value instanceof FileVersion,
-        options: { inLog?: boolean } = {}
+        options: { inLog?: boolean; deferCommit?: boolean } = {}
     ) => {
         const documentsOpen = Documents.prototype.open;
-        const held = { arrived: false, restore: () => spy.mockRestore() };
+        let restoreAddListener: (() => void) | undefined;
+        const held = {
+            arrived: false,
+            /** Change events, and those matching `matches`, during the hold. */
+            changes: 0,
+            batches: 0,
+            delivered: false,
+            evidenceBeforeDelivery: undefined as boolean | undefined,
+            restore: () => {
+                spy.mockRestore();
+                restoreAddListener?.();
+            },
+        };
         const spy = vi
             .spyOn(Documents.prototype, "open")
             .mockImplementation(async function (
@@ -135,15 +149,26 @@ describe("shared fs cold-start bootstrap", () => {
                 let pending = false;
                 const onChange = (event: any) => {
                     pending = (event?.detail?.added ?? []).some(matches);
+                    held.changes++;
+                    if (pending) {
+                        held.batches++;
+                    }
                 };
+                let deliver: (() => void) | undefined;
                 const sync = args[0].sync;
                 const profile = sync.profile;
                 sync.profile = (event: { name: string }) => {
+                    const commit =
+                        event.name === "log.joinPreparedFacts.change" ||
+                        event.name === "log.joinIndependent.change";
+                    if (commit && pending && options.deferCommit && !deliver) {
+                        pending = false;
+                        deliver = () => profile?.(event);
+                        committed();
+                        return;
+                    }
                     profile?.(event);
-                    if (
-                        event.name !== "log.joinPreparedFacts.change" &&
-                        event.name !== "log.joinIndependent.change"
-                    ) {
+                    if (!commit) {
                         return;
                     }
                     if (pending) {
@@ -185,6 +210,39 @@ describe("shared fs cold-start bootstrap", () => {
                     if (!options.inLog) {
                         await hold();
                     }
+                    if (deliver) {
+                        // shared-fs registers that listener as soon as the
+                        // store's open resolved, before anything else arrives.
+                        const events = this.events as any;
+                        const store = this as any;
+                        const add = events.addEventListener;
+                        const ownAdd = Object.hasOwn(
+                            events,
+                            "addEventListener"
+                        );
+                        restoreAddListener = () => {
+                            restoreAddListener = undefined;
+                            if (ownAdd) {
+                                events.addEventListener = add;
+                            } else {
+                                delete events.addEventListener;
+                            }
+                        };
+                        events.addEventListener = function (
+                            this: unknown,
+                            ...listenerArgs: unknown[]
+                        ) {
+                            const added = add.apply(this, listenerArgs);
+                            if (listenerArgs[0] === "change") {
+                                restoreAddListener?.();
+                                held.evidenceBeforeDelivery =
+                                    store.parents?.[0]?.writeReadinessRemoteEvidence;
+                                held.delivered = true;
+                                deliver!();
+                            }
+                            return added;
+                        };
+                    }
                     return result;
                 } finally {
                     clearTimeout(bound);
@@ -197,6 +255,52 @@ describe("shared fs cold-start bootstrap", () => {
                 }
             });
         return held;
+    };
+
+    /** Mirrors shared-fs's readiness-evidence predicate. */
+    const isReadinessEvidence = (value: unknown) =>
+        value instanceof NamingEvent ||
+        value instanceof FileVersion ||
+        value instanceof BootstrapManifest;
+
+    /**
+     * Captures the commit-diagnostic sink of `peer`'s next filesystem store
+     * open (the latest one). Calling it after open stands in for the late
+     * diagnostic of a message received during open. The open ends with a
+     * metadata change event that no diagnostic follows, as a local replay's
+     * would (this cohort's persisted index replays none on its own).
+     */
+    const captureOpenSink = (peer: Peerbit) => {
+        const documentsOpen = Documents.prototype.open;
+        const captured = {
+            sink: undefined as ((event: { name: string }) => void) | undefined,
+            restore: () => spy.mockRestore(),
+        };
+        const spy = vi
+            .spyOn(Documents.prototype, "open")
+            .mockImplementation(async function (
+                this: Documents<any, any>,
+                ...args: any[]
+            ) {
+                if (
+                    (this as any).node !== peer ||
+                    args[0]?.type !== SharedFsEntry
+                ) {
+                    return documentsOpen.apply(this, args as any);
+                }
+                captured.sink = args[0].sync.profile;
+                const result = await documentsOpen.apply(this, args as any);
+                this.events.dispatchEvent(
+                    new CustomEvent("change", {
+                        detail: {
+                            added: [Object.create(FileVersion.prototype)],
+                            removed: [],
+                        },
+                    })
+                );
+                return result;
+            });
+        return captured;
     };
 
     it("keeps creators and proven warm persisted reopens immediately writable", async () => {
@@ -702,16 +806,31 @@ describe("shared fs cold-start bootstrap", () => {
 
             reopenedPeer = await Peerbit.create({ directory });
             await reopenedPeer.dial(donorPeer);
-            const reopened = await openSharedFs({
-                peerbit: reopenedPeer,
-                address,
-                machineLabel: "missing-sidecar-reopen",
-                bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            const captured = captureOpenSink(reopenedPeer);
+            let reopened: SharedFsHandle;
+            try {
+                reopened = await openSharedFs({
+                    peerbit: reopenedPeer,
+                    address,
+                    machineLabel: "missing-sidecar-reopen",
+                    bootstrap: false,
+                    writeReadinessSettleMs: 100,
+                } as any);
+            } finally {
+                captured.restore();
+            }
             expect(decode(await reopened.readFile("/persisted.txt"))).toBe(
                 "local replay"
             );
+            // A message received during open whose evidence-free change and
+            // commit diagnostic land after open must not pair with the
+            // replay's classification.
+            (reopened.program as any).entries.events.dispatchEvent(
+                new CustomEvent("change", {
+                    detail: { added: [], removed: [] },
+                })
+            );
+            captured.sink!({ name: "log.joinIndependent.change" });
             expect((reopened.program as any).writeReadinessRemoteEvidence).toBe(
                 false
             );
@@ -769,15 +888,22 @@ describe("shared fs cold-start bootstrap", () => {
             const stateDirectory = join(directory, "shared-fs-bootstrap");
             const [stateName] = await readdir(stateDirectory);
             await rm(join(stateDirectory, stateName));
-            const reopened = await localPeer.open(originalProgram, {
-                existing: "reuse",
-                args: {
-                    addressOpen: true,
-                    machineLabel: "same-program-reopen",
-                    bootstrap: false,
-                    writeReadinessSettleMs: 100,
-                } as any,
-            });
+            const captured = captureOpenSink(localPeer);
+            let reopened: SharedFileSystem;
+            try {
+                reopened = await localPeer.open(originalProgram, {
+                    existing: "reuse",
+                    args: {
+                        addressOpen: true,
+                        machineLabel: "same-program-reopen",
+                        bootstrap: false,
+                        writeReadinessSettleMs: 100,
+                    } as any,
+                });
+            } finally {
+                captured.restore();
+            }
+            const staleSink = captured.sink;
             expect(reopened === originalProgram).toBe(true);
             expect(decode(await reopened.readFile("/persisted.txt"))).toBe(
                 "local replay"
@@ -790,6 +916,24 @@ describe("shared fs cold-start bootstrap", () => {
                 writeReady: false,
                 guardArmed: false,
             });
+
+            // The replay left that open's classification set. A commit
+            // diagnostic still in flight from it must not mark the next open.
+            await reopened.close();
+            const again = await localPeer.open(originalProgram, {
+                existing: "reuse",
+                args: {
+                    addressOpen: true,
+                    machineLabel: "same-program-again",
+                    bootstrap: false,
+                    writeReadinessSettleMs: 100,
+                } as any,
+            });
+            staleSink!({ name: "log.joinIndependent.change" });
+            expect((again as any).writeReadinessRemoteEvidence).toBe(false);
+            await expect(
+                again.awaitWriteReady({ timeout: 500 })
+            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
         } finally {
             await donorPeer?.stop().catch(() => {});
             await localPeer?.stop().catch(() => {});
@@ -1641,6 +1785,52 @@ describe("shared fs cold-start bootstrap", () => {
             writeReady: false,
             guardArmed: false,
         });
+    });
+
+    it("keeps the evidence of a batch committed just after its store opened", async () => {
+        // A quiet donor: what it wrote reaches the joiner in one batch, so
+        // that batch is the joiner's only readiness evidence.
+        const donorPeer = await createPeer();
+        const donor = await openSharedFs({
+            peerbit: donorPeer,
+            machineLabel: "late-commit-donor",
+        });
+        await donor.writeFile("/quiet.txt", "quiet");
+        const joinerPeer = await createPeer();
+        await joinerPeer.dial(donorPeer);
+
+        // The joiner's store open resolves after that batch's change event
+        // and before its commit diagnostic.
+        const held = holdOpenUntilHistory(joinerPeer, isReadinessEvidence, {
+            deferCommit: true,
+        });
+        let joiner: SharedFsHandle;
+        try {
+            joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address: donor.address,
+                machineLabel: "late-commit-joiner",
+                bootstrap: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+        } finally {
+            held.restore();
+        }
+        expect(held).toMatchObject({
+            delivered: true,
+            changes: 1,
+            batches: 1,
+            evidenceBeforeDelivery: false,
+        });
+        expect((joiner.program as any).writeReadinessRemoteEvidence).toBe(true);
+        expect(decode(await joiner.readFile("/quiet.txt"))).toBe("quiet");
+        // Nothing else arrives on a quiet filesystem, so without that
+        // batch's evidence the joiner would wait for a new write forever.
+        await joiner.awaitWriteReady({ timeout: 20_000 });
+        await joiner.writeFile("/after-join.txt", "written");
+        expect(decode(await joiner.readFile("/after-join.txt"))).toBe(
+            "written"
+        );
     });
 
     it(

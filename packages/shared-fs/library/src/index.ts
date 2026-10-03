@@ -3409,6 +3409,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // classification (a chunk-only batch resets it false), and every commit
         // diagnostic consumes/resets it. This preserves replicated-open/native
         // receive acceleration without depending on private storage layout.
+        // A message received during open keeps the sink it captured, so its
+        // batch can fire the change event before open resolves and the commit
+        // diagnostic after. The classification therefore survives open: the
+        // steady-state change listener takes over resetting it, so a late
+        // diagnostic consumes its own batch's classification (on the same
+        // no-change-in-between premise as above; only a batch id on the
+        // diagnostic would remove it), never a local replay's. It counts only
+        // while this open is current: a diagnostic still in flight across
+        // close→reopen must not mark the next open.
         const captureFreshOpenEvidence =
             addressOpen && this.writeReadinessRequired && this.isFullReplica();
         let duringOpenChangeHadMetadata = false;
@@ -3428,7 +3437,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   ) {
                       return;
                   }
-                  if (duringOpenChangeHadMetadata) {
+                  if (
+                      duringOpenChangeHadMetadata &&
+                      this.openGeneration === openGeneration
+                  ) {
                       this.writeReadinessRemoteEvidence = true;
                       this.writeReadinessQuietChecks = 0;
                       this.lastArrivalMs = this.clock();
@@ -3517,7 +3529,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (retainedSync && retainedSync.profile === entrySyncProfile) {
                 delete retainedSync.profile;
             }
-            duringOpenChangeHadMetadata = false;
             if (freshOpenListener) {
                 this.entries.events.removeEventListener(
                     "change",
@@ -3531,9 +3542,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Registering a change consumer also makes Documents materialize
         // removed VALUES on delete. Deduped so a close→reopen of the same
         // instance never stacks listeners.
-        this.changeListener = (event: any) => {
+        const changeListener = (event: any) => {
+            // Removing a listener may not detach it (main-event 1.0.4 and
+            // earlier register a wrapper, then remove the original), so a
+            // listener from an earlier open of this instance can still fire,
+            // and would count this open's local replay as remote evidence.
+            if (this.changeListener !== changeListener) {
+                return;
+            }
             const added = event?.detail?.added ?? [];
             const removed = event?.detail?.removed ?? [];
+            // This listener counts later batches itself; a commit diagnostic
+            // still in flight from open must not pair with them.
+            duringOpenChangeHadMetadata = false;
             if (
                 this.disposalPreparationRunning &&
                 [added, removed].some((values) =>
@@ -3617,7 +3638,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         };
-        this.entries.events.addEventListener("change", this.changeListener);
+        this.changeListener = changeListener;
+        this.entries.events.addEventListener("change", changeListener);
         this.bootstrapDecision = Promise.resolve();
         if (bootstrapCandidate) {
             const bootstrapAbortController = new AbortController();
