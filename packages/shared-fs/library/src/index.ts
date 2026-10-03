@@ -2650,6 +2650,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessSettleMs = WRITE_READINESS_SETTLE_MS;
     private writeReadinessQuietChecks = 0;
     private writeReadinessTimer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * When writeReadinessTimer fires, on Date.now(): setTimeout's timebase,
+     * not the injectable this.clock().
+     */
+    private writeReadinessTimerDueAt = 0;
+    /** Pulls the next readiness check forward; set by the active tracker. */
+    private writeReadinessRecheck: (() => void) | undefined;
+    /** A recheck arrived while a check was awaiting; it reruns promptly. */
+    private writeReadinessRecheckPending = false;
     private writeReadinessCheckRunning = false;
     /** Owns the async readiness probe so an older finally cannot unlock a reopen. */
     private writeReadinessCheckRunningRequestGeneration: number | undefined;
@@ -3118,6 +3127,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             !addressOpen || partialWriteOverride;
         this.writeReadinessRemoteEvidence = false;
         this.writeReadinessQuietChecks = 0;
+        this.writeReadinessTimerDueAt = 0;
+        this.writeReadinessRecheck = undefined;
+        this.writeReadinessRecheckPending = false;
         this.writeReadinessCheckRunning = false;
         this.writeReadinessCheckRunningRequestGeneration = undefined;
         this.writeReadinessSource = undefined;
@@ -3658,13 +3670,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         lifecycleRequestGeneration
                     );
                 } finally {
-                    if (
-                        this.openGeneration === openGeneration &&
-                        this.lifecycleRequestGeneration ===
-                            lifecycleRequestGeneration
-                    ) {
-                        this.writeReadinessDecisionSettled = true;
-                    }
+                    this.settleWriteReadinessDecision(
+                        openGeneration,
+                        lifecycleRequestGeneration
+                    );
                 }
             } else {
                 const run = this.startBootstrap(
@@ -3694,26 +3703,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         }
                     }
                 });
-                this.bootstrapDecision = run;
-                void run.then(
-                    () => {
-                        if (
-                            this.openGeneration === openGeneration &&
-                            this.lifecycleRequestGeneration ===
-                                lifecycleRequestGeneration
-                        ) {
-                            this.writeReadinessDecisionSettled = true;
-                        }
-                    },
-                    () => {
-                        if (
-                            this.openGeneration === openGeneration &&
-                            this.lifecycleRequestGeneration ===
-                                lifecycleRequestGeneration
-                        ) {
-                            this.writeReadinessDecisionSettled = true;
-                        }
-                    }
+                this.trackBootstrapDecision(
+                    run,
+                    openGeneration,
+                    lifecycleRequestGeneration
                 );
             }
         } else if (bootstrapMarker !== undefined) {
@@ -10290,6 +10283,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.writesReady = true;
             this.writeReadinessRequired = false;
             this.writeReadinessQuietChecks = 0;
+            this.writeReadinessRecheck = undefined;
             this.setGuardArmed(true);
             this.writeReadinessSource = "remote-settled";
             this.emitWriteReadyOnce("remote-settled");
@@ -10341,12 +10335,41 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (!lifecycleActive()) {
                 return;
             }
-            const timer = setTimeout(
-                () => void check(timer),
-                Math.max(0, Math.ceil(delayMs))
-            );
+            const delay = Math.max(0, Math.ceil(delayMs));
+            const timer = setTimeout(() => void check(timer), delay);
             this.writeReadinessTimer = timer;
+            this.writeReadinessTimerDueAt = Date.now() + delay;
             (timer as any)?.unref?.();
+        };
+        // A prerequisite that settles between checks (the bootstrap
+        // decision) pulls the next check forward to the minimum gap instead
+        // of waiting out the interval; repeated rechecks coalesce into one
+        // check. A check only awaits once the decision has settled, so no
+        // current caller lands mid-check; the pending flag keeps a future
+        // prerequisite wired here from being dropped until the next tick.
+        this.writeReadinessRecheck = () => {
+            if (!lifecycleActive()) {
+                return;
+            }
+            if (
+                this.writeReadinessCheckRunning &&
+                this.writeReadinessCheckRunningRequestGeneration ===
+                    lifecycleRequestGeneration
+            ) {
+                this.writeReadinessRecheckPending = true;
+                return;
+            }
+            const timer = this.writeReadinessTimer;
+            if (
+                !timer ||
+                this.writeReadinessTimerDueAt <=
+                    Date.now() + WRITE_READINESS_MIN_CHECK_MS
+            ) {
+                return;
+            }
+            clearTimeout(timer);
+            this.writeReadinessTimer = undefined;
+            schedule(WRITE_READINESS_MIN_CHECK_MS);
         };
         const check = async (timer: ReturnType<typeof setTimeout>) => {
             if (!owns(timer)) {
@@ -10364,6 +10387,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.writeReadinessCheckRunning = true;
             this.writeReadinessCheckRunningRequestGeneration =
                 lifecycleRequestGeneration;
+            this.writeReadinessRecheckPending = false;
             let nextDelayMs = intervalMs;
             try {
                 const settledPhase =
@@ -10433,11 +10457,56 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         undefined;
                 }
                 if (owns(timer)) {
+                    if (this.writeReadinessRecheckPending) {
+                        this.writeReadinessRecheckPending = false;
+                        nextDelayMs = Math.min(
+                            nextDelayMs,
+                            WRITE_READINESS_MIN_CHECK_MS
+                        );
+                    }
                     schedule(nextDelayMs);
                 }
             }
         };
         schedule(0);
+    }
+
+    /**
+     * Publishes a background bootstrap decision and settles write readiness
+     * when it finishes, either way.
+     */
+    private trackBootstrapDecision(
+        run: Promise<void>,
+        openGeneration: number,
+        lifecycleRequestGeneration: number
+    ) {
+        this.bootstrapDecision = run;
+        const settled = () =>
+            this.settleWriteReadinessDecision(
+                openGeneration,
+                lifecycleRequestGeneration
+            );
+        void run.then(settled, settled);
+    }
+
+    /**
+     * Records that this open's bootstrap decision settled and re-checks
+     * write readiness promptly. Discovery's deadline and the readiness
+     * interval both start at the end of open(), so without the recheck the
+     * interval tick just misses the decision and adds up to a full period.
+     */
+    private settleWriteReadinessDecision(
+        openGeneration: number,
+        lifecycleRequestGeneration: number
+    ) {
+        if (
+            this.openGeneration !== openGeneration ||
+            this.lifecycleRequestGeneration !== lifecycleRequestGeneration
+        ) {
+            return;
+        }
+        this.writeReadinessDecisionSettled = true;
+        this.writeReadinessRecheck?.();
     }
 
     private clearBootstrapTimers() {
