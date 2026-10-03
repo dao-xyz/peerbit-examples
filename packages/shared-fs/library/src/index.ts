@@ -538,6 +538,14 @@ export type BootstrapTelemetryEvent =
           trusted: number;
           invalid: number;
           stale: number;
+          /** Remote peers the manifest query was sent to. */
+          targets: number;
+          /**
+           * Zero-document manifests found (a creator's genesis, published
+           * before anything was written). They install nothing, so they are
+           * not counted in `candidates`.
+           */
+          zeroDocument: number;
       }
     | {
           type: "segments-fetch:start";
@@ -733,7 +741,15 @@ export type BootstrapOptions = {
     mode?: "auto" | "require" | "off";
     /** Reject snapshots older than this (default 2h). */
     maxSnapshotAgeMs?: number;
-    /** How long to look for (and verify) manifest candidates (default 5s). */
+    /**
+     * How long to look for manifest candidates, and then how long to wait
+     * for their signers to become trusted (default 5s each). Discovery ends
+     * early once every peer asked has answered, or once a usable snapshot
+     * has arrived and every peer visible as running the filesystem has
+     * answered. Otherwise it waits this long, for example when nobody runs
+     * the filesystem yet, or when a connected peer that does not run it
+     * (such as a bootstrap relay) never answers.
+     */
     discoveryTimeoutMs?: number;
     segmentFetchConcurrency?: number;
     /**
@@ -2113,6 +2129,10 @@ const SNAPSHOT_MAX_SEGMENT_COUNT = 256;
 const SNAPSHOT_TARGET_SEGMENT_BYTES = 384_000;
 const SNAPSHOT_EST_DOC_BYTES = 384;
 const MANIFEST_PAYLOAD_CAP_BYTES = 100_000;
+/** Direct neighbours one manifest discovery asks at most besides the peers
+ *  visible as running the filesystem, which are always asked
+ *  (@peerbit/document asked up to 8 targets in all). */
+const MANIFEST_DISCOVERY_MAX_NEIGHBOURS = 16;
 /** @peerbit/log EntryType.CUT (not re-exported by @peerbit/document). */
 const ENTRY_TYPE_CUT = 1;
 /** Members per changeset manifest, versions+naming combined. 12k x 36B is
@@ -3852,7 +3872,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         usable: number,
         trusted: number,
         invalid: number,
-        stale: number
+        stale: number,
+        seen: { targets: number; zeroDocument: number }
     ) {
         if (
             !this.bootstrapTelemetry ||
@@ -3873,6 +3894,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             trusted,
             invalid,
             stale,
+            targets: seen.targets,
+            zeroDocument: seen.zeroDocument,
         });
     }
 
@@ -10150,6 +10173,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async hasConnectedRemoteReplicator() {
+        return (await this.liveRemoteReplicators()).length > 0;
+    }
+
+    /**
+     * Remote replicators of this log with current donor liveness: reachable,
+     * with a non-expiring best route whose next hop is a live direct stream.
+     * Empty when the transport cannot prove liveness or the replication
+     * index is still cold.
+     */
+    private async liveRemoteReplicators(): Promise<string[]> {
         const pubsub = (this.node?.services?.pubsub as any) ?? undefined;
         const peers = pubsub?.peers as Map<string, unknown> | undefined;
         const routes = pubsub?.routes as
@@ -10169,12 +10202,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             typeof routes?.isReachable !== "function" ||
             typeof routes.getBestRouteHint !== "function"
         ) {
-            return false;
+            return [];
         }
         try {
             const self = this.node.identity.publicKey.hashcode();
             const replicators = await this.entries.log.getReplicators();
-            return [...replicators].some((hash) => {
+            return [...replicators].filter((hash) => {
                 if (hash === self || !routes.isReachable(self, hash)) {
                     return false;
                 }
@@ -10193,7 +10226,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         } catch {
             // A cold replication index is not proof. The periodic readiness
             // check retries once the relevant membership rows arrive.
-            return false;
+            return [];
         }
     }
 
@@ -11043,6 +11076,345 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
+     * Peers visible as running this filesystem now: live remote replicators
+     * of its log, plus reachable remote subscribers of its topic.
+     */
+    private async visibleFilesystemPeers(): Promise<Set<string>> {
+        const visible = new Set(await this.liveRemoteReplicators());
+        const pubsub = this.node.services.pubsub as any;
+        const self = this.node.identity.publicKey.hashcode();
+        try {
+            const subscribers: PublicSignKey[] =
+                (await pubsub.getSubscribers(this.entries.log.topic)) ?? [];
+            for (const key of subscribers) {
+                const hash = key.hashcode();
+                if (
+                    hash !== self &&
+                    (pubsub.peers?.has?.(hash) ||
+                        pubsub.routes?.isReachable?.(self, hash))
+                ) {
+                    visible.add(hash);
+                }
+            }
+        } catch {
+            // A cold subscription view proves nothing; replicators suffice.
+        }
+        return visible;
+    }
+
+    /**
+     * Collect bootstrap manifests from the local index and from remote
+     * peers, with one query per peer and one deadline (timeoutMs) for the
+     * whole discovery. A peer that never answers costs that deadline once;
+     * iterate() waited it out three times (15 s by default).
+     *
+     * Asked: every peer visible as running this filesystem
+     * (visibleFilesystemPeers), and up to MANIFEST_DISCOVERY_MAX_NEIGHBOURS
+     * other direct pubsub neighbours. Neighbours are asked even when they
+     * are not visible as filesystem peers, as @peerbit/document did when it
+     * picked the targets: the subscriber view can lag behind the connection
+     * (a lost Subscribe announcement), and a connected donor must not be
+     * skipped for that. The cap never applies to a visible peer.
+     *
+     * Discovery ends before the deadline in two cases only:
+     * - every peer asked has answered (an answer with nothing counts);
+     * - a remote peer returned a manifest `usable` accepts, and every peer
+     *   known to run this filesystem (visible as above) has answered. The
+     *   queries still waiting on other neighbours are then cancelled: the
+     *   joiner has a snapshot to install, and a silent neighbour could at
+     *   most hold a newer one.
+     * Otherwise discovery waits for the deadline. Nothing tells a peer that
+     * does not run this filesystem (a relay peer.bootstrap() dials, which
+     * never answers) from a donor whose answer is still on its way, so an
+     * empty or zero-document answer from one peer never cancels the query
+     * to another.
+     *
+     * Membership events (replicator join, replication change, topic
+     * subscribe, peer reachable, new neighbour stream) re-evaluate the
+     * targets until discovery ends. A new neighbour is asked, and a
+     * neighbour that becomes visible is asked again: it may have dropped
+     * the first query because it had not opened this filesystem yet. Such
+     * a neighbour can also stay invisible (the same lagging view), so every
+     * peer still silent at half the deadline is asked once more, as
+     * iterate()'s retry did.
+     *
+     * Still missed, as before: a donor that is neither visible nor a direct
+     * neighbour, one beyond the neighbour cap, and one that answers after
+     * the deadline. A fresh joiner then takes the plain-join fallback (it
+     * replicates the log in full; only the snapshot speed-up is lost), a
+     * resumed partial store takes the unverified posture, and mode
+     * "require" fails the open.
+     */
+    private async discoverManifests(
+        signal: AbortSignal,
+        timeoutMs: number,
+        usable: (found: unknown[]) => Promise<boolean> = async () => false
+    ): Promise<{ results: unknown[]; targets: number }> {
+        const query = {
+            query: [
+                new StringMatch({
+                    key: "kind",
+                    value: "bootstrap-manifest",
+                }),
+            ],
+        };
+        const results: unknown[] = await this.entries.index
+            .iterate(query, { local: true, remote: false, resolve: true })
+            .all();
+        if (signal.aborted) {
+            throw (
+                signal.reason ??
+                new SharedFsError("ECLOSED", "bootstrap was aborted")
+            );
+        }
+        return new Promise((resolve, reject) => {
+            // Aborting this cancels the queries still pending and drops the
+            // membership listeners.
+            const discovery = new AbortController();
+            // settled: timed out, failed or answered with nothing.
+            // asVisible: asked while visible as a filesystem peer.
+            const queries = new Map<
+                string,
+                {
+                    state: "pending" | "settled" | "answered";
+                    asVisible: boolean;
+                    token: object;
+                }
+            >();
+            const filesystemPeers = new Set<string>();
+            let neighbours = 0;
+            let usableFound = false;
+            let settled = false;
+            let evaluating = false;
+            let dirty = false;
+            const pubsub = this.node.services.pubsub as any;
+            const logEvents = this.entries.log.events as any;
+            const onEvent = () => void evaluate();
+            const onAbort = () =>
+                finish(
+                    signal.reason ??
+                        new SharedFsError("ECLOSED", "bootstrap was aborted")
+                );
+            const finish = (error?: unknown) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                clearTimeout(timer);
+                clearTimeout(retry);
+                signal.removeEventListener("abort", onAbort);
+                discovery.abort();
+                // main-event's removeEventListener drops its own record of
+                // the listener; the wrapper it registered goes with the
+                // abort above.
+                logEvents.removeEventListener("replicator:join", onEvent);
+                logEvents.removeEventListener("replication:change", onEvent);
+                pubsub.removeEventListener("subscribe", onEvent);
+                pubsub.removeEventListener("peer:reachable", onEvent);
+                pubsub.removeEventListener("stream:outbound", onEvent);
+                if (error !== undefined) {
+                    reject(error);
+                } else {
+                    resolve({ results, targets: queries.size });
+                }
+            };
+            const check = () => {
+                let pending = false;
+                let knownPending = false;
+                for (const [hash, { state }] of queries) {
+                    if (state === "pending") {
+                        pending = true;
+                        knownPending ||= filesystemPeers.has(hash);
+                    }
+                }
+                if (
+                    (queries.size > 0 && !pending) ||
+                    (usableFound && !knownPending)
+                ) {
+                    finish();
+                }
+            };
+            const ask = (hash: string, visible: boolean, again = false) => {
+                const existing = queries.get(hash);
+                if (existing) {
+                    if (
+                        existing.state !== "pending" ||
+                        (!again && (!visible || existing.asVisible))
+                    ) {
+                        return;
+                    }
+                } else if (!visible) {
+                    if (neighbours >= MANIFEST_DISCOVERY_MAX_NEIGHBOURS) {
+                        return;
+                    }
+                    neighbours++;
+                }
+                const token = {};
+                queries.set(hash, {
+                    state: "pending",
+                    asVisible: visible || !!existing?.asVisible,
+                    token,
+                });
+                const settle = async (found: unknown[]) => {
+                    if (settled) {
+                        return;
+                    }
+                    results.push(...found);
+                    let isUsable = false;
+                    if (found.length > 0) {
+                        try {
+                            isUsable = await usable(found);
+                        } catch {
+                            // Not usable; the deadline still bounds the wait.
+                        }
+                    }
+                    const current = queries.get(hash);
+                    if (settled || !current) {
+                        return;
+                    }
+                    usableFound ||= isUsable;
+                    if (found.length > 0) {
+                        current.state = "answered";
+                    } else if (
+                        current.token === token &&
+                        current.state === "pending"
+                    ) {
+                        current.state = "settled";
+                    }
+                    check();
+                };
+                this.entries.index
+                    .iterate(query, {
+                        local: false,
+                        remote: {
+                            timeout: timeoutMs,
+                            from: [hash],
+                            // Asked again explicitly below, at most once.
+                            retryMissingResponses: false,
+                        } as any,
+                        resolve: true,
+                        signal: discovery.signal,
+                    })
+                    .all()
+                    .then(settle, () => settle([]));
+            };
+            const evaluate = async () => {
+                if (evaluating) {
+                    dirty = true;
+                    return;
+                }
+                evaluating = true;
+                try {
+                    do {
+                        dirty = false;
+                        const visible = await this.visibleFilesystemPeers();
+                        if (settled) {
+                            return;
+                        }
+                        for (const hash of visible) {
+                            filesystemPeers.add(hash);
+                            ask(hash, true);
+                        }
+                        for (const hash of pubsub.peers?.keys?.() ?? []) {
+                            ask(hash, false);
+                        }
+                        check();
+                    } while (dirty && !settled);
+                } catch {
+                    // The next membership event re-evaluates.
+                } finally {
+                    evaluating = false;
+                }
+            };
+            const timer = setTimeout(() => finish(), timeoutMs);
+            const retry = setTimeout(() => {
+                for (const [hash, { state, asVisible }] of [...queries]) {
+                    if (state === "pending") {
+                        ask(hash, asVisible, true);
+                    }
+                }
+            }, timeoutMs / 2);
+            signal.addEventListener("abort", onAbort, { once: true });
+            const options = { signal: discovery.signal };
+            logEvents.addEventListener("replicator:join", onEvent, options);
+            logEvents.addEventListener("replication:change", onEvent, options);
+            pubsub.addEventListener("subscribe", onEvent, options);
+            pubsub.addEventListener("peer:reachable", onEvent, options);
+            // "peer:reachable" is skipped for a neighbour whose route another
+            // service added first; "stream:outbound" is not.
+            pubsub.addEventListener("stream:outbound", onEvent, options);
+            if (signal.aborted) {
+                onAbort();
+                return;
+            }
+            void evaluate();
+        });
+    }
+
+    /**
+     * Verify one bootstrap manifest copy that arrived via query (so
+     * pre-canPerform) against this store: never trust the serving peer.
+     * Trust in the signer is checked by the caller, against OUR trust
+     * graph.
+     */
+    private async checkBootstrapManifest(
+        raw: BootstrapManifest,
+        config: { maxSnapshotAgeMs: number }
+    ): Promise<
+        | { kind: "invalid" }
+        | {
+              kind: "empty" | "stale" | "candidate";
+              id: string;
+              createdAtWallMs: bigint;
+              candidate: {
+                  payload: SnapshotManifestPayload;
+                  signerKey: PublicSignKey;
+                  authorKey: string;
+              };
+          }
+    > {
+        let signature: SignatureWithKey;
+        let payload: SnapshotManifestPayload;
+        try {
+            signature = deserialize(raw.signatureBytes, SignatureWithKey);
+            payload = deserialize(raw.payloadBytes, SnapshotManifestPayload);
+        } catch {
+            return { kind: "invalid" };
+        }
+        const authorKey = encodePublicSignKey(signature.publicKey);
+        try {
+            if (
+                raw.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES ||
+                raw.id !== `bootstrap:${authorKey}` ||
+                !equalBytes(payload.storeId, this.id) ||
+                !(await verify(signature, raw.payloadBytes))
+            ) {
+                return { kind: "invalid" };
+            }
+        } catch {
+            return { kind: "invalid" };
+        }
+        const checked = {
+            id: raw.id,
+            createdAtWallMs: payload.createdAtWallMs,
+            candidate: { payload, signerKey: signature.publicKey, authorKey },
+        };
+        if (payload.segments.length === 0) {
+            // A zero-document manifest (a creator's genesis) installs
+            // nothing, and its overlay would retire at once, counting as
+            // verified coverage and readiness evidence without covering
+            // any log entry, though a genesis can be older than the data.
+            // Plain-join instead: its replication is the evidence.
+            return { kind: "empty", ...checked };
+        }
+        const age = this.clock() - Number(payload.createdAtWallMs);
+        if (age > config.maxSnapshotAgeMs) {
+            return { kind: "stale", ...checked };
+        }
+        return { kind: "candidate", ...checked };
+    }
+
+    /**
      * Discover, verify, fetch and install the newest trusted snapshot.
      * Returns false when no usable manifest exists (caller falls back).
      */
@@ -11067,31 +11439,64 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 atMs: this.bootstrapTelemetryElapsed(clockMs),
             });
         }
-        const results = await this.entries.index
-            .iterate(
-                {
-                    query: [
-                        new StringMatch({
-                            key: "kind",
-                            value: "bootstrap-manifest",
-                        }),
-                    ],
-                },
-                {
-                    local: true,
-                    remote: { timeout: config.discoveryTimeoutMs } as any,
-                    resolve: true,
-                    signal,
-                }
-            )
-            .all();
-        throwIfAborted();
-        const deadline = this.clock() + config.discoveryTimeoutMs;
         type Candidate = {
             payload: SnapshotManifestPayload;
             signerKey: PublicSignKey;
             authorKey: string;
         };
+        type Checked =
+            | { kind: "invalid" }
+            | {
+                  kind: "empty" | "stale" | "candidate";
+                  id: string;
+                  createdAtWallMs: bigint;
+                  candidate: Candidate;
+              };
+        // Several peers (and the local index) can return the same manifest:
+        // one verdict per exact copy. A copy that differs in any byte is
+        // checked on its own, so a corrupted copy cannot shadow the genuine
+        // one.
+        const copyKey = (raw: BootstrapManifest) =>
+            `${raw.id}:${toBase64(raw.signatureBytes)}:${sha256Base64Sync(raw.payloadBytes)}`;
+        const checks = new Map<string, Promise<Checked>>();
+        const checkManifest = (raw: BootstrapManifest, key: string) => {
+            let checked = checks.get(key);
+            if (!checked) {
+                checked = this.checkBootstrapManifest(raw, config);
+                checks.set(key, checked);
+            }
+            return checked;
+        };
+        // Lets discovery stop waiting on silent neighbours once a remote
+        // peer has served a snapshot this joiner would install.
+        const usable = async (found: unknown[]) => {
+            for (const raw of found) {
+                if (
+                    !(raw instanceof BootstrapManifest) ||
+                    raw.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES
+                ) {
+                    continue;
+                }
+                const checked = await checkManifest(raw, copyKey(raw));
+                if (
+                    checked.kind === "candidate" &&
+                    (!this.trustGraph ||
+                        (await this.trustGraph.isTrusted(
+                            checked.candidate.signerKey
+                        )))
+                ) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const discovered = await this.discoverManifests(
+            signal,
+            config.discoveryTimeoutMs,
+            usable
+        );
+        throwIfAborted();
+        const deadline = this.clock() + config.discoveryTimeoutMs;
         // Per-stage rejection tally: surfaced in bootstrapStatus and the
         // "require" error so clock-skew or trust failures are diagnosable
         // instead of a silent fallback.
@@ -11099,53 +11504,42 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let stale = 0;
         let empty = 0;
         const candidates: Candidate[] = [];
-        for (const raw of results) {
+        // Each author's newest verified version counts once, as the index
+        // keeps one document per id; a lagging peer can still serve an
+        // older version of it.
+        const newest = new Map<string, Exclude<Checked, { kind: "invalid" }>>();
+        const copies = new Set<string>();
+        for (const raw of discovered.results) {
             if (!(raw instanceof BootstrapManifest)) {
                 continue;
             }
-            // The manifest arrived via query, pre-canPerform: verify it
-            // here against OUR trust graph — never trust the serving peer.
-            let signature: SignatureWithKey;
-            let payload: SnapshotManifestPayload;
-            try {
-                signature = deserialize(raw.signatureBytes, SignatureWithKey);
-                payload = deserialize(
-                    raw.payloadBytes,
-                    SnapshotManifestPayload
-                );
-            } catch {
+            if (raw.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES) {
                 invalid++;
                 continue;
             }
-            const authorKey = encodePublicSignKey(signature.publicKey);
-            if (
-                raw.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES ||
-                raw.id !== `bootstrap:${authorKey}` ||
-                !equalBytes(payload.storeId, this.id) ||
-                !(await verify(signature, raw.payloadBytes))
-            ) {
+            const key = copyKey(raw);
+            if (copies.has(key)) {
+                continue;
+            }
+            copies.add(key);
+            const checked = await checkManifest(raw, key);
+            if (checked.kind === "invalid") {
                 invalid++;
                 continue;
             }
-            if (payload.segments.length === 0) {
-                // A zero-document manifest (a creator's genesis) installs
-                // nothing, and its overlay would retire at once, counting as
-                // verified coverage and readiness evidence without covering
-                // any log entry, though a genesis can be older than the data.
-                // Plain-join instead: its replication is the evidence.
+            const kept = newest.get(checked.id);
+            if (!kept || checked.createdAtWallMs > kept.createdAtWallMs) {
+                newest.set(checked.id, checked);
+            }
+        }
+        for (const checked of newest.values()) {
+            if (checked.kind === "empty") {
                 empty++;
-                continue;
-            }
-            const age = this.clock() - Number(payload.createdAtWallMs);
-            if (age > config.maxSnapshotAgeMs) {
+            } else if (checked.kind === "stale") {
                 stale++;
-                continue;
+            } else {
+                candidates.push(checked.candidate);
             }
-            candidates.push({
-                payload,
-                signerKey: signature.publicKey,
-                authorKey,
-            });
         }
         if (candidates.length === 0) {
             this.emitManifestDiscoveryEnd(
@@ -11153,7 +11547,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 0,
                 0,
                 invalid,
-                stale
+                stale,
+                { targets: discovered.targets, zeroDocument: empty }
             );
             this.bootstrapFailure =
                 invalid + stale > 0
@@ -11206,7 +11601,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 candidates.length,
                 0,
                 invalid,
-                stale
+                stale,
+                { targets: discovered.targets, zeroDocument: empty }
             );
             this.bootstrapFailure = `${candidates.length} snapshot candidate(s) found, none from a trusted signer by the discovery deadline`;
             return false;
@@ -11226,7 +11622,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             candidates.length,
             trusted.length,
             invalid,
-            stale
+            stale,
+            { targets: discovered.targets, zeroDocument: empty }
         );
         this.bootstrapFailure = undefined;
         // Manifest-carried ADVISORY ignore patterns: installed into the
