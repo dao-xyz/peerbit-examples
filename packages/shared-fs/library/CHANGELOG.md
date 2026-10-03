@@ -1,5 +1,28 @@
 # @peerbit/shared-fs
 
+## 0.16.5
+
+### Patch Changes
+
+- 213c1ff: Fix a join that could stay write-gated on a quiet filesystem. This affected a
+  join that did not install a snapshot, such as a `bootstrap: false` open or one
+  whose peers had no usable snapshot. When the last batch of file metadata from
+  the other peers landed exactly as the local store finished opening, the joiner
+  lost track of it and waited for a new change before it allowed writes. If
+  nobody wrote again, it waited indefinitely.
+
+    Reopening the same filesystem object after closing it no longer leaves the
+    previous session's change handler running beside the new one.
+
+    These were found in code review, not reported by a user.
+
+- 0eca757: A joining peer becomes writable about a second sooner when both peers called
+  `peer.bootstrap()`. In that setup snapshot discovery waits out its 5 s
+  deadline, and the bootstrap decision used to settle just after a once-a-second
+  readiness check, so writes stayed blocked until the next one. The readiness
+  check now runs within about a tenth of a second of the decision settling. What
+  a join must see before it becomes writable is unchanged.
+
 ## 0.16.4
 
 ### Patch Changes
