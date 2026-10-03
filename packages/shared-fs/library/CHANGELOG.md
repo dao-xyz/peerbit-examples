@@ -1,5 +1,86 @@
 # @peerbit/shared-fs
 
+## 0.16.4
+
+### Patch Changes
+
+- ca4e7ae: Stop asking each directly connected peer for the filesystem's subscribers on
+  open. shared-fs added this in 0.15.0 after a cold join in CI waited 90 s with
+  "Path does not exist", because the joiner never learned that the replicator
+  next to it held the filesystem. Since the Peerbit 5.4.9 cohort, pubsub covers
+  the same neighbours with its own direct exchange: it sends each direct
+  neighbour its subscriptions, with a request to answer, when it subscribes and
+  when a neighbour's stream opens. In normal operation the shared-fs request is
+  therefore redundant.
+
+    A cold-join soak of the multi-party workload with the shared-fs request
+    turned off stalled 0 of 1,500 times on Peerbit 5.4.10, against 3 of 542 on
+    5.4.6 (Fisher p=0.019; 95% upper bound 0.2%). Cold-join time did not change
+    (median 1.41 s without it, 1.47 s with it).
+
+    One induced case is not covered. When a test drops every subscription
+    announcement the joiner sends for the log topic, including the direct one to
+    its neighbour, and the joiner happens to be that topic's shard root, the join
+    stalls without the shared-fs request (10 of 10 runs on 5.4.10) and recovers
+    with it (0 of 10). The joiner then finds no snapshot and stays write-gated
+    rather than becoming writable. This needs the direct neighbour message itself
+    to be lost, which never happened in the soak, and the fix belongs in Peerbit:
+    the shard root should announce again once it subscribes. A new test checks
+    that pubsub keeps sending the direct exchange.
+
+- 562dd09: A fresh join no longer stays write-gated for ten minutes or more when the
+  donor's files reach it while its store is still opening. That happens when the
+  open is slow, for example on a heavily loaded machine, so the donor's history
+  arrives before the joiner's own store has finished opening. The join then
+  treated the files it had just received as a partial bootstrap left by an
+  interrupted earlier session. When the donor had no snapshot to install, the
+  join held the unverified posture, which lifts only after two quiet checks five
+  minutes apart. The same mix-up held a `bootstrap: false` retry of a stopped
+  join in that posture too.
+
+    The join now checks what the store held before it stores anything it receives,
+    so only files an earlier session stored count as a partial bootstrap. A fresh
+    join without a snapshot now joins plainly and becomes write-ready after the
+    usual remote evidence and quiet window. A store with files from an interrupted
+    earlier session still reopens in the unverified posture, and a marker left by a
+    bootstrap that retired unverified keeps that posture.
+
+    No user reported this. A test that slowed the store open by 3 seconds found it:
+    the join was not write-ready within 45 seconds in both runs, and was ready in
+    about 6 seconds without the delay. New tests hold the open until the donor's
+    files have arrived, and they fail without the fix.
+
+- 1555c79: A joining peer no longer spends about 15 s looking for a snapshot when it is
+  also connected to peers that do not run the filesystem, such as the public
+  relays `peer.bootstrap()` dials. Those peers never answer, and the snapshot
+  query waited 5 s for them three times. The query now asks each peer
+  separately, with one deadline (`discoveryTimeoutMs`, 5 s by default) and one
+  repeat at half of it:
+    - When a peer has served a usable snapshot, discovery ends as soon as the
+      peers visible as running the filesystem have answered. In the tests that
+      takes tens of milliseconds.
+    - When no usable snapshot has arrived, discovery waits for every connected
+      peer until the deadline, once. A peer that never answers cannot be told
+      apart from a donor whose answer is still on its way, so an empty answer
+      from one peer does not end the wait for another. An address-open that sees
+      no peer running the filesystem now also waits up to `discoveryTimeoutMs`
+      for one before it falls back, instead of falling back at once.
+
+    Connected peers are asked before they show up as filesystem peers, so a
+    connected donor whose subscription has not arrived yet is still found if it
+    answers before the deadline. A donor that is neither connected directly nor
+    visible yet can still be missed. The joiner then replicates normally, without
+    the snapshot speed-up.
+
+    Copies of a manifest served by several peers are now checked one by one, so a
+    corrupted copy no longer hides the genuine one. Each author's newest manifest
+    counts once in `candidates`.
+
+    The `manifest-discovery:end` telemetry event gains `targets` (peers asked)
+    and `zeroDocument`. A creator's genesis manifest, published before anything
+    was written, installs nothing and was reported only as "0 candidates". It is
+    now counted in `zeroDocument`.
+
 ## 0.16.3
 
 ### Patch Changes
