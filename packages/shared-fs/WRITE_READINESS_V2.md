@@ -4,7 +4,9 @@ Status: design for owner review, revised after a 25-finding review (see "Review
 notes" at the end), then revised again on 2026-10-05 after a benchmark of six
 proof mechanisms (section 11.1). That revision replaced the proof mechanism:
 salted `u64` lists and per-session RIBLT became a maintained coded prefix plus
-a set hash. Nothing is implemented. Code refs: `origin/master`
+a set hash. The M0 probes ran on 2026-10-05; section "M0 results" lists what
+they changed, and **D3 is back with the owner** (K0 fired). Nothing is
+implemented. Code refs: `origin/master`
 `2fd4f64b` (0.16.5, Peerbit 5.4.10, `@peerbit/shared-log` 16.0.40,
 `@peerbit/document` 15.1.11). `src/index.ts:N` is
 `packages/shared-fs/library/src/index.ts` (16,859 lines). `@peerbit/<pkg> file.js:N`
@@ -54,6 +56,7 @@ directions:
 | The window certifies partial views at 6k files                      | ready at 62-97 s (n=4) with 5,846/6,060 naming and 5,783/6,000 version rows, and 5,872/5,779 in another run (counted in 2 runs) | `evidence/semantic-safety/results.ndjson`                               |
 | A wrong "ready" is not loss-free                                    | an equal-bytes save is silently lost; a `mkdir` splits a directory; a stale edit can win                                        | `evidence/correctness-model/zz-staleview.out`; `src/index.ts:6651-6669` |
 | The prototype of this design                                        | 1 file 0.31 s, 400 files 0.95-0.99 s, donor writing every 1 s 0.66 s                                                            | `evidence/upstream-sync/reconcile-run2.out` (in-process, section 6)     |
+| The chosen mechanism, cross-process over one-way RPC (M0 P5, n=20)  | 1 file p50 0.28-0.36 s (today 5.45-5.49 s); donor writing every 1 s p50 0.82-0.93 s, 20/20 ready (today 0/20)                   | `evidence/m0/p5/README.md` (section "M0 results")                       |
 | The proof mechanism chosen on 2026-10-05 (simulated WAN, 100k rows) | rejoin with nothing missing: 64 ms, 388 B, 1 round trip; 1,000 missing: 426 ms, 87.5 kB, 3 round trips                          | `sota/c4/out/table-arms-wan.md` (microbenchmark, section 6.1)           |
 
 **What changes.**
@@ -62,9 +65,11 @@ directions:
   messages and a new store salt. This is a format break with no migration (D5).
 - Every peer keeps two small structures over its namespace rows, updated on
   each write: the first 4,096 cells of a rateless IBLT (180 KB) and an
-  LtHash32 set hash (4 KB). They cost about 0.3 µs plus 2.1 µs per write
-  (measured separately; about 2.4 µs together, an estimate) and are persisted
-  across restarts (D15, D17).
+  LtHash32 set hash (4 KB), plus a map from document id to current head
+  (about 13 MB at 200k rows). Measured in the product's change tap (M0 P4),
+  the anchor's cost grows with heap size, so it runs in a worker thread; the
+  main thread then pays about 2-6 µs per row change (p50). All three are
+  persisted across restarts (D15, D17).
 - The quiet window, the 1 s re-check poll, the 100 ms double check, the
   "remote evidence" flag and its profile-event capture, and the private read of
   `syncronizer.pending` all go (`src/index.ts:10161-10188`, `10314-10471`,
@@ -105,24 +110,24 @@ never a wrong ready. The end state is the same structure inside shared-log
 
 ### 2.1 Terms
 
-| Term            | Meaning                                                                                                                                                                                                                                                                                          |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Namespace row   | A `NamingEvent`, `FileVersion` or `ChangesetManifest` in the entries index. Not `FileChunk` or `BootstrapManifest`.                                                                                                                                                                              |
-| Trust row       | A row of the `TrustedNetwork` trust graph (access-controlled stores only). It lives in a separate log, `trustGraph.log`.                                                                                                                                                                         |
-| Entry           | The log entry behind a row. Identified by its hash (`__context.head`), which covers the row bytes and the signature.                                                                                                                                                                             |
-| Element         | The full 32-byte entry hash. No salt, no truncation.                                                                                                                                                                                                                                             |
-| Snapshot S_R(t) | The set of elements of every live namespace (or trust) row of R at one epoch, frozen at time t_R. R freezes it by copying its cells and anchor.                                                                                                                                                  |
-| Live row        | A row in the scope's index. A row leaves the live set when a CUT or a later put of the same document replaces it.                                                                                                                                                                                |
-| Anchor          | R's LtHash32 set hash of its live rows: 1,024 lanes of 32 bits, each element expanded to 4 KB and added lane-wise mod 2^32. D_R = sha256 of the lanes at the snapshot.                                                                                                                           |
-| Cells           | The first M = 4,096 coded cells of a rateless IBLT over the live rows. A cell is the XOR of 32-byte hashes, the XOR of a keyed 64-bit checksum, and a count (44 B). They are a hint: they say which elements differ, never whether J is done.                                                    |
-| Contained       | Every entry of S_R(t_R) is indexed by J (J's index of that scope has a row whose `__context.head` is that entry), or is explained. `Log.has` alone is not enough: the log commits before the index (`@peerbit/log log.js:3756`, `3785`).                                                         |
-| Explained       | J will correctly never index it: J's log of that scope holds an entry whose `meta.next` includes it (superseded), or J's `canPerform` rejected it under the rules of section 4.6.                                                                                                                |
-| Visible         | Subscribed to the readiness topic, or listed by the scope log's `getReplicators()`.                                                                                                                                                                                                              |
-| Connected       | A readiness-topic subscriber that pubsub has not dropped. Pubsub emits `unsubscribe` when a peer becomes unreachable and when its session resets (`@peerbit/pubsub index.js:3328-3351`).                                                                                                         |
-| Live            | A visible peer that is not connected but has sent J something since J opened: a replication announcement (`replicator:join`, `replication:change`), a readiness message, or a subscribe. A peer whose readiness Subscribe was lost (U-1) but whose replication traffic arrives is live.          |
-| Qualified donor | In the `HeaderV1` of the session that J contained, R reported `writeReady`, a source in {creator, reconciled, warm, operator} (M2: `warm-fresh` instead of `warm`), a full replica, the same format, and, in access-controlled stores, an identity in J's trusted set. A notice never qualifies. |
-| Required        | The connected and live visible peers at the moment of evaluation, plus any peer with a session in flight, plus any `left-unanswered` peer (section 4.7). Never frozen.                                                                                                                           |
-| Dominance       | Every naming and content head in S is in J or is an ancestor of a row in J. Containment implies dominance. Every needless conflict type comes from a write that ignores an existing head (correctness map §2).                                                                                   |
+| Term            | Meaning                                                                                                                                                                                                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Namespace row   | A `NamingEvent`, `FileVersion` or `ChangesetManifest` in the entries index. Not `FileChunk` or `BootstrapManifest`.                                                                                                                                                                                     |
+| Trust row       | A row of the `TrustedNetwork` trust graph (access-controlled stores only). It lives in a separate log, `trustGraph.log`.                                                                                                                                                                                |
+| Entry           | The log entry behind a row. Identified by its hash (`__context.head`), which covers the row bytes and the signature.                                                                                                                                                                                    |
+| Element         | The full 32-byte entry hash. No salt, no truncation.                                                                                                                                                                                                                                                    |
+| Snapshot S_R(t) | The set of elements of every live namespace (or trust) row of R at one epoch, frozen at time t_R. R freezes it by copying its cells and anchor.                                                                                                                                                         |
+| Live row        | A row in the scope's index. A row leaves the live set when a CUT or a later put of the same document replaces it.                                                                                                                                                                                       |
+| Anchor          | R's LtHash32 set hash of its live rows: 1,024 lanes of 32 bits, each element expanded to 4 KB and added lane-wise mod 2^32. D_R = sha256 of the lanes at the snapshot.                                                                                                                                  |
+| Cells           | The first M = 4,096 coded cells of a rateless IBLT over the live rows. A cell is the XOR of 32-byte hashes, the XOR of a keyed 64-bit checksum, and a count (44 B). They are a hint: they say which elements differ, never whether J is done.                                                           |
+| Contained       | Every entry of S_R(t_R) is indexed by J (J's index of that scope has a row whose `__context.head` is that entry), or is explained. `Log.has` alone is not enough: the log commits before the index (`@peerbit/log log.js:3756`, `3785`).                                                                |
+| Explained       | J will correctly never index it: J's log of that scope holds an entry whose `meta.next` includes it (superseded), or J's `canPerform` rejected it under the rules of section 4.6.                                                                                                                       |
+| Visible         | Subscribed to the readiness topic, or listed by the scope log's `getReplicators()`.                                                                                                                                                                                                                     |
+| Connected       | A readiness-topic subscriber that is reachable on the route table now (`pubsub.routes.isReachable`, re-read on libp2p `peer:disconnect` / `peer:connect` and fanout `peer:unreachable`). Pending D3: M0 P1 found that pubsub never drops a dead subscriber on its fanout parent (section "M0 results"). |
+| Live            | A visible peer that is not connected but has sent J something since J opened: a replication announcement (`replicator:join`, `replication:change`), a readiness message, or a subscribe. A peer whose readiness Subscribe was lost (U-1) but whose replication traffic arrives is live.                 |
+| Qualified donor | In the `HeaderV1` of the session that J contained, R reported `writeReady`, a source in {creator, reconciled, warm, operator} (M2: `warm-fresh` instead of `warm`), a full replica, the same format, and, in access-controlled stores, an identity in J's trusted set. A notice never qualifies.        |
+| Required        | The connected and live visible peers at the moment of evaluation, plus any peer with a session in flight, plus any `left-unanswered` peer (section 4.7). Never frozen.                                                                                                                                  |
+| Dominance       | Every naming and content head in S is in J or is an ancestor of a row in J. Containment implies dominance. Every needless conflict type comes from a write that ignores an existing head (correctness map §2).                                                                                          |
 
 ### 2.2 What "ready" proves after this change
 
@@ -142,8 +147,10 @@ When a fresh address-open of a full replica turns `writeReady` with source
    header, or a hash R's cells or list named whose fetched entry is not a row
    of that scope), or has left (recorded in `gaps` when J still lacked its rows,
    D4). Silence, `BUSY`, slowness and fetch timeouts never exclude a Required
-   peer. This item assumes pubsub eventually drops dead subscribers; M0 probe
-   P1 checks it, and K0 says what changes if it does not.
+   peer. M0 P1 showed that pubsub does not reliably drop dead subscribers, so
+   "left" is read from route reachability instead (pending D3). A hung peer
+   whose sockets stay open never leaves; it keeps J gated until the caller's
+   timeout.
 3. **Non-vacuous.** At least one peer in C qualified in the `HeaderV1` of the
    same session that J contained. A `StateNoticeV1` from a peer that J
    contained while that peer was gated only starts a new session with it, so a
@@ -168,25 +175,28 @@ Readiness chains: a qualified donor was itself proven, or created the store.
 
 ### 2.3 What "ready" does not prove
 
-| Not proven                                                                                                            | Why                                                                       | What we do                                                                  |
-| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Rows held only by peers J cannot see (lost Subscribe with no other traffic, U-1; offline writers; stale creator, U-7) | No local mechanism can see them                                           | Stated in README; `writersUnheard` telemetry; optional frontier layer (M4)  |
-| Rows any peer received after its snapshot                                                                             | Snapshot semantics; such writes are concurrent with J by definition       | Normal sync and conflict handling                                           |
-| Rows of a peer that became visible only after ready                                                                   | The decision is made at one moment                                        | Same as above                                                               |
-| Rows of a peer that left before answering and never came back                                                         | J never learned its set                                                   | Recorded as `gaps: {peer, missing: "unknown"}` (D4)                         |
-| That a peer told the truth                                                                                            | Under-reporting looks like a lagging donor                                | Every Required peer must be contained, so one liar wins only if it is alone |
-| That chunk bytes are present                                                                                          | A write needs chunk ids, not bytes                                        | Reads wait for chunks, as today                                             |
-| Freshness of a warm reopen                                                                                            | Warm reopens trust their persisted proof (offline-first)                  | M2 freshness check and `warm-fresh`; opt-in `requireFreshOnReopen`          |
-| GC safety                                                                                                             | Not readiness's job; arrival-age shields protect GC (at least 1 h to 2 d) | Unchanged; scheduled GC also gated on readiness now                         |
-| Revocation enforcement                                                                                                | J cannot tell pre-revocation history from later writes                    | Unchanged (README "trust")                                                  |
-| Write-path losses E1 (equal-bytes save) and E2 (mode/mtime-only change)                                               | These come from the write path, not from readiness                        | Separate fix (D9)                                                           |
+| Not proven                                                                                                            | Why                                                                       | What we do                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Rows held only by peers J cannot see (lost Subscribe with no other traffic, U-1; offline writers; stale creator, U-7) | No local mechanism can see them                                           | Stated in README; `writersUnheard` telemetry; optional frontier layer (M4)                                                               |
+| Rows any peer received after its snapshot                                                                             | Snapshot semantics; such writes are concurrent with J by definition       | Normal sync and conflict handling                                                                                                        |
+| Rows of a peer that became visible only after ready                                                                   | The decision is made at one moment                                        | Same as above                                                                                                                            |
+| Rows of a peer that left before answering and never came back                                                         | J never learned its set                                                   | Recorded as `gaps: {peer, missing: "unknown"}` (D4)                                                                                      |
+| That a peer told the truth                                                                                            | Under-reporting looks like a lagging donor                                | Every Required peer must be contained, so one liar wins only if it is alone                                                              |
+| That chunk bytes are present                                                                                          | A write needs chunk ids, not bytes                                        | Reads wait for chunks, as today                                                                                                          |
+| Freshness of a warm reopen                                                                                            | Warm reopens trust their persisted proof (offline-first)                  | M2 freshness check and `warm-fresh`; opt-in `requireFreshOnReopen`                                                                       |
+| GC safety                                                                                                             | Not readiness's job; arrival-age shields protect GC (at least 1 h to 2 d) | Unchanged; scheduled GC also gated on readiness now                                                                                      |
+| Revocation enforcement                                                                                                | J cannot tell pre-revocation history from later writes                    | Unchanged (README "trust")                                                                                                               |
+| That a revoked grant stays revoked at a fresh J                                                                       | A fresh J never receives a revocation CUT for a grant it never held (P3)  | A stale peer can re-introduce the grant until a CUT holder re-offers the CUT (about 1 s while connected); stated in README and the proof |
+| Write-path losses E1 (equal-bytes save) and E2 (mode/mtime-only change)                                               | These come from the write path, not from readiness                        | Separate fix (D9)                                                                                                                        |
 
 ### 2.4 Scenarios: today vs proposed
 
 | Scenario                                                       | Today (5 s window)                                                           | Proposed                                                                                        |
 | -------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Plain dial, 1-file store, idle donor                           | 5.34 s, measured                                                             | 0.3-0.6 s estimated cross-process; 0.31 s measured in-process                                   |
-| Donor saving every 1 s                                         | never; mount fails at 120 s                                                  | 0.66 s measured in-process                                                                      |
+| Plain dial, 1-file store, idle donor                           | 5.34 s, measured                                                             | p50 0.28-0.36 s, p95 0.43-0.53 s, measured cross-process (M0 P5, n=20 per batch)                |
+| Donor saving every 1 s                                         | never; mount fails at 120 s                                                  | p50 0.82-0.93 s, p95 1.13-1.81 s, measured cross-process (M0 P5)                                |
+| A visible peer crashes (`kill -9`) before answering            | not applicable                                                               | leaves within 4-24 ms on the transport event; `left-unanswered`, then `gaps` (pending D3)       |
+| A visible peer hangs with its sockets open                     | not applicable                                                               | stays Required; gated until the caller's timeout, which names it as reachable and silent        |
 | 6k-file join                                                   | ready at 62-97 s (n=4); 3-4% of namespace rows missing in the 2 runs counted | ready only when every row of every Required peer is indexed (73-99 s today for the whole store) |
 | Donor holds only the genesis manifest, both call `bootstrap()` | about 5.7 s (5 s discovery deadline)                                         | same in M1; under 1 s estimated in M2 (decision on a complete answer)                           |
 | Busy live creator plus a stale warm replica, both visible      | ready once arrivals pause for 5 s, may miss the creator's rows               | gated until the creator answers and is contained, however late                                  |
@@ -241,8 +251,9 @@ Two adjacent gaps found while mapping the contract:
 ### 4.1 Overview
 
 ```text
-every peer, always, per scope, from the change tap (about 2.4 µs per row change, estimate):
-  cells[0..4096) ^= hash, checksum, ±1      anchor[0..1024) ±= AES-256-CTR(key = hash)
+every peer, always, per scope, from the change tap (main thread 2-6 µs p50 per row change, M0 P4):
+  idHead[id] = head (replace: old head out, new head in; verified against the index)
+  cells[0..4096) ^= hash, checksum, ±1      worker: anchor[0..1024) ±= AES-256-CTR(key = hash)
 
 J opens (fresh, full replica, gated)
   │
@@ -252,10 +263,10 @@ J opens (fresh, full replica, gated)
   │     OpenV1{count_J, hlcProved, above_J} ──► R copies cells + anchor (the snapshot, < 1 ms)
   │     ◄── HeaderV1{count, D_R, hlc, above_R} (+ the first cells when the gap is small)
   │     set hashes match ──► contained in 1 round trip
-  │     gap large (> 2,800) ──► wait for Peerbit sync to shrink it (arrival events)
+  │     gap > 256 while sync delivers, or > 2,800 ──► wait for Peerbit sync to shrink it (arrival events)
   │     peel R's cells − J's cells ──► R\J hashes (drain by events, else join(hashes))
   │                                    J\R hashes (into X)
-  │     explained R\J hashes (superseded / rejected) ──► E
+  │     explained R\J hashes (superseded / ignored-older / rejected) ──► E
   │     contained ⇔ nothing pending ∧ sha256(LtHash(S_J) − LtHash(X) + LtHash(E)) == D_R
   │     mismatch ──► re-peel; one fresh session; then the exact hash list (recovery)
   │     provable lie → excluded; fetch failed → retried on R's next sign of life or arrival
@@ -346,14 +357,14 @@ scope's log id (the entries log for `NAMESPACE_V1`, `trustGraph.log` for
 does not match its scope, gets `ErrorV1{UNSUPPORTED}` or is dropped. It is
 never read as empty.
 
-| J to R                                                                           | R to J                                                                                                     | Notes                                                                                                                                                                                                                                                                                           |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OpenV1{sessionId[16], scopes, attempt:u8, count:u32, hlcProved:u64, above:u32}` | `HeaderV1{sessionId, scope, provenance, count:u32, anchor[32], hlc:u64, above:u32, cells[≤480]}` per scope | every attempt of one session gets the same snapshot; `anchor` is D_R; `hlc` is the highest entry timestamp in the snapshot; `above` counts rows newer than J's `hlcProved` on each side; R pushes the first cells when 0 < gapEst ≤ 256 (4.5 step 4); `TRUST_V1` is frozen after `NAMESPACE_V1` |
-| `CellsReqV1{sessionId, scope, from:u32, to:u32}`                                 | `CellsV1{sessionId, scope, from, cells[]}`                                                                 | 44 B per cell (32 B XOR of hashes, 8 B XOR of checksums, 4 B count); at most 4,096 cells (180 KB) per session                                                                                                                                                                                   |
-| `ListPageV1{sessionId, scope, offset:u32}`                                       | `ListV1{sessionId, scope, offset, hashes:[32][≤2,048], done:bool}`                                         | recovery only (4.5 step 10); 64 KiB pages; checked against the header's count and anchor                                                                                                                                                                                                        |
-| `CloseV1{sessionId}`                                                             | none                                                                                                       | frees R's state early                                                                                                                                                                                                                                                                           |
-| any                                                                              | `ErrorV1{sessionId, code: BUSY \| UNSUPPORTED \| EXPIRED \| SCOPE}`                                        | explicit refusals; `BUSY` promises a `StateNoticeV1` when capacity frees; `EXPIRED` makes J open a new session                                                                                                                                                                                  |
-| none                                                                             | `StateNoticeV1{openNonce, provenance, reason}`                                                             | sent with `to:` each peer that had a session or a `BUSY` with R in this open (at most 256), when R becomes ready or `warm-fresh`, or frees capacity                                                                                                                                             |
+| J to R                                                                           | R to J                                                                                                     | Notes                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OpenV1{sessionId[16], scopes, attempt:u8, count:u32, hlcProved:u64, above:u32}` | `HeaderV1{sessionId, scope, provenance, count:u32, anchor[32], hlc:u64, above:u32, cells[≤480]}` per scope | every attempt of one session gets the same snapshot; `anchor` is D_R; `hlc` is the highest `__context.modified` (entry wall time, u64 ns) in the snapshot; `above` counts rows newer than J's `hlcProved` on each side; R pushes the first cells when 0 < gapEst ≤ 256 (4.5 step 4); `TRUST_V1` is frozen after `NAMESPACE_V1` |
+| `CellsReqV1{sessionId, scope, from:u32, to:u32}`                                 | `CellsV1{sessionId, scope, from, cells[]}`                                                                 | 44 B per cell (32 B XOR of hashes, 8 B XOR of checksums, 4 B count); at most 4,096 cells (180 KB) per session                                                                                                                                                                                                                  |
+| `ListPageV1{sessionId, scope, offset:u32}`                                       | `ListV1{sessionId, scope, offset, hashes:[32][≤2,048], done:bool}`                                         | recovery only (4.5 step 10); 64 KiB pages; checked against the header's count and anchor                                                                                                                                                                                                                                       |
+| `CloseV1{sessionId}`                                                             | none                                                                                                       | frees R's state early                                                                                                                                                                                                                                                                                                          |
+| any                                                                              | `ErrorV1{sessionId, code: BUSY \| UNSUPPORTED \| EXPIRED \| SCOPE}`                                        | explicit refusals; `BUSY` promises a `StateNoticeV1` when capacity frees; `EXPIRED` makes J open a new session                                                                                                                                                                                                                 |
+| none                                                                             | `StateNoticeV1{openNonce, provenance, reason}`                                                             | sent with `to:` each peer that had a session or a `BUSY` with R in this open (at most 256), when R becomes ready or `warm-fresh`, or frees capacity                                                                                                                                                                            |
 
 There is no resolve message: a peeled cell yields an entry hash, and J pulls
 it with `SharedLog.join`. The cell format is our own and is not
@@ -374,8 +385,9 @@ Answers are capped at 256 KiB. A peer that sends more is `inconsistent`.
 
 ### 4.4 Maintained structures and responder rules
 
-Every open replica keeps two structures per scope, whether gated or not,
-because it needs them both to answer and to join:
+Every open replica keeps three structures per scope, whether gated or not,
+because it needs them to answer and to join (the id map was added after M0
+P2(c) and P4):
 
 - **Cells.** The first M = 4,096 cells of a rateless IBLT over its live rows,
   as in Yang, Gilad and Alizadeh (section 11.1). A cell is the XOR of 32-byte
@@ -389,27 +401,66 @@ because it needs them both to answer and to join:
 - **Anchor.** An LtHash32 set hash: 1,024 lanes of 32 bits (4 KB). An element
   is expanded to 4 KB of AES-256-CTR keystream, keyed by the entry hash itself,
   with a fixed IV per scope as the domain tag, and added lane by lane mod 2^32.
-  A removal subtracts. Measured 2.10 µs per element in isolation (D17).
+  A removal subtracts. Measured 2.10 µs per element in isolation (D17). In
+  the product process the same expansion costs 2.6-7.6 µs and grows with heap
+  size (6.4-7.7 µs at a 477 MB heap, 20-52 µs at 1.9 GB), because every
+  expansion allocates a 4 KiB external buffer (M0 P4). ChaCha20 and BLAKE3
+  allocate the same way. So the anchor lives in a worker thread, fed batches
+  of 32-byte digests (2.2-2.9 µs per element at any main heap size).
+- **Id map.** A map from a document-id hash to its current head, so a replace
+  can subtract the head it replaced. Compact form (open addressing on a
+  64-bit id hash, plus a slab of 32-byte digests): about 57-63 B per row,
+  12.7 MB at 200k rows and 57 MB at 1M (measured; a `Map<string,string>` is
+  175-243 B per row).
 
 **Upkeep from the change tap.** One cell walk and one anchor update per added
 or removed row. A CUT emits `removed`. A replace emits only `added`
-(`@peerbit/document program.js:3390-3432`, primitives map A6). The new entry's
-`meta.next[0]` names the head it replaced when Documents accepts the put as a
-successor (`@peerbit/document program.js:1785`), so the tap subtracts that head.
-M0 P2(c) checks that a replace always names the head it replaced. If not, the
-tap keeps a map from a document-id hash to its current head (about 3-5 MB at
-200k rows, estimate). The tap is idempotent: it compares the index row's old
-and new head, so a re-delivered event changes nothing. Cost: about 0.25 µs for
-the cells and 2.1 µs for the anchor, about 2.4 µs per change together
-(estimate from measured parts; section 6).
+(`@peerbit/document program.js:3390-3432`, primitives map A6), and the new
+entry does not reliably name the head it replaced: a `unique` put carries
+`meta.next = []` (`program.js:2065`, `2090`), and shared-fs makes such puts
+on most paths (`src/index.ts:4390`, `5970`); a remote fork names its own
+parent (M0 P2(c), P4). So the tap reads the old head from the id map, not
+from `meta.next` (that rule is dropped). Rules from M0 P4, each one a test:
 
-**Seed and restart.** A peer persists its cells and anchor (184 KB per scope)
-at clean close, next to the sidecar, and deletes the file when the store opens.
-Restoring took 16 ms at 200k rows against 1.28 s for a rebuild by one
-projected index scan (measured, section 6). A crash leaves no file, so the
-next open always rebuilds. A request that arrives during the rebuild waits for
-it. A shadow check in tests compares the maintained structures with a fresh
-build after every session (K2).
+- Scope rows by class (`instanceof NamingEvent`, `FileVersion`,
+  `ChangesetManifest`), never by `value.kind`: `kind` is a plain initializer
+  (`model.ts:196`) and is absent on removed values, remote arrivals and
+  Guard D re-puts.
+- Read `__context` synchronously in the listener; the event value can be the
+  caller's object, which a later put mutates.
+- Ignore empty change events (ignored older arrivals and CUTs with no row
+  dispatch `{added: [], removed: []}`).
+- **Replace verify.** Documents can dispatch the event of an older entry after
+  the event of the newer one that the index kept (concurrent same-id writes,
+  `program.js:3912`); a tap that trusted event order diverged in 4 of 4
+  two-peer runs. On every replace or stale removal the tap re-reads that id's
+  indexed head (serialized, with a per-id version so a newer event retries)
+  and reconciles map, cells and anchor. That made 3 of 3 runs match a fresh
+  build, at 57-78 µs per verify, async, on replaces only.
+- Attach before `entries.open()` starts ingesting, as `freshOpenListener` does
+  (`src/index.ts:3487`), or build from a scan while queueing events and apply
+  them under the idempotent and verify rules.
+- Feed the cells 32-byte digests. Decoding the head string with base58btc
+  costs 2.0-2.6 µs; a fixed-shape decoder for these CIDs costs 0.37-0.45 µs
+  with 0 mismatches over 50k real heads.
+
+The tap is idempotent: it compares the id map's old head with the new one, so
+a re-delivered event changes nothing (50 of 50 skipped). Cost per row change,
+p50 at 50k-200k rows: 5.5-15 µs for an add and 9.5-35 µs for a replace with
+the anchor inline; 1.8-2.6 µs and 3.2-5.6 µs on the main thread with the
+anchor in a worker (M0 P4). That is 0.2-0.8% of `writeBatch` time per file.
+
+**Seed and restart.** A peer persists its cells, anchor and id map at clean
+close, next to the sidecar, and deletes the file when the store opens. The
+order is: detach the listener, drain writes and Guard D re-puts, then write;
+a snapshot taken before `peer.stop()` missed late Guard D re-puts. Restoring
+cells and anchor took 0.08-0.78 ms and the map 57-131 ms (as text at 204k
+rows; about 8 MB in the compact binary form), against a rebuild of 2.0-4.0 s
+at 204k rows (projected scan 1.1-2.2 s plus build 0.9-1.8 s) and 0.45-0.55 s
+at 54k (M0 P4). A crash leaves no file, so the next open always rebuilds. A
+request that arrives during the rebuild waits for it. A shadow check in tests
+compares the maintained structures with a fresh build after every session
+(K2).
 
 **Responder rules.**
 
@@ -418,9 +469,12 @@ build after every session (K2).
   persisted.
 - **Snapshot.** R copies its cells and anchor lanes at one epoch and hashes the
   lanes: D_R = sha256(lanes). It also records its live count and `hlc`, the
-  highest entry timestamp among its live rows (tracked on insert, so it never
-  decreases). Every row in S_R has a timestamp at or below `hlc`. A freeze took
-  0.04-1.1 ms (medians, simulated, under load). Every session opened at the
+  highest `__context.modified` among its live rows (the entry's wall time in
+  u64 ns; tracked on insert, so it never decreases). Every row in S_R has a
+  timestamp at or below `hlc`. With the anchor in a worker, the freeze is a
+  sequence-numbered request for the lanes at a point in the tap's stream:
+  p50 52-167 µs, p99 0.39-6.8 ms round trip at 50k-200k rows (inline it was
+  p50 16-31 µs). Every session opened at the
   same epoch shares the copy. t_R is the freeze time. With both scopes, R
   freezes `TRUST_V1` after `NAMESPACE_V1`. Later writes change R's live
   structures, never the snapshot.
@@ -428,7 +482,8 @@ build after every session (K2).
   `hlcProved`. R computes the same gap estimate J will (4.5 step 4) and, when
   it is between 1 and 256, sends the first cells with the header. There is no
   encoder to build and no scan.
-- **Caps.** 4 sessions per peer and 16 in total. A live snapshot costs 184 KB,
+- **Caps.** 4 sessions per peer and 16 in total. A live snapshot costs 184 KB
+  (the id map is not part of it),
   so 16 sessions hold about 3 MB. Beyond any cap R replies `BUSY` and remembers
   the requester for a `StateNoticeV1`. A session expires after 30 s idle
   (memory bound, never evidence).
@@ -446,10 +501,15 @@ build after every session (K2).
 2. `count == 0`: R's scope is empty; R is contained at once (the genesis-only
    creator case).
 3. **Rows R cannot hold.** J's live rows with a timestamp above R's `hlc` are
-   not in S_R, so they start in X. Call their number k. J finds them with a
-   range query on the entry timestamp, or from an 8-byte timestamp per row kept
-   while gated (about 10 MB at 1M rows, the harness's peak; M0 P4 picks). Then
-   the **fast path**: if `count_R == count_J − k` and
+   not in S_R, so they start in X. Call their number k. J finds them with an
+   index range query (M0 P4): `IntegerCompare({key: ['__context','modified'],
+compare: Greater, value: hlc})` plus an `Or` of `StringMatch` on the three
+   namespace kinds. It was exact for k = 0-10,000. `count()` takes 0.01-0.87 ms
+   for any k, so J uses it for the gap estimate and iterates only to build X
+   (3.8-5.3 ms at k = 1,000). SQLite builds the needed indexes lazily on the
+   first such query (0.6-1.2 s at 204k rows), so J issues one at open, off the
+   critical path. No per-row timestamp table is kept. Rows at exactly `hlc` are
+   treated as possibly in S_R; the anchor decides. Then the **fast path**: if `count_R == count_J − k` and
    `sha256(LtHash(S_J) − LtHash(X)) == D_R`, R is contained after one round
    trip, about 0.4 kB. The anchor check is exact, so this is a proof, not a
    guess.
@@ -458,15 +518,21 @@ build after every session (K2).
    section 11.1, untested) catches an equal-count gap: J lacks some of R's rows and
    holds as many that R lacks. A count difference alone misses it and restarts
    the doubling from the smallest prefix (848 ms, 175 kB and 10 round trips in
-   the measured interleaved case, section 6.1).
-5. **Large gap: let Peerbit sync work.** If gapEst > 2,800 (M / 1.45), J asks
-   for no cells. Peerbit's own sync is already moving the rows. J recomputes
-   gapEst on each namespace arrival, O(1), and asks for cells once it is at
-   most T = 256. This is the fresh-join path: the proof cost 2.1-11.5 kB in
-   total and finished 38-62 ms after the last row arrived (simulated WAN,
-   10k-1M rows). If no namespace row arrives during a whole request attempt
-   while the gap is still large, J switches to the recovery list (step 10).
-   That attempt bounds a request; it never makes J ready.
+   the measured interleaved case, section 6.1). When `hlcProved = 0` the second
+   term is off: "above 0" is every row, so it would equal count_R + count_J
+   and make every first join look like a huge gap (M0 P5).
+5. **Large gap: let Peerbit sync work.** If gapEst > 256 and Peerbit's sync
+   has delivered a namespace row since J opened (sync is delivering), or if
+   gapEst > 2,800 (M / 1.45), J asks for no cells. J recomputes gapEst on each
+   namespace arrival, O(1), and asks for cells once it is at most T = 256.
+   This is the fresh-join path: the proof cost 2.1-11.5 kB in total and
+   finished 38-62 ms after the last row arrived (simulated WAN, 10k-1M rows).
+   Cross-process (M0 P5, 805 rows), peeling at once at gapEst ≤ 2,800 fetched
+   1,472 cells (65 kB), while waiting for T = 256 sent 3.0 kB at the same
+   latency (913 against 826 ms, n = 10, within noise). If no namespace row
+   arrives during a whole request attempt while the gap is above 256, J peels
+   at once when gapEst ≤ 2,800 and switches to the recovery list (step 10)
+   above that. That attempt bounds a request; it never makes J ready.
 6. **Peel.** J asks for the first m = max(64, ⌈1.8 · gapEst⌉ rounded up to 32)
    cells (R may have pushed them already). J copies its own first m cells at
    that moment and subtracts them. Peeling yields R\J hashes (to fetch or
@@ -477,9 +543,14 @@ build after every session (K2).
    1.5-2.0 ms at d = 1,000 and 4-5.4 ms at d = 2,700.
 7. **Drain and pull.** For every row J's index adds, the change event carries
    `__context.head` (primitives map, A6) and fires after the index write. J
-   removes that hash from the R\J set, O(1). One batch of up to 256 hashes is
-   in flight per session; J pulls them with the scope log's
-   `join(hashes, {timeout})` (`@peerbit/shared-log index.d.ts:1124-1131`).
+   removes that hash from the R\J set, O(1). J keeps one pull queue for all
+   sessions, so a hash is in flight once however many peers name it (with two
+   donors in M0 P5 each session pulled the same 256 hashes). One batch of up
+   to 256 hashes is in flight per session; J pulls them with the scope log's
+   `join(hashes, {timeout})` (`@peerbit/shared-log index.d.ts:1124-1131`). On
+   a fresh join the wait of step 5 leaves at most 256 hashes for the peel, so
+   pulls rarely duplicate sync (drain-only was 780 ms against 826 ms with
+   pulls in M0 P5).
    Before a pull, J drops a hash whose row its index already has, moves an
    explained hash to E (section 4.6), and leaves a hash that `Log.has` but the
    index lacks for its change event (`@peerbit/log log.js:3756`, `3785`;
@@ -487,7 +558,8 @@ build after every session (K2).
    of this scope is a lie: R put it in its cells. Peerbit's own pushes keep
    arriving in parallel and shrink the set. There is no stall timer.
 8. A hash still not indexed after a pull is classified as before:
-    - explained (section 4.6): moved to E;
+    - explained (section 4.6, including `ignored-older`, which needs the
+      pulled entry): moved to E;
     - trust-pending (its signer is not yet trusted, and the trust scopes are
       not all contained yet): parked; re-classified on the next trust-graph
       change, whenever any peer's `TRUST_V1` scope becomes contained, and
@@ -504,7 +576,8 @@ build after every session (K2).
       it (`waiting-fetch`).
 9. **Certificate.** When nothing is pending, J checks
    `sha256(LtHash(S_J) − LtHash(X) + LtHash(E)) == D_R`. S_J's lanes are J's
-   maintained anchor at that moment, and a row that arrived with a timestamp
+   maintained anchor at that moment (read from the worker at a sequence
+   point), and a row that arrived with a timestamp
    above R's `hlc` has already joined X. The check costs one expansion per row
    of X and E, about 2 µs each. On a match R is contained at t_R. J records
    `{peer, openNonce, scope, count, hlc, missingAtStart, pulled}` plus
@@ -526,13 +599,14 @@ build after every session (K2).
 
 ### 4.6 Explained rows
 
-| Case                                                                                                                   | Explained?                                                                                                                                           |
-| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| J's log of that scope holds an entry whose `meta.next` includes this exact head: a CUT, or a later put of the document | Yes, `superseded`. R lists a row J has already seen replaced or deleted                                                                              |
-| `canPerform` rejected the entry for structure (bad fields, sealed name)                                                | Yes, `rejected-structure`                                                                                                                            |
-| Rejected because the signer is untrusted, and J contains the trust scope of every peer in C                            | Provisionally, `rejected-untrusted`. Re-checked on every trust-graph change and whenever C grows; the head goes back into D if its signer is trusted |
-| Rejected because the signer is untrusted, while some trust scope is not yet contained                                  | No, `trust-pending` (section 4.5 step 8)                                                                                                             |
-| Rejected by the 1 s negative trust cache (`src/index.ts:2111`)                                                         | No, `trust-pending`                                                                                                                                  |
+| Case                                                                                                                                                  | Explained?                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| J's log of that scope holds an entry whose `meta.next` includes this exact head: a CUT, or a later put of the document                                | Yes, `superseded`. R lists a row J has already seen replaced or deleted                                                                              |
+| The entry is in J's log but not indexed, and J's indexed row for the same document id wins under Documents' newest-wins rule (`program.js:3824-3830`) | Yes, `ignored-older` (added after M0 P2(b)). J holds a newer row for that id, typically a re-put whose earlier CUT J rejected                        |
+| `canPerform` rejected the entry for structure (bad fields, sealed name)                                                                               | Yes, `rejected-structure`                                                                                                                            |
+| Rejected because the signer is untrusted, and J contains the trust scope of every peer in C                                                           | Provisionally, `rejected-untrusted`. Re-checked on every trust-graph change and whenever C grows; the head goes back into D if its signer is trusted |
+| Rejected because the signer is untrusted, while some trust scope is not yet contained                                                                 | No, `trust-pending` (section 4.5 step 8)                                                                                                             |
+| Rejected by the 1 s negative trust cache (`src/index.ts:2111`)                                                                                        | No, `trust-pending`                                                                                                                                  |
 
 **Superseded is a lookup in J's own log, not a map.**
 `log.entryIndex.getHasNext(head)` (`@peerbit/log entry-index.d.ts:404`, an
@@ -555,12 +629,38 @@ a fresh joiner's log held all 24 CUTs of 12 retired versions
 
 The lookup runs only for hashes still pending before a pull, at most 256 per
 batch. Every explained hash joins E in the certificate (4.5 step 9), so the
-set hash still has to match exactly. M0 P2 confirms that it finds the CUT of a head J never held, in both
-logs, after a reopen. One case stays unexplained: J holds the CUT of a later
-version d but not d itself, and R still lists the older head h. Nothing in J
-names h, so J pulls h, and Peerbit's index does with it what it would do if R
-had pushed h. P2 records which; K0 has the follow-up if h is logged but never
-indexed.
+set hash still has to match exactly.
+
+**What M0 found (P2, P3).** The lookup finds the CUT whenever J holds it: for
+a fresh joiner, after a program reopen, and after a Peerbit restart from disk
+with no connections. So no CUT-target index is needed. But J does not always
+hold the CUT:
+
+- Documents rejects a CUT whose target is not J's current row head, unless
+  that head descends from the target (`@peerbit/document program.js:1810-1850`).
+  After a unique re-put of the same id (Guard D, GC CUT recovery) the CUT is
+  order-dependent: in real shared-fs a joiner held 6 of 15 such CUTs. R's
+  live set then holds the re-put head, so this matters only against a stale R
+  that still lists the old head.
+- `TrustedNetwork` rejects a delete when J has no local relation
+  (`@peerbit/trusted-network controller.js:67-72`, `216-223`). A fresh joiner
+  never holds a revocation CUT for a grant it never held.
+
+The case the design left open, J holds the CUT of a later version d but not
+d, and R lists the older head h: Documents **indexes h** (3 of 3 runs). The
+log's CUT check matches exact `next` only (`@peerbit/log log.js:3878-3888`),
+so the deleted document comes back, and J replicated it back to the peer that
+deleted it. Containment holds, because h is indexed; the resurrection is an
+upstream bug, reported in section 10. The variant: J already holds a newer row
+for the same id and lacks the CUT. Then the pulled h is logged as a head but
+never indexed (Documents' newest-wins rule), the change event is empty, and
+nothing in J's log names h. Without a rule J would stay pending forever. That
+is `ignored-older`: after the pull, J reads the entry's document id and
+explains h when J's indexed row for that id wins under the same comparison
+Documents makes (`program.js:3824-3830`; a test pins the two against each
+other). It is the outcome sync reaches on every peer anyway: R replaces h with
+J's row by the same rule once it receives it. The K0 fallback "fetch the CUT's
+target" is not used: in this variant there is no CUT.
 
 **Rejections.** `canPerform` records `entryHash → {permanent, reason}` only for
 hashes in J's in-flight pull batches (at most 256 per session), so the record
@@ -599,15 +699,34 @@ The rules that matter:
   event order when the creator's readiness Subscribe was lost (U-1) but its
   replication traffic still reaches J. Only a row with no sign of life since J
   opened is `unconfirmed`: asked once, and it does not block. That is the
-  stale row of a dead peer after an unclean leave. M0 P1 checks that such a
-  row produces no replication event at a fresh joiner.
+  stale row of a dead peer after an unclean leave. M0 P1 confirmed that such a
+  row produces no replication event at a fresh joiner (107 of 107 runs) and
+  never reaches its `getReplicators()`, so for a fresh J the rule is
+  vacuous. A dead or hung peer can still be relayed to a fresh J as a pubsub
+  subscriber (5 of 107 runs); it was unreachable on J's route table, so
+  visible-peer discovery filters subscribers by reachability, as
+  `visibleFilesystemPeers` does today (`src/index.ts:11170-11192`).
+- **Departure (pending D3).** M0 P1: pubsub's own unreachability path never
+  runs with the default services, because fanout shares the routes and
+  removes the peer first (U-35, deterministic: 0 of 154 observer-runs). A
+  dead subscriber is dropped only on peers that hear a PeerUnavailable from
+  its fanout parent; the parent itself, and every peer when there was no
+  parent, keep it indefinitely (36 of 36 and 82 of 82). So J does not wait
+  for `unsubscribe`. It re-reads R's reachability
+  (`pubsub.routes.isReachable`, `pubsub.peers`) on libp2p `peer:disconnect`
+  and `peer:connect` and on fanout `peer:unreachable`; unreachable means R
+  left. That fired 4-24 ms after a `kill -9` or a transport stop in every run.
+  A half-open socket keeps R reachable until the TCP inactivity timeout
+  (120 s); a hung process with open sockets stays reachable, so it blocks
+  until the caller's timeout and status names it "reachable, silent". These
+  are private reads until U-37.
 - **Leaving before answering.** Pubsub emits `unsubscribe` on a peer session
-  reset as well as on unreachability (`@peerbit/pubsub index.js:3328-3351`),
-  so a reconnect flap looks like a departure. A peer that leaves before J
+  reset (`@peerbit/pubsub index.js:3328-3332`, `3392`), so a reconnect flap
+  looks like a departure. A peer that leaves before J
   holds its `HeaderV1` is `left-unanswered` and keeps blocking until its
   attempt in flight ends. If it comes back, it gets a new session. If it stays
   away, J records `gaps: {peer, missing: "unknown"}` and status shows it (D4).
-  So a timer can end a block only for a peer pubsub has already reported gone.
+  So a timer can end a block only for a peer already reported gone.
 - **Departure after answering.** If R leaves while J still lacks rows only R
   listed, J keeps trying to pull them from any peer. If nobody can serve them,
   J records `gaps: {peer, missing}` in the proof and status, and R stops
@@ -653,19 +772,20 @@ A failed sidecar write retries on the next trigger, as today.
 
 Every re-evaluation comes from one of these public events:
 
-| Event                                                                              | Effect                                                                                                                             |
-| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| open finished                                                                      | list visible peers, start sessions                                                                                                 |
-| pubsub `subscribe` / `unsubscribe` on the readiness topic                          | add the peer / mark it `left` or `left-unanswered`                                                                                 |
-| `replicator:join`, `replication:change`, `replicator:leave` (`index.d.ts:471-473`) | add the peer; a sign of life makes it live (full attempts); leave as above                                                         |
-| any readiness message from R                                                       | advance that session; moves `silent` and `busy` back to `asking`; retries R's failed pulls                                         |
-| index `change` (added rows)                                                        | update J's cells and anchor; drain pending hashes, O(1) per row per live session; recompute the gap estimate; retries failed pulls |
-| trust graph `change`                                                               | retry `trust-pending`; re-check `rejected-untrusted`; re-check qualification                                                       |
-| a peer's `TRUST_V1` scope becomes contained, or C changes                          | re-classify `trust-pending` and `rejected-untrusted` heads                                                                         |
-| another session of J completes                                                     | re-ask each `busy` peer once                                                                                                       |
-| bootstrap decision or phase change (the #403 hook)                                 | `evaluate()`                                                                                                                       |
-| attempt timeout                                                                    | next attempt or `silent`; ends `left-unanswered` for a peer still gone                                                             |
-| pull batch finished                                                                | start the next batch; retry failed pulls                                                                                           |
+| Event                                                                              | Effect                                                                                                                                                 |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| open finished                                                                      | list visible peers, start sessions                                                                                                                     |
+| pubsub `subscribe` / `unsubscribe` on the readiness topic                          | add the peer (if reachable) / mark it `left` or `left-unanswered`                                                                                      |
+| libp2p `peer:disconnect` / `peer:connect`, fanout `peer:unreachable`               | re-read that peer's route reachability; unreachable → `left` or `left-unanswered`; reachable again → new session (pending D3)                          |
+| `replicator:join`, `replication:change`, `replicator:leave` (`index.d.ts:471-473`) | add the peer; a sign of life makes it live (full attempts); leave as above                                                                             |
+| any readiness message from R                                                       | advance that session; moves `silent` and `busy` back to `asking`; retries R's failed pulls                                                             |
+| index `change` (added rows)                                                        | update J's id map, cells and anchor; drain pending hashes, O(1) per row per live session; recompute the gap estimate; retries failed pulls             |
+| trust graph `change` (any, including added-only and empty events)                  | from the current rows: retry `trust-pending`; re-check `rejected-untrusted`; re-check qualification. A revocation may never arrive as a delete (M0 P3) |
+| a peer's `TRUST_V1` scope becomes contained, or C changes                          | re-classify `trust-pending` and `rejected-untrusted` heads                                                                                             |
+| another session of J completes                                                     | re-ask each `busy` peer once                                                                                                                           |
+| bootstrap decision or phase change (the #403 hook)                                 | `evaluate()`                                                                                                                                           |
+| attempt timeout                                                                    | next attempt or `silent`; ends `left-unanswered` for a peer still gone                                                                                 |
+| pull batch finished                                                                | start the next batch; retry failed pulls                                                                                                               |
 
 Timers that remain. None makes J ready on its own:
 
@@ -718,10 +838,12 @@ The sidecar keeps its writer, fsync, crash-marker and content-probe rules
 - The proof is for audit, status and telemetry. Nothing re-reads it to decide
   readiness. The next open reads the highest contained `hlc` as `hlcProved`,
   which only shapes the gap estimate (4.5 step 4).
-- The cells and anchor live in a separate file per scope,
-  `<dir>/shared-fs-readiness/<address>.<scope>.bin` (184 KB plus a header with
-  the format tag and the live count). It is written at clean close and deleted
-  at open, so a stale file is never trusted after a crash (4.4).
+- The cells, anchor and id map live in a separate file per scope,
+  `<dir>/shared-fs-readiness/<address>.<scope>.bin` (184 KB for cells and
+  anchor, plus the compact id map, about 8 MB at 200k rows, plus a header
+  with the format tag and the live count). It is written at clean close after
+  the listener is detached and writes and Guard D re-puts have drained, and
+  deleted at open, so a stale file is never trusted after a crash (4.4).
 - A crash before the write leaves J gated, and the sessions run again.
   Superseded heads are found in J's log again, so the rerun behaves like the
   first run.
@@ -754,13 +876,17 @@ Also in M1:
   reads stay as well (`11281`, `11409`, `11754`, and the GC peer gate at
   `14013`). M2 moves bootstrap discovery onto readiness answers and the
   readiness topic's subscribers; the GC gate needs its own decision.
+- If the owner takes D3 option A' (after M0 P1), the coordinator adds one
+  private read: `pubsub.routes.isReachable` and `pubsub.peers` for departure,
+  the same reads `visibleFilesystemPeers` makes (`src/index.ts:11184-11185`),
+  re-read only on transport events. It stays until U-37.
 
 ### 4.12 Edge cases
 
 | #   | Case                                                                    | Outcome                                                                                                                                                                                             |
 | --- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | Plain dial, idle donor                                                  | Ready after transfer plus about 3 round trips                                                                                                                                                       |
-| 2   | Donor writes every 1 s                                                  | Ready; the snapshot does not move. 0.66 s measured                                                                                                                                                  |
+| 2   | Donor writes every 1 s                                                  | Ready; the snapshot does not move. p50 0.82-0.93 s measured cross-process (M0 P5)                                                                                                                   |
 | 3   | Genesis-only creator                                                    | `count: 0`, contained, qualified. One round trip                                                                                                                                                    |
 | 4   | Busy creator plus a stale warm replica                                  | Gated until the creator answers, even after its attempts end (`silent` blocks; the late answer counts); then contained                                                                              |
 | 5   | Truncated list, `done` forged early, or a wrong set hash                | The set hash cannot match. A list that contradicts R's own header is `inconsistent`                                                                                                                 |
@@ -772,9 +898,9 @@ Also in M1:
 | 11  | Two fresh joiners, donor present                                        | First to finish becomes ready and notifies; the other opens a fresh session with it, which can qualify it                                                                                           |
 | 12  | Donor leaves after answering, J contained it                            | Still ready                                                                                                                                                                                         |
 | 13  | Donor leaves mid-pull, nobody else has its rows                         | `gaps` recorded, R stops blocking (D4)                                                                                                                                                              |
-| 14  | Dead peer still in `getReplicators()` after an unclean leave            | No sign of life since open: asked once, `unconfirmed`. Subscriber: blocks until pubsub drops it (M0 probe P1)                                                                                       |
+| 14  | Dead peer still in `getReplicators()` after an unclean leave            | No sign of life since open: asked once, `unconfirmed` (a fresh J never sees the row, M0 P1). Subscriber: pubsub may never drop it; it leaves when unreachable on the route table (pending D3)       |
 | 15  | Donor retires a row between snapshot and pull                           | One fresh session; the new snapshot lacks it                                                                                                                                                        |
-| 16  | J holds the CUT of a head R still lists                                 | `superseded`; not pulled                                                                                                                                                                            |
+| 16  | J holds the CUT of a head R still lists                                 | `superseded`; not pulled. J may not hold it after a re-put of the same id (M0 P2(a)); then case 41                                                                                                  |
 | 17  | Writer revoked during the join                                          | Its rows are provisionally `rejected-untrusted` once every trust scope is contained                                                                                                                 |
 | 18  | Trust graph lagging                                                     | `trust-pending`; gated until the edge arrives (correct)                                                                                                                                             |
 | 19  | Only partial replicas or observers visible                              | Gated                                                                                                                                                                                               |
@@ -797,8 +923,13 @@ Also in M1:
 | 36  | Notice from a peer J contained while that peer was gated                | Starts a fresh session; qualifies only through that session's header                                                                                                                                |
 | 37  | Equal counts, J lacks 1,000 of R's rows and holds 1,000 R lacks         | Measured: 848 ms, 175 kB, 10 round trips, because the count gap is 0. With `hlcProved` in OPEN (4.5 step 4) the estimate sees the gap: about 1 round plus the pull, 115-168 kB (estimate, untested) |
 | 38  | Rejoin with more than about 2,800 rows missing                          | No cells until Peerbit sync shrinks the gap below 256; the recovery list only if no row arrives for a whole attempt                                                                                 |
-| 39  | Crash while open                                                        | No persisted cells file (deleted at open), so the next open rebuilds by one scan (1.1-1.3 s at 200k rows, measured)                                                                                 |
+| 39  | Crash while open                                                        | No persisted cells file (deleted at open), so the next open rebuilds by one scan (2.0-4.0 s at 204k rows in the product, M0 P4)                                                                     |
 | 40  | Peer clocks skewed                                                      | Latency only: a wrong `hlc` puts the wrong rows into X, so the set hash does not match and recovery runs. Soundness never uses a clock                                                              |
+| 41  | J holds a newer row for an id (a re-put); a stale R lists an older head | J pulls it; Documents logs it but never indexes it. `ignored-older`, explained (M0 P2(b))                                                                                                           |
+| 42  | J holds the CUT of version d, not d; R lists the older head h           | Documents indexes h, so R is contained; the deleted document is resurrected (upstream bug, section 10)                                                                                              |
+| 43  | Stale R pushes a revoked trust grant to a fresh J                       | J indexes and trusts it until a CUT holder re-offers the CUT (about 1 s while connected, M0 P3); J can be ready in that window. Revocation enforcement is not promised                              |
+| 44  | Visible peer hung, sockets open; live replicas also visible             | Stays Required (reachable, silent); gated until the caller's timeout. A fresh J may also take about 60 s to see the live replicas (M0 P1)                                                           |
+| 45  | Concurrent same-id writes dispatch change events out of order           | The tap's replace verify re-reads the indexed head; the shadow check stays equal (M0 P4)                                                                                                            |
 
 ## 5. Trust and adversarial analysis
 
@@ -849,7 +980,10 @@ Specific attacks:
   or the peer leaving.
 - **Revoked writers.** Their rows are explained only after J contains every
   peer's trust scope, and only provisionally. J never claims to enforce
-  revocation.
+  revocation. M0 P3 made one gap concrete: a fresh J never receives the
+  revocation CUT of a grant it never held, so a stale peer that pushes the
+  revoked grant makes J trust the writer again until a CUT holder re-offers
+  the CUT (about 1 s while connected). J can become ready inside that window.
 - **What stays open.** A writer whose rows sit only on peers J cannot see. A
   frontier layer (M4) narrows this for trusted writers, if frontiers spread
   wider than the data, for example through always-on witnesses.
@@ -949,20 +1083,30 @@ repetitions of 100k elements; load 7.3-7.4; `sota/decision/xof-256.ndjson`,
 
 So the chosen per-write cost is about 0.25 µs for the cells plus 2.10 µs for
 the anchor: **about 2.4 µs per row change. This is an estimate, a sum of
-measured parts, not measured end to end.** It is well under the 20 µs budget
-of K2. LtHash16 is not cheaper here, because the cipher's fixed setup
-dominates, so we keep the 32-bit lanes and their margin.
+measured parts, not measured end to end.** LtHash16 is not cheaper here,
+because the cipher's fixed setup dominates, so we keep the 32-bit lanes and
+their margin.
+
+**Measured in the product (M0 P4, supersedes the estimate).** Inside
+shared-fs's real change tap the cost per row change was 2.5-6 times the
+estimate: p50 5.5-15 µs for an add and 9.5-35 µs for a replace at 50k-200k
+rows, p90 of adds 15-34 µs at 200k. The missing parts were decoding the head
+string (2.0-2.6 µs), event overhead (about 1 µs), a replace costing two
+updates, and the anchor slowing with heap size (2.6-7.6 µs in the product
+against 2.10 µs in isolation). K2's 20 µs fails inline at 200k rows. With the
+anchor in a worker the main thread pays 1.8-2.6 µs p50 per add and 3.2-5.6 µs
+per replace (p99 at most 14 µs), which is what M1 ships (section 4.4).
 
 **Table D. Other costs** (measured unless marked).
 
-| Item                                         | Value                                                                                                                                                  |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| J cost per arriving row (cells + anchor)     | 5.0-5.2 µs median, 16-24 µs p99 (BLAKE3; 100k rows, 3 runs, load 6.6-8.1); about 2.4 µs with AES-256-CTR (estimate)                                    |
-| Snapshot freeze on R                         | 0.04-1.1 ms (medians, simulated, load 10-100); 5-190 µs on a quieter run (`sota/setrecon/`)                                                            |
-| Peel on J                                    | under 0.04 ms at d ≤ 10; 1.5-2.0 ms at d = 1,000; 4-5.4 ms at d = 2,700 (1,000 trials each, load 124-139)                                              |
-| Cells needed to decode                       | 1.65-1.69 × d at d = 10-20, 1.37-1.38 × d at d ≥ 1,000; a 32-cell prefix decodes 99% at d = 10 and 57% at d = 20                                       |
-| Restart                                      | restore 16-17 ms (128-bit-id arm) or 0.4-0.5 ms (full-hash arm) at 200k rows, against a rebuild of 1.08-1.30 s (3 runs, load 6.6-8.2)                  |
-| Interleaved gap, equal counts, d = x = 1,000 | 848-867 ms, 175 kB, 10 RTT (2 runs, load 4.1-5.9); change 2 (section 11.1) should make it about 1 round plus the pull, 115-168 kB (estimate, untested) |
+| Item                                         | Value                                                                                                                                                                                                                              |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| J cost per arriving row (cells + anchor)     | 5.0-5.2 µs median, 16-24 µs p99 (BLAKE3; 100k rows, 3 runs, load 6.6-8.1); about 2.4 µs with AES-256-CTR (estimate; M0 P4 measured 5.5-15 µs p50 inline in the product, 1.8-2.6 µs on the main thread with the anchor in a worker) |
+| Snapshot freeze on R                         | 0.04-1.1 ms (medians, simulated, load 10-100); 5-190 µs on a quieter run (`sota/setrecon/`)                                                                                                                                        |
+| Peel on J                                    | under 0.04 ms at d ≤ 10; 1.5-2.0 ms at d = 1,000; 4-5.4 ms at d = 2,700 (1,000 trials each, load 124-139)                                                                                                                          |
+| Cells needed to decode                       | 1.65-1.69 × d at d = 10-20, 1.37-1.38 × d at d ≥ 1,000; a 32-cell prefix decodes 99% at d = 10 and 57% at d = 20                                                                                                                   |
+| Restart                                      | restore 16-17 ms (128-bit-id arm) or 0.4-0.5 ms (full-hash arm) at 200k rows, against a rebuild of 1.08-1.30 s (3 runs, load 6.6-8.2)                                                                                              |
+| Interleaved gap, equal counts, d = x = 1,000 | 848-867 ms, 175 kB, 10 RTT (2 runs, load 4.1-5.9); change 2 (section 11.1) should make it about 1 round plus the pull, 115-168 kB (estimate, untested)                                                                             |
 
 ### 6.2 Measured: the end-to-end prototype
 
@@ -989,38 +1133,44 @@ takes 13.6-42 s and the whole store lands at 73-99 s
 
 The prototype resolved through an in-memory map and its joiner held no rows
 (`joinerRows: 0` in every first session). Its session flow carries over; its
-list mode does not. M1 must re-measure end to end with the mechanism of 6.1.
+list mode does not. M0 P5 re-measured end to end with the mechanism of 6.1,
+cross-process over one-way RPC; section "M0 results" has the table (1 file
+p50 0.28-0.36 s, 400 files p50 0.93-0.96 s, donor writing every 1 s p50
+0.82-0.93 s, n = 20 per batch).
 
 ### 6.3 Cost
 
-| Item                   | Value                                                                                                                                                         |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per row change, always | one cell walk and one anchor update per scope, on every peer: about 2.4 µs (estimate from measured parts; 5.1-5.5 µs measured with BLAKE3)                    |
-| Seed                   | restore at open, 16-17 ms at 200k rows; after a crash, one projected scan, 1.1-1.3 s at 200k rows (BLAKE3; less with AES-256-CTR, not measured)               |
-| Donor snapshot         | copy 184 KB, 0.04-1.1 ms; shared by every session at the same epoch                                                                                           |
-| Donor CPU per session  | 0.07-4.9 ms (simulated medians, any N, under load); no encoder, no scan, no sort                                                                              |
-| Memory per peer        | 184 KB per scope at any N, plus 184 KB per live snapshot (16 sessions: about 3 MB)                                                                            |
-| Joiner memory          | peak 1.5 MB at 100k rows and 9.9 MB at 1M (analytic, simulated)                                                                                               |
-| Wire, nothing missing  | about 0.4 kB, 1 round trip                                                                                                                                    |
-| Wire, d rows differ    | about 1.4-1.7 cells × 44 B per difference, plus framing; 1.9 kB at d = 10, 86-88 kB at d = 1,000; pulls are entry transfer and not counted                    |
-| Wire, fresh join       | 2.1-11.5 kB in total at 10k-1M rows; Peerbit sync moves the rows                                                                                              |
-| Wire, recovery only    | 32 B per donor row (6.4 MB at 200k rows)                                                                                                                      |
-| Storage                | sidecar proof, at most 96 peer records; one 184 KB file per scope, written at clean close; no index column                                                    |
-| Code (estimate)        | +1,000-1,250 product lines (the cells, anchor and peel are about 150-200 of them), +1,150 test lines, about −300 lines (tracker, evidence capture, idle read) |
-| Format                 | one salt bump and one program field                                                                                                                           |
+| Item                   | Value                                                                                                                                                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Per row change, always | one id-map update, one cell walk and one anchor update per scope, on every peer: main thread p50 1.8-2.6 µs per add, 3.2-5.6 µs per replace, anchor in a worker (M0 P4; 5.5-35 µs inline)                                                              |
+| Seed                   | restore at open: cells and anchor 0.08-0.78 ms, id map 57-131 ms (text) at 204k rows; after a crash, one projected scan plus build, 2.0-4.0 s at 204k rows (M0 P4)                                                                                     |
+| Donor snapshot         | copy 184 KB; worker round trip p50 52-167 µs, p99 0.39-6.8 ms (M0 P4); shared by every session at the same epoch                                                                                                                                       |
+| Donor CPU per session  | 0.07-4.9 ms (simulated medians, any N, under load); no encoder, no scan, no sort                                                                                                                                                                       |
+| Memory per peer        | 184 KB per scope at any N, plus the compact id map (12.7 MB at 200k rows, 57 MB at 1M, M0 P4), plus 184 KB per live snapshot (16 sessions: about 3 MB)                                                                                                 |
+| Joiner memory          | peak 1.5 MB at 100k rows and 9.9 MB at 1M (analytic, simulated)                                                                                                                                                                                        |
+| Wire, nothing missing  | about 0.4 kB, 1 round trip                                                                                                                                                                                                                             |
+| Wire, d rows differ    | about 1.4-1.7 cells × 44 B per difference, plus framing; 1.9 kB at d = 10, 86-88 kB at d = 1,000; pulls are entry transfer and not counted                                                                                                             |
+| Wire, fresh join       | 2.1-11.5 kB in total at 10k-1M rows; Peerbit sync moves the rows                                                                                                                                                                                       |
+| Wire, recovery only    | 32 B per donor row (6.4 MB at 200k rows)                                                                                                                                                                                                               |
+| Storage                | sidecar proof, at most 96 peer records; one file per scope (184 KB plus the id map, about 8 MB at 200k rows), written at clean close; no index column; SQLite adds lazy indexes on `__context.modified` for the rows-above query (upkeep not measured) |
+| Code (estimate)        | +1,000-1,250 product lines (the cells, anchor and peel are about 150-200 of them), +1,150 test lines, about −300 lines (tracker, evidence capture, idle read)                                                                                          |
+| Format                 | one salt bump and one program field                                                                                                                                                                                                                    |
 
-### 6.4 Expected latency after M1 (cross-process, estimates)
+### 6.4 Expected latency after M1 (cross-process; M0 P5 measured where marked)
 
-| Case                                    | Today                          | M1                                                                                      | M2            |
-| --------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------- | ------------- |
-| Plain dial, small store                 | 5.34 s measured                | 0.3-0.6 s                                                                               | same          |
-| Both peers `bootstrap()`, genesis donor | about 5.7 s measured           | about 5.3-5.7 s (discovery deadline dominates)                                          | under 1 s     |
-| Donor writing every 1 s                 | never                          | under 2 s                                                                               | same          |
-| 3k-file cold join                       | 12.9-14.9 s in-process         | transfer plus about one round trip                                                      | same          |
-| 200k-row cold join                      | transfer + 5 s, may be partial | transfer plus about 40-210 ms and under 12 kB of proof (simulated at 100k-1M)           | same          |
-| Rejoin after a partition, small diff    | transfer + 5 s                 | 1-2 round trips per peer plus the pull; under 2 kB at d = 10; no scan on either side    | same          |
-| Rejoin with 1,000 rows missing          | transfer + 5 s                 | 3 round trips including the pull, about 88 kB, about 0.43 s on a 60 ms link (simulated) | same          |
-| Unverified bootstrap posture            | at least 10 min                | at least 10 min                                                                         | ends on proof |
+| Case                                    | Today                          | M1                                                                                      | M2                                                                              |
+| --------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Plain dial, small store                 | 5.45-5.49 s p50 measured       | p50 0.28-0.36 s, p95 0.43-0.53 s (P5 prototype, measured)                               | same                                                                            |
+| Plain dial, 400 files (805 rows)        | 6.07-6.11 s p50 measured       | p50 0.93-0.96 s, p95 1.05-1.09 s (P5, measured; bound by row transfer)                  | same                                                                            |
+| Two visible donors, 400 files           | 6.16-6.49 s p50 measured       | p50 1.06-1.38 s, p95 1.17-2.58 s (P5, measured)                                         | same                                                                            |
+| Warm rejoin, nothing missing            | ready at open (318-352 ms p50) | ready at open, unchanged                                                                | proof session: 1 round trip, 148 B in, 68 B out, p50 0.38-0.44 s (P5, measured) |
+| Both peers `bootstrap()`, genesis donor | about 5.7 s measured           | about 5.3-5.7 s (discovery deadline dominates)                                          | under 1 s                                                                       |
+| Donor writing every 1 s                 | never (0 of 20 within 20 s)    | p50 0.82-0.93 s, p95 1.13-1.81 s (P5, measured)                                         | same                                                                            |
+| 3k-file cold join                       | 12.9-14.9 s in-process         | transfer plus about one round trip                                                      | same                                                                            |
+| 200k-row cold join                      | transfer + 5 s, may be partial | transfer plus about 40-210 ms and under 12 kB of proof (simulated at 100k-1M)           | same                                                                            |
+| Rejoin after a partition, small diff    | transfer + 5 s                 | 1-2 round trips per peer plus the pull; under 2 kB at d = 10; no scan on either side    | same                                                                            |
+| Rejoin with 1,000 rows missing          | transfer + 5 s                 | 3 round trips including the pull, about 88 kB, about 0.43 s on a 60 ms link (simulated) | same                                                                            |
+| Unverified bootstrap posture            | at least 10 min                | at least 10 min                                                                         | ends on proof                                                                   |
 
 ## 7. API, telemetry and mount behaviour
 
@@ -1068,45 +1218,51 @@ anchor equal a fresh build from its index.
 
 **Adversarial and failure**
 
-| #   | Test                                                                                                                       | Pass when                                                                                                  |
-| --- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| 15  | Busy live creator (answers after 6 s) plus a stale warm replica (answers in 20 ms)                                         | not ready until the creator is contained                                                                   |
-| 16  | Same, with the creator's readiness Subscribe suppressed                                                                    | not ready until the creator is contained                                                                   |
-| 17  | Same, with the creator answering after 40 s (after all attempts)                                                           | ready only after the late answer, without the caller retrying                                              |
-| 18  | Connected subscriber that never answers                                                                                    | gated; `ETIMEDOUT` names it; ready after it unsubscribes                                                   |
-| 19  | Unanswered peer's pubsub session resets and it redials                                                                     | stays Required; a new session; not ready without it unless it stays away (then `gaps`)                     |
-| 20  | `BUSY` whose notice is lost                                                                                                | re-asked when another session completes or on R's next message                                             |
-| 21  | Dead replicator row with no sign of life since open                                                                        | asked once, `unconfirmed`, does not block                                                                  |
-| 22  | Truncated recovery list; forged early `done`; wrong set hash in the header                                                 | never ready on that answer; a list that contradicts its own header is `inconsistent`                       |
-| 23  | Under-report with a second honest peer                                                                                     | gated until the honest peer is contained                                                                   |
-| 24  | Under-report as the only peer                                                                                              | ready; the proof names the peer (pins the non-guarantee)                                                   |
-| 25  | Over-claim: cells or a list naming a hash whose entry is of the wrong kind                                                 | `unsubstantiated`; with no other qualified donor, gated                                                    |
-| 26  | Honest donor whose block serving is delayed past two pull timeouts                                                         | never excluded; ready once the blocks are served                                                           |
-| 27  | Hash named by R but never served by anyone                                                                                 | gated, `waiting-fetch` names the peer; never excluded                                                      |
-| 28  | Peel succeeds but the set hash does not match (injected false decode, a lying cell, a hook-forced collision)               | never ready on the hint; re-peel, fresh session, then the list; ready with the correct rows (change 3)     |
-| 29  | Equal counts with a symmetric difference of 2k (interleaved), with and without `hlcProved`                                 | correct result; with `hlcProved`, one cell round plus the pull (change 2)                                  |
-| 30  | Gap of 5,000 rows on rejoin; then the same with sync stalled for a whole attempt                                           | no cells until the gap is below 256; with sync stalled, the recovery list; ready either way                |
-| 31  | Replayed or foreign `sessionId`, wrong log id for the scope, notice with a stale `openNonce`                               | ignored                                                                                                    |
-| 32  | Only gated peers; only partial replicas                                                                                    | gated; `state: no-qualified-donor`                                                                         |
-| 33  | No peer visible; fake clock advanced by hours                                                                              | never ready; a later peer makes it ready by event                                                          |
-| 34  | Trust lag: a row whose trust edge arrives later                                                                            | gated until the edge, then ready                                                                           |
-| 35  | Revoked writer's rows                                                                                                      | explained once all trust scopes are contained; ready                                                       |
-| 36  | Grant and write land at R between J's trust and namespace views; a second peer holding the grant joins C after a rejection | trust is frozen after namespace; `rejected-untrusted` is re-checked; ready only with the edge and the rows |
-| 37  | `trust-pending` head whose last trust session completes with an empty D                                                    | re-classified without a trust-graph change; no hang                                                        |
-| 38  | Cross-process ACL store; the joiner lacks one trust edge                                                                   | `TRUST_V1` pulls from `trustGraph.log`; ready with the edge                                                |
-| 39  | Donor lists a head whose CUT J holds                                                                                       | `superseded`; not pulled; no resurrection                                                                  |
-| 40  | GC CUT plus recovery re-put during a join                                                                                  | the re-put head is required and pulled                                                                     |
-| 41  | Guard D resurrection with the stale delete already admitted at J                                                           | the re-put head is required                                                                                |
-| 42  | Revoke then re-grant of a writer during a join                                                                             | the re-grant is required; the writer's rows are held                                                       |
-| 43  | Donor with 20k CUTs (slow lane)                                                                                            | a fresh joiner becomes ready; no readiness state grows with the CUT count                                  |
-| 44  | Index write delayed after the log commit (hook)                                                                            | not ready until the index has the row                                                                      |
-| 45  | Donor departs mid-pull with rows nobody else has                                                                           | `gaps` recorded; behaviour per D4                                                                          |
-| 46  | `BUSY` storm: 20 joiners, one donor                                                                                        | all ready; the donor never exceeds its caps                                                                |
-| 47  | `assumeComplete()` with no peers                                                                                           | ready with source `operator`; refused on an observer                                                       |
-| 48  | Clean close and reopen; crash and reopen                                                                                   | restored cells and anchor equal a fresh build; after a crash no file exists and the peer rebuilds          |
-| 49  | Replace (re-put of a document id) on a donor and on a joiner                                                               | the replaced head leaves cells and anchor (M0 P2(c)); shadow check equal                                   |
-| 50  | Writer at 100 rows/s during a 100k-row join                                                                                | ready on R's snapshot; rows above R's `hlc` go to X; no chase                                              |
-| 51  | Peers with clocks skewed by hours                                                                                          | never a wrong ready; recovery may run (latency only)                                                       |
+| #   | Test                                                                                                                                                                 | Pass when                                                                                                      |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 15  | Busy live creator (answers after 6 s) plus a stale warm replica (answers in 20 ms)                                                                                   | not ready until the creator is contained                                                                       |
+| 16  | Same, with the creator's readiness Subscribe suppressed                                                                                                              | not ready until the creator is contained                                                                       |
+| 17  | Same, with the creator answering after 40 s (after all attempts)                                                                                                     | ready only after the late answer, without the caller retrying                                                  |
+| 18  | Connected subscriber that never answers                                                                                                                              | gated; `ETIMEDOUT` names it as reachable and silent; ready after it becomes unreachable (pending D3)           |
+| 19  | Unanswered peer's pubsub session resets and it redials                                                                                                               | stays Required; a new session; not ready without it unless it stays away (then `gaps`)                         |
+| 20  | `BUSY` whose notice is lost                                                                                                                                          | re-asked when another session completes or on R's next message                                                 |
+| 21  | Dead replicator row with no sign of life since open                                                                                                                  | asked once, `unconfirmed`, does not block                                                                      |
+| 22  | Truncated recovery list; forged early `done`; wrong set hash in the header                                                                                           | never ready on that answer; a list that contradicts its own header is `inconsistent`                           |
+| 23  | Under-report with a second honest peer                                                                                                                               | gated until the honest peer is contained                                                                       |
+| 24  | Under-report as the only peer                                                                                                                                        | ready; the proof names the peer (pins the non-guarantee)                                                       |
+| 25  | Over-claim: cells or a list naming a hash whose entry is of the wrong kind                                                                                           | `unsubstantiated`; with no other qualified donor, gated                                                        |
+| 26  | Honest donor whose block serving is delayed past two pull timeouts                                                                                                   | never excluded; ready once the blocks are served                                                               |
+| 27  | Hash named by R but never served by anyone                                                                                                                           | gated, `waiting-fetch` names the peer; never excluded                                                          |
+| 28  | Peel succeeds but the set hash does not match (injected false decode, a lying cell, a hook-forced collision)                                                         | never ready on the hint; re-peel, fresh session, then the list; ready with the correct rows (change 3)         |
+| 29  | Equal counts with a symmetric difference of 2k (interleaved), with and without `hlcProved`                                                                           | correct result; with `hlcProved`, one cell round plus the pull (change 2)                                      |
+| 30  | Gap of 5,000 rows on rejoin; then the same with sync stalled for a whole attempt                                                                                     | no cells until the gap is below 256; with sync stalled, the recovery list; ready either way                    |
+| 31  | Replayed or foreign `sessionId`, wrong log id for the scope, notice with a stale `openNonce`                                                                         | ignored                                                                                                        |
+| 32  | Only gated peers; only partial replicas                                                                                                                              | gated; `state: no-qualified-donor`                                                                             |
+| 33  | No peer visible; fake clock advanced by hours                                                                                                                        | never ready; a later peer makes it ready by event                                                              |
+| 34  | Trust lag: a row whose trust edge arrives later                                                                                                                      | gated until the edge, then ready                                                                               |
+| 35  | Revoked writer's rows                                                                                                                                                | explained once all trust scopes are contained; ready                                                           |
+| 36  | Grant and write land at R between J's trust and namespace views; a second peer holding the grant joins C after a rejection                                           | trust is frozen after namespace; `rejected-untrusted` is re-checked; ready only with the edge and the rows     |
+| 37  | `trust-pending` head whose last trust session completes with an empty D                                                                                              | re-classified without a trust-graph change; no hang                                                            |
+| 38  | Cross-process ACL store; the joiner lacks one trust edge                                                                                                             | `TRUST_V1` pulls from `trustGraph.log`; ready with the edge                                                    |
+| 39  | Donor lists a head whose CUT J holds                                                                                                                                 | `superseded`; not pulled; no resurrection                                                                      |
+| 40  | GC CUT plus recovery re-put during a join                                                                                                                            | the re-put head is required and pulled                                                                         |
+| 41  | Guard D resurrection with the stale delete already admitted at J                                                                                                     | the re-put head is required                                                                                    |
+| 42  | Revoke then re-grant of a writer during a join                                                                                                                       | the re-grant is required; the writer's rows are held                                                           |
+| 43  | Donor with 20k CUTs (slow lane)                                                                                                                                      | a fresh joiner becomes ready; no readiness state grows with the CUT count                                      |
+| 44  | Index write delayed after the log commit (hook)                                                                                                                      | not ready until the index has the row                                                                          |
+| 45  | Donor departs mid-pull with rows nobody else has                                                                                                                     | `gaps` recorded; behaviour per D4                                                                              |
+| 46  | `BUSY` storm: 20 joiners, one donor                                                                                                                                  | all ready; the donor never exceeds its caps                                                                    |
+| 47  | `assumeComplete()` with no peers                                                                                                                                     | ready with source `operator`; refused on an observer                                                           |
+| 48  | Clean close and reopen; crash and reopen                                                                                                                             | restored cells and anchor equal a fresh build; after a crash no file exists and the peer rebuilds              |
+| 49  | Replace (re-put of a document id) on a donor and on a joiner: non-unique, `unique` over a present row, remote fork; plus two peers making concurrent same-id re-puts | the replaced head leaves the id map, cells and anchor (M0 P2(c), P4); shadow check equal on both peers         |
+| 50  | Writer at 100 rows/s during a 100k-row join                                                                                                                          | ready on R's snapshot; rows above R's `hlc` go to X; no chase                                                  |
+| 51  | Peers with clocks skewed by hours                                                                                                                                    | never a wrong ready; recovery may run (latency only)                                                           |
+| 52  | J holds a newer row for an id and lacks the CUT; a stale R lists the older head                                                                                      | `ignored-older`; ready; the older head is not indexed                                                          |
+| 53  | Cross-process: a visible subscriber is killed (`kill -9`) before answering, with J as its fanout parent and with no parent                                           | `left-unanswered` within one transport event; then `gaps`; never waits for pubsub (pending D3)                 |
+| 54  | Cross-process: a visible subscriber is frozen (`SIGSTOP`)                                                                                                            | gated; `ETIMEDOUT` names it as reachable and silent; no wrong ready                                            |
+| 55  | Stale peer pushes a revoked trust grant to a fresh J                                                                                                                 | J may turn ready while trusting the writer; it stops when the CUT is re-offered; pins the stated non-guarantee |
+| 56  | Tap rules: removed values and remote arrivals without `kind`; an event value mutated by a later put; events during open                                              | shadow check equal; class-based scoping; attached before ingest                                                |
+| 57  | Clean close with late Guard D re-puts in flight                                                                                                                      | the persisted file is written after the drain and equals a fresh build on reopen                               |
 
 **Cross-process** (the `quiet-window` harness): n = 20 for plain dial, both
 `bootstrap()`, and donor writing every 1 s. Report p50 and p95.
@@ -1116,21 +1272,25 @@ then accepts `git clone` with no naming conflicts.
 
 ## 9. Milestones and kill points
 
-| Milestone                                      | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Exit                                                                                                                                                                                          | Kill point                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M0** Probes (private copy, about 3 days)     | P1: how long pubsub keeps a subscriber after an unclean leave, and whether a dead peer's stale replication row produces any replication event at a fresh joiner. P2: (a) `log.entryIndex.getHasNext` finds the CUT of a head J never held, in the entries log and the trust log, after a reopen; (b) what Documents indexes when J pulls an older head whose later version's CUT J holds. P3: whether trust revocation always reaches a joiner as a delete (`@peerbit/trusted-network controller.js:248-255`). P2(c): a Documents replace always carries the replaced head in `meta.next[0]`, so the change tap can subtract it. P4: per-change cost of cells plus the AES-256-CTR anchor in the product's change tap, restore and rebuild time, and freeze time at 50k and 200k rows; whether J can find its rows above an `hlc` with an index range query. P5: the prototype over one-way RPC messages, cross-process. P6: whether put paths can carry `meta.data` tags. File U-36. | results recorded under `readiness-design-20261004/m0/`                                                                                                                                        | **K0:** if P1 shows dead subscribers linger over 60 s, `silent` still blocks until pubsub's peer-unreachable `unsubscribe` (`@peerbit/pubsub index.js:3334-3351`), never on elapsed attempts; the linger is latency, and U-37 is filed. If P1 shows they are never dropped, D3 goes back to the owner with option B and its wrong ready. If P2(a) fails, keep a CUT-target index (entry hash → CUT) from the change tap and one log scan at open, bounded by the log, not by a cap. If P2(b) shows the older head is logged but never indexed, J also fetches the CUT's target and explains the head when that target descends from it. |
-| **M1** Proof-based readiness (no upstream)     | Salt `/shared-fs/v9.2` and the RPC field; one-way messages; maintained cells (M = 4,096, full hashes) and LtHash32 anchor per scope on every peer, persisted at clean close; sessions (anchor fast path, gap estimate with `hlcProved`, first flight of `max(64, 1.8·gap)` cells, ×4 on a failed peel, wait for sync above 2,800, set-hash certificate, recovery list); coordinator; peer states including live and `left-unanswered`; the `superseded` lookup and the bounded rejection record; `TRUST_V1` on `trustGraph.log`; `ChangesetManifest` in `NAMESPACE_V1`; directed `StateNoticeV1` as a trigger only; `assumeComplete`; sidecar proof and parser allowlist; telemetry; CLI line. Remove the quiet window, the poll, the double check, the evidence flag, the `syncronizer.pending` read and the fence's route read. Gate scheduled GC on readiness. Guard D never armed by the override. Tests 1-51.                                                                    | cross-process plain dial p50 ≤ 0.6 s and p95 ≤ 1.5 s (n = 20); continuous writer ≤ 2 s; test 13 green n ≥ 3; suite green 3 times; no timer armed while idle-gated; shadow check never differs | **K1:** p95 > 1.5 s, flakes > 1 in 200, or a soundness hole in review: ship containment as an extra prerequisite of today's tracker (strictly safer than today, no faster) and diagnose before going further. **K2:** if the shadow check ever finds maintained cells or anchor differ from a fresh build, or per-change upkeep exceeds 20 µs at 200k rows, build each snapshot by a scan instead (about 1.1-1.3 s CPU at 200k rows) and keep the same wire format. If the AES-256-CTR expansion is rejected in review, use ChaCha20 (3.21 µs, D17).                                                                                    |
-| **M2** Reach                                   | Warm freshness: fetch without joining, explained by superseding entries in J's log; `warm-fresh`; only `warm-fresh` qualifies (D6); opt-in `requireFreshOnReopen`. Bootstrap decision on a complete qualified answer (both `bootstrap()` under 1 s). `unverified` posture ends on proof. Bootstrap discovery moves off the private `pubsub` reads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | both-bootstrap p95 < 1 s; freshness at rest ≤ 1 request per peer per minute in a 10-peer soak                                                                                                 | If freshness load is too high, make it on-demand.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **M3** Adopt U-36 (when released in a cohort)  | Capability-selected transport behind one `ReconcileTransport` seam; shadow test comparing entry-hash sets; delete the interim session messages and shared-fs's own cells; keep the explain step, the anchor check against U-36's range certificate, and a small provenance attestation RPC; ride the next salt bump.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | shadow sets equal on all tests; latency not worse than M1                                                                                                                                     | **K3:** if U-36 lacks metadata scoping and whole-log scope makes ready more than 20% slower on a store with large files, keep the interim for namespace scope and use U-36 for trust only.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| **M4** Optional: signed frontiers (ACL stores) | Per-stream (author key, random stream id) frontiers that commit to entry hashes, signed and bound to the store id, ordered by seq; carried in answers and by witnesses; default policy `available`, never `strict`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | closes the stale-donor test when a witness holds the frontier; frontier bytes < 2% of write bytes                                                                                             | if frontier traffic > 5% of write bytes, or `writers-unheard` stays at zero in practice, drop it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **M5** Optional: per-operation readiness       | Owned writes never wait; foreign writes prove their footprint over the same RPC; built only on top of the M1 global proof.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | first foreign write about 0.2 s after open at 6k files (measured with a stand-in)                                                                                                             | if footprint coverage cannot be made exhaustive by a table-driven test, drop it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Milestone                                      | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Exit                                                                                                                                                                                          | Kill point                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M0** Probes (private copy, about 3 days)     | P1: how long pubsub keeps a subscriber after an unclean leave, and whether a dead peer's stale replication row produces any replication event at a fresh joiner. P2: (a) `log.entryIndex.getHasNext` finds the CUT of a head J never held, in the entries log and the trust log, after a reopen; (b) what Documents indexes when J pulls an older head whose later version's CUT J holds. P3: whether trust revocation always reaches a joiner as a delete (`@peerbit/trusted-network controller.js:248-255`). P2(c): a Documents replace always carries the replaced head in `meta.next[0]`, so the change tap can subtract it. P4: per-change cost of cells plus the AES-256-CTR anchor in the product's change tap, restore and rebuild time, and freeze time at 50k and 200k rows; whether J can find its rows above an `hlc` with an index range query. P5: the prototype over one-way RPC messages, cross-process. P6: whether put paths can carry `meta.data` tags. File U-36.                                                                                                                                                                                                                                                | results recorded under `readiness-design-20261004/m0/` (done 2026-10-05: `m0/RESULTS.md` and section "M0 results")                                                                            | **K0:** if P1 shows dead subscribers linger over 60 s, `silent` still blocks until pubsub's peer-unreachable `unsubscribe` (`@peerbit/pubsub index.js:3334-3351`), never on elapsed attempts; the linger is latency, and U-37 is filed. If P1 shows they are never dropped, D3 goes back to the owner with option B and its wrong ready. If P2(a) fails, keep a CUT-target index (entry hash → CUT) from the change tap and one log scan at open, bounded by the log, not by a cap. If P2(b) shows the older head is logged but never indexed, J also fetches the CUT's target and explains the head when that target descends from it. **Outcome (2026-10-05):** K0 fired on "never dropped", so D3 is back with the owner; the P2(a) and P2(b) fallbacks were not taken, and `ignored-older` was added instead (section "M0 results"). |
+| **M1** Proof-based readiness (no upstream)     | Salt `/shared-fs/v9.2` and the RPC field; one-way messages; maintained cells (M = 4,096, full hashes), LtHash32 anchor in a worker thread and a compact id → head map per scope on every peer, with the tap rules of 4.4 (class scoping, replace verify, digests), persisted at clean close after the drain; sessions (anchor fast path, rows above `hlc` by a `__context.modified` range query, gap estimate with `hlcProved`, first flight of `max(64, 1.8·gap)` cells, ×4 on a failed peel, wait for sync to T = 256 while it delivers and above 2,800 always, set-hash certificate, recovery list, one shared pull queue); coordinator; peer states including live and `left-unanswered`, departure by route reachability (per D3); the `superseded` lookup, `ignored-older` and the bounded rejection record; `TRUST_V1` on `trustGraph.log`; `ChangesetManifest` in `NAMESPACE_V1`; directed `StateNoticeV1` as a trigger only; `assumeComplete`; sidecar proof and parser allowlist; telemetry; CLI line. Remove the quiet window, the poll, the double check, the evidence flag, the `syncronizer.pending` read and the fence's route read. Gate scheduled GC on readiness. Guard D never armed by the override. Tests 1-57. | cross-process plain dial p50 ≤ 0.6 s and p95 ≤ 1.5 s (n = 20); continuous writer ≤ 2 s; test 13 green n ≥ 3; suite green 3 times; no timer armed while idle-gated; shadow check never differs | **K1:** p95 > 1.5 s, flakes > 1 in 200, or a soundness hole in review: ship containment as an extra prerequisite of today's tracker (strictly safer than today, no faster) and diagnose before going further. **K2:** if the shadow check ever finds maintained cells or anchor differ from a fresh build, or per-change upkeep on the main thread exceeds 20 µs (p90) at 200k rows, or the anchor worker falls behind without bound, build each snapshot by a scan instead (about 2-4 s CPU at 200k rows in the product, M0 P4) and keep the same wire format. (M0 P4: inline, the anchor already trips this at 200k; hence the worker.) If the AES-256-CTR expansion is rejected in review, use ChaCha20 (3.21 µs, D17).                                                                                                               |
+| **M2** Reach                                   | Warm freshness: fetch without joining, explained by superseding entries in J's log; `warm-fresh`; only `warm-fresh` qualifies (D6); opt-in `requireFreshOnReopen`. Bootstrap decision on a complete qualified answer (both `bootstrap()` under 1 s). `unverified` posture ends on proof. Bootstrap discovery moves off the private `pubsub` reads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | both-bootstrap p95 < 1 s; freshness at rest ≤ 1 request per peer per minute in a 10-peer soak                                                                                                 | If freshness load is too high, make it on-demand.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **M3** Adopt U-36 (when released in a cohort)  | Capability-selected transport behind one `ReconcileTransport` seam; shadow test comparing entry-hash sets; delete the interim session messages and shared-fs's own cells; keep the explain step, the anchor check against U-36's range certificate, and a small provenance attestation RPC; ride the next salt bump.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | shadow sets equal on all tests; latency not worse than M1                                                                                                                                     | **K3:** if U-36 lacks metadata scoping and whole-log scope makes ready more than 20% slower on a store with large files, keep the interim for namespace scope and use U-36 for trust only. Scoping cannot use `meta.data` as it is: shared-log overwrites it with `MinReplicas` on every append (M0 P6), so U-36 needs its own tag field.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **M4** Optional: signed frontiers (ACL stores) | Per-stream (author key, random stream id) frontiers that commit to entry hashes, signed and bound to the store id, ordered by seq; carried in answers and by witnesses; default policy `available`, never `strict`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | closes the stale-donor test when a witness holds the frontier; frontier bytes < 2% of write bytes                                                                                             | if frontier traffic > 5% of write bytes, or `writers-unheard` stays at zero in practice, drop it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **M5** Optional: per-operation readiness       | Owned writes never wait; foreign writes prove their footprint over the same RPC; built only on top of the M1 global proof.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | first foreign write about 0.2 s after open at 6k files (measured with a stand-in)                                                                                                             | if footprint coverage cannot be made exhaustive by a table-driven test, drop it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-M1 depends on no unreleased upstream work. It uses only public surfaces of the
+M1 depends on no unreleased upstream work. It uses public surfaces of the
 5.4.10 cohort: `@peerbit/rpc` 6.2.4 (`send` with `to`), `node:crypto`
-(AES-256-CTR, sha256), the projected index iterate with `__context.head`,
+(AES-256-CTR, sha256), `node:worker_threads`, the projected index iterate
+and count with `__context.head` and `__context.modified`,
 `SharedLog.join(hashes)`, `Log.has`, `log.entryIndex.getHasNext`,
-`getReplicators`, replicator and pubsub events, the trust graph's own
-`Documents` log, and `getTrusted()`.
+`getReplicators`, replicator and pubsub events, libp2p `peer:disconnect` /
+`peer:connect` and fanout `peer:unreachable`, the trust graph's own
+`Documents` log, and `getTrusted()`. If D3 goes the recommended way, it also
+reads `pubsub.routes.isReachable` and `pubsub.peers` privately, as shared-fs
+already does (`src/index.ts:10200-10246`, `11185`), until U-37.
 
 ## 10. Upstream asks
 
@@ -1148,7 +1308,13 @@ It works for any size, including above `maxRatelessReceiveRangeEntries`
 Folded in: a per-hash result for `join(hashes)` (today it returns
 `Promise<void>`, `@peerbit/shared-log index.d.ts:1124-1131`, which is why a
 fetch failure can never exclude a peer), and a per-peer receive-progress
-event. Optional part (b): scoping by `meta.data` prefix. Full semantics and
+event. Optional part (b): scoping by an application tag. M0 P6 found that
+`meta.data` is not free for applications: `SharedLog.createLogAppendOptions`
+overwrites it with the encoded `MinReplicas` on every append
+(`@peerbit/shared-log index.js:10873-10882`), and shared-log decodes it as
+`MinReplicas` everywhere (`replication.js:593-606`). So part (b) must add a
+separate tag field, or define `meta.data` as `MinReplicas` followed by an
+application suffix with a tolerant decoder. Full semantics and
 done-when tests: `evidence/design-upstream-sync.md` §3. This closes U-7.
 
 **U-36 mechanism (2026-10-05).** The benchmark (section 11.1) says how U-36
@@ -1181,10 +1347,30 @@ large rejoin fall back to a full hash list (about 53 MB and an estimated
 3,240 s stall at 1M rows). The `[start, end)` range query always mis-decodes
 R's highest element as R-only.
 
-**U-37 (only if K0 fires): a public peer reachability signal.** A documented
-way to learn that a peer is reachable now, and an `unsubscribe` within a stated
-bound after an unclean leave. Today the fence and discovery read
-`pubsub.routes` privately (`src/index.ts:10200-10246`).
+**U-37 (K0 fired on 2026-10-05): a public peer reachability signal.** A
+documented way to learn that a peer is reachable now, and an `unsubscribe`
+within a stated bound after an unclean leave. Today the fence and discovery
+read `pubsub.routes` privately (`src/index.ts:10200-10246`). M0 P1 adds the
+evidence: pubsub's `onPeerUnreachable` never runs when fanout shares the
+routes (U-35, deterministic, `@peerbit/pubsub index.js:416`, `3334-3365`;
+`@peerbit/stream index.js:1624`, `routes.js:264-295`); the fanout parent
+announces PeerUnavailable to others but never applies it locally
+(`@peerbit/pubsub index.js:3071-3098`); the receive path ignores it while a direct stream
+looks readable (`:3865`); nothing bounds subscriber state; and
+`abortConnectionOnPingFailure: false` (`peerbit libp2p.js:81`) leaves
+half-open and hung peers connected. Done-when: after `kill -9` every remaining
+peer emits `unsubscribe` within a stated bound, and a hung peer is dropped by
+a stated liveness policy. To be handed to the upstream owner by the user.
+
+**Other upstream reports from M0 (2026-10-05).** For the upstream owner; no
+upstream code was changed.
+
+| Package                    | Finding                                                                                                                                                                                                                   | Evidence                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `@peerbit/document` / log  | Pulling an older head h whose later version's CUT the receiver holds resurrects the deleted document, which then replicates back to the deleter. The CUT check covers exact `next` only (`@peerbit/log log.js:3878-3888`) | `evidence/m0/p2p3/docs-run{4,5,6}.lines.txt` |
+| `@peerbit/document`        | Change events of concurrent same-id writes can be dispatched in a different order from the index writes (`program.js:3912`), so a consumer that trusts event order diverges                                               | `evidence/m0/p4p6/remote.ndjson`             |
+| `@peerbit/document`        | A `unique` put over a present row replaces it with `meta.next = []`, and no replace reports the replaced head as `removed`                                                                                                | `evidence/m0/p2p3/`, `p4p6/remote*.ndjson`   |
+| `@peerbit/trusted-network` | A delete with no local relation is rejected rather than kept as a tombstone, so a fresh joiner never learns a revocation and a stale peer can re-introduce the revoked grant                                              | `evidence/m0/p2p3/trust-run{1-4}.lines.txt`  |
 
 **U-38 (for M4 only): the authenticated signer in Documents change context.**
 Today the signer is visible only at ingest (`src/index.ts:4230`). Frontiers per
@@ -1330,14 +1516,21 @@ benchmarked as one of the candidates above.
 - AES-256-CTR as an LtHash expander is not a published parameter set. The
   conservative alternative is ChaCha20 at 3.21 µs (D17).
 - The harness modelled one visible peer and no libp2p transport, and it could
-  not model a sender that streams cells until told to stop.
-- The per-write total of about 2.4 µs is a sum of measured parts, not an end
-  to end measurement.
+  not model a sender that streams cells until told to stop. M0 P5 has since
+  run the mechanism cross-process over libp2p with one and two donors (192
+  runs, 0 false readies).
+- The per-write total of about 2.4 µs was a sum of measured parts. Measured in
+  the product (M0 P4) it was 5.5-35 µs p50 inline, so the anchor moves to a
+  worker; the main thread then pays 1.8-5.6 µs p50.
 
 ## 12. Owner decisions needed
 
 **2026-10-05: the owner accepted every recommendation below (D1-D18).** Work
 proceeds with M0, then M1, in shared-fs only.
+
+**After M0 (2026-10-05): D3 is back with the owner.** K0 fired on its "never
+dropped" branch (section "M0 results"). D15 and D17 keep their choice, with
+corrected figures; D10 now files U-37.
 
 1. **D1. The new promise.** Ready means: J holds everything every connected or
    live visible peer held at its snapshot, and at least one of those peers was
@@ -1353,6 +1546,23 @@ proceeds with M0, then M1, in shared-fs only.
    its own: if pubsub lingers, J waits for its `unsubscribe`. Only if P1 shows
    dead subscribers are never dropped does this decision come back.
    _Recommendation: A._
+
+    **Reopened after M0 P1 (2026-10-05).** P1 showed that dead subscribers are
+    never dropped on the dead peer's fanout parent (36 of 36), or on any peer
+    when it had no parent (82 of 82), so A as accepted would gate J until a
+    crashed peer returns. The options now:
+
+    | Option               | "R left" means                                                                                                                 | Wrong ready? | Cost                                                                                                                                                                                                      |
+    | -------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+    | A as accepted        | pubsub `unsubscribe`                                                                                                           | no           | after most crashes J stays gated until R returns; every `awaitWriteReady` times out                                                                                                                       |
+    | **A' (recommended)** | R is unreachable on the route table, re-read on libp2p `peer:disconnect` / `peer:connect` and fanout `peer:unreachable` events | no           | private reads (`pubsub.routes.isReachable`, `pubsub.peers`, already used at `src/index.ts:10200-10246`, `11185`) until U-37; half-open socket: 120 s; hung peer: never, so the caller's timeout bounds it |
+    | B                    | the attempts end (35 s)                                                                                                        | **yes**      | a creator busy for more than 35 s next to a fast stale replica can be missed                                                                                                                              |
+
+    A' keeps A's guarantee: a busy but connected creator stays reachable, so it
+    stays Required. It fired 4-24 ms after every `kill -9` and transport stop
+    in P1. The design text marked "pending D3" assumes A'.
+    _Recommendation: A'._
+
 4. **D4. A peer that leaves while J lacks rows only it had, or before it
    answered.** Block until it returns, or proceed and record `gaps` in the
    proof and status (`missing: "unknown"` when it never answered, after its
@@ -1375,7 +1585,8 @@ proceeds with M0, then M1, in shared-fs only.
    dropped) as a separate change. _Recommendation: yes, separately._
 10. **D10. Upstream.** File the merged U-36 now, with the mechanism in
     section 10 (D18); file U-37 only if K0 fires;
-    hold U-38 for M4. _Recommendation: yes._
+    hold U-38 for M4. _Recommendation: yes._ After M0: K0 fired, so U-37 is
+    due, together with the other M0 upstream reports in section 10.
 11. **D11. Operator escape.** Add `assumeComplete()` and
     `--assume-complete`, persisting source `operator`. _Recommendation: yes._
 12. **D12. Optional layers.** Decide on signed frontiers (M4) and
@@ -1398,7 +1609,11 @@ proceeds with M0, then M1, in shared-fs only.
     scan, sort or encoder, joiners never re-hash their store, and a collision
     can only delay readiness. This replaces the earlier "salt per responder
     open", which cost 0.7 s per peer at 1M rows and failed the collision test.
-    _Recommendation: accept._
+    _Recommendation: accept._ After M0 P4 the figures are: a worker thread
+    for the anchor; main thread p50 1.8-2.6 µs per add and 3.2-5.6 µs per
+    replace (5.5-35 µs inline); plus a compact id → head map of about 13 MB
+    at 200k rows and 57 MB at 1M, persisted with the cells. The choice
+    stands; the owner may want to note the memory.
 16. **D16. `ChangesetManifest` in the namespace scope.** Ready then also covers
     every changeset turn a contained peer held, so `changesetStatus` agrees
     with readiness. The alternative is to state in section 2.3 that changeset
@@ -1411,14 +1626,96 @@ proceeds with M0, then M1, in shared-fs only.
     out (its 128-bit key caps expansion collisions at about 2^64, estimate).
     The cells use our own format, not `@peerbit/riblt`'s wire format.
     _Recommendation: A, switching to B if a crypto review objects; the wire
-    format does not change._
+    format does not change._ After M0 P4: 2.10 µs holds only in a small heap.
+    In the product the expansion's 4 KiB allocation makes it 6.4-7.7 µs at a
+    477 MB heap and 20-52 µs at 1.9 GB. ChaCha20 and BLAKE3 allocate the
+    same way, so B does not avoid this; a worker does, for any choice.
 18. **D18. End state.** Ask upstream for U-36 as the mechanism of section 10
     (per-segment cells over full hashes, a per-segment LtHash, a streamed
     sender, a completion signal with `D_range`), and drop shared-fs's own cells
     at M3. The benchmarked U-36 sketch with 64-bit cells must not ship.
     _Recommendation: accept and report to the upstream owner._
 
+## M0 results (2026-10-05)
+
+The six M0 probes ran on shared-fs 0.16.5 and the Peerbit 5.4.10 cohort, on a
+shared machine with other load (load averages are given in the raw results).
+Full answers, evidence paths and run counts are in
+`evidence/m0/RESULTS.md`; raw data is in `evidence/m0/p1`, `p2p3`, `p4p6`
+and `p5`.
+
+### What each probe found
+
+| Probe                        | Question                                                                          | Answer                                                                                                                                                                                                                                       | Consequence for M1                                                                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| P1(a) unclean leave          | How long does pubsub keep a dead subscriber, and does it ever emit `unsubscribe`? | The transport notices in 4-24 ms. Pubsub drops the peer only on peers that hear its fanout parent's PeerUnavailable (16-40 ms). The parent never drops it (36/36), nor does anyone when there was no parent (82/82); still listed at 20 min. | K0 fires on "never dropped": D3 goes back to the owner. Departure is read from route reachability on transport events (option A'). |
+| P1(a) half-open, hung        | Does anything drop a peer whose sockets stay open?                                | Half-open: only the 120 s TCP inactivity timeout. Frozen process: nothing (0/30 `unsubscribe`).                                                                                                                                              | Such a peer stays Required until the caller's timeout; status names it "reachable, silent". Not a wrong ready.                     |
+| P1(a) U-35                   | Does pubsub's own `onPeerUnreachable` run?                                        | Never (0/154): fanout shares the routes and removes the peer first.                                                                                                                                                                          | M1 never uses pubsub `unsubscribe` or pubsub `peer:unreachable` as a departure signal. Feeds U-37.                                 |
+| P1(b) stale row at a fresh J | Does a dead peer's replication row cause replication events at a fresh joiner?    | No (107/107); the row never reaches the joiner. A dead or hung peer was relayed as a pubsub subscriber in 5/107 runs, unreachable on the route table.                                                                                        | `unconfirmed` is safe and, for a fresh J, vacuous. Discovery keeps filtering subscribers by reachability.                          |
+| P2(a) entries log            | Does `getHasNext` find the CUT of a head J never held, after reopen?              | Yes whenever J holds the CUT, also after a restart from disk with no network. J does not hold it after a unique re-put of the same id (6 of 15 CUTs held in real shared-fs).                                                                 | Sound and durable; no CUT-target index. Incomplete only against a stale R (see P2(b)).                                             |
+| P2(a) trust log              | Same, in the trust log                                                            | A fresh joiner never holds a revocation CUT for a grant it never held: `TrustedNetwork` rejects it.                                                                                                                                          | Fine against an up-to-date R; against a stale R see P3.                                                                            |
+| P2(b) older head             | J holds the CUT of d, not d; it pulls the older head h. What is indexed?          | h is indexed: the deleted document comes back and replicates to the deleter (3/3). Variant: J holds a newer row for the id, lacks the CUT; h is logged, never indexed, and nothing names it.                                                 | Containment holds in the stated case (upstream bug reported). The variant needs a new explained class, `ignored-older`.            |
+| P2(c) replace                | Does a replace always name the replaced head in `meta.next[0]`?                   | No: not for `unique` puts over a present row, not for remote forks, not for independent unique puts. No replace reports the old head as removed. Ignored arrivals dispatch empty events.                                                     | The tap keeps an id → head map and ignores empty events. The `meta.next` rule is dropped.                                          |
+| P3 revocation                | Does a joiner always see a revocation as a delete?                                | Only if it held the relation. A fresh joiner sees no event and no CUT (end state correct). A stale peer can push the revoked grant: J trusts the writer again for about 1 s, until A re-offers the CUT.                                      | The trust listener re-evaluates on any change, from current rows. The revocation window is stated (2.3, 5); upstream report filed. |
+| P4 tap cost                  | Cells plus anchor per change in the real change tap, at 50k and 200k rows         | Inline p50 5.5-15 µs per add and 9.5-35 µs per replace; p90 of adds 15-34 µs at 200k. With the anchor in a worker: main thread 1.8-2.6 µs and 3.2-5.6 µs.                                                                                    | K2's 20 µs fails inline; M1 hosts the anchor in a worker.                                                                          |
+| P4 why                       | Where does the time go?                                                           | Head string decode 2.0-2.6 µs; the anchor slows with heap size (4 KiB allocation per expansion; 20-52 µs at a 1.9 GB heap); cells 0.23-0.31 µs.                                                                                              | Fast fixed-shape decoder or digests; anchor in a worker (any cipher).                                                              |
+| P4 shadow check              | Does maintained state equal a fresh build?                                        | One peer: always. Two peers with concurrent same-id re-puts: no (4/4), because change events can arrive out of index order. With a replace-verify step: yes (3/3).                                                                           | The tap re-reads the indexed head on every replace or stale removal.                                                               |
+| P4 restore, freeze, query    | Restore vs rebuild; freeze; rows above `hlc`                                      | Cells plus anchor restore in under 1 ms, the map in 57-131 ms, against a 2-4 s rebuild at 204k rows. Freeze p50 16-31 µs inline, 52-167 µs via the worker. A `__context.modified` range query is exact; `count()` under 1 ms.                | Persist the map too, after the drain. No timestamp side table; warm the query's lazy index at open; `hlc` is wall time in ns.      |
+| P5 end to end                | Does the session work over one-way RPC, cross-process, and how fast?              | Yes: 192 runs, 0 false readies, shadow equal in all. Latency in the table below.                                                                                                                                                             | Transport and session flow carry over. Three tunings (step 5's T = 256, gapEst with `hlcProved = 0`, one pull queue).              |
+| P6 tags                      | Can put paths carry `meta.data` tags?                                             | No: shared-log overwrites `meta.data` with `MinReplicas` on every append.                                                                                                                                                                    | M1 does not need tags. U-36 part (b) and K3 need a separate tag field.                                                             |
+
+### P5 latency, cross-process (n = 20 per batch, two batches)
+
+| Scenario                         | Proof-based (P5) p50 / p95                 | Today p50 / p95            |
+| -------------------------------- | ------------------------------------------ | -------------------------- |
+| Plain dial, 1 file               | 0.28-0.36 s / 0.43-0.53 s                  | 5.45-5.49 s / 5.57-5.77 s  |
+| Plain dial, 400 files (805 rows) | 0.93-0.96 s / 1.05-1.09 s                  | 6.07-6.11 s / 6.25-6.84 s  |
+| Donor writing every 1 s          | 0.82-0.93 s / 1.13-1.81 s                  | 0 of 20 ready within 20 s  |
+| Two donors, 400 files            | 1.06-1.38 s / 1.17-2.58 s                  | 6.16-6.49 s / 6.27-8.08 s  |
+| Warm rejoin, d = 0 (proof only)  | 0.38-0.44 s / 0.49-0.57 s, 1 RTT, 148 B in | ready at open, 0.32-0.35 s |
+
+The M1 exit target for a small plain dial (p50 ≤ 0.6 s, p95 ≤ 1.5 s) is met by
+the prototype. At 400 files the p50 is bound by Peerbit's transfer of the
+rows: the proof finished 0-1 ms after the last row arrived.
+
+### Kill points and the branch M1 takes
+
+| Rule                        | Result                                                                                                     | Branch                                                                                           |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| K0, linger over 60 s        | Yes, and on the parent or with no parent the subscriber is never dropped                                   | **"Never dropped" branch: D3 goes back to the owner** (section 12, recommended A'). U-37 is due. |
+| P2(a) fallback              | The lookup works whenever J holds the CUT, durably; J lacks CUTs only when `canPerform` rejected them      | Not taken: a CUT-target index from the tap would not see rejected CUTs either                    |
+| P2(b) fallback              | The stated case is indexed (not "logged but never indexed"); the variant is logged but has no CUT to fetch | Not taken as written; `ignored-older` instead                                                    |
+| K2 (M1 kill point, from P4) | Inline upkeep exceeds 20 µs at 200k rows                                                                   | Anchor in a worker; K2 now measures the main thread (p90) and the worker's backlog               |
+
+M1 continues in shared-fs only on Peerbit 5.4.10. Everything except the
+departure rule can start now; the departure rule waits for D3.
+
+### What changed in this document
+
+| Section                | Change                                                                                                                                                                                                                                                                       | Probe         |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| Status, 1, 12          | D3 reopened with options A, A' and B; D10 files U-37; D15 and D17 carry corrected figures                                                                                                                                                                                    | P1, P4        |
+| 1 (what changes), 4.1  | Per-change cost replaced by the product measurement; anchor in a worker; id map added                                                                                                                                                                                        | P4            |
+| 2.1, 2.2 item 2        | "Connected" and departure defined by route reachability, re-read on transport events (pending D3); the pubsub assumption removed                                                                                                                                             | P1            |
+| 2.3                    | New row: a fresh J can trust a revoked grant that a stale peer re-introduces                                                                                                                                                                                                 | P3            |
+| 2.4, 6.2, 6.4, 4.12 #2 | Latency rows use the P5 cross-process numbers; new rows for a crashed and a hung peer                                                                                                                                                                                        | P1, P5        |
+| 4.3                    | `hlc` is the highest `__context.modified` (wall time, u64 ns)                                                                                                                                                                                                                | P4            |
+| 4.4                    | Id → head map (compact) replaces the `meta.next[0]` rule; tap rules (class scoping, synchronous reads, empty events, replace verify, attach before ingest, digests); anchor in a worker with a sequence-numbered freeze; restore and freeze figures; persist after the drain | P2(c), P4     |
+| 4.5 steps 3-5, 7-9     | Rows above `hlc` by a range query (no side table); `above` term off when `hlcProved = 0`; wait for T = 256 while sync delivers; one pull queue across sessions; `ignored-older` after a pull                                                                                 | P4, P5, P2(b) |
+| 4.6                    | New explained class `ignored-older`; the open case resolved (h is indexed; resurrection reported upstream); where J lacks CUTs                                                                                                                                               | P2            |
+| 4.7, 4.9               | `unconfirmed` confirmed; departure paragraph; transport events as triggers; trust re-checks on any change                                                                                                                                                                    | P1, P3        |
+| 4.10, 4.11, 6.3        | Persisted file holds the id map; memory, seed, snapshot and storage rows; the private reachability read under A'                                                                                                                                                             | P1, P4        |
+| 4.12                   | Cases 14, 16, 39 updated; cases 41-45 added                                                                                                                                                                                                                                  | P1-P4         |
+| 5                      | Revocation gap made concrete                                                                                                                                                                                                                                                 | P3            |
+| 6.1, 11.1              | Note that the 2.4 µs estimate is superseded; residual risks updated                                                                                                                                                                                                          | P4, P5        |
+| 8                      | Tests 18 and 49 changed; tests 52-57 added                                                                                                                                                                                                                                   | P1-P4         |
+| 9                      | M0 outcome; M1 content (worker, id map, `ignored-older`, T = 256, pull queue, reachability); K2 on the main thread; K3 needs a tag field; surfaces list                                                                                                                      | all           |
+| 10                     | U-36(b) cannot use `meta.data`; U-37 filled in with P1's evidence; four new upstream reports                                                                                                                                                                                 | P1-P3, P6     |
+
 ## Appendix: evidence
+
+- `evidence/m0/RESULTS.md` and `evidence/m0/{p1,p2p3,p4p6,p5}/`: the M0
+  probes (section "M0 results").
 
 - `~/git/shared-fs-evidence/unblocked-20261003/quiet-window/`: today's 5.34 s
   breakdown, the donor-confirmed prototype and its patch.
