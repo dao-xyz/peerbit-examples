@@ -1561,7 +1561,7 @@ corrected figures; D10 now files U-37.
     A' keeps A's guarantee: a busy but connected creator stays reachable, so it
     stays Required. It fired 4-24 ms after every `kill -9` and transport stop
     in P1. The design text marked "pending D3" assumes A'.
-    _Recommendation: A'._
+    _Recommendation: A'._ **Owner decision 2026-10-05: A'.**
 
 4. **D4. A peer that leaves while J lacks rows only it had, or before it
    answered.** Block until it returns, or proceed and record `gaps` in the
