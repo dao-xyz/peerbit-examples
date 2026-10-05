@@ -1336,6 +1336,9 @@ benchmarked as one of the candidates above.
 
 ## 12. Owner decisions needed
 
+**2026-10-05: the owner accepted every recommendation below (D1-D18).** Work
+proceeds with M0, then M1, in shared-fs only.
+
 1. **D1. The new promise.** Ready means: J holds everything every connected or
    live visible peer held at its snapshot, and at least one of those peers was
    a ready full replica in that same answer. Invisible peers are out of scope,
