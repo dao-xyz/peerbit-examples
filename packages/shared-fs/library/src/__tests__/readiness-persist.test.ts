@@ -1,15 +1,18 @@
 import { fork } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, promises as fsPromises } from "node:fs";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
+import { TrustedNetwork } from "@peerbit/trusted-network";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import { openSharedFs, type SharedFsHandle } from "../index.js";
 import { NamingEvent } from "../model.js";
+import { AnchorHost } from "../readiness/anchor-host.js";
 import { DIGEST_BYTES } from "../readiness/constants.js";
 import { digestToHead } from "../readiness/digest.js";
 import {
@@ -18,7 +21,7 @@ import {
     structuresPath,
     takeStructures,
 } from "../readiness/persist.js";
-import type { ReadinessRuntime } from "../readiness/runtime.js";
+import { ReadinessRuntime, logIdOf } from "../readiness/runtime.js";
 import {
     NAMESPACE_V1,
     SCOPE_NAMESPACE_V1,
@@ -26,7 +29,7 @@ import {
     TRUST_V1,
     type ScopeId,
 } from "../readiness/scopes.js";
-import { compareScope } from "../readiness/shadow.js";
+import { compareScope, optOutOfReadinessShadow } from "../readiness/shadow.js";
 import { ScopeTap, type IndexedHead } from "../readiness/tap.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
@@ -74,8 +77,35 @@ const writeFiles = async (fs: SharedFsHandle, n: number, prefix = "f") => {
     }
 };
 
-const namespaceFile = (directory: string, address: string) =>
-    structuresPath(directory, address, NAMESPACE_V1);
+/** The namespace store's log id: its structures file's name. */
+const storeOf = (fs: SharedFsHandle): Uint8Array => logIdOf(entriesOf(fs));
+
+const namespaceFile = (directory: string, store: Uint8Array) =>
+    structuresPath(directory, store, NAMESPACE_V1);
+
+/**
+ * Removals of `path` fail with EPERM until the returned function runs, as
+ * for a file another process holds (Windows sharing locks) or an immutable
+ * one.
+ */
+const lockRemoval = (path: string) => {
+    const rm = fsPromises.rm;
+    fsPromises.rm = (async (target: any, options?: any) => {
+        if (String(target) === path) {
+            throw Object.assign(
+                new Error(`EPERM: operation not permitted, unlink '${path}'`),
+                { code: "EPERM" }
+            );
+        }
+        return rm(target, options);
+    }) as typeof rm;
+    // The library's `import("node:fs/promises")` sees the patched export.
+    syncBuiltinESMExports();
+    return () => {
+        fsPromises.rm = rm;
+        syncBuiltinESMExports();
+    };
+};
 
 const runChild = (args: string[]) =>
     new Promise<{
@@ -150,6 +180,7 @@ describe("readiness persistence", () => {
         await writeFiles(fs, n);
         const before = await stateOf(fs);
         const address = fs.address!;
+        const store = storeOf(fs);
         const ids: string[] = (
             await entriesOf(fs)
                 .index.index.iterate(
@@ -159,7 +190,7 @@ describe("readiness persistence", () => {
                 .all()
         ).map((row: any) => row.value.id);
         await stopPeer(peer);
-        return { directory, address, before, ids };
+        return { directory, address, store, before, ids };
     };
     const reopen = async (directory: string, address: string) => {
         const peer = await createPeer(directory);
@@ -169,12 +200,12 @@ describe("readiness persistence", () => {
     };
 
     it("restores at a clean reopen and equals a fresh build (test 48)", async () => {
-        const { directory, address, before } = await persisted();
-        const file = await namespaceFile(directory, address);
+        const { directory, address, store, before } = await persisted();
+        const file = await namespaceFile(directory, store);
         expect(existsSync(file)).toBe(true);
         // The trust scope is always rebuilt by scan: no file for it.
         expect(
-            existsSync(await structuresPath(directory, address, TRUST_V1))
+            existsSync(await structuresPath(directory, store, TRUST_V1))
         ).toBe(false);
 
         const { fs } = await reopen(directory, address);
@@ -200,9 +231,10 @@ describe("readiness persistence", () => {
         const first = await runChild(["close", directory]);
         expect(first.code, first.output).toBe(0);
         const address: string = first.report.address;
+        const store = Buffer.from(first.report.store, "hex");
         // S14: the child's only remaining work was the close; it still
         // wrote the structures file before the process exited.
-        expect(existsSync(await namespaceFile(directory, address))).toBe(true);
+        expect(existsSync(await namespaceFile(directory, store))).toBe(true);
         expect(first.report.mode).toBe("worker");
 
         const crashed = await runChild(["crash", directory, address]);
@@ -215,7 +247,7 @@ describe("readiness persistence", () => {
             expect(crashed.signal, crashed.output).toBe("SIGKILL");
         }
         expect(crashed.report.start).toEqual({ kind: "restored" });
-        expect(existsSync(await namespaceFile(directory, address))).toBe(false);
+        expect(existsSync(await namespaceFile(directory, store))).toBe(false);
 
         const { fs } = await reopen(directory, address);
         expect(runtimeOf(fs).starts.get("namespace-v1")).toEqual({
@@ -239,6 +271,7 @@ describe("readiness persistence", () => {
         await writeFiles(fs, 30);
         await runtimeOf(fs).whenStarted();
         const address = fs.address!;
+        const store = storeOf(fs);
         // CUTs of live rows: Guard D re-puts them. Close without waiting.
         const rows = await entriesOf(fs)
             .index.index.iterate(
@@ -263,7 +296,7 @@ describe("readiness persistence", () => {
         // The CUTs and the re-puts both reached the tap before the file.
         expect(repairs.removes - before.removes).toBeGreaterThan(0);
         expect(repairs.adds - before.adds).toBeGreaterThan(0);
-        expect(existsSync(await namespaceFile(directory, address))).toBe(true);
+        expect(existsSync(await namespaceFile(directory, store))).toBe(true);
 
         const again = await reopen(directory, address);
         peer = again.peer;
@@ -274,8 +307,8 @@ describe("readiness persistence", () => {
     });
 
     it("rebuilds from a torn file (checksum) or a truncated one", async () => {
-        const { directory, address } = await persisted(5);
-        const file = await namespaceFile(directory, address);
+        const { directory, address, store } = await persisted(5);
+        const file = await namespaceFile(directory, store);
         const bytes = await readFile(file);
         bytes[100] ^= 0xff;
         await writeFile(file, bytes);
@@ -299,8 +332,8 @@ describe("readiness persistence", () => {
     });
 
     it("rebuilds when the restored count does not match the index", async () => {
-        const { directory, address, ids } = await persisted(10);
-        const file = await namespaceFile(directory, address);
+        const { directory, address, store, ids } = await persisted(10);
+        const file = await namespaceFile(directory, store);
         const decoded = decodeStructures(
             await readFile(file),
             address,
@@ -332,15 +365,16 @@ describe("readiness persistence", () => {
         await writeFiles(one, 5, "one");
         await writeFiles(other, 7, "other");
         const [a, b] = [one.address!, other.address!];
+        const [storeA, storeB] = [storeOf(one), storeOf(other)];
         await stopPeer(peer);
-        const fileA = await namespaceFile(directory, a);
-        const fileB = await namespaceFile(directory, b);
+        const fileA = await namespaceFile(directory, storeA);
+        const fileB = await namespaceFile(directory, storeB);
         // B's file name, A's content.
         await copyFile(fileA, fileB);
-        // A's namespace file as A's trust file.
-        const trustA = await structuresPath(directory, a, TRUST_V1);
+        // A's namespace file as a trust file of A's store.
+        const trustA = await structuresPath(directory, storeA, TRUST_V1);
         await copyFile(fileA, trustA);
-        expect(await takeStructures(directory, a, TRUST_V1)).toEqual({
+        expect(await takeStructures(directory, storeA, a, TRUST_V1)).toEqual({
             ok: false,
             reason: "scope",
         });
@@ -354,9 +388,123 @@ describe("readiness persistence", () => {
         expect(await shadow(reopened.fs)).toMatchObject({ kind: "equal" });
     });
 
+    it("takes the file of another address over the same store, so a later restore is never stale", async () => {
+        // Two addresses share one store when only `sealedIgnoredNames` (or
+        // the rootKey) differs: the store is keyed by the log id.
+        const directory = join(await newRoot(), "peer");
+        const id = randomBytes(32);
+        let peer = await createPeer(directory);
+        const rootKey = peer.identity.publicKey;
+        const first = await openSharedFs({
+            peerbit: peer,
+            id,
+            rootKey,
+            gc: false,
+        });
+        await writeFiles(first, 5);
+        const a = first.address!;
+        const store = storeOf(first);
+        await stopPeer(peer);
+        const file = await namespaceFile(directory, store);
+        expect(existsSync(file)).toBe(true);
+
+        peer = await createPeer(directory);
+        const second = await openSharedFs({
+            peerbit: peer,
+            id,
+            rootKey,
+            sealedIgnoredNames: [],
+            gc: false,
+        });
+        expect(second.address).not.toBe(a);
+        expect(hex(storeOf(second))).toBe(hex(store));
+        await runtimeOf(second).whenStarted();
+        // The open took A's file (and rejected it: another address).
+        expect(runtimeOf(second).starts.get("namespace-v1")).toEqual({
+            kind: "scanned",
+            rejected: "address",
+        });
+        expect(existsSync(file)).toBe(false);
+        // A change that keeps the count: overwrites, then GC retires the
+        // superseded versions.
+        const count = runtimeOf(second).namespace!.count;
+        await writeFiles(second, 5);
+        await second.collectGarbage({
+            settleMs: 0,
+            chunkSweep: "immediate",
+            nowMs: Date.now() + 40 * 24 * 3600 * 1000,
+            keepVersions: 1,
+            retentionMs: 0,
+            graceMs: 0,
+        });
+        await runtimeOf(second).namespace!.verifyIdle();
+        expect(runtimeOf(second).namespace!.count).toBe(count);
+        await stopPeer(peer);
+
+        // A again: B's file is for B, so A scans the changed store.
+        const again = await reopen(directory, a);
+        expect(runtimeOf(again.fs).starts.get("namespace-v1")).toEqual({
+            kind: "scanned",
+            rejected: "address",
+        });
+        expect(await shadow(again.fs)).toMatchObject({ kind: "equal" });
+    });
+
+    it("removes the file beside the trust graph's open, and before the store ingests", async () => {
+        const { directory, address, store } = await persisted(3);
+        const file = await namespaceFile(directory, store);
+        expect(existsSync(file)).toBe(true);
+        // The removal waits until the trust graph's open began (or 2 s).
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const fallback = setTimeout(() => release(), 2_000);
+        let taking = true;
+        const rm = fsPromises.rm;
+        fsPromises.rm = (async (target: any, options?: any) => {
+            if (String(target) === file) {
+                await gate;
+                taking = false;
+            }
+            return rm(target, options);
+        }) as typeof rm;
+        syncBuiltinESMExports();
+        const order: string[] = [];
+        const trustOpen = TrustedNetwork.prototype.open;
+        TrustedNetwork.prototype.open = async function (
+            this: any,
+            ...args: any[]
+        ) {
+            order.push(taking ? "trust open, file taking" : "trust open");
+            release();
+            return trustOpen.apply(this, args as any);
+        };
+        const attach = ReadinessRuntime.prototype.attachNamespace;
+        ReadinessRuntime.prototype.attachNamespace = function (
+            this: ReadinessRuntime,
+            entries: any
+        ) {
+            order.push(existsSync(file) ? "attach, file present" : "attach");
+            return attach.call(this, entries);
+        };
+        let again: Awaited<ReturnType<typeof reopen>>;
+        try {
+            again = await reopen(directory, address);
+        } finally {
+            clearTimeout(fallback);
+            fsPromises.rm = rm;
+            syncBuiltinESMExports();
+            TrustedNetwork.prototype.open = trustOpen;
+            ReadinessRuntime.prototype.attachNamespace = attach;
+        }
+        expect(order).toEqual(["trust open, file taking", "attach"]);
+        expect(runtimeOf(again.fs).starts.get("namespace-v1")).toEqual({
+            kind: "restored",
+        });
+    });
+
     it("writes nothing when close() returns false (S7)", async () => {
-        const { directory, address } = await persisted(3);
-        const file = await namespaceFile(directory, address);
+        const { directory, address, store } = await persisted(3);
+        const file = await namespaceFile(directory, store);
         const { peer, fs } = await reopen(directory, address);
         expect(existsSync(file)).toBe(false);
         // Another parent still holds the program: Program.close returns
@@ -384,6 +532,93 @@ describe("readiness persistence", () => {
         expect(runtimeOf(again.fs).starts.get("namespace-v1")).toEqual({
             kind: "scanned",
         });
+    });
+
+    it("never restores a file an open could not remove (void marker)", async () => {
+        const { directory, address, store } = await persisted(5);
+        const file = await namespaceFile(directory, store);
+        const marker = `${file}.void`;
+        // Held while the open runs: the open cannot unlink it.
+        let unlock = lockRemoval(file);
+        const second = await reopen(directory, address).finally(unlock);
+        expect(runtimeOf(second.fs).starts.get("namespace-v1")).toEqual({
+            kind: "scanned",
+            rejected: "unlink: EPERM",
+        });
+        expect(existsSync(file)).toBe(true);
+        expect(existsSync(marker)).toBe(true);
+        // A change that keeps the count: overwrites, then GC retires the
+        // superseded versions.
+        const count = runtimeOf(second.fs).namespace!.count;
+        await writeFiles(second.fs, 5);
+        await second.fs.collectGarbage({
+            settleMs: 0,
+            chunkSweep: "immediate",
+            nowMs: Date.now() + 40 * 24 * 3600 * 1000,
+            keepVersions: 1,
+            retentionMs: 0,
+            graceMs: 0,
+        });
+        await runtimeOf(second.fs).namespace!.verifyIdle();
+        expect(runtimeOf(second.fs).namespace!.count).toBe(count);
+        // A crash: no replacement file is written.
+        optOutOfReadinessShadow(second.fs.program);
+        runtimeOf(second.fs).disposeWithoutPersist();
+        (second.fs.program as any).readinessRuntime = undefined;
+        await stopPeer(second.peer);
+        expect(existsSync(file)).toBe(true);
+
+        // The stale file matches the count, but its marker voids it.
+        const third = await reopen(directory, address);
+        expect(runtimeOf(third.fs).starts.get("namespace-v1")).toEqual({
+            kind: "scanned",
+            rejected: "void",
+        });
+        expect(existsSync(file)).toBe(false);
+        expect(existsSync(marker)).toBe(false);
+        expect(await shadow(third.fs)).toMatchObject({ kind: "equal" });
+        await stopPeer(third.peer);
+
+        // A clean close replaces a voided file and drops its marker.
+        unlock = lockRemoval(file);
+        const fourth = await reopen(directory, address).finally(unlock);
+        expect(existsSync(marker)).toBe(true);
+        await writeFiles(fourth.fs, 2, "later");
+        await stopPeer(fourth.peer);
+        expect(existsSync(marker)).toBe(false);
+        const fifth = await reopen(directory, address);
+        expect(runtimeOf(fifth.fs).starts.get("namespace-v1")).toEqual({
+            kind: "restored",
+        });
+        expect(await shadow(fifth.fs)).toMatchObject({ kind: "equal" });
+    });
+
+    it("releases the readiness state on drop and never persists it", async () => {
+        const directory = join(await newRoot(), "peer");
+        const peer = await createPeer(directory);
+        const host = await AnchorHost.shared();
+        const before = host.openSets;
+        const fs = await openSharedFs({
+            peerbit: peer,
+            rootKey: peer.identity.publicKey,
+            gc: false,
+        });
+        await writeFiles(fs, 3);
+        const runtime = runtimeOf(fs);
+        await runtime.whenStarted();
+        const store = storeOf(fs);
+        expect(host.openSets).toBe(before + 2);
+        // Program.drop does not run close(): the override releases the
+        // lane sets, which would otherwise pin the dropped program on the
+        // process-wide host.
+        expect(await fs.program.drop()).toBe(true);
+        expect(runtime.disposed).toBe(true);
+        expect(runtime.namespace).toBeUndefined();
+        expect(host.openSets).toBe(before);
+        // A close after the drop has nothing to write.
+        await fs.program.close();
+        await stopPeer(peer);
+        expect(existsSync(await namespaceFile(directory, store))).toBe(false);
     });
 
     it("compares the restore count only at a stable epoch (S11)", async () => {

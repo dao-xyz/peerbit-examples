@@ -142,7 +142,12 @@ const keys = async (n: number): Promise<PublicSignKey[]> =>
  * host (worker or inline), so a test can fault the tap or crash the worker
  * without touching the process-wide host.
  */
-const fakeResponder = async (rows: number, mode?: "inline") => {
+const fakeResponder = async (
+    rows: number,
+    mode?: "inline",
+    provenance?: () => ProvenanceState,
+    options: { started?: Promise<void> } = {}
+) => {
     const heads = new Map<string, string>();
     const port = {
         readHead: async (key: unknown) => {
@@ -179,7 +184,7 @@ const fakeResponder = async (rows: number, mode?: "inline") => {
         cells,
         laneSet,
         logId,
-        started: Promise.resolve(),
+        started: options.started ?? Promise.resolve(),
     };
     const network = new DirectNetwork();
     const responder = new Responder(
@@ -190,12 +195,14 @@ const fakeResponder = async (rows: number, mode?: "inline") => {
         },
         {
             send: network.send,
-            provenance: () => ({
-                writeReady: true,
-                source: "creator",
-                fullReplica: true,
-                phase: "off",
-            }),
+            provenance:
+                provenance ??
+                (() => ({
+                    writeReady: true,
+                    source: "creator",
+                    fullReplica: true,
+                    phase: "off",
+                })),
             timers: new FakeTimers(),
         }
     );
@@ -625,26 +632,177 @@ describe("readiness responder", () => {
             // All 16 sessions shared one snapshot.
             expect(responder.stats.freezes).toBe(1);
 
-            // Capacity frees: every BUSY peer gets a directed notice.
+            // Capacity frees: the peer the total cap refused gets a
+            // directed notice.
             await clients[1].close(opened[1][0]);
             const notice = await clients[4].next(StateNoticeV1);
             expect(notice.reason).toBe(NOTICE_REASON.CAPACITY);
             expect(
                 sameBytes(notice.provenance.openNonce, runtime.openNonce)
             ).toBe(true);
-            await clients[0].next(StateNoticeV1);
-            expect(responder.debug().busyWaiters).toBe(0);
+            // The peer its own cap refused still holds 4: it keeps waiting.
+            expect(
+                clients[0].inbox.some((m) => m instanceof StateNoticeV1)
+            ).toBe(false);
+            expect(responder.debug().busyWaiters).toBe(1);
             // The notified peer now gets a session.
             const retry = clients[4].open({ scopes });
             await clients[4].next(HeaderV1, (message) =>
                 sameBytes(message.sessionId, retry.sessionId)
             );
+            // One of its own sessions ends: now it hears.
+            await clients[0].close(opened[0][0]);
+            await clients[0].next(StateNoticeV1);
+            expect(responder.debug().busyWaiters).toBe(0);
             expect(responder.noticeTargets.size).toBe(5);
             responder.dispose();
             expect(responder.debug()).toMatchObject({
                 sessions: 0,
                 armedTimers: 0,
             });
+        });
+
+        it("notices a waiter only when the cap that refused it has room", async () => {
+            const r = await fakeResponder(20, "inline");
+            const [holder, churner, ...waiting] = await keys(7);
+            const waiters = waiting.map((key) => r.network.client(key));
+            let reasks = 0;
+            for (const client of waiters) {
+                const receive = client.receive.bind(client);
+                client.receive = (message) => {
+                    receive(message);
+                    if (message instanceof StateNoticeV1) {
+                        reasks++;
+                        client.open({
+                            scopes: r.scopes,
+                            flags: OPEN_FLAG_LIST,
+                        });
+                    }
+                };
+            }
+            // H holds the list slot; five peers wait for list mode.
+            const held = r.network.client(holder);
+            const list = held.open({ scopes: r.scopes, flags: OPEN_FLAG_LIST });
+            await held.next(HeaderV1);
+            for (const client of waiters) {
+                client.open({ scopes: r.scopes, flags: OPEN_FLAG_LIST });
+            }
+            await settle();
+            expect(r.responder.debug().busyWaiters).toBe(5);
+            // Another peer opens and closes plain sessions: no list waiter
+            // can be served, so none is noticed.
+            const churn = r.network.client(churner);
+            for (let i = 0; i < 10; i++) {
+                const { sessionId } = churn.open({ scopes: r.scopes });
+                await churn.next(HeaderV1, (message) =>
+                    sameBytes(message.sessionId, sessionId)
+                );
+                await churn.close(sessionId);
+            }
+            await settle();
+            expect(r.responder.stats.notices).toBe(0);
+            expect(reasks).toBe(0);
+            // The list slot frees: every list waiter hears once.
+            await held.close(list.sessionId);
+            await settle();
+            expect(r.responder.stats.notices).toBe(5);
+            expect(reasks).toBe(5);
+            r.close();
+        });
+
+        it("runs no freeze and sends no header for a session that ended before its freeze", async () => {
+            let start!: () => void;
+            const started = new Promise<void>((resolve) => (start = resolve));
+            const r = await fakeResponder(20, "inline", undefined, {
+                started,
+            });
+            let counted = 0;
+            const above = r.tap.above.bind(r.tap);
+            r.tap.above = (hlc: bigint) => {
+                counted++;
+                return above(hlc);
+            };
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            // OPEN then CLOSE while the scope's start is pending: each pair
+            // passes the caps, since CLOSE frees the slot at once.
+            for (let i = 0; i < 200; i++) {
+                const { sessionId } = client.open({
+                    scopes: r.scopes,
+                    hlcProved: BigInt(i + 1),
+                });
+                await client.close(sessionId);
+            }
+            await settle();
+            expect(r.responder.debug().sessions).toBe(0);
+            start();
+            await settle();
+            expect(r.responder.stats.freezes).toBe(0);
+            expect(counted).toBe(0);
+            expect(
+                r.network.sent.filter(
+                    ({ message }) => message instanceof HeaderV1
+                )
+            ).toEqual([]);
+            // A live session is still answered.
+            client.open({ scopes: r.scopes });
+            await client.next(HeaderV1);
+            r.close();
+        });
+
+        it("ends a session it answers EXPIRED", async () => {
+            const r = await fakeResponder(20, "inline");
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            const { sessionId } = client.open({ scopes: r.scopes });
+            await client.next(HeaderV1);
+            // Beyond M cells: EXPIRED, and the session is gone.
+            await client.cellsReq(sessionId, SCOPE_NAMESPACE_V1, r.logId, 0, M);
+            await client.next(CellsV1);
+            await client.cellsReq(sessionId, SCOPE_NAMESPACE_V1, r.logId, 0, 1);
+            expect(
+                (
+                    await client.next(ErrorV1, (message) =>
+                        sameBytes(message.sessionId, sessionId)
+                    )
+                ).code
+            ).toBe(ERROR_CODE.EXPIRED);
+            expect(r.responder.debug().sessions).toBe(0);
+            let after = client.inbox.length;
+            await client.listPage(sessionId, SCOPE_NAMESPACE_V1, r.logId, 0);
+            expect(
+                (await client.next(ErrorV1, () => true, { after })).code
+            ).toBe(ERROR_CODE.EXPIRED);
+            expect(
+                client.inbox.slice(after).some((m) => m instanceof ListV1)
+            ).toBe(false);
+
+            // A plain session listing after its epoch moved (deviation c):
+            // EXPIRED, and its slot is free for the fresh list session.
+            const opened: Uint8Array[] = [];
+            for (let i = 0; i < 4; i++) {
+                const plain = client.open({ scopes: r.scopes });
+                await client.next(HeaderV1, (message) =>
+                    sameBytes(message.sessionId, plain.sessionId)
+                );
+                opened.push(plain.sessionId);
+            }
+            r.add(`moved`);
+            after = client.inbox.length;
+            await client.listPage(opened[0], SCOPE_NAMESPACE_V1, r.logId, 0);
+            expect(
+                (await client.next(ErrorV1, () => true, { after })).code
+            ).toBe(ERROR_CODE.EXPIRED);
+            expect(r.responder.debug().sessions).toBe(3);
+            const fresh = client.open({
+                scopes: r.scopes,
+                flags: OPEN_FLAG_LIST,
+            });
+            const header = await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, fresh.sessionId)
+            );
+            expect(header.count).toBe(21);
+            r.close();
         });
 
         it("answers BUSY for a faulted tap without a notice ping-pong", async () => {
@@ -749,6 +907,108 @@ describe("readiness responder", () => {
                 await client.close(opened.sessionId);
             }
             expect(counted).toBe(1);
+            r.close();
+        });
+
+        it("keeps at most one list copy alive while sessions outlive their epochs", async () => {
+            const r = await fakeResponder(2000, "inline");
+            const holders = await keys(4);
+            const [lister] = await keys(1);
+            /** Distinct hash lists the responder can still reach. */
+            const reachableLists = async () => {
+                const lists = new Set<Uint8Array>();
+                const responder = r.responder as any;
+                for (const session of responder.sessions.values()) {
+                    const frozen = await session.frozen;
+                    if (typeof frozen === "number") continue;
+                    for (const scope of frozen) {
+                        if (scope.list) lists.add(scope.list);
+                        if (scope.snapshot.list) lists.add(scope.snapshot.list);
+                    }
+                }
+                for (const snapshot of responder.snapshots.values()) {
+                    if (snapshot.list) lists.add(snapshot.list);
+                }
+                for (const cached of responder.lists?.values() ?? []) {
+                    lists.add(cached.list);
+                }
+                return lists.size;
+            };
+            for (let round = 0; round < 15; round++) {
+                r.add(`epoch${round}`);
+                // A session that stays open at this epoch (idle timers
+                // never fire here).
+                const holder = r.network.client(holders[round % 4]);
+                const held = holder.open({ scopes: r.scopes });
+                await holder.next(HeaderV1, (message) =>
+                    sameBytes(message.sessionId, held.sessionId)
+                );
+                // A list session at the same epoch, then closed.
+                const client = r.network.client(lister);
+                const list = client.open({
+                    scopes: r.scopes,
+                    flags: OPEN_FLAG_LIST,
+                });
+                await client.next(HeaderV1, (message) =>
+                    sameBytes(message.sessionId, list.sessionId)
+                );
+                await client.close(list.sessionId);
+                await settle();
+            }
+            expect(r.responder.debug()).toMatchObject({
+                sessions: 15,
+                listSession: false,
+            });
+            expect(r.responder.stats.listCopies).toBe(15);
+            expect(await reachableLists()).toBe(1);
+            r.close();
+        });
+
+        it("sends every attempt of a session the provenance of its first freeze", async () => {
+            let provenance: ProvenanceState = {
+                writeReady: false,
+                source: "none",
+                fullReplica: true,
+                phase: "off",
+            };
+            const r = await fakeResponder(1000, "inline", () => provenance);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            const { sessionId } = client.open({ scopes: r.scopes });
+            const first = await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, sessionId)
+            );
+            expect(first.provenance.writeReady).toBe(false);
+            // R pulls the rows it lacked and turns ready (PR-3: reconciled).
+            for (let i = 0; i < 50; i++) r.add(`pulled${i}`);
+            provenance = {
+                ...provenance,
+                writeReady: true,
+                source: "reconciled",
+            };
+            // A retry of the same session gets the gated snapshot, so it
+            // must not carry the later, qualifying state.
+            const after = client.inbox.length;
+            client.open({ sessionId, attempt: 2, scopes: r.scopes });
+            const second = await client.next(
+                HeaderV1,
+                (message) => sameBytes(message.sessionId, sessionId),
+                { after }
+            );
+            expect(second.count).toBe(1000);
+            expect(hex(second.anchor)).toBe(hex(first.anchor));
+            expect(second.provenance.writeReady).toBe(false);
+            expect(PROVENANCE_SOURCES[second.provenance.source]).toBe("none");
+            // A fresh session freezes the set now, with the state now.
+            const fresh = client.open({ scopes: r.scopes });
+            const third = await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, fresh.sessionId)
+            );
+            expect(third.count).toBe(1050);
+            expect(third.provenance.writeReady).toBe(true);
+            expect(PROVENANCE_SOURCES[third.provenance.source]).toBe(
+                "reconciled"
+            );
             r.close();
         });
 

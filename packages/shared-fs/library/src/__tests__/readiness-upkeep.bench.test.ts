@@ -151,6 +151,7 @@ manualDescribe("readiness upkeep bench", () => {
                     });
                     const address = fs.address!;
                     let runtime = runtimeOf(fs);
+                    const store = runtime.namespaceStore;
                     await runtime.whenStarted();
                     expect(runtime.anchorHost!.mode).toBe("worker");
                     const probe = instrument(runtime);
@@ -338,7 +339,7 @@ manualDescribe("readiness upkeep bench", () => {
                     const closeMs = performance.now() - closeStart;
                     const file = await structuresPath(
                         directory,
-                        address,
+                        store,
                         NAMESPACE_V1
                     );
                     const bytes = await readFile(file);

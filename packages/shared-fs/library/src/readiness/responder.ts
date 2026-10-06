@@ -48,14 +48,24 @@ import {
  *   the scope's replace-verify queue is empty (S10, deviation k). The trust
  *   scope is frozen after the namespace scope.
  * - **Sessions** are keyed by (peer, sessionId). Every attempt of a session
- *   gets the same snapshot. First-flight cells go with the header when
- *   0 < gapEst <= 256. A session expires after 30 s without a request.
+ *   gets the same snapshot and the same provenance, read in the synchronous
+ *   step that took its first snapshot: a later state never vouches for an
+ *   earlier snapshot (design 2.2(3)). First-flight cells go with the header
+ *   when 0 < gapEst <= 256. A session expires after 30 s without a request.
  * - **Caps.** 4 sessions per peer and 16 in total, and one list-mode
  *   session (deviation c). Beyond a cap the answer is `BUSY`, and the
  *   requester gets a directed `StateNoticeV1{CAPACITY}` when a session that
- *   was answered ends. A session costs the responder one freeze per epoch
- *   (the list copy and `above` are shared by the sessions at that epoch) and
- *   at most M requested cells.
+ *   was answered ends and the cap that refused it has room again (its own
+ *   sessions, the list slot, or the total). Only live sessions count, so a
+ *   session that ends before its freeze ran never runs it. A session costs
+ *   the responder one freeze per epoch
+ *   and at most M requested cells. A list session copies the hash list
+ *   unless the last list session copied it at the same epoch; only that
+ *   newest copy is cached, so sessions that outlive their epoch never keep
+ *   one alive. `above` is counted per `hlcProved`, and the first 8 values
+ *   at an epoch are cached; any other value costs a session one O(n) scan
+ *   of the id map (deviation a: about 0.6 ms at 200k rows, below the cost
+ *   of the session's signed messages).
  * - **Failures.** A worker restart during a freeze is retried at once (the
  *   lane sets are rebuilt before the requests reject). A scope that cannot
  *   be answered (a faulted or stopped tap) gets `BUSY`, and its session ends
@@ -63,7 +73,8 @@ import {
  *   responder that fails each time, so waiters are noticed only when an
  *   answered session ends.
  * - **Late requests** for a live session are answered however late; an
- *   unknown session gets `EXPIRED`.
+ *   unknown session gets `EXPIRED`. Every `EXPIRED` ends its session, since
+ *   the joiner opens a new one.
  * - **Re-entrancy (S15).** The RPC awaits decryption before each handler and
  *   directed messages take different routes, so no handler assumes order: a
  *   request awaits its session's freeze, and every await re-checks that the
@@ -125,8 +136,6 @@ interface Snapshot {
     readonly count: number;
     readonly hlc: bigint;
     readonly anchor: Promise<Uint8Array>;
-    /** The hash list, copied once at this epoch by the first list session. */
-    list?: Uint8Array;
     /** `above` per `hlcProved`, counted once at this epoch (O(n) each). */
     readonly above: Map<bigint, number>;
 }
@@ -134,6 +143,8 @@ interface Snapshot {
 interface FrozenScope {
     readonly scope: ResponderScope;
     readonly snapshot: Snapshot;
+    /** Read with the session's first snapshot; every header sends it. */
+    readonly provenance: ProvenanceState;
     readonly anchor: Uint8Array;
     /** Rows newer than the session's `hlcProved` (0 when it is 0). */
     readonly above: number;
@@ -172,6 +183,17 @@ export interface ResponderStats {
     /** Answers to joiners (PR-3) and malformed messages, dropped. */
     ignored: number;
 }
+
+/**
+ * Caps besides the total that refused a `BUSY` peer: its notice waits for
+ * room in each of them (a notice always needs room in the total).
+ */
+interface BusyLimit {
+    peer: boolean;
+    list: boolean;
+}
+
+const ANY_LIMIT: BusyLimit = { peer: false, list: false };
 
 class Refused {
     constructor(readonly code: ErrorCode) {}
@@ -235,11 +257,19 @@ export class Responder {
     private readonly sessions = new Map<string, Session>();
     private readonly perPeer = new Map<string, number>();
     private listSession?: string;
-    /** Peers answered `BUSY` since the last capacity notice. */
-    private readonly busyWaiters = new Map<string, PublicSignKey>();
+    /** Peers answered `BUSY` since their last capacity notice. */
+    private readonly busyWaiters = new Map<
+        string,
+        { peer: PublicSignKey; limit: BusyLimit }
+    >();
     /** Peers that had a session or a `BUSY` in this open (READY notices, PR-3). */
     readonly noticeTargets = new Map<string, PublicSignKey>();
     private readonly snapshots = new Map<ScopeId, Snapshot>();
+    /** The newest list copy per scope (`listOf`). */
+    private readonly lists = new Map<
+        ScopeId,
+        { snapshot: Snapshot; list: Uint8Array }
+    >();
     private readonly timers: Timers;
     private disposed = false;
 
@@ -316,6 +346,11 @@ export class Responder {
         return peerHash + "/" + toHexString(sessionId);
     }
 
+    /** Not ended (a later session may reuse the same key). */
+    private live(session: Session) {
+        return this.sessions.get(session.key) === session;
+    }
+
     private send(message: ReadinessMessage, to: PublicSignKey) {
         if (!this.answering()) return;
         void this.ports.send(message, to).catch(() => {
@@ -323,12 +358,27 @@ export class Responder {
         });
     }
 
-    private error(to: PublicSignKey, sessionId: Uint8Array, code: ErrorCode) {
+    private error(
+        to: PublicSignKey,
+        sessionId: Uint8Array,
+        code: ErrorCode,
+        limit: BusyLimit = ANY_LIMIT
+    ) {
         if (code === ERROR_CODE.BUSY) {
             this.stats.busy++;
             const hash = to.hashcode();
-            if (this.busyWaiters.size < NOTICE_TARGETS) {
-                this.busyWaiters.set(hash, to);
+            const waiting = this.busyWaiters.get(hash)?.limit;
+            if (waiting || this.busyWaiters.size < NOTICE_TARGETS) {
+                // Two refused requests: room for either one is news.
+                this.busyWaiters.set(hash, {
+                    peer: to,
+                    limit: waiting
+                        ? {
+                              peer: waiting.peer && limit.peer,
+                              list: waiting.list && limit.list,
+                          }
+                        : limit,
+                });
             }
             this.remember(hash, to);
         } else if (code === ERROR_CODE.EXPIRED) {
@@ -348,9 +398,10 @@ export class Responder {
         }
     }
 
-    private provenance() {
+    /** `state`, or the provenance now (notices: a trigger, never evidence). */
+    private provenance(state: ProvenanceState = this.ports.provenance()) {
         return new ProvenanceV1({
-            ...this.ports.provenance(),
+            ...state,
             openNonce: this.host.openNonce,
             caps: READINESS_CAPS,
         });
@@ -384,12 +435,16 @@ export class Responder {
                 return this.error(from, open.sessionId, ERROR_CODE.SCOPE);
             }
             const list = (open.flags & OPEN_FLAG_LIST) !== 0;
+            const limit: BusyLimit = {
+                peer: (this.perPeer.get(peerHash) ?? 0) >= SESSIONS_PER_PEER,
+                list: list && this.listSession !== undefined,
+            };
             if (
                 this.sessions.size >= SESSIONS_TOTAL ||
-                (this.perPeer.get(peerHash) ?? 0) >= SESSIONS_PER_PEER ||
-                (list && this.listSession !== undefined)
+                limit.peer ||
+                limit.list
             ) {
-                return this.error(from, open.sessionId, ERROR_CODE.BUSY);
+                return this.error(from, open.sessionId, ERROR_CODE.BUSY, limit);
             }
             const created: Session = {
                 key,
@@ -410,7 +465,8 @@ export class Responder {
         }
         this.touch(session);
         const frozen = await session.frozen;
-        if (!this.answering()) return;
+        // A session that ended meanwhile (CLOSE, idle) gets no answer.
+        if (!this.answering() || !this.live(session)) return;
         if (typeof frozen === "number") {
             // Nothing was answered, so no capacity notice (see the class
             // comment); BUSY registers this peer for the next real one.
@@ -457,7 +513,7 @@ export class Responder {
                 sessionId: session.sessionId,
                 scope: frozen.scope.descriptor.id,
                 logId: frozen.scope.logId,
-                provenance: this.provenance(),
+                provenance: this.provenance(frozen.provenance),
                 count: snapshot.count,
                 anchor: frozen.anchor,
                 hlc: snapshot.hlc,
@@ -472,8 +528,9 @@ export class Responder {
     /**
      * Freezes every scope of a session in order. Each freeze waits for its
      * scope's start and for an empty replace-verify queue, then takes the
-     * snapshot in one synchronous step (S10). A worker restart (EAGAIN) is
-     * retried at once: the lane sets were rebuilt before it rejected.
+     * snapshot in one synchronous step (S10); a session that ended during a
+     * wait stops there (`EXPIRED`). A worker restart (EAGAIN) is retried at
+     * once: the lane sets were rebuilt before it rejected.
      */
     private async freeze(
         session: Session,
@@ -493,12 +550,16 @@ export class Responder {
         const out: Array<
             Omit<FrozenScope, "anchor"> & { anchor?: Uint8Array }
         > = [];
+        let provenance: ProvenanceState | undefined;
         try {
             for (const scope of scopes) {
                 await scope.started;
                 const { tap } = scope;
                 for (;;) {
                     if (!this.answering()) return ERROR_CODE.BUSY;
+                    // Ended while it waited: the caps bound live sessions
+                    // only, so its freeze must not run.
+                    if (!this.live(session)) return ERROR_CODE.EXPIRED;
                     if (tap.faulted !== undefined || tap.state !== "live") {
                         throw new Refused(ERROR_CODE.BUSY);
                     }
@@ -506,14 +567,20 @@ export class Responder {
                     await tap.verifyIdle();
                 }
                 const snapshot = this.snapshotOf(scope);
+                // In the same synchronous step as the first snapshot: a
+                // peer that turns ready later must not vouch for it.
+                provenance ??= this.ports.provenance();
                 out.push({
                     scope,
                     snapshot,
+                    provenance,
                     above:
                         session.hlcProved > 0n
                             ? aboveOf(snapshot, tap, session.hlcProved)
                             : 0,
-                    list: session.list ? this.listOf(snapshot, tap) : undefined,
+                    list: session.list
+                        ? this.listOf(scope, snapshot, tap)
+                        : undefined,
                 });
             }
             for (const frozen of out) {
@@ -541,13 +608,23 @@ export class Responder {
         return out as FrozenScope[];
     }
 
-    /** The snapshot's hash list; call only while the tap is at its epoch. */
-    private listOf(snapshot: Snapshot, tap: ScopeTap): Uint8Array {
-        if (!snapshot.list) {
-            this.stats.listCopies++;
-            snapshot.list = copyList(tap);
-        }
-        return snapshot.list;
+    /**
+     * The snapshot's hash list; call only while the tap is at its epoch.
+     * Cached for the newest list snapshot of the scope only, never on the
+     * snapshot: sessions of older epochs would keep their copies alive.
+     */
+    private listOf(
+        scope: ResponderScope,
+        snapshot: Snapshot,
+        tap: ScopeTap
+    ): Uint8Array {
+        const id = scope.descriptor.id;
+        const cached = this.lists.get(id);
+        if (cached?.snapshot === snapshot) return cached.list;
+        this.stats.listCopies++;
+        const list = copyList(tap);
+        this.lists.set(id, { snapshot, list });
+        return list;
     }
 
     /** The scope's snapshot at its current epoch (shared, or taken now). */
@@ -620,6 +697,8 @@ export class Responder {
             (session.cellsServed.get(request.scope) ?? 0) +
             (request.to - request.from);
         if (served > M) {
+            // EXPIRED makes the joiner open a new session: end this one.
+            this.endSession(session.key);
             return this.error(from, request.sessionId, ERROR_CODE.EXPIRED);
         }
         session.cellsServed.set(request.scope, served);
@@ -657,6 +736,7 @@ export class Responder {
                 tap.epoch !== frozen.snapshot.epoch ||
                 tap.pendingVerify !== 0
             ) {
+                this.endSession(session.key);
                 return this.error(from, request.sessionId, ERROR_CODE.EXPIRED);
             }
             if (
@@ -664,9 +744,12 @@ export class Responder {
                 this.listSession !== undefined &&
                 this.listSession !== session.key
             ) {
-                return this.error(from, request.sessionId, ERROR_CODE.BUSY);
+                return this.error(from, request.sessionId, ERROR_CODE.BUSY, {
+                    peer: false,
+                    list: true,
+                });
             }
-            frozen.list = this.listOf(frozen.snapshot, tap);
+            frozen.list = this.listOf(frozen.scope, frozen.snapshot, tap);
             session.list = true;
             this.listSession = session.key;
         }
@@ -715,7 +798,12 @@ export class Responder {
         if (notify) this.noticeCapacity();
     }
 
-    /** `BUSY` promised a notice: capacity just freed, tell every waiter. */
+    /**
+     * `BUSY` promised a notice: a session ended, so tell every waiter whose
+     * cap has room now. One refused by its own sessions or by the list slot
+     * keeps waiting while those stay full, so a cheap session churn by
+     * another peer does not make it re-ask in vain.
+     */
     private noticeCapacity() {
         if (
             this.busyWaiters.size === 0 ||
@@ -724,9 +812,21 @@ export class Responder {
         ) {
             return;
         }
-        const waiters = [...this.busyWaiters.values()];
-        this.busyWaiters.clear();
-        this.sendNotice(waiters, NOTICE_REASON.CAPACITY);
+        const waiters: PublicSignKey[] = [];
+        for (const [hash, { peer, limit }] of this.busyWaiters) {
+            if (
+                (limit.peer &&
+                    (this.perPeer.get(hash) ?? 0) >= SESSIONS_PER_PEER) ||
+                (limit.list && this.listSession !== undefined)
+            ) {
+                continue;
+            }
+            this.busyWaiters.delete(hash);
+            waiters.push(peer);
+        }
+        if (waiters.length > 0) {
+            this.sendNotice(waiters, NOTICE_REASON.CAPACITY);
+        }
     }
 
     /** Directed `StateNoticeV1` to each peer (a trigger, never evidence). */
@@ -753,6 +853,7 @@ export class Responder {
         this.perPeer.clear();
         this.busyWaiters.clear();
         this.snapshots.clear();
+        this.lists.clear();
         this.listSession = undefined;
     }
 }

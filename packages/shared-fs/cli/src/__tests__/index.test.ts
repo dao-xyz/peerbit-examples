@@ -331,6 +331,23 @@ describe("peerbit-fs cli", () => {
         ).toBe(true);
     });
 
+    it("runs the readiness shadow check on in-process closes", async () => {
+        // vitest.setup.ts installs the library's registry; the built
+        // library reads the same global.
+        const registry = globalThis.__SFS_READINESS_SHADOW__;
+        expect(registry).toBeDefined();
+        const before = { ...registry!.counts };
+        const peer = await Peerbit.create();
+        try {
+            const shared = await openSharedFs({ peerbit: peer });
+            await shared.writeFile("/shadow.txt", "checked at close");
+        } finally {
+            await stopPeer(peer);
+        }
+        expect(registry!.counts.compared).toBeGreaterThan(before.compared);
+        expect(registry!.counts.failed).toBe(before.failed);
+    });
+
     it("creates an address and exits cleanly", async () => {
         const directory = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-")

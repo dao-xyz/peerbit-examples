@@ -35,7 +35,9 @@ import {
 /**
  * How a scope's maintained state started in this open generation:
  * restored from the structures file, seeded by an index scan (no usable
- * file, or a restore whose count did not match), or not started.
+ * file, or a restore whose count did not match), or not started. A count
+ * check deferred past the start may still scan again later
+ * (`ScopeTap.stats.rescans`).
  */
 export type ScopeStart =
     | { kind: "pending" }
@@ -90,20 +92,26 @@ export class ReadinessRuntime {
      * can be collected while this generation lives.
      */
     private persisted?: DecodeResult;
+    /** The structures take started by `create` (`whenTaken`). */
+    private readonly taking: Promise<void>;
 
     private constructor(
         readonly address: string,
         readonly directory: string | undefined,
+        /** The namespace store's log id: its structures file's name. */
+        readonly namespaceStore: Uint8Array,
         /**
          * Undefined when this runtime cannot hash (no `node:crypto`, e.g. a
          * browser): the generation then maintains and answers nothing.
          */
         readonly anchorHost: AnchorHost | undefined,
         ports: ResponderPorts | undefined,
-        persisted?: DecodeResult,
+        taking: Promise<DecodeResult | undefined>,
         readonly unavailable?: string
     ) {
-        this.persisted = persisted;
+        this.taking = taking.then((persisted) => {
+            this.persisted = persisted;
+        });
         this.cellKey = cellKey(address);
         // Test mode: remember which test opened this generation, so a shadow
         // difference fails that test and no other (the suite shares module
@@ -123,28 +131,40 @@ export class ReadinessRuntime {
     }
 
     /**
-     * Captures the address and directory for this generation and takes
-     * (reads, verifies, unlinks) the persisted structures before the store
-     * ingests. The trust scope is always seeded by scan: its tap attaches
-     * after `TrustedNetwork.open` returns the instance it uses, so events
-     * during that open are not seen and a restore could miss them. A trust
-     * file is still removed if one exists. Without `ports` the runtime
-     * maintains state but does not answer. Never rejects for want of the
-     * anchor host: without one the generation runs without readiness state,
-     * so an open cannot fail because of it (shadow mode decides nothing).
+     * Captures the address and directory for this generation and starts
+     * taking (reading, verifying, unlinking) the persisted structures; the
+     * open awaits `whenTaken` before the namespace store ingests, so the
+     * take's directory fsync overlaps the trust graph's open. The trust
+     * scope is always seeded by scan: its tap may move to the instance
+     * `TrustedNetwork.open` returns (S8), so events during that open can be
+     * missed and a restore could miss them. A trust file is still removed if
+     * one exists. Without `ports` the runtime maintains state but does not
+     * answer. Never rejects for want of the anchor host: without one the
+     * generation runs without readiness state, so an open cannot fail
+     * because of it (shadow mode decides nothing).
      */
     static async create(properties: {
         address: string;
         directory?: string;
+        /** Log ids of the stores the scopes describe (`logIdOf`). */
+        stores: { namespace: Uint8Array; trust?: Uint8Array };
         ports?: ResponderPorts;
         anchorHost?: AnchorHost;
     }): Promise<ReadinessRuntime> {
-        const { address, directory } = properties;
-        let persisted: DecodeResult | undefined;
-        if (directory) {
-            persisted = await takeStructures(directory, address, NAMESPACE_V1);
-            await takeStructures(directory, address, TRUST_V1);
-        }
+        const { address, directory, stores } = properties;
+        const take = async (store: Uint8Array, scope: ScopeDescriptor) =>
+            directory
+                ? takeStructures(directory, store, address, scope).catch(
+                      (error: any): DecodeResult => ({
+                          ok: false,
+                          reason: `take: ${error?.message ?? error}`,
+                      })
+                  )
+                : undefined;
+        const taking = Promise.all([
+            take(stores.namespace, NAMESPACE_V1),
+            stores.trust && take(stores.trust, TRUST_V1),
+        ]).then(([namespace]) => namespace);
         let host = properties.anchorHost;
         let unavailable: string | undefined;
         if (!host) {
@@ -157,11 +177,21 @@ export class ReadinessRuntime {
         return new ReadinessRuntime(
             address,
             directory,
+            stores.namespace,
             host,
             properties.ports,
-            persisted,
+            taking,
             unavailable
         );
+    }
+
+    /**
+     * Resolves once the structures files of this open are taken: each one
+     * read and durably removed (or voided). Await it before the namespace
+     * store ingests. Never rejects.
+     */
+    whenTaken(): Promise<void> {
+        return this.taking;
     }
 
     get blocked(): boolean {
@@ -265,49 +295,73 @@ export class ReadinessRuntime {
      * Runs in the background; `whenStarted` joins it.
      */
     startNamespace() {
-        const persisted = this.persisted;
-        this.persisted = undefined;
         const state = this.scopes.get(SCOPE_NAMESPACE_V1);
         if (!state || this.disposedValue) return;
         const { tap, cells, laneSet } = state;
         this.track(state, async () => {
+            // Taken before the store opened (`whenTaken`); this await only
+            // reads the result.
+            await this.taking;
+            const persisted = this.persisted;
+            this.persisted = undefined;
             if (persisted?.ok && persisted.state.scope === SCOPE_NAMESPACE_V1) {
                 const { map, hlc, epoch } = persisted.state;
                 // Sinks first: the tap applies its buffered events at once.
                 cells.restore(persisted.state.cells!);
                 laneSet.restore(persisted.state.lanes!, epoch);
                 tap.restore({ map, hlc, epoch });
-                const matches = await tap.restoredCountMatches();
-                if (matches === true) {
-                    return { kind: "restored" };
+                // A count that differs discards the restore (the tap scans
+                // again). One that cannot be compared during ingest keeps it
+                // unverified until a quiet point (`ScopeTap.checkCount`),
+                // and unverified, it is not persisted.
+                if ((await tap.checkCount()) === false) {
+                    return { kind: "scanned", rejected: "count" };
                 }
-                // A count that differs, or no stable epoch to compare at in
-                // three tries (plan section 6.2): seed by scan instead.
-                await tap.reseed();
-                return {
-                    kind: "scanned",
-                    rejected: matches === false ? "count" : "count unstable",
-                };
+                return { kind: "restored" };
             }
-            await tap.seedFromScan();
+            await tap.seedChecked();
             return persisted && !persisted.ok
                 ? { kind: "scanned", rejected: persisted.reason }
                 : { kind: "scanned" };
         });
     }
 
+    /** The trust graph instance the trust tap listens on. */
+    private trustDocuments?: DocumentsLike<any, any>;
+
     /**
-     * After `TrustedNetwork.open()`: attach to the trust graph instance it
-     * returned (S8) and seed by scan; the scan starts after the attach.
+     * Before `TrustedNetwork.open()`: listen on the trust graph instance it
+     * will open, buffering. Documents decides once, when a batch starts,
+     * whether that batch dispatches a change event at all: a replicated
+     * batch that started before any listener existed would index its rows
+     * with no event, after the seed scan read the index.
      */
     attachTrust(trustGraph: DocumentsLike<any, any>) {
         if (this.disposedValue) return;
         const created = this.createScope(TRUST_V1, trustGraph);
         if (!created) return;
-        const { state, settle } = created;
-        this.settlers.set(SCOPE_TRUST_V1, settle);
+        this.trustDocuments = trustGraph;
+        this.settlers.set(SCOPE_TRUST_V1, created.settle);
+    }
+
+    /**
+     * After `TrustedNetwork.open()`: seed the trust tap by scan; the scan
+     * starts after the attach. `open` replaces its trust graph with the
+     * instance `node.open` returned (S8); when that is another instance (one
+     * already open at the same address), the tap moves to it first.
+     */
+    startTrust(trustGraph: DocumentsLike<any, any>) {
+        if (this.disposedValue) return;
+        if (
+            trustGraph !== this.trustDocuments ||
+            !this.scopes.has(SCOPE_TRUST_V1)
+        ) {
+            this.attachTrust(trustGraph);
+        }
+        const state = this.scopes.get(SCOPE_TRUST_V1);
+        if (!state) return;
         this.track(state, async () => {
-            await state.tap.seedFromScan();
+            await state.tap.seedChecked();
             return { kind: "scanned" };
         });
     }
@@ -354,7 +408,8 @@ export class ReadinessRuntime {
      * index. A verify pending at the seal faults its tap, and a start
      * (restore or seed scan) that has not finished by now is not persisted:
      * the next open rebuilds. `program` is the filesystem, for the shadow
-     * opt-outs. Never throws.
+     * opt-outs. A count check still waiting for a quiet point compares once
+     * more before the seal. Never throws.
      */
     async prepareClose(program?: object): Promise<void> {
         if (this.disposedValue || this.sealedStart) return;
@@ -378,6 +433,13 @@ export class ReadinessRuntime {
             await drain();
         }
         if (this.disposedValue) return;
+        // Only a verified count is persisted.
+        await Promise.all(
+            [...this.scopes.values()].map(({ tap }) =>
+                tap.confirmCount().catch(() => {})
+            )
+        );
+        if (this.disposedValue) return;
         for (const { tap } of this.scopes.values()) tap.seal();
         this.sealedStart = this.starts.get(NAMESPACE_V1.name) ?? {
             kind: "pending",
@@ -388,10 +450,10 @@ export class ReadinessRuntime {
      * Call only after `super.close()` returned true: the stores are closed,
      * so no change event can land after the snapshot. Writes the namespace
      * structures (map, cells and the lanes at the same sequence point) when
-     * its start finished before `prepareClose` and nothing faulted it, then
-     * disposes. The lanes request keeps the process alive until it answers
-     * (S14). Never throws: a failed write logs and leaves no file, and the
-     * next open rebuilds.
+     * its start finished before `prepareClose`, its count was verified and
+     * nothing faulted it, then disposes. The lanes request keeps the process
+     * alive until it answers (S14). Never throws: a failed write logs and
+     * leaves no file, and the next open rebuilds.
      */
     async persistAndDispose(): Promise<void> {
         if (this.disposedValue) return;
@@ -407,6 +469,7 @@ export class ReadinessRuntime {
                 tap.sealed &&
                 tap.state === "live" &&
                 tap.faulted === undefined &&
+                tap.countVerified &&
                 (started === "restored" || started === "scanned")
             ) {
                 // One synchronous point: cells, map and the lanes request.
@@ -430,7 +493,7 @@ export class ReadinessRuntime {
                 };
                 await writeStructures(
                     this.directory,
-                    this.address,
+                    this.namespaceStore,
                     tap.scope,
                     encodeStructures(this.address, persisted)
                 );
@@ -451,5 +514,6 @@ export class ReadinessRuntime {
         shadowRegistry()?.live.delete(this);
         this.responder?.dispose();
         for (const id of [...this.scopes.keys()]) this.disposeScope(id);
+        this.trustDocuments = undefined;
     }
 }
