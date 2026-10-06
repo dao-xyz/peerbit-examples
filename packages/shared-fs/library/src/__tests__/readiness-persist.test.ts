@@ -206,7 +206,14 @@ describe("readiness persistence", () => {
         expect(first.report.mode).toBe("worker");
 
         const crashed = await runChild(["crash", directory, address]);
-        expect(crashed.signal, crashed.output).toBe("SIGKILL");
+        if (process.platform === "win32") {
+            // Windows has no signals: the self-kill terminates the process
+            // with a nonzero exit code and no signal.
+            expect(crashed.signal, crashed.output).toBeNull();
+            expect(crashed.code, crashed.output).not.toBe(0);
+        } else {
+            expect(crashed.signal, crashed.output).toBe("SIGKILL");
+        }
         expect(crashed.report.start).toEqual({ kind: "restored" });
         expect(existsSync(await namespaceFile(directory, address))).toBe(false);
 
