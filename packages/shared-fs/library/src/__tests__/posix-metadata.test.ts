@@ -89,7 +89,7 @@ describe("shared fs posix metadata", () => {
         }
     });
 
-    it("rejects invalid metadata at ingest and the pre-v9.1 program", async () => {
+    it("rejects invalid metadata at ingest and the pre-v9.2 program", async () => {
         const fs = await open();
         const base = await versionDoc(fs, (await fs.writeFile("/x", "x")).id);
         const forged = (
@@ -120,16 +120,17 @@ describe("shared fs posix metadata", () => {
                 fs.program.entries.put(version).then(() => version.id)
             ).rejects.toThrow();
         }
-        // The variant is the format break: an old program no longer loads.
+        // The variant is the format break: the v9.2 program loads, the
+        // previous variant no longer does.
         const blocks = peers[0].services.blocks;
         const bytes = (await blocks.get(fs.address!))!;
-        const variant = borshString("peerbit_shared_fs_v9_1");
+        const variant = borshString("peerbit_shared_fs_v9_2");
         const at = Buffer.from(bytes).indexOf(variant);
         expect(at).toBeGreaterThanOrEqual(0);
         const legacy = await blocks.put(
             concat([
                 bytes.subarray(0, at),
-                borshString("peerbit_shared_fs"),
+                borshString("peerbit_shared_fs_v9_1"),
                 bytes.subarray(at + variant.byteLength),
             ])
         );

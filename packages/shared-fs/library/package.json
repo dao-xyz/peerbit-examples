@@ -44,6 +44,7 @@
         "@peerbit/crypto": "3.1.6",
         "@peerbit/document": "15.1.11",
         "@peerbit/program": "6.0.68",
+        "@peerbit/rpc": "6.2.4",
         "@peerbit/trusted-network": "6.0.142",
         "peerbit": "5.4.10",
         "uint8arrays": "^5.1.0"
