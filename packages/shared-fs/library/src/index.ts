@@ -2637,6 +2637,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private partialWriteOverride = false;
     private writeReadinessRequired = false;
     /**
+     * This open's view is proven complete: a creator, a trusted warm reopen
+     * or a settled readiness fence. allowPartialWrites alone never sets it,
+     * so Guard D stays disarmed on such a view.
+     */
+    private viewProven = false;
+    /**
      * Armed by an open that holds an "active" marker: whether the store held
      * content before this open's sync could add any (see
      * contentStoredBeforeOpen).
@@ -3123,6 +3129,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writesReady = !addressOpen || partialWriteOverride;
         this.partialWriteOverride = partialWriteOverride;
         this.writeReadinessRequired = addressOpen && !partialWriteOverride;
+        this.viewProven = !addressOpen;
         this.writeReadinessDecisionSettled =
             !addressOpen || partialWriteOverride;
         this.writeReadinessRemoteEvidence = false;
@@ -3338,6 +3345,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // interrupted-bootstrap marker remain fail-closed.
             this.writesReady = true;
             this.writeReadinessRequired = false;
+            this.viewProven = true;
             this.writeReadinessDecisionSettled = true;
         }
         if (addressOpen && !trustedWarmWriteReady) {
@@ -10282,6 +10290,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // provenance from diverging.
             this.writesReady = true;
             this.writeReadinessRequired = false;
+            this.viewProven = true;
             this.writeReadinessQuietChecks = 0;
             this.writeReadinessRecheck = undefined;
             this.setGuardArmed(true);
@@ -10643,6 +10652,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.slotPointCache = new BoundedSlotPointCache();
         this.writesReady = false;
         this.writeReadinessRequired = false;
+        this.viewProven = false;
         this.watchHub?.closeAll();
         this.changesetHub?.close();
         // A reopened instance gets fresh hubs: bootstrap resync latches
@@ -11110,8 +11120,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * Fall back to a plain join over a FRESH store; clears any partial
-     * overlay state and re-arms the guard. Never valid for a resumed
-     * partial store — that path takes enterUnverified().
+     * overlay state and re-arms the guard on a proven view. Never valid
+     * for a resumed partial store — that path takes enterUnverified().
      */
     private abandonBootstrap(
         generation: number = this.openGeneration,
@@ -11128,7 +11138,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.overlayPending = new Map();
         this.bootstrapManifestMeta = undefined;
         this.bootstrapPhase = "off";
-        this.setGuardArmed(!this.writeReadinessRequired);
+        this.setGuardArmed(this.viewProven);
         this.emitBootstrapFallbackOnce("plain-join", reason);
         void this.writeBootstrapState({ bootstrap: null }, generation).catch(
             () => {}
@@ -12334,7 +12344,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (verified) {
             this.bootstrapPhase = "converged";
             this.bootstrapVerified = true;
-            this.setGuardArmed(!this.writeReadinessRequired);
+            this.setGuardArmed(this.viewProven);
             this.emitOverlayRetiredOnce(true);
             void this.writeBootstrapState(
                 { bootstrap: null },
@@ -12423,7 +12433,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (this.quiescenceTimer !== timer) return;
                 this.quiescenceTimer = undefined;
                 this.bootstrapPhase = "converged";
-                this.setGuardArmed(!this.writeReadinessRequired);
+                this.setGuardArmed(this.viewProven);
                 void this.writeBootstrapState(
                     { bootstrap: null },
                     generation
@@ -13997,6 +14007,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         };
+        // The readiness manual GC asserts (assertSafeMaintenanceReady):
+        // neither a gated joiner nor an allowPartialWrites session, even
+        // over a warm proof, plans retirements against its view.
+        if (
+            !this.writesReady ||
+            this.writeReadinessLifecycleBlocked ||
+            !this.viewProven ||
+            this.partialWriteOverride
+        ) {
+            return gateSkip();
+        }
         if (
             this.bootstrapPhase !== "off" &&
             this.bootstrapPhase !== "converged"

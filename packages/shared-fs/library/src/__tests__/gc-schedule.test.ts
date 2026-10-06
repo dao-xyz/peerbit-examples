@@ -181,6 +181,108 @@ describe("scheduled garbage collection", () => {
         expect(runEvents.length).toBe(before + 1);
     });
 
+    it("skips scheduled runs on a gated joiner and re-arms the interval", async () => {
+        await openScheduled({
+            intervalMs: 20_000,
+            initialDelayMs: 20_000,
+            jitterRatio: 0,
+            run: { settleMs: 0 },
+            testOverrides: { noFloors: true },
+        });
+        await fs.writeFile("/kept.txt", "kept");
+        const program: any = fs.program;
+        await program.close();
+        // An in-memory peer keeps no readiness proof: the address reopen is
+        // a gated joiner, and with no peer to settle against it stays gated
+        // past its first scheduled run.
+        await (peer as any).open(program, {
+            existing: "reuse",
+            args: {
+                machineLabel: "gc-gated-joiner",
+                addressOpen: true,
+                bootstrap: false,
+                clock,
+                gcRng: () => 0,
+                gc: {
+                    intervalMs: 20_000,
+                    initialDelayMs: 60,
+                    jitterRatio: 0,
+                    run: { settleMs: 0 },
+                    testOverrides: { noFloors: true },
+                },
+            },
+        });
+        listen();
+        expect(fs.bootstrapStatus()).toMatchObject({
+            writeReady: false,
+            partialWriteOverride: false,
+        });
+        // The first run comes due after 60 ms and skips: it re-arms a full
+        // interval out.
+        await waitUntil(() => {
+            expect(fs.gcStatus().nextRunAtMs).toBeGreaterThan(clock() + 10_000);
+        });
+        await tick();
+        expect(runEvents).toHaveLength(0);
+        expect(errorEvents).toHaveLength(0);
+        expect(fs.gcStatus().scheduled).toBe(true);
+        expect(fs.gcStatus().nextRunAtMs).toBeGreaterThan(0);
+        expect(fs.gcStatus().lastRun).toBeUndefined();
+        await expect(fs.collectGarbage({ settleMs: 0 })).rejects.toMatchObject({
+            code: "EAGAIN",
+        });
+    });
+
+    it("skips scheduled runs under allowPartialWrites even on a warm reopen", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-gc-override-"));
+        await peer.stop();
+        peer = await Peerbit.create({ directory: join(root, "peer") });
+        try {
+            await openScheduled({
+                intervalMs: 20_000,
+                initialDelayMs: 20_000,
+                jitterRatio: 0,
+                run: { settleMs: 0 },
+                testOverrides: { noFloors: true },
+            });
+            await fs.writeFile("/kept.txt", "kept");
+            const address = fs.program.address!.toString();
+            await fs.program.close();
+
+            fs = await openSharedFs({
+                peerbit: peer,
+                address,
+                clock,
+                allowPartialWrites: true,
+                gc: {
+                    intervalMs: 20_000,
+                    initialDelayMs: 20_000,
+                    jitterRatio: 0,
+                    run: { settleMs: 0 },
+                    testOverrides: { noFloors: true },
+                } as any,
+            } as any);
+            listen();
+            // The warm proof makes the view proven, but the override still
+            // withholds maintenance, scheduled as well as manual.
+            expect(fs.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                partialWriteOverride: true,
+                writeReadinessSource: "creator",
+            });
+            await tick();
+            expect(runEvents).toHaveLength(0);
+            expect(errorEvents).toHaveLength(0);
+            expect(fs.gcStatus().nextRunAtMs).toBeGreaterThan(0);
+            await expect(
+                fs.collectGarbage({ settleMs: 0 })
+            ).rejects.toMatchObject({ code: "EAGAIN" });
+        } finally {
+            await peer.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it("does not schedule on an observer replica", async () => {
         // Create the fs with a first full peer so the observer has an
         // address to open.
@@ -540,8 +642,6 @@ describe("scheduled garbage collection", () => {
                 existing: "reuse",
                 args: {
                     machineLabel: "gc-in-flight-close-reopen",
-                    allowPartialWrites: true,
-                    addressOpen: true,
                     bootstrap: false,
                     clock,
                     gc: {
