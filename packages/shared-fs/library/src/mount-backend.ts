@@ -314,6 +314,21 @@ type OpenFileState = {
     /** Exec bit (as a regular-file mode) and mtime that stat reports. */
     mode: RegularMode;
     mtimeMs: number;
+    /**
+     * A utimens set `mtimeMs` after the last write or truncate. Otherwise a
+     * dirty state's mtime is that write's clock, and a commit says so (see
+     * WriteFileOptions.mtimeFromWrite).
+     */
+    mtimeSet?: boolean;
+    /**
+     * The mutation generation at which a truncate to empty (at open or on a
+     * handle) was this state's only change since its last commit. While no
+     * later mutation follows, flush skips the commit (see flush), and so
+     * does the release of any other descriptor while `emptiedBy` is open.
+     */
+    emptiedGeneration?: number;
+    /** The descriptor whose open or truncate set `emptiedGeneration`. */
+    emptiedBy?: number;
     /** The base version's mode; commits send the mode only when changed. */
     baseMode: RegularMode;
     dirty: boolean;
@@ -399,6 +414,7 @@ type CommitSnapshot = {
     mutationGeneration: number;
     mode: RegularMode;
     mtimeMs: number;
+    mtimeSet: boolean;
 };
 
 type RegularMode = 0o100644 | 0o100755;
@@ -808,6 +824,7 @@ const resizeState = (state: OpenFileState, size: number) => {
     }
     state.length = size;
     state.mtimeMs = Date.now();
+    state.mtimeSet = false;
     state.dirty = true;
     state.mutationGeneration++;
 };
@@ -1054,9 +1071,17 @@ export const createSharedFsMountBackend = (
         }
     };
 
-    const resize = (state: OpenFileState, size: number) => {
+    /** Truncate or extend through descriptor `by`. */
+    const resize = (state: OpenFileState, size: number, by: number) => {
         const wasDirty = state.dirty;
+        const onlyEmptied =
+            size === 0 &&
+            (!wasDirty || state.emptiedGeneration === state.mutationGeneration);
         resizeState(state, size);
+        state.emptiedGeneration = onlyEmptied
+            ? state.mutationGeneration
+            : undefined;
+        state.emptiedBy = onlyEmptied ? by : undefined;
         if (!wasDirty) noteDirtied(state);
     };
 
@@ -1705,6 +1730,18 @@ export const createSharedFsMountBackend = (
         return handle;
     };
 
+    /** Attaches a descriptor to an existing state, applying its O_TRUNC. */
+    const attachTruncating = (
+        state: OpenFileState,
+        flags: ReturnType<typeof parseFlags>
+    ) => {
+        const handle = attachHandle(state, flags);
+        if (flags.truncate) {
+            resize(state, 0, handle);
+        }
+        return handle;
+    };
+
     const detachHandle = (handle: number, openHandle: OpenHandle) => {
         if (handles.get(handle) !== openHandle) return;
         handles.delete(handle);
@@ -1952,6 +1989,7 @@ export const createSharedFsMountBackend = (
             mutationGeneration: state.mutationGeneration,
             mode: state.mode,
             mtimeMs: state.mtimeMs,
+            mtimeSet: state.mtimeSet === true,
         };
         const commitMarks = state.namespaceMarks ?? 0;
         const creating = state.nodeId === null;
@@ -2019,13 +2057,20 @@ export const createSharedFsMountBackend = (
                     ? { expectedParentNodeId: state.openedParentNodeId }
                     : {}),
                 // Send the mode only when changed locally; otherwise the
-                // target inherits it from the best-ranked (absorbed) parent,
-                // so a remote chmod survives a local edit. A dirty state's
-                // mtime is always local (write, truncate, create, utimens).
+                // target inherits the (absorbed) parents' merged mode, so a
+                // remote chmod survives a local edit. A dirty state's mtime
+                // is always local (write, truncate, create, utimens), so a
+                // save of unchanged bytes publishes too; SharedFileSystem
+                // records a save of the base's bytes and mode as a copy that
+                // keeps the base's rank, also when the heads changed since
+                // the open. Only a utimens over bytes this replica authored
+                // makes it an ordinary version, as a touch is, so the commit
+                // says whether a write or a utimens set the mtime.
                 ...(snapshot.mode !== state.baseMode
                     ? { mode: snapshot.mode }
                     : {}),
                 mtime: snapshot.mtimeMs,
+                ...(snapshot.mtimeSet ? {} : { mtimeFromWrite: true }),
                 // Editors flush/fsync liberally: the target skips minting a
                 // version only while the bytes, the metadata and this exact
                 // opened head snapshot are unchanged.
@@ -2492,10 +2537,7 @@ export const createSharedFsMountBackend = (
                         "Path already exists locally: " + normalized
                     );
                 }
-                if (parsedFlags.truncate) {
-                    resize(provisional, 0);
-                }
-                return attachHandle(provisional, parsedFlags);
+                return attachTruncating(provisional, parsedFlags);
             }
 
             let createIntent: symbol | undefined;
@@ -2614,10 +2656,7 @@ export const createSharedFsMountBackend = (
                                 normalized
                         );
                     }
-                    if (parsedFlags.truncate) {
-                        resize(state, 0);
-                    }
-                    return attachHandle(state, parsedFlags);
+                    return attachTruncating(state, parsedFlags);
                 };
 
                 const shared = statesByNodeId.get(entry.nodeId);
@@ -2685,10 +2724,7 @@ export const createSharedFsMountBackend = (
                 }
                 registerState(state);
                 serve(loaded.entry.nodeId, loaded.entry.parentId);
-                if (parsedFlags.truncate) {
-                    resize(state, 0);
-                }
-                return attachHandle(state, parsedFlags);
+                return attachTruncating(state, parsedFlags);
             } catch (error) {
                 if (createIntent) {
                     releaseCreateIntent(normalized, createIntent);
@@ -3029,6 +3065,7 @@ export const createSharedFsMountBackend = (
             state.buffer.set(data, writeOffset);
             state.length = Math.max(state.length, end);
             state.mtimeMs = Date.now();
+            state.mtimeSet = false;
             const wasDirty = state.dirty;
             state.dirty = true;
             state.mutationGeneration++;
@@ -3050,7 +3087,7 @@ export const createSharedFsMountBackend = (
                         );
                     }
                     assertWriteReady(`Truncate on handle ${targetRef}`);
-                    resize(openHandle.state, size);
+                    resize(openHandle.state, size, targetRef);
                     return;
                 }
                 const normalized = normalizeFsPath(targetRef);
@@ -3071,7 +3108,7 @@ export const createSharedFsMountBackend = (
                 });
                 const openHandle = requireHandle(handle);
                 try {
-                    resize(openHandle.state, size);
+                    resize(openHandle.state, size, handle);
                     const cutoff = openHandle.state.mutationGeneration;
                     await localCommit(openHandle.state, cutoff, "truncate");
                 } finally {
@@ -3082,6 +3119,22 @@ export const createSharedFsMountBackend = (
 
         async flush(handle: number) {
             const openHandle = requireHandle(handle);
+            // Linux sends a flush on every close(2), also of a duplicate
+            // descriptor. A shell redirect (`cmd > file`) opens with O_TRUNC,
+            // dups the descriptor and closes the original before `cmd`
+            // writes. Committing then would publish an empty version, and the
+            // bytes written next would no longer be compared with the version
+            // the file was opened on (an unchanged save would outrank instead
+            // of being recorded as a copy). A flush after a further change,
+            // an fsync or the release of the emptying descriptor commits
+            // (see release), so a truncate-only change (`: > file`) publishes
+            // at release, which Linux sends after close(2) returns.
+            if (
+                openHandle.state.emptiedGeneration ===
+                openHandle.state.mutationGeneration
+            ) {
+                return;
+            }
             const cutoff = openHandle.state.mutationGeneration;
             return wrap(() => localCommit(openHandle.state, cutoff, "flush"));
         },
@@ -3104,6 +3157,20 @@ export const createSharedFsMountBackend = (
             }
             if (openHandle.releasing) {
                 return openHandle.releasing;
+            }
+            // A reader closing between a redirect's O_TRUNC open and its
+            // write (a watcher reloading the file) must not publish the empty
+            // version either (see flush): the descriptor that emptied the
+            // file commits when it is released.
+            if (
+                state.emptiedGeneration === state.mutationGeneration &&
+                state.emptiedBy !== handle
+            ) {
+                const emptier = handles.get(state.emptiedBy!);
+                if (emptier?.state === state && !emptier.closing) {
+                    detachHandle(handle, openHandle);
+                    return;
+                }
             }
             // Close mutation admission before the first await. Every write or
             // handle truncate accepted before this point has already advanced
@@ -3557,9 +3624,25 @@ export const createSharedFsMountBackend = (
                             // Fold into the pending commit (git's chmod of a
                             // lock file, cp -p, touch newfile): the bytes and
                             // metadata publish as one version.
-                            if (mode !== undefined) state.mode = mode;
-                            if (mtimeMs !== undefined) state.mtimeMs = mtimeMs;
-                            state.mutationGeneration++;
+                            // A value equal to the pending one changes
+                            // nothing: WinFsp fills the mtime of an
+                            // atime-only SetFileTime from getattr, and that
+                            // must not turn the write's clock into a set
+                            // mtime (see mtimeSet).
+                            let changed = false;
+                            if (mode !== undefined && mode !== state.mode) {
+                                state.mode = mode;
+                                changed = true;
+                            }
+                            if (
+                                mtimeMs !== undefined &&
+                                mtimeMs !== state.mtimeMs
+                            ) {
+                                state.mtimeMs = mtimeMs;
+                                state.mtimeSet = true;
+                                changed = true;
+                            }
+                            if (changed) state.mutationGeneration++;
                             return;
                         }
                         if (!entry) throw notFound(normalized);

@@ -665,6 +665,14 @@ const emitSharedFsOpenProfile = (
 export type BlockStoreAccess = "store-exclusive" | "shared" | "unknown";
 
 export type SharedFsOpenArgs = {
+    /**
+     * Names this machine on what it writes. With the signing key it is
+     * "this replica" for unchanged saves: a save of bytes this replica
+     * already wrote is free (see the README's Conflicts). Defaults to
+     * "unknown-machine", so devices that share one Peerbit identity (a
+     * copied store directory, a reused key) must each pass a distinct
+     * label, or each one's save of the other's bytes is a no-op.
+     */
     machineLabel?: string;
     /**
      * Replication policy for the filesystem entries. Defaults to a full
@@ -1207,6 +1215,14 @@ export type WriteFileOptions = {
      * the write time.
      */
     mtime?: number;
+    /**
+     * @internal Set only by a native-mount commit (with
+     * `noOpIfHeadVersionIds`): `mtime` is the time of the last write or
+     * truncate, not one a utimens set. Such a save of the bytes and mode the
+     * open file showed changes nothing but that clock, so it is recorded as
+     * a copy (see writeFile) whoever wrote the bytes.
+     */
+    mtimeFromWrite?: boolean;
     chunkSize?: number;
     /**
      * "verify" (default): dedup-skip a chunk only when a fresh witness
@@ -1525,6 +1541,86 @@ const now = () => BigInt(Date.now());
 const createId = (prefix: string) =>
     `${prefix}:${toBase64URL(randomBytes(32))}`;
 
+/**
+ * Leading id characters a recorded copy (see isRecordedCopy) shares with
+ * the version it copies: "version:" and 24 base64url characters, exactly the
+ * first 18 of the 32 id bytes. Visible-head order breaks depth ties by id,
+ * so a copy at its parent's depth ranks against every other version exactly
+ * as the copied version did and never changes which version is visible. The
+ * other 14 bytes are random, and the id stays a 32-byte identity (changeset
+ * manifests decode it). Two unrelated versions share the prefix with
+ * probability 2^-144.
+ */
+const RECORDED_COPY_PREFIX_CHARS = "version:".length + 24;
+
+/**
+ * The id of a recorded copy of `copied`, or undefined when `copied` does not
+ * carry a canonical 32-byte id (only a writer outside shared-fs mints one):
+ * without the shared prefix a copy cannot keep the copied version's rank, so
+ * the save takes an ordinary version at depth + 1 instead.
+ */
+const recordedCopyId = (copied: { id: string }) => {
+    let raw: Uint8Array | undefined;
+    try {
+        raw = copied.id.startsWith("version:")
+            ? fromBase64URL(copied.id.slice("version:".length))
+            : undefined;
+    } catch {
+        raw = undefined;
+    }
+    if (raw?.byteLength !== 32) {
+        return undefined;
+    }
+    const id = new Uint8Array(32);
+    id.set(raw.subarray(0, 18));
+    id.set(randomBytes(14), 18);
+    return `version:${toBase64URL(id)}`;
+};
+
+/**
+ * Whether `version` is a recorded copy (an unchanged save, or a native-mount
+ * save of unchanged bytes; see writeFile): its id carries the rank prefix of
+ * one of its parents (see recordedCopyId). Decided from the row alone, so
+ * retiring the parent never changes the answer.
+ */
+const isRecordedCopy = (version: {
+    id: string;
+    parentVersionIds: string[];
+}) => {
+    const prefix = version.id.slice(0, RECORDED_COPY_PREFIX_CHARS);
+    return version.parentVersionIds.some(
+        (parent) =>
+            parent !== version.id &&
+            parent.slice(0, RECORDED_COPY_PREFIX_CHARS) === prefix
+    );
+};
+
+/**
+ * The parents of a recorded copy of `copied` (the save's best-ranked parent):
+ * `parentIds`, plus the version the copy repeats. That is `copied` itself
+ * when it is not a copy, else the version `copied` lists that is not a copy
+ * and shares its rank prefix, found in `chain` (see
+ * SharedFileSystem.copiedVersions), since every copy lists it. Referencing it
+ * directly lets GC retire the copies in between without leaving it childless
+ * (see planDag), and the authorship walk reaches it in one step. A copy so
+ * lists at most one parent more than the save has, however long its run: an
+ * open file saved again and again while another replica touches it lists the
+ * touch it took in, not every touch the run ever took in.
+ */
+const copyParentIds = (
+    parentIds: string[],
+    copied: VersionLike,
+    chain: VersionLike[]
+) => {
+    const prefix = copied.id.slice(0, RECORDED_COPY_PREFIX_CHARS);
+    const repeated = chain.find(
+        (version) =>
+            version.id.slice(0, RECORDED_COPY_PREFIX_CHARS) === prefix &&
+            !isRecordedCopy(version)
+    );
+    return [...new Set([...parentIds, ...(repeated ? [repeated.id] : [])])];
+};
+
 const nodeKindOf = (nodeId: string): "directory" | "file" =>
     nodeId.startsWith("dir:") ? "directory" : "file";
 
@@ -1708,23 +1804,156 @@ const validSymlinkTarget = (bytes: Uint8Array) => {
 /**
  * Mode and mtime of a new version: explicit options win, else the
  * best-ranked parent's mode, and its mtime only while the bytes are
- * unchanged (a content change is modified at `createdAt`).
+ * unchanged (a content change is modified at `createdAt`). `merged` is the
+ * parents' merged metadata (see mergeHeadMeta), when the caller has it.
  */
 const inheritMeta = (
     parents: VersionLike[],
     contentHash: string,
     createdAt: bigint,
-    options: { mode?: number; mtime?: number }
+    options: { mode?: number; mtime?: number },
+    merged?: { mode: number; mtime: bigint }
 ) => {
     const best = [...parents].sort(compareVersionRank)[0];
     return {
-        mode: options.mode ?? best?.mode ?? SHARED_FS_MODE.file,
+        mode: options.mode ?? merged?.mode ?? best?.mode ?? SHARED_FS_MODE.file,
         mtime:
             options.mtime !== undefined
                 ? BigInt(options.mtime)
                 : best?.contentHash === contentHash
-                  ? best.mtime
+                  ? (merged?.mtime ?? best.mtime)
                   : createdAt,
+    };
+};
+
+/**
+ * Each of `heads` and the versions it descends from in `rows`, by id, and
+ * the id resolver the walk used (see metaMergeBase for missing parents).
+ */
+const metaAncestry = <T extends VersionLike>(
+    heads: VersionLike[],
+    rows: Map<string, T>
+) => {
+    let copied: Map<string, T> | undefined;
+    const resolve = (id: string) => {
+        const row = rows.get(id);
+        if (row) {
+            return row;
+        }
+        if (!copied) {
+            copied = new Map();
+            for (const version of rows.values()) {
+                if (!isRecordedCopy(version)) {
+                    copied.set(
+                        version.id.slice(0, RECORDED_COPY_PREFIX_CHARS),
+                        version
+                    );
+                }
+            }
+        }
+        return copied.get(id.slice(0, RECORDED_COPY_PREFIX_CHARS));
+    };
+    const ancestry = heads.map((head) => {
+        const ancestors = new Set<string>();
+        const stack = [head.id];
+        for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
+            const row = resolve(id);
+            if (row && !ancestors.has(row.id)) {
+                ancestors.add(row.id);
+                stack.push(...row.parentVersionIds);
+            }
+        }
+        return ancestors;
+    });
+    return { resolve, ancestry };
+};
+
+/**
+ * The nearest common version of `heads` in `rows` (a head counts as its own
+ * ancestor): of the common versions that no other common version descends
+ * from, the best-ranked. A recorded copy shares its parent's depth, so
+ * plain rank order alone could pick the parent over its copy.
+ * GC keeps this version while the heads' metadata differs.
+ *
+ * GC collapses copy runs, so a head may build on a copy that a collector
+ * without that head retired. A missing parent then stands for the present
+ * version that is not a copy and has its rank prefix (see recordedCopyId):
+ * the version the copy repeats, with the same bytes and mode (a save whose
+ * merged mode that version lacks is not a copy; see writeFile). The mode then
+ * merges as it would against the copy, while a head that kept the copy's
+ * mtime counts as having changed it.
+ */
+const metaMergeBase = <T extends VersionLike>(
+    heads: VersionLike[],
+    rows: Map<string, T>,
+    walked = metaAncestry(heads, rows)
+): T | undefined => {
+    const { resolve, ancestry } = walked;
+    let common: Set<string> | undefined;
+    for (const ancestors of ancestry) {
+        common = common
+            ? new Set([...common].filter((id) => ancestors.has(id)))
+            : ancestors;
+    }
+    const superseded = new Set<string>();
+    for (const id of common ?? []) {
+        for (const parent of rows.get(id)!.parentVersionIds) {
+            superseded.add(resolve(parent)?.id ?? parent);
+        }
+    }
+    return [...(common ?? [])]
+        .filter((id) => !superseded.has(id))
+        .map((id) => rows.get(id)!)
+        .sort(compareVersionRank)[0];
+};
+
+/**
+ * Mode and mtime of heads holding the same bytes (best-ranked first),
+ * merged field by field against their merge base in `rows`: a value one
+ * head changed wins over heads that kept the base's, and concurrent mtime
+ * changes keep the latest. Regular files have two modes, so concurrent mode
+ * changes from one base agree. Without a base every head counts as changed
+ * and the best-ranked mode is kept.
+ *
+ * Only concurrent heads merge. A head that another one descends from (the
+ * version a mount save was opened on, under a head the save took in) holds
+ * no change that head lacks: merged as a head, it would bring back a value
+ * that head had since reverted. It still counts as a merge base candidate.
+ */
+const mergeHeadMeta = (
+    givenHeads: VersionLike[],
+    rows: Map<string, VersionLike>
+): { mode: number; mtime: bigint } => {
+    const { resolve, ancestry } = metaAncestry(givenHeads, rows);
+    let concurrent = givenHeads.flatMap((head, i) =>
+        ancestry.some(
+            (ancestors, j) =>
+                givenHeads[j].id !== head.id && ancestors.has(head.id)
+        )
+            ? []
+            : [i]
+    );
+    if (concurrent.length === 0) {
+        concurrent = givenHeads.map((_, i) => i);
+    }
+    const heads = concurrent.map((i) => givenHeads[i]);
+    const base = metaMergeBase(heads, rows, {
+        resolve,
+        ancestry: concurrent.map((i) => ancestry[i]),
+    });
+    const modes = heads.filter((head) => head.mode !== base?.mode);
+    let mtime: bigint | undefined;
+    for (const head of heads) {
+        if (
+            head.mtime !== base?.mtime &&
+            (mtime === undefined || head.mtime > mtime)
+        ) {
+            mtime = head.mtime;
+        }
+    }
+    return {
+        mode: modes[0]?.mode ?? heads[0].mode,
+        mtime: mtime ?? heads[0].mtime,
     };
 };
 
@@ -2529,6 +2758,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private versionRowCache = new Map<string, Map<string, VersionLike>>();
     private namingRowCache = new Map<string, Map<string, NamingLike>>();
+    /** headMeta results of diverged files, keyed by epoch and heads. */
+    private headMetaMemo = new Map<
+        string,
+        { key: string; meta: { mode: number; mtime: bigint } }
+    >();
     /**
      * Per-node change counters (bumped for added AND removed, whether or
      * not a bucket exists) plus a monotonic global epoch bumped on opens,
@@ -3184,6 +3418,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.gcSuppressed = new Set();
         this.memoryLedger = undefined;
         this.versionRowCache = new Map();
+        this.headMetaMemo = new Map();
         this.namingRowCache = new Map();
         this.cacheEpochs = new Map();
         // Never reuse a generation on the same program instance. Public
@@ -6288,6 +6523,131 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return result;
     }
 
+    /** Every stored version row of a file node, keyed by id (read view). */
+    private async versionRowsFor(
+        nodeId: string
+    ): Promise<Map<string, VersionLike>> {
+        const cached = this.versionRowCache.get(nodeId);
+        const rows = cached
+            ? [...cached.values()]
+            : (
+                  await this.queryRows([
+                      new StringMatch({ key: "kind", value: "file-version" }),
+                      new StringMatch({ key: "nodeId", value: nodeId }),
+                  ])
+              ).map(versionRowOf);
+        return new Map(
+            this.overlayUnionVersions(nodeId, rows).map((row) => [row.id, row])
+        );
+    }
+
+    /**
+     * The mode and mtime a file shows and its next write inherits: the
+     * visible head's, merged with every head holding the same bytes, so a
+     * concurrent chmod and touch both survive. `heads` is best-ranked first.
+     */
+    private async headMeta(
+        heads: VersionLike[]
+    ): Promise<{ mode: number; mtime: bigint } | undefined> {
+        const visible = heads[0];
+        if (!visible) {
+            return undefined;
+        }
+        const same = heads.filter(
+            (head) => head.contentHash === visible.contentHash
+        );
+        if (
+            same.every(
+                (head) =>
+                    head.mode === visible.mode && head.mtime === visible.mtime
+            )
+        ) {
+            return { mode: visible.mode, mtime: visible.mtime };
+        }
+        // Memoized per node until its rows change (the epoch moves), so a
+        // diverged file's stat, list and getattr do not repeat the walk.
+        const memoKey = `${this.epochOf(visible.nodeId)}|${same
+            .map((head) => head.id)
+            .join(",")}`;
+        const memo = this.headMetaMemo.get(visible.nodeId);
+        if (memo?.key === memoKey) {
+            return memo.meta;
+        }
+        const sole = await this.soleHead(visible.nodeId, same);
+        const meta = sole
+            ? { mode: sole.mode, mtime: sole.mtime }
+            : mergeHeadMeta(same, await this.versionRowsFor(visible.nodeId));
+        // The bootstrap overlay can change rows without moving the epoch.
+        if (this.bootstrapPhase !== "overlay-active") {
+            this.headMetaMemo.delete(visible.nodeId);
+            this.headMetaMemo.set(visible.nodeId, { key: memoKey, meta });
+            for (const nodeId of this.headMetaMemo.keys()) {
+                if (
+                    this.headMetaMemo.size <= SharedFileSystem.CACHE_NODE_LIMIT
+                ) {
+                    break;
+                }
+                this.headMetaMemo.delete(nodeId);
+            }
+        }
+        return meta;
+    }
+
+    /**
+     * The one of `heads` that every other one is an ancestor of, if any: the
+     * merge of such heads is its metadata (see mergeHeadMeta). A mount
+     * save's opened version under a head the save took in is the common
+     * case. The walk goes no deeper than the shallowest other head, since a
+     * parent is never deeper than its child, so it covers only the history
+     * between them. Undefined when no head qualifies, or when a row on the
+     * way is missing (the full merge resolves a retired copy).
+     */
+    private async soleHead(
+        nodeId: string,
+        heads: VersionLike[]
+    ): Promise<VersionLike | undefined> {
+        const rowOf = await this.versionRowLookup(nodeId);
+        for (const candidate of heads) {
+            const others = heads.filter((head) => head.id !== candidate.id);
+            const pending = new Set(others.map((head) => head.id));
+            if (pending.size === 0) {
+                return candidate;
+            }
+            const floor = others.reduce(
+                (min, head) =>
+                    head.causalDepth < min ? head.causalDepth : min,
+                candidate.causalDepth
+            );
+            const seen = new Set<string>();
+            const stack = [...candidate.parentVersionIds];
+            let missing = false;
+            for (
+                let id = stack.pop();
+                id !== undefined && pending.size > 0;
+                id = stack.pop()
+            ) {
+                if (seen.has(id)) {
+                    continue;
+                }
+                seen.add(id);
+                pending.delete(id);
+                const row = rowOf(id);
+                if (!row) {
+                    missing = true;
+                } else if (row.causalDepth >= floor) {
+                    stack.push(...row.parentVersionIds);
+                }
+            }
+            if (pending.size === 0) {
+                return candidate;
+            }
+            if (missing) {
+                return undefined;
+            }
+        }
+        return undefined;
+    }
+
     private versionInfo(
         head: VersionLike,
         path: string,
@@ -6314,6 +6674,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         path: string,
         options: {
             heads?: VersionLike[];
+            /** headMeta(heads); the visible head's when absent. */
+            meta?: { mode: number; mtime: bigint };
             namingConflict?: boolean;
         } = {}
     ): SharedFsEntryInfo | undefined {
@@ -6345,14 +6707,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             name: winner.name,
             kind,
             size: visible.size,
-            updatedAt: visible.mtime,
+            updatedAt: options.meta?.mtime ?? visible.mtime,
             authorKey: winner.authorKey ?? "",
             machineLabel: winner.machineLabel ?? "",
             conflict: contentConflictHeads(options.heads ?? []).length > 1,
             versionId: visible.id,
             headVersionIds: options.heads?.map((head) => head.id) ?? [],
             contentHash: visible.contentHash,
-            mode: visible.mode,
+            mode: options.meta?.mode ?? visible.mode,
             namingConflict: options.namingConflict || undefined,
         };
     }
@@ -6392,6 +6754,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const heads = await this.headsForNode(resolved.nodeId);
         return this.entryInfoFor(resolved.winner, resolved.path, {
             heads,
+            meta: await this.headMeta(heads),
             namingConflict,
         });
     }
@@ -6631,42 +6994,51 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             options.baseVersionIds?.length === 1
                 ? options.baseVersionIds[0]
                 : undefined;
-        const sameMeta = (head: VersionLike) =>
-            (options.mode ?? head.mode) === head.mode &&
+        // The metadata the file shows: the visible head's, merged with the
+        // other heads holding its bytes (see headMeta).
+        const shown = await this.headMeta(currentHeads);
+        const sameMeta =
+            shown !== undefined &&
+            (options.mode ?? shown.mode) === shown.mode &&
             (options.mtime === undefined ||
-                BigInt(options.mtime) === head.mtime);
-        if (
+                BigInt(options.mtime) === shown.mtime);
+        const exactMountHead =
             noOpHeadVersionIds !== undefined &&
             options.chunkSize === undefined &&
             explicitBaseId !== undefined &&
             currentHeads[0]?.id === explicitBaseId &&
-            exactHeadSetMatches &&
-            currentHeads[0].contentHash === contentHash &&
-            sameMeta(currentHeads[0])
-        ) {
-            if (expectedNodeId !== undefined) {
-                await assertExpectedNode("no-op");
-            }
-            profiler?.enter("writeFile.result", {
-                outcome: "unchanged",
-                newFile: false,
-            });
-            return {
-                ...this.versionInfo(currentHeads[0], normalized, currentHeads),
-                mountWriteOutcome: "unchanged",
-            };
-        }
-        // Idempotent save: identical content over a single unchanged head is
-        // a no-op — no new version, no new chunks, nothing to replicate.
-        // Explicit baseVersionIds (conflict flows) and explicit chunk sizes
-        // (re-chunking migrations) always create a version.
-        if (
-            noOpHeadVersionIds === undefined &&
-            options.baseVersionIds === undefined &&
+            exactHeadSetMatches;
+        // Every head already holds these bytes and the file shows this mode.
+        // Explicit baseVersionIds outside the mount (conflict flows) and
+        // explicit chunk sizes (re-chunking migrations) always create a
+        // version.
+        const sameBytes =
             options.chunkSize === undefined &&
-            currentHeads.length === 1 &&
+            (noOpHeadVersionIds !== undefined ||
+                options.baseVersionIds === undefined) &&
+            currentHeads.length > 0 &&
+            currentHeads.every((head) => head.contentHash === contentHash) &&
+            shown !== undefined &&
+            (options.mode ?? shown.mode) === shown.mode;
+        // Unchanged save: the file shows this mtime too.
+        const unchangedSave = sameBytes && sameMeta;
+        // A mount commit of the visible bytes and metadata of a file already
+        // in conflict stays a no-op, as before: the conflict is already
+        // listed.
+        const conflictedMountSave =
+            exactMountHead &&
+            contentConflictHeads(currentHeads).length > 1 &&
             currentHeads[0].contentHash === contentHash &&
-            sameMeta(currentHeads[0])
+            sameMeta;
+        // Idempotent save: an unchanged save mints nothing when this replica
+        // already wrote these bytes (see unchangedSaveIsNoOp); otherwise it is
+        // recorded as a copy below. A mount reports "unchanged" only over its
+        // exact opened heads.
+        if (
+            conflictedMountSave ||
+            (unchangedSave &&
+                (noOpHeadVersionIds === undefined || exactMountHead) &&
+                (await this.unchangedSaveIsNoOp(existingNodeId!, currentHeads)))
         ) {
             if (expectedNodeId !== undefined) {
                 await assertExpectedNode("no-op");
@@ -6675,7 +7047,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 outcome: "unchanged",
                 newFile: false,
             });
-            return this.versionInfo(currentHeads[0], normalized, currentHeads);
+            // The metadata the file shows, which may merge several heads.
+            const info = {
+                ...this.versionInfo(currentHeads[0], normalized, currentHeads),
+                mode: shown!.mode,
+                mtime: shown!.mtime,
+            };
+            return noOpHeadVersionIds === undefined
+                ? info
+                : { ...info, mountWriteOutcome: "unchanged" as const };
         }
         if ((options.baseVersionIds?.length ?? 0) > 8000) {
             // The indexer's batched child-table insert has a bound-variable
@@ -6728,7 +7108,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
             // Absorb current heads holding a base's bytes (a concurrent
-            // chmod or touch), so they merge instead of forking.
+            // chmod or touch), so they merge instead of forking. Like any
+            // ordinary version, the write then ranks one deeper than every
+            // parent, absorbed heads included: a recorded copy of such a
+            // head keeps that head's depth, so it can never tie with a
+            // change made on top of it.
             const baseHashes = new Set(
                 parentVersions.map((parent) => parent.contentHash)
             );
@@ -6753,12 +7137,70 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             options.chunkSize === undefined && options.dedup !== "off"
                 ? currentHeads.find((head) => head.contentHash === contentHash)
                 : undefined;
+        // A mount's explicit base is already loaded: reuse that document.
         const reused =
             sameBytesHead &&
-            (sameBytesHead instanceof FileVersion
-                ? sameBytesHead
-                : await this.getDocument<SharedFsEntry>(sameBytesHead.id));
-        const versionId = createId("version");
+            (parentVersions.find(
+                (parent) =>
+                    parent.id === sameBytesHead.id &&
+                    parent instanceof FileVersion
+            ) ??
+                (sameBytesHead instanceof FileVersion
+                    ? sameBytesHead
+                    : await this.getDocument<SharedFsEntry>(sameBytesHead.id)));
+        // A save that keeps the bytes and mode of every parent is recorded as
+        // a copy of the best-ranked parent: it keeps that parent's depth (no
+        // +1) and takes its rank prefix (see recordedCopyId), so it ranks
+        // exactly where that parent ranked and never changes which version
+        // is visible. Through writeFile the parents are the heads (an
+        // unchanged save that was not a no-op). Through a mount they are the
+        // version the open file showed and the heads holding its bytes, even
+        // when other heads hold a change that arrived after the open: those
+        // stay heads. A mount commit carries a new mtime. When the last write
+        // or truncate set it (mtimeFromWrite), the save changed nothing but
+        // that clock and is a copy too, whoever wrote the bytes. When a
+        // utimens set it, over bytes this replica authored (an ordinary
+        // version of them among the parents or the versions they copy, see
+        // copiedVersions, not just its own copy of another replica's bytes)
+        // it is an ordinary version, as a touch is. A parent without a
+        // canonical id leaves the save an ordinary version. So does a merge
+        // of parents whose modes differ when the best-ranked one lacks the
+        // merged mode (a concurrent chmod of another parent): a copy always
+        // has the mode of the version it copies, which stands in for it once
+        // GC retires it (see metaMergeBase). The merge takes only concurrent
+        // parents (see mergeHeadMeta): the opened version under a head the
+        // save took in is only a merge base candidate.
+        const ranked = [...parentVersions].sort(compareVersionRank);
+        const parentMeta = await this.headMeta(ranked);
+        const keepsParents =
+            options.chunkSize === undefined &&
+            (noOpHeadVersionIds !== undefined ||
+                options.baseVersionIds === undefined) &&
+            parentMeta !== undefined &&
+            ranked.every((parent) => parent.contentHash === contentHash) &&
+            (options.mode ?? parentMeta.mode) === parentMeta.mode &&
+            parentMeta.mode === ranked[0].mode;
+        const copied = keepsParents
+            ? await this.copiedVersions(existingNodeId!, ranked)
+            : [];
+        const copyId =
+            keepsParents &&
+            (options.mtime === undefined ||
+                BigInt(options.mtime) === parentMeta!.mtime ||
+                (noOpHeadVersionIds !== undefined &&
+                    (options.mtimeFromWrite === true ||
+                        !this.wroteAny(copied, true))))
+                ? recordedCopyId(ranked[0])
+                : undefined;
+        const recordedCopy = copyId !== undefined;
+        if (recordedCopy) {
+            parentVersionIds = copyParentIds(
+                parentVersionIds,
+                ranked[0],
+                copied
+            );
+        }
+        const versionId = copyId ?? createId("version");
         let chunkIds: string[];
         let uniqueChunks: FileChunk[] | undefined;
         if (
@@ -6825,14 +7267,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             id: versionId,
             nodeId,
             parentVersionIds,
-            causalDepth: maxDepth(parentVersions),
+            causalDepth: recordedCopy
+                ? ranked[0].causalDepth
+                : maxDepth(parentVersions),
             contentHash,
             size: BigInt(bytes.byteLength),
             ...inheritMeta(
                 parentVersions,
                 contentHash,
                 metadata.timestamp,
-                options
+                options,
+                parentMeta
             ),
             chunkIds,
             createdAt: metadata.timestamp,
@@ -7203,15 +7648,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     `Path is a symlink: ${entry.path}`
                 );
             }
-            if (
+            // Unchanged: every head already holds these bytes (a batch
+            // inherits the merged metadata, so that is unchanged too).
+            const unchanged =
                 entry.chunkSize === undefined &&
-                currentHeads.length === 1 &&
-                currentHeads[0].contentHash === contentHash
+                currentHeads.length > 0 &&
+                currentHeads.every((head) => head.contentHash === contentHash);
+            if (
+                unchanged &&
+                (await this.unchangedSaveIsNoOp(existingNodeId!, currentHeads))
             ) {
                 results[i] = undefined; // unchanged content: no-op
                 if (options.manifest && resolved) {
-                    if (youngEnough(currentHeads[0].createdAt)) {
-                        adoptVersionIds.add(currentHeads[0].id);
+                    for (const head of currentHeads) {
+                        if (youngEnough(head.createdAt)) {
+                            adoptVersionIds.add(head.id);
+                        }
                     }
                     if (youngEnough(resolved.winner.createdAt)) {
                         adoptNamingIds.add(resolved.winner.id);
@@ -7220,39 +7672,76 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 continue;
             }
-            const orderedChunks = chunkBytes(bytes, entry.chunkSize).map(
-                (chunk) => new FileChunk({ bytes: chunk })
-            );
-            const uniqueChunkIds = new Set(
-                orderedChunks.map((chunk) => chunk.id)
-            );
-            if (uniqueChunkIds.size > 8000) {
-                // The indexer bound is per version row's chunkRefs (see
-                // writeFile); the batch as a whole probes and puts chunks
-                // one document at a time, so its total is unbounded.
-                throw new SharedFsError(
-                    "EINVAL",
-                    `File has ${uniqueChunkIds.size} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version): ${entry.path}`
+            // A recorded unchanged save reuses the visible head's chunk list
+            // while every chunk is local, as writeFile does.
+            let chunkIds: string[] | undefined;
+            if (unchanged && options.dedup !== "off") {
+                const head = await this.getDocument<SharedFsEntry>(
+                    currentHeads[0].id
                 );
+                if (
+                    head instanceof FileVersion &&
+                    (await this.indexRowsById(head.chunkIds, { id: true }))
+                        .size === new Set(head.chunkIds).size
+                ) {
+                    chunkIds = head.chunkIds;
+                }
             }
-            for (const chunk of orderedChunks) {
-                allChunks.set(chunk.id, chunk);
+            if (!chunkIds) {
+                const orderedChunks = chunkBytes(bytes, entry.chunkSize).map(
+                    (chunk) => new FileChunk({ bytes: chunk })
+                );
+                const uniqueChunkIds = new Set(
+                    orderedChunks.map((chunk) => chunk.id)
+                );
+                if (uniqueChunkIds.size > 8000) {
+                    // The indexer bound is per version row's chunkRefs (see
+                    // writeFile); the batch as a whole probes and puts
+                    // chunks one document at a time, so its total is
+                    // unbounded.
+                    throw new SharedFsError(
+                        "EINVAL",
+                        `File has ${uniqueChunkIds.size} unique chunks; raise chunkSize (default ${DEFAULT_FILE_CHUNK_SIZE} bytes supports ~4 GiB per version): ${entry.path}`
+                    );
+                }
+                for (const chunk of orderedChunks) {
+                    allChunks.set(chunk.id, chunk);
+                }
+                chunkIds = orderedChunks.map((chunk) => chunk.id);
             }
             const nodeId = existingNodeId ?? createId("file");
+            // Recorded as a copy of the heads (see writeFile); a head without
+            // a canonical id, or merged heads whose mode the visible one
+            // lacks, leave an ordinary version.
+            const mergedMeta = await this.headMeta(currentHeads);
+            const copyId =
+                unchanged && mergedMeta?.mode === currentHeads[0].mode
+                    ? recordedCopyId(currentHeads[0])
+                    : undefined;
             const version = new FileVersion({
-                id: createId("version"),
+                id: copyId ?? createId("version"),
                 nodeId,
-                parentVersionIds: currentHeads.map((head) => head.id),
-                causalDepth: maxDepth(currentHeads),
+                parentVersionIds: copyId
+                    ? copyParentIds(
+                          currentHeads.map((head) => head.id),
+                          currentHeads[0],
+                          await this.copiedVersions(
+                              existingNodeId!,
+                              currentHeads
+                          )
+                      )
+                    : currentHeads.map((head) => head.id),
+                causalDepth: maxDepth(currentHeads) - (copyId ? 1n : 0n),
                 contentHash,
                 size: BigInt(bytes.byteLength),
                 ...inheritMeta(
                     currentHeads,
                     contentHash,
                     metadata.timestamp,
-                    {}
+                    {},
+                    mergedMeta
                 ),
-                chunkIds: orderedChunks.map((chunk) => chunk.id),
+                chunkIds,
                 createdAt: metadata.timestamp,
                 authorKey: metadata.authorKey,
                 machineLabel: metadata.machineLabel,
@@ -7817,6 +8306,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 joinFsPath(normalized, child.name),
                 {
                     heads: child.heads,
+                    meta: await this.headMeta(child.heads ?? []),
                     namingConflict: child.state.conflicted || child.contested,
                 }
             );
@@ -8004,15 +8494,24 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         const heads = await this.headsForNode(resolved.nodeId);
-        // Selecting other bytes than the visible ones modifies the file now.
+        // The selected bytes keep the metadata the heads holding them show
+        // (see headMeta), whichever of those heads was selected, so a
+        // concurrent chmod and touch both survive. Selecting other bytes than
+        // the visible ones modifies the file now.
+        const meta =
+            (await this.headMeta(
+                heads.filter(
+                    (head) => head.contentHash === selected.contentHash
+                )
+            )) ?? selected;
         const resolution = this.copyVersion(
             selected,
             heads,
             {
-                mode: selected.mode,
+                mode: meta.mode,
                 mtime:
                     selected.contentHash === heads[0]?.contentHash
-                        ? selected.mtime
+                        ? meta.mtime
                         : undefined,
             },
             true
@@ -8089,13 +8588,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `Cannot set metadata on a symlink: ${normalized}`
             );
         }
+        const current = (await this.headMeta(heads))!;
         const meta = {
-            mode: patch.mode ?? visible.mode,
+            mode: patch.mode ?? current.mode,
             mtime:
-                patch.mtime !== undefined ? BigInt(patch.mtime) : visible.mtime,
+                patch.mtime !== undefined ? BigInt(patch.mtime) : current.mtime,
         };
-        if (meta.mode === visible.mode && meta.mtime === visible.mtime) {
-            return this.versionInfo(visible, normalized, heads);
+        // The values the file already shows: a no-op. A version would only
+        // restate them, and at depth + 1 it could outrank a concurrent change.
+        if (meta.mode === current.mode && meta.mtime === current.mtime) {
+            return {
+                ...this.versionInfo(visible, normalized, heads),
+                mode: current.mode,
+                mtime: current.mtime,
+            };
         }
         const source = await this.getDocument<SharedFsEntry>(visible.id);
         if (!(source instanceof FileVersion)) {
@@ -9851,10 +10357,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     }
                 }
                 await this.touchChunks(chunkDocs, "off");
+                // The metadata the file showed, merged as in headMeta.
                 const resolution = this.copyVersion(
                     visible,
                     heads,
-                    visible,
+                    (await this.headMeta(heads)) ?? visible,
                     true
                 );
                 await this.entries.put(resolution, { unique: true });
@@ -10193,6 +10700,134 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Whether an unchanged save over `heads` (every head holds the saved
+     * bytes and the file shows the saved metadata) mints nothing: only when
+     * this replica already wrote these bytes, as one of the heads or as a
+     * version the heads copy: through each recorded copy, its stored parents
+     * holding the same bytes, down to versions that are not copies. A change
+     * it has not received was then made either concurrently with that write
+     * (already a conflict) or after seeing it (a three-way merge in which
+     * this save changed nothing). Otherwise the save is recorded as a copy
+     * (see writeFile), so a change made elsewhere that this replica has not
+     * received becomes a listed conflict instead of silently winning. The
+     * copy chain makes repeated saves free for every replica that took part,
+     * including replicas taking turns: at most one copy per replica while
+     * GC keeps it. The walk stops at the first version this replica wrote,
+     * so it passes only the copies other replicas recorded since this
+     * replica's own; every copy lists the version its run repeats (see
+     * copyParentIds), so that one is a step from any copy of the run. A
+     * native-mount save of these bytes publishes unless its mtime is the
+     * one the file shows. writeFile records it as a copy when the mtime
+     * came from a write (mtimeFromWrite), whoever wrote the bytes; when a
+     * utimens set it, as a touch over bytes this replica authored (wroteAny
+     * with `authored`), else as a copy.
+     *
+     * "This replica" is the signing key plus the machine label, so two
+     * machines sharing one writer key (or a cloned store directory) count
+     * as two replicas while their labels differ; the CLI labels by host
+     * name. A changed key or label only costs one recorded copy per file.
+     */
+    private async unchangedSaveIsNoOp(
+        nodeId: string,
+        heads: VersionLike[]
+    ): Promise<boolean> {
+        if (this.wroteAny(heads)) {
+            return true;
+        }
+        const copies = heads.filter(isRecordedCopy);
+        if (copies.length === 0) {
+            return false;
+        }
+        const rowOf = await this.versionRowLookup(nodeId);
+        const seen = new Set(heads.map((head) => head.id));
+        for (let copy = copies.pop(); copy; copy = copies.pop()) {
+            for (const id of copy.parentVersionIds) {
+                const parent = rowOf(id);
+                if (
+                    seen.has(id) ||
+                    !parent ||
+                    parent.contentHash !== copy.contentHash
+                ) {
+                    continue;
+                }
+                if (this.wroteAny([parent])) {
+                    return true;
+                }
+                seen.add(id);
+                if (isRecordedCopy(parent)) {
+                    copies.push(parent);
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether this replica (its signing key and machine label) wrote one of
+     * `versions`. With `authored`, its recorded copies do not count: a copy
+     * repeats another version's bytes.
+     */
+    private wroteAny(versions: VersionLike[], authored = false) {
+        const authorKey = this.authorKey();
+        return versions.some(
+            (version) =>
+                version.authorKey === authorKey &&
+                version.machineLabel === this.machineLabel &&
+                !(authored && isRecordedCopy(version))
+        );
+    }
+
+    /**
+     * `versions` and, for each recorded copy among them, its stored parents
+     * holding the same bytes: the version the copy repeats (every copy lists
+     * it, see copyParentIds) and the versions it was saved over. One step,
+     * so the cost does not grow with a run of copies.
+     */
+    private async copiedVersions(
+        nodeId: string,
+        versions: VersionLike[]
+    ): Promise<VersionLike[]> {
+        const copies = versions.filter(isRecordedCopy);
+        if (copies.length === 0) {
+            return versions;
+        }
+        const rowOf = await this.versionRowLookup(nodeId);
+        const chain = new Map(versions.map((version) => [version.id, version]));
+        for (const copy of copies) {
+            for (const id of copy.parentVersionIds) {
+                const parent = rowOf(id);
+                if (
+                    parent &&
+                    !chain.has(id) &&
+                    parent.contentHash === copy.contentHash
+                ) {
+                    chain.set(id, parent);
+                }
+            }
+        }
+        return [...chain.values()];
+    }
+
+    /**
+     * The stored version rows of a file node by id (read view): the cached
+     * rows when present, so a lookup does not copy every row of the node.
+     */
+    private async versionRowLookup(
+        nodeId: string
+    ): Promise<(id: string) => VersionLike | undefined> {
+        const cached = this.versionRowCache.get(nodeId);
+        if (!cached) {
+            const rows = await this.versionRowsFor(nodeId);
+            return (id) => rows.get(id);
+        }
+        const overlay =
+            this.bootstrapPhase === "overlay-active"
+                ? this.overlayVersions.get(nodeId)
+                : undefined;
+        return (id) => cached.get(id) ?? overlay?.get(id);
     }
 
     private async hasConnectedRemoteReplicator() {
@@ -12333,6 +12968,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // was active; an epoch bump alone is not enough (warm buckets are
         // never re-validated on read), so clear them outright.
         this.versionRowCache = new Map();
+        this.headMetaMemo = new Map();
         this.namingRowCache = new Map();
         this.slotSweepCache = new Map();
         this.slotPointCache = new BoundedSlotPointCache();
@@ -15866,7 +16502,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parentsOf: (doc: T) => string[],
                 heads: T[],
                 keep: Set<string>,
-                cap?: { limit: number; depthOf: (doc: T) => bigint }
+                cap?: { limit: number; depthOf: (doc: T) => bigint },
+                isCopy?: (doc: T) => boolean
             ): Map<string, T> => {
                 const byId = new Map(docs.map((doc) => [doc.id, doc]));
                 const children = new Map<string, string[]>();
@@ -15939,7 +16576,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 // Grace-closure fixpoint: never leave a surviving doc whose
                 // every present child is being retired — deleting them would
-                // promote the survivor to a spurious head.
+                // promote the survivor to a spurious head. Every recorded
+                // copy also references the version its run repeats (see
+                // copyParentIds), so a kept version is the parent of every
+                // copy of its run, and of children that are copies one is
+                // enough: keep the children that are not copies, else one
+                // copy a survivor builds on, else the newest copy. The other
+                // copies stay retired, so a run of saves of the same bytes
+                // older than the keepVersions window does not pile up.
+                const newer = (a: T, b: T) =>
+                    Number(b.createdAt) - Number(a.createdAt) ||
+                    compareIds(b.id, a.id);
                 let changed = true;
                 while (changed) {
                     changed = false;
@@ -15952,7 +16599,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             kids.length > 0 &&
                             kids.every((kid) => retire.has(kid))
                         ) {
-                            for (const kid of kids) {
+                            let spared = isCopy
+                                ? kids.filter((kid) => !isCopy(byId.get(kid)!))
+                                : kids;
+                            if (spared.length === 0) {
+                                spared = [
+                                    kids.find((kid) =>
+                                        (children.get(kid) ?? []).some(
+                                            (child) => !retire.has(child)
+                                        )
+                                    ) ??
+                                        kids
+                                            .map((kid) => byId.get(kid)!)
+                                            .sort(newer)[0].id,
+                                ];
+                            }
+                            for (const kid of spared) {
                                 retire.delete(kid);
                                 changed = true;
                             }
@@ -15988,13 +16650,65 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         keep.add(id);
                     }
                 }
+                // The newest keepVersions versions stay, recorded copies
+                // included: a mount save of unchanged bytes was an ordinary
+                // version before, and an open file may be based on one (see
+                // planDag for runs of them older than these). A copy with
+                // its copied parent's mtime (an unchanged writeFile or
+                // writeBatch save, which recorded nothing before) stays too
+                // while within them, but is not counted, so it never pushes
+                // an older version out.
+                const docById = new Map(docs.map((doc) => [doc.id, doc]));
+                const repeatsParent = (doc: FileVersion) =>
+                    doc.parentVersionIds.some((id) => {
+                        const parent = docById.get(id);
+                        return (
+                            parent !== undefined &&
+                            parent.id !== doc.id &&
+                            parent.id.slice(0, RECORDED_COPY_PREFIX_CHARS) ===
+                                doc.id.slice(0, RECORDED_COPY_PREFIX_CHARS) &&
+                            parent.mtime === doc.mtime
+                        );
+                    });
                 const newest = [...docs].sort(
                     (a, b) =>
                         Number(b.createdAt) - Number(a.createdAt) ||
                         compareIds(b.id, a.id)
                 );
-                for (const doc of newest.slice(0, config.keepVersions)) {
+                let counted = 0;
+                for (const doc of newest) {
+                    if (counted >= config.keepVersions) {
+                        break;
+                    }
                     keep.add(doc.id);
+                    if (!repeatsParent(doc)) {
+                        counted++;
+                    }
+                }
+                // Heads holding the same bytes with different metadata show
+                // a merge against their nearest common version (headMeta):
+                // keep it, or stat and the next write would lose a change.
+                const byHash = new Map<string | undefined, FileVersion[]>();
+                for (const head of heads) {
+                    const group = byHash.get(head.contentHash) ?? [];
+                    group.push(head);
+                    byHash.set(head.contentHash, group);
+                }
+                let docRows: Map<string, FileVersion> | undefined;
+                for (const group of byHash.values()) {
+                    if (
+                        group.some(
+                            (head) =>
+                                head.mode !== group[0].mode ||
+                                head.mtime !== group[0].mtime
+                        )
+                    ) {
+                        docRows ??= new Map(docs.map((doc) => [doc.id, doc]));
+                        const base = metaMergeBase(group, docRows);
+                        if (base) {
+                            keep.add(base.id);
+                        }
+                    }
                 }
                 for (const doc of docs) {
                     if (!ageOk(doc, config.retentionMs)) {
@@ -16049,7 +16763,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     docs,
                     (doc) => doc.parentVersionIds,
                     heads,
-                    keep
+                    keep,
+                    undefined,
+                    isRecordedCopy
                 );
                 for (const [id, doc] of retire) {
                     versionRetire.set(id, doc);
@@ -16228,11 +16944,47 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             docs: (FileVersion | NamingEvent)[]
         ): Promise<number> => {
             let deleted = 0;
-            const ordered = [...docs].sort(
+            const sorted = [...docs].sort(
                 (a, b) =>
                     compareBigint(a.causalDepth, b.causalDepth) ||
                     compareIds(a.id, b.id)
             );
+            // Depth order, except that a parent at its child's depth (an
+            // unchanged save keeps its parent's depth) goes first.
+            const byId = new Map(sorted.map((doc) => [doc.id, doc]));
+            const ordered: typeof sorted = [];
+            const placed = new Set<string>();
+            const onStack = new Set<string>();
+            for (const doc of sorted) {
+                const stack = [doc];
+                onStack.add(doc.id);
+                while (stack.length > 0) {
+                    const top = stack[stack.length - 1];
+                    const parent = (
+                        top instanceof FileVersion
+                            ? top.parentVersionIds
+                            : top.parentNamingIds
+                    )
+                        .map((id) => byId.get(id))
+                        .find(
+                            (candidate) =>
+                                candidate &&
+                                !placed.has(candidate.id) &&
+                                !onStack.has(candidate.id)
+                        );
+                    if (parent) {
+                        stack.push(parent);
+                        onStack.add(parent.id);
+                    } else {
+                        stack.pop();
+                        onStack.delete(top.id);
+                        if (!placed.has(top.id)) {
+                            placed.add(top.id);
+                            ordered.push(top);
+                        }
+                    }
+                }
+            }
             for (const doc of ordered) {
                 if (context) this.throwIfMaintenanceInactive(context);
                 try {

@@ -518,14 +518,28 @@ describe("shared fs posix metadata", () => {
             (await fsA.stat("/touch"))!,
             (await fsB.stat("/touch"))!,
         ];
-        expect(touchA).toMatchObject({ conflict: false });
+        // Both changes survive: stat and the next write merge the heads
+        // field by field (the chmod's mode, the touch's mtime).
+        for (const touch of [touchA, touchB]) {
+            expect(touch).toMatchObject({
+                conflict: false,
+                mode: EXEC,
+                updatedAt: 5000n,
+            });
+        }
         expect(touchA.versionId).toBe(touchB.versionId);
-        // The next write merges both heads; heads[0] supplies mode AND
-        // mtime, so exactly one of the two changes survives.
-        const merged = await fsA.writeFile("/touch", "/touch");
+        // Saving the bytes and metadata the file shows is a no-op (A wrote
+        // one of the heads) that reports them; a write that sets one field
+        // keeps the other's merged value.
+        const unchanged = await fsA.writeFile("/touch", "/touch");
+        expect(touchA.headVersionIds).toContain(unchanged.id);
+        expect([unchanged.mode, unchanged.mtime]).toEqual([EXEC, 5000n]);
+        const merged = await fsA.writeFile("/touch", "/touch", {
+            mode: FILE,
+        });
         expect(merged.parentVersionIds.sort()).toEqual(
             [...touchA.headVersionIds!].sort()
         );
-        expect(merged.mode === EXEC).not.toBe(merged.mtime === 5000n);
+        expect([merged.mode, merged.mtime]).toEqual([FILE, 5000n]);
     });
 });

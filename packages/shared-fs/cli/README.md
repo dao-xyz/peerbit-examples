@@ -316,7 +316,13 @@ that upstream barrier.
 
 Mounted `flush` publishes one frozen buffer generation. `fsync` and close drain
 every mutation accepted before their fence, while mutations racing a closing
-handle fail instead of disappearing. These calls do not wait for a remote
+handle fail instead of disappearing. A truncate to empty that is a file's only
+change since its last commit (a shell redirect before its first write) is the
+exception: a flush, or the close of another descriptor, publishes nothing until
+a later write is flushed or the descriptor that emptied the file is fsynced or
+closed. A background job started with `> file` therefore leaves the previous
+bytes visible to other replicas until then. See the library README's "Native
+Mounts" section. These calls do not wait for a remote
 persisted quorum; use the quiesced `prepare-disposal` workflow for machine
 retirement. CI verifies the default disk-backed store after forced process
 termination, not arbitrary custom targets or a host/controller power failure.
@@ -349,9 +355,14 @@ is still required.
 A replica that missed writes while offline, such as a creator restarting after
 another machine wrote and left, still vouches that the filesystem is empty, so
 a mount that reaches only that replica becomes writable on an empty view.
-Nothing is lost: the missed writes merge when a peer holding them comes back,
-and clashing paths become conflict copies. Closing this gap needs a per-peer
-sync frontier from Peerbit upstream.
+The missed writes merge when a peer holding them comes back, and no stored
+version is deleted: clashing edits become conflict copies and clashing paths
+naming conflicts, whose visible choice can flip. Files can still end up
+inconsistent with each other, such as a git repository's refs and objects.
+Today's readiness can also certify a partial view at scale; proof-based write
+readiness ([#406](https://github.com/dao-xyz/peerbit-examples/pull/406)) is
+replacing it. See the library README's "Conflicts" section for which saves
+on a stale view are kept.
 
 The `--allow-partial-writes` mount escape hatch is a session-only recovery
 bypass. It can manufacture duplicate paths or overwrite from stale state, does
