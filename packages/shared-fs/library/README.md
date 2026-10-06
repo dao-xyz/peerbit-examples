@@ -213,9 +213,11 @@ namespace and remain write-gated. `allowPartialWrites: true` is an explicit
 unsafe, session-only recovery escape hatch: it can create duplicate paths or
 base a write on stale state, and it never persists a readiness proof. The
 override is limited to namespace recovery mutations; snapshot publication,
-garbage collection, ACL changes, and disposal certification still require
-genuine readiness. Closing and reopening without the override returns to the
-write gate.
+garbage collection (manual or scheduled), ACL changes, and disposal
+certification still require genuine readiness. Unless the open is a proven
+warm reopen, the override also leaves the resurrection guard disarmed: a
+partial view must not judge removals. Closing and reopening without the
+override returns to the write gate.
 
 The current readiness fence is deliberately a settled-view heuristic, not a
 cryptographic or protocol-level remote log frontier: Peerbit does not expose
@@ -1316,6 +1318,9 @@ Notes on scheduled runs:
 - Every run inherits the HEAL phase's full chunk probe (each chunk of
   each surviving version), so the default cadence probes the store four
   times a day — budget disk latency accordingly on very large stores.
+- A replica that is not yet write-ready, or that was opened with
+  `allowPartialWrites`, skips scheduled runs and tries again an interval
+  later; manual runs refuse in the same states.
 - An unverified replica with no peer evidence (no connections, no recent
   arrivals) defers scheduled runs rather than collecting against a
   partitioned view; manual runs stay available.
