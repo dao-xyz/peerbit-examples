@@ -74,7 +74,18 @@ export interface TapStats {
     repairs: number;
     /** Adds of an absent id an event removed lately, verified. */
     readdVerifies: number;
+    /** Seeds scanned again because the count did not match the index. */
+    rescans: number;
+    /** Count checks deferred until no event applied for `COUNT_QUIET_MS`. */
+    deferredCounts: number;
 }
+
+/**
+ * A fault the close caused, not the maintained state: a verify the close
+ * would not wait for or could no longer read. The set is dropped (never
+ * persisted), and the shadow check counts the scope as skipped.
+ */
+export class CloseFault extends Error {}
 
 /**
  * Rows per page of a seed scan: the first page, doubling up to the cap. The
@@ -89,10 +100,28 @@ const SCAN_PAGE_ROWS_MAX = 65_536;
  * Ids an event removed that an add of the same absent id is verified
  * against (oldest forgotten first). The add that needs it was indexed
  * before the removal's event and is dispatched once its batch finishes, so
- * the bound covers 4,096 distinct removals in between; an add later than
- * that is missed, and the K2 shadow check would show it in tests.
+ * the bound covers 4,096 distinct in-scope removals in between. A batch
+ * holds at most 256 live entries or 512 KiB, and the removals that could
+ * land inside it share the connection's FIFO barrier with its puts (review
+ * probe: 0 removals inside any batch, across 14k adds under a GC loop). An
+ * add later than the bound is missed: the map keeps a row the index does
+ * not hold until the next open's count check. No test reaches the bound in
+ * a real store; `readiness-shadow.test.ts` shows the K2 check reports such
+ * a row.
  */
 const RECENT_REMOVALS = 4096;
+/**
+ * Rescans the count check may start in one open generation before the tap
+ * faults (an index whose count never matches its scan, a bug).
+ */
+const COUNT_RESCANS = 3;
+/**
+ * A count check that found no stable epoch, or a difference that a scan
+ * under ingest may have caused, runs again once no event has applied for
+ * this long (ms). The timer exists only while such a check is pending and
+ * every applied event restarts it, so it never fires during ingest.
+ */
+export const COUNT_QUIET_MS = 1_000;
 
 const toBigInt = (value: unknown): bigint =>
     typeof value === "bigint" ? value : BigInt((value as number) ?? 0);
@@ -183,6 +212,8 @@ export class ScopeTap {
         verifyRetries: 0,
         repairs: 0,
         readdVerifies: 0,
+        rescans: 0,
+        deferredCounts: 0,
     };
     /** Set when a verify read failed; the maintained set is then unreliable. */
     faulted?: unknown;
@@ -208,6 +239,12 @@ export class ScopeTap {
     private draining = false;
     /** Ids an event removed lately, oldest first (`RECENT_REMOVALS`). */
     private readonly recentRemovals = new Set<string>();
+    /** The count matched the index at a stable epoch (`checkCount`). */
+    private countVerifiedValue = false;
+    /** A count check is running (`checkCount` or a deferred one). */
+    private countRunning = false;
+    /** Armed while a count check waits for no event to apply. */
+    private countTimer?: ReturnType<typeof setTimeout>;
     /** Called with every id an event or a verify names (the shadow check). */
     private readonly watchers: Array<(key: IdKey) => void> = [];
     private readonly digest = new Uint8Array(DIGEST_BYTES);
@@ -298,6 +335,7 @@ export class ScopeTap {
 
     dispose() {
         this.detach();
+        this.clearCountCheck();
         this.stateValue = "disposed";
         this.buffered = [];
         this.verifyVersions.clear();
@@ -344,6 +382,8 @@ export class ScopeTap {
             return;
         }
         this.applyCaptured(captured);
+        // A deferred count check waits until events stop.
+        if (this.countTimer !== undefined) this.armCountCheck();
     }
 
     private emit(digest: Uint8Array, sign: 1 | -1) {
@@ -446,7 +486,9 @@ export class ScopeTap {
 
     private scheduleVerify(key: IdKey) {
         if (this.sealedValue) {
-            this.faulted ??= new Error("replace verify after the close began");
+            this.faulted ??= new CloseFault(
+                "replace verify after the close began"
+            );
             return;
         }
         const ks = keyString(key);
@@ -464,7 +506,7 @@ export class ScopeTap {
             if (this.sealedValue) {
                 // Queued before the seal: the stores may be closing, so no
                 // read. The set is then not persisted.
-                this.faulted ??= new Error(
+                this.faulted ??= new CloseFault(
                     "replace verify after the close began"
                 );
                 this.verifyVersions.delete(ks);
@@ -484,7 +526,7 @@ export class ScopeTap {
             }
             if (this.is("disposed")) return;
             if (this.sealedValue) {
-                this.faulted ??= new Error(
+                this.faulted ??= new CloseFault(
                     "replace verify after the close began"
                 );
                 this.verifyVersions.delete(ks);
@@ -493,7 +535,7 @@ export class ScopeTap {
             if (this.verifyVersions.get(ks) !== version) {
                 if (this.draining) {
                     // The close waits for no further read of this id.
-                    this.faulted ??= new Error(
+                    this.faulted ??= new CloseFault(
                         "replace verify still moving when the close began"
                     );
                     this.verifyVersions.delete(ks);
@@ -533,8 +575,11 @@ export class ScopeTap {
      */
     seal() {
         this.sealedValue = true;
+        this.clearCountCheck();
         if (this.verifyVersions.size > 0) {
-            this.faulted ??= new Error("sealed with a replace verify pending");
+            this.faulted ??= new CloseFault(
+                "sealed with a replace verify pending"
+            );
         }
     }
 
@@ -588,15 +633,153 @@ export class ScopeTap {
         this.goLive();
     }
 
+    /** `seedFromScan`, then `checkCount`. */
+    async seedChecked(): Promise<void> {
+        await this.seedFromScan();
+        await this.checkCount();
+    }
+
+    /**
+     * Whether the count matched the index at a stable epoch since the last
+     * seed, restore or rescan. Only such a state is persisted (and, from
+     * PR-3, trusted).
+     */
+    get countVerified(): boolean {
+        return this.countVerifiedValue;
+    }
+
+    /**
+     * The count check after a seed or a restore (plan section 6.2), checked
+     * until it holds. The sqlite3 index pages a scan by OFFSET and checks for
+     * writes before a page waits for the connection: a delete admitted ahead
+     * of the page shifts a row past it unseen, and no event ever names that
+     * row. A scan is short only while writes run beside it, and those writes
+     * also keep the count from being compared, or make it differ while a
+     * remote batch is indexed but not yet dispatched. So:
+     *
+     * - a match verifies the state;
+     * - a difference right after the seed or restore scans again at once
+     *   (in a quiet store it is real; a remote batch in flight costs one
+     *   scan more);
+     * - any other result (no stable epoch in three tries, or a difference
+     *   after a rescan) keeps the state unverified and compares again once
+     *   no event has applied for `COUNT_QUIET_MS`; a difference then scans
+     *   again, and that scan is checked the same way.
+     *
+     * A restore whose count cannot be compared during ingest is kept, not
+     * discarded: a scan under the same ingest is no more trustworthy. After
+     * `COUNT_RESCANS` rescans a difference faults the tap. Resolves with the
+     * first comparison (false: the tap has scanned again).
+     */
+    async checkCount(): Promise<boolean | undefined> {
+        this.clearCountCheck();
+        this.countVerifiedValue = false;
+        this.countRunning = true;
+        try {
+            const first = await this.restoredCountMatches();
+            await this.settleCount(first, true);
+            return first;
+        } finally {
+            this.countRunning = false;
+        }
+    }
+
+    private async settleCount(
+        matches: boolean | undefined,
+        rescanOnDifference: boolean
+    ): Promise<void> {
+        for (;;) {
+            if (!this.is("live") || this.sealedValue) return;
+            if (matches === true) {
+                this.countVerifiedValue = true;
+                return;
+            }
+            if (matches === undefined || !rescanOnDifference) {
+                this.stats.deferredCounts++;
+                this.armCountCheck();
+                return;
+            }
+            if (this.stats.rescans >= COUNT_RESCANS) {
+                this.faulted ??= new Error(
+                    `readiness: ${this.scope.name} count differs from its index after ${COUNT_RESCANS} rescans`
+                );
+                return;
+            }
+            this.stats.rescans++;
+            await this.reseed();
+            matches = await this.restoredCountMatches();
+            // Scanned under the same ingest, perhaps: a difference now waits
+            // for a quiet point.
+            rescanOnDifference = false;
+        }
+    }
+
+    private armCountCheck() {
+        this.clearCountCheck();
+        if (this.sealedValue || this.is("disposed")) return;
+        const timer = setTimeout(() => {
+            this.countTimer = undefined;
+            void this.runDeferredCount();
+        }, COUNT_QUIET_MS);
+        (timer as { unref?: () => void }).unref?.();
+        this.countTimer = timer;
+    }
+
+    private clearCountCheck() {
+        if (this.countTimer === undefined) return;
+        clearTimeout(this.countTimer);
+        this.countTimer = undefined;
+    }
+
+    /** No event applied for `COUNT_QUIET_MS`: compare again. */
+    private async runDeferredCount() {
+        if (this.countRunning || !this.is("live") || this.sealedValue) return;
+        this.countRunning = true;
+        try {
+            await this.settleCount(await this.restoredCountMatches(), true);
+        } catch (error) {
+            // The start's errors fault the tap in the runtime; this one has
+            // no caller.
+            if (!this.is("disposed") && !this.sealedValue) {
+                this.faulted ??= error;
+            }
+        } finally {
+            this.countRunning = false;
+        }
+    }
+
+    /**
+     * The close's last chance for a state whose count was never verified:
+     * one comparison, and only with no verify pending (the close waits for
+     * no further read). Never rescans.
+     */
+    async confirmCount(): Promise<void> {
+        if (
+            this.countVerifiedValue ||
+            this.countRunning ||
+            !this.is("live") ||
+            this.sealedValue ||
+            this.faulted !== undefined ||
+            this.pendingVerify > 0
+        ) {
+            return;
+        }
+        if ((await this.restoredCountMatches(1)) === true) {
+            this.countVerifiedValue = true;
+            this.clearCountCheck();
+        }
+    }
+
     /**
      * Adopts a persisted state (map, `hlc`, epoch), then applies the events
      * buffered since `attach`. The caller restores its sinks to the same
-     * point first and then checks the count with `restoredCountMatches`.
+     * point first and then checks the count with `checkCount`.
      */
     restore(state: { map: IdHeadMap; hlc: bigint; epoch: number }) {
         if (!this.is("buffering")) {
             throw new Error(`cannot restore a ${this.stateValue} tap`);
         }
+        this.countVerifiedValue = false;
         this.map = state.map;
         this.hlc = state.hlc;
         this.epoch = state.epoch;
@@ -612,17 +795,20 @@ export class ScopeTap {
 
     /**
      * Compares the live count with the index's projected count at a stable
-     * epoch (no change applied and no verify pending across the await).
+     * epoch (no change applied and no verify pending across the await),
+     * after a restore or a seed.
      * `undefined` when no stable point was found in `tries` attempts.
      */
     async restoredCountMatches(tries = 3): Promise<boolean | undefined> {
         for (let i = 0; i < tries; i++) {
             await this.verifyIdle();
-            if (!this.is("live")) return undefined;
+            // Sealed: the stores close next, so no index read.
+            if (!this.is("live") || this.sealedValue) return undefined;
             const epoch = this.epoch;
             const indexed = await this.port.count();
             if (
                 this.is("live") &&
+                !this.sealedValue &&
                 this.epoch === epoch &&
                 this.pendingVerify === 0
             ) {
@@ -634,13 +820,15 @@ export class ScopeTap {
 
     /**
      * Discards the live state and seeds again by scan. Events are buffered
-     * from now on, so none is lost between the reset and the scan.
+     * from now on, so none is lost between the reset and the scan. Nothing
+     * once the close sealed the tap (no index read from then on).
      */
     async reseed(): Promise<void> {
-        if (this.is("disposed")) return;
+        if (this.is("disposed") || this.sealedValue) return;
         await this.verifyIdle();
-        if (this.is("disposed")) return;
+        if (this.is("disposed") || this.sealedValue) return;
         this.stateValue = "buffering";
+        this.countVerifiedValue = false;
         // A fresh seed. The epoch keeps counting, so a sink that numbers
         // its applies re-aligns to it on reset.
         this.map = new IdHeadMap();

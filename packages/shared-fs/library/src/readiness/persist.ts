@@ -1,4 +1,4 @@
-import { sha256Sync } from "@peerbit/crypto";
+import { sha256Sync, toHexString } from "@peerbit/crypto";
 import { concat, fromString } from "uint8arrays";
 import { CELL_BYTES, LANES, M, READINESS_FORMAT_TAG } from "./constants.js";
 import { IdHeadMap } from "./id-map.js";
@@ -8,12 +8,20 @@ import { isScopeId, type ScopeDescriptor, type ScopeId } from "./scopes.js";
  * Local persistence of readiness state.
  *
  * Structures file, one per scope:
- * `<directory>/shared-fs-readiness/<address>.<scope>.bin`. Written only at a
- * clean close, after `super.close()` returned true (so no change event can
+ * `<directory>/shared-fs-readiness/<store>.<scope>.bin`, where `<store>` is
+ * the hex log id of the store the scope describes: SharedLog keys a store's
+ * storage and index by that id, not by the program address, so two
+ * addresses can share one store (the same `id` with another `rootKey` or
+ * `sealedIgnoredNames`). Every open of that store takes the file, whichever
+ * address wrote it; the file still names its address (the cell key), and a
+ * file of another address is rejected. Written only at a clean close, after `super.close()` returned true (so no change event can
  * land after the snapshot), through a temp file and a rename. Read,
  * verified and unlinked at open before the store ingests, and that removal
- * is made durable, so a crash never leaves a stale file behind. A missing or
- * rejected file means a rebuild by scan; it is never trusted partially.
+ * is made durable, so a crash never leaves a stale file behind. A file the
+ * open cannot remove (Windows sharing locks, an immutable flag) gets a
+ * durable `<file>.void` marker beside it instead, and no open trusts a file
+ * while its marker exists. A missing or rejected file means a rebuild by
+ * scan; it is never trusted partially.
  */
 
 export const STRUCTURES_DIRECTORY = "shared-fs-readiness";
@@ -214,47 +222,101 @@ const syncDirectory = async (path: string) => {
     }
 };
 
+/** `store` is the 32-byte log id of the scope's store (`logIdOf`). */
 export const structuresPath = async (
     directory: string,
-    address: string,
+    store: Uint8Array,
     scope: ScopeDescriptor
 ) => {
     const { join } = await import("node:path");
     return join(
         directory,
         STRUCTURES_DIRECTORY,
-        `${address}.${scope.name}.bin`
+        `${toHexString(store)}.${scope.name}.bin`
     );
+};
+
+/** Beside a structures file an open could not remove: never trust it. */
+const voidPath = (path: string) => `${path}.void`;
+
+const exists = async (path: string) => {
+    const fs = await import("node:fs/promises");
+    try {
+        await fs.stat(path);
+        return true;
+    } catch (error: any) {
+        // Only a missing marker is absent; anything else counts as there.
+        return error?.code !== "ENOENT";
+    }
+};
+
+/**
+ * Removes a structures file durably, or, when it cannot be removed, writes
+ * its durable void marker. Rejects with the removal's error either way, so
+ * the caller does not use the file now. A marker that cannot be written
+ * either (an unwritable directory) leaves the file unmarked; this
+ * generation cannot write a replacement there, and a later open with the
+ * directory writable again would trust it.
+ */
+const discardStructures = async (path: string) => {
+    const fs = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    try {
+        await fs.rm(path, { force: true });
+        await syncDirectory(dirname(path));
+    } catch (error) {
+        try {
+            await fs.writeFile(voidPath(path), new Uint8Array(0));
+            await syncDirectory(dirname(path));
+        } catch {
+            // See above.
+        }
+        throw error;
+    }
+    // The file is gone durably: its marker, if any, has nothing to void.
+    await fs.rm(voidPath(path), { force: true }).catch(() => {});
 };
 
 /**
  * Reads, verifies and removes one scope's structures file. The file is
  * unlinked (and the removal made durable) whatever it held, so a later
- * crash can never restore it. Undefined when there was no file.
+ * crash can never restore it; when it cannot be unlinked, its void marker
+ * keeps every later open from restoring it (`void`) until an open removes
+ * it. A file another address wrote over the same store is taken and
+ * rejected (`address`). Undefined when there was no file.
  */
 export const takeStructures = async (
     directory: string,
+    store: Uint8Array,
     address: string,
     scope: ScopeDescriptor
 ): Promise<DecodeResult | undefined> => {
     const fs = await import("node:fs/promises");
-    const { dirname } = await import("node:path");
-    const path = await structuresPath(directory, address, scope);
+    const path = await structuresPath(directory, store, scope);
     let bytes: Uint8Array;
     try {
         bytes = await fs.readFile(path);
     } catch (error: any) {
-        if (error?.code === "ENOENT") return undefined;
-        await fs.rm(path, { force: true }).catch(() => {});
+        if (error?.code === "ENOENT") {
+            await fs.rm(voidPath(path), { force: true }).catch(() => {});
+            return undefined;
+        }
+        await discardStructures(path).catch(() => {});
         return { ok: false, reason: `read: ${error?.code ?? error}` };
     }
+    // Read before the removal below drops it.
+    const voided = await exists(voidPath(path));
     try {
-        await fs.rm(path, { force: true });
-        await syncDirectory(dirname(path));
+        await discardStructures(path);
     } catch (error: any) {
         // A removal that may not be durable could come back after a crash
         // and be restored over a changed store: do not use it now either.
         return { ok: false, reason: `unlink: ${error?.code ?? error}` };
+    }
+    if (voided) {
+        // An earlier open could not remove this file: it may predate
+        // anything that generation changed.
+        return { ok: false, reason: "void" };
     }
     return decodeStructures(bytes, address, scope.id);
 };
@@ -262,20 +324,27 @@ export const takeStructures = async (
 /**
  * Writes one scope's structures file: a temp file renamed over the path.
  * Not fsynced: the file is a cache, and after a power loss during or after
- * the close it is either absent or fails its checksum (a rebuild), never a
- * stale valid file, since the previous one was durably removed at open. The
+ * the close it is either absent or fails its checksum (a rebuild), since
+ * the previous one was durably removed at open (or is voided). That holds
+ * where the filesystem never exposes a new file's blocks before its data
+ * (ext4 data=ordered, XFS, btrfs, APFS, NTFS). Where it can (ext4
+ * data=writeback with nodelalloc, FAT32/exFAT outside Windows), a power
+ * loss could show the freed blocks of the previous generation's file under
+ * the new name, and that file is valid; it is restored only if it lands on
+ * exactly those blocks, whole, and the count still matches. Accepted: the
  * two fsyncs cost about 10 ms per close, and 70-230 ms under disk load
- * (review measurement), for a restore that only a power loss would lose.
+ * (review measurement). When the rename replaced a voided file, the marker
+ * goes only after the rename is durable.
  */
 export const writeStructures = async (
     directory: string,
-    address: string,
+    store: Uint8Array,
     scope: ScopeDescriptor,
     bytes: Uint8Array
 ): Promise<void> => {
     const fs = await import("node:fs/promises");
     const { dirname } = await import("node:path");
-    const path = await structuresPath(directory, address, scope);
+    const path = await structuresPath(directory, store, scope);
     await fs.mkdir(dirname(path), { recursive: true });
     const temp = `${path}.tmp`;
     try {
@@ -284,5 +353,13 @@ export const writeStructures = async (
     } catch (error) {
         await fs.rm(temp, { force: true }).catch(() => {});
         throw error;
+    }
+    if (await exists(voidPath(path))) {
+        try {
+            await syncDirectory(dirname(path));
+            await fs.rm(voidPath(path), { force: true });
+        } catch {
+            // The marker stays: the next open rebuilds instead of restoring.
+        }
     }
 };

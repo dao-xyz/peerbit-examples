@@ -97,7 +97,7 @@ import {
 } from "./mount-profile.js";
 import { READINESS_TOPIC_SALT } from "./readiness/constants.js";
 import type { ProvenanceState } from "./readiness/responder.js";
-import { ReadinessRuntime } from "./readiness/runtime.js";
+import { ReadinessRuntime, logIdOf } from "./readiness/runtime.js";
 import { ReadinessMessage } from "./readiness/wire.js";
 
 export * from "./model.js";
@@ -3439,12 +3439,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Readiness state of this generation. The directory and address are
         // captured now: the persist step runs after super.close() and must
         // not read this.node. Persisted structures are read and unlinked
-        // before any store of this open ingests.
+        // beside the trust graph's open, and before the entries store
+        // ingests.
         this.readinessRuntime?.disposeWithoutPersist();
         this.readinessRuntime = undefined;
         const readinessRuntime = await ReadinessRuntime.create({
             address: this.address.toString(),
             directory: (this.node as any)?.directory as string | undefined,
+            stores: {
+                namespace: logIdOf(this.entries),
+                trust: this.trustGraph
+                    ? logIdOf(this.trustGraph.trustGraph)
+                    : undefined,
+            },
             ports: {
                 send: (message, to) =>
                     this.readiness.send(message, { to: [to] }),
@@ -3453,6 +3460,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
         this.readinessRuntime = readinessRuntime;
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        // The trust tap listens before the trust log opens, so every batch
+        // that log replicates dispatches its change event.
+        if (this.trustGraph) {
+            readinessRuntime.attachTrust(this.trustGraph.trustGraph);
+        }
         // The trust graph is tiny and gates every write; always keep a full
         // copy so signature checks never depend on which peer holds a relation.
         await this.trustGraph?.open({
@@ -3461,9 +3473,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         if (this.trustGraph) {
             // TrustedNetwork.open replaces trustGraph.trustGraph with the
-            // instance node.open returned: attach to that one, then seed by
-            // a scan that starts after the attach.
-            readinessRuntime.attachTrust(this.trustGraph.trustGraph);
+            // instance node.open returned: seed the tap there by a scan
+            // that starts after the attach.
+            readinessRuntime.startTrust(this.trustGraph.trustGraph);
         }
         this.clock = args?.clock ?? Date.now;
         this.skipHorizonMs = Math.max(
@@ -3789,9 +3801,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (freshOpenListener) {
             this.entries.events.addEventListener("change", freshOpenListener);
         }
-        // The namespace tap buffers from before ingest starts; it restores or
-        // seeds once entries.open() resolves. The readiness RPC opens beside
-        // the store (its topic is known up front) and is joined after it.
+        // The namespace structures file is gone durably before the store
+        // ingests (taken since the runtime was created). The namespace tap
+        // buffers from before ingest starts; it restores or seeds once
+        // entries.open() resolves. The readiness RPC opens beside the store
+        // (its topic is known up front) and is joined after it.
+        await readinessRuntime.whenTaken();
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         readinessRuntime.attachNamespace(this.entries);
         const readinessOpen = this.readiness.open({
             topic: toBase64(
@@ -11427,6 +11443,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.lifecycleRequestedState = "open";
             }
             throw error;
+        }
+    }
+
+    /**
+     * Program.drop ends the stores without close(): release this open's
+     * readiness state here (lane sets on the process-wide anchor host, the
+     * taps' listeners), as close() does whatever Program.close returns.
+     * Never persisted: the store is gone, and the open already removed the
+     * file.
+     */
+    async drop(from?: any): Promise<boolean> {
+        const readinessRuntime = this.readinessRuntime;
+        readinessRuntime?.block();
+        try {
+            return await super.drop(from);
+        } finally {
+            if (this.readinessRuntime === readinessRuntime) {
+                this.readinessRuntime = undefined;
+            }
+            readinessRuntime?.disposeWithoutPersist();
         }
     }
 

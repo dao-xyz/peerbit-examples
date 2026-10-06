@@ -32,6 +32,7 @@ for (let i = 0; i < 20; i++) {
 await report({
     scenario,
     address: fs.address,
+    store: Buffer.from(runtime.namespaceStore).toString("hex"),
     start: runtime.starts.get("namespace-v1"),
     count: runtime.namespace.count,
     mode: runtime.anchorHost.mode,

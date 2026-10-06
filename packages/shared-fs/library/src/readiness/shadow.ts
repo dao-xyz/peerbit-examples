@@ -1,10 +1,11 @@
 import { toHexString } from "@peerbit/crypto";
-import { AnchorHost } from "./anchor-host.js";
+import { AnchorHost, AnchorUnavailableError } from "./anchor-host.js";
 import { Cells } from "./cells.js";
 import { DIGEST_BYTES, M } from "./constants.js";
 import { headDigest } from "./digest.js";
 import type { IdHeadMap, IdKey } from "./id-map.js";
 import type { ScopeState } from "./runtime.js";
+import { CloseFault } from "./tap.js";
 
 /**
  * The K2 shadow check (M1 plan section 7.2, S9), test mode only.
@@ -14,7 +15,10 @@ import type { ScopeState } from "./runtime.js";
  * the anchor) is compared with a fresh build from an index scan. Rows are
  * matched by id, and a difference counts only once no event can explain it
  * (`compareScope`). A difference is recorded in the registry, never thrown
- * from close; the test setup fails the test that recorded it.
+ * from close; the test setup fails the test that recorded it. So is a
+ * scope that could not be compared for a reason the close did not cause (a
+ * faulted tap, a failed start, an error in the check): a fault must not
+ * turn the check into a silent skip.
  *
  * Switched on by `globalThis.__SFS_READINESS_SHADOW__`, which the library's
  * `vitest.setup.ts` sets to a registry. Product code never sets it, and
@@ -24,13 +28,26 @@ import type { ScopeState } from "./runtime.js";
 export interface ShadowOwner {
     file?: string;
     test?: string;
+    /** The test's task id (names can repeat across describes). */
+    id?: string;
 }
 
 export interface ShadowFailure {
+    /** The test that opened the filesystem. */
     owner: ShadowOwner;
+    /** The test running when it was recorded; none in a suite hook. */
+    recordedIn: ShadowOwner;
     address: string;
     scope?: string;
     message: string;
+}
+
+/** A scope the check skipped for a reason the close caused. */
+export interface ShadowSkip {
+    owner: ShadowOwner;
+    address: string;
+    scope?: string;
+    reason: string;
 }
 
 export interface ShadowRegistry {
@@ -38,6 +55,8 @@ export interface ShadowRegistry {
     current: ShadowOwner;
     /** Recorded failures; the setup takes them per test file. */
     failures: ShadowFailure[];
+    /** Skips and their reasons; the setup reports them per test file. */
+    skips: ShadowSkip[];
     /** Live runtimes and the test that opened them. */
     readonly live: WeakMap<object, ShadowOwner>;
     /** Filesystems whose closes skip the check (fault injection). */
@@ -64,6 +83,7 @@ declare global {
 export const createShadowRegistry = (): ShadowRegistry => ({
     current: {},
     failures: [],
+    skips: [],
     live: new WeakMap(),
     optedOut: new WeakSet(),
     inlineAllowed: new WeakSet(),
@@ -76,6 +96,34 @@ export const createShadowRegistry = (): ShadowRegistry => ({
         failed: 0,
     },
 });
+
+/**
+ * Test setup helper: removes and returns the failures of runtimes `file`
+ * opened that were recorded during the test with task id `test` (all of
+ * them when undefined), and every failure of another file's runtime (to be
+ * reported, never to fail this file). A failure recorded in a suite hook
+ * has no test, so it waits for the file's end.
+ */
+export const takeShadowFailures = (
+    registry: ShadowRegistry,
+    file: string | undefined,
+    test?: string
+): { mine: ShadowFailure[]; foreign: ShadowFailure[] } => {
+    const mine: ShadowFailure[] = [];
+    const foreign: ShadowFailure[] = [];
+    const kept: ShadowFailure[] = [];
+    for (const failure of registry.failures.splice(0)) {
+        if (failure.owner.file !== undefined && failure.owner.file !== file) {
+            foreign.push(failure);
+        } else if (test === undefined || failure.recordedIn.id === test) {
+            mine.push(failure);
+        } else {
+            kept.push(failure);
+        }
+    }
+    registry.failures.push(...kept);
+    return { mine, foreign };
+};
 
 /** The registry when the shadow check is on (tests), else undefined. */
 export const shadowRegistry = (): ShadowRegistry | undefined =>
@@ -98,7 +146,12 @@ export type ShadowOutcome =
     | { kind: "equal"; attempts: number }
     | { kind: "different"; attempts: number; difference: string }
     | { kind: "unstable"; attempts: number; difference?: string }
-    | { kind: "skipped"; reason: string };
+    /**
+     * Not compared. `expected` when the close caused it (a start the close
+     * overtook, a verify the close would not wait for, a worker restart);
+     * otherwise the check reports it like a difference.
+     */
+    | { kind: "skipped"; reason: string; expected: boolean };
 
 export interface CompareOptions {
     /**
@@ -130,6 +183,34 @@ const sameBytes = (a: Uint8Array, b: Uint8Array) => {
 };
 
 const short = (digest: Uint8Array) => toHexString(digest).slice(0, 16);
+
+const skippedBy = (fault: unknown): ShadowOutcome => ({
+    kind: "skipped",
+    reason: `tap faulted: ${(fault as any)?.message ?? fault}`,
+    expected: fault instanceof CloseFault,
+});
+
+/** A scope that cannot be compared now, or undefined. */
+const unavailable = (state: ScopeState): ShadowOutcome | undefined => {
+    const { tap, laneSet } = state;
+    // A failed start faults the tap too, so the fault is read first.
+    if (tap.faulted !== undefined) return skippedBy(tap.faulted);
+    if (tap.state !== "live") {
+        // Buffering: the close came before the restore or seed finished.
+        return { kind: "skipped", reason: `tap ${tap.state}`, expected: true };
+    }
+    if (laneSet.closed) {
+        return { kind: "skipped", reason: "lane set closed", expected: true };
+    }
+    if (laneSet.faulted) {
+        return {
+            kind: "skipped",
+            reason: `lane set faulted: ${laneSet.faulted.message}`,
+            expected: false,
+        };
+    }
+    return undefined;
+};
 
 type ScannedRow = {
     /** The id's keyed hash under the map's seed (`IdHeadMap.hashKey`). */
@@ -199,41 +280,65 @@ class Differences {
  * Rows are matched by id. A scan is compared at its end, in one synchronous
  * step. A row that differs and that an event or a verify named during the
  * scan is in flight: the scope is scanned again. A row that differs and
- * that nothing named waits for an event naming it, up to `eventWaitMs`,
- * whatever happens to other rows meanwhile; if none comes, the difference
- * is real. Once every row matches, the cells, count, `hlc` and anchor are
- * compared with a build from the same scan, at the same synchronous point.
+ * that nothing named is timed on its own from the scan that first saw it so,
+ * across scans, and only an event or verify naming it stops its clock: if
+ * nothing names it within `eventWaitMs`, the difference is real, whatever
+ * happens to other rows meanwhile. Once every row matches, the cells,
+ * count, `hlc` and anchor are compared with a build from the same scan, at
+ * the same synchronous point.
  */
 export const compareScope = async (
     state: ScopeState,
     cellKey: [number, number],
     options: CompareOptions = {}
 ): Promise<ShadowOutcome> => {
-    const { tap, laneSet } = state;
+    const { tap } = state;
     const eventWaitMs = options.eventWaitMs ?? EVENT_WAIT_MS;
     let touched = new Set<string>();
-    let waitingFor: Set<string> | undefined;
+    /** Differing rows nothing named yet, by when a scan first saw them. */
+    const unnamed = new Map<string, number>();
     let wake: (() => void) | undefined;
     const unwatch = tap.watch((key) => {
         const hash = tap.map.hashKey(key);
         touched.add(hash);
-        if (waitingFor?.has(hash)) wake?.();
+        if (unnamed.delete(hash)) wake?.();
     });
+    /**
+     * Waits until a row of `unnamed` is named (true) or the oldest one's
+     * wait ran out (false).
+     */
+    const waitForNames = async (): Promise<boolean> => {
+        let oldest = Infinity;
+        for (const since of unnamed.values()) {
+            if (since < oldest) oldest = since;
+        }
+        const left = oldest + eventWaitMs - Date.now();
+        if (left <= 0) return false;
+        try {
+            return await new Promise<boolean>((resolve) => {
+                const timer = setTimeout(() => resolve(false), left);
+                wake = () => {
+                    clearTimeout(timer);
+                    resolve(true);
+                };
+            });
+        } finally {
+            wake = undefined;
+        }
+    };
     let attempts = 0;
     let last: string | undefined;
+    const different = (): ShadowOutcome => ({
+        kind: "different",
+        attempts,
+        difference: `${last} (no event named them in ${eventWaitMs} ms)`,
+    });
     try {
         for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
             // Bounded: verifies queued later are compared as in flight.
             await tap.verifiesSettled();
-            if (tap.state !== "live") {
-                return { kind: "skipped", reason: `tap ${tap.state}` };
-            }
-            if (tap.faulted !== undefined) {
-                return { kind: "skipped", reason: "tap faulted" };
-            }
-            if (laneSet.faulted || laneSet.closed) {
-                return { kind: "skipped", reason: "lane set unavailable" };
-            }
+            const skipped = unavailable(state);
+            if (skipped) return skipped;
             const map = tap.map;
             touched = new Set();
             const rows: ScannedRow[] = [];
@@ -250,11 +355,10 @@ export const compareScope = async (
             // One synchronous step from here to the anchor requests.
             if (tap.state !== "live" || tap.map !== map) {
                 // Reseeded during the scan: compare the new map.
+                unnamed.clear();
                 continue;
             }
-            if (tap.faulted !== undefined) {
-                return { kind: "skipped", reason: "tap faulted" };
-            }
+            if (tap.faulted !== undefined) return skippedBy(tap.faulted);
             attempts++;
             const differences = new Differences();
             const settled: string[] = [];
@@ -291,34 +395,33 @@ export const compareScope = async (
                     : { kind: "different", attempts, difference: problem };
             }
             last = differences.describe(map.size, indexed.size);
-            if (settled.length === 0) {
+            // A row no longer settled matches now (or was named).
+            const now = Date.now();
+            const settledNow = new Set(settled);
+            for (const hash of [...unnamed.keys()]) {
+                if (!settledNow.has(hash)) unnamed.delete(hash);
+            }
+            for (const hash of settled) {
+                if (!unnamed.has(hash)) unnamed.set(hash, now);
+            }
+            if (unnamed.size === 0) {
                 // Only rows an event named during the scan: scan again.
                 continue;
             }
             // Rows nothing named: their event may still be on its way.
-            waitingFor = new Set(settled);
-            const named = await new Promise<boolean>((resolve) => {
-                const timer = setTimeout(() => resolve(false), eventWaitMs);
-                wake = () => {
-                    clearTimeout(timer);
-                    resolve(true);
-                };
-            });
-            waitingFor = undefined;
-            wake = undefined;
-            if (!named) {
-                return {
-                    kind: "different",
-                    attempts,
-                    difference: `${last} (no event named them in ${eventWaitMs} ms)`,
-                };
-            }
+            if (!(await waitForNames())) return different();
+        }
+        // Out of scans: a row nothing named still gets its own full wait.
+        while (unnamed.size > 0) {
+            if (!(await waitForNames())) return different();
         }
     } catch (error: any) {
-        // A failed read or a worker restart: nothing was compared.
+        // Nothing was compared. A worker restart (EAGAIN) is expected; a
+        // failed read or a bug in the check is not.
         return {
             kind: "skipped",
             reason: `error: ${error?.message ?? error}`,
+            expected: error instanceof AnchorUnavailableError,
         };
     } finally {
         unwatch();
@@ -383,17 +486,24 @@ export const runShadowCheck = async (
         scopeStates(): ScopeState[];
     },
     registry: ShadowRegistry,
-    program: object | undefined
+    program: object | undefined,
+    options?: CompareOptions
 ): Promise<ShadowOutcome[]> => {
-    if (program && registry.optedOut.has(program)) {
-        registry.counts.skipped++;
-        return [{ kind: "skipped", reason: "opted out" }];
-    }
     const owner = registry.live.get(runtime) ?? registry.current;
+    const skip = (reason: string, scope?: string) => {
+        registry.counts.skipped++;
+        registry.skips.push({ owner, address: runtime.address, scope, reason });
+    };
+    if (program && registry.optedOut.has(program)) {
+        skip("opted out");
+        return [{ kind: "skipped", reason: "opted out", expected: true }];
+    }
     const record = (message: string, scope?: string) => {
         registry.counts.failed++;
         registry.failures.push({
             owner,
+            // Stamped now: a close in a suite hook fails no test of its own.
+            recordedIn: { ...registry.current },
             address: runtime.address,
             scope,
             message,
@@ -410,15 +520,22 @@ export const runShadowCheck = async (
     const outcomes: ShadowOutcome[] = [];
     for (const state of runtime.scopeStates()) {
         registry.counts.checks++;
-        const outcome = await compareScope(state, runtime.cellKey);
+        const outcome = await compareScope(state, runtime.cellKey, options);
         outcomes.push(outcome);
         const scope = state.descriptor.name;
         if (outcome.kind === "equal") registry.counts.compared++;
         else if (outcome.kind === "unstable") {
             registry.counts.unstable++;
             if (outcome.difference) registry.counts.unconfirmed++;
-        } else if (outcome.kind === "skipped") registry.counts.skipped++;
-        else {
+        } else if (outcome.kind === "skipped") {
+            if (outcome.expected) skip(outcome.reason, scope);
+            else {
+                record(
+                    `readiness shadow: ${scope} of ${runtime.address} was not compared: ${outcome.reason}`,
+                    scope
+                );
+            }
+        } else {
             record(
                 `readiness shadow: ${scope} of ${runtime.address} differs from its index after ${outcome.attempts} scans: ${outcome.difference}`,
                 scope

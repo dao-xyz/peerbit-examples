@@ -1,7 +1,8 @@
 import { Ed25519Keypair, randomBytes } from "@peerbit/crypto";
 import { RPC } from "@peerbit/rpc";
+import { TrustedNetwork } from "@peerbit/trusted-network";
 import { Peerbit } from "peerbit";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileVersion, NamingEvent } from "../model.js";
 import {
     SharedFileSystem,
@@ -25,6 +26,7 @@ import {
     type CompareOptions,
 } from "../readiness/shadow.js";
 import {
+    COUNT_QUIET_MS,
     ScopeTap,
     documentsIndexPort,
     type IndexedHead,
@@ -331,6 +333,235 @@ describe("readiness tap", () => {
             expect(fourth.stats.repairs).toBe(0);
         });
 
+        it("scans again when a delete between OFFSET pages hid a row from the seed", async () => {
+            // The sqlite3 index pages by OFFSET: a row deleted from a page
+            // already read shifts the next page by one, so one row is
+            // never seen, and no event names it.
+            const index = new FakeIndex();
+            for (let i = 0; i < 6; i++) index.set(`n${i}`, head());
+            const deleted = index.rows.get("n0")!;
+            let race = true;
+            index.scan = async function* () {
+                for (let offset = 0; ; ) {
+                    await Promise.resolve();
+                    const page = [...index.rows].slice(offset, offset + 2);
+                    offset += page.length;
+                    if (page.length === 0) return;
+                    yield page.map(([key, row]) => ({ key, ...row }));
+                    if (race) {
+                        race = false;
+                        // A local delete: the index first, then its event.
+                        index.rows.delete("n0");
+                        target.dispatchEvent(
+                            new CustomEvent("change", {
+                                detail: {
+                                    added: [],
+                                    removed: [remoteNaming("n0", deleted.head)],
+                                },
+                            })
+                        );
+                    }
+                }
+            };
+            const target = new EventTarget();
+            const tap = new ScopeTap(NAMESPACE_V1, index);
+            tap.attach(target as any);
+            await tap.seedChecked();
+            expect(tap.stats.rescans).toBe(1);
+            expect(tap.countVerified).toBe(true);
+            expectTapEqualsIndex(tap, index);
+            expect(mapHead(tap, "n2")).toBeDefined();
+            tap.dispose();
+
+            // A quiet seed is compared once and kept.
+            const quiet = new ScopeTap(NAMESPACE_V1, index);
+            await quiet.seedChecked();
+            expect(quiet.stats.rescans).toBe(0);
+            expect(quiet.countVerified).toBe(true);
+            expectTapEqualsIndex(quiet, index);
+        });
+
+        describe("a count check under ingest", () => {
+            /**
+             * A 40-row index paged by OFFSET (4 rows a page). `deletes(scan)`
+             * deletes the first row after the first page of that scan (index
+             * first, then its event), so the scan misses a row no event
+             * names. `arrivals(count)` adds a row during that count's await.
+             */
+            const offsetIndex = (hooks: {
+                deletes: (scan: number) => boolean;
+                arrivals: (count: number) => boolean;
+            }) => {
+                const index = new FakeIndex();
+                for (let i = 0; i < 40; i++) index.set(`n${i}`, head());
+                const target = new EventTarget();
+                const dispatch = (added: unknown[], removed: unknown[] = []) =>
+                    target.dispatchEvent(
+                        new CustomEvent("change", {
+                            detail: { added, removed },
+                        })
+                    );
+                let scans = 0;
+                let counts = 0;
+                let extra = 0;
+                index.scan = async function* () {
+                    const scan = ++scans;
+                    let deleted = false;
+                    for (let offset = 0; ; ) {
+                        await Promise.resolve();
+                        const page = [...index.rows].slice(offset, offset + 4);
+                        offset += page.length;
+                        if (page.length === 0) return;
+                        yield page.map(([key, row]) => ({ key, ...row }));
+                        if (!deleted && hooks.deletes(scan)) {
+                            deleted = true;
+                            const [key, row] = [...index.rows][0];
+                            index.rows.delete(key);
+                            dispatch([], [remoteNaming(key, row.head)]);
+                        }
+                    }
+                };
+                index.count = async () => {
+                    const n = index.rows.size;
+                    await Promise.resolve();
+                    if (hooks.arrivals(++counts)) {
+                        const id = `x${extra++}`;
+                        const h = head();
+                        index.set(id, h);
+                        dispatch([remoteNaming(id, h)]);
+                    }
+                    return n;
+                };
+                const tap = new ScopeTap(NAMESPACE_V1, index);
+                tap.attach(target as any);
+                return { index, tap, scans: () => scans };
+            };
+            /** Real timers' macrotasks; the fake port settles on microtasks. */
+            const flush = async () => {
+                for (let i = 0; i < 5; i++) {
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
+            };
+
+            afterEach(() => {
+                vi.useRealTimers();
+            });
+
+            it("checks the rescan too, and scans again at a quiet point", async () => {
+                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+                // The first scan and the rescan right after it both miss a
+                // row.
+                const { index, tap } = offsetIndex({
+                    deletes: (scan) => scan <= 2,
+                    arrivals: () => false,
+                });
+                await tap.seedChecked();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.count).toBe(index.rows.size - 1);
+                expect(tap.countVerified).toBe(false);
+                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS);
+                await flush();
+                expect(tap.stats.rescans).toBe(2);
+                expect(tap.countVerified).toBe(true);
+                expectTapEqualsIndex(tap, index);
+                expect(vi.getTimerCount()).toBe(0);
+                tap.dispose();
+            });
+
+            it("does not accept a seed it could not compare while rows kept arriving", async () => {
+                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+                const { index, tap } = offsetIndex({
+                    deletes: (scan) => scan === 1,
+                    // An arrival during each of the three tries.
+                    arrivals: (count) => count <= 3,
+                });
+                await tap.seedChecked();
+                expect(tap.stats.rescans).toBe(0);
+                expect(tap.countVerified).toBe(false);
+                // Every arrival restarts the wait.
+                const arrival = remoteNaming("late", head());
+                index.set("late", arrival.__context.head);
+                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS - 1);
+                tap.onChange(change([arrival]));
+                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS - 1);
+                await flush();
+                expect(tap.countVerified).toBe(false);
+                await vi.advanceTimersByTimeAsync(1);
+                await flush();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.countVerified).toBe(true);
+                expectTapEqualsIndex(tap, index);
+                tap.dispose();
+            });
+
+            it("keeps a restore it could not compare and verifies it once quiet", async () => {
+                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+                const { index, tap } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 3,
+                });
+                const exact = new ScopeTap(NAMESPACE_V1, index);
+                await exact.seedFromScan();
+                const restored = exact.map;
+                tap.restore({ map: restored, hlc: exact.hlc, epoch: 40 });
+                expect(await tap.checkCount()).toBeUndefined();
+                // Kept, not discarded for a scan under the same ingest.
+                expect(tap.map).toBe(restored);
+                expect(tap.countVerified).toBe(false);
+                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS);
+                await flush();
+                expect(tap.map).toBe(restored);
+                expect(tap.stats.rescans).toBe(0);
+                expect(tap.countVerified).toBe(true);
+                expectTapEqualsIndex(tap, index);
+                tap.dispose();
+            });
+
+            it("faults a tap whose count never matches its scans", async () => {
+                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+                const { tap } = offsetIndex({
+                    deletes: () => true,
+                    arrivals: () => false,
+                });
+                await tap.seedChecked();
+                for (let i = 0; i < 3; i++) {
+                    await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS);
+                    await flush();
+                }
+                expect(tap.stats.rescans).toBe(3);
+                expect(tap.countVerified).toBe(false);
+                expect(String(tap.faulted)).toMatch(/after 3 rescans/);
+                expect(vi.getTimerCount()).toBe(0);
+                tap.dispose();
+            });
+
+            it("leaves no timer once sealed or disposed", async () => {
+                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+                const { tap } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 3,
+                });
+                await tap.seedChecked();
+                expect(vi.getTimerCount()).toBe(1);
+                tap.seal();
+                expect(vi.getTimerCount()).toBe(0);
+                expect(tap.countVerified).toBe(false);
+                tap.dispose();
+            });
+
+            it("confirms an unverified count once at close", async () => {
+                const { tap } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 3,
+                });
+                await tap.seedChecked();
+                expect(tap.countVerified).toBe(false);
+                await tap.confirmCount();
+                expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+        });
+
         it("bounds the close's verify wait while replaces of one id keep arriving", async () => {
             let at = 0;
             let reads = 0;
@@ -420,6 +651,80 @@ describe("readiness tap", () => {
             expect(await shadow(fs, SCOPE_TRUST_V1)).toMatchObject({
                 kind: "equal",
             });
+        });
+
+        it("listens on the trust graph before its log opens, so a replicated batch cannot start unseen", async () => {
+            // Documents decides when a batch starts whether it dispatches a
+            // change event: the trust tap must listen before the trust log
+            // can replicate one.
+            const consumersAtOpen: boolean[] = [];
+            const open = TrustedNetwork.prototype.open;
+            TrustedNetwork.prototype.open = async function (
+                this: any,
+                ...args: any[]
+            ) {
+                // Documents' own count (`hasDocumentChangeConsumers`, which
+                // also reads the index, not set up before open).
+                const docs = this.trustGraph;
+                consumersAtOpen.push(
+                    (docs._documentChangeListenerCount ?? 0) >
+                        (docs._documentInternalChangeListenerCount ?? 0)
+                );
+                return open.apply(this, args as any);
+            };
+            try {
+                const [a, b] = [await createPeer(), await createPeer()];
+                await a.dial(b);
+                const owner = await openSharedFs({
+                    peerbit: a,
+                    rootKey: a.identity.publicKey,
+                    gc: false,
+                });
+                for (let i = 0; i < 4; i++) {
+                    await owner.authorizeWriter(
+                        (await Ed25519Keypair.create()).publicKey
+                    );
+                }
+                // A joiner opens by address while relations keep coming.
+                const granting = (async () => {
+                    for (let i = 0; i < 8; i++) {
+                        await owner.authorizeWriter(
+                            (await Ed25519Keypair.create()).publicKey
+                        );
+                    }
+                })();
+                const joiner = await openSharedFs({
+                    peerbit: b,
+                    address: owner.address,
+                    allowPartialWrites: true,
+                    gc: false,
+                });
+                await granting;
+                expect(consumersAtOpen).toEqual([true, true]);
+                for (const fs of [owner, joiner]) {
+                    // The tap listens on the instance open returned (S8).
+                    const trustGraph = (fs.program as any).trustGraph
+                        .trustGraph;
+                    expect((runtimeOf(fs) as any).trustDocuments).toBe(
+                        trustGraph
+                    );
+                    expect(runtimeOf(fs).starts.get("trust-v1")).toEqual({
+                        kind: "scanned",
+                    });
+                }
+                await until(async () => {
+                    expect(
+                        await shadow(joiner, SCOPE_TRUST_V1, {
+                            eventWaitMs: 1_000,
+                        })
+                    ).toMatchObject({ kind: "equal" });
+                    expect(runtimeOf(joiner).trust!.count).toBe(
+                        runtimeOf(owner).trust!.count
+                    );
+                });
+            } finally {
+                TrustedNetwork.prototype.open = open;
+            }
         });
 
         it("keeps the shadow equal on both peers over a remote fork and concurrent same-id re-puts", async () => {
