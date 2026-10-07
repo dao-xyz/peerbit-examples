@@ -7,8 +7,8 @@ import { describe, expect, it } from "vitest";
  * in `__name(...)`; without the shim the serialized anchor worker would
  * crash under `node --import tsx` and the host would silently fall back to
  * the inline path. A child opens a filesystem under tsx and reports the
- * host mode after a digest and a cells round trip through the namespace
- * lane set.
+ * host mode after a state round trip (cells and digest) through the
+ * namespace lane set.
  */
 
 const childPath = fileURLToPath(

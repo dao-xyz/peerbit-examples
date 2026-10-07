@@ -441,16 +441,13 @@ const compareBuilds = async (
 ): Promise<string | undefined> => {
     const { tap, laneSet } = state;
     const problems: string[] = [];
-    // Posted at this synchronous point: both answer for the tap's epoch.
+    // Posted at this synchronous point: cells and anchor of the tap's
+    // epoch, in one reply (a worker failure fails both).
     const maintained =
         laneSet.seq === tap.epoch
-            ? {
-                  digest: laneSet.digestNow().digest,
-                  cells: laneSet.cellsNow().cells,
-              }
+            ? laneSet.stateNow("digest").state
             : undefined;
-    maintained?.digest.catch(() => {});
-    maintained?.cells.catch(() => {});
+    maintained?.catch(() => {});
     const fresh = new Cells(M, cellKey[0], cellKey[1]);
     const list = new Uint8Array(rows.length * DIGEST_BYTES);
     let hlc = 0n;
@@ -467,13 +464,14 @@ const compareBuilds = async (
     if (tap.hlc < hlc) {
         problems.push(`hlc ${tap.hlc} below the index's ${hlc}`);
     }
-    if (!maintained) {
+    const own = maintained && (await maintained);
+    if (!own) {
         problems.push(`lane set at ${laneSet.seq}, tap at ${tap.epoch}`);
-    } else if (!sameBytes(await maintained.cells, fresh.toBytes())) {
+    } else if (!sameBytes(own.cells, fresh.toBytes())) {
         problems.push("cells differ");
     }
     const scanned = await laneSet.digestOf(list);
-    if (maintained && !sameBytes(await maintained.digest, scanned)) {
+    if (own && !sameBytes(own.digest, scanned)) {
         problems.push("anchor differs");
     }
     return problems.length > 0 ? problems.join("; ") : undefined;

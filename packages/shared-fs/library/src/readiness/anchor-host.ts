@@ -21,14 +21,18 @@ import { CELL_BYTES, DIGEST_BYTES, LANES } from "./constants.js";
  * - **Cells.** A lane set opened with a cell key also keeps the scope's
  *   maintained cells, next to its lanes and from the same batches (the
  *   tap's main thread then only decodes and updates its id map). Requests
- *   posted in one synchronous step (`digestNow`, `cellsNow`, `lanesNow`)
- *   answer for the same `seq`, so a freeze or a persisted state holds cells
- *   and anchor of one epoch.
+ *   posted in one synchronous step answer for the same `seq`; `stateNow`
+ *   gets the cells with the lanes or the digest in one reply, so a freeze
+ *   or a persisted state holds cells and anchor of one epoch, and a worker
+ *   failure fails both (two requests can straddle it).
+ * - **Replies** are views of buffers only the main thread holds (cells and
+ *   lanes are transferred, a digest is cloned), and every consumer only
+ *   reads them, so they are not copied again: a copy of the 180 KB cells
+ *   was most of a freeze's main-thread CPU.
  * - **Process lifetime (S14).** The worker is unref'ed while no request is
- *   outstanding and ref'ed while any `digestNow`, `digestOf`, `lanesNow` or
- *   `cellsNow` is pending, so a one-shot process cannot exit before
- *   persistence gets its lanes and cells, and an idle host never keeps a
- *   process alive.
+ *   outstanding and ref'ed while any request is pending, so a one-shot
+ *   process cannot exit before persistence gets its lanes and cells, and an
+ *   idle host never keeps a process alive.
  * - **Failure.** On a worker `error`, `messageerror` or unintended `exit`,
  *   pending requests reject with `EAGAIN`, the worker is respawned once and
  *   every lane set of the process (lanes and cells) is rebuilt from its
@@ -115,11 +119,19 @@ type WorkerConstructor = new (
 
 type PendingRequest = {
     set: number;
-    resolve(value: Uint8Array): void;
+    resolve(value: unknown): void;
     reject(error: unknown): void;
 };
 
-type RequestType = "digestNow" | "digestOf" | "lanes" | "cells";
+type RequestType = "digestNow" | "digestOf" | "lanes" | "cells" | "state";
+
+/** What `stateNow` gets with the cells: the lanes or the anchor digest. */
+export type LaneSetPart = "lanes" | "digest";
+
+/** The cells and the requested part, all at one seq (`stateNow`). */
+export type LaneSetState<K extends LaneSetPart> = {
+    cells: Uint8Array;
+} & Record<K, Uint8Array>;
 
 /**
  * The eval source of the worker. The `__name` shim keeps the serialized
@@ -272,7 +284,8 @@ export class LaneSet {
     /**
      * Every cell in the wire layout (m x 44 B, `encodeCells`) at the current
      * seq. Synchronous up to the post like `digestNow`: both called in one
-     * synchronous step answer for the same seq.
+     * synchronous step answer for the same seq, but a worker failure can
+     * fail one and not the other; `stateNow` cannot.
      */
     cellsNow(): { seq: number; cells: Promise<Uint8Array> } {
         const seq = this.seqValue;
@@ -283,6 +296,31 @@ export class LaneSet {
             };
         }
         return { seq, cells: this.host.request(this, "cells", { seq }) };
+    }
+
+    /**
+     * The cells (as `cellsNow`) and the lanes (as `lanesNow`) or the anchor
+     * digest (as `digestNow()`) at the current seq, from one request: they
+     * settle together, so a freeze, a shadow compare or a persisted state
+     * never gets one part without the other.
+     */
+    stateNow<K extends LaneSetPart>(
+        part: K
+    ): { seq: number; state: Promise<LaneSetState<K>> } {
+        const seq = this.seqValue;
+        if (!this.cells) {
+            return {
+                seq,
+                state: Promise.reject(new Error("lane set keeps no cells")),
+            };
+        }
+        return {
+            seq,
+            state: this.host.request<LaneSetState<K>>(this, "state", {
+                seq,
+                part,
+            }),
+        };
     }
 
     /** Elements posted or pending that the worker has not acknowledged. */
@@ -594,7 +632,7 @@ export class AnchorHost {
     }
 
     /** @internal Sends one request for `set`; settles with the reply. */
-    request(
+    request<T = Uint8Array>(
         set: LaneSet,
         type: RequestType,
         body: {
@@ -602,8 +640,9 @@ export class AnchorHost {
             sub?: Uint8Array;
             add?: Uint8Array;
             buf?: Uint8Array;
+            part?: LaneSetPart;
         }
-    ): Promise<Uint8Array> {
+    ): Promise<T> {
         if (set.closed) {
             return Promise.reject(new Error("lane set closed"));
         }
@@ -619,14 +658,18 @@ export class AnchorHost {
         if (!worker || set.faulted) {
             if (set.faulted) return Promise.reject(set.faulted);
             try {
-                return Promise.resolve(this.answerInline(set, type, body));
+                return Promise.resolve(this.answerInline(set, type, body) as T);
             } catch (error) {
                 return Promise.reject(error);
             }
         }
         const id = this.nextRequestId++;
-        const reply = new Promise<Uint8Array>((resolve, reject) => {
-            this.requests.set(id, { set: set.id, resolve, reject });
+        const reply = new Promise<T>((resolve, reject) => {
+            this.requests.set(id, {
+                set: set.id,
+                resolve: resolve as (value: unknown) => void,
+                reject,
+            });
         });
         if (this.requests.size === 1) {
             // A pending answer keeps the process alive (S14).
@@ -639,14 +682,23 @@ export class AnchorHost {
     private answerInline(
         set: LaneSet,
         type: RequestType,
-        body: { sub?: Uint8Array; add?: Uint8Array; buf?: Uint8Array }
-    ): Uint8Array {
+        body: {
+            sub?: Uint8Array;
+            add?: Uint8Array;
+            buf?: Uint8Array;
+            part?: LaneSetPart;
+        }
+    ): Uint8Array | LaneSetState<"lanes"> | LaneSetState<"digest"> {
         if (type === "lanes") {
             return this.math.lanesToBytes(set.lanes!);
         }
-        if (type === "cells") {
+        if (type === "cells" || type === "state") {
             if (!set.cellsInline) throw new Error("lane set keeps no cells");
-            return this.cellsMath.toBytes(set.cellsInline);
+            const cells = this.cellsMath.toBytes(set.cellsInline);
+            if (type === "cells") return cells;
+            return body.part === "lanes"
+                ? { cells, lanes: this.math.lanesToBytes(set.lanes!) }
+                : { cells, digest: this.math.digest(set.lanes!, set.iv) };
         }
         const lanes =
             type === "digestOf" ? new Uint32Array(LANES) : set.lanes!.slice();
@@ -738,14 +790,15 @@ export class AnchorHost {
         if (message.type === "error") {
             request.reject(new Error(`anchor worker: ${message.message}`));
         } else {
+            // Not copied: see Replies above.
             request.resolve(
-                new Uint8Array(
-                    message.type === "lanes"
-                        ? message.lanes
-                        : message.type === "cells"
-                          ? message.cells
-                          : message.digest
-                )
+                message.type === "lanes"
+                    ? message.lanes
+                    : message.type === "cells"
+                      ? message.cells
+                      : message.type === "state"
+                        ? message.state
+                        : message.digest
             );
         }
         this.afterRequest();

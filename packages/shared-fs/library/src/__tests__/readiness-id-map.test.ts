@@ -229,6 +229,55 @@ describe("readiness id map", () => {
         expect(IdHeadMap.restore(new IdHeadMap().serialize()).size).toBe(0);
     });
 
+    it("writes the persisted layout byte for byte and restores it at any offset", () => {
+        const map = new IdHeadMap(Uint8Array.from({ length: 16 }, (_, i) => i));
+        for (let n = 0; n < 3_000; n++) {
+            // `modified` beyond 32 bits and with the top bit set.
+            map.set(`naming:${n}`, headOf(n), (1n << 63n) + BigInt(n) * 7919n);
+        }
+        // Removes move rows; replaces rewrite them.
+        for (let n = 0; n < 3_000; n += 7) map.delete(`naming:${n}`);
+        for (let n = 1; n < 3_000; n += 11) {
+            map.set(`naming:${n}`, headOf(n, 2), BigInt(n));
+        }
+        // The documented layout, written field by field: seed | n (u32 LE)
+        // | keys (low, high; u32 LE) | heads | modified (u64 LE).
+        const expected = new Uint8Array(16 + 4 + map.size * 48);
+        const view = new DataView(expected.buffer);
+        expected.set(map.seed);
+        view.setUint32(16, map.size, true);
+        let row = 0;
+        map.forEachEntry((hash, head, modified) => {
+            const [low, high] = hash.split(":").map(Number);
+            view.setUint32(20 + 8 * row, low, true);
+            view.setUint32(24 + 8 * row, high, true);
+            expected.set(head, 20 + 8 * map.size + 32 * row);
+            view.setBigUint64(20 + 40 * map.size + 8 * row, modified, true);
+            row++;
+        });
+        const bytes = map.serialize();
+        expect(hex(bytes)).toBe(hex(expected));
+        // Restored from every alignment, out of a larger Buffer as a file
+        // read gives it (the structures file holds the map at 2 mod 4), it
+        // serializes to the same bytes and leaves its input alone.
+        for (let offset = 0; offset < 4; offset++) {
+            const file = Buffer.alloc(offset + bytes.length + 33);
+            file.set(bytes, offset);
+            const input = file.subarray(offset, offset + bytes.length);
+            const restored = IdHeadMap.restore(input);
+            expect(hex(input)).toBe(hex(bytes));
+            expect(hex(restored.serialize())).toBe(hex(bytes));
+            expect(contents(restored)).toEqual(contents(map));
+            const duplicate = Buffer.from(file);
+            duplicate.copyWithin(offset + 28, offset + 20, offset + 28);
+            expect(() =>
+                IdHeadMap.restore(
+                    duplicate.subarray(offset, offset + bytes.length)
+                )
+            ).toThrow(/duplicate/);
+        }
+    });
+
     it("rejects malformed serialized maps", () => {
         const map = new IdHeadMap();
         map.set("a", headOf(1), 1n);

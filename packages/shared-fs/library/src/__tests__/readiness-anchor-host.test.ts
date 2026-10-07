@@ -129,10 +129,13 @@ describe("readiness anchor host", () => {
         // 1000 % 256 elements are still in the unflushed batch here.
         const first = set.digestNow();
         const firstCells = set.cellsNow();
+        const firstState = set.stateNow("digest");
         for (let i = 1000; i < 1500; i++) add(elements[i]);
         remove(elements[0]);
         const second = set.digestNow();
         const secondCells = set.cellsNow();
+        const secondState = set.stateNow("lanes");
+        const secondLanes = set.lanesNow();
         expect(first.seq).toBe(1000);
         expect(second.seq).toBe(1501);
         expect(hex(await first.digest)).toBe(fresh(elements.slice(0, 1000)));
@@ -145,6 +148,15 @@ describe("readiness anchor host", () => {
         expect(hex(await secondCells.cells)).toBe(
             freshCells(elements.slice(1, 1500))
         );
+        // So does one state request, with the digest or the lanes.
+        expect(firstState.seq).toBe(1000);
+        const { cells, digest } = await firstState.state;
+        expect(hex(cells)).toBe(freshCells(elements.slice(0, 1000)));
+        expect(hex(digest)).toBe(fresh(elements.slice(0, 1000)));
+        expect(secondState.seq).toBe(1501);
+        const both = await secondState.state;
+        expect(hex(both.cells)).toBe(freshCells(elements.slice(1, 1500)));
+        expect(hex(both.lanes)).toBe(hex(await secondLanes.lanes));
         // Lag drains to zero once the worker acknowledged everything.
         await vi.waitFor(() => expect(set.lag()).toBe(0), { timeout: 5_000 });
         expect(host.stats.lagHighWater).toBeGreaterThan(0);
@@ -220,6 +232,7 @@ describe("readiness anchor host", () => {
         const plain = host.open(iv);
         sets.push(plain);
         await expect(plain.cellsNow().cells).rejects.toThrow(/no cells/);
+        await expect(plain.stateNow("lanes").state).rejects.toThrow(/no cells/);
 
         b.reset(400);
         expect(b.seq).toBe(400);
@@ -448,6 +461,17 @@ describe("readiness anchor host", () => {
         expect(hex(await i.cellsNow().cells)).toBe(
             freshCells(elements.slice(100))
         );
+        for (const part of ["lanes", "digest"] as const) {
+            const inline = await i.stateNow(part).state;
+            const fromWorker = await w.stateNow(part).state;
+            expect(hex(inline.cells)).toBe(hex(fromWorker.cells));
+            expect(hex((inline as any)[part])).toBe(
+                hex((fromWorker as any)[part])
+            );
+        }
+        expect(hex((await i.stateNow("digest").state).digest)).toBe(
+            hex(await w.digestNow().digest)
+        );
         expect(i.lag()).toBe(0);
         expect(inline.workerRunning).toBe(false);
     });
@@ -487,14 +511,87 @@ describe("readiness anchor host", () => {
         listener!({ type: "digestNow", id: 7, set: 1, seq: 3 });
         listener!({ type: "digestNow", id: 8, set: 1, seq: 2 });
         listener!({ type: "cells", id: 9, set: 1, seq: 3 });
+        listener!({ type: "state", id: 10, set: 1, seq: 3, part: "digest" });
+        listener!({ type: "state", id: 11, set: 1, seq: 3, part: "lanes" });
         const digest = replies.find((reply) => reply.id === 7);
         expect(digest.type).toBe("digest");
         expect(hex(digest.digest)).toBe(fresh(elements));
         const cells = replies.find((reply) => reply.id === 9);
         expect(cells.type).toBe("cells");
         expect(hex(cells.cells)).toBe(freshCells(elements));
+        const withDigest = replies.find((reply) => reply.id === 10);
+        expect(withDigest.type).toBe("state");
+        expect(hex(withDigest.state.cells)).toBe(freshCells(elements));
+        expect(hex(withDigest.state.digest)).toBe(fresh(elements));
+        const withLanes = replies.find((reply) => reply.id === 11);
+        expect(hex(withLanes.state.cells)).toBe(freshCells(elements));
+        expect(withLanes.state.lanes).toHaveLength(LANES * 4);
         // An out-of-step request is refused, never answered for another set.
         expect(replies.find((reply) => reply.id === 8).type).toBe("error");
+    });
+
+    it("hands out the worker's reply buffers without copying them", async () => {
+        // Cells and lanes arrive transferred and a digest cloned, so only
+        // this thread holds them: a copy of the 180 KB cells on receipt was
+        // most of a freeze's main-thread CPU.
+        const sent = {
+            cells: new Uint8Array(M * 44),
+            lanes: new Uint8Array(LANES * 4),
+            digest: new Uint8Array(32),
+        };
+        class ReplyingWorker extends EventEmitter {
+            postMessage(message: any) {
+                if (message.id === undefined) return;
+                const reply =
+                    message.type === "state"
+                        ? {
+                              type: "state",
+                              id: message.id,
+                              state:
+                                  message.part === "lanes"
+                                      ? {
+                                            cells: sent.cells,
+                                            lanes: sent.lanes,
+                                        }
+                                      : {
+                                            cells: sent.cells,
+                                            digest: sent.digest,
+                                        },
+                          }
+                        : message.type === "lanes"
+                          ? { type: "lanes", id: message.id, lanes: sent.lanes }
+                          : message.type === "cells"
+                            ? {
+                                  type: "cells",
+                                  id: message.id,
+                                  cells: sent.cells,
+                              }
+                            : {
+                                  type: "digest",
+                                  id: message.id,
+                                  digest: sent.digest,
+                              };
+                setImmediate(() => this.emit("message", reply));
+            }
+            ref() {}
+            unref() {}
+            terminate() {
+                return Promise.resolve(0);
+            }
+        }
+        const host = AnchorHost.fromModules(crypto, ReplyingWorker);
+        hosts.push(host);
+        const set = host.open(iv, { cells: cellSpec });
+        sets.push(set);
+        expect(await set.cellsNow().cells).toBe(sent.cells);
+        expect(await set.lanesNow().lanes).toBe(sent.lanes);
+        expect(await set.digestNow().digest).toBe(sent.digest);
+        const withLanes = await set.stateNow("lanes").state;
+        expect(withLanes.cells).toBe(sent.cells);
+        expect(withLanes.lanes).toBe(sent.lanes);
+        const withDigest = await set.stateNow("digest").state;
+        expect(withDigest.cells).toBe(sent.cells);
+        expect(withDigest.digest).toBe(sent.digest);
     });
 
     it("a pending request keeps the process alive (S14)", async () => {

@@ -1,4 +1,6 @@
 import { fork } from "node:child_process";
+import * as nodeCrypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import { existsSync, promises as fsPromises } from "node:fs";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -12,7 +14,10 @@ import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import { openSharedFs, type SharedFsHandle } from "../index.js";
 import { NamingEvent } from "../model.js";
+import { createAnchorMath } from "../readiness/anchor.js";
 import { AnchorHost } from "../readiness/anchor-host.js";
+import { anchorWorkerMain } from "../readiness/anchor-worker.js";
+import { createCellsMath } from "../readiness/cells.js";
 import { DIGEST_BYTES } from "../readiness/constants.js";
 import { digestToHead } from "../readiness/digest.js";
 import {
@@ -139,6 +144,61 @@ const runChild = (args: string[]) =>
             });
         });
     });
+
+/**
+ * A worker running the real worker code on this thread, one message per
+ * later turn. `failAfter` picks a request: the worker answers it, then
+ * fails (`error`) in the same turn, before it reads another message. That
+ * is a crash between two replies, made deterministic.
+ */
+class InProcessWorker extends EventEmitter {
+    static failAfter?: (message: any) => boolean;
+    private dead = false;
+    private listener!: (message: any) => void;
+    private held?: any[];
+
+    constructor() {
+        super();
+        anchorWorkerMain(
+            {
+                on: (_event, listener) => (this.listener = listener),
+                postMessage: (message) => {
+                    if (this.held) this.held.push(message);
+                    else setImmediate(() => this.emit("message", message));
+                },
+            },
+            createAnchorMath(nodeCrypto as any),
+            createCellsMath()
+        );
+    }
+
+    postMessage(message: any) {
+        setImmediate(() => {
+            if (this.dead) return;
+            const fail = InProcessWorker.failAfter;
+            if (message.id === undefined || !fail?.(message)) {
+                this.listener(message);
+                return;
+            }
+            InProcessWorker.failAfter = undefined;
+            this.dead = true;
+            const replies: any[] = (this.held = []);
+            this.listener(message);
+            this.held = undefined;
+            setImmediate(() => {
+                for (const reply of replies) this.emit("message", reply);
+                this.emit("error", new Error("injected worker failure"));
+            });
+        });
+    }
+
+    ref() {}
+    unref() {}
+    terminate() {
+        this.dead = true;
+        return Promise.resolve(0);
+    }
+}
 
 describe("readiness persistence", () => {
     const peers: Peerbit[] = [];
@@ -304,6 +364,51 @@ describe("readiness persistence", () => {
             kind: "restored",
         });
         expect(await shadow(again.fs)).toMatchObject({ kind: "equal" });
+    });
+
+    it("persists and compares across a worker failure right after the answer", async () => {
+        // The persist takes the lanes with the cells, the shadow compare the
+        // digest with the cells, each in one request: a worker that fails
+        // right after answering cannot leave one of the two unanswered.
+        const directory = join(await newRoot(), "peer");
+        const saved = (AnchorHost as any).sharedHost;
+        const host = AnchorHost.fromModules(nodeCrypto, InProcessWorker);
+        (AnchorHost as any).sharedHost = Promise.resolve(host);
+        let address: string;
+        let store: Uint8Array;
+        try {
+            const peer = await createPeer(directory);
+            const fs = await openSharedFs({
+                peerbit: peer,
+                rootKey: peer.identity.publicKey,
+                gc: false,
+            });
+            await writeFiles(fs, 10);
+            address = fs.address!;
+            store = storeOf(fs);
+            InProcessWorker.failAfter = (message) =>
+                message.type === "digestNow" ||
+                (message.type === "state" && message.part === "digest");
+            expect(await shadow(fs)).toMatchObject({ kind: "equal" });
+            expect(host.stats.failures).toBe(1);
+            // A second failure within 10 minutes would switch to inline.
+            (host as any).lastFailureAt = undefined;
+            InProcessWorker.failAfter = (message) =>
+                message.type === "lanes" ||
+                (message.type === "state" && message.part === "lanes");
+            await stopPeer(peer);
+            expect(host.stats.failures).toBe(2);
+            expect(host.mode).toBe("worker");
+        } finally {
+            InProcessWorker.failAfter = undefined;
+            (AnchorHost as any).sharedHost = saved;
+        }
+        expect(existsSync(await namespaceFile(directory, store))).toBe(true);
+        const { fs } = await reopen(directory, address);
+        expect(runtimeOf(fs).starts.get("namespace-v1")).toEqual({
+            kind: "restored",
+        });
+        expect(await shadow(fs)).toMatchObject({ kind: "equal" });
     });
 
     it("rebuilds from a torn file (checksum) or a truncated one", async () => {

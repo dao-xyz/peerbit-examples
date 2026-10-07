@@ -134,6 +134,7 @@ const MIN_TABLE = 64;
 const ROW_WORDS = 12;
 const ROW_BYTES = 4 * ROW_WORDS;
 const HEAD_AT = 8;
+const HEAD_WORD = HEAD_AT / 4;
 /** `modified` of row r is u64 number `ROW_U64 * r + MOD_U64`. */
 const ROW_U64 = ROW_BYTES / 8;
 const MOD_U64 = 5;
@@ -477,30 +478,48 @@ export class IdHeadMap {
         out.set(this.seed, 0);
         view.setUint32(ID_SEED_BYTES, n, true);
         const words = this.words;
-        const bytes = this.bytes;
+        if (HOST_LE) {
+            // Word for word into the three columns (keys, heads, modified),
+            // unrolled: at 200k rows a DataView call per word took 2.3x as
+            // long, and a loop over the head's words 1.3x.
+            const to = new Uint32Array(out.buffer);
+            let k = (ID_SEED_BYTES + 4) / 4;
+            let h = k + 2 * n;
+            let m = k + 10 * n;
+            for (let w = 0; w < n * ROW_WORDS; w += ROW_WORDS) {
+                to[k] = words[w];
+                to[k + 1] = words[w + 1];
+                to[h] = words[w + HEAD_WORD];
+                to[h + 1] = words[w + HEAD_WORD + 1];
+                to[h + 2] = words[w + HEAD_WORD + 2];
+                to[h + 3] = words[w + HEAD_WORD + 3];
+                to[h + 4] = words[w + HEAD_WORD + 4];
+                to[h + 5] = words[w + HEAD_WORD + 5];
+                to[h + 6] = words[w + HEAD_WORD + 6];
+                to[h + 7] = words[w + HEAD_WORD + 7];
+                to[m] = words[w + MOD_WORD];
+                to[m + 1] = words[w + MOD_WORD + 1];
+                k += 2;
+                h += 8;
+                m += 2;
+            }
+            return out;
+        }
+        // Big-endian: keys and `modified` are swapped, heads are bytes.
         let o = ID_SEED_BYTES + 4;
         for (let slot = 0; slot < n; slot++, o += 8) {
             view.setUint32(o, words[slot * ROW_WORDS], true);
             view.setUint32(o + 4, words[slot * ROW_WORDS + 1], true);
         }
         for (let slot = 0; slot < n; slot++) {
-            const w = slot * ROW_WORDS + HEAD_AT / 4;
-            // Memory order either way: the head is bytes.
+            const w = slot * ROW_WORDS + HEAD_WORD;
+            // Memory order: the head is bytes.
             for (let k = 0; k < 8; k++, o += 4) {
-                view.setUint32(o, words[w + k], HOST_LE);
+                view.setUint32(o, words[w + k], false);
             }
         }
         for (let slot = 0; slot < n; slot++, o += 8) {
-            if (HOST_LE) {
-                view.setUint32(o, words[slot * ROW_WORDS + MOD_WORD], true);
-                view.setUint32(
-                    o + 4,
-                    words[slot * ROW_WORDS + MOD_WORD + 1],
-                    true
-                );
-            } else {
-                view.setBigUint64(o, this.modified(slot), true);
-            }
+            view.setBigUint64(o, this.modified(slot), true);
         }
         return out;
     }
@@ -525,10 +544,7 @@ export class IdHeadMap {
         }
         map.resize(capacity);
         const words = map.words;
-        let o = ID_SEED_BYTES + 4;
-        for (let slot = 0; slot < n; slot++, o += 8) {
-            const lo = view.getUint32(o, true);
-            const hi = view.getUint32(o + 4, true);
+        const add = (slot: number, lo: number, hi: number) => {
             if (map.find(lo, hi) >= 0) {
                 throw new Error("id map: duplicate key");
             }
@@ -536,23 +552,58 @@ export class IdHeadMap {
             words[slot * ROW_WORDS + 1] = hi;
             map.insertKey(lo, slot);
             map.count = slot + 1;
+        };
+        if (HOST_LE) {
+            // Word for word, as `serialize` writes them. The structures
+            // file holds the map at 2 mod 4: it is copied to an aligned
+            // buffer first (one memcpy, no slower than a DataView read per
+            // word).
+            const from =
+                bytes.byteOffset % 4 === 0
+                    ? new Uint32Array(
+                          bytes.buffer,
+                          bytes.byteOffset,
+                          bytes.length / 4
+                      )
+                    : new Uint32Array(new Uint8Array(bytes).buffer);
+            let k = (ID_SEED_BYTES + 4) / 4;
+            let h = k + 2 * n;
+            let m = k + 10 * n;
+            // The keys first: the table inserts are most of the time, and
+            // the rows' copy then streams on its own.
+            for (let slot = 0; slot < n; slot++, k += 2) {
+                add(slot, from[k], from[k + 1]);
+            }
+            for (let w = 0; w < n * ROW_WORDS; w += ROW_WORDS) {
+                words[w + HEAD_WORD] = from[h];
+                words[w + HEAD_WORD + 1] = from[h + 1];
+                words[w + HEAD_WORD + 2] = from[h + 2];
+                words[w + HEAD_WORD + 3] = from[h + 3];
+                words[w + HEAD_WORD + 4] = from[h + 4];
+                words[w + HEAD_WORD + 5] = from[h + 5];
+                words[w + HEAD_WORD + 6] = from[h + 6];
+                words[w + HEAD_WORD + 7] = from[h + 7];
+                words[w + MOD_WORD] = from[m];
+                words[w + MOD_WORD + 1] = from[m + 1];
+                h += 8;
+                m += 2;
+            }
+            return map;
+        }
+        // Big-endian: keys and `modified` are swapped, heads are bytes.
+        let o = ID_SEED_BYTES + 4;
+        for (let slot = 0; slot < n; slot++, o += 8) {
+            add(slot, view.getUint32(o, true), view.getUint32(o + 4, true));
         }
         for (let slot = 0; slot < n; slot++) {
-            const w = slot * ROW_WORDS + HEAD_AT / 4;
+            const w = slot * ROW_WORDS + HEAD_WORD;
+            // Memory order: the head is bytes.
             for (let k = 0; k < 8; k++, o += 4) {
-                words[w + k] = view.getUint32(o, HOST_LE);
+                words[w + k] = view.getUint32(o, false);
             }
         }
         for (let slot = 0; slot < n; slot++, o += 8) {
-            if (HOST_LE) {
-                words[slot * ROW_WORDS + MOD_WORD] = view.getUint32(o, true);
-                words[slot * ROW_WORDS + MOD_WORD + 1] = view.getUint32(
-                    o + 4,
-                    true
-                );
-            } else {
-                map.mods[slot * ROW_U64 + MOD_U64] = view.getBigUint64(o, true);
-            }
+            map.mods[slot * ROW_U64 + MOD_U64] = view.getBigUint64(o, true);
         }
         return map;
     }

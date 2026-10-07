@@ -43,11 +43,11 @@ import {
  * full or partial, and reports its provenance honestly.
  *
  * - **Snapshots.** One per scope and epoch, shared by every session opened
- *   at that epoch: the count, `hlc`, and the cells and D_R from the lane
- *   set's `cellsNow()` and `digestNow()`, all taken in one synchronous step
+ *   at that epoch: the count, `hlc`, and the cells and D_R from one
+ *   `stateNow("digest")` of the lane set, all taken in one synchronous step
  *   at a point where the scope's replace-verify queue is empty (S10,
- *   deviation k), so the worker answers both for that epoch. The trust
- *   scope is frozen after the namespace scope.
+ *   deviation k), so the worker answers both for that epoch, in one reply.
+ *   The trust scope is frozen after the namespace scope.
  * - **Sessions** are keyed by (peer, sessionId). Every attempt of a session
  *   gets the same snapshot and the same provenance, read in the synchronous
  *   step that took its first snapshot: a later state never vouches for an
@@ -86,7 +86,7 @@ import {
 export interface ResponderScope {
     readonly descriptor: ScopeDescriptor;
     readonly tap: ScopeTap;
-    /** The anchor lanes and the cells (`cellsNow`). */
+    /** The anchor lanes and the cells (`stateNow`). */
     readonly laneSet: LaneSet;
     /** The 32-byte id of the scope's log. */
     readonly logId: Uint8Array;
@@ -135,9 +135,8 @@ interface Snapshot {
     readonly epoch: number;
     readonly count: number;
     readonly hlc: bigint;
-    /** Every cell in the wire layout (m x 44 B). */
-    readonly cells: Promise<Uint8Array>;
-    readonly anchor: Promise<Uint8Array>;
+    /** Every cell in the wire layout (m x 44 B) and the anchor, at once. */
+    readonly state: Promise<{ cells: Uint8Array; digest: Uint8Array }>;
     /** `above` per `hlcProved`, counted once at this epoch (O(n) each). */
     readonly above: Map<bigint, number>;
 }
@@ -591,8 +590,9 @@ export class Responder {
                 });
             }
             for (const frozen of out) {
-                frozen.anchor = await frozen.snapshot.anchor;
-                frozen.cells = await frozen.snapshot.cells;
+                const { cells, digest } = await frozen.snapshot.state;
+                frozen.anchor = digest;
+                frozen.cells = cells;
             }
         } catch (error) {
             for (const frozen of out) {
@@ -650,19 +650,17 @@ export class Responder {
             );
             throw new Refused(ERROR_CODE.BUSY);
         }
-        // One synchronous step: both answer for this epoch.
-        const { digest } = laneSet.digestNow();
-        const { cells } = laneSet.cellsNow();
-        // Never unhandled: the freeze awaits them.
-        digest.catch(() => {});
-        cells.catch(() => {});
+        // One synchronous step and one request: cells and anchor of this
+        // epoch, which a worker failure fails together.
+        const { state } = laneSet.stateNow("digest");
+        // Never unhandled: the freeze awaits it.
+        state.catch(() => {});
         const snapshot: Snapshot = {
             map: tap.map,
             epoch: tap.epoch,
             count: tap.count,
             hlc: tap.hlc,
-            cells,
-            anchor: digest,
+            state,
             above: new Map(),
         };
         this.stats.freezes++;

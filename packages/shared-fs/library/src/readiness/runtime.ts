@@ -454,7 +454,7 @@ export class ReadinessRuntime {
      * so no change event can land after the snapshot. Writes the namespace
      * structures (map, cells and the lanes at the same sequence point) when
      * its start finished before `prepareClose`, its count was verified and
-     * nothing faulted it, then disposes. The lanes request keeps the process
+     * nothing faulted it, then disposes. The state request keeps the process
      * alive until it answers (S14). Never throws: a failed write logs and
      * leaves no file, and the next open rebuilds.
      */
@@ -475,27 +475,26 @@ export class ReadinessRuntime {
                 tap.countVerified &&
                 (started === "restored" || started === "scanned")
             ) {
-                // One synchronous point: the map and the lanes and cells
-                // requests (answered for the same seq).
-                const { seq, lanes } = state.laneSet.lanesNow();
-                const { cells } = state.laneSet.cellsNow();
-                const both = Promise.all([lanes, cells]);
+                // One synchronous point: the map, and one request for the
+                // lanes and cells of its seq (a worker failure cannot leave
+                // one of them unanswered).
+                const { seq, state: frozen } = state.laneSet.stateNow("lanes");
                 const { count, hlc, epoch, map } = tap;
                 if (seq !== epoch) {
-                    both.catch(() => {});
+                    frozen.catch(() => {});
                     throw new Error(
                         `lane set at ${seq}, tap at epoch ${epoch}`
                     );
                 }
-                const [laneBytes, cellBytes] = await both;
+                const { cells, lanes } = await frozen;
                 const persisted: PersistedScope = {
                     scope: tap.scope.id,
                     count,
                     hlc,
                     epoch,
                     map,
-                    cells: cellBytes,
-                    lanes: laneBytes,
+                    cells,
+                    lanes,
                 };
                 await writeStructures(
                     this.directory,

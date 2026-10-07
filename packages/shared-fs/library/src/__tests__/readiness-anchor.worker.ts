@@ -7,7 +7,8 @@
 // - idle: a lane set stays open after a round trip; nothing else is
 //   pending, so the process must exit 0 by itself.
 // - filesystem: opens a filesystem, writes, and reports the anchor host mode
-//   after a digest and a cells round trip through the namespace lane set.
+//   after a state round trip (cells and digest, as a freeze takes them)
+//   through the namespace lane set.
 import * as crypto from "node:crypto";
 import { createAnchorMath } from "../readiness/anchor.js";
 import { AnchorHost } from "../readiness/anchor-host.js";
@@ -73,8 +74,7 @@ if (scenario === "pending") {
         const runtime = (fs.program as any).readinessRuntime;
         await runtime.whenStarted();
         const scope = runtime.scope(0);
-        const { seq, digest } = scope.laneSet.digestNow();
-        const { cells } = scope.laneSet.cellsNow();
+        const { seq, state } = scope.laneSet.stateNow("digest");
         const list = new Uint8Array(scope.tap.count * 32);
         const fresh = new Cells(M, runtime.cellKey[0], runtime.cellKey[1]);
         let offset = 0;
@@ -83,7 +83,7 @@ if (scenario === "pending") {
             fresh.apply(head, 1);
             offset += 32;
         });
-        const value = await digest;
+        const { cells, digest: value } = await state;
         const ofList = await scope.laneSet.digestOf(list);
         const host = await AnchorHost.shared();
         report({
@@ -96,7 +96,7 @@ if (scenario === "pending") {
             count: scope.tap.count,
             digest: hex(value),
             digestOfList: hex(ofList),
-            cellsMatch: hex(await cells) === hex(fresh.toBytes()),
+            cellsMatch: hex(cells) === hex(fresh.toBytes()),
         });
     } finally {
         await peer.stop();

@@ -289,18 +289,17 @@ manualDescribe("readiness upkeep bench", () => {
                         }
                     });
 
-                    // ---- freeze: the digest and cells requests (one
-                    // synchronous step) and their round trip
+                    // ---- freeze: the state request (cells and digest, one
+                    // synchronous step) and its round trip
                     {
                         await tap.verifyIdle();
                         const copyNs: number[] = [];
                         const roundTripMs: number[] = [];
                         for (let i = 0; i < 100; i++) {
                             const t0 = performance.now();
-                            const { digest } = laneSet.digestNow();
-                            const { cells } = laneSet.cellsNow();
+                            const { state } = laneSet.stateNow("digest");
                             copyNs.push((performance.now() - t0) * 1e6);
-                            await Promise.all([digest, cells]);
+                            await state;
                             roundTripMs.push(performance.now() - t0);
                         }
                         // `above` for a responder with hlcProved > 0: O(n).

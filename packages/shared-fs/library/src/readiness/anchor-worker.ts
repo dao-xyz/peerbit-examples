@@ -15,9 +15,11 @@ import type { CellsMath } from "./cells.js";
  * posted after a batch sees that batch applied.
  *
  * Main -> worker: `init`, `batch` (n x 32 digests followed by n signs, one
- * transferred buffer), `digestNow`, `digestOf`, `lanes`, `cells`, `drop`,
- * and `crash` (tests only). Worker -> main: `ack` (every 16 batches and when
- * the queue empties), `digest`, `lanes` and `cells` (transferred), `error`.
+ * transferred buffer), `digestNow`, `digestOf`, `lanes`, `cells`, `state`
+ * (the cells with the lanes or the digest), `drop`, and `crash` (tests
+ * only). Worker -> main: `ack` (every 16 batches and when the queue
+ * empties), `digest`, `lanes`, `cells` and `state` (cells and lanes
+ * transferred), `error`.
  */
 
 /** The `parentPort` surface the worker uses. */
@@ -163,6 +165,37 @@ export function anchorWorkerMain(
                     port.postMessage(
                         { type: "cells", id: message.id, cells: bytes },
                         [bytes.buffer]
+                    );
+                });
+            case "state":
+                // One reply, so the host settles both parts together.
+                return atSeq(message, (set) => {
+                    if (!set.cells) {
+                        return fail(message.id, "lane set keeps no cells");
+                    }
+                    const cells = cellsMath.toBytes(set.cells);
+                    if (message.part === "lanes") {
+                        const lanes = math.lanesToBytes(set.lanes);
+                        port.postMessage(
+                            {
+                                type: "state",
+                                id: message.id,
+                                state: { cells, lanes },
+                            },
+                            [cells.buffer, lanes.buffer]
+                        );
+                        return;
+                    }
+                    port.postMessage(
+                        {
+                            type: "state",
+                            id: message.id,
+                            state: {
+                                cells,
+                                digest: math.digest(set.lanes, set.iv),
+                            },
+                        },
+                        [cells.buffer]
                     );
                 });
             case "drop":
