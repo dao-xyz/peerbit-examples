@@ -144,6 +144,39 @@ describe("readiness id map", () => {
         expect(() => map.set("short", new Uint8Array(31), 0n)).toThrow();
     });
 
+    it("hashes a string id as its UTF-8 bytes", () => {
+        const map = new IdHeadMap();
+        for (const id of [
+            "",
+            "naming:Z9_-",
+            "file-version:" + "q".repeat(57),
+            "snowman ☃ and 😀",
+            "é",
+        ]) {
+            expect(map.hashOf(id)).toEqual(
+                map.hashOf(new TextEncoder().encode(id))
+            );
+        }
+    });
+
+    it("puts and removes without allocating, copying the replaced head", () => {
+        const map = new IdHeadMap();
+        const prev = new Uint8Array(32);
+        const head = headOf(1);
+        expect(map.put("naming:a", head, 7n, prev)).toBe(false);
+        head.fill(0); // the map keeps its own copy
+        const slot = map.get("naming:a");
+        expect(map.headEquals(slot, headOf(1))).toBe(true);
+        expect(map.headEquals(slot, headOf(2))).toBe(false);
+        expect(map.put("naming:a", headOf(2), 8n, prev)).toBe(true);
+        expect(hex(prev)).toBe(hex(headOf(1)));
+        expect(map.modified(map.get("naming:a"))).toBe(8n);
+        expect(map.remove("naming:b", prev)).toBe(false);
+        expect(map.remove("naming:a", prev)).toBe(true);
+        expect(hex(prev)).toBe(hex(headOf(2)));
+        expect(map.size).toBe(0);
+    });
+
     it("counts and visits the rows above an hlc", () => {
         const map = new IdHeadMap();
         for (let n = 0; n < 100; n++) {

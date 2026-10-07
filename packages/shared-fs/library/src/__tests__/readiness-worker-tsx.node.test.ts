@@ -7,7 +7,8 @@ import { describe, expect, it } from "vitest";
  * in `__name(...)`; without the shim the serialized anchor worker would
  * crash under `node --import tsx` and the host would silently fall back to
  * the inline path. A child opens a filesystem under tsx and reports the
- * host mode after a digest round trip through the namespace lane set.
+ * host mode after a digest and a cells round trip through the namespace
+ * lane set.
  */
 
 const childPath = fileURLToPath(
@@ -51,5 +52,7 @@ describe("readiness anchor worker under tsx", () => {
         expect(report.count).toBeGreaterThan(0);
         expect(report.digest).toMatch(/^[0-9a-f]{64}$/);
         expect(report.digest).toBe(report.digestOfList);
+        // The cells the worker keeps match a build from the live set.
+        expect(report.cellsMatch).toBe(true);
     });
 });

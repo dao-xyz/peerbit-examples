@@ -4,9 +4,16 @@ import { DIGEST_BYTES } from "./constants.js";
 /**
  * Document id -> current head, so a replace (which Documents reports as a
  * bare `added`) can subtract the head it replaced. Compact form: open
- * addressing on a keyed 64-bit hash of the id, plus dense slot columns
- * (32-byte heads and exact u64 `__context.modified`). About 56-64 B per
- * row, against 175-243 B for a `Map<string, string>` (M0 P4).
+ * addressing on a keyed 64-bit hash of the id, plus dense rows (the hash,
+ * the 32-byte head and the exact u64 `__context.modified`). 64 B per slot
+ * of capacity, against 175-243 B per row for a `Map<string, string>`
+ * (M0 P4).
+ *
+ * Laid out for the tap's write path, whose cost inside a filesystem
+ * process is mostly cache misses: a probe compares the hash's low word in
+ * the table itself, and a row is one 48-byte span, so a lookup touches the
+ * table line and the row only. The tap's calls (`get`, `headEquals`,
+ * `put`, `remove`) allocate nothing; `set` and `delete` return copies.
  *
  * The hash is SipHash-2-4 under a 16-byte seed drawn per open and kept only
  * in the local structures file (M1 plan deviation d). Ids are writer
@@ -19,69 +26,7 @@ export type IdKey = string | Uint8Array;
 
 const textEncoder = new TextEncoder();
 let scratch = new Uint8Array(256);
-
-// SipHash state as 32-bit halves: v0..v3 low and high words.
-const V = new Uint32Array(8);
 const OUT = new Uint32Array(2);
-
-const sipRound = () => {
-    let v0l = V[0],
-        v0h = V[1],
-        v1l = V[2],
-        v1h = V[3],
-        v2l = V[4],
-        v2h = V[5],
-        v3l = V[6],
-        v3h = V[7],
-        lo: number,
-        hi: number;
-    // v0 += v1; v1 = rotl(v1, 13); v1 ^= v0; v0 = rotl(v0, 32)
-    lo = (v0l + v1l) >>> 0;
-    v0h = (v0h + v1h + (lo < v0l ? 1 : 0)) >>> 0;
-    v0l = lo;
-    lo = (v1l << 13) | (v1h >>> 19);
-    hi = (v1h << 13) | (v1l >>> 19);
-    v1l = (lo ^ v0l) >>> 0;
-    v1h = (hi ^ v0h) >>> 0;
-    lo = v0l;
-    v0l = v0h;
-    v0h = lo;
-    // v2 += v3; v3 = rotl(v3, 16); v3 ^= v2
-    lo = (v2l + v3l) >>> 0;
-    v2h = (v2h + v3h + (lo < v2l ? 1 : 0)) >>> 0;
-    v2l = lo;
-    lo = (v3l << 16) | (v3h >>> 16);
-    hi = (v3h << 16) | (v3l >>> 16);
-    v3l = (lo ^ v2l) >>> 0;
-    v3h = (hi ^ v2h) >>> 0;
-    // v0 += v3; v3 = rotl(v3, 21); v3 ^= v0
-    lo = (v0l + v3l) >>> 0;
-    v0h = (v0h + v3h + (lo < v0l ? 1 : 0)) >>> 0;
-    v0l = lo;
-    lo = (v3l << 21) | (v3h >>> 11);
-    hi = (v3h << 21) | (v3l >>> 11);
-    v3l = (lo ^ v0l) >>> 0;
-    v3h = (hi ^ v0h) >>> 0;
-    // v2 += v1; v1 = rotl(v1, 17); v1 ^= v2; v2 = rotl(v2, 32)
-    lo = (v2l + v1l) >>> 0;
-    v2h = (v2h + v1h + (lo < v2l ? 1 : 0)) >>> 0;
-    v2l = lo;
-    lo = (v1l << 17) | (v1h >>> 15);
-    hi = (v1h << 17) | (v1l >>> 15);
-    v1l = (lo ^ v2l) >>> 0;
-    v1h = (hi ^ v2h) >>> 0;
-    lo = v2l;
-    v2l = v2h;
-    v2h = lo;
-    V[0] = v0l;
-    V[1] = v0h;
-    V[2] = v1l;
-    V[3] = v1h;
-    V[4] = v2l;
-    V[5] = v2h;
-    V[6] = v3l;
-    V[7] = v3h;
-};
 
 const readU32 = (b: Uint8Array, o: number) =>
     (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
@@ -89,7 +34,9 @@ const readU32 = (b: Uint8Array, o: number) =>
 /**
  * SipHash-2-4 of `bytes[0, length)` under a 128-bit key given as four
  * little-endian u32 words (k0 low, k0 high, k1 low, k1 high). Writes the
- * 64-bit result into `out` as [low, high].
+ * 64-bit result into `out` as [low, high]. The state stays in locals as
+ * 32-bit halves; one loop runs every round, taking in a message word
+ * before and after each pair of compression rounds.
  */
 export const sipHash24 = (
     key: Uint32Array,
@@ -97,62 +44,117 @@ export const sipHash24 = (
     length: number,
     out: Uint32Array
 ) => {
-    V[0] = (key[0] ^ 0x70736575) >>> 0;
-    V[1] = (key[1] ^ 0x736f6d65) >>> 0;
-    V[2] = (key[2] ^ 0x6e646f6d) >>> 0;
-    V[3] = (key[3] ^ 0x646f7261) >>> 0;
-    V[4] = (key[0] ^ 0x6e657261) >>> 0;
-    V[5] = (key[1] ^ 0x6c796765) >>> 0;
-    V[6] = (key[2] ^ 0x79746573) >>> 0;
-    V[7] = (key[3] ^ 0x74656462) >>> 0;
+    let v0l = (key[0] ^ 0x70736575) >>> 0,
+        v0h = (key[1] ^ 0x736f6d65) >>> 0,
+        v1l = (key[2] ^ 0x6e646f6d) >>> 0,
+        v1h = (key[3] ^ 0x646f7261) >>> 0,
+        v2l = (key[0] ^ 0x6e657261) >>> 0,
+        v2h = (key[1] ^ 0x6c796765) >>> 0,
+        v3l = (key[2] ^ 0x79746573) >>> 0,
+        v3h = (key[3] ^ 0x74656462) >>> 0,
+        lo: number,
+        hi: number;
     const end = length - (length % 8);
-    for (let o = 0; o < end; o += 8) {
-        const ml = readU32(bytes, o);
-        const mh = readU32(bytes, o + 4);
-        V[6] ^= ml;
-        V[7] ^= mh;
-        sipRound();
-        sipRound();
-        V[0] ^= ml;
-        V[1] ^= mh;
-    }
+    // Blocks of 8 bytes, then the last block (the tail and the length).
+    const compression = 2 * (end / 8 + 1);
     let ml = 0;
-    let mh = (length & 0xff) << 24;
-    const left = length - end;
-    for (let i = 0; i < left; i++) {
-        const b = bytes[end + i];
-        if (i < 4) ml |= b << (8 * i);
-        else mh |= b << (8 * (i - 4));
+    let mh = 0;
+    for (let round = 0; round < compression + 4; round++) {
+        if (round < compression && (round & 1) === 0) {
+            const o = 4 * round;
+            if (o < end) {
+                ml = readU32(bytes, o);
+                mh = readU32(bytes, o + 4);
+            } else {
+                ml = 0;
+                mh = (length & 0xff) << 24;
+                for (let i = 0; i < length - end; i++) {
+                    const b = bytes[end + i];
+                    if (i < 4) ml |= b << (8 * i);
+                    else mh |= b << (8 * (i - 4));
+                }
+                ml >>>= 0;
+                mh >>>= 0;
+            }
+            v3l = (v3l ^ ml) >>> 0;
+            v3h = (v3h ^ mh) >>> 0;
+        }
+        // v0 += v1; v1 = rotl(v1, 13); v1 ^= v0; v0 = rotl(v0, 32)
+        lo = (v0l + v1l) >>> 0;
+        v0h = (v0h + v1h + (lo < v0l ? 1 : 0)) >>> 0;
+        v0l = lo;
+        lo = (v1l << 13) | (v1h >>> 19);
+        hi = (v1h << 13) | (v1l >>> 19);
+        v1l = (lo ^ v0l) >>> 0;
+        v1h = (hi ^ v0h) >>> 0;
+        lo = v0l;
+        v0l = v0h;
+        v0h = lo;
+        // v2 += v3; v3 = rotl(v3, 16); v3 ^= v2
+        lo = (v2l + v3l) >>> 0;
+        v2h = (v2h + v3h + (lo < v2l ? 1 : 0)) >>> 0;
+        v2l = lo;
+        lo = (v3l << 16) | (v3h >>> 16);
+        hi = (v3h << 16) | (v3l >>> 16);
+        v3l = (lo ^ v2l) >>> 0;
+        v3h = (hi ^ v2h) >>> 0;
+        // v0 += v3; v3 = rotl(v3, 21); v3 ^= v0
+        lo = (v0l + v3l) >>> 0;
+        v0h = (v0h + v3h + (lo < v0l ? 1 : 0)) >>> 0;
+        v0l = lo;
+        lo = (v3l << 21) | (v3h >>> 11);
+        hi = (v3h << 21) | (v3l >>> 11);
+        v3l = (lo ^ v0l) >>> 0;
+        v3h = (hi ^ v0h) >>> 0;
+        // v2 += v1; v1 = rotl(v1, 17); v1 ^= v2; v2 = rotl(v2, 32)
+        lo = (v2l + v1l) >>> 0;
+        v2h = (v2h + v1h + (lo < v2l ? 1 : 0)) >>> 0;
+        v2l = lo;
+        lo = (v1l << 17) | (v1h >>> 15);
+        hi = (v1h << 17) | (v1l >>> 15);
+        v1l = (lo ^ v2l) >>> 0;
+        v1h = (hi ^ v2h) >>> 0;
+        lo = v2l;
+        v2l = v2h;
+        v2h = lo;
+        if (round < compression && (round & 1) === 1) {
+            v0l = (v0l ^ ml) >>> 0;
+            v0h = (v0h ^ mh) >>> 0;
+            if (round === compression - 1) v2l = (v2l ^ 0xff) >>> 0;
+        }
     }
-    ml >>>= 0;
-    mh >>>= 0;
-    V[6] ^= ml;
-    V[7] ^= mh;
-    sipRound();
-    sipRound();
-    V[0] ^= ml;
-    V[1] ^= mh;
-    V[4] ^= 0xff;
-    sipRound();
-    sipRound();
-    sipRound();
-    sipRound();
-    out[0] = (V[0] ^ V[2] ^ V[4] ^ V[6]) >>> 0;
-    out[1] = (V[1] ^ V[3] ^ V[5] ^ V[7]) >>> 0;
+    out[0] = (v0l ^ v1l ^ v2l ^ v3l) >>> 0;
+    out[1] = (v0h ^ v1h ^ v2h ^ v3h) >>> 0;
 };
 
 const ID_SEED_BYTES = 16;
 /** Slot load factor of the probe table (it grows at half full). */
 const MIN_TABLE = 64;
+/** A row: hash low and high, the head (8 words), modified (u64 LE). */
+const ROW_WORDS = 12;
+const ROW_BYTES = 4 * ROW_WORDS;
+const HEAD_AT = 8;
+/** `modified` of row r is u64 number `ROW_U64 * r + MOD_U64`. */
+const ROW_U64 = ROW_BYTES / 8;
+const MOD_U64 = 5;
+const MOD_WORD = 2 * MOD_U64;
+/**
+ * Rows hold host-order words: on a little-endian host a row's bytes are
+ * already the serialized layout (keys and `modified` little-endian), so
+ * `serialize` and `restore` copy words.
+ */
+const HOST_LE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 export class IdHeadMap {
     readonly seed: Uint8Array;
     private readonly key: Uint32Array;
-    private table: Int32Array; // slot + 1, 0 = empty
+    /** Two i32 per entry: slot + 1 (0 = empty) and the hash's low word. */
+    private table: Int32Array;
+    /** Entries in the table, less one. */
     private mask: number;
-    private keyLo: Uint32Array;
-    private keyHi: Uint32Array;
-    private heads: Uint8Array;
+    /** The rows, as words, bytes (heads) and u64 (modified). */
+    private words: Uint32Array;
+    private bytes: Uint8Array;
     private mods: BigUint64Array;
     private capacity: number;
     private count = 0;
@@ -175,12 +177,12 @@ export class IdHeadMap {
             this.key[i] = readU32(this.seed, 4 * i);
         }
         this.capacity = MIN_TABLE / 2;
-        this.table = new Int32Array(MIN_TABLE);
         this.mask = MIN_TABLE - 1;
-        this.keyLo = new Uint32Array(this.capacity);
-        this.keyHi = new Uint32Array(this.capacity);
-        this.heads = new Uint8Array(this.capacity * DIGEST_BYTES);
-        this.mods = new BigUint64Array(this.capacity);
+        this.table = new Int32Array(2 * MIN_TABLE);
+        const rows = new ArrayBuffer(this.capacity * ROW_BYTES);
+        this.words = new Uint32Array(rows);
+        this.bytes = new Uint8Array(rows);
+        this.mods = new BigUint64Array(rows);
     }
 
     get size(): number {
@@ -200,11 +202,21 @@ export class IdHeadMap {
                 OUT[1] = this.lastHi;
                 return;
             }
-            if (scratch.length < id.length * 3) {
-                scratch = new Uint8Array(id.length * 3);
+            const n = id.length;
+            if (scratch.length < n * 3) {
+                scratch = new Uint8Array(n * 3);
             }
-            const { written } = textEncoder.encodeInto(id, scratch);
-            sipHash24(this.key, scratch, written, OUT);
+            // Ids are ASCII in practice: their UTF-8 is their char codes.
+            let length = n;
+            for (let i = 0; i < n; i++) {
+                const c = id.charCodeAt(i);
+                if (c >= 0x80) {
+                    length = textEncoder.encodeInto(id, scratch).written;
+                    break;
+                }
+                scratch[i] = c;
+            }
+            sipHash24(this.key, scratch, length, OUT);
             this.lastId = id;
             this.lastLo = OUT[0];
             this.lastHi = OUT[1];
@@ -213,49 +225,50 @@ export class IdHeadMap {
         }
     }
 
-    /** Table index holding (lo, hi), or -1. */
+    /** Table entry holding (lo, hi), or -1. */
     private find(lo: number, hi: number): number {
-        let i = lo & this.mask;
+        const table = this.table;
+        const mask = this.mask;
+        const low = lo | 0;
+        let i = lo & mask;
         for (;;) {
-            const entry = this.table[i];
+            const entry = table[2 * i];
             if (entry === 0) {
                 return -1;
             }
-            const slot = entry - 1;
-            if (this.keyLo[slot] === lo && this.keyHi[slot] === hi) {
+            if (
+                table[2 * i + 1] === low &&
+                this.words[(entry - 1) * ROW_WORDS + 1] === hi
+            ) {
                 return i;
             }
-            i = (i + 1) & this.mask;
+            i = (i + 1) & mask;
         }
     }
 
-    private insertKey(lo: number, hi: number, slot: number) {
+    private insertKey(lo: number, slot: number) {
+        const table = this.table;
         let i = lo & this.mask;
-        while (this.table[i] !== 0) {
+        while (table[2 * i] !== 0) {
             i = (i + 1) & this.mask;
         }
-        this.table[i] = slot + 1;
+        table[2 * i] = slot + 1;
+        table[2 * i + 1] = lo;
     }
 
-    private grow() {
-        const capacity = this.capacity * 2;
-        const keyLo = new Uint32Array(capacity);
-        keyLo.set(this.keyLo);
-        const keyHi = new Uint32Array(capacity);
-        keyHi.set(this.keyHi);
-        const heads = new Uint8Array(capacity * DIGEST_BYTES);
-        heads.set(this.heads);
-        const mods = new BigUint64Array(capacity);
-        mods.set(this.mods);
-        this.keyLo = keyLo;
-        this.keyHi = keyHi;
-        this.heads = heads;
-        this.mods = mods;
+    /** Rows and table for `capacity` rows; keeps the first `count` rows. */
+    private resize(capacity: number) {
+        const rows = new ArrayBuffer(capacity * ROW_BYTES);
+        const words = new Uint32Array(rows);
+        words.set(this.words.subarray(0, this.count * ROW_WORDS));
+        this.words = words;
+        this.bytes = new Uint8Array(rows);
+        this.mods = new BigUint64Array(rows);
         this.capacity = capacity;
-        this.table = new Int32Array(capacity * 2);
         this.mask = capacity * 2 - 1;
+        this.table = new Int32Array(capacity * 4);
         for (let slot = 0; slot < this.count; slot++) {
-            this.insertKey(this.keyLo[slot], this.keyHi[slot], slot);
+            this.insertKey(this.words[slot * ROW_WORDS], slot);
         }
     }
 
@@ -263,26 +276,52 @@ export class IdHeadMap {
     get(id: IdKey): number {
         this.hash(id);
         const i = this.find(OUT[0], OUT[1]);
-        return i < 0 ? -1 : this.table[i] - 1;
+        return i < 0 ? -1 : this.table[2 * i] - 1;
     }
 
     /** A view of the slot's head; valid until the next mutation. */
     head(slot: number): Uint8Array {
-        return this.heads.subarray(
-            slot * DIGEST_BYTES,
-            slot * DIGEST_BYTES + DIGEST_BYTES
-        );
+        const at = slot * ROW_BYTES + HEAD_AT;
+        return this.bytes.subarray(at, at + DIGEST_BYTES);
+    }
+
+    /** Whether the slot's head is `digest` (its first 32 bytes). */
+    headEquals(slot: number, digest: Uint8Array): boolean {
+        const bytes = this.bytes;
+        const at = slot * ROW_BYTES + HEAD_AT;
+        for (let i = 0; i < DIGEST_BYTES; i++) {
+            if (bytes[at + i] !== digest[i]) return false;
+        }
+        return true;
     }
 
     modified(slot: number): bigint {
-        return this.mods[slot];
+        return this.mods[slot * ROW_U64 + MOD_U64];
     }
 
-    set(
+    private copyHead(slot: number, out: Uint8Array) {
+        const bytes = this.bytes;
+        const at = slot * ROW_BYTES + HEAD_AT;
+        for (let i = 0; i < DIGEST_BYTES; i++) out[i] = bytes[at + i];
+    }
+
+    private writeRow(slot: number, digest: Uint8Array, modified: bigint) {
+        const bytes = this.bytes;
+        const at = slot * ROW_BYTES + HEAD_AT;
+        for (let i = 0; i < DIGEST_BYTES; i++) bytes[at + i] = digest[i];
+        this.mods[slot * ROW_U64 + MOD_U64] = modified;
+    }
+
+    /**
+     * Sets `id` to `digest` (its first 32 bytes) and `modified`; returns
+     * whether it replaced a row, whose head is then copied into `prev`.
+     */
+    put(
         id: IdKey,
         digest: Uint8Array,
-        modified: bigint
-    ): { prev?: Uint8Array; prevModified?: bigint } {
+        modified: bigint,
+        prev?: Uint8Array
+    ): boolean {
         if (digest.length < DIGEST_BYTES) {
             throw new Error(`expected a ${DIGEST_BYTES}-byte digest`);
         }
@@ -291,79 +330,104 @@ export class IdHeadMap {
         const hi = OUT[1];
         const i = this.find(lo, hi);
         if (i >= 0) {
-            const slot = this.table[i] - 1;
-            const prev = this.head(slot).slice();
-            const prevModified = this.mods[slot];
-            this.heads.set(
-                digest.subarray(0, DIGEST_BYTES),
-                slot * DIGEST_BYTES
-            );
-            this.mods[slot] = modified;
-            return { prev, prevModified };
+            const slot = this.table[2 * i] - 1;
+            if (prev) this.copyHead(slot, prev);
+            this.writeRow(slot, digest, modified);
+            return true;
         }
         if (this.count === this.capacity) {
-            this.grow();
+            this.resize(this.capacity * 2);
         }
         const slot = this.count++;
-        this.keyLo[slot] = lo;
-        this.keyHi[slot] = hi;
-        this.heads.set(digest.subarray(0, DIGEST_BYTES), slot * DIGEST_BYTES);
-        this.mods[slot] = modified;
-        this.insertKey(lo, hi, slot);
-        return {};
+        this.words[slot * ROW_WORDS] = lo;
+        this.words[slot * ROW_WORDS + 1] = hi;
+        this.writeRow(slot, digest, modified);
+        this.insertKey(lo, slot);
+        return false;
     }
 
-    delete(id: IdKey): { prev?: Uint8Array; prevModified?: bigint } {
+    /** `put`, returning copies of the replaced head and modified time. */
+    set(
+        id: IdKey,
+        digest: Uint8Array,
+        modified: bigint
+    ): { prev?: Uint8Array; prevModified?: bigint } {
+        const slot = this.get(id);
+        const prevModified = slot >= 0 ? this.modified(slot) : undefined;
+        const prev = new Uint8Array(DIGEST_BYTES);
+        return this.put(id, digest, modified, prev)
+            ? { prev, prevModified }
+            : {};
+    }
+
+    /**
+     * Deletes `id`; returns whether it held a row, whose head is then copied
+     * into `prev`.
+     */
+    remove(id: IdKey, prev?: Uint8Array): boolean {
         this.hash(id);
         let i = this.find(OUT[0], OUT[1]);
         if (i < 0) {
-            return {};
+            return false;
         }
-        const slot = this.table[i] - 1;
-        const prev = this.head(slot).slice();
-        const prevModified = this.mods[slot];
+        const table = this.table;
+        const mask = this.mask;
+        const slot = table[2 * i] - 1;
+        if (prev) this.copyHead(slot, prev);
         // Backward-shift deletion keeps linear probing free of tombstones.
-        this.table[i] = 0;
+        table[2 * i] = 0;
         let j = i;
         for (;;) {
-            j = (j + 1) & this.mask;
-            const entry = this.table[j];
+            j = (j + 1) & mask;
+            const entry = table[2 * j];
             if (entry === 0) {
                 break;
             }
-            const home = this.keyLo[entry - 1] & this.mask;
+            const home = table[2 * j + 1] & mask;
             const between =
                 i <= j ? i < home && home <= j : i < home || home <= j;
             if (!between) {
-                this.table[i] = entry;
-                this.table[j] = 0;
+                table[2 * i] = entry;
+                table[2 * i + 1] = table[2 * j + 1];
+                table[2 * j] = 0;
                 i = j;
             }
         }
-        // Keep the slot columns dense: move the last slot into the hole.
+        // Keep the rows dense: move the last row into the hole.
         const last = this.count - 1;
         if (slot !== last) {
-            const lo = this.keyLo[last];
-            const hi = this.keyHi[last];
-            const at = this.find(lo, hi);
-            this.table[at] = slot + 1;
-            this.keyLo[slot] = lo;
-            this.keyHi[slot] = hi;
-            this.heads.copyWithin(
-                slot * DIGEST_BYTES,
-                last * DIGEST_BYTES,
-                last * DIGEST_BYTES + DIGEST_BYTES
+            const words = this.words;
+            const at = this.find(
+                words[last * ROW_WORDS],
+                words[last * ROW_WORDS + 1]
             );
-            this.mods[slot] = this.mods[last];
+            table[2 * at] = slot + 1;
+            words.copyWithin(
+                slot * ROW_WORDS,
+                last * ROW_WORDS,
+                last * ROW_WORDS + ROW_WORDS
+            );
         }
         this.count--;
+        return true;
+    }
+
+    /** `remove`, returning copies of the removed head and modified time. */
+    delete(id: IdKey): { prev?: Uint8Array; prevModified?: bigint } {
+        const slot = this.get(id);
+        if (slot < 0) {
+            return {};
+        }
+        const prevModified = this.modified(slot);
+        const prev = new Uint8Array(DIGEST_BYTES);
+        this.remove(id, prev);
         return { prev, prevModified };
     }
 
     /** Calls `fn` with every live head (a view) and its modified time. */
     forEach(fn: (digest: Uint8Array, modified: bigint) => void) {
         for (let slot = 0; slot < this.count; slot++) {
-            fn(this.head(slot), this.mods[slot]);
+            fn(this.head(slot), this.modified(slot));
         }
     }
 
@@ -377,9 +441,9 @@ export class IdHeadMap {
     ) {
         for (let slot = 0; slot < this.count; slot++) {
             fn(
-                `${this.keyLo[slot]}:${this.keyHi[slot]}`,
+                `${this.words[slot * ROW_WORDS]}:${this.words[slot * ROW_WORDS + 1]}`,
                 this.head(slot),
-                this.mods[slot]
+                this.modified(slot)
             );
         }
     }
@@ -394,7 +458,7 @@ export class IdHeadMap {
     forEachAbove(hlc: bigint, fn?: (digest: Uint8Array) => void): number {
         let n = 0;
         for (let slot = 0; slot < this.count; slot++) {
-            if (this.mods[slot] > hlc) {
+            if (this.modified(slot) > hlc) {
                 n++;
                 fn?.(this.head(slot));
             }
@@ -412,15 +476,31 @@ export class IdHeadMap {
         const view = new DataView(out.buffer);
         out.set(this.seed, 0);
         view.setUint32(ID_SEED_BYTES, n, true);
+        const words = this.words;
+        const bytes = this.bytes;
         let o = ID_SEED_BYTES + 4;
         for (let slot = 0; slot < n; slot++, o += 8) {
-            view.setUint32(o, this.keyLo[slot], true);
-            view.setUint32(o + 4, this.keyHi[slot], true);
+            view.setUint32(o, words[slot * ROW_WORDS], true);
+            view.setUint32(o + 4, words[slot * ROW_WORDS + 1], true);
         }
-        out.set(this.heads.subarray(0, n * DIGEST_BYTES), o);
-        o += n * DIGEST_BYTES;
+        for (let slot = 0; slot < n; slot++) {
+            const w = slot * ROW_WORDS + HEAD_AT / 4;
+            // Memory order either way: the head is bytes.
+            for (let k = 0; k < 8; k++, o += 4) {
+                view.setUint32(o, words[w + k], HOST_LE);
+            }
+        }
         for (let slot = 0; slot < n; slot++, o += 8) {
-            view.setBigUint64(o, this.mods[slot], true);
+            if (HOST_LE) {
+                view.setUint32(o, words[slot * ROW_WORDS + MOD_WORD], true);
+                view.setUint32(
+                    o + 4,
+                    words[slot * ROW_WORDS + MOD_WORD + 1],
+                    true
+                );
+            } else {
+                view.setBigUint64(o, this.modified(slot), true);
+            }
         }
         return out;
     }
@@ -439,15 +519,12 @@ export class IdHeadMap {
             throw new Error("id map: length does not match its row count");
         }
         const map = new IdHeadMap(bytes.subarray(0, ID_SEED_BYTES));
-        while (map.capacity < n) {
-            map.capacity *= 2;
+        let capacity = map.capacity;
+        while (capacity < n) {
+            capacity *= 2;
         }
-        map.keyLo = new Uint32Array(map.capacity);
-        map.keyHi = new Uint32Array(map.capacity);
-        map.heads = new Uint8Array(map.capacity * DIGEST_BYTES);
-        map.mods = new BigUint64Array(map.capacity);
-        map.table = new Int32Array(map.capacity * 2);
-        map.mask = map.capacity * 2 - 1;
+        map.resize(capacity);
+        const words = map.words;
         let o = ID_SEED_BYTES + 4;
         for (let slot = 0; slot < n; slot++, o += 8) {
             const lo = view.getUint32(o, true);
@@ -455,15 +532,27 @@ export class IdHeadMap {
             if (map.find(lo, hi) >= 0) {
                 throw new Error("id map: duplicate key");
             }
-            map.keyLo[slot] = lo;
-            map.keyHi[slot] = hi;
-            map.insertKey(lo, hi, slot);
+            words[slot * ROW_WORDS] = lo;
+            words[slot * ROW_WORDS + 1] = hi;
+            map.insertKey(lo, slot);
             map.count = slot + 1;
         }
-        map.heads.set(bytes.subarray(o, o + n * DIGEST_BYTES));
-        o += n * DIGEST_BYTES;
+        for (let slot = 0; slot < n; slot++) {
+            const w = slot * ROW_WORDS + HEAD_AT / 4;
+            for (let k = 0; k < 8; k++, o += 4) {
+                words[w + k] = view.getUint32(o, HOST_LE);
+            }
+        }
         for (let slot = 0; slot < n; slot++, o += 8) {
-            map.mods[slot] = view.getBigUint64(o, true);
+            if (HOST_LE) {
+                words[slot * ROW_WORDS + MOD_WORD] = view.getUint32(o, true);
+                words[slot * ROW_WORDS + MOD_WORD + 1] = view.getUint32(
+                    o + 4,
+                    true
+                );
+            } else {
+                map.mods[slot * ROW_U64 + MOD_U64] = view.getBigUint64(o, true);
+            }
         }
         return map;
     }

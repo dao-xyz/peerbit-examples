@@ -12,13 +12,14 @@ import {
     anchorWorkerSource,
     type LaneSet,
 } from "../readiness/anchor-host.js";
-import { LANES } from "../readiness/constants.js";
+import { Cells } from "../readiness/cells.js";
+import { LANES, M } from "../readiness/constants.js";
 
 /**
  * The anchor host (M1 plan sections 4 and 8): sequence points, sub/add,
  * digestOf, restore, process lifetime (S14), intentional terminate,
  * respawn and rebuild from the slab after a crash, the inline fallback,
- * and the serialized worker source.
+ * and the serialized worker source; each for the cells a set keeps too.
  */
 
 const childPath = fileURLToPath(
@@ -42,7 +43,15 @@ const fresh = (elements: Uint8Array[]) => {
     return hex(math.digest(lanes, iv));
 };
 
-/** A live set with a slab, as a tap would hold it. */
+const cellSpec = { m: M, k0: 0x1234567, k1: -0x7654321 };
+/** The cells of a set built from scratch on the main thread (`Cells`). */
+const freshCells = (elements: Uint8Array[]) => {
+    const cells = new Cells(cellSpec.m, cellSpec.k0, cellSpec.k1);
+    for (const e of elements) cells.apply(e, 1);
+    return hex(cells.toBytes());
+};
+
+/** A live set with a slab and cells, as a tap would hold it. */
 const tracked = (host: AnchorHost) => {
     const live = new Map<string, Uint8Array>();
     const set: LaneSet = host.open(iv, {
@@ -50,6 +59,7 @@ const tracked = (host: AnchorHost) => {
             size: live.size,
             forEach: (fn) => live.forEach((digest) => fn(digest)),
         }),
+        cells: cellSpec,
     });
     return {
         set,
@@ -118,13 +128,23 @@ describe("readiness anchor host", () => {
         for (let i = 0; i < 1000; i++) add(elements[i]);
         // 1000 % 256 elements are still in the unflushed batch here.
         const first = set.digestNow();
+        const firstCells = set.cellsNow();
         for (let i = 1000; i < 1500; i++) add(elements[i]);
         remove(elements[0]);
         const second = set.digestNow();
+        const secondCells = set.cellsNow();
         expect(first.seq).toBe(1000);
         expect(second.seq).toBe(1501);
         expect(hex(await first.digest)).toBe(fresh(elements.slice(0, 1000)));
         expect(hex(await second.digest)).toBe(fresh(elements.slice(1, 1500)));
+        // The cells answer for the same sequence points.
+        expect(firstCells.seq).toBe(1000);
+        expect(hex(await firstCells.cells)).toBe(
+            freshCells(elements.slice(0, 1000))
+        );
+        expect(hex(await secondCells.cells)).toBe(
+            freshCells(elements.slice(1, 1500))
+        );
         // Lag drains to zero once the worker acknowledged everything.
         await vi.waitFor(() => expect(set.lag()).toBe(0), { timeout: 5_000 });
         expect(host.stats.lagHighWater).toBeGreaterThan(0);
@@ -167,10 +187,15 @@ describe("readiness anchor host", () => {
         for (const e of elements.slice(0, 200)) a.add(e);
         const { seq, lanes } = a.set.lanesNow();
         const bytes = await lanes;
+        const cells = await a.set.cellsNow().cells;
         expect(seq).toBe(200);
         expect(bytes.length).toBe(LANES * 4);
+        expect(cells.length).toBe(M * 44);
 
-        const b = host.open(iv, { restore: { lanes: bytes, seq } });
+        const b = host.open(iv, {
+            restore: { lanes: bytes, cells, seq },
+            cells: cellSpec,
+        });
         sets.push(b);
         expect(b.seq).toBe(200);
         expect(hex(await b.digestNow().digest)).toBe(
@@ -179,12 +204,27 @@ describe("readiness anchor host", () => {
         for (const e of elements.slice(200)) b.apply(e, 1);
         expect(b.seq).toBe(300);
         expect(hex(await b.digestNow().digest)).toBe(fresh(elements));
-        // Restore only fits an untouched set.
+        expect(hex(await b.cellsNow().cells)).toBe(freshCells(elements));
+        // Restore only fits an untouched set, and cells only a set that
+        // keeps them, at their size.
         expect(() => b.restore(bytes, 5)).toThrow();
+        expect(() =>
+            host.open(iv, { restore: { lanes: bytes, cells, seq } })
+        ).toThrow(/no cells/);
+        expect(() =>
+            host.open(iv, {
+                restore: { lanes: bytes, cells: cells.subarray(44), seq },
+                cells: cellSpec,
+            })
+        ).toThrow(/bytes of cells/);
+        const plain = host.open(iv);
+        sets.push(plain);
+        await expect(plain.cellsNow().cells).rejects.toThrow(/no cells/);
 
         b.reset(400);
         expect(b.seq).toBe(400);
         expect(hex(await b.digestNow().digest)).toBe(fresh([]));
+        expect(hex(await b.cellsNow().cells)).toBe(freshCells([]));
     });
 
     it("terminates the worker after the last set closes and never respawns", async () => {
@@ -255,6 +295,9 @@ describe("readiness anchor host", () => {
         expect(hex(await a.set.digestNow().digest)).toBe(
             fresh(elements.slice(1, 400))
         );
+        expect(hex(await a.set.cellsNow().cells)).toBe(
+            freshCells(elements.slice(1, 400))
+        );
         b.add(element(5000));
         expect(hex(await b.set.digestNow().digest)).toBe(
             fresh([...elements.slice(400), element(5000)])
@@ -277,6 +320,9 @@ describe("readiness anchor host", () => {
         a.add(element(6000));
         expect(hex(await a.set.digestNow().digest)).toBe(
             fresh([...elements.slice(1, 400), element(6000)])
+        );
+        expect(hex(await a.set.cellsNow().cells)).toBe(
+            freshCells([...elements.slice(1, 400), element(6000)])
         );
     });
 
@@ -319,6 +365,9 @@ describe("readiness anchor host", () => {
         );
         expect(hex(await b.set.digestNow().digest)).toBe(
             fresh(elements.slice(3))
+        );
+        expect(hex(await b.set.cellsNow().cells)).toBe(
+            freshCells(elements.slice(3))
         );
     });
 
@@ -373,8 +422,8 @@ describe("readiness anchor host", () => {
         const worker = await newHost();
         const inline = await newHost("inline");
         expect(inline.mode).toBe("inline");
-        const w = worker.open(iv);
-        const i = inline.open(iv);
+        const w = worker.open(iv, { cells: cellSpec });
+        const i = inline.open(iv, { cells: cellSpec });
         sets.push(w, i);
         const elements = Array.from({ length: 700 }, (_, n) => element(n));
         for (const e of elements) {
@@ -392,6 +441,12 @@ describe("readiness anchor host", () => {
         );
         expect(hex(await i.lanesNow().lanes)).toBe(
             hex(await w.lanesNow().lanes)
+        );
+        expect(hex(await i.cellsNow().cells)).toBe(
+            hex(await w.cellsNow().cells)
+        );
+        expect(hex(await i.cellsNow().cells)).toBe(
+            freshCells(elements.slice(100))
         );
         expect(i.lag()).toBe(0);
         expect(inline.workerRunning).toBe(false);
@@ -427,13 +482,17 @@ describe("readiness anchor host", () => {
         const buf = new Uint8Array(3 * 33);
         elements.forEach((e, n) => buf.set(e, 32 * n));
         buf.fill(1, 96);
-        listener!({ type: "init", set: 1, iv, seq: 0 });
+        listener!({ type: "init", set: 1, iv, seq: 0, cells: cellSpec });
         listener!({ type: "batch", set: 1, buf: buf.buffer, n: 3, seqEnd: 3 });
         listener!({ type: "digestNow", id: 7, set: 1, seq: 3 });
         listener!({ type: "digestNow", id: 8, set: 1, seq: 2 });
+        listener!({ type: "cells", id: 9, set: 1, seq: 3 });
         const digest = replies.find((reply) => reply.id === 7);
         expect(digest.type).toBe("digest");
         expect(hex(digest.digest)).toBe(fresh(elements));
+        const cells = replies.find((reply) => reply.id === 9);
+        expect(cells.type).toBe("cells");
+        expect(hex(cells.cells)).toBe(freshCells(elements));
         // An out-of-step request is refused, never answered for another set.
         expect(replies.find((reply) => reply.id === 8).type).toBe("error");
     });

@@ -4,7 +4,8 @@ import {
     type AnchorMath,
 } from "./anchor.js";
 import { anchorWorkerMain } from "./anchor-worker.js";
-import { DIGEST_BYTES, LANES } from "./constants.js";
+import { createCellsMath, type CellsMath } from "./cells.js";
+import { CELL_BYTES, DIGEST_BYTES, LANES } from "./constants.js";
 
 /**
  * The process-wide anchor host (M1 plan section 4). One worker thread per
@@ -17,17 +18,25 @@ import { DIGEST_BYTES, LANES } from "./constants.js";
  *   (`seq`). Elements are batched (flushed on a microtask or at 256) and a
  *   request flushes the pending batch before it is posted, so the worker
  *   answers for exactly the current `seq`; the API takes no seq argument.
+ * - **Cells.** A lane set opened with a cell key also keeps the scope's
+ *   maintained cells, next to its lanes and from the same batches (the
+ *   tap's main thread then only decodes and updates its id map). Requests
+ *   posted in one synchronous step (`digestNow`, `cellsNow`, `lanesNow`)
+ *   answer for the same `seq`, so a freeze or a persisted state holds cells
+ *   and anchor of one epoch.
  * - **Process lifetime (S14).** The worker is unref'ed while no request is
- *   outstanding and ref'ed while any `digestNow`, `digestOf` or `lanesNow`
- *   is pending, so a one-shot process cannot exit before persistence gets
- *   its lanes, and an idle host never keeps a process alive.
+ *   outstanding and ref'ed while any `digestNow`, `digestOf`, `lanesNow` or
+ *   `cellsNow` is pending, so a one-shot process cannot exit before
+ *   persistence gets its lanes and cells, and an idle host never keeps a
+ *   process alive.
  * - **Failure.** On a worker `error`, `messageerror` or unintended `exit`,
  *   pending requests reject with `EAGAIN`, the worker is respawned once and
- *   every lane set of the process is rebuilt from its tap's id-map slab
- *   (posted before any later batch, so ordering holds). A second failure
- *   within 10 minutes switches the process to the inline fallback.
- * - **Inline fallback.** The same math (anchor.ts) on the main thread
- *   through the same interface: used without `worker_threads`, after
+ *   every lane set of the process (lanes and cells) is rebuilt from its
+ *   tap's id-map slab (posted before any later batch, so ordering holds). A
+ *   second failure within 10 minutes switches the process to the inline
+ *   fallback.
+ * - **Inline fallback.** The same math (anchor.ts, cells.ts) on the main
+ *   thread through the same interface: used without `worker_threads`, after
  *   repeated failure, and by unit tests. Degraded (M0 P4: the expansion's
  *   4 KiB allocation is slow on a large main heap) and reported by `mode`.
  * - **Shutdown.** Refcounted by lane sets: when the last one closes (and no
@@ -49,11 +58,23 @@ export interface LaneSlab {
     forEach(fn: (digest: Uint8Array) => void): void;
 }
 
+/** The cells a lane set keeps: m cells under the cell key (k0, k1). */
+export interface LaneSetCells {
+    m: number;
+    k0: number;
+    k1: number;
+}
+
 export interface LaneSetOptions {
-    /** Persisted lanes (1,024 little-endian u32) and their sequence number. */
-    restore?: { lanes: Uint8Array; seq: number };
+    /**
+     * Persisted lanes (1,024 little-endian u32), the cells in the wire layout
+     * when the set keeps them, and their sequence number.
+     */
+    restore?: { lanes: Uint8Array; cells?: Uint8Array; seq: number };
     /** The current live set, read at rebuild time (the tap's id map). */
     slab?: () => LaneSlab;
+    /** Keep the maintained cells too (`cellsNow`). */
+    cells?: LaneSetCells;
 }
 
 export interface AnchorHostStats {
@@ -98,6 +119,8 @@ type PendingRequest = {
     reject(error: unknown): void;
 };
 
+type RequestType = "digestNow" | "digestOf" | "lanes" | "cells";
+
 /**
  * The eval source of the worker. The `__name` shim keeps the serialized
  * functions valid when a transform (tsx, esbuild `keepNames`) wrapped inner
@@ -108,7 +131,7 @@ export const anchorWorkerSource = () =>
         '"use strict";',
         "var __name = (fn, _value) => fn;",
         'const { parentPort } = require("node:worker_threads");',
-        `(${anchorWorkerMain.toString()})(parentPort, (${createAnchorMath.toString()})(require("node:crypto")));`,
+        `(${anchorWorkerMain.toString()})(parentPort, (${createAnchorMath.toString()})(require("node:crypto")), (${createCellsMath.toString()})());`,
     ].join("\n");
 
 const packDigests = (digests: Uint8Array[] | undefined) => {
@@ -141,6 +164,8 @@ export class LaneSet {
     };
     /** Inline lanes (inline mode only). */
     lanes?: Uint32Array;
+    /** Inline cells (inline mode only, when the set keeps cells). */
+    cellsInline?: Uint32Array;
     private closedValue = false;
     private applied = false;
     /** Set when a respawn could not rebuild this set (no slab). */
@@ -151,7 +176,9 @@ export class LaneSet {
         private readonly host: AnchorHost,
         readonly iv: Uint8Array,
         readonly slab: (() => LaneSlab) | undefined,
-        seq: number
+        seq: number,
+        /** The cells this set keeps, if any. */
+        readonly cells?: LaneSetCells
     ) {
         this.seqValue = seq;
         this.acked = seq;
@@ -190,17 +217,19 @@ export class LaneSet {
     }
 
     /**
-     * Adopts persisted lanes at `seq`. Only on a fresh set: nothing may have
-     * been applied yet, since the restored lanes replace the whole set.
+     * Adopts persisted lanes (and cells, for a set that keeps them) at
+     * `seq`. Only on a fresh set: nothing may have been applied yet, since
+     * the restored state replaces the whole set.
      */
-    restore(lanes: Uint8Array, seq: number) {
+    restore(lanes: Uint8Array, seq: number, cells?: Uint8Array) {
         if (this.closedValue) return;
         if (this.applied) {
             throw new Error("restore needs an untouched lane set");
         }
+        this.host.checkInit(this, lanes, cells);
         this.seqValue = seq;
         this.acked = seq;
-        this.host.initSet(this, lanes);
+        this.host.initSet(this, lanes, cells);
     }
 
     /**
@@ -238,6 +267,22 @@ export class LaneSet {
     lanesNow(): { seq: number; lanes: Promise<Uint8Array> } {
         const seq = this.seqValue;
         return { seq, lanes: this.host.request(this, "lanes", { seq }) };
+    }
+
+    /**
+     * Every cell in the wire layout (m x 44 B, `encodeCells`) at the current
+     * seq. Synchronous up to the post like `digestNow`: both called in one
+     * synchronous step answer for the same seq.
+     */
+    cellsNow(): { seq: number; cells: Promise<Uint8Array> } {
+        const seq = this.seqValue;
+        if (!this.cells) {
+            return {
+                seq,
+                cells: Promise.reject(new Error("lane set keeps no cells")),
+            };
+        }
+        return { seq, cells: this.host.request(this, "cells", { seq }) };
     }
 
     /** Elements posted or pending that the worker has not acknowledged. */
@@ -384,6 +429,9 @@ export class AnchorHost {
     private rebuilding = false;
     private rebuildAgain = false;
 
+    /** The cells upkeep (inline mode; the worker embeds the same code). */
+    readonly cellsMath: CellsMath = createCellsMath();
+
     private constructor(
         readonly math: AnchorMath,
         private readonly workerConstructor: WorkerConstructor | undefined,
@@ -421,25 +469,60 @@ export class AnchorHost {
         if (iv.length !== 16) {
             throw new Error("anchor domain tag must be 16 bytes");
         }
-        const set = new LaneSet(this, Uint8Array.from(iv), options.slab, 0);
+        const set = new LaneSet(
+            this,
+            Uint8Array.from(iv),
+            options.slab,
+            0,
+            options.cells && { ...options.cells }
+        );
+        // A restore that does not fit never registers the set.
+        if (options.restore) {
+            this.checkInit(set, options.restore.lanes, options.restore.cells);
+        }
         this.sets.set(set.id, set);
         if (options.restore) {
-            set.restore(options.restore.lanes, options.restore.seq);
+            set.restore(
+                options.restore.lanes,
+                options.restore.seq,
+                options.restore.cells
+            );
         } else {
             this.initSet(set);
         }
         return set;
     }
 
-    /** @internal Posts (or sets inline) a set's lanes: empty or restored. */
-    initSet(set: LaneSet, lanes?: Uint8Array) {
+    /** @internal Throws unless `lanes` and `cells` fit `set`. */
+    checkInit(set: LaneSet, lanes?: Uint8Array, cells?: Uint8Array) {
         if (lanes && lanes.length !== LANES * 4) {
             throw new Error(`expected ${LANES * 4} bytes of lanes`);
         }
+        if (cells && !set.cells) {
+            throw new Error("lane set keeps no cells");
+        }
+        if (cells && cells.length !== set.cells!.m * CELL_BYTES) {
+            throw new Error(
+                `expected ${set.cells!.m * CELL_BYTES} bytes of cells, got ${cells.length}`
+            );
+        }
+    }
+
+    /**
+     * @internal Posts (or sets inline) a set's lanes and cells: empty or
+     * restored.
+     */
+    initSet(set: LaneSet, lanes?: Uint8Array, cells?: Uint8Array) {
+        const spec = set.cells;
         if (this.modeValue === "inline") {
             set.lanes = lanes
                 ? this.math.bytesToLanes(lanes)
                 : new Uint32Array(LANES);
+            set.cellsInline = spec
+                ? cells
+                    ? this.cellsMath.fromBytes(cells)
+                    : this.cellsMath.create(spec.m)
+                : undefined;
             return;
         }
         this.post({
@@ -448,14 +531,32 @@ export class AnchorHost {
             iv: set.iv,
             seq: set.seq,
             lanes: lanes ? lanes.slice() : undefined,
+            cells: spec && {
+                ...spec,
+                bytes: cells ? cells.slice() : undefined,
+            },
         });
+    }
+
+    /** Inline: one element into a set's lanes and cells. */
+    private applyInline(set: LaneSet, digest: Uint8Array, sign: 1 | -1) {
+        this.math.applyMany(set.lanes!, set.iv, digest, sign);
+        if (set.cellsInline) {
+            this.cellsMath.applyMany(
+                set.cellsInline,
+                set.cells!.k0,
+                set.cells!.k1,
+                digest,
+                sign
+            );
+        }
     }
 
     /** @internal */
     enqueue(set: LaneSet, digest: Uint8Array, sign: 1 | -1) {
         this.stats.elements++;
         if (this.modeValue === "inline") {
-            this.math.applyMany(set.lanes!, set.iv, digest, sign);
+            this.applyInline(set, digest, sign);
             set.noteAck(set.seq);
             return;
         }
@@ -495,7 +596,7 @@ export class AnchorHost {
     /** @internal Sends one request for `set`; settles with the reply. */
     request(
         set: LaneSet,
-        type: "digestNow" | "digestOf" | "lanes",
+        type: RequestType,
         body: {
             seq?: number;
             sub?: Uint8Array;
@@ -537,11 +638,15 @@ export class AnchorHost {
 
     private answerInline(
         set: LaneSet,
-        type: "digestNow" | "digestOf" | "lanes",
+        type: RequestType,
         body: { sub?: Uint8Array; add?: Uint8Array; buf?: Uint8Array }
     ): Uint8Array {
         if (type === "lanes") {
             return this.math.lanesToBytes(set.lanes!);
+        }
+        if (type === "cells") {
+            if (!set.cellsInline) throw new Error("lane set keeps no cells");
+            return this.cellsMath.toBytes(set.cellsInline);
         }
         const lanes =
             type === "digestOf" ? new Uint32Array(LANES) : set.lanes!.slice();
@@ -635,7 +740,11 @@ export class AnchorHost {
         } else {
             request.resolve(
                 new Uint8Array(
-                    message.type === "lanes" ? message.lanes : message.digest
+                    message.type === "lanes"
+                        ? message.lanes
+                        : message.type === "cells"
+                          ? message.cells
+                          : message.digest
                 )
             );
         }
@@ -725,9 +834,7 @@ export class AnchorHost {
             this.initSet(set);
             if (this.modeValue !== mode) return;
             if (mode === "inline") {
-                slab.forEach((digest) =>
-                    this.math.applyMany(set.lanes!, set.iv, digest, 1)
-                );
+                slab.forEach((digest) => this.applyInline(set, digest, 1));
                 continue;
             }
             const buf = new Uint8Array(REBUILD_BATCH_ELEMENTS * DIGEST_BYTES);

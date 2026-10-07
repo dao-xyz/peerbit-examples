@@ -1,10 +1,13 @@
 import type { AnchorMath } from "./anchor.js";
+import type { CellsMath } from "./cells.js";
 
 /**
  * The anchor worker (M1 plan section 4): one thread per process holds the
  * lanes of every lane set, so the 4 KiB expansion of each element stays off
  * the main heap (M0 P4: 2.2-2.9 µs per element in a worker at any main heap
- * size, against 20-52 µs inline at a 1.9 GB heap).
+ * size, against 20-52 µs inline at a 1.9 GB heap), and the maintained cells
+ * of every set that keeps them, so their 180 KB stay out of the main
+ * thread's caches (cells.ts `createCellsMath`).
  *
  * `anchorWorkerMain` is serialized with `toString()` into an eval worker
  * (anchor-host.ts), so it must stay self-contained: no imports, no outer
@@ -12,9 +15,9 @@ import type { AnchorMath } from "./anchor.js";
  * posted after a batch sees that batch applied.
  *
  * Main -> worker: `init`, `batch` (n x 32 digests followed by n signs, one
- * transferred buffer), `digestNow`, `digestOf`, `lanes`, `drop`, and `crash`
- * (tests only). Worker -> main: `ack` (every 16 batches and when the queue
- * empties), `digest`, `lanes` (transferred), `error`.
+ * transferred buffer), `digestNow`, `digestOf`, `lanes`, `cells`, `drop`,
+ * and `crash` (tests only). Worker -> main: `ack` (every 16 batches and when
+ * the queue empties), `digest`, `lanes` and `cells` (transferred), `error`.
  */
 
 /** The `parentPort` surface the worker uses. */
@@ -23,11 +26,24 @@ export interface AnchorWorkerPort {
     postMessage(message: any, transfer?: any[]): void;
 }
 
-export function anchorWorkerMain(port: AnchorWorkerPort, math: AnchorMath) {
+export function anchorWorkerMain(
+    port: AnchorWorkerPort,
+    math: AnchorMath,
+    cellsMath: CellsMath
+) {
     const ACK_EVERY = 16;
     const sets = new Map<
         number,
-        { iv: Uint8Array; lanes: Uint32Array; seq: number; batches: number }
+        {
+            iv: Uint8Array;
+            lanes: Uint32Array;
+            /** The maintained cells and their key, when the set keeps them. */
+            cells?: Uint32Array;
+            k0: number;
+            k1: number;
+            seq: number;
+            batches: number;
+        }
     >();
     const unacked = new Set<number>();
     let flushScheduled = false;
@@ -64,9 +80,17 @@ export function anchorWorkerMain(port: AnchorWorkerPort, math: AnchorMath) {
                 const lanes = message.lanes
                     ? math.bytesToLanes(message.lanes)
                     : new Uint32Array(math.lanes);
+                const cells = message.cells;
                 sets.set(message.set, {
                     iv: message.iv,
                     lanes,
+                    cells: cells
+                        ? cells.bytes
+                            ? cellsMath.fromBytes(cells.bytes)
+                            : cellsMath.create(cells.m)
+                        : undefined,
+                    k0: cells ? cells.k0 : 0,
+                    k1: cells ? cells.k1 : 0,
                     seq: message.seq,
                     batches: 0,
                 });
@@ -76,13 +100,18 @@ export function anchorWorkerMain(port: AnchorWorkerPort, math: AnchorMath) {
                 const set = sets.get(message.set);
                 if (!set) return;
                 const n = message.n;
-                const bytes = new Uint8Array(message.buf);
-                math.applyMany(
-                    set.lanes,
-                    set.iv,
-                    bytes.subarray(0, 32 * n),
-                    new Int8Array(message.buf, 32 * n, n)
-                );
+                const digests = new Uint8Array(message.buf, 0, 32 * n);
+                const signs = new Int8Array(message.buf, 32 * n, n);
+                math.applyMany(set.lanes, set.iv, digests, signs);
+                if (set.cells) {
+                    cellsMath.applyMany(
+                        set.cells,
+                        set.k0,
+                        set.k1,
+                        digests,
+                        signs
+                    );
+                }
                 set.seq = message.seqEnd;
                 unacked.add(message.set);
                 if (++set.batches >= ACK_EVERY) ack(message.set);
@@ -122,6 +151,17 @@ export function anchorWorkerMain(port: AnchorWorkerPort, math: AnchorMath) {
                     const bytes = math.lanesToBytes(set.lanes);
                     port.postMessage(
                         { type: "lanes", id: message.id, lanes: bytes },
+                        [bytes.buffer]
+                    );
+                });
+            case "cells":
+                return atSeq(message, (set) => {
+                    if (!set.cells) {
+                        return fail(message.id, "lane set keeps no cells");
+                    }
+                    const bytes = cellsMath.toBytes(set.cells);
+                    port.postMessage(
+                        { type: "cells", id: message.id, cells: bytes },
                         [bytes.buffer]
                     );
                 });

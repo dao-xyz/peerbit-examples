@@ -439,8 +439,18 @@ const compareBuilds = async (
     rows: ScannedRow[],
     indexed: number
 ): Promise<string | undefined> => {
-    const { tap, cells, laneSet } = state;
+    const { tap, laneSet } = state;
     const problems: string[] = [];
+    // Posted at this synchronous point: both answer for the tap's epoch.
+    const maintained =
+        laneSet.seq === tap.epoch
+            ? {
+                  digest: laneSet.digestNow().digest,
+                  cells: laneSet.cellsNow().cells,
+              }
+            : undefined;
+    maintained?.digest.catch(() => {});
+    maintained?.cells.catch(() => {});
     const fresh = new Cells(M, cellKey[0], cellKey[1]);
     const list = new Uint8Array(rows.length * DIGEST_BYTES);
     let hlc = 0n;
@@ -457,15 +467,11 @@ const compareBuilds = async (
     if (tap.hlc < hlc) {
         problems.push(`hlc ${tap.hlc} below the index's ${hlc}`);
     }
-    if (!sameBytes(cells.toBytes(), fresh.toBytes())) {
-        problems.push("cells differ");
-    }
-    const maintained =
-        laneSet.seq === tap.epoch ? laneSet.digestNow() : undefined;
     if (!maintained) {
         problems.push(`lane set at ${laneSet.seq}, tap at ${tap.epoch}`);
+    } else if (!sameBytes(await maintained.cells, fresh.toBytes())) {
+        problems.push("cells differ");
     }
-    maintained?.digest.catch(() => {});
     const scanned = await laneSet.digestOf(list);
     if (maintained && !sameBytes(await maintained.digest, scanned)) {
         problems.push("anchor differs");

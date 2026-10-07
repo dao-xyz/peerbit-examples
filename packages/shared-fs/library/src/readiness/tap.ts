@@ -31,6 +31,7 @@ import type { ScopeDescriptor } from "./scopes.js";
 
 /** Receives every element change, in order. */
 export interface ScopeSink {
+    /** `digest` is valid during the call only: the tap reuses it. */
     apply(digest: Uint8Array, sign: 1 | -1): void;
     /** Drops everything applied so far (a discarded restore). */
     reset?(): void;
@@ -128,13 +129,6 @@ const toBigInt = (value: unknown): bigint =>
 
 const keyString = (key: IdKey) =>
     typeof key === "string" ? key : "b:" + toBase64(key);
-
-const sameDigest = (a: Uint8Array, b: Uint8Array) => {
-    for (let i = 0; i < DIGEST_BYTES; i++) {
-        if (a[i] !== b[i]) return false;
-    }
-    return true;
-};
 
 /** The raw index of a store (`Documents.index.index`), read at call time. */
 const rawIndex = (documents: Pick<DocumentsLike<any, any>, "index">) => {
@@ -247,7 +241,9 @@ export class ScopeTap {
     private countTimer?: ReturnType<typeof setTimeout>;
     /** Called with every id an event or a verify names (the shadow check). */
     private readonly watchers: Array<(key: IdKey) => void> = [];
+    /** The element an event names, and the head it replaced or removed. */
     private readonly digest = new Uint8Array(DIGEST_BYTES);
+    private readonly prev = new Uint8Array(DIGEST_BYTES);
 
     constructor(
         readonly scope: ScopeDescriptor,
@@ -427,10 +423,10 @@ export class ScopeTap {
             let stale = head === undefined;
             if (head !== undefined) {
                 headDigestInto(head, this.digest);
-                stale = !sameDigest(this.digest, this.map.head(slot));
+                stale = !this.map.headEquals(slot, this.digest);
             }
-            const { prev } = this.map.delete(key);
-            this.emit(prev!, -1);
+            this.map.remove(key, this.prev);
+            this.emit(this.prev, -1);
             this.stats.removes++;
             if (stale) {
                 this.stats.staleRemoves++;
@@ -463,13 +459,13 @@ export class ScopeTap {
     ): "same" | "added" | "replaced" {
         headDigestInto(head, this.digest);
         const slot = this.map.get(key);
-        if (slot >= 0 && sameDigest(this.digest, this.map.head(slot))) {
+        if (slot >= 0 && this.map.headEquals(slot, this.digest)) {
             this.stats.idempotentSkips++;
             return "same";
         }
-        const { prev } = this.map.set(key, this.digest, modified);
-        if (prev) {
-            this.emit(prev, -1);
+        const replaced = this.map.put(key, this.digest, modified, this.prev);
+        if (replaced) {
+            this.emit(this.prev, -1);
             this.stats.replaces++;
         } else {
             this.stats.adds++;
@@ -478,10 +474,10 @@ export class ScopeTap {
         if (modified > this.hlc) {
             this.hlc = modified;
         }
-        if (prev && verifyReplace) {
+        if (replaced && verifyReplace) {
             this.scheduleVerify(key);
         }
-        return prev ? "replaced" : "added";
+        return replaced ? "replaced" : "added";
     }
 
     private scheduleVerify(key: IdKey) {
@@ -553,9 +549,8 @@ export class ScopeTap {
 
     private reconcile(key: IdKey, indexed: IndexedHead | undefined) {
         if (indexed === undefined) {
-            if (this.map.get(key) >= 0) {
-                const { prev } = this.map.delete(key);
-                this.emit(prev!, -1);
+            if (this.map.remove(key, this.prev)) {
+                this.emit(this.prev, -1);
                 this.stats.repairs++;
             }
             return;

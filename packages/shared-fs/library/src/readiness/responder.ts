@@ -1,8 +1,8 @@
 import type { PublicSignKey } from "@peerbit/crypto";
 import { toHexString } from "@peerbit/crypto";
 import { AnchorUnavailableError, type LaneSet } from "./anchor-host.js";
-import { encodeCells, type Cells } from "./cells.js";
 import {
+    CELL_BYTES,
     DIGEST_BYTES,
     LIST_PAGE_HASHES,
     M,
@@ -43,9 +43,10 @@ import {
  * full or partial, and reports its provenance honestly.
  *
  * - **Snapshots.** One per scope and epoch, shared by every session opened
- *   at that epoch: a cells copy, the count, `hlc`, and D_R from the lane
- *   set's `digestNow()`, all taken in one synchronous step at a point where
- *   the scope's replace-verify queue is empty (S10, deviation k). The trust
+ *   at that epoch: the count, `hlc`, and the cells and D_R from the lane
+ *   set's `cellsNow()` and `digestNow()`, all taken in one synchronous step
+ *   at a point where the scope's replace-verify queue is empty (S10,
+ *   deviation k), so the worker answers both for that epoch. The trust
  *   scope is frozen after the namespace scope.
  * - **Sessions** are keyed by (peer, sessionId). Every attempt of a session
  *   gets the same snapshot and the same provenance, read in the synchronous
@@ -85,7 +86,7 @@ import {
 export interface ResponderScope {
     readonly descriptor: ScopeDescriptor;
     readonly tap: ScopeTap;
-    readonly cells: Cells;
+    /** The anchor lanes and the cells (`cellsNow`). */
     readonly laneSet: LaneSet;
     /** The 32-byte id of the scope's log. */
     readonly logId: Uint8Array;
@@ -132,9 +133,10 @@ interface Snapshot {
     /** The tap's map at the freeze: a restore or reseed replaces it. */
     readonly map: object;
     readonly epoch: number;
-    readonly cells: Cells;
     readonly count: number;
     readonly hlc: bigint;
+    /** Every cell in the wire layout (m x 44 B). */
+    readonly cells: Promise<Uint8Array>;
     readonly anchor: Promise<Uint8Array>;
     /** `above` per `hlcProved`, counted once at this epoch (O(n) each). */
     readonly above: Map<bigint, number>;
@@ -146,6 +148,8 @@ interface FrozenScope {
     /** Read with the session's first snapshot; every header sends it. */
     readonly provenance: ProvenanceState;
     readonly anchor: Uint8Array;
+    /** The snapshot's cells in the wire layout (m x 44 B). */
+    readonly cells: Uint8Array;
     /** Rows newer than the session's `hlcProved` (0 when it is 0). */
     readonly above: number;
     /** The snapshot's hash list (list-mode sessions only). */
@@ -504,7 +508,7 @@ export class Responder {
         let cells: Uint8Array | undefined;
         if (gapEst > 0 && gapEst <= T_SYNC) {
             const n = Math.min(PUSH_MAX, firstCells(gapEst));
-            cells = encodeCells(snapshot.cells, 0, n);
+            cells = frozen.cells.slice(0, n * CELL_BYTES);
             this.stats.pushedCells += n;
         }
         this.stats.headers++;
@@ -548,7 +552,10 @@ export class Responder {
         scopes: ResponderScope[]
     ): Promise<FrozenScope[] | ErrorCode | typeof RETRY> {
         const out: Array<
-            Omit<FrozenScope, "anchor"> & { anchor?: Uint8Array }
+            Omit<FrozenScope, "anchor" | "cells"> & {
+                anchor?: Uint8Array;
+                cells?: Uint8Array;
+            }
         > = [];
         let provenance: ProvenanceState | undefined;
         try {
@@ -585,6 +592,7 @@ export class Responder {
             }
             for (const frozen of out) {
                 frozen.anchor = await frozen.snapshot.anchor;
+                frozen.cells = await frozen.snapshot.cells;
             }
         } catch (error) {
             for (const frozen of out) {
@@ -642,15 +650,18 @@ export class Responder {
             );
             throw new Refused(ERROR_CODE.BUSY);
         }
+        // One synchronous step: both answer for this epoch.
         const { digest } = laneSet.digestNow();
-        // Never unhandled: the freeze awaits it.
+        const { cells } = laneSet.cellsNow();
+        // Never unhandled: the freeze awaits them.
         digest.catch(() => {});
+        cells.catch(() => {});
         const snapshot: Snapshot = {
             map: tap.map,
             epoch: tap.epoch,
-            cells: scope.cells.copy(),
             count: tap.count,
             hlc: tap.hlc,
+            cells,
             anchor: digest,
             above: new Map(),
         };
@@ -709,10 +720,9 @@ export class Responder {
                 scope: request.scope,
                 logId: frozen.scope.logId,
                 from: request.from,
-                cells: encodeCells(
-                    frozen.snapshot.cells,
-                    request.from,
-                    request.to
+                cells: frozen.cells.slice(
+                    request.from * CELL_BYTES,
+                    request.to * CELL_BYTES
                 ),
             }),
             from

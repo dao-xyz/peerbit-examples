@@ -2,7 +2,7 @@ import { randomBytes } from "@peerbit/crypto";
 import { describe, expect, it } from "vitest";
 import { NamingEvent } from "../model.js";
 import { AnchorHost } from "../readiness/anchor-host.js";
-import { Cells, cellKey } from "../readiness/cells.js";
+import { cellKey } from "../readiness/cells.js";
 import { DIGEST_BYTES, M } from "../readiness/constants.js";
 import { digestToHead } from "../readiness/digest.js";
 import type { IdKey } from "../readiness/id-map.js";
@@ -58,10 +58,11 @@ const scope = async () => {
     };
     const tap = new ScopeTap(NAMESPACE_V1, port);
     const key = cellKey("shadow-test");
-    const cells = new Cells(M, key[0], key[1]);
     const host = await AnchorHost.create({ mode: "inline" });
-    const laneSet = host.open(NAMESPACE_V1.ivTag, { slab: () => tap.map });
-    tap.addSink(cells);
+    const laneSet = host.open(NAMESPACE_V1.ivTag, {
+        slab: () => tap.map,
+        cells: { m: M, k0: key[0], k1: key[1] },
+    });
     tap.addSink({
         apply: (digest, sign) => laneSet.apply(digest, sign),
         reset: () => laneSet.reset(tap.epoch),
@@ -70,7 +71,6 @@ const scope = async () => {
     const state = {
         descriptor: NAMESPACE_V1,
         tap,
-        cells,
         laneSet,
         logId: new Uint8Array(32),
         started: Promise.resolve(),
@@ -252,6 +252,20 @@ describe("readiness shadow verdict", () => {
         expect((outcome as any).difference).toMatch(
             /count 5, index 6 \(delta -1\); 1 rows differ \(missing [0-9a-f]{16}\)/
         );
+        s.close();
+    });
+
+    it("reports cells the lane set keeps that no longer match its rows", async () => {
+        const s = await scope();
+        for (let i = 0; i < 5; i++) s.arrive(`n${i}`);
+        // Every row matches; only the cells (here inline, in a worker
+        // otherwise) drifted.
+        s.state.laneSet.cellsInline![0] ^= 1;
+        const outcome = await compareScope(s.state, s.key);
+        expect(outcome).toMatchObject({
+            kind: "different",
+            difference: "cells differ",
+        });
         s.close();
     });
 

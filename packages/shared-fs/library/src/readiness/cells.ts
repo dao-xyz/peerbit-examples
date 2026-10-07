@@ -170,6 +170,154 @@ export const cellIndices = (
     return indices;
 };
 
+/** The maintained cells of a lane set (anchor-host.ts). */
+export interface CellsMath {
+    /** Empty cells: m cells of 11 u32 each, in the wire order. */
+    create(m: number): Uint32Array;
+    /** Adds (+1) or removes (-1) the `n` 32-byte digests at `buf`. */
+    applyMany(
+        cells: Uint32Array,
+        k0: number,
+        k1: number,
+        buf: Uint8Array,
+        signs: Int8Array | number
+    ): void;
+    /** All cells in the wire layout (a copy; `encodeCells` of every cell). */
+    toBytes(cells: Uint32Array): Uint8Array;
+    /** Inverse of `toBytes`. */
+    fromBytes(bytes: Uint8Array): Uint32Array;
+}
+
+/**
+ * The cells upkeep of the anchor worker, next to its lanes, so the tap's
+ * main thread only decodes the digest and updates the id map. Inside a
+ * filesystem process the cells were the largest per-event footprint of the
+ * tap: a replace touches about 30 cells spread over 180 KB, which the
+ * surrounding write path keeps evicting.
+ *
+ * Self-contained like `createAnchorMath` (the worker embeds its source): no
+ * import, no outer binding, no class. A cell is kept as 11 u32 in the wire
+ * order (8 sum lanes, the two checksum words, the count as two's
+ * complement), so its 44 bytes are one span and a snapshot is a copy. The
+ * checksum and the walk are `chkL` and `walk` above, unrolled; a test pins
+ * the result to `Cells` (and so to the golden vectors).
+ */
+export function createCellsMath(): CellsMath {
+    const WORDS = 11;
+    const ELEMENT = 32;
+    const littleEndian = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+    const lanes = new Uint32Array(8);
+    const word = (bytes: Uint8Array, o: number) =>
+        (bytes[o] |
+            (bytes[o + 1] << 8) |
+            (bytes[o + 2] << 16) |
+            (bytes[o + 3] << 24)) >>>
+        0;
+    return {
+        create: (m) => new Uint32Array(WORDS * m),
+        applyMany(cells, k0, k1, buf, signs) {
+            if (buf.length % ELEMENT !== 0) {
+                throw new Error("cells: digests must be 32 bytes each");
+            }
+            const n = buf.length / ELEMENT;
+            const m = cells.length / WORDS;
+            for (let e = 0; e < n; e++) {
+                const sign = typeof signs === "number" ? signs : signs[e];
+                const o = e * ELEMENT;
+                for (let k = 0; k < 8; k++) lanes[k] = word(buf, o + 4 * k);
+                // chkL over the lanes.
+                let a = k0 ^ 0x85ebca6b;
+                let b = k1 ^ 0xc2b2ae35;
+                for (let k = 0; k < 8; k++) {
+                    const v = lanes[k];
+                    a = Math.imul(a ^ v, 0xcc9e2d51);
+                    a = (a << 15) | (a >>> 17);
+                    a = Math.imul(a, 0x1b873593);
+                    b = Math.imul(b ^ v, 0x85ebca6b);
+                    b = (b << 13) | (b >>> 19);
+                    b = Math.imul(b, 0xc2b2ae35);
+                }
+                a ^= a >>> 16;
+                a = Math.imul(a, 0x85ebca6b);
+                a ^= a >>> 13;
+                a = Math.imul(a, 0xc2b2ae35);
+                a ^= a >>> 16;
+                b ^= b >>> 15;
+                b = Math.imul(b, 0x2c1b3c6d);
+                b ^= b >>> 12;
+                b = Math.imul(b, 0x297a2d39);
+                b ^= b >>> 15;
+                const c0 = a >>> 0;
+                const c1 = b >>> 0;
+                const v0 = lanes[0];
+                const v1 = lanes[1];
+                const v2 = lanes[2];
+                const v3 = lanes[3];
+                const v4 = lanes[4];
+                const v5 = lanes[5];
+                const v6 = lanes[6];
+                const v7 = lanes[7];
+                // The walk, seeded by the checksum.
+                let lo = c0 | 0;
+                let hi = c1 | 0 || 0x6d2b79f5;
+                let t: number;
+                let i = 0;
+                while (i < m) {
+                    const w = WORDS * i;
+                    cells[w] ^= v0;
+                    cells[w + 1] ^= v1;
+                    cells[w + 2] ^= v2;
+                    cells[w + 3] ^= v3;
+                    cells[w + 4] ^= v4;
+                    cells[w + 5] ^= v5;
+                    cells[w + 6] ^= v6;
+                    cells[w + 7] ^= v7;
+                    cells[w + 8] ^= c0;
+                    cells[w + 9] ^= c1;
+                    cells[w + 10] += sign;
+                    t = lo << 13;
+                    hi ^= (hi << 13) | (lo >>> 19);
+                    lo ^= t;
+                    t = hi >>> 7;
+                    lo ^= (lo >>> 7) | (hi << 25);
+                    hi ^= t;
+                    t = lo << 17;
+                    hi ^= (hi << 17) | (lo >>> 15);
+                    lo ^= t;
+                    const u =
+                        1 -
+                        ((hi >>> 0) * 2.3283064365386963e-10 +
+                            (lo >>> 0) * 5.421010862427522e-20);
+                    i += Math.ceil((i + 1.5) * (1 / Math.sqrt(u) - 1)) || 1;
+                }
+            }
+        },
+        toBytes(cells) {
+            if (littleEndian) {
+                return new Uint8Array(cells.slice().buffer);
+            }
+            const out = new Uint8Array(cells.length * 4);
+            for (let i = 0; i < cells.length; i++) {
+                const v = cells[i];
+                const o = 4 * i;
+                out[o] = v & 0xff;
+                out[o + 1] = (v >>> 8) & 0xff;
+                out[o + 2] = (v >>> 16) & 0xff;
+                out[o + 3] = (v >>> 24) & 0xff;
+            }
+            return out;
+        },
+        fromBytes(bytes) {
+            if (bytes.length % (4 * WORDS) !== 0) {
+                throw new Error("cells: expected whole cells");
+            }
+            const out = new Uint32Array(bytes.length / 4);
+            for (let i = 0; i < out.length; i++) out[i] = word(bytes, 4 * i);
+            return out;
+        },
+    };
+}
+
 export class Cells implements CellsLike {
     readonly sum: Uint32Array;
     readonly chk: Uint32Array;

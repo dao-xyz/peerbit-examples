@@ -7,6 +7,7 @@ import {
     cellIndices,
     cellKey,
     chkL,
+    createCellsMath,
     decodeCellsInto,
     digestToLanes,
     emptyRemoteCells,
@@ -255,6 +256,38 @@ describe("readiness cells", () => {
 
         cells.reset();
         expect(cells.isEmpty()).toBe(true);
+    });
+
+    it("the worker's cells upkeep matches Cells exactly", () => {
+        const cellsMath = createCellsMath();
+        const kept = cellsMath.create(M);
+        const cells = new Cells(M, k0, k1);
+        for (let i = 0; i < 5; i++) {
+            cells.apply(golden(i), 1);
+            cellsMath.applyMany(kept, k0, k1, golden(i), 1);
+        }
+        cells.apply(golden(1), -1);
+        cellsMath.applyMany(kept, k0, k1, golden(1), -1);
+        // The golden set above, byte for byte.
+        expect(sha(cellsMath.toBytes(kept))).toBe(sha(cells.toBytes()));
+        // Batches with mixed signs, and counts below zero.
+        const batch = Array.from({ length: 300 }, random);
+        const buf = new Uint8Array(32 * batch.length);
+        const signs = new Int8Array(batch.length);
+        batch.forEach((digest, i) => {
+            buf.set(digest, 32 * i);
+            signs[i] = i % 3 === 0 ? -1 : 1;
+            cells.apply(digest, signs[i] as 1 | -1);
+        });
+        cellsMath.applyMany(kept, k0, k1, buf, signs);
+        expect(hex(cellsMath.toBytes(kept))).toBe(hex(cells.toBytes()));
+        expect(
+            hex(cellsMath.toBytes(cellsMath.fromBytes(cells.toBytes())))
+        ).toBe(hex(cells.toBytes()));
+        expect(() => cellsMath.fromBytes(new Uint8Array(45))).toThrow();
+        expect(() =>
+            cellsMath.applyMany(kept, k0, k1, new Uint8Array(33), 1)
+        ).toThrow();
     });
 
     it("touches about 15 cells per element at M = 4,096", () => {
