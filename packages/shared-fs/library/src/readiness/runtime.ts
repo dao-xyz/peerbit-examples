@@ -315,8 +315,8 @@ export class ReadinessRuntime {
                 tap.restore({ map, hlc, epoch });
                 // A count that differs discards the restore (the tap scans
                 // again). One that cannot be compared during ingest keeps it
-                // unverified until a quiet point (`ScopeTap.checkCount`),
-                // and unverified, it is not persisted.
+                // unverified until a later change or a consumer compares it
+                // (`ScopeTap.checkCount`); unverified, it is not persisted.
                 if ((await tap.checkCount()) === false) {
                     return { kind: "scanned", rejected: "count" };
                 }
@@ -411,8 +411,8 @@ export class ReadinessRuntime {
      * index. A verify pending at the seal faults its tap, and a start
      * (restore or seed scan) that has not finished by now is not persisted:
      * the next open rebuilds. `program` is the filesystem, for the shadow
-     * opt-outs. A count check still waiting for a quiet point compares once
-     * more before the seal. Never throws.
+     * opt-outs. A count never verified is compared once more before the
+     * seal. Never throws.
      */
     async prepareClose(program?: object): Promise<void> {
         if (this.disposedValue || this.sealedStart) return;

@@ -26,7 +26,7 @@ import {
     type CompareOptions,
 } from "../readiness/shadow.js";
 import {
-    COUNT_QUIET_MS,
+    COUNT_STRIDE_MAX,
     ScopeTap,
     documentsIndexPort,
     type IndexedHead,
@@ -386,7 +386,9 @@ describe("readiness tap", () => {
              * A 40-row index paged by OFFSET (4 rows a page). `deletes(scan)`
              * deletes the first row after the first page of that scan (index
              * first, then its event), so the scan misses a row no event
-             * names. `arrivals(count)` adds a row during that count's await.
+             * names. `arrivals(count)` adds a row during that count's await,
+             * so the comparison sees a change and is inconclusive. `write(n)`
+             * adds n rows in one event, as a writer or a remote batch does.
              */
             const offsetIndex = (hooks: {
                 deletes: (scan: number) => boolean;
@@ -404,6 +406,8 @@ describe("readiness tap", () => {
                 let scans = 0;
                 let counts = 0;
                 let extra = 0;
+                /** Pages each scan read, by scan number. */
+                const pages: number[] = [];
                 index.scan = async function* () {
                     const scan = ++scans;
                     let deleted = false;
@@ -412,6 +416,7 @@ describe("readiness tap", () => {
                         const page = [...index.rows].slice(offset, offset + 4);
                         offset += page.length;
                         if (page.length === 0) return;
+                        pages[scan] = (pages[scan] ?? 0) + 1;
                         yield page.map(([key, row]) => ({ key, ...row }));
                         if (!deleted && hooks.deletes(scan)) {
                             deleted = true;
@@ -432,9 +437,19 @@ describe("readiness tap", () => {
                     }
                     return n;
                 };
+                let written = 0;
+                /** Indexes n rows; returns their values, not dispatched. */
+                const indexRows = (n: number) =>
+                    Array.from({ length: n }, () => {
+                        const id = `w${written++}`;
+                        const h = head();
+                        index.set(id, h);
+                        return remoteNaming(id, h);
+                    });
+                const write = (n = 1) => dispatch(indexRows(n));
                 const tap = new ScopeTap(NAMESPACE_V1, index);
                 tap.attach(target as any);
-                return { index, tap, scans: () => scans };
+                return { index, tap, write, indexRows, dispatch, pages };
             };
             /** Real timers' macrotasks; the fake port settles on microtasks. */
             const flush = async () => {
@@ -442,16 +457,73 @@ describe("readiness tap", () => {
                     await new Promise((resolve) => setImmediate(resolve));
                 }
             };
+            /** Fake timers: the tap must arm none, so only writers count. */
+            const fakeTimers = () =>
+                vi.useFakeTimers({
+                    toFake: [
+                        "setTimeout",
+                        "clearTimeout",
+                        "setInterval",
+                        "clearInterval",
+                    ],
+                });
+            /** `write()` every `everyMs` until the returned stop runs. */
+            const writer = (write: () => void, everyMs: number) => {
+                const handle = setInterval(write, everyMs);
+                return () => clearInterval(handle);
+            };
+            /** Advances fake time; every timer's callbacks settle first. */
+            const advance = async (ms: number) => {
+                await vi.advanceTimersByTimeAsync(ms);
+                await flush();
+            };
 
             afterEach(() => {
                 vi.useRealTimers();
             });
 
-            it("checks the rescan too, and scans again at a quiet point", async () => {
-                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+            it("verifies a seed that hid a row while a writer keeps writing, without a quiet point", async () => {
+                fakeTimers();
+                // The seed misses a row, and a row arrives during each of
+                // the start's three count reads and during the retry those
+                // arrivals start.
+                const { index, tap, write } = offsetIndex({
+                    deletes: (scan) => scan === 1,
+                    arrivals: (count) => count <= 4,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                expect(tap.stats.rescans).toBe(0);
+                expect(tap.countVerified).toBe(false);
+                expect(tap.stats.countReads).toBe(4);
+                // Nothing waits for the events to stop.
+                expect(vi.getTimerCount()).toBe(0);
+                const stop = writer(() => write(), 4);
+                // The writer's first event starts the next comparison: the
+                // seed's first conclusive difference scans again at once.
+                await advance(4);
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.countVerified).toBe(true);
+                await tap.verifyIdle();
+                expectTapEqualsIndex(tap, index);
+                // A verified count is not read again, however long the
+                // writer goes on.
+                const reads = tap.stats.countReads;
+                await advance(3_000);
+                expect(tap.stats.countReads).toBe(reads);
+                expectTapEqualsIndex(tap, index);
+                // Only the writer's timer was ever armed.
+                expect(vi.getTimerCount()).toBe(1);
+                stop();
+                expect(vi.getTimerCount()).toBe(0);
+                tap.dispose();
+            });
+
+            it("checks the rescan too, and scans again once a later change confirms its difference", async () => {
+                fakeTimers();
                 // The first scan and the rescan right after it both miss a
                 // row.
-                const { index, tap } = offsetIndex({
+                const { index, tap, write } = offsetIndex({
                     deletes: (scan) => scan <= 2,
                     arrivals: () => false,
                 });
@@ -459,105 +531,286 @@ describe("readiness tap", () => {
                 expect(tap.stats.rescans).toBe(1);
                 expect(tap.count).toBe(index.rows.size - 1);
                 expect(tap.countVerified).toBe(false);
-                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS);
-                await flush();
-                expect(tap.stats.rescans).toBe(2);
-                expect(tap.countVerified).toBe(true);
-                expectTapEqualsIndex(tap, index);
-                expect(vi.getTimerCount()).toBe(0);
-                tap.dispose();
-            });
-
-            it("does not accept a seed it could not compare while rows kept arriving", async () => {
-                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-                const { index, tap } = offsetIndex({
-                    deletes: (scan) => scan === 1,
-                    // An arrival during each of the three tries.
-                    arrivals: (count) => count <= 3,
-                });
-                await tap.seedChecked();
-                expect(tap.stats.rescans).toBe(0);
-                expect(tap.countVerified).toBe(false);
-                // Every arrival restarts the wait.
-                const arrival = remoteNaming("late", head());
-                index.set("late", arrival.__context.head);
-                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS - 1);
-                tap.onChange(change([arrival]));
-                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS - 1);
-                await flush();
-                expect(tap.countVerified).toBe(false);
-                await vi.advanceTimersByTimeAsync(1);
+                // The rescan's difference may be a batch in flight: it waits
+                // for a change to tell (no timer).
                 await flush();
                 expect(tap.stats.rescans).toBe(1);
+                expect(vi.getTimerCount()).toBe(0);
+                const stop = writer(() => write(), 5);
+                await advance(5);
+                expect(tap.stats.rescans).toBe(2);
                 expect(tap.countVerified).toBe(true);
+                await tap.verifyIdle();
                 expectTapEqualsIndex(tap, index);
+                stop();
                 tap.dispose();
             });
 
-            it("keeps a restore it could not compare and verifies it once quiet", async () => {
-                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-                const { index, tap } = offsetIndex({
-                    deletes: () => false,
-                    arrivals: (count) => count <= 3,
+            it("verifies with a writer every second (no quiet window to starve on)", async () => {
+                fakeTimers();
+                // Both scans miss a row and the start cannot compare: the
+                // old 1 s quiet window never fired under this writer.
+                const { index, tap, write } = offsetIndex({
+                    deletes: (scan) => scan <= 2,
+                    arrivals: (count) => count <= 4,
                 });
-                const exact = new ScopeTap(NAMESPACE_V1, index);
-                await exact.seedFromScan();
-                const restored = exact.map;
-                tap.restore({ map: restored, hlc: exact.hlc, epoch: 40 });
-                expect(await tap.checkCount()).toBeUndefined();
-                // Kept, not discarded for a scan under the same ingest.
-                expect(tap.map).toBe(restored);
+                await tap.seedChecked();
+                await tap.countSettled();
                 expect(tap.countVerified).toBe(false);
-                await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS);
-                await flush();
-                expect(tap.map).toBe(restored);
-                expect(tap.stats.rescans).toBe(0);
+                const stop = writer(() => write(), 1_000);
+                await advance(999);
+                expect(tap.stats.countReads).toBe(4);
+                // The first write: a conclusive difference, a rescan that
+                // misses again, and a difference left to the next change.
+                await advance(1);
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.countVerified).toBe(false);
+                // The second write confirms it.
+                await advance(1_000);
+                expect(tap.stats.rescans).toBe(2);
                 expect(tap.countVerified).toBe(true);
+                await tap.verifyIdle();
                 expectTapEqualsIndex(tap, index);
+                expect(vi.getTimerCount()).toBe(1);
+                stop();
                 tap.dispose();
             });
 
-            it("faults a tap whose count never matches its scans", async () => {
-                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-                const { tap } = offsetIndex({
+            it("keeps a restore it could not compare and verifies it while a writer keeps writing", async () => {
+                fakeTimers();
+                const restoreUnder = async (drop?: string) => {
+                    const { index, tap, write } = offsetIndex({
+                        deletes: () => false,
+                        arrivals: (count) => count <= 4,
+                    });
+                    const exact = new ScopeTap(NAMESPACE_V1, index);
+                    await exact.seedFromScan();
+                    if (drop) exact.map.delete(drop);
+                    const restored = exact.map;
+                    tap.restore({
+                        map: restored,
+                        hlc: exact.hlc,
+                        epoch: restored.size,
+                    });
+                    expect(await tap.checkCount()).toBeUndefined();
+                    await tap.countSettled();
+                    // Kept, not discarded for a scan under the same ingest.
+                    expect(tap.map).toBe(restored);
+                    expect(tap.countVerified).toBe(false);
+                    const stop = writer(() => write(), 3);
+                    await advance(3);
+                    expect(tap.countVerified).toBe(true);
+                    await tap.verifyIdle();
+                    expectTapEqualsIndex(tap, index);
+                    await advance(300);
+                    expectTapEqualsIndex(tap, index);
+                    stop();
+                    tap.dispose();
+                    return { tap, restored };
+                };
+
+                // A correct restore is verified as it is.
+                const correct = await restoreUnder();
+                expect(correct.tap.stats.rescans).toBe(0);
+                expect(correct.tap.map).toBe(correct.restored);
+
+                // A stale one (a row missing) is scanned again at its first
+                // conclusive comparison.
+                const stale = await restoreUnder("n5");
+                expect(stale.tap.stats.rescans).toBe(1);
+                expect(stale.tap.map).not.toBe(stale.restored);
+            });
+
+            it("does not rescan for a batch indexed but not yet dispatched", async () => {
+                fakeTimers();
+                // The rescan misses a row too, so later differences need a
+                // second look.
+                const { index, tap, write, indexRows, dispatch } = offsetIndex({
+                    deletes: (scan) => scan <= 2,
+                    arrivals: () => false,
+                });
+                await tap.seedChecked();
+                expect(tap.stats.rescans).toBe(1);
+                // A remote batch indexes 2 rows per tick and dispatches only
+                // at its end, while a local writer writes every tick: every
+                // comparison sees the missed row plus a growing batch.
+                const batch: unknown[] = [];
+                const stopBatch = writer(() => {
+                    batch.push(...indexRows(2));
+                }, 5);
+                const stop = writer(() => write(), 5);
+                await advance(100);
+                expect(tap.stats.deferredCounts).toBeGreaterThan(2);
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.countVerified).toBe(false);
+                stopBatch();
+                dispatch(batch);
+                // Once the batch's event applied, the missed row's
+                // difference repeats and is scanned again.
+                for (let i = 0; i < 200 && !tap.countVerified; i++) {
+                    await advance(5);
+                }
+                expect(tap.stats.rescans).toBe(2);
+                expect(tap.countVerified).toBe(true);
+                await tap.verifyIdle();
+                expectTapEqualsIndex(tap, index);
+                stop();
+                tap.dispose();
+            });
+
+            it("reads the count a bounded number of times while every comparison sees a change", async () => {
+                fakeTimers();
+                let concurrent = true;
+                const { index, tap, write } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: () => concurrent,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                const from = tap.epoch;
+                // 600 events of 10 rows each, and a row arriving during
+                // every count read.
+                const stop = writer(() => write(10), 5);
+                await advance(3_000);
+                const changes = tap.epoch - from;
+                expect(changes).toBeGreaterThan(6_000);
+                expect(tap.countVerified).toBe(false);
+                // The start's 3 reads, then one per doubling stride up to
+                // the cap, then one per COUNT_STRIDE_MAX changes.
+                expect(tap.stats.countReads).toBeLessThanOrEqual(
+                    3 +
+                        Math.log2(COUNT_STRIDE_MAX) +
+                        1 +
+                        Math.ceil(changes / COUNT_STRIDE_MAX)
+                );
+                expect(tap.stats.countReads).toBeGreaterThan(10);
+                // Once a read sees no change, the next stride verifies.
+                concurrent = false;
+                await advance(5 * Math.ceil(COUNT_STRIDE_MAX / 10) + 5);
+                expect(tap.countVerified).toBe(true);
+                await tap.verifyIdle();
+                expectTapEqualsIndex(tap, index);
+                stop();
+                tap.dispose();
+            });
+
+            it("compares at once when a consumer reads the state, once per stride", async () => {
+                const { tap, write } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 5,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(4);
+                // A consumer asks before the next stride: one read now (a
+                // row arrives during it).
+                tap.requestCount();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(5);
+                expect(tap.countVerified).toBe(false);
+                // Asking again reads nothing until changes start a
+                // comparison of their own.
+                tap.requestCount();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(5);
+                write(8);
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(6);
+                expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+
+            it("faults a tap whose count never matches its scans, once changes confirm it", async () => {
+                fakeTimers();
+                const { tap, write } = offsetIndex({
                     deletes: () => true,
                     arrivals: () => false,
                 });
                 await tap.seedChecked();
-                for (let i = 0; i < 3; i++) {
-                    await vi.advanceTimersByTimeAsync(COUNT_QUIET_MS);
-                    await flush();
-                }
+                expect(tap.stats.rescans).toBe(1);
+                // Quiet: a difference cannot be told from a batch still being
+                // indexed, so it stays unverified (never persisted) and
+                // nothing is armed.
+                await flush();
+                await tap.confirmCount();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.faulted).toBeUndefined();
+                expect(tap.countVerified).toBe(false);
+                expect(vi.getTimerCount()).toBe(0);
+                // Each change confirms the difference: rescans, then the
+                // fault.
+                const stop = writer(() => write(), 5);
+                await advance(15);
                 expect(tap.stats.rescans).toBe(3);
                 expect(tap.countVerified).toBe(false);
                 expect(String(tap.faulted)).toMatch(/after 3 rescans/);
+                const reads = tap.stats.countReads;
+                await advance(50);
+                expect(tap.stats.countReads).toBe(reads);
+                stop();
                 expect(vi.getTimerCount()).toBe(0);
                 tap.dispose();
             });
 
-            it("leaves no timer once sealed or disposed", async () => {
-                vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-                const { tap } = offsetIndex({
-                    deletes: () => false,
-                    arrivals: (count) => count <= 3,
+            it("does nothing once sealed or disposed", async () => {
+                fakeTimers();
+                for (const end of ["seal", "dispose"] as const) {
+                    const { tap, write } = offsetIndex({
+                        deletes: () => false,
+                        arrivals: (count) => count <= 4,
+                    });
+                    await tap.seedChecked();
+                    await tap.countSettled();
+                    expect(tap.countVerified).toBe(false);
+                    const reads = tap.stats.countReads;
+                    if (end === "seal") tap.seal();
+                    else tap.dispose();
+                    const stop = writer(() => write(), 5);
+                    await advance(50);
+                    tap.requestCount();
+                    await tap.confirmCount();
+                    await tap.countSettled();
+                    expect(tap.stats.countReads).toBe(reads);
+                    expect(tap.countVerified).toBe(false);
+                    expect(vi.getTimerCount()).toBe(1);
+                    stop();
+                    tap.dispose();
+                }
+            });
+
+            it("reads no further page once sealed during a rescan", async () => {
+                let sealNow = () => {};
+                // The seal lands after the rescan's first page.
+                const { tap, pages } = offsetIndex({
+                    deletes: (scan) => {
+                        if (scan === 2) sealNow();
+                        return scan === 1;
+                    },
+                    arrivals: () => false,
                 });
+                sealNow = () => tap.seal();
                 await tap.seedChecked();
-                expect(vi.getTimerCount()).toBe(1);
-                tap.seal();
-                expect(vi.getTimerCount()).toBe(0);
-                expect(tap.countVerified).toBe(false);
+                expect(tap.stats.rescans).toBe(1);
+                // Only the page already requested at the seal; the rescan
+                // stays unfinished, so its state is never persisted.
+                expect(pages[1]).toBe(10);
+                expect(pages[2]).toBe(2);
+                expect(tap.state).toBe("buffering");
+                expect(tap.stats.countReads).toBe(1);
                 tap.dispose();
             });
 
             it("confirms an unverified count once at close", async () => {
                 const { tap } = offsetIndex({
                     deletes: () => false,
-                    arrivals: (count) => count <= 3,
+                    arrivals: (count) => count <= 4,
                 });
                 await tap.seedChecked();
+                await tap.countSettled();
                 expect(tap.countVerified).toBe(false);
                 await tap.confirmCount();
                 expect(tap.countVerified).toBe(true);
+                expect(tap.stats.countReads).toBe(5);
                 tap.dispose();
             });
         });

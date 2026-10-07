@@ -146,9 +146,14 @@ const fakeResponder = async (
     rows: number,
     mode?: "inline",
     provenance?: () => ProvenanceState,
-    options: { started?: Promise<void> } = {}
+    options: {
+        started?: Promise<void>;
+        /** Runs during the `count`-th count read's await. */
+        onCount?: (count: number) => void;
+    } = {}
 ) => {
     const heads = new Map<string, string>();
+    let counts = 0;
     const port = {
         readHead: async (key: unknown) => {
             const h = heads.get(key as string);
@@ -161,7 +166,12 @@ const fakeResponder = async (
                 modified: 1n,
             }));
         },
-        count: async () => heads.size,
+        count: async () => {
+            const n = heads.size;
+            await Promise.resolve();
+            options.onCount?.(++counts);
+            return n;
+        },
     };
     for (let i = 0; i < rows; i++) {
         heads.set(`n${i}`, digestToHead(randomBytes(DIGEST_BYTES)));
@@ -802,6 +812,31 @@ describe("readiness responder", () => {
                 sameBytes(message.sessionId, fresh.sessionId)
             );
             expect(header.count).toBe(21);
+            r.close();
+        });
+
+        it("compares an unverified count when a freeze reads the state", async () => {
+            // A row arrives during each count read of the check and of the
+            // retry those arrivals start; nothing changes after that.
+            const r: Awaited<ReturnType<typeof fakeResponder>> =
+                await fakeResponder(20, "inline", undefined, {
+                    onCount: (count) => {
+                        if (count <= 4) r.add(`late${count}`);
+                    },
+                });
+            expect(await r.tap.checkCount()).toBeUndefined();
+            await r.tap.countSettled();
+            expect(r.tap.countVerified).toBe(false);
+            const reads = r.tap.stats.countReads;
+            // No change starts another comparison; the freeze does.
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const header = await client.next(HeaderV1);
+            expect(header.count).toBe(24);
+            await r.tap.countSettled();
+            expect(r.tap.stats.countReads).toBe(reads + 1);
+            expect(r.tap.countVerified).toBe(true);
             r.close();
         });
 

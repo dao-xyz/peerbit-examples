@@ -667,6 +667,10 @@ export class Responder {
         };
         this.stats.freezes++;
         this.snapshots.set(scope.descriptor.id, snapshot);
+        // A consumer of the state: an unverified count is compared now
+        // rather than at the tap's next stride (shadow mode: the answer does
+        // not wait for it).
+        tap.requestCount();
         return snapshot;
     }
 

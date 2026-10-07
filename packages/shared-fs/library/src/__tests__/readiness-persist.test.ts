@@ -357,6 +357,53 @@ describe("readiness persistence", () => {
         expect(await shadow(again.fs)).toMatchObject({ kind: "equal" });
     });
 
+    it("persists only a verified count, compared once more at close", async () => {
+        const { directory, address, store } = await persisted(5);
+        const file = await namespaceFile(directory, store);
+        /** The tap's count reads add one row while `wrong()` holds. */
+        const skewCount = (fs: SharedFsHandle, wrong: () => boolean) => {
+            const tap = runtimeOf(fs).namespace!;
+            const count = tap.port.count.bind(tap.port);
+            (tap.port as any).count = async () =>
+                (await count()) + (wrong() ? 1 : 0);
+            return tap;
+        };
+
+        // Every read differs: scanned again at once, then a difference no
+        // change confirms. Unverified at close, so nothing is written.
+        const first = await reopen(directory, address);
+        const skewed = skewCount(first.fs, () => true);
+        expect(skewed.countVerified).toBe(true);
+        expect(await skewed.checkCount()).toBe(false);
+        await skewed.countSettled();
+        expect(skewed.stats.rescans).toBe(1);
+        expect(skewed.countVerified).toBe(false);
+        const reads = skewed.stats.countReads;
+        await stopPeer(first.peer);
+        expect(skewed.stats.countReads).toBe(reads + 1);
+        expect(existsSync(file)).toBe(false);
+
+        // Two reads differ: the close's comparison verifies the count, and
+        // the file is written.
+        const second = await reopen(directory, address);
+        expect(runtimeOf(second.fs).starts.get("namespace-v1")).toEqual({
+            kind: "scanned",
+        });
+        let wrong = 2;
+        const recovering = skewCount(second.fs, () => wrong-- > 0);
+        expect(await recovering.checkCount()).toBe(false);
+        await recovering.countSettled();
+        expect(recovering.countVerified).toBe(false);
+        await stopPeer(second.peer);
+        expect(recovering.countVerified).toBe(true);
+        expect(existsSync(file)).toBe(true);
+        const third = await reopen(directory, address);
+        expect(runtimeOf(third.fs).starts.get("namespace-v1")).toEqual({
+            kind: "restored",
+        });
+        expect(await shadow(third.fs)).toMatchObject({ kind: "equal" });
+    });
+
     it("rejects a file of another address or scope", async () => {
         const directory = join(await newRoot(), "peer");
         const peer = await createPeer(directory);

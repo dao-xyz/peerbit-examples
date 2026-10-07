@@ -77,7 +77,13 @@ export interface TapStats {
     readdVerifies: number;
     /** Seeds scanned again because the count did not match the index. */
     rescans: number;
-    /** Count checks deferred until no event applied for `COUNT_QUIET_MS`. */
+    /** Index count reads of the count check (`ScopeIndexPort.count`). */
+    countReads: number;
+    /**
+     * Count comparisons that neither verified nor rescanned: no stable
+     * point, or a difference not yet seen twice. Later changes or a
+     * consumer compare again (`countNext`).
+     */
     deferredCounts: number;
 }
 
@@ -117,12 +123,15 @@ const RECENT_REMOVALS = 4096;
  */
 const COUNT_RESCANS = 3;
 /**
- * A count check that found no stable epoch, or a difference that a scan
- * under ingest may have caused, runs again once no event has applied for
- * this long (ms). The timer exists only while such a check is pending and
- * every applied event restarts it, so it never fires during ingest.
+ * The most element changes between two count comparisons of a tap whose
+ * count is not verified. Every comparison that neither verifies nor
+ * rescans doubles the distance to the next one, from 1 up to this cap, so
+ * over n changes an unverified tap reads the count about log2(cap) + n /
+ * cap times however its events arrive (a consumer adds at most one read
+ * per such read): never once per event, and never waiting for the events
+ * to stop.
  */
-export const COUNT_QUIET_MS = 1_000;
+export const COUNT_STRIDE_MAX = 1024;
 
 const toBigInt = (value: unknown): bigint =>
     typeof value === "bigint" ? value : BigInt((value as number) ?? 0);
@@ -207,6 +216,7 @@ export class ScopeTap {
         repairs: 0,
         readdVerifies: 0,
         rescans: 0,
+        countReads: 0,
         deferredCounts: 0,
     };
     /** Set when a verify read failed; the maintained set is then unreliable. */
@@ -235,10 +245,25 @@ export class ScopeTap {
     private readonly recentRemovals = new Set<string>();
     /** The count matched the index at a stable epoch (`checkCount`). */
     private countVerifiedValue = false;
-    /** A count check is running (`checkCount` or a deferred one). */
-    private countRunning = false;
-    /** Armed while a count check waits for no event to apply. */
-    private countTimer?: ReturnType<typeof setTimeout>;
+    /**
+     * From a seed or restore until the count is verified: applied changes,
+     * a drained verify queue and consumers start comparisons.
+     */
+    private countDue = false;
+    /** The comparison running, until it settled (at most one). */
+    private countRun?: Promise<void>;
+    /** Applied changes start the next comparison from this epoch on. */
+    private countNext = 0;
+    /** Element changes from one comparison to the next (`COUNT_STRIDE_MAX`). */
+    private countStride = 1;
+    /** No comparison was conclusive since the seed or restore. */
+    private countFirst = false;
+    /** The last conclusive difference and the epoch it was read at. */
+    private countSeen?: { difference: number; epoch: number };
+    /** The epoch of the last conclusive count read. */
+    private countReadAt = 0;
+    /** A consumer started a comparison since changes last started one. */
+    private countDemanded = false;
     /** Called with every id an event or a verify names (the shadow check). */
     private readonly watchers: Array<(key: IdKey) => void> = [];
     /** The element an event names, and the head it replaced or removed. */
@@ -331,7 +356,6 @@ export class ScopeTap {
 
     dispose() {
         this.detach();
-        this.clearCountCheck();
         this.stateValue = "disposed";
         this.buffered = [];
         this.verifyVersions.clear();
@@ -378,8 +402,7 @@ export class ScopeTap {
             return;
         }
         this.applyCaptured(captured);
-        // A deferred count check waits until events stop.
-        if (this.countTimer !== undefined) this.armCountCheck();
+        if (this.countDue) this.countOnChange();
     }
 
     private emit(digest: Uint8Array, sign: 1 | -1) {
@@ -543,6 +566,10 @@ export class ScopeTap {
             this.reconcile(key, indexed);
             this.verifyVersions.delete(ks);
             if (this.watchers.length > 0) this.notify(key);
+            // A drained queue: a comparison it held back may start.
+            if (this.countDue && this.verifyVersions.size === 0) {
+                this.countOnChange();
+            }
             return;
         }
     }
@@ -570,7 +597,6 @@ export class ScopeTap {
      */
     seal() {
         this.sealedValue = true;
-        this.clearCountCheck();
         if (this.verifyVersions.size > 0) {
             this.faulted ??= new CloseFault(
                 "sealed with a replace verify pending"
@@ -619,7 +645,9 @@ export class ScopeTap {
             throw new Error(`cannot seed a ${this.stateValue} tap`);
         }
         for await (const rows of this.port.scan()) {
-            if (!this.is("buffering")) return;
+            // Sealed: the stores close next, so no further page (a rescan
+            // that began before the close stays buffering, unpersisted).
+            if (!this.is("buffering") || this.sealedValue) return;
             for (const row of rows) {
                 this.applyHead(row.key, row.head, row.modified, false);
             }
@@ -648,110 +676,180 @@ export class ScopeTap {
      * until it holds. The sqlite3 index pages a scan by OFFSET and checks for
      * writes before a page waits for the connection: a delete admitted ahead
      * of the page shifts a row past it unseen, and no event ever names that
-     * row. A scan is short only while writes run beside it, and those writes
-     * also keep the count from being compared, or make it differ while a
-     * remote batch is indexed but not yet dispatched. So:
+     * row. A comparison reads the index's projected count at a stable point
+     * (`countDifferenceOnce`): a change applied during the read leaves it
+     * inconclusive. A stable read can still differ while a remote batch is
+     * indexed but not yet dispatched, so:
      *
      * - a match verifies the state;
-     * - a difference right after the seed or restore scans again at once
-     *   (in a quiet store it is real; a remote batch in flight costs one
-     *   scan more);
-     * - any other result (no stable epoch in three tries, or a difference
-     *   after a rescan) keeps the state unverified and compares again once
-     *   no event has applied for `COUNT_QUIET_MS`; a difference then scans
-     *   again, and that scan is checked the same way.
+     * - the first conclusive difference since the seed or restore scans
+     *   again at once (in a quiet store it is real; a remote batch in flight
+     *   costs one scan more);
+     * - a later difference scans again once a comparison read after more
+     *   changes applied sees the same difference: rows in flight have had
+     *   their events by then, a missed row never has one;
+     * - anything else keeps the state unverified. The next comparison starts
+     *   from the changes that follow (`countOnChange`, at most one running
+     *   and one per `countStride` changes) or from a consumer
+     *   (`requestCount`, `confirmCount`); never from a timer.
      *
-     * A restore whose count cannot be compared during ingest is kept, not
-     * discarded: a scan under the same ingest is no more trustworthy. After
-     * `COUNT_RESCANS` rescans a difference faults the tap. Resolves with the
-     * first comparison (false: the tap has scanned again).
+     * So ingest drives the check instead of starving it: a comparison is
+     * conclusive unless a change applies during its one count read, and the
+     * next change after an inconclusive one is the next chance. A restore
+     * whose count cannot be compared during ingest is kept, not discarded: a
+     * scan under the same ingest is no more trustworthy. After
+     * `COUNT_RESCANS` rescans a difference faults the tap. A store that stays
+     * quiet after a difference cannot tell, without a clock, a missed row
+     * from a batch still being indexed: its state stays unverified (never
+     * persisted) until a change confirms the difference or the next open
+     * scans. Resolves with the first comparison (false: the tap has scanned
+     * again).
      */
     async checkCount(): Promise<boolean | undefined> {
-        this.clearCountCheck();
+        while (this.countRun) await this.countRun;
         this.countVerifiedValue = false;
-        this.countRunning = true;
-        try {
-            const first = await this.restoredCountMatches();
-            await this.settleCount(first, true);
-            return first;
-        } finally {
-            this.countRunning = false;
-        }
+        this.countDue = true;
+        this.countFirst = true;
+        this.countSeen = undefined;
+        this.countStride = 1;
+        this.countDemanded = false;
+        return this.runCount(true);
     }
 
-    private async settleCount(
-        matches: boolean | undefined,
-        rescanOnDifference: boolean
-    ): Promise<void> {
+    /** Runs `settleCount`, one at a time (`countRun`). */
+    private runCount(atStart: boolean): Promise<boolean | undefined> {
+        let settled!: () => void;
+        const running = new Promise<void>((resolve) => (settled = resolve));
+        this.countRun = running;
+        return this.settleCount(atStart).finally(() => {
+            if (this.countRun === running) this.countRun = undefined;
+            settled();
+            // Changes applied during the run may have made the next
+            // comparison due.
+            if (this.countDue) this.countOnChange();
+        });
+    }
+
+    /**
+     * One comparison and what follows from it (`checkCount`). The start's
+     * comparison waits for the verify queue and tries three times; any other
+     * reads once, from the point it starts.
+     */
+    private async settleCount(atStart: boolean): Promise<boolean | undefined> {
+        let from = this.epoch;
+        let difference = atStart
+            ? await this.countDifference(3)
+            : await this.countDifferenceOnce();
+        const first = difference === undefined ? undefined : difference === 0;
         for (;;) {
-            if (!this.is("live") || this.sealedValue) return;
-            if (matches === true) {
+            if (
+                !this.countDue ||
+                !this.is("live") ||
+                this.sealedValue ||
+                this.faulted !== undefined
+            ) {
+                return first;
+            }
+            if (difference === 0) {
                 this.countVerifiedValue = true;
-                return;
+                this.countDue = false;
+                return first;
             }
-            if (matches === undefined || !rescanOnDifference) {
+            let rescan = false;
+            if (difference !== undefined) {
+                const seen = this.countSeen;
+                rescan =
+                    this.countFirst ||
+                    (seen?.difference === difference &&
+                        seen.epoch < this.countReadAt);
+                this.countFirst = false;
+                this.countSeen = { difference, epoch: this.countReadAt };
+            }
+            if (!rescan) {
                 this.stats.deferredCounts++;
-                this.armCountCheck();
-                return;
+                this.countNext = from + this.countStride;
+                this.countStride = Math.min(
+                    2 * this.countStride,
+                    COUNT_STRIDE_MAX
+                );
+                return first;
             }
+            // The close began: no scan from now on, and the state is not
+            // persisted.
+            if (this.draining) return first;
             if (this.stats.rescans >= COUNT_RESCANS) {
                 this.faulted ??= new Error(
                     `readiness: ${this.scope.name} count differs from its index after ${COUNT_RESCANS} rescans`
                 );
-                return;
+                return first;
             }
             this.stats.rescans++;
             await this.reseed();
-            matches = await this.restoredCountMatches();
-            // Scanned under the same ingest, perhaps: a difference now waits
-            // for a quiet point.
-            rescanOnDifference = false;
-        }
-    }
-
-    private armCountCheck() {
-        this.clearCountCheck();
-        if (this.sealedValue || this.is("disposed")) return;
-        const timer = setTimeout(() => {
-            this.countTimer = undefined;
-            void this.runDeferredCount();
-        }, COUNT_QUIET_MS);
-        (timer as { unref?: () => void }).unref?.();
-        this.countTimer = timer;
-    }
-
-    private clearCountCheck() {
-        if (this.countTimer === undefined) return;
-        clearTimeout(this.countTimer);
-        this.countTimer = undefined;
-    }
-
-    /** No event applied for `COUNT_QUIET_MS`: compare again. */
-    private async runDeferredCount() {
-        if (this.countRunning || !this.is("live") || this.sealedValue) return;
-        this.countRunning = true;
-        try {
-            await this.settleCount(await this.restoredCountMatches(), true);
-        } catch (error) {
-            // The start's errors fault the tap in the runtime; this one has
-            // no caller.
-            if (!this.is("disposed") && !this.sealedValue) {
-                this.faulted ??= error;
-            }
-        } finally {
-            this.countRunning = false;
+            from = this.epoch;
+            difference = await this.countDifference(3);
         }
     }
 
     /**
-     * The close's last chance for a state whose count was never verified:
-     * one comparison, and only with no verify pending (the close waits for
-     * no further read). Never rescans.
+     * After an applied change, a drained verify queue or a comparison: the
+     * next comparison of an unverified count, once `countNext` is reached.
+     */
+    private countOnChange() {
+        if (this.epoch < this.countNext || !this.countMayStart()) return;
+        this.countDemanded = false;
+        this.startCount();
+    }
+
+    /**
+     * A consumer reads the state now (the responder's freeze): an
+     * unverified count is compared at once, before `countNext`. At most once
+     * between two comparisons that changes started, so consumers add at most
+     * one count read per stride.
+     */
+    requestCount() {
+        if (this.countDemanded || !this.countMayStart()) return;
+        this.countDemanded = true;
+        this.startCount();
+    }
+
+    private countMayStart(): boolean {
+        return (
+            this.countDue &&
+            this.countRun === undefined &&
+            // A drained queue starts it (`runVerify`).
+            this.verifyVersions.size === 0 &&
+            this.faulted === undefined &&
+            // The close compares once itself (`confirmCount`).
+            !this.draining &&
+            !this.sealedValue &&
+            this.is("live")
+        );
+    }
+
+    private startCount() {
+        this.runCount(false).catch((error) => {
+            // The start's errors fault the tap in the runtime; this run has
+            // no caller.
+            if (!this.is("disposed") && !this.sealedValue) {
+                this.faulted ??= error;
+            }
+        });
+    }
+
+    /** Resolves once no count comparison runs (tests). */
+    async countSettled(): Promise<void> {
+        while (this.countRun) await this.countRun;
+    }
+
+    /**
+     * The close's last comparison for a count never verified: one read, and
+     * only with no verify pending (the close waits for no further read).
+     * Never rescans. A comparison still running may end after the seal; it
+     * then changes nothing.
      */
     async confirmCount(): Promise<void> {
         if (
             this.countVerifiedValue ||
-            this.countRunning ||
             !this.is("live") ||
             this.sealedValue ||
             this.faulted !== undefined ||
@@ -759,9 +857,9 @@ export class ScopeTap {
         ) {
             return;
         }
-        if ((await this.restoredCountMatches(1)) === true) {
+        if ((await this.countDifferenceOnce()) === 0) {
             this.countVerifiedValue = true;
-            this.clearCountCheck();
+            this.countDue = false;
         }
     }
 
@@ -795,22 +893,50 @@ export class ScopeTap {
      * `undefined` when no stable point was found in `tries` attempts.
      */
     async restoredCountMatches(tries = 3): Promise<boolean | undefined> {
+        const difference = await this.countDifference(tries);
+        return difference === undefined ? undefined : difference === 0;
+    }
+
+    /** `countDifferenceOnce` with the verify queue drained, `tries` times. */
+    private async countDifference(tries: number): Promise<number | undefined> {
         for (let i = 0; i < tries; i++) {
             await this.verifyIdle();
             // Sealed: the stores close next, so no index read.
             if (!this.is("live") || this.sealedValue) return undefined;
-            const epoch = this.epoch;
-            const indexed = await this.port.count();
-            if (
-                this.is("live") &&
-                !this.sealedValue &&
-                this.epoch === epoch &&
-                this.pendingVerify === 0
-            ) {
-                return indexed === this.map.size;
-            }
+            const difference = await this.countDifferenceOnce();
+            if (difference !== undefined) return difference;
         }
         return undefined;
+    }
+
+    /**
+     * The index's projected count minus the live count, read at a stable
+     * point: no change applied and no verify pending across the read.
+     * Undefined, without a read, when a verify is pending or the tap is not
+     * live or sealed; and after the read when a change applied during it.
+     */
+    private async countDifferenceOnce(): Promise<number | undefined> {
+        if (
+            !this.is("live") ||
+            this.sealedValue ||
+            this.verifyVersions.size > 0
+        ) {
+            return undefined;
+        }
+        const { epoch, map } = this;
+        this.stats.countReads++;
+        const indexed = await this.port.count();
+        if (
+            !this.is("live") ||
+            this.sealedValue ||
+            this.epoch !== epoch ||
+            this.map !== map ||
+            this.verifyVersions.size > 0
+        ) {
+            return undefined;
+        }
+        this.countReadAt = epoch;
+        return indexed - map.size;
     }
 
     /**
@@ -824,6 +950,12 @@ export class ScopeTap {
         if (this.is("disposed") || this.sealedValue) return;
         this.stateValue = "buffering";
         this.countVerifiedValue = false;
+        // Compared again, and its differences must be seen twice
+        // (`checkCount`).
+        this.countDue = true;
+        this.countFirst = false;
+        this.countSeen = undefined;
+        this.countStride = 1;
         // A fresh seed. The epoch keeps counting, so a sink that numbers
         // its applies re-aligns to it on reset.
         this.map = new IdHeadMap();
