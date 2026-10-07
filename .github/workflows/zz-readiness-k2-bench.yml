@@ -1,0 +1,51 @@
+name: zz readiness K2 bench (throwaway)
+
+on:
+    push:
+        branches:
+            - bench/readiness-k2
+
+jobs:
+    bench:
+        name: K2 bench ${{ matrix.os }} run ${{ matrix.run }}
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 170
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest]
+                run: [1, 2, 3]
+                include:
+                    - os: macos-latest
+                      run: 1
+        steps:
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+            - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+              with:
+                  run_install: false
+            - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 24
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm -r --sort --filter @peerbit/shared-fs run build
+            - name: Machine
+              run: |
+                  node -e "const os=require('os');console.log(JSON.stringify({cpus:os.cpus().length,model:os.cpus()[0].model,mem:os.totalmem(),load:os.loadavg(),node:process.version}))"
+            - name: Bench 200k
+              working-directory: packages/shared-fs/library
+              env:
+                  PEERBIT_SHARED_FS_READINESS_BENCH: "1"
+                  PEERBIT_SHARED_FS_READINESS_BENCH_ROWS: "200000"
+                  PEERBIT_SHARED_FS_READINESS_BENCH_OUT: ${{ github.workspace }}/k2-${{ matrix.os }}-${{ matrix.run }}.ndjson
+                  CI: "true"
+              run: pnpm exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0 src/__tests__/readiness-upkeep.bench.test.ts
+            - name: Load after
+              if: always()
+              run: node -e "console.log(JSON.stringify({load:require('os').loadavg()}))"
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              if: always()
+              with:
+                  name: k2-${{ matrix.os }}-${{ matrix.run }}
+                  path: k2-*.ndjson
