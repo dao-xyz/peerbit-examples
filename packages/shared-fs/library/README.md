@@ -57,13 +57,18 @@ important for any deployment with more than one writer:
   [Write readiness on joins](#write-readiness-on-joins).
 - **Mount durability is local-first.** For an attached writable file, successful
   `flush`, `fsync`, and `release` drain the locally accepted mutation generations
-  through the Peerbit commit path. They neither wait for a remote persisted
+  through the Peerbit commit path. One exception: when a file's only change
+  since its last commit is a truncate to empty, `flush` and the release of
+  another descriptor (while the one that emptied it is open) commit nothing;
+  `fsync` and the release of the descriptor that emptied it do (see
+  [Native Mounts](#native-mounts)). A process that keeps that descriptor open
+  (`nohup cmd > log &`) leaves the previous bytes published until it closes or
+  fsyncs it, or writes and flushes. These calls neither wait for a remote persisted
   receipt nor promise survival of a kernel, host, or storage-controller power
-  failure.
-  `prepareForDisposal()` is the separate, quiesced remote-persistence fence: its
-  receipt applies to each exact captured entry at that instant, can be satisfied
-  by different peers per entry, and is neither permanent custody nor a Byzantine
-  proof.
+  failure. `prepareForDisposal()` is the separate, quiesced remote-persistence
+  fence: its receipt applies to each exact captured entry at that instant, can
+  be satisfied by different peers per entry, and is neither permanent custody
+  nor a Byzantine proof.
 - **There is no distributed file lock.** Shared FS does not implement cross-peer
   `flock`, `fcntl`, or mandatory locking. `O_APPEND` allocates non-overlapping
   ranges only among sibling descriptors sharing one backend-process state;
@@ -252,12 +257,32 @@ The genesis proves only that sync with some replica started, and a replica
 vouches from its own view. One that missed writes while it was offline, such
 as a creator restarting after another machine wrote and left, still serves the
 genesis and no data, so a joiner that reaches only that replica becomes
-write-ready on an empty view. Nothing is lost: the missed writes merge when a
-peer holding them, such as their author, comes back, and clashing paths become
-conflict copies. This is the same exposure as settling on any donor's partial
-view; closing it needs a per-peer sync frontier from Peerbit upstream.
-Protocol-grade empty-log and no-late-arrival proofs likewise require an
-upstream shared-log frontier/barrier API.
+write-ready on an empty view. The missed writes merge when a peer holding
+them, such as their author, comes back, and the merge deletes no stored
+version: edits made on the partial view become content conflicts
+(`conflicts()`), and clashing creates and directories become naming conflicts
+(`namingConflicts()`) whose visible choice can flip to the other side.
+Earlier releases lost two kinds of write made on such a view: saving the bytes
+a file showed was a no-op, so a newer change made elsewhere won with no
+conflict listed, and of a concurrent `chmod` and `touch` the next write kept
+one. Both are now kept, within the limits listed under
+[Conflicts](#conflicts). Consistency across files, such as a git repository's
+refs, index and objects, is not kept: each file merges on its own, so work
+done on a partial view can leave such a repository inconsistent.
+
+This is the same exposure as settling on any donor's partial view, and it
+grows with scale. Today's write readiness waits for a quiet window on a live,
+idle donor, which proves nothing about completeness: with many peers and
+documents it can certify a partial view (a 6,000-file join became write-ready
+with 3-4% of the namespace rows still missing). It is being replaced by
+proof-based write readiness (design in
+[#406](https://github.com/dao-xyz/peerbit-examples/pull/406)), where a
+replica becomes write-ready only once it proves its view contains the
+snapshot of every connected peer it can see. Stale views stay possible after
+that, for example on a warm reopen, which is ready offline, or when a peer
+holding newer writes is not visible. Protocol-grade empty-log and
+no-late-arrival proofs likewise require an upstream shared-log
+frontier/barrier API.
 
 Access-controlled filesystems have an additional upstream limitation: write
 readiness fences the namespace log, not an authoritative trusted-writer
@@ -590,9 +615,11 @@ durability and must not be presented as a storage-generation upgrade.
 
 File content is content-addressed: a chunk's id is the hash of its bytes, so
 identical content — across versions of one file or across different files — is
-stored and replicated exactly once, saving an unchanged file is a no-op, and a
-small edit to a large file stores only the changed chunks (fixed-size
-chunking: in-place edits dedupe; inserts shift subsequent chunks). A save
+stored and replicated exactly once, saving an unchanged file stores no new
+chunks (see [Conflicts](#conflicts) for when it records a version that lists
+the stored chunks), and a small edit to a large file stores only the changed
+chunks (fixed-size chunking: in-place edits dedupe; inserts shift subsequent
+chunks). A save
 skips re-putting a chunk only when the chunk is present locally and a version
 younger than the dedup skip horizon (15 days by default) references it;
 otherwise it re-puts the chunk, and after the new version lands it
@@ -616,12 +643,13 @@ immutable document. Use `authorizeWriter(publicKey)` to trust another writer.
 
 Explicit garbage collection retires eligible logical history:
 `collectGarbage()` / `peerbit-fs gc` retires superseded versions (keeping the
-newest K, everything recent, all conflict heads, and anything a delete-vs-edit
-conflict may need), compacts settled naming histories, and deletes chunks no
-surviving version references. Safety over speed: winners never change (depths
-are stored, not recomputed), a two-run ledger barrier keeps a freshly-synced
-replica from collecting anything, every replica resurrects removed documents it
-still needs, and writers re-verify chunk presence after every save. Version and
+newest K, everything recent, all conflict heads, the version a metadata merge
+needs, and anything a delete-vs-edit conflict may need), compacts settled
+naming histories, and deletes chunks no surviving version references. Safety
+over speed: winners never change (depths are stored, not recomputed), a
+two-run ledger barrier keeps a freshly-synced replica from collecting anything,
+every replica resurrects removed documents it still needs, and writers
+re-verify chunk presence after every save. Version and
 naming GC retire index rows and reduce per-operation CPU. Chunk GC retires
 unreferenced chunk documents, and `reclaimedChunkBytes` reports their logical
 payload size; neither is a measurement or guarantee of physical block-store or
@@ -631,6 +659,21 @@ the time span between runs, never the second run itself. The separately gated
 snapshot segment reclaimer described under
 [Unattended lifecycle](#unattended-lifecycle) can delete positively owned raw
 segment blocks.
+
+A version is superseded only once every head of its file descends from it, so
+while a file has several heads, even heads holding the same bytes (identical
+concurrent saves, or a concurrent `chmod` and `touch`), each keeps its own
+history since they diverged until a write merges them. An unchanged save by a
+replica that wrote one of them is free and merges nothing (see
+[Conflicts](#conflicts)). Recorded copies count toward K like any version,
+except one with the mtime of the version it copies (an unchanged `writeFile`
+or `writeBatch` save, which earlier releases did not record): it stays while
+within the newest K without being counted, so it never pushes an older
+version out. Every recorded copy also references the version it repeats (the
+ordinary version its run of copies started from, or the `touch` the save took
+in), and no other version besides the save's own parents. So once a run of
+copies is past the newest K and GC keeps the version it repeats, the run
+collapses to one copy: the one a kept version builds on, else the newest.
 
 ## CLI
 
@@ -707,13 +750,16 @@ whole-namespace conflict scan.
 
 Mounted writes are buffered by the native adapter. Each successful `flush` or
 `fsync` persists through the mutation generation captured when its fence
-starts. Backend-local descriptors for the same current file-node/path binding
-share one buffer, logical length, mutation generation, and commit ancestry;
-access mode, `O_APPEND`, and closing remain descriptor-local. A remote removal,
-replacement, or move detaches the old binding: its existing descriptors retain
-local-only bytes until close while a later open receives a fresh attached
-state. `release` closes writes through that descriptor before persisting its
-cutoff. Later writes through sibling descriptors stay dirty for the next fence
+starts, except a `flush` of a truncate-only change (see
+[Native Mounts](#native-mounts)). Backend-local descriptors for the same
+current file-node/path binding share one buffer, logical length, mutation
+generation, and commit ancestry; access mode, `O_APPEND`, and closing remain
+descriptor-local. A remote removal, replacement, or move detaches the old
+binding: its existing descriptors retain local-only bytes until close while a
+later open receives a fresh attached state. `release` closes writes through
+that descriptor before persisting its cutoff; while a truncate to empty is the
+only change, only the release of the descriptor that emptied the file
+persists. Later writes through sibling descriptors stay dirty for the next fence
 instead of starving the current one. The CLI waits for write readiness before
 exposing the mount and rejects `mount --no-replicate`.
 
@@ -792,9 +838,34 @@ negotiated IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
 `truncate`, `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`,
 `unlink`, `setattr`, `symlink`, and `readlink`. Numeric open flags are parsed
 with the host platform's `O_*` constants, and truncate shrinks and zero-fill
-grows both open handles and paths. A flush with no write mints no version; any
-write, even of identical bytes, advances mtime and publishes one version that
-reuses the stored chunks. Writable opens load the exact visible version rather
+grows both open handles and paths. A flush with no write mints no version, and
+neither does one whose only change since the last commit emptied the file at
+open or by truncate: a shell redirect (`cmd > file`) closes a duplicate
+descriptor before `cmd` writes, and that flush must not publish an empty
+version. A flush after a further change, an fsync, or the release of the
+descriptor that emptied the file publishes; the release of another descriptor
+(a reader or watcher that opened the file meanwhile) does not while that
+descriptor is open. So a truncate-only change (`: > file`, `truncate -s 0`,
+which truncates through its descriptor) publishes at release, which Linux sends
+after `close(2)` has returned: a crash in that window keeps the old bytes, and a
+failed commit is not reported to the closing process. A process that keeps the
+emptying descriptor open stretches that window to its lifetime: after
+`nohup ./server > server.log &` (or `exec > file` in a script), other replicas
+and a restarted mount show the previous bytes until the process closes the
+file, fsyncs, or writes and then flushes (a child that inherited the
+descriptor exiting is such a flush). Its writes stay unpublished until such a
+fence either way. Any write, even of
+identical bytes, advances mtime and publishes one version that reuses the
+stored chunks. When the bytes and mode are those the open file showed, that
+version keeps the rank of the version the file was opened on (unless a
+`utimens` set another mtime over bytes this replica wrote, which is a touch),
+so it never changes which version is visible: on every such save, and also
+when another replica's change arrived while the file was open. An fsync or a
+flush after a write in the middle of a save publishes what was written so far,
+and a later commit is compared with that version, not with the one the file
+was opened on. A save that writes a new file and renames it over the original
+replaces the file instead. See [Conflicts](#conflicts) for both.
+Writable opens load the exact visible version rather
 than a temporarily available ancestor, retain
 that version as their sole causal base, and compare-and-set the path's node id
 at commit. A read-only first opener also loads that exact verified snapshot,
@@ -974,9 +1045,11 @@ its socket write completes without an additional file-sized copy.
 
 The portable backend gives `flush` and `fsync` the same bounded file-state
 fence: each captures a synchronous mutation-generation cutoff and persists
-every generation accepted before that call. `release` first closes mutation
+every generation accepted before that call (a `flush` of a truncate-only change
+excepted, see [Native Mounts](#native-mounts)). `release` first closes mutation
 admission through that descriptor, then persists the same kind of cutoff before
-detaching it. Mutations admitted later through sibling descriptors remain
+detaching it (for a truncate-only change, only the descriptor that emptied the
+file does). Mutations admitted later through sibling descriptors remain
 buffered for a later fence. The current target interface still has no
 backend-independent hardware cache or power-loss barrier.
 
@@ -1067,9 +1140,115 @@ a deterministic display choice. Conflicting versions are listed through
 
 A file is in conflict only when its heads hold two or more different contents,
 and `conflicts()` lists one version per content. Heads that differ only in mode
-or mtime (a concurrent `chmod` or `touch`) are not a conflict: the visible head
-supplies both fields, and the next write merges the heads, so one of the two
-metadata changes is lost. `stat().headVersionIds` still lists every head.
+or mtime (a concurrent `chmod` or `touch`) are not a conflict: `stat()`,
+`list()`, the next write that changes the file, `resolveConflict()` and a
+naming `restore` merge them field by field against the nearest version they
+both descend from, so a mode or mtime one side changed wins over the side that
+kept it, and of two changed mtimes the later wins. Regular files have two
+modes, so two sides that changed the mode agree. `stat().headVersionIds` still
+lists every head. Such heads, like those of identical concurrent saves, stay
+separate until a write merges them, and GC keeps each one's own history until
+then; an unchanged save by a replica that wrote one of them is free (below)
+and merges nothing.
+
+GC keeps the common version while the heads' metadata differs, but only on a
+replica that holds both heads. A collector that has not yet received the other
+side's change can retire it, and the retirement replicates to every replica.
+It can do so once that version is older than the retention window (30 days by
+default) and the collector's side holds K (`keepVersions`, 10 by default)
+newer versions, one of them older than the grace period (3 days by default),
+so a partition only a little longer than the grace period can be enough.
+Without that version the visible head's mode and the later mtime are kept,
+which can drop the other side's `chmod`. A recorded copy (below) counts toward K
+like any version, but of a run of copies past the newest K GC keeps only one,
+so a copy the other side built on can retire while GC keeps the version it
+copies (a read or an open file pinned it, say). That version, which has the
+same bytes and mode (a save whose merged mode the best-ranked head lacks is not
+a copy, below), then stands in as the merge base: a mode change still wins,
+while a head that kept the copy's mtime counts as having changed it, so the
+later mtime is kept.
+
+A save is unchanged when every head of the file already holds its bytes and the
+file shows its mode and mtime. An unchanged save mints no version when this
+replica already wrote those bytes: as one of the heads, or as a version the
+heads copy through recorded saves (below). A change made elsewhere that it has
+not received was then either concurrent with that write, and so already a
+conflict, or made after seeing it, and so it wins as in a three-way merge in
+which this save changed nothing. Otherwise the save is recorded as a copy of
+the heads: one version that reuses their chunks, keeps their causal depth, and
+takes the best-ranked head's place in the visible order (depth ties break by
+id, and the copy's id shares that head's leading bytes). It ranks below every
+change made on top of the head it copies and never changes which version is
+visible: a concurrent edit that tied with that head wins or loses the tie as
+before. One exception: when the heads' modes differ and the best-ranked head
+lacks the merged mode (another head's concurrent `chmod`), the save is an
+ordinary version one deeper that records the merge, so a copy always has the
+mode of the version it copies. Each replica records at most one copy of the
+same bytes, since its
+later saves find its own copy in the chain (until GC retires it), so two
+machines taking turns re-saving a file add one version each (no chunk bytes,
+but like every version it lists the file's chunk ids), not one per save. If
+the other side changed the file meanwhile and this replica had not received
+it, both versions are listed in `conflicts()`, and the other side's change
+stays visible when it was made on top of the version this replica saw.
+If the other side deleted the file, the delete stays visible and the save is a
+`delete-vs-edit` naming conflict that `restore` brings back. `writeFile` and
+`writeBatch` follow this rule, and so does a native-mount commit that keeps the
+mtime the file shows (a `utimens` before close set it back); a mount commit
+over heads that changed since the file was opened records the copy rather than
+reporting "unchanged". An ordinary mount write advances the mtime (see
+[Native Mounts](#native-mounts)), so a mount save of unchanged bytes and mode
+is never free: it publishes one version per save, as before. For a mount,
+unchanged means the bytes and mode the open file showed, those of the version
+it was opened on, even when another replica's change has reached this replica
+since; that change stays a head. The version is recorded as a copy of the
+version the file was opened on, carrying the new mtime, so it ranks as the copy
+above does: a change made elsewhere on top of that version stays visible, and
+both are listed. This holds whoever wrote those bytes, since the save changed
+only the clock the write advanced. Every such save does so, so repeated saves
+of the same bytes (a checkout, a formatter, a generator, an editor's `:w`) add
+one copy each, a row that lists the file's chunk ids (about 53 bytes per
+512 KiB chunk). They count toward K, as the ordinary versions such saves
+published before did, and all of them stay for the retention window. Past it
+GC keeps the newest K versions of the file, and of an older run of copies of a
+version it keeps, one copy: the one a later version builds on, else the
+newest. A `utimens` before close that sets another mtime (`cp -p`, `touch -r`,
+an archive extract) makes the save a touch instead when this replica authored
+the bytes, that is, wrote them as an ordinary version and not just as its own
+copy of another replica's bytes: an ordinary version at depth + 1, so a
+change made elsewhere after seeing those bytes ties with it, and both are
+listed. Over another replica's bytes it stays a copy. When another
+replica's `chmod` or `touch` of the bytes the file was opened on has arrived
+since, a mount write takes it in (the merged mode and mtime survive). Only
+concurrent heads merge: the opened version, when a head the write takes in
+descends from it, is only the base of that merge, so a change that head
+reverted (a `chmod +x` undone by `chmod -x`) does not come back. A save of
+unchanged bytes is then a copy of that head and ranks where it ranked; any
+other save is an ordinary version one deeper than that head, as a change made
+after receiving it is. So it outranks a change made elsewhere on top of the
+opened version (both are listed), and a copy of that head made elsewhere never
+ties with it. A save that writes a new file and renames it over the original,
+as `sed -i`, rsync and many editors' safe-write do, replaces the file instead:
+a change made elsewhere to the original becomes a `delete-vs-edit` naming
+conflict with the replacement visible, as in earlier releases.
+`setMetadata` with the values the file already shows (merged, as above) stays a
+no-op, since it could not change a merge.
+
+"This replica" is the signing key plus the machine label. Two machines that
+share a writer key, or a store directory copied to another machine, count as
+two replicas while their labels differ; with the same label they count as one,
+and each one's save of the other's bytes is a no-op. The CLI labels by host
+name, but the library's default label is the constant `"unknown-machine"`, so
+an application that opens one Peerbit identity on several devices, including
+through a copied store directory, must pass each device its own
+`machineLabel`. A changed key or label costs at most one recorded copy per
+file. The stored `authorKey` and `machineLabel` are advisory (see the
+access-control notes above): a trusted writer can stamp a version with another
+replica's key and label and so make that replica's save of those bytes a
+no-op, as it could equally overwrite the file. Two saves still let a newer
+change win without a conflict: an unchanged save of bytes this replica already
+wrote, as above, and a native-mount commit of the visible bytes and metadata
+of a file already in conflict, which stays a no-op as in earlier releases.
 
 ## File metadata and symlinks
 
@@ -1089,18 +1268,23 @@ await fs.writeFile("/latest", "releases/v2", { mode: SHARED_FS_MODE.symlink });
   owner, or group are stored. `mtime` is in milliseconds. `stat()` reports
   `mode`, and `updatedAt` is the mtime for files; versions carry `mode` and
   `mtime`.
-- A write without `mode` or `mtime` keeps the best-ranked parent's mode, and
-  keeps its mtime only when the bytes are unchanged; otherwise mtime is the
-  write time. `writeBatch` and naming restores keep the mode too;
-  `resolveConflict()` keeps the selected version's mode, and its mtime only
-  when the selected bytes are the visible ones. Re-saving identical bytes and
-  metadata is still a no-op.
+- A write without `mode` or `mtime` keeps the parents' mode (merged as in
+  [Conflicts](#conflicts)), and keeps their mtime only when the bytes are
+  unchanged; otherwise mtime is the write time. `writeBatch` keeps the mode
+  too, and a naming restore keeps the mode and mtime the restored heads
+  show. `resolveConflict()` keeps the selected bytes' mode (merged over the
+  heads holding them, else the selected version's), and their mtime only
+  when they are the visible bytes, so resolving to the visible bytes leaves
+  `stat()` as it was. Re-saving the bytes and metadata a file shows is a
+  no-op when this replica already wrote them (see [Conflicts](#conflicts)).
 - `setMetadata(path, { mode?, mtime? }, { expectedNodeId? })` publishes one
   version that reuses the current chunks, so it moves no chunk bytes. A write
   of a current head's bytes with a new mode or mtime reuses them the same way
   while they are all stored locally (unless it sets `chunkSize` or
   `dedup: "off"`). `setMetadata` rejects directories
-  with `EISDIR` and symlinks with `EINVAL`.
+  with `EISDIR` and symlinks with `EINVAL`. A `setMetadata` or `writeFile`
+  that changes nothing returns the visible version with the mode and mtime
+  `stat()` shows, which may merge several heads.
 - A symlink is a file node whose bytes are its target: 1-1023 bytes of UTF-8
   without NUL. `stat()`, `list()`, and watch events report it as a file; check
   `stat().mode`, since watch events carry no mode. `readFile()` returns the
