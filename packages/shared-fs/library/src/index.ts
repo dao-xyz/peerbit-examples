@@ -26,6 +26,7 @@ import {
     NotFoundError,
     Or,
     StringMatch,
+    type IndexIterator,
     type Query,
     type Shape,
 } from "@peerbit/document";
@@ -34,6 +35,7 @@ import {
     type BlockStoreSafety,
 } from "@peerbit/blocks-interface";
 import {
+    ClosedError,
     Program,
     type ProgramClient,
     type ProgramInitializationOptions,
@@ -53,6 +55,7 @@ import {
     SegmentRef,
     SHARED_FS_MODE,
     SharedFsEntry,
+    type SharedFsEntryKind,
     type SharedFsFileMode,
     SnapshotCounts,
     SnapshotManifestPayload,
@@ -261,6 +264,17 @@ const CHUNK_QUERY_BATCH = 128;
  * read every matching row narrows its Or to the chunks still unwitnessed.
  */
 const CHUNK_WITNESS_PAGE = 16;
+
+/**
+ * The fields arrival-time bookkeeping reads from an index row: its id and
+ * the Context fields GC uses (arrival time, head, size). Without a shape
+ * each row also selects and resolves the chunkRefs and causalRefs arrays
+ * and every payload column, several times the memory and work.
+ */
+const ARRIVAL_ROW_SHAPE: Shape = {
+    id: true,
+    __context: { modified: true, head: true, size: true },
+};
 
 /** Parent versions a write offers as W1 base-witness candidates. */
 const BASE_WITNESS_LIMIT = 8;
@@ -4584,13 +4598,42 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     // reads.
     // ------------------------------------------------------------------
 
+    /**
+     * Documents per read when a local scan resolves every match. The sqlite3
+     * indexer pages an iterator with LIMIT/OFFSET, so each read re-skips
+     * every row an earlier read returned: DocumentIndex `all()` reads 100 at
+     * a time, which made a full-kind scan quadratic (minutes of a large
+     * filesystem's first snapshot and GC). Reads this large cut the skipped
+     * rows 200-fold and leave scans of up to this many documents a single
+     * statement. Bounded rather than unlimited: Documents spreads a read's
+     * results into argument lists, which overflow the stack somewhere above
+     * 100k elements. Index-only scans (localIndexRows) are a single
+     * statement at any size.
+     */
+    private static LOCAL_SCAN_PAGE = 20_000;
+
+    /** Every matching local document, read in LOCAL_SCAN_PAGE pages. */
     private async queryDocuments<T extends SharedFsEntry>(
         query: Query[]
     ): Promise<T[]> {
-        const results = await this.entries.index
-            .iterate({ query }, { local: true, remote: false, resolve: true })
-            .all();
-        return results as unknown as T[];
+        const iterator = this.entries.index.iterate(
+            { query },
+            { local: true, remote: false, resolve: true }
+        );
+        try {
+            const results: SharedFsEntry[] = [];
+            for (;;) {
+                const batch = await iterator.next(
+                    SharedFileSystem.LOCAL_SCAN_PAGE
+                );
+                results.push(...batch);
+                if (batch.length === 0 || iterator.done()) {
+                    return results as T[];
+                }
+            }
+        } finally {
+            await iterator.close();
+        }
     }
 
     private async getDocument<T extends SharedFsEntry>(
@@ -5375,10 +5418,46 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /** Index-only rows for a query; never resolves documents. */
     private async queryRows(query: Query[]): Promise<any[]> {
+        return (await this.localIndexRows(query)).rows;
+    }
+
+    /**
+     * Rows per read of an arrival scan. One read holds every raw row and
+     * every resolved value it returns at once, so a whole-kind read of a
+     * chunk-heavy store needs far more heap than the rows it keeps. Each
+     * later read re-skips the rows before it (the indexer pages with
+     * OFFSET), though it neither returns nor resolves them: at this size a
+     * kind of 200k rows takes 25 reads that skip 2.5M rows in all, against
+     * 2,000 reads and 200M skipped rows at the Documents page of 100.
+     */
+    private static ARRIVAL_SCAN_PAGE = 8_192;
+
+    /**
+     * The ARRIVAL_ROW_SHAPE fields of every local row of a kind, read in
+     * ARRIVAL_SCAN_PAGE pages. Like a single read, it may miss rows written
+     * while it runs: GC counts a row without an arrival time as young and
+     * re-checks each row it acts on.
+     */
+    private async arrivalRows(kind: SharedFsEntryKind): Promise<any[]> {
         this.rowQueries++;
-        return (await this.entries.index
-            .iterate({ query }, { local: true, remote: false, resolve: false })
-            .all()) as any[];
+        return this.readLocalIndex(
+            [new StringMatch({ key: "kind", value: kind })],
+            ARRIVAL_ROW_SHAPE,
+            async (iterator) => {
+                const rows: any[] = [];
+                for (;;) {
+                    const batch = await iterator.next(
+                        SharedFileSystem.ARRIVAL_SCAN_PAGE
+                    );
+                    for (const result of batch) {
+                        rows.push(result.value);
+                    }
+                    if (batch.length === 0 || iterator.done()) {
+                        return rows;
+                    }
+                }
+            }
+        );
     }
 
     /**
@@ -5389,17 +5468,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         query: Query[],
         limit: number
     ): Promise<{ rows: any[]; complete: boolean }> {
-        this.rowQueries++;
-        const iterator = this.entries.index.iterate(
-            { query },
-            { local: true, remote: false, resolve: false }
-        );
-        try {
-            const rows = (await iterator.next(limit + 1)) as any[];
-            return { rows, complete: rows.length <= limit && iterator.done() };
-        } finally {
-            await (iterator as any).close?.();
-        }
+        return this.localIndexRows(query, { limit });
     }
 
     /**
@@ -6225,21 +6294,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     /**
      * Rows read straight from the local index. A local, unresolved Documents
      * query filters nothing on this peer (it passes no canRead), so it
-     * matches exactly these rows; it also loads each row's log head for its
-     * result envelope, which W1/W2 bookkeeping never reads. `shape` narrows
-     * the returned fields. At most `limit + 1` rows (every row without a
-     * `limit`); `complete` only when they are provably every matching row.
+     * matches exactly these rows, fields and `__context` included; it also
+     * loads each row's log head for its result envelope, which no caller
+     * reads, and drains in OFFSET pages. Without a `limit` this is one
+     * indexer statement. `shape` narrows the returned fields. At most
+     * `limit + 1` rows (every row without a `limit`); `complete` only when
+     * they are provably every matching row.
      */
     private async localIndexRows(
         query: Query[],
         options: { limit?: number; shape?: Shape } = {}
     ): Promise<{ rows: any[]; complete: boolean }> {
         this.rowQueries++;
-        const iterator = this.entries.index.index.iterate(
-            { query },
-            options.shape ? { shape: options.shape } : undefined
-        );
-        try {
+        return this.readLocalIndex(query, options.shape, async (iterator) => {
             if (options.limit === undefined) {
                 const results = await iterator.all();
                 return {
@@ -6253,9 +6320,54 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 complete:
                     results.length <= options.limit && iterator.done() === true,
             };
+        });
+    }
+
+    /**
+     * Every raw local index read goes through here. `read` drives one
+     * iterator over `query`; this opens and closes it and reads nothing
+     * itself, so a lone `all()` stays one statement. The raw index answers
+     * a closing store with no rows rather than an error, so a read that
+     * starts, or is in flight, while the store closes can come back short
+     * or empty. The DocumentIndex is marked closed before its index starts
+     * closing, and close() moves to a new open generation before either,
+     * so a read that starts or returns on a closed program, a closed
+     * DocumentIndex or a later generation throws ClosedError, as a
+     * Documents read would, and never reports rows as absent. A read that
+     * fails on a closed store throws ClosedError too.
+     */
+    private async readLocalIndex<R>(
+        query: Query[],
+        shape: Shape | undefined,
+        read: (iterator: IndexIterator<any, Shape | undefined>) => Promise<R>
+    ): Promise<R> {
+        const documentIndex = this.entries.index;
+        const generation = this.openGeneration;
+        const assertReadable = () => {
+            if (
+                this.closed ||
+                documentIndex.closed ||
+                this.openGeneration !== generation
+            ) {
+                throw new ClosedError();
+            }
+        };
+        assertReadable();
+        const iterator = documentIndex.index.iterate(
+            { query },
+            shape ? { shape } : undefined
+        );
+        let result: R;
+        try {
+            result = await read(iterator);
+        } catch (error) {
+            assertReadable();
+            throw error;
         } finally {
             await iterator.close();
         }
+        assertReadable();
+        return result;
     }
 
     /**
@@ -14233,23 +14345,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * not make a cold store look warm.
      */
     private async hasLocalContentRow() {
-        const probe = this.entries.index.iterate(
-            {
-                query: [
-                    new Or([
-                        new StringMatch({ key: "kind", value: "naming" }),
-                        new StringMatch({ key: "kind", value: "file-version" }),
-                        new StringMatch({ key: "kind", value: "file-chunk" }),
-                    ]),
-                ],
-            },
-            { local: true, remote: false, resolve: false }
-        );
-        try {
-            return (await probe.next(1)).length > 0;
-        } finally {
-            await (probe as any).close?.();
+        // One probe per kind: the kind index answers each with its first
+        // row, while one Or of the three kinds is planned as a sorted union
+        // of every content row before the first comes back. readLocalIndex
+        // keeps a closing index an error rather than "no rows", and callers
+        // treat an unreadable index as content (fail-closed).
+        for (const kind of ["naming", "file-version", "file-chunk"]) {
+            const found = await this.readLocalIndex(
+                [new StringMatch({ key: "kind", value: kind })],
+                { id: true },
+                async (probe) => (await probe.next(1)).length > 0
+            );
+            if (found) {
+                return true;
+            }
         }
+        return false;
     }
 
     /**
@@ -16435,29 +16546,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     versionsByNode.set(doc.nodeId, list);
                 }
             }
-            // Arrival times (Context.modified) via one index-only pass.
+            // Arrival times (Context.modified) via one index-only pass per
+            // kind.
             const modifiedMs = new Map<string, number>();
-            const rows = await this.entries.index
-                .iterate(
-                    {
-                        query: [
-                            new Or([
-                                new StringMatch({
-                                    key: "kind",
-                                    value: "file-version",
-                                }),
-                                new StringMatch({
-                                    key: "kind",
-                                    value: "naming",
-                                }),
-                            ]),
-                        ],
-                    },
-                    { local: true, remote: false, resolve: false }
-                )
-                .all();
-            for (const row of rows as any[]) {
-                modifiedMs.set(row.id, this.contextModifiedMs(row.__context));
+            for (const kind of ["file-version", "naming"] as const) {
+                for (const row of await this.arrivalRows(kind)) {
+                    modifiedMs.set(
+                        row.id,
+                        this.contextModifiedMs(row.__context)
+                    );
+                }
             }
             const ageOk = (
                 doc: { id: string; createdAt: bigint },
@@ -17094,16 +17192,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
         // Chunk candidates: refcount 0 against the post-retirement index and
         // old enough by arrival time.
-        const chunkRows = (await this.entries.index
-            .iterate(
-                {
-                    query: [
-                        new StringMatch({ key: "kind", value: "file-chunk" }),
-                    ],
-                },
-                { local: true, remote: false, resolve: false }
-            )
-            .all()) as any[];
+        const chunkRows = await this.arrivalRows("file-chunk");
         if (context) this.throwIfMaintenanceInactive(context);
         const orphaned = new Map<string, any>();
         const graceOldRows = chunkRows.filter(
@@ -17201,19 +17290,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // trackers observe the removal and resolve their waiters honestly.
         {
             const manifestAgeMs = Math.max(config.retentionMs, config.graceMs);
-            const manifestRows = (await this.entries.index
-                .iterate(
-                    {
-                        query: [
-                            new StringMatch({
-                                key: "kind",
-                                value: "changeset-manifest",
-                            }),
-                        ],
-                    },
-                    { local: true, remote: false, resolve: false }
-                )
-                .all()) as any[];
+            const manifestRows = await this.arrivalRows("changeset-manifest");
             if (context) this.throwIfMaintenanceInactive(context);
             for (const row of manifestRows) {
                 const arrivalMs = this.contextModifiedMs(row.__context);
