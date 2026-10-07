@@ -27,9 +27,10 @@ export const headDigestStats = { fallbacks: 0 };
 /**
  * Fixed-shape base58btc decoder for the standard head: 24-bit limbs, four
  * digits per step (58^4 < 2^24), every product exact in a double. 0.37-0.45
- * µs per head against 2.0-2.6 µs for a generic decode (M0 P4). Writes the
- * digest into `out` and returns false, leaving `out` unspecified, when the
- * head is not the standard shape.
+ * µs per head against 2.0-2.6 µs for a generic decode (M0 P4). Each step
+ * multiplies only the limbs the value already reaches (about half of them
+ * on average). Writes the digest into `out` and returns false, leaving
+ * `out` unspecified, when the head is not the standard shape.
  */
 const decodeStandard = (head: string, out: Uint8Array): boolean => {
     const n = head.length;
@@ -37,6 +38,8 @@ const decodeStandard = (head: string, out: Uint8Array): boolean => {
         return false;
     }
     limbs.fill(0);
+    // limbs[used..] are zero.
+    let used = 0;
     let i = 1;
     while (i < n) {
         let acc = 0;
@@ -51,14 +54,21 @@ const decodeStandard = (head: string, out: Uint8Array): boolean => {
             mul *= 58;
         }
         let carry = acc;
-        for (let j = 0; j < LIMBS; j++) {
+        let j = 0;
+        for (; j < used; j++) {
             const x = limbs[j] * mul + carry;
             carry = Math.floor(x / LIMB);
             limbs[j] = x - carry * LIMB;
         }
-        if (carry !== 0) {
-            return false;
+        for (; carry !== 0; j++) {
+            if (j === LIMBS) {
+                return false;
+            }
+            const x = carry;
+            carry = Math.floor(x / LIMB);
+            limbs[j] = x - carry * LIMB;
         }
+        if (j > used) used = j;
     }
     // limbs[11] holds bytes 0-2 (most significant), limbs[0] bytes 33-35.
     const top = limbs[LIMBS - 1];

@@ -155,7 +155,7 @@ manualDescribe("readiness upkeep bench", () => {
                     await runtime.whenStarted();
                     expect(runtime.anchorHost!.mode).toBe("worker");
                     const probe = instrument(runtime);
-                    const { tap, laneSet, cells } = probe.state;
+                    const { tap, laneSet } = probe.state;
 
                     // ---- grow through the product write path
                     const BATCH = 1000;
@@ -289,17 +289,18 @@ manualDescribe("readiness upkeep bench", () => {
                         }
                     });
 
-                    // ---- freeze: cells copy plus one digest round trip
+                    // ---- freeze: the digest and cells requests (one
+                    // synchronous step) and their round trip
                     {
                         await tap.verifyIdle();
                         const copyNs: number[] = [];
                         const roundTripMs: number[] = [];
                         for (let i = 0; i < 100; i++) {
                             const t0 = performance.now();
-                            cells.copy();
                             const { digest } = laneSet.digestNow();
+                            const { cells } = laneSet.cellsNow();
                             copyNs.push((performance.now() - t0) * 1e6);
-                            await digest;
+                            await Promise.all([digest, cells]);
                             roundTripMs.push(performance.now() - t0);
                         }
                         // `above` for a responder with hlcProved > 0: O(n).

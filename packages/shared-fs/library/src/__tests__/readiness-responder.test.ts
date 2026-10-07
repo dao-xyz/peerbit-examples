@@ -168,10 +168,11 @@ const fakeResponder = async (
     }
     const tap = new ScopeTap(NAMESPACE_V1, port);
     const key = cellKey("fake-responder");
-    const cells = new Cells(M, key[0], key[1]);
     const host = await AnchorHost.create({ mode });
-    const laneSet = host.open(NAMESPACE_V1.ivTag, { slab: () => tap.map });
-    tap.addSink(cells);
+    const laneSet = host.open(NAMESPACE_V1.ivTag, {
+        slab: () => tap.map,
+        cells: { m: M, k0: key[0], k1: key[1] },
+    });
     tap.addSink({
         apply: (digest, sign) => laneSet.apply(digest, sign),
         reset: () => laneSet.reset(tap.epoch),
@@ -181,7 +182,6 @@ const fakeResponder = async (
     const scope = {
         descriptor: NAMESPACE_V1,
         tap,
-        cells,
         laneSet,
         logId,
         started: options.started ?? Promise.resolve(),

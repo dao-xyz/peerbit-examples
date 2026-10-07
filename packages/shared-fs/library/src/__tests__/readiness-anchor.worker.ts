@@ -7,11 +7,12 @@
 // - idle: a lane set stays open after a round trip; nothing else is
 //   pending, so the process must exit 0 by itself.
 // - filesystem: opens a filesystem, writes, and reports the anchor host mode
-//   after a digest round trip through the namespace lane set.
+//   after a digest and a cells round trip through the namespace lane set.
 import * as crypto from "node:crypto";
 import { createAnchorMath } from "../readiness/anchor.js";
 import { AnchorHost } from "../readiness/anchor-host.js";
-import { LANES } from "../readiness/constants.js";
+import { Cells } from "../readiness/cells.js";
+import { LANES, M } from "../readiness/constants.js";
 
 const scenario = process.argv[2];
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
@@ -73,10 +74,13 @@ if (scenario === "pending") {
         await runtime.whenStarted();
         const scope = runtime.scope(0);
         const { seq, digest } = scope.laneSet.digestNow();
+        const { cells } = scope.laneSet.cellsNow();
         const list = new Uint8Array(scope.tap.count * 32);
+        const fresh = new Cells(M, runtime.cellKey[0], runtime.cellKey[1]);
         let offset = 0;
         scope.tap.map.forEach((head: Uint8Array) => {
             list.set(head, offset);
+            fresh.apply(head, 1);
             offset += 32;
         });
         const value = await digest;
@@ -92,6 +96,7 @@ if (scenario === "pending") {
             count: scope.tap.count,
             digest: hex(value),
             digestOfList: hex(ofList),
+            cellsMatch: hex(await cells) === hex(fresh.toBytes()),
         });
     } finally {
         await peer.stop();

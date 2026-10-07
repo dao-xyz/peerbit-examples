@@ -65,10 +65,10 @@ const stateOf = async (fs: SharedFsHandle) => {
     await runtime.whenStarted();
     const scope = runtime.scope(SCOPE_NAMESPACE_V1)!;
     await scope.tap.verifyIdle();
-    const cells = hex(scope.cells.toBytes());
     const { count, hlc } = scope.tap;
+    const cells = scope.laneSet.cellsNow().cells;
     const anchor = hex(await scope.laneSet.digestNow().digest);
-    return { count, hlc, cells, anchor };
+    return { count, hlc, cells: hex(await cells), anchor };
 };
 
 const writeFiles = async (fs: SharedFsHandle, n: number, prefix = "f") => {
