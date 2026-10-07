@@ -77,6 +77,12 @@ export interface TapStats {
     readdVerifies: number;
     /** Seeds scanned again because the count did not match the index. */
     rescans: number;
+    /**
+     * Rescans an event raced (one arrived during the scan): they may miss
+     * rows again, so they back off instead of counting toward
+     * `COUNT_RESCANS`.
+     */
+    exposedRescans: number;
     /** Index count reads of the count check (`ScopeIndexPort.count`). */
     countReads: number;
     /**
@@ -118,8 +124,11 @@ const SCAN_PAGE_ROWS_MAX = 65_536;
  */
 const RECENT_REMOVALS = 4096;
 /**
- * Rescans the count check may start in one open generation before the tap
- * faults (an index whose count never matches its scan, a bug).
+ * Clean rescans (no event during the scan) the count check may start in one
+ * open generation before the tap faults (an index whose count never matches
+ * its scan, a bug). A rescan an event raced may miss rows again under the
+ * same ingest, which says nothing about the index: it only backs off
+ * (`countBackoff`).
  */
 const COUNT_RESCANS = 3;
 /**
@@ -216,6 +225,7 @@ export class ScopeTap {
         repairs: 0,
         readdVerifies: 0,
         rescans: 0,
+        exposedRescans: 0,
         countReads: 0,
         deferredCounts: 0,
     };
@@ -256,6 +266,14 @@ export class ScopeTap {
     private countNext = 0;
     /** Element changes from one comparison to the next (`COUNT_STRIDE_MAX`). */
     private countStride = 1;
+    /** Clean rescans in this open generation (`COUNT_RESCANS`). */
+    private countCleanRescans = 0;
+    /**
+     * The stride an exposed rescan's comparisons start from: doubles with
+     * each one, up to `COUNT_STRIDE_MAX`, so rescans under a steady stream
+     * of deletes thin out instead of faulting.
+     */
+    private countBackoff = 1;
     /** No comparison was conclusive since the seed or restore. */
     private countFirst = false;
     /** The last conclusive difference and the epoch it was read at. */
@@ -644,16 +662,37 @@ export class ScopeTap {
         if (!this.is("buffering")) {
             throw new Error(`cannot seed a ${this.stateValue} tap`);
         }
+        await this.scanThenGoLive(false);
+    }
+
+    /**
+     * The scan of a seed or a rescan, then the buffered events. Resolves
+     * whether nothing was buffered (for a rescan, which buffers from a live
+     * state: no event raced its pages), or undefined when it did not finish.
+     */
+    private async scanThenGoLive(
+        rescan: boolean
+    ): Promise<boolean | undefined> {
         for await (const rows of this.port.scan()) {
             // Sealed: the stores close next, so no further page (a rescan
-            // that began before the close stays buffering, unpersisted).
-            if (!this.is("buffering") || this.sealedValue) return;
+            // that began before the close stays buffering, unpersisted). A
+            // rescan stops once the close drains, too: the close waits for
+            // the comparison that runs it (`confirmCount`).
+            if (
+                !this.is("buffering") ||
+                this.sealedValue ||
+                (rescan && this.draining)
+            ) {
+                return undefined;
+            }
             for (const row of rows) {
                 this.applyHead(row.key, row.head, row.modified, false);
             }
         }
-        if (!this.is("buffering")) return;
+        if (!this.is("buffering")) return undefined;
+        const clean = this.buffered.length === 0;
         this.goLive();
+        return clean;
     }
 
     /** `seedFromScan`, then `checkCount`. */
@@ -686,8 +725,14 @@ export class ScopeTap {
      *   again at once (in a quiet store it is real; a remote batch in flight
      *   costs one scan more);
      * - a later difference scans again once a comparison read after more
-     *   changes applied sees the same difference: rows in flight have had
-     *   their events by then, a missed row never has one;
+     *   changes applied sees the same difference. A missed row never has an
+     *   event, so its difference stays; a batch in flight does not repeat
+     *   one because the sqlite3 index admits whole database operations in
+     *   one connection-wide FIFO (`@peerbit/indexer-sqlite3 engine.js:97-125`,
+     *   coarse on purpose, TODO(perf) upstream): on 5.4.10 no stable read
+     *   started from a change event differed (review probe: 0 of 8.5k under
+     *   local writers and replication). The real-store case in
+     *   `readiness-tap.test.ts` fails without that barrier;
      * - anything else keeps the state unverified. The next comparison starts
      *   from the changes that follow (`countOnChange`, at most one running
      *   and one per `countStride` changes) or from a consumer
@@ -697,10 +742,13 @@ export class ScopeTap {
      * conclusive unless a change applies during its one count read, and the
      * next change after an inconclusive one is the next chance. A restore
      * whose count cannot be compared during ingest is kept, not discarded: a
-     * scan under the same ingest is no more trustworthy. After
-     * `COUNT_RESCANS` rescans a difference faults the tap. A store that stays
-     * quiet after a difference cannot tell, without a clock, a missed row
-     * from a batch still being indexed: its state stays unverified (never
+     * scan under the same ingest is no more trustworthy. A rescan an event
+     * raced (a delete stream races every OFFSET-paged scan) may miss rows
+     * again: it keeps the state unverified and backs off (`countBackoff`).
+     * Only clean rescans count: a difference that a later change confirms
+     * after `COUNT_RESCANS` of them faults the tap. A store that stays quiet
+     * after a difference cannot tell, without a clock, a missed row from a
+     * batch still being indexed: its state stays unverified (never
      * persisted) until a change confirms the difference or the next open
      * scans. Resolves with the first comparison (false: the tap has scanned
      * again).
@@ -777,14 +825,25 @@ export class ScopeTap {
             // The close began: no scan from now on, and the state is not
             // persisted.
             if (this.draining) return first;
-            if (this.stats.rescans >= COUNT_RESCANS) {
+            if (this.countCleanRescans >= COUNT_RESCANS) {
                 this.faulted ??= new Error(
-                    `readiness: ${this.scope.name} count differs from its index after ${COUNT_RESCANS} rescans`
+                    `readiness: ${this.scope.name} count differs from its index after ${COUNT_RESCANS} clean rescans`
                 );
                 return first;
             }
             this.stats.rescans++;
-            await this.reseed();
+            const clean = await this.reseed();
+            if (clean === true) {
+                this.countCleanRescans++;
+                this.countStride = 1;
+            } else if (clean === false) {
+                this.stats.exposedRescans++;
+                this.countStride = this.countBackoff;
+                this.countBackoff = Math.min(
+                    2 * this.countBackoff,
+                    COUNT_STRIDE_MAX
+                );
+            }
             from = this.epoch;
             difference = await this.countDifference(3);
         }
@@ -844,10 +903,13 @@ export class ScopeTap {
     /**
      * The close's last comparison for a count never verified: one read, and
      * only with no verify pending (the close waits for no further read).
-     * Never rescans. A comparison still running may end after the seal; it
-     * then changes nothing.
+     * Never rescans. A comparison still running ends first, so one count
+     * read is in flight at a time; once the close drains, that comparison
+     * reads no more and starts no rescan, and a rescan's scan stops at its
+     * next page.
      */
     async confirmCount(): Promise<void> {
+        while (this.countRun) await this.countRun;
         if (
             this.countVerifiedValue ||
             !this.is("live") ||
@@ -900,13 +962,27 @@ export class ScopeTap {
     /** `countDifferenceOnce` with the verify queue drained, `tries` times. */
     private async countDifference(tries: number): Promise<number | undefined> {
         for (let i = 0; i < tries; i++) {
-            await this.verifyIdle();
-            // Sealed: the stores close next, so no index read.
-            if (!this.is("live") || this.sealedValue) return undefined;
+            await this.countVerifyIdle();
+            // Sealed: the stores close next, so no index read. Draining: the
+            // close compares once itself (`confirmCount`).
+            if (!this.is("live") || this.sealedValue || this.draining) {
+                return undefined;
+            }
             const difference = await this.countDifferenceOnce();
             if (difference !== undefined) return difference;
         }
         return undefined;
+    }
+
+    /**
+     * `verifyIdle` for the count check, which the close waits for
+     * (`confirmCount`): once the close drains, verifies queued later are not
+     * waited for (each queued one reads once, `drainVerifies`).
+     */
+    private async countVerifyIdle(): Promise<void> {
+        while (this.verifyVersions.size > 0 && !this.draining) {
+            await this.verifyChain;
+        }
     }
 
     /**
@@ -942,20 +1018,24 @@ export class ScopeTap {
     /**
      * Discards the live state and seeds again by scan. Events are buffered
      * from now on, so none is lost between the reset and the scan. Nothing
-     * once the close sealed the tap (no index read from then on).
+     * once the close sealed the tap (no index read from then on) or began
+     * draining. Resolves whether the scan was clean (no event raced it), or
+     * undefined when it did not start or finish.
      */
-    async reseed(): Promise<void> {
-        if (this.is("disposed") || this.sealedValue) return;
-        await this.verifyIdle();
-        if (this.is("disposed") || this.sealedValue) return;
+    async reseed(): Promise<boolean | undefined> {
+        if (this.is("disposed") || this.sealedValue) return undefined;
+        await this.countVerifyIdle();
+        if (this.is("disposed") || this.sealedValue || this.draining) {
+            return undefined;
+        }
         this.stateValue = "buffering";
         this.countVerifiedValue = false;
         // Compared again, and its differences must be seen twice
-        // (`checkCount`).
+        // (`checkCount`); `settleCount` sets the stride once it knows
+        // whether the scan was clean.
         this.countDue = true;
         this.countFirst = false;
         this.countSeen = undefined;
-        this.countStride = 1;
         // A fresh seed. The epoch keeps counting, so a sink that numbers
         // its applies re-aligns to it on reset.
         this.map = new IdHeadMap();
@@ -963,6 +1043,6 @@ export class ScopeTap {
         for (const sink of this.sinks) {
             sink.reset?.();
         }
-        await this.seedFromScan();
+        return this.scanThenGoLive(true);
     }
 }

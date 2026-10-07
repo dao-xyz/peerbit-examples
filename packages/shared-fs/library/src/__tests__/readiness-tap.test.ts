@@ -720,12 +720,114 @@ describe("readiness tap", () => {
                 tap.dispose();
             });
 
-            it("faults a tap whose count never matches its scans, once changes confirm it", async () => {
-                fakeTimers();
+            it("does not rescan for one difference read twice at one epoch", async () => {
+                // Both scans miss a row. Rows arriving during the rescan's
+                // reads, and during the comparison those arrivals start,
+                // leave them inconclusive.
                 const { tap, write } = offsetIndex({
-                    deletes: () => true,
+                    deletes: (scan) => scan <= 2,
+                    arrivals: (count) => count >= 2 && count <= 5,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.stats.countReads).toBe(5);
+                // A change starts the first conclusive comparison since the
+                // rescan: a difference seen once.
+                write();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(6);
+                expect(tap.stats.rescans).toBe(1);
+                // A consumer reads it again with no change between: a batch
+                // in flight could still explain it.
+                tap.requestCount();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(7);
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.countVerified).toBe(false);
+                // Read again after more changes, it is confirmed.
+                write(8);
+                await tap.countSettled();
+                expect(tap.stats.rescans).toBe(2);
+                expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+
+            it("verifies once the verify of a last replace drains, with no further change", async () => {
+                const { index, tap, dispatch } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 4,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(4);
+                expect(tap.countVerified).toBe(false);
+                // The replace reaches the next comparison's point, and its
+                // verify holds that comparison back.
+                const h = head();
+                index.set("n1", h, 2n);
+                dispatch([remoteNaming("n1", h, 2n)]);
+                expect(tap.pendingVerify).toBe(1);
+                expect(tap.stats.countReads).toBe(4);
+                // The drained queue starts it.
+                await tap.verifyIdle();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(5);
+                expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+
+            it("starts no comparison and no rescan once the close drains", async () => {
+                // A change and a consumer after the drain began start
+                // nothing: the close compares once itself.
+                const quiet = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 4,
+                });
+                await quiet.tap.seedChecked();
+                await quiet.tap.countSettled();
+                expect(quiet.tap.stats.countReads).toBe(4);
+                const drained = quiet.tap.drainVerifies();
+                quiet.write(8);
+                quiet.tap.requestCount();
+                await drained;
+                await flush();
+                await quiet.tap.countSettled();
+                expect(quiet.tap.stats.countReads).toBe(4);
+                await quiet.tap.confirmCount();
+                expect(quiet.tap.stats.countReads).toBe(5);
+                expect(quiet.tap.countVerified).toBe(true);
+                quiet.tap.dispose();
+
+                // A comparison reading when the drain begins finds the
+                // seed's missed row: no rescan from then on.
+                const missed = offsetIndex({
+                    deletes: (scan) => scan === 1,
+                    arrivals: (count) => count <= 4,
+                });
+                await missed.tap.seedChecked();
+                await missed.tap.countSettled();
+                expect(missed.tap.stats.countReads).toBe(4);
+                missed.write();
+                expect(missed.tap.stats.countReads).toBe(5);
+                await missed.tap.drainVerifies();
+                await missed.tap.countSettled();
+                expect(missed.tap.stats.rescans).toBe(0);
+                expect(missed.tap.state).toBe("live");
+                expect(missed.tap.countVerified).toBe(false);
+                missed.tap.dispose();
+            });
+
+            it("faults a tap whose count never matches its clean scans, once changes confirm it", async () => {
+                fakeTimers();
+                // The index counts a row its scans never return (a bug); no
+                // event races any scan.
+                const { index, tap, write } = offsetIndex({
+                    deletes: () => false,
                     arrivals: () => false,
                 });
+                const count = index.count;
+                index.count = async () => (await count()) + 1;
                 await tap.seedChecked();
                 expect(tap.stats.rescans).toBe(1);
                 // Quiet: a difference cannot be told from a batch still being
@@ -737,18 +839,136 @@ describe("readiness tap", () => {
                 expect(tap.faulted).toBeUndefined();
                 expect(tap.countVerified).toBe(false);
                 expect(vi.getTimerCount()).toBe(0);
-                // Each change confirms the difference: rescans, then the
-                // fault.
+                // Each change confirms the difference: clean rescans, then
+                // the fault.
                 const stop = writer(() => write(), 5);
                 await advance(15);
                 expect(tap.stats.rescans).toBe(3);
+                expect(tap.stats.exposedRescans).toBe(0);
                 expect(tap.countVerified).toBe(false);
-                expect(String(tap.faulted)).toMatch(/after 3 rescans/);
+                expect(String(tap.faulted)).toMatch(/after 3 clean rescans/);
                 const reads = tap.stats.countReads;
                 await advance(50);
                 expect(tap.stats.countReads).toBe(reads);
                 stop();
                 expect(vi.getTimerCount()).toBe(0);
+                tap.dispose();
+            });
+
+            it("keeps a count that differs under ingest unverified, never faulted, while raced rescans back off", async () => {
+                fakeTimers();
+                // Every scan misses a row, and that row's delete races it.
+                let racing = true;
+                const { index, tap, write } = offsetIndex({
+                    deletes: () => racing,
+                    arrivals: () => false,
+                });
+                await tap.seedChecked();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.stats.exposedRescans).toBe(1);
+                const stop = writer(() => write(), 5);
+                await advance(500);
+                // Raced rescans use none of the 3 clean ones, and each one
+                // doubles the stride to the next.
+                expect(tap.faulted).toBeUndefined();
+                expect(tap.countVerified).toBe(false);
+                expect(tap.stats.rescans).toBeGreaterThan(3);
+                expect(tap.stats.exposedRescans).toBe(tap.stats.rescans);
+                expect(tap.stats.rescans).toBeLessThanOrEqual(
+                    2 + Math.log2(tap.stats.events)
+                );
+                // Once no change races a scan, the next confirmed difference
+                // scans clean and verifies.
+                racing = false;
+                for (let i = 0; i < 100 && !tap.countVerified; i++) {
+                    await advance(5);
+                }
+                expect(tap.countVerified).toBe(true);
+                expect(tap.stats.rescans - tap.stats.exposedRescans).toBe(1);
+                expect(tap.faulted).toBeUndefined();
+                await tap.verifyIdle();
+                expectTapEqualsIndex(tap, index);
+                stop();
+                tap.dispose();
+            });
+
+            it("rescans ever more rarely while a delete stream races every scan, and verifies once one is clean", async () => {
+                fakeTimers();
+                // A GC sweep over 400 rows paged by 40: a delete between any
+                // two pages of a scan and one every 5 ms, with a writer every
+                // 7 ms. The parent design faulted here after 3 rescans.
+                const index = new FakeIndex();
+                for (let i = 0; i < 400; i++) index.set(`n${i}`, head());
+                const target = new EventTarget();
+                const dispatch = (added: unknown[], removed: unknown[] = []) =>
+                    target.dispatchEvent(
+                        new CustomEvent("change", {
+                            detail: { added, removed },
+                        })
+                    );
+                let sweeping = true;
+                const deleteOne = () => {
+                    const [key, row] = [...index.rows][0];
+                    index.rows.delete(key);
+                    dispatch([], [remoteNaming(key, row.head)]);
+                };
+                index.scan = async function* () {
+                    for (let offset = 0; ; ) {
+                        await Promise.resolve();
+                        const page = [...index.rows].slice(offset, offset + 40);
+                        offset += page.length;
+                        if (page.length === 0) return;
+                        yield page.map(([key, row]) => ({ key, ...row }));
+                        if (sweeping) deleteOne();
+                    }
+                };
+                let written = 0;
+                const write = () => {
+                    const id = `w${written++}`;
+                    const h = head();
+                    index.set(id, h);
+                    dispatch([remoteNaming(id, h)]);
+                };
+                const tap = new ScopeTap(NAMESPACE_V1, index);
+                tap.attach(target as any);
+                const stopSweep = writer(
+                    () => index.rows.size > 10 && deleteOne(),
+                    5
+                );
+                const stopWriter = writer(write, 7);
+                await tap.seedChecked();
+                for (let i = 0; i < 40; i++) await advance(10);
+                expect(tap.faulted).toBeUndefined();
+                expect(tap.countVerified).toBe(false);
+                expect(tap.stats.rescans).toBeGreaterThan(3);
+                expect(tap.stats.exposedRescans).toBe(tap.stats.rescans);
+                expect(tap.stats.rescans).toBeLessThanOrEqual(
+                    2 + Math.log2(tap.stats.events)
+                );
+                // The sweep ends. Quiet, the difference cannot be told from
+                // a batch in flight: unverified, and nothing armed.
+                sweeping = false;
+                stopSweep();
+                stopWriter();
+                const rescans = tap.stats.rescans;
+                await advance(3_000);
+                expect(tap.stats.rescans).toBe(rescans);
+                expect(tap.faulted).toBeUndefined();
+                expect(tap.countVerified).toBe(false);
+                expect(vi.getTimerCount()).toBe(0);
+                // The next changes confirm it: one clean rescan verifies.
+                for (
+                    let i = 0;
+                    i < 2 * COUNT_STRIDE_MAX && !tap.countVerified;
+                    i++
+                ) {
+                    write();
+                    await flush();
+                }
+                expect(tap.countVerified).toBe(true);
+                expect(tap.stats.rescans - tap.stats.exposedRescans).toBe(1);
+                await tap.verifyIdle();
+                expectTapEqualsIndex(tap, index);
                 tap.dispose();
             });
 
@@ -778,26 +998,32 @@ describe("readiness tap", () => {
                 }
             });
 
-            it("reads no further page once sealed during a rescan", async () => {
-                let sealNow = () => {};
-                // The seal lands after the rescan's first page.
-                const { tap, pages } = offsetIndex({
-                    deletes: (scan) => {
-                        if (scan === 2) sealNow();
-                        return scan === 1;
-                    },
-                    arrivals: () => false,
-                });
-                sealNow = () => tap.seal();
-                await tap.seedChecked();
-                expect(tap.stats.rescans).toBe(1);
-                // Only the page already requested at the seal; the rescan
-                // stays unfinished, so its state is never persisted.
-                expect(pages[1]).toBe(10);
-                expect(pages[2]).toBe(2);
-                expect(tap.state).toBe("buffering");
-                expect(tap.stats.countReads).toBe(1);
-                tap.dispose();
+            it("reads no further page once sealed or draining during a rescan", async () => {
+                for (const end of ["seal", "drain"] as const) {
+                    let endNow = () => {};
+                    // The seal or the drain lands after the rescan's first
+                    // page.
+                    const { tap, pages } = offsetIndex({
+                        deletes: (scan) => {
+                            if (scan === 2) endNow();
+                            return scan === 1;
+                        },
+                        arrivals: () => false,
+                    });
+                    endNow = () =>
+                        end === "seal" ? tap.seal() : void tap.drainVerifies();
+                    await tap.seedChecked();
+                    expect(tap.stats.rescans).toBe(1);
+                    // Only the page already requested; the rescan stays
+                    // unfinished, so its state is never persisted, and the
+                    // close's comparison waits for no further page.
+                    expect(pages[1]).toBe(10);
+                    expect(pages[2]).toBe(2);
+                    expect(tap.state).toBe("buffering");
+                    await tap.confirmCount();
+                    expect(tap.stats.countReads).toBe(1);
+                    tap.dispose();
+                }
             });
 
             it("confirms an unverified count once at close", async () => {
@@ -812,6 +1038,56 @@ describe("readiness tap", () => {
                 expect(tap.countVerified).toBe(true);
                 expect(tap.stats.countReads).toBe(5);
                 tap.dispose();
+            });
+
+            it("lets a comparison still reading end before the close's own: one count read in flight", async () => {
+                for (const moving of [true, false]) {
+                    const { index, tap, write } = offsetIndex({
+                        deletes: () => false,
+                        arrivals: (count) => count <= 4,
+                    });
+                    await tap.seedChecked();
+                    await tap.countSettled();
+                    expect(tap.stats.countReads).toBe(4);
+                    const read = index.count;
+                    let inFlight = 0;
+                    let maxInFlight = 0;
+                    let release!: () => void;
+                    const held = new Promise<void>((resolve) => {
+                        release = resolve;
+                    });
+                    index.count = async () => {
+                        inFlight++;
+                        maxInFlight = Math.max(maxInFlight, inFlight);
+                        try {
+                            const n = await read();
+                            await held;
+                            return n;
+                        } finally {
+                            inFlight--;
+                        }
+                    };
+                    // A change starts a comparison; its read is held open.
+                    write(2);
+                    expect(inFlight).toBe(1);
+                    // Moving: a row lands during that read, which then
+                    // decides nothing.
+                    if (moving) write();
+                    // The close.
+                    const drained = tap.drainVerifies();
+                    const confirmed = tap.confirmCount();
+                    await flush();
+                    expect(maxInFlight).toBe(1);
+                    release();
+                    await drained;
+                    await confirmed;
+                    expect(maxInFlight).toBe(1);
+                    expect(tap.countVerified).toBe(true);
+                    // The close reads only when that comparison left the
+                    // count unverified.
+                    expect(tap.stats.countReads).toBe(moving ? 6 : 5);
+                    tap.dispose();
+                }
             });
         });
 
@@ -852,6 +1128,92 @@ describe("readiness tap", () => {
             } finally {
                 clearInterval(stream);
             }
+        });
+
+        it("bounds the close's wait for a start comparison while replaces of new ids keep arriving", async () => {
+            const index = new FakeIndex();
+            const ids = Array.from({ length: 2000 }, (_, i) => `a${i}`);
+            for (const id of ids) index.set(id, head());
+            // A verify read takes 4 ms, and a replace of a new id lands
+            // every millisecond: the verify queue never empties.
+            index.readHead = (key) =>
+                new Promise((resolve) =>
+                    setTimeout(() => resolve(index.rows.get(key as string)), 4)
+                );
+            const tap = new ScopeTap(NAMESPACE_V1, index);
+            await tap.seedFromScan();
+            let next = 0;
+            const replace = () => {
+                const id = ids[next++];
+                const h = head();
+                index.set(id, h);
+                tap.onChange(change([remoteNaming(id, h)]));
+            };
+            replace();
+            // The start's comparison waits for the verify queue.
+            const checked = tap.checkCount();
+            const stream = setInterval(replace, 1);
+            try {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+                const close = (async () => {
+                    await tap.drainVerifies();
+                    await tap.confirmCount();
+                    return "closed";
+                })();
+                const waited = await Promise.race([
+                    close,
+                    new Promise((resolve) =>
+                        setTimeout(() => resolve("waiting"), 1_000)
+                    ),
+                ]);
+                expect(waited).toBe("closed");
+                // Verifies still pending: no count read, nothing verified.
+                expect(tap.stats.countReads).toBe(0);
+                expect(tap.countVerified).toBe(false);
+                tap.seal();
+            } finally {
+                clearInterval(stream);
+            }
+            expect(await checked).toBeUndefined();
+        });
+
+        it("reads the count once in the close, after a start comparison it waited for", async () => {
+            const index = new FakeIndex();
+            for (let i = 0; i < 10; i++) index.set(`n${i}`, head());
+            const tap = new ScopeTap(NAMESPACE_V1, index);
+            await tap.seedFromScan();
+            // Every count read sees a change, so none decides anything.
+            let arrived = 0;
+            index.onCount = () => {
+                const id = `x${arrived++}`;
+                const h = head();
+                index.set(id, h);
+                tap.onChange(change([remoteNaming(id, h)]));
+            };
+            // A replace whose verify is held open.
+            let release!: () => void;
+            const held = new Promise<void>((resolve) => {
+                release = resolve;
+            });
+            const readHead = index.readHead.bind(index);
+            index.readHead = async (key) => {
+                await held;
+                return readHead(key);
+            };
+            const h = head();
+            index.set("n1", h, 2n);
+            tap.onChange(change([remoteNaming("n1", h, 2n)]));
+            const checked = tap.checkCount();
+            // The close drains, then the verify ends: the start's
+            // comparison reads no more, and the close reads once.
+            const drained = tap.drainVerifies();
+            release();
+            await drained;
+            await tap.confirmCount();
+            expect(tap.stats.countReads).toBe(1);
+            expect(await checked).toBeUndefined();
+            expect(tap.countVerified).toBe(false);
+            tap.dispose();
         });
     });
 
@@ -904,6 +1266,75 @@ describe("readiness tap", () => {
             expect(await shadow(fs, SCOPE_TRUST_V1)).toMatchObject({
                 kind: "equal",
             });
+        });
+
+        it("reads no difference in the comparisons change events start under concurrent writers", async () => {
+            // The count check rescans a difference seen twice, so a batch in
+            // flight must not show one in a stable read. That rests on the
+            // sqlite3 index's connection-wide FIFO barrier
+            // (`ScopeTap.checkCount`): without it, stable reads here differ
+            // by 1 and 4, again and again.
+            const peer = await createPeer();
+            const fs = await openSharedFs({
+                peerbit: peer,
+                rootKey: peer.identity.publicKey,
+                gc: false,
+            });
+            const runtime = runtimeOf(fs);
+            await runtime.whenStarted();
+            const tap = runtime.namespace!;
+            await writeFiles(fs, 6, "old");
+            type Phase = "sequential" | "concurrent";
+            let phase: Phase = "sequential";
+            const differences: Record<Phase, number[]> = {
+                sequential: [],
+                concurrent: [],
+            };
+            let running = false;
+            // Registered after the tap's listener, so it reads as
+            // `countOnChange` does: one comparison at a time, from the event
+            // that just applied.
+            const compare = () => {
+                if (running || tap.state !== "live") return;
+                running = true;
+                const at = phase;
+                (tap as any).countDifferenceOnce().then(
+                    (difference: number | undefined) => {
+                        running = false;
+                        if (difference !== undefined) {
+                            differences[at].push(difference);
+                        }
+                    },
+                    () => (running = false)
+                );
+            };
+            entriesOf(fs).events.addEventListener("change", compare);
+            try {
+                await writeFiles(fs, 6, "seq");
+                phase = "concurrent";
+                await Promise.all([
+                    ...[0, 1, 2, 3].map((w) => writeFiles(fs, 6, `w${w}-`)),
+                    fs.writeBatch(
+                        Array.from({ length: 24 }, (_, i) => ({
+                            path: `/batch/f${i}.txt`,
+                            content: `batch ${i}`,
+                        }))
+                    ),
+                    (async () => {
+                        for (let i = 0; i < 6; i++) await fs.rm(`/old${i}.txt`);
+                    })(),
+                ]);
+            } finally {
+                entriesOf(fs).events.removeEventListener("change", compare);
+            }
+            await until(() => expect(running).toBe(false));
+            expect(differences.sequential.length).toBeGreaterThan(0);
+            expect(differences.concurrent.length).toBeGreaterThan(0);
+            expect(
+                [...differences.sequential, ...differences.concurrent].filter(
+                    (difference) => difference !== 0
+                )
+            ).toEqual([]);
         });
 
         it("listens on the trust graph before its log opens, so a replicated batch cannot start unseen", async () => {
