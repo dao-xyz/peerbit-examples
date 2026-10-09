@@ -157,15 +157,49 @@ const rawIndex = (documents: Pick<DocumentsLike<any, any>, "index">) => {
     return index;
 };
 
+/**
+ * Raw index reads fail closed, as `readLocalIndex` in index.ts makes the
+ * filesystem's own reads do. The raw index answers a closing store with no
+ * rows (`get` undefined, `count` 0, an empty page) rather than an error, and
+ * the store's DocumentIndex is marked closed before its index starts
+ * closing: a read that starts, returns or fails on a closed DocumentIndex
+ * throws a CloseFault and never reports a row as absent. (`readLocalIndex`
+ * itself would refuse the close's reads: the close moves to a new open
+ * generation before it lets them run.)
+ */
+const assertOpen = (documents: Pick<DocumentsLike<any, any>, "index">) => {
+    if ((documents.index as any)?.closed === true) {
+        throw new CloseFault("readiness: index read on a closed store");
+    }
+};
+
+/** One raw index read, under `assertOpen` before and after. */
+const readOpen = async <T>(
+    documents: Pick<DocumentsLike<any, any>, "index">,
+    read: () => Promise<T>
+): Promise<T> => {
+    assertOpen(documents);
+    let result: T;
+    try {
+        result = await read();
+    } catch (error) {
+        assertOpen(documents);
+        throw error;
+    }
+    assertOpen(documents);
+    return result;
+};
+
 /** Index reads of a Documents store for one scope. */
 export const documentsIndexPort = (
     documents: Pick<DocumentsLike<any, any>, "index">,
     scope: ScopeDescriptor
 ): ScopeIndexPort => ({
     readHead: async (key) => {
-        const result = await rawIndex(documents).get(toId(key), {
-            shape: scope.scanShape,
-        });
+        const result = await readOpen<{ value: unknown } | undefined>(
+            documents,
+            () => rawIndex(documents).get(toId(key), { shape: scope.scanShape })
+        );
         const row = result?.value as any;
         if (!row?.__context?.head || !scope.indexedRowInScope(row)) {
             return undefined;
@@ -176,6 +210,7 @@ export const documentsIndexPort = (
         };
     },
     scan: async function* () {
+        assertOpen(documents);
         const iterator = rawIndex(documents).iterate(
             { query: scope.scanQuery() },
             { shape: scope.scanShape }
@@ -183,7 +218,12 @@ export const documentsIndexPort = (
         let pageRows = SCAN_PAGE_ROWS;
         try {
             while (!iterator.done()) {
-                const page = await iterator.next(pageRows);
+                // An empty page from a closing store would end the scan
+                // early, and the seed would go live on part of the rows.
+                const page = await readOpen<Array<{ value: unknown }>>(
+                    documents,
+                    () => iterator.next(pageRows)
+                );
                 pageRows = Math.min(2 * pageRows, SCAN_PAGE_ROWS_MAX);
                 const out: Array<IndexedHead & { key: IdKey }> = [];
                 for (const result of page) {
@@ -199,11 +239,17 @@ export const documentsIndexPort = (
                 if (page.length === 0) break;
                 yield out;
             }
+            // The raw iterator also reports done() once its store is
+            // closing, which would end the scan early the same way.
+            assertOpen(documents);
         } finally {
             await iterator.close();
         }
     },
-    count: async () => rawIndex(documents).count({ query: scope.scanQuery() }),
+    count: () =>
+        readOpen<number>(documents, () =>
+            rawIndex(documents).count({ query: scope.scanQuery() })
+        ),
 });
 
 export class ScopeTap {

@@ -6446,12 +6446,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Every raw local index read goes through here. `read` drives one
-     * iterator over `query`; this opens and closes it and reads nothing
-     * itself, so a lone `all()` stays one statement. The raw index answers
-     * a closing store with no rows rather than an error, so a read that
-     * starts, or is in flight, while the store closes can come back short
-     * or empty. The DocumentIndex is marked closed before its index starts
+     * Every raw local index read of the filesystem goes through here; the
+     * readiness taps fail closed through their own port (readiness/tap.ts).
+     * `read` drives one iterator over `query`; this opens and closes it and
+     * reads nothing itself, so a lone `all()` stays one statement. The raw
+     * index answers a closing store with no rows rather than an error, so a
+     * read that starts, or is in flight, while the store closes can come
+     * back short or empty. The DocumentIndex is marked closed before its index starts
      * closing, and close() moves to a new open generation before either,
      * so a read that starts or returns on a closed program, a closed
      * DocumentIndex or a later generation throws ClosedError, as a
@@ -13503,10 +13504,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * Wait until any active snapshot overlay retires. `verified` narrowly
      * means the accepted snapshot's ids were covered before retirement; it is
      * false when bootstrap is off/plain-join or retirement was unverified.
+     * A bootstrap still deciding whether to run is waited for.
      */
     awaitBootstrapConverged(): Promise<{ verified: boolean }> {
         if (this.bootstrapPhase === "off") {
-            return Promise.resolve({ verified: false });
+            // A candidate open decides in the background after open()
+            // returns, and stays "off" until its index probe answers
+            // (contentStoredBeforeOpen), which queues behind whatever else
+            // reads the index. "off" is only an answer once that decision
+            // has settled; a reopen's decision is joined in turn.
+            const decision = this.bootstrapDecision;
+            const decided = (): Promise<{ verified: boolean }> =>
+                this.bootstrapPhase === "off" &&
+                this.bootstrapDecision === decision
+                    ? Promise.resolve({ verified: false })
+                    : this.awaitBootstrapConverged();
+            return Promise.resolve(decision).then(decided, decided);
         }
         if (this.bootstrapPhase === "converged") {
             return Promise.resolve({ verified: this.bootstrapVerified });

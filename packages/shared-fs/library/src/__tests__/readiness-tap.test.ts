@@ -27,6 +27,7 @@ import {
 } from "../readiness/shadow.js";
 import {
     COUNT_STRIDE_MAX,
+    CloseFault,
     ScopeTap,
     documentsIndexPort,
     type IndexedHead,
@@ -1754,6 +1755,83 @@ describe("readiness tap", () => {
             expect(
                 NAMESPACE_V1.classify(Object.create(FileVersion.prototype))
             ).toBe(true);
+        });
+
+        it("faults the index reads a closing store answers instead of reporting rows absent", async () => {
+            const peer = await createPeer();
+            const fs = await openSharedFs({ peerbit: peer, gc: false });
+            await writeFiles(fs, 3);
+            await runtimeOf(fs).whenStarted();
+            const documents = entriesOf(fs);
+            const port = documentsIndexPort(documents, NAMESPACE_V1);
+            const [id] = await idsOf(fs, "file-version", 1);
+            expect(await port.readHead(id)).toBeDefined();
+
+            // Reads that start while the store is open and reach its raw
+            // index once it is closing, where it answers no rows: a get, a
+            // count and a scan page. Only these are held; the close's own
+            // reads (its count check, the shadow scan) are not.
+            const rawIndex = documents.index.index;
+            const { get, count, iterate, setClosing, clearStatements } =
+                rawIndex;
+            let markClosing!: () => void;
+            const closing = new Promise<void>((resolve) => {
+                markClosing = resolve;
+            });
+            const held = <F extends (...args: any[]) => Promise<any>>(
+                target: object,
+                read: F
+            ) =>
+                async function (...args: unknown[]) {
+                    await closing;
+                    return read.apply(target, args);
+                };
+            rawIndex.get = held(rawIndex, get);
+            rawIndex.count = held(rawIndex, count);
+            rawIndex.iterate = (...args: unknown[]) => {
+                const iterator = iterate.apply(rawIndex, args);
+                iterator.next = held(iterator, iterator.next);
+                return iterator;
+            };
+            const scanned = async () => {
+                const rows: unknown[] = [];
+                for await (const page of port.scan()) rows.push(...page);
+                return rows;
+            };
+            const reads = Promise.allSettled([
+                port.readHead(id),
+                port.count(),
+                scanned(),
+            ]);
+            rawIndex.get = get;
+            rawIndex.count = count;
+            rawIndex.iterate = iterate;
+            rawIndex.setClosing = function (this: any, ...args: unknown[]) {
+                const result = setClosing.apply(this, args);
+                markClosing();
+                return result;
+            };
+            rawIndex.clearStatements = async function (
+                this: any,
+                ...args: unknown[]
+            ) {
+                await reads;
+                return clearStatements.apply(this, args);
+            };
+            peers.splice(peers.indexOf(peer), 1);
+            await peer.stop();
+
+            const outcomes = (await reads).map((outcome) =>
+                outcome.status === "rejected" &&
+                outcome.reason instanceof CloseFault
+                    ? "CloseFault"
+                    : outcome
+            );
+            expect(outcomes).toEqual([
+                "CloseFault",
+                "CloseFault",
+                "CloseFault",
+            ]);
         });
     });
 });

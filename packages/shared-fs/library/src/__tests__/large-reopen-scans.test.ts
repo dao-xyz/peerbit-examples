@@ -5,6 +5,7 @@ import { ClosedError, StringMatch } from "@peerbit/document";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import { openSharedFs } from "../index.js";
+import { optOutOfReadinessShadow } from "../readiness/shadow.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
@@ -433,6 +434,10 @@ describe("shared fs large reopen scans", () => {
         const reachedAll = new Promise<void>((resolve) => {
             allHeld = resolve;
         });
+        // In test mode the close runs the readiness shadow check before it
+        // closes the stores, and that check scans the index with a
+        // `__context` shape: held here, it would wait for its own close.
+        optOutOfReadinessShadow(program);
         const iterate = rawIndex.iterate;
         rawIndex.iterate = function (this: object, ...args: any[]) {
             const iterator = iterate.apply(this, args);
