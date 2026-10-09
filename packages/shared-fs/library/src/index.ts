@@ -96,11 +96,22 @@ import {
     type SharedFsWriteFileProfiler,
 } from "./mount-profile.js";
 import { READINESS_TOPIC_SALT } from "./readiness/constants.js";
+import {
+    describeReadiness,
+    type ReadinessStatus,
+} from "./readiness/coordinator.js";
+import type { RejectionReason } from "./readiness/explain.js";
+import { PeerbitTransport } from "./readiness/reachability.js";
 import type { ProvenanceState } from "./readiness/responder.js";
 import { ReadinessRuntime, logIdOf } from "./readiness/runtime.js";
+import { SCOPE_NAMESPACE_V1 } from "./readiness/scopes.js";
 import { ReadinessMessage } from "./readiness/wire.js";
 
 export * from "./model.js";
+export type {
+    ReadinessState,
+    ReadinessStatus,
+} from "./readiness/coordinator.js";
 export {
     type FsWatcher,
     type FsWatchOptions,
@@ -620,7 +631,7 @@ export type BootstrapTelemetryEvent =
           atMs: number;
           /** Time since this filesystem open began. */
           durationMs: number;
-          source: "creator" | "remote-settled";
+          source: WriteReadinessSource;
       }
     | {
           type: "fallback";
@@ -819,6 +830,14 @@ export type BootstrapPhase =
     | "converged"
     | "unverified";
 
+/**
+ * What made a full replica writable, as the sidecar records it: a creating
+ * open, the settled-view tracker (`remote-settled`; PR-3 commit 2 also
+ * requires the readiness coordinator's containment), or assumeComplete()
+ * (`operator`).
+ */
+type WriteReadinessSource = "creator" | "remote-settled" | "operator";
+
 export type BootstrapStatus = {
     phase: BootstrapPhase;
     /**
@@ -836,8 +855,18 @@ export type BootstrapStatus = {
     writeReady?: boolean;
     /** True when writeReady comes from the explicit unsafe override. */
     partialWriteOverride?: boolean;
-    /** Durable provenance for a ready full replica, when recorded. */
-    writeReadinessSource?: "creator" | "remote-settled";
+    /**
+     * Durable provenance for a ready full replica, when recorded: `operator`
+     * after assumeComplete().
+     */
+    writeReadinessSource?: WriteReadinessSource;
+    /**
+     * Which peers a fresh full address-open waits for and why (design
+     * section 7), while and after it joins. Undefined when this open runs
+     * no join: a creator, a proven warm reopen, an observer or partial
+     * replica, allowPartialWrites, and after close.
+     */
+    readiness?: ReadinessStatus;
     manifest?: {
         authorKey: string;
         snapshotSeq: bigint;
@@ -1520,6 +1549,27 @@ export class SharedFsWritePendingError extends SharedFsError {
             `${operation} is unavailable until this address-open has a settled initial view (bootstrap phase: ${phase}); await write readiness and retry`
         );
         this.name = "SharedFsWritePendingError";
+    }
+}
+
+/**
+ * awaitWriteReady() timed out. Code `ETIMEDOUT`; `readiness` is the status
+ * snapshot at the timeout (bootstrapStatus().readiness), naming the peers
+ * the join still waited for and why, when this open runs one.
+ */
+export class SharedFsWriteReadyTimeoutError extends SharedFsError {
+    constructor(readonly readiness?: ReadinessStatus) {
+        let reason = "";
+        try {
+            reason = readiness ? `: ${describeReadiness(readiness)}` : "";
+        } catch {
+            // The snapshot still rides on the error.
+        }
+        super(
+            "ETIMEDOUT",
+            `timed out awaiting shared filesystem write readiness${reason}`
+        );
+        this.name = "SharedFsWriteReadyTimeoutError";
     }
 }
 
@@ -2933,7 +2983,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private writeReadinessCheckRunning = false;
     /** Owns the async readiness probe so an older finally cannot unlock a reopen. */
     private writeReadinessCheckRunningRequestGeneration: number | undefined;
-    private writeReadinessSource: "creator" | "remote-settled" | undefined;
+    private writeReadinessSource: WriteReadinessSource | undefined;
     private writeReadinessWaiters: Array<{
         resolve: () => void;
         reject: (error: unknown) => void;
@@ -3078,6 +3128,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     private writeReadinessTransitionChain: Promise<unknown> = Promise.resolve();
     private writeReadinessLifecycleBlocked = false;
+    /**
+     * Counts drop() calls. A write-ready flip whose sidecar write was in
+     * flight when a drop began does not flip (commitWriteReady).
+     */
+    private dropRequests = 0;
     private snapshotRunning = false;
     private snapshotRunningGeneration: number | undefined;
     private sweepRunningGeneration: number | undefined;
@@ -3453,10 +3508,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     : undefined,
             },
             ports: {
+                // `to` is a key, or a hashcode for the joiner's sessions.
                 send: (message, to) =>
                     this.readiness.send(message, { to: [to] }),
                 provenance: () => this.readinessProvenance(),
             },
+            program: this,
         });
         this.readinessRuntime = readinessRuntime;
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
@@ -3623,6 +3680,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (this.disposalPreparationRunning) {
                     this.disposalContentGeneration++;
                 }
+                // Hashes a readiness session parked as trust-pending are
+                // classified again (G2-10).
+                this.readinessRuntime?.onTrustChange();
             };
             this.trustChangeListener = trustChangeListener;
             this.trustGraph.trustGraph.events.addEventListener(
@@ -3808,7 +3868,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // (its topic is known up front) and is joined after it.
         await readinessRuntime.whenTaken();
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
-        readinessRuntime.attachNamespace(this.entries);
+        // A fresh full address-open runs the joiner's coordinator later
+        // (startWriteReadinessTracking); what peers announce from here on
+        // is a sign of life it counts.
+        readinessRuntime.attachNamespace(this.entries, {
+            join: captureFreshOpenEvidence,
+        });
         const readinessOpen = this.readiness.open({
             topic: toBase64(
                 sha256Sync(concat([this.id, fromString(READINESS_TOPIC_SALT)]))
@@ -3816,8 +3881,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             queryType: ReadinessMessage,
             responseType: ReadinessMessage,
             responseHandler: (message, context) => {
-                // One-way messages only: the handler never responds.
-                readinessRuntime.onMessage(message, context.from);
+                // One-way messages only: the handler never responds. The
+                // envelope's size bounds a joiner session's answers.
+                readinessRuntime.onMessage(
+                    message,
+                    context.from,
+                    context.message?.data?.byteLength
+                );
                 return undefined;
             },
         });
@@ -4331,7 +4401,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
-    private emitWriteReadyOnce(source: "creator" | "remote-settled") {
+    private emitWriteReadyOnce(source: WriteReadinessSource) {
         if (
             !this.bootstrapTelemetry ||
             this.bootstrapTelemetryWriteReadyEmitted
@@ -4399,25 +4469,30 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * What the readiness responder reports about this open (honest
-     * provenance, WRITE_READINESS_V2.md 4.4). A warm reopen of a proven
-     * view reports `warm`, not the source it persisted. Today's timer
-     * (`remote-settled`) is no proof and has no v1 source code: such a peer
-     * reports `writeReady` with source `none`, and so does a warm reopen of
-     * its sidecar (`warm` qualifies a donor in PR-3), until PR-3 replaces
-     * the timer by `reconciled`.
+     * provenance, WRITE_READINESS_V2.md 4.4). A warm reopen of an accepted
+     * sidecar reports `warm`, not the source it persisted. In this open,
+     * `remote-settled` is set only by markWriteReady(), which since PR-3
+     * commit 2 also requires the coordinator's containment of every
+     * required peer: such a peer reports `reconciled`, so a chain of
+     * joiners can qualify each other (G2-1). Caveat: a `remote-settled`
+     * sidecar a PR-2-era build wrote (timer only) also reopens as `warm`;
+     * those exist only on developer disks (release hold). assumeComplete()
+     * reports `operator`.
      */
     private readinessProvenance(): ProvenanceState {
         const writeReady = this.writesReady === true;
-        const proven = this.writeReadinessSource === "creator";
+        const source = this.writeReadinessSource;
         return {
             writeReady,
             source: this.partialWriteOverride
                 ? "partial-override"
-                : !writeReady || !proven
+                : !writeReady || source === undefined
                   ? "none"
                   : this.readinessWarmOpen
                     ? "warm"
-                    : "creator",
+                    : source === "remote-settled"
+                      ? "reconciled"
+                      : source,
             fullReplica: this.isFullReplica(),
             phase: this.bootstrapPhase,
         };
@@ -4454,6 +4529,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private async canPerformEntry(operation: any) {
+        // Every refusal tells the readiness runtime why, for a head a joiner
+        // session pulls (explain.ts: only a structural refusal explains a
+        // row; anything later state can reverse parks or says nothing). The
+        // boolean never depends on it. Captured now, so a check that spans
+        // a reopen notes into its own generation (G2-23).
+        const readiness = this.readinessRuntime;
+        const reject = (reason: RejectionReason) => {
+            readiness?.noteRejection(
+                SCOPE_NAMESPACE_V1,
+                operation?.entry?.hash,
+                reason
+            );
+            return false;
+        };
         // Hold this open's first ingest until the store's pre-open content
         // has been read (see contentStoredBeforeOpen). The hold precedes the
         // trust fence below: a trust-graph change while the probe is pending
@@ -4463,7 +4552,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (preOpenContent?.generation === this.openGeneration) {
             await this.preOpenContentProbe(preOpenContent);
             if (this.openGeneration !== preOpenContent.generation) {
-                return false;
+                return reject("transient");
             }
         }
         const trustGraph = this.trustGraph;
@@ -4487,7 +4576,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (operation?.type === "put") {
             const value = operation.value;
             if (!structurallyValidEntry(value)) {
-                return false;
+                return reject("structure");
             }
             // Sealed artifact-ignore tier: DIRECTORY basenames on the
             // sealed list bounce at ingest on every peer identically.
@@ -4500,7 +4589,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 value.nodeId.startsWith("dir:") &&
                 this.sealedIgnoredNames.includes(value.name)
             ) {
-                return false;
+                return reject("structure");
             }
             if (value instanceof BootstrapManifest) {
                 // A signed snapshot pointer: the payload is bounded, the
@@ -4512,7 +4601,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (
                     value.payloadBytes.byteLength > MANIFEST_PAYLOAD_CAP_BYTES
                 ) {
-                    return false;
+                    return reject("structure");
                 }
                 let signature: SignatureWithKey;
                 let payload: SnapshotManifestPayload;
@@ -4526,7 +4615,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         SnapshotManifestPayload
                     );
                 } catch {
-                    return false;
+                    return reject("structure");
                 }
                 if (
                     value.id !==
@@ -4534,13 +4623,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     !equalBytes(payload.storeId, this.id) ||
                     !(await verify(signature, value.payloadBytes))
                 ) {
-                    return false;
+                    return reject("structure");
                 }
                 if (
                     this.trustGraph &&
                     !(await this.trustGraph.isTrusted(signature.publicKey))
                 ) {
-                    return false;
+                    return reject("untrusted");
                 }
             }
             if (value instanceof ChangesetManifest) {
@@ -4553,7 +4642,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     value.payloadBytes.byteLength >
                     CHANGESET_MANIFEST_PAYLOAD_CAP_BYTES
                 ) {
-                    return false;
+                    return reject("structure");
                 }
                 let signature: SignatureWithKey;
                 let payload: ChangesetManifestPayload;
@@ -4567,8 +4656,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         ChangesetManifestPayload
                     );
                 } catch {
-                    return false;
+                    return reject("structure");
                 }
+                // One refusal as before, its terms split only for the
+                // reason: the checks of the entry alone first, then the
+                // clock-skew bound (a later clock reverses it), then the
+                // signature.
                 if (
                     value.id !==
                         `changeset-manifest:${sha256Base64Sync(value.payloadBytes)}` ||
@@ -4580,37 +4673,45 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     value.createdAtWallMs !== payload.createdAtWallMs ||
                     value.authorKey !==
                         encodePublicSignKey(signature.publicKey) ||
-                    payload.createdAtWallMs >
-                        BigInt(
-                            Math.floor(this.clock()) +
-                                CHANGESET_MANIFEST_MAX_CLOCK_SKEW_MS
-                        ) ||
                     payload.versionMembers.length +
                         payload.namingMembers.length >
-                        CHANGESET_MANIFEST_MAX_MEMBERS ||
-                    !(await verify(signature, value.payloadBytes))
+                        CHANGESET_MANIFEST_MAX_MEMBERS
                 ) {
-                    return false;
+                    return reject("structure");
+                }
+                if (
+                    payload.createdAtWallMs >
+                    BigInt(
+                        Math.floor(this.clock()) +
+                            CHANGESET_MANIFEST_MAX_CLOCK_SKEW_MS
+                    )
+                ) {
+                    return reject("transient");
+                }
+                if (!(await verify(signature, value.payloadBytes))) {
+                    return reject("structure");
                 }
                 if (
                     this.trustGraph &&
                     !(await this.trustGraph.isTrusted(signature.publicKey))
                 ) {
-                    return false;
+                    return reject("untrusted");
                 }
             }
         }
         if (!trustCheckCurrent()) {
-            return false;
+            return reject("transient");
         }
         if (!trustGraph) {
             return true;
         }
         const keys = await operation.entry.getPublicKeys();
         if (!trustCheckCurrent()) {
-            return false;
+            return reject("transient");
         }
         const now = this.clock();
+        // Some signer was judged now, not only by the negative cache.
+        let judged = false;
         for (const key of keys) {
             // Memoized trust verdicts: the trust-graph BFS runs per entry
             // on the replication ingest path, so a cold join pays it tens
@@ -4635,12 +4736,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // nor may that result approve this admission. Fail closed once;
             // a later admission evaluates fresh state without a retry loop.
             if (!trustCheckCurrent()) {
-                return false;
+                return reject("transient");
             }
             if (this.trustVerdicts.size > 10_000) {
                 this.trustVerdicts.clear();
             }
             this.trustVerdicts.set(id, { ok, at: now });
+            judged = true;
             if (ok) {
                 // Any trusted signer may append. The stored authorKey is
                 // advisory attribution, not an authentication binding:
@@ -4650,7 +4752,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 return true;
             }
         }
-        return false;
+        return reject(judged ? "untrusted" : "trust-cache");
     }
 
     get accessControlled() {
@@ -11141,45 +11243,81 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.writeReadinessLifecycleBlocked ||
                 generation !== this.openGeneration ||
                 !this.writeReadinessRequired ||
-                this.writesReady
+                this.writesReady ||
+                // Prerequisite mode (PR-3 commit 2): the readiness
+                // coordinator must also have contained every required peer,
+                // with a qualified donor. Decided here, at one synchronous
+                // point before the sidecar write (design 2.3).
+                this.readinessRuntime?.satisfied() !== true
             ) {
                 return;
             }
-            await this.writeBootstrapState(
-                {
-                    writeReady: true,
-                    writeReadySource: "remote-settled",
-                    bootstrap: null,
-                },
-                generation,
-                true
-            );
-            // open()/close() block and drain this entire transition before
-            // changing generations. Keeping the memory update in the same
-            // serialization slot also keeps the on-disk and status()
-            // provenance from diverging.
-            this.writesReady = true;
-            this.writeReadinessRequired = false;
-            this.viewProven = true;
-            this.writeReadinessQuietChecks = 0;
-            this.writeReadinessRecheck = undefined;
-            this.setGuardArmed(true);
-            this.writeReadinessSource = "remote-settled";
-            this.emitWriteReadyOnce("remote-settled");
-            if (this.writeReadinessTimer) {
-                clearTimeout(this.writeReadinessTimer);
-                this.writeReadinessTimer = undefined;
-            }
-            this.events.dispatchEvent(
-                new CustomEvent("write:ready", {
-                    detail: this.bootstrapStatus(),
-                })
-            );
-            const waiters = this.writeReadinessWaiters.splice(0);
-            for (const waiter of waiters) {
-                waiter.resolve();
-            }
+            await this.commitWriteReady(generation, "remote-settled");
         });
+    }
+
+    /**
+     * The flip to writable, inside the serialized readiness transition and
+     * after its decision: the sidecar records `source` durably first, then
+     * memory, Guard D, telemetry, the readiness runtime (its coordinator
+     * finishes and READY notices go out, carrying the new provenance), the
+     * `write:ready` event and the waiters. markWriteReady() and
+     * assumeComplete() share it; neither runs under allowPartialWrites, so
+     * the view is proven.
+     */
+    private async commitWriteReady(
+        generation: number,
+        source: "remote-settled" | "operator"
+    ) {
+        const drops = this.dropRequests;
+        await this.writeBootstrapState(
+            {
+                writeReady: true,
+                writeReadySource: source,
+                bootstrap: null,
+            },
+            generation,
+            true
+        );
+        if (this.dropRequests !== drops) {
+            // drop() began while the sidecar write ran, after the decision:
+            // the store goes away with this open, so the flip never happens.
+            // The proof goes back to the address-open's gate on the same
+            // chain, which drop() drains before the store goes. Memory,
+            // Guard D, the runtime and the event stay as they were; drop()
+            // already failed the waiters with ECLOSED.
+            await this.writeBootstrapState(
+                { writeReady: false, writeReadySource: null },
+                generation
+            );
+            return;
+        }
+        // open()/close() block and drain this entire transition before
+        // changing generations. Keeping the memory update in the same
+        // serialization slot also keeps the on-disk and status()
+        // provenance from diverging.
+        this.writesReady = true;
+        this.writeReadinessRequired = false;
+        this.viewProven = true;
+        this.writeReadinessQuietChecks = 0;
+        this.writeReadinessRecheck = undefined;
+        this.setGuardArmed(true);
+        this.writeReadinessSource = source;
+        this.emitWriteReadyOnce(source);
+        if (this.writeReadinessTimer) {
+            clearTimeout(this.writeReadinessTimer);
+            this.writeReadinessTimer = undefined;
+        }
+        this.readinessRuntime?.markReady();
+        this.events.dispatchEvent(
+            new CustomEvent("write:ready", {
+                detail: this.bootstrapStatus(),
+            })
+        );
+        const waiters = this.writeReadinessWaiters.splice(0);
+        for (const waiter of waiters) {
+            waiter.resolve();
+        }
     }
 
     /**
@@ -11198,6 +11336,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             return;
         }
+        // Prerequisite mode (PR-3 commit 2): the readiness coordinator asks
+        // every visible peer of this fresh full address-open for its set,
+        // and the checks below also require its containment. Its
+        // evaluations only pull a check forward, so it never releases this
+        // open earlier than the tracker's own conditions would.
+        this.readinessRuntime?.startJoin({
+            transport: () =>
+                new PeerbitTransport(this.node, {
+                    topic: this.readiness.topic,
+                    log: this.entries.log,
+                }),
+            hlcProved: 0n,
+            onEvaluate: ({ satisfied, changed }) => {
+                if (
+                    satisfied &&
+                    changed &&
+                    generation === this.openGeneration
+                ) {
+                    this.writeReadinessRecheck?.();
+                }
+            },
+        });
         const intervalMs = Math.max(
             WRITE_READINESS_MIN_CHECK_MS,
             Math.min(1_000, Math.floor(this.writeReadinessSettleMs / 2))
@@ -11276,7 +11436,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     !this.isFullReplica() ||
                     !this.writeReadinessDecisionSettled ||
                     !settledPhase ||
-                    !this.writeReadinessRemoteEvidence
+                    !this.writeReadinessRemoteEvidence ||
+                    this.readinessRuntime?.satisfied() !== true
                 ) {
                     if (owns(timer)) this.writeReadinessQuietChecks = 0;
                     return;
@@ -11386,6 +11547,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.writeReadinessDecisionSettled = true;
         this.writeReadinessRecheck?.();
+        // The coordinator's status names `waiting-phase` from the decision.
+        this.readinessRuntime?.evaluate();
     }
 
     private clearBootstrapTimers() {
@@ -11448,16 +11611,40 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Program.drop ends the stores without close(): release this open's
-     * readiness state here (lane sets on the process-wide anchor host, the
-     * taps' listeners), as close() does whatever Program.close returns.
-     * Never persisted: the store is gone, and the open already removed the
-     * file.
+     * Program.drop ends the stores without close(): stop this open's
+     * background work and release its readiness state here (lane sets on
+     * the process-wide anchor host, the taps' listeners), as close() does
+     * whatever Program.close returns. Never persisted: the store is gone,
+     * and the open already removed the file. A write-ready flip in flight
+     * when the drop begins withdraws its proof instead of flipping, and the
+     * drop returns only after it and every queued sidecar write landed.
      */
     async drop(from?: any): Promise<boolean> {
+        // close()'s synchronous half: the readiness runtime blocks, readiness
+        // waiters fail with ECLOSED, and the write-readiness tracker, the
+        // snapshot, gc and bootstrap timers stop with their owners aborted.
+        // Without it the tracker of a joiner dropped while gated polls for
+        // good: its runtime goes below, so the coordinator's predicate
+        // stays false.
+        this.beginLifecycleRequest("close");
+        // The block above stops new write-ready decisions, not one already
+        // made: its flip sees this after its sidecar write and withdraws.
+        this.dropRequests = (this.dropRequests ?? 0) + 1;
         const readinessRuntime = this.readinessRuntime;
-        readinessRuntime?.block();
         try {
+            // As close() does: join that flip and every sidecar write queued
+            // behind it, so none lands (or dispatches) after drop returned.
+            this.writeReadinessTransitionChain ??= Promise.resolve();
+            this.stateWriteChain ??= Promise.resolve();
+            await this.writeReadinessTransitionChain;
+            let pendingStateWrites: Promise<unknown>;
+            do {
+                pendingStateWrites = this.stateWriteChain;
+                await pendingStateWrites;
+            } while (pendingStateWrites !== this.stateWriteChain);
+            // The readiness pulls block() aborted must settle first: a log
+            // refuses to drop while one of their commits runs.
+            await readinessRuntime?.whenPullsSettled();
             return await super.drop(from);
         } finally {
             if (this.readinessRuntime === readinessRuntime) {
@@ -11750,7 +11937,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async readBootstrapState(): Promise<{
         bootstrap?: "active" | "unverified";
         writeReady: boolean;
-        writeReadySource?: "creator" | "remote-settled";
+        writeReadySource?: WriteReadinessSource;
     }> {
         const path = await this.bootstrapStatePath();
         if (!path) {
@@ -11780,9 +11967,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 parsed?.bootstrap === "unverified"
                     ? parsed.bootstrap
                     : undefined;
-            const writeReadySource = ["creator", "remote-settled"].includes(
-                parsed?.writeReadySource
-            )
+            // `operator` (assumeComplete) joins in PR-3 commit 2 (G2-2);
+            // the proof keys and `reconciled` come with commit 4.
+            const writeReadySource = [
+                "creator",
+                "remote-settled",
+                "operator",
+            ].includes(parsed?.writeReadySource)
                 ? parsed.writeReadySource
                 : undefined;
             const malformed =
@@ -11852,7 +12043,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         patch: {
             bootstrap?: "active" | "unverified" | null;
             writeReady?: boolean;
-            writeReadySource?: "creator" | "remote-settled" | null;
+            writeReadySource?: WriteReadinessSource | null;
         },
         generation?: number,
         failOnError = false
@@ -13411,7 +13602,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 this.lastArrivalMs === 0
                     ? Number.POSITIVE_INFINITY
                     : this.clock() - this.lastArrivalMs,
+            readiness: this.readinessStatus(),
         };
+    }
+
+    /** The readiness join's snapshot, when this open runs one. */
+    private readinessStatus(): ReadinessStatus | undefined {
+        return this.readinessRuntime?.status({
+            writeReady:
+                this.writesReady && !this.writeReadinessLifecycleBlocked,
+            phaseSettled:
+                this.writeReadinessDecisionSettled &&
+                (this.bootstrapPhase === "off" ||
+                    this.bootstrapPhase === "converged"),
+        });
     }
 
     /**
@@ -13479,16 +13683,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             const waiter = { resolve: settleResolve, reject: settleReject };
             waiters.push(waiter);
             if (options.timeout !== undefined) {
-                timer = setTimeout(
-                    () =>
-                        settleReject(
-                            new SharedFsError(
-                                "ETIMEDOUT",
-                                "timed out awaiting shared filesystem write readiness"
-                            )
-                        ),
-                    options.timeout
-                );
+                timer = setTimeout(() => {
+                    // The snapshot says which peers it still waited for.
+                    let readiness: ReadinessStatus | undefined;
+                    try {
+                        readiness = this.readinessStatus();
+                    } catch {
+                        // The timeout itself must still reject.
+                    }
+                    settleReject(new SharedFsWriteReadyTimeoutError(readiness));
+                }, options.timeout);
                 (timer as any)?.unref?.();
             }
             options.signal?.addEventListener("abort", onAbort, {
@@ -13497,6 +13701,69 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             if (options.signal?.aborted) {
                 onAbort();
             }
+        });
+    }
+
+    /**
+     * Operator escape (design D11 and section 7): declares this fresh full
+     * replica's view complete and makes it writable now, for a filesystem
+     * whose readiness join cannot finish (no peer, only gated or partial
+     * peers, a peer that stays silent). The caller asserts what the join
+     * could not prove: rows only an absent peer holds are not here. Persists
+     * source `operator` (a later reopen is warm), proves the view so Guard D
+     * arms, dispatches `write:ready` and resolves pending awaitWriteReady()
+     * calls; peers that asked this replica get a READY notice.
+     *
+     * Refused with EINVAL on an observer or partial replica, and under
+     * allowPartialWrites (that open opted into partial semantics; reopen
+     * without it). Waits for the bootstrap decision, then refuses with
+     * EAGAIN while a snapshot overlay is fetching, active or unverified.
+     * ECLOSED once a close or reopen began. A no-op when already writable
+     * (the source is kept).
+     */
+    async assumeComplete(): Promise<void> {
+        const closed = () =>
+            new SharedFsError(
+                "ECLOSED",
+                "filesystem lifecycle changed before assumeComplete"
+            );
+        if (this.writeReadinessLifecycleBlocked) throw closed();
+        if (!this.isFullReplica()) {
+            throw new SharedFsError(
+                "EINVAL",
+                "assumeComplete needs a full replica; an observer or partial replica never becomes writable"
+            );
+        }
+        if (this.partialWriteOverride) {
+            throw new SharedFsError(
+                "EINVAL",
+                "assumeComplete is refused under allowPartialWrites; reopen without it"
+            );
+        }
+        if (this.writesReady) return;
+        const generation = this.openGeneration;
+        const lifecycleRequestGeneration = this.lifecycleRequestGeneration;
+        const current = () =>
+            !this.writeReadinessLifecycleBlocked &&
+            generation === this.openGeneration &&
+            lifecycleRequestGeneration === this.lifecycleRequestGeneration;
+        // A background bootstrap decides the phase; its failure is the
+        // phase's concern, not this call's.
+        await Promise.resolve(this.bootstrapDecision).catch(() => {});
+        if (!current()) throw closed();
+        if (
+            this.bootstrapPhase !== "off" &&
+            this.bootstrapPhase !== "converged"
+        ) {
+            throw new SharedFsWritePendingError(
+                "assumeComplete",
+                this.bootstrapPhase
+            );
+        }
+        await this.serializeWriteReadinessTransition(async () => {
+            if (!current()) throw closed();
+            if (this.writesReady || !this.writeReadinessRequired) return;
+            await this.commitWriteReady(generation, "operator");
         });
     }
 
@@ -17745,6 +18012,11 @@ export class SharedFsHandle {
     /** Resolves when mutations are safe to retry on this open handle. */
     awaitWriteReady(options?: AwaitWriteReadyOptions) {
         return this.program.awaitWriteReady(options);
+    }
+
+    /** Operator escape: assume this full replica's view complete. */
+    assumeComplete() {
+        return this.program.assumeComplete();
     }
 
     /** Resolves when the bootstrap overlay retires (either path). */

@@ -153,6 +153,19 @@ const toBigInt = (value: unknown): bigint =>
 const keyString = (key: IdKey) =>
     typeof key === "string" ? key : "b:" + toBase64(key);
 
+/**
+ * The map key of a document value of `scope`: `null` when the value is not a
+ * row of the scope (by class, `ScopeDescriptor.classify`), `undefined` when
+ * it is one without a usable id. The tap keys every change-event value by
+ * it, and the explainer's `inspect` (ports.ts) keys a logged entry's decoded
+ * value by it, so both name a document the same way.
+ */
+export const scopeRowKey = (
+    scope: ScopeDescriptor,
+    value: unknown
+): IdKey | null | undefined =>
+    scope.classify(value) ? scope.key(value) : null;
+
 /** The raw index of a store (`Documents.index.index`), read at call time. */
 const rawIndex = (documents: Pick<DocumentsLike<any, any>, "index">) => {
     const index = (documents.index as any)?.index;
@@ -335,6 +348,8 @@ export class ScopeTap {
     private countDemanded = false;
     /** Called with every id an event or a verify names (the shadow check). */
     private readonly watchers: Array<(key: IdKey) => void> = [];
+    /** Called when a comparison verifies the count (`onCountVerified`). */
+    private readonly countListeners: Array<() => void> = [];
     /** The element an event names, and the head it replaced or removed. */
     private readonly digest = new Uint8Array(DIGEST_BYTES);
     private readonly prev = new Uint8Array(DIGEST_BYTES);
@@ -385,6 +400,33 @@ export class ScopeTap {
 
     private notify(key: IdKey) {
         for (const watcher of this.watchers) watcher(key);
+    }
+
+    /**
+     * Calls `listener` synchronously each time a comparison that ingest or a
+     * consumer started (`checkCount`, `requestCount`, `confirmCountNow`)
+     * verifies the count, after the state says so. A seed, restore or
+     * reseed clears the verification, so the next one calls it again; the
+     * close's own comparison (`confirmCount`) does not. The responder's
+     * `BUSY` for an unverified count promised a notice, and this is the
+     * moment it has an answer (PR-3 commit 2, G2-9). Returns the removal.
+     */
+    onCountVerified(listener: () => void): () => void {
+        this.countListeners.push(listener);
+        return () => {
+            const at = this.countListeners.indexOf(listener);
+            if (at >= 0) this.countListeners.splice(at, 1);
+        };
+    }
+
+    private countVerifiedNow() {
+        for (const listener of [...this.countListeners]) {
+            try {
+                listener();
+            } catch {
+                // A listener's error is the listener's.
+            }
+        }
     }
 
     addSink(sink: ScopeSink): () => void {
@@ -443,19 +485,18 @@ export class ScopeTap {
         }
         const captured: Captured = { removed: [], added: [] };
         for (const value of removed) {
-            if (!this.scope.classify(value)) continue;
-            const key = this.scope.key(value);
-            if (key === undefined) continue;
+            const key = scopeRowKey(this.scope, value);
+            if (key == null) continue;
             captured.removed.push({
                 key,
                 head: (value as any).__context?.head,
             });
         }
         for (const value of added) {
-            if (!this.scope.classify(value)) continue;
-            const key = this.scope.key(value);
+            const key = scopeRowKey(this.scope, value);
+            if (key == null) continue;
             const head = (value as any).__context?.head;
-            if (key === undefined || typeof head !== "string") continue;
+            if (typeof head !== "string") continue;
             captured.added.push({
                 key,
                 head,
@@ -866,8 +907,10 @@ export class ScopeTap {
                 return first;
             }
             if (difference === 0) {
+                const was = this.countVerifiedValue;
                 this.countVerifiedValue = true;
                 this.countDue = false;
+                if (!was) this.countVerifiedNow();
                 return first;
             }
             let rescan = false;

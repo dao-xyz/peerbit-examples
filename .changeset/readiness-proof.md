@@ -1,14 +1,17 @@
 ---
 "@peerbit/shared-fs": minor
+"@peerbit/shared-fs-cli": patch
 ---
 
-A joining replica becomes writable once it proves that it holds every row
-its visible peers hold, instead of after a quiet window with no arrivals.
-Each peer answers with a compact summary of its rows. The joiner pulls
-what it lacks, explains rows it cannot hold (superseded, older or
-refused), and checks a set hash against the peer's. A direct join becomes
-writable in well under a second, and a join next to a peer that keeps
-writing no longer waits for a pause that never comes. A peer that is
-reachable but never answers now keeps a joiner gated until its timeout;
-`assumeComplete()` is the operator escape, and `bootstrapStatus()` and the
-`ETIMEDOUT` error name the peers it is waiting for.
+A joining replica now also proves that it holds every row its visible
+peers hold before it becomes writable. Each peer answers with a compact
+summary of its rows; the joiner pulls what it lacks, explains rows it
+cannot hold (superseded, older or refused), and checks a set hash against
+the peer's. The existing quiet window still applies, so a join is never
+released earlier than before, but some joiners are now held that were
+released before: one whose only peers are not write-ready themselves, and
+one next to a reachable peer that never answers. `assumeComplete()` is the
+operator escape. `bootstrapStatus().readiness` and the `ETIMEDOUT` error
+(`SharedFsWriteReadyTimeoutError`) name the peers a joiner is waiting for,
+and the CLI's timeout messages carry that reason. `drop()` now stops the
+write-readiness tracker and its timers, as `close()` does.

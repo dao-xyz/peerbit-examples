@@ -7,8 +7,10 @@ import {
     PrepareForDisposalError,
     SharedFileSystem,
     SharedFsHandle,
+    SharedFsWriteReadyTimeoutError,
     encodePublicSignKey,
     openSharedFs,
+    type ReadinessStatus,
 } from "@peerbit/shared-fs";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -19,6 +21,7 @@ import {
     resolveMountProfileDirectory,
     runCli,
     stopMountSession,
+    writeReadyTimeoutMessage,
 } from "../index.js";
 
 const stopPeer = async (peer: Peerbit) => {
@@ -191,6 +194,26 @@ const mockCliBootstrap = () => {
         return peer;
     });
 };
+
+/** A bootstrapStatus().readiness snapshot, as an ETIMEDOUT carries it. */
+const readinessSnapshot = (
+    status: Partial<ReadinessStatus> & Pick<ReadinessStatus, "state">
+): ReadinessStatus => ({
+    satisfied: false,
+    required: [],
+    contained: [],
+    excluded: [],
+    silent: [],
+    inFlight: [],
+    busy: [],
+    fetchPending: [],
+    gaps: [],
+    unconfirmed: [],
+    ...status,
+});
+
+const WRITE_READY_TIMEOUT_PREFIX =
+    "timed out awaiting shared filesystem write readiness: ";
 
 describe("mount network connection", () => {
     const fakePeer = (bootstrap: () => Promise<unknown>) => ({
@@ -476,6 +499,264 @@ describe("peerbit-fs cli", () => {
         ).rejects.toThrow(
             "mount requires a full replica; --no-replicate is not allowed for a writable mount"
         );
+    });
+
+    it.each([
+        {
+            label: "a reachable silent peer",
+            readiness: readinessSnapshot({
+                state: "waiting-silent",
+                required: ["peer-a", "peer-b"],
+                silent: [{ peer: "peer-a", reachable: true }],
+            }),
+            names: "reachable and silent: peer-a",
+            advice: "A required peer that does not answer blocks while it is reachable, and another replicator does not change that: restart the silent peer or stop it, and retry.",
+        },
+        {
+            label: "a silent peer that refused",
+            readiness: readinessSnapshot({
+                state: "waiting-silent",
+                required: ["peer-a"],
+                silent: [
+                    { peer: "peer-a", reachable: true, refused: "UNSUPPORTED" },
+                ],
+            }),
+            names: "peer-a (refused UNSUPPORTED)",
+            advice: "restart the silent peer (run this shared-fs release on one that refused) or stop it, and retry.",
+        },
+        {
+            label: "only peers that are not write-ready",
+            readiness: readinessSnapshot({
+                state: "no-qualified-donor",
+                contained: [
+                    {
+                        peer: "peer-a",
+                        qualified: false,
+                        source: "none",
+                        scopes: ["namespace-v1"],
+                        departed: false,
+                    },
+                ],
+            }),
+            names: "none qualified: peer-a (none)",
+            advice: "connect a write-ready replica, such as the filesystem's creator, and retry.",
+        },
+        {
+            label: "a peer that left before answering",
+            readiness: readinessSnapshot({
+                state: "waiting-left",
+                required: ["peer-a"],
+                inFlight: [
+                    { peer: "peer-a", state: "left-unanswered", scopes: {} },
+                ],
+            }),
+            names: "waiting for the attempt in flight: peer-a",
+            advice: "reconnect it, or retry.",
+        },
+        {
+            label: "peers still reconciling",
+            readiness: readinessSnapshot({
+                state: "reconciling",
+                required: ["peer-a"],
+                inFlight: [
+                    {
+                        peer: "peer-a",
+                        state: "reconciling",
+                        scopes: { "namespace-v1": "draining" },
+                    },
+                ],
+            }),
+            names: "in flight: peer-a",
+            advice: "retry with a longer --write-ready-timeout-ms.",
+        },
+        {
+            label: "this replica's own fault",
+            readiness: readinessSnapshot({
+                state: "reconciling",
+                fault: "cells unavailable",
+            }),
+            names: "(cells unavailable)",
+            advice: "which no peer fixes: rerun the command to reopen the filesystem.",
+        },
+        {
+            label: "no visible peer",
+            readiness: readinessSnapshot({ state: "no-peer" }),
+            names: "no visible peer",
+        },
+        {
+            label: "an unserved fetch",
+            readiness: readinessSnapshot({
+                state: "waiting-fetch",
+                required: ["peer-a"],
+                fetchPending: [{ peer: "peer-a", hashes: 2 }],
+            }),
+            names: "no peer served, named by 1 of 1 required peer: peer-a",
+        },
+        {
+            label: "the trust graph",
+            readiness: readinessSnapshot({
+                state: "waiting-trust",
+                required: ["peer-a"],
+            }),
+            names: "trust graph: peer-a",
+        },
+        {
+            label: "the bootstrap phase",
+            readiness: readinessSnapshot({
+                state: "waiting-phase",
+                satisfied: true,
+            }),
+            names: "the bootstrap phase has not settled",
+        },
+        {
+            label: "the write-readiness tracker",
+            readiness: readinessSnapshot({
+                state: "reconciling",
+                satisfied: true,
+            }),
+            names: "the write-readiness tracker decides",
+        },
+    ] as Array<{
+        label: string;
+        readiness: ReadinessStatus;
+        names: string;
+        advice?: string;
+    }>)(
+        "names the readiness reason and advice that fits it on a write-readiness timeout: $label",
+        ({ readiness, names, advice }) => {
+            const subject =
+                "mount did not establish a safe initial write view within 500 ms";
+            const error = new SharedFsWriteReadyTimeoutError(readiness);
+            expect(error.message.startsWith(WRITE_READY_TIMEOUT_PREFIX)).toBe(
+                true
+            );
+            const reason = error.message.slice(
+                WRITE_READY_TIMEOUT_PREFIX.length
+            );
+            expect(reason.startsWith(`${readiness.state}: `)).toBe(true);
+            expect(reason).toContain(names);
+
+            const message = writeReadyTimeoutMessage(subject, error);
+            expect(message.startsWith(`${subject}: ${reason}. `)).toBe(true);
+            if (advice) {
+                // The old advice does not end these gates.
+                expect(message.endsWith(advice)).toBe(true);
+                expect(message).not.toContain("complete replicator");
+                expect(message.includes("on one that refused")).toBe(
+                    readiness.silent.some(({ refused }) => refused)
+                );
+            } else {
+                expect(message).toBe(
+                    `${subject}: ${reason}. Keep a complete replicator connected and retry.`
+                );
+            }
+        }
+    );
+
+    it("keeps the old write-readiness timeout message without a readiness snapshot", () => {
+        const subject =
+            "mount did not establish a safe initial write view within 500 ms";
+        expect(
+            writeReadyTimeoutMessage(
+                subject,
+                new SharedFsWriteReadyTimeoutError()
+            )
+        ).toBe(`${subject}; keep a complete replicator connected and retry.`);
+    });
+
+    it("reports the readiness reason when a mount or resolution times out awaiting write readiness", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-write-ready-")
+        );
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        let seedPeer: Peerbit | undefined;
+        let createSpy: ReturnType<typeof mockCliBootstrap> | undefined;
+        let waitSpy: ReturnType<typeof vi.spyOn> | undefined;
+        try {
+            seedPeer = await Peerbit.create({ directory });
+            const seeded = await openSharedFs({
+                peerbit: seedPeer,
+                machineLabel: "cli-write-ready-seed",
+                replicate: { factor: 1 },
+                bootstrap: false,
+                gc: false,
+            });
+            const address = seeded.address;
+            await stopPeer(seedPeer);
+            seedPeer = undefined;
+
+            // Fault injection tests the CLI's report; the library's readiness
+            // tests time out real joins and check their snapshots.
+            const timeout = new SharedFsWriteReadyTimeoutError(
+                readinessSnapshot({
+                    state: "waiting-silent",
+                    required: ["peer-a", "peer-b"],
+                    silent: [{ peer: "peer-a", reachable: true }],
+                })
+            );
+            const reason = timeout.message.slice(
+                WRITE_READY_TIMEOUT_PREFIX.length
+            );
+            expect(reason).toContain("reachable and silent: peer-a");
+            const advice =
+                "A required peer that does not answer blocks while it is reachable, and another replicator does not change that: restart the silent peer or stop it, and retry.";
+            waitSpy = vi
+                .spyOn(SharedFsHandle.prototype, "awaitWriteReady")
+                .mockRejectedValue(timeout);
+            createSpy = mockCliBootstrap();
+
+            const mount = await runCli([
+                "mount",
+                address,
+                path.join(directory, "not-mounted"),
+                "--native-adapter",
+                path.join(directory, "adapter-never-started"),
+                "--directory",
+                directory,
+                "--write-ready-timeout-ms",
+                "750",
+            ]).then(
+                () => undefined,
+                (error) => error
+            );
+            expect(mount).toBeInstanceOf(Error);
+            expect(mount.message).toBe(
+                `mount did not establish a safe initial write view within 750 ms: ${reason}. ${advice} --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`
+            );
+            expect(mount.cause).toBe(timeout);
+            expect(waitSpy).toHaveBeenLastCalledWith({ timeout: 750 });
+
+            for (const args of [
+                ["resolve-conflict", address, "/file.txt", "version-missing"],
+                ["resolve-naming-conflict", address, "node-missing", "keep"],
+            ]) {
+                const error = await runCli([
+                    ...args,
+                    "--directory",
+                    directory,
+                    "--write-ready-timeout-ms",
+                    "750",
+                ]).then(
+                    () => undefined,
+                    (error) => error
+                );
+                expect(error).toBeInstanceOf(Error);
+                expect(error.message).toBe(
+                    `${args[0]} did not establish a safe write view within 750 ms: ${reason}. ${advice}`
+                );
+                expect(error.cause).toBe(timeout);
+            }
+            expect(waitSpy).toHaveBeenCalledTimes(3);
+            expect(log).not.toHaveBeenCalled();
+        } finally {
+            createSpy?.mockRestore();
+            waitSpy?.mockRestore();
+            log.mockRestore();
+            if (seedPeer) {
+                await stopPeer(seedPeer);
+            }
+            await fs.rm(directory, { recursive: true, force: true });
+        }
     });
 
     it("requires an output directory for --mount-profile before mounting", async () => {

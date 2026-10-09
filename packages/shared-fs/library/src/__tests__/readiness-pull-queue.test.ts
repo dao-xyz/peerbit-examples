@@ -18,6 +18,7 @@ import {
 interface JoinCall {
     heads: string[];
     timeout: number;
+    signal: AbortSignal;
     resolve(): void;
     reject(error: unknown): void;
 }
@@ -26,9 +27,15 @@ const fakeLog = () => {
     const calls: JoinCall[] = [];
     const listeners = new Set<() => void>();
     const ports: PullPorts = {
-        join: (heads, { timeout }) =>
+        join: (heads, { timeout, signal }) =>
             new Promise<void>((resolve, reject) =>
-                calls.push({ heads: [...heads], timeout, resolve, reject })
+                calls.push({
+                    heads: [...heads],
+                    timeout,
+                    signal,
+                    resolve,
+                    reject,
+                })
             ),
         subscribe: (listener) => {
             listeners.add(listener);
@@ -632,5 +639,38 @@ describe("readiness pull queue", () => {
         log.calls[0].resolve();
         await flush();
         expect(pending.report).toMatchObject({ heads: ["h1"], joined: 1 });
+    });
+
+    it("aborts every join in flight on dispose; whenIdle settles once they did", async () => {
+        const log = fakeLog();
+        const queue = new PullQueue(log.ports, new RejectionRecord());
+        let idle = false;
+        void queue.whenIdle().then(() => (idle = true));
+        await flush();
+        expect(idle).toBe(true);
+
+        const first = watch(queue.pull("a", ["h1", "h2"]));
+        const second = watch(queue.pull("b", ["h3"]));
+        expect(log.calls.map(({ signal }) => signal.aborted)).toEqual([
+            false,
+            false,
+        ]);
+        idle = false;
+        void queue.whenIdle().then(() => (idle = true));
+        queue.dispose();
+        // The store may close only after both joins settled.
+        expect(log.calls.map(({ signal }) => signal.aborted)).toEqual([
+            true,
+            true,
+        ]);
+        log.calls[0].reject(log.calls[0].signal.reason);
+        await flush();
+        expect(idle).toBe(false);
+        log.calls[1].resolve();
+        await flush();
+        expect(idle).toBe(true);
+        expect(first.report?.error).toBe(log.calls[0].signal.reason);
+        expect(second.report).toMatchObject({ heads: ["h3"], joined: 1 });
+        expect(second.report?.error).toBeUndefined();
     });
 });

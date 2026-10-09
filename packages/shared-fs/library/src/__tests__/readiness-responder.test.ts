@@ -203,6 +203,7 @@ const fakeResponder = async (
         started: options.started ?? Promise.resolve(),
     };
     const network = new DirectNetwork();
+    const timers = new FakeTimers();
     const responder = new Responder(
         {
             openNonce: new Uint8Array(16),
@@ -219,7 +220,7 @@ const fakeResponder = async (
                     fullReplica: true,
                     phase: "off",
                 })),
-            timers: new FakeTimers(),
+            timers,
         }
     );
     network.responder = responder;
@@ -238,6 +239,8 @@ const fakeResponder = async (
         host,
         network,
         responder,
+        /** The responder's idle timers. */
+        timers,
         add,
         /** The fake index (id to head), and its port. */
         heads,
@@ -681,6 +684,69 @@ describe("readiness responder", () => {
             });
         });
 
+        it("notices the BUSY of an unverified count once the count verifies (PR-3 commit 2, G2-9)", async () => {
+            for (const hooked of [true, false]) {
+                // Seeded and never compared: a quiet, unverified tap.
+                const r = await fakeResponder(10, "inline", undefined, {
+                    unchecked: true,
+                });
+                // As the runtime binds it (runtime.ts createScope).
+                const off = hooked
+                    ? r.tap.onCountVerified(() => r.responder.noticeCapacity())
+                    : () => {};
+                const [key] = await keys(1);
+                const client = r.network.client(key);
+                const first = client.open({ scopes: r.scopes });
+                const busy = await client.next(ErrorV1, (message) =>
+                    sameBytes(message.sessionId, first.sessionId)
+                );
+                expect(busy.code).toBe(ERROR_CODE.BUSY);
+                expect(r.tap.countVerified).toBe(false);
+                expect(r.responder.debug()).toMatchObject({
+                    sessions: 0,
+                    busyWaiters: 1,
+                });
+                // No answered session ends, so nothing else notices it.
+                await settle();
+                expect(
+                    client.inbox.some((m) => m instanceof StateNoticeV1)
+                ).toBe(false);
+                // A comparison that ingest or a consumer starts verifies it.
+                await r.tap.checkCount();
+                expect(r.tap.countVerified).toBe(true);
+                await settle();
+                const notices = client.inbox.filter(
+                    (m): m is StateNoticeV1 => m instanceof StateNoticeV1
+                );
+                if (!hooked) {
+                    // Without the hook the waiter would wait for a session
+                    // end that never comes.
+                    expect(notices).toHaveLength(0);
+                    expect(r.responder.debug().busyWaiters).toBe(1);
+                    r.close();
+                    continue;
+                }
+                expect(notices.map((notice) => notice.reason)).toEqual([
+                    NOTICE_REASON.CAPACITY,
+                ]);
+                expect(r.responder.debug().busyWaiters).toBe(0);
+                // The re-ask is answered from the verified count.
+                const again = client.open({ scopes: r.scopes });
+                await client.next(HeaderV1, (message) =>
+                    sameBytes(message.sessionId, again.sessionId)
+                );
+                // Later verifications notice nobody: the waiter was served.
+                r.add("late");
+                await r.tap.checkCount();
+                await settle();
+                expect(
+                    client.inbox.filter((m) => m instanceof StateNoticeV1)
+                ).toHaveLength(1);
+                off();
+                r.close();
+            }
+        });
+
         it("notices a waiter only when the cap that refused it has room", async () => {
             const r = await fakeResponder(20, "inline");
             const [holder, churner, ...waiting] = await keys(7);
@@ -763,9 +829,91 @@ describe("readiness responder", () => {
                     ({ message }) => message instanceof HeaderV1
                 )
             ).toEqual([]);
+            // A CLOSE needs no answer, not even EXPIRED.
+            expect(
+                r.network.sent.filter(
+                    ({ message }) => message instanceof ErrorV1
+                )
+            ).toEqual([]);
             // A live session is still answered.
             client.open({ scopes: r.scopes });
             await client.next(HeaderV1);
+            r.close();
+        });
+
+        it("answers EXPIRED, once, to an OPEN whose session idled out while its freeze waited", async () => {
+            // A freeze that outlives the idle timer: the joiner's three
+            // attempts (5, 10 and 20 s) end unanswered meanwhile, and only
+            // an answer from R re-asks it (a static donor sends nothing
+            // else).
+            let start!: () => void;
+            const started = new Promise<void>((resolve) => (start = resolve));
+            const r = await fakeResponder(20, "inline", undefined, {
+                started,
+            });
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            const { sessionId } = client.open({ scopes: r.scopes });
+            for (const attempt of [2, 3]) {
+                client.open({ sessionId, attempt, scopes: r.scopes });
+            }
+            await settle();
+            expect(r.responder.debug().sessions).toBe(1);
+            r.timers.advance(SESSION_IDLE_MS);
+            expect(r.responder.debug().sessions).toBe(0);
+            expect(r.network.sent).toEqual([]);
+
+            start();
+            await settle();
+            expect(r.responder.stats.freezes).toBe(0);
+            const answers = r.network.sent.map(({ message }) => message);
+            expect(answers).toHaveLength(1);
+            expect(answers[0]).toBeInstanceOf(ErrorV1);
+            expect((answers[0] as ErrorV1).code).toBe(ERROR_CODE.EXPIRED);
+            expect(
+                sameBytes((answers[0] as ErrorV1).sessionId, sessionId)
+            ).toBe(true);
+            expect(r.responder.stats.expired).toBe(1);
+            expect(r.timers.armed()).toBe(0);
+
+            // The joiner's next session is answered.
+            const next = client.open({ scopes: r.scopes });
+            await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, next.sessionId)
+            );
+            r.close();
+        });
+
+        it("answers no EXPIRED over a later session under the same id", async () => {
+            let start!: () => void;
+            const started = new Promise<void>((resolve) => (start = resolve));
+            const r = await fakeResponder(20, "inline", undefined, {
+                started,
+            });
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            const { sessionId } = client.open({ scopes: r.scopes });
+            await settle();
+            r.timers.advance(SESSION_IDLE_MS);
+            expect(r.responder.debug().sessions).toBe(0);
+            // The joiner re-sends the OPEN (a resume): a new session, a new
+            // freeze, under the same id.
+            client.open({ sessionId, attempt: 4, scopes: r.scopes });
+            await settle();
+            expect(r.responder.debug().sessions).toBe(1);
+
+            start();
+            const header = await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, sessionId)
+            );
+            await settle();
+            expect(header.count).toBe(20);
+            expect(
+                r.network.sent.filter(
+                    ({ message }) => message instanceof ErrorV1
+                )
+            ).toEqual([]);
+            expect(r.responder.debug().sessions).toBe(1);
             r.close();
         });
 
@@ -1338,8 +1486,12 @@ describe("readiness responder", () => {
             expect(hex(header.anchor)).toBe(await anchorOfIndex(warm));
             await stopPeer(peer);
 
-            // A warm reopen of a timer-made sidecar (`remote-settled`) is
-            // writable but proves nothing: `none`, never `warm`.
+            // A warm reopen of a `remote-settled` sidecar reports `warm`
+            // (G2-1): since PR-3 commit 2 only markWriteReady() writes that
+            // source, after the coordinator contained every required peer
+            // (a non-warm one reports `reconciled`, readiness-escape.test.ts).
+            // Caveat: one a PR-2-era build wrote (timer only) reopens as
+            // `warm` too; such sidecars exist only on developer disks.
             const sidecar = join(
                 directory,
                 "shared-fs-bootstrap",
@@ -1357,7 +1509,7 @@ describe("readiness responder", () => {
             const settled = await openSharedFs({ peerbit: peer, address });
             expect(provenanceOf(settled)).toMatchObject({
                 writeReady: true,
-                source: "none",
+                source: "warm",
                 fullReplica: true,
             });
             await stopPeer(peer);

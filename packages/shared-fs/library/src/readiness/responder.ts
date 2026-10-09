@@ -78,8 +78,10 @@ import {
  *   responder that fails each time, so waiters are noticed only when an
  *   answered session ends.
  * - **Late requests** for a live session are answered however late; an
- *   unknown session gets `EXPIRED`. Every `EXPIRED` ends its session, since
- *   the joiner opens a new one.
+ *   unknown session gets `EXPIRED`, and so does an OPEN whose session idled
+ *   out while its freeze waited (the joiner's attempts may have ended
+ *   unanswered meanwhile). Every `EXPIRED` ends its session, since the
+ *   joiner opens a new one.
  * - **Re-entrancy (S15).** The RPC awaits decryption before each handler and
  *   directed messages take different routes, so no handler assumes order: a
  *   request awaits its session's freeze, and every await re-checks that the
@@ -121,7 +123,8 @@ export const systemTimers: Timers = {
 };
 
 export interface ResponderPorts {
-    send(message: ReadinessMessage, to: PublicSignKey): Promise<void>;
+    /** Directed send; `to` is a key or its hashcode (`rpc.send`'s `to`). */
+    send(message: ReadinessMessage, to: PublicSignKey | string): Promise<void>;
     provenance(): ProvenanceState;
     timers?: Timers;
 }
@@ -171,6 +174,11 @@ interface Session {
     /** Resolves to the frozen scopes, or to an error code to answer. */
     frozen: Promise<FrozenScope[] | ErrorCode>;
     timer?: unknown;
+    /**
+     * The idle timer ended it (a CLOSE did not) and no OPEN of it was
+     * answered `EXPIRED` yet.
+     */
+    idled?: boolean;
     /** Cells served by `CellsReqV1` per scope (at most M each). */
     readonly cellsServed: Map<number, number>;
 }
@@ -360,7 +368,7 @@ export class Responder {
         return this.sessions.get(session.key) === session;
     }
 
-    private send(message: ReadinessMessage, to: PublicSignKey) {
+    private send(message: ReadinessMessage, to: PublicSignKey | string) {
         if (!this.answering()) return;
         void this.ports.send(message, to).catch(() => {
             this.stats.sendFailures++;
@@ -477,8 +485,21 @@ export class Responder {
         }
         this.touch(session);
         const frozen = await session.frozen;
-        // A session that ended meanwhile (CLOSE, idle) gets no answer.
-        if (!this.answering() || !this.live(session)) return;
+        if (!this.answering()) return;
+        if (!this.live(session)) {
+            // It ended meanwhile. A CLOSE needs no answer. One that idled out
+            // while its freeze waited gets `EXPIRED`, as a request of an
+            // unknown session does, so the joiner opens a new one: its
+            // attempts may have run out by now, and it re-asks a silent
+            // peer only on a sign of life, which a static donor never
+            // gives. Once per session, and never over a later session
+            // under the same id.
+            if (session.idled && !this.sessions.has(key)) {
+                session.idled = false;
+                this.error(from, open.sessionId, ERROR_CODE.EXPIRED);
+            }
+            return;
+        }
         if (typeof frozen === "number") {
             // Nothing was answered, so no capacity notice (see the class
             // comment); BUSY registers this peer for the next real one.
@@ -810,6 +831,7 @@ export class Responder {
         if (session.timer !== undefined) this.timers.clear(session.timer);
         session.timer = this.timers.set(() => {
             session.timer = undefined;
+            session.idled = true;
             this.endSession(session.key);
         }, SESSION_IDLE_MS);
     }
@@ -831,12 +853,15 @@ export class Responder {
     }
 
     /**
-     * `BUSY` promised a notice: a session ended, so tell every waiter whose
-     * cap has room now. One refused by its own sessions or by the list slot
-     * keeps waiting while those stay full, so a cheap session churn by
-     * another peer does not make it re-ask in vain.
+     * `BUSY` promised a notice: a session ended, or (the runtime calls it, PR-3
+     * commit 2) a scope's count verified, so tell every waiter whose cap has
+     * room now. One refused by its own sessions or by the list slot keeps
+     * waiting while those stay full, so a cheap session churn by another peer
+     * does not make it re-ask in vain. The count case answers the `BUSY` a
+     * quiet, unverified tap gets (`freezeOnce`): no answered session ends to
+     * notice that waiter, and a joiner re-asks only on a trigger.
      */
-    private noticeCapacity() {
+    noticeCapacity() {
         if (
             this.busyWaiters.size === 0 ||
             this.sessions.size >= SESSIONS_TOTAL ||
@@ -861,8 +886,11 @@ export class Responder {
         }
     }
 
-    /** Directed `StateNoticeV1` to each peer (a trigger, never evidence). */
-    sendNotice(peers: Iterable<PublicSignKey>, reason: number) {
+    /**
+     * Directed `StateNoticeV1` to each peer, a key or its hashcode (a
+     * trigger, never evidence).
+     */
+    sendNotice(peers: Iterable<PublicSignKey | string>, reason: number) {
         if (!this.answering()) return;
         const notice = new StateNoticeV1({
             provenance: this.provenance(),

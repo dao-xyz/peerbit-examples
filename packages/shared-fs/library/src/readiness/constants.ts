@@ -55,3 +55,12 @@ export const REQUEST_TIMEOUT_MS = 5_000;
 export const PULL_TIMEOUT_MS = 10_000;
 /** Hashes per pull batch. */
 export const PULL_BATCH = 256;
+/**
+ * `SharedLog.join` calls of one scope's pulls in flight at once, over every
+ * batch. Each is a background block request that every other replica
+ * lacking the block proxies on, holding one of its log's 9 background
+ * slots for the requester's remaining time (`@peerbit/blocks
+ * remote.js:183-191`, `843-882`). Measured with three replicas: at 2 their
+ * reads stayed at milliseconds, at 4 they reached 2 s, at 16 or more 6-9 s.
+ */
+export const PULL_LANES = 2;

@@ -2085,9 +2085,11 @@ describe("shared fs cold-start bootstrap", () => {
                 );
             const before = await heads();
 
-            // A fresh peer opens it and settles from the author's genesis. It
-            // brings nothing new, and the author may not re-publish: its own
-            // put would count as an arrival and open its gate on no evidence.
+            // A fresh peer opens it and contains the author's genesis, but
+            // the gated author is no qualified donor, so the joiner stays
+            // gated (design test 32). It brings nothing new, and the author
+            // may not re-publish: its own put would count as an arrival and
+            // open its gate on no evidence.
             const joinerPeer = await createPeer();
             await joinerPeer.dial(creatorPeer);
             const joiner = await openSharedFs({
@@ -2097,7 +2099,27 @@ describe("shared fs cold-start bootstrap", () => {
                 bootstrap: false,
                 writeReadinessSettleMs: 100,
             } as any);
-            await joiner.awaitWriteReady({ timeout: 20_000 });
+            // Prerequisite mode (PR-3 commit 2, S23): the gated author is the
+            // joiner's only peer and does not qualify as a donor.
+            const author = creatorPeer.identity.publicKey.hashcode();
+            await waitUntil(() =>
+                expect(joiner.bootstrapStatus().readiness).toMatchObject({
+                    state: "no-qualified-donor",
+                    required: [],
+                    contained: [
+                        expect.objectContaining({
+                            peer: author,
+                            qualified: false,
+                        }),
+                    ],
+                })
+            );
+            await expect(
+                joiner.awaitWriteReady({ timeout: 500 })
+            ).rejects.toMatchObject({
+                code: "ETIMEDOUT",
+                readiness: { state: "no-qualified-donor" },
+            });
             await expect(
                 gated.awaitWriteReady({ timeout: 1_000 })
             ).rejects.toMatchObject({ code: "ETIMEDOUT" });

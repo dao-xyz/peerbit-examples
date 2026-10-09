@@ -340,6 +340,18 @@ export interface SessionEvents {
     onOutcome(session: JoinerSession, outcome: SessionOutcome): void;
     /** A scope changed state (status and telemetry). */
     onState?(session: JoinerSession, scope: ScopeId, state: SessionState): void;
+    /**
+     * An OPEN attempt ended with some scope still without a header: before
+     * the next attempt goes out (`last` false), or before those scopes go
+     * `silent` after the last one (`last` true). `attempt` counts the
+     * attempts of the current series (1 to 3; `resume` starts a new one).
+     * The owner may close the session in the call (a peer still gone, a
+     * confirm-only peer's single attempt); nothing is sent then.
+     */
+    onAttempt?(
+        session: JoinerSession,
+        info: { attempt: number; last: boolean }
+    ): void;
 }
 
 export interface SessionPorts {
@@ -1271,9 +1283,22 @@ export class JoinerSession {
     /** T2: the next attempt, or `silent` after the third. */
     private onOpenTimer() {
         this.openTimer = undefined;
+        if (!this.runs.some((run) => !run.header)) return;
+        const last = this.openTries >= ATTEMPT_DELAYS_MS.length;
+        try {
+            this.ports.events.onAttempt?.(this, {
+                attempt: this.openTries,
+                last,
+            });
+        } catch {
+            // A listener's error is the listener's.
+        }
+        // The owner closed the session, or resumed it (a new series is
+        // already in flight).
+        if (this.ended || this.openTimer !== undefined) return;
         const asking = this.runs.filter((run) => !run.header);
         if (asking.length === 0) return;
-        if (this.openTries < ATTEMPT_DELAYS_MS.length) return this.sendOpen();
+        if (!last) return this.sendOpen();
         for (const run of asking) this.setState(run, "silent");
     }
 

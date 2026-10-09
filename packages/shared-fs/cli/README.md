@@ -341,8 +341,12 @@ write-ready; `create` fails if it cannot publish it. Until something is
 written, the creator publishes it again whenever another peer opens the
 filesystem. `create --no-replicate` is rejected.
 `mount` waits up to 120 seconds by default; tune this with
-`--write-ready-timeout-ms`. A timeout is not permission to write: keep a
-complete replicator for this filesystem connected and retry. An unrelated
+`--write-ready-timeout-ms`. A timeout is not permission to write. Its error
+names what the mount waited for and the advice that fits: usually keep a
+complete replicator for this filesystem connected and retry. Another replicator
+does not help when a required peer is reachable but does not answer (restart
+or stop that peer) or when the peers that answered are not write-ready
+themselves (connect a write-ready replica, such as the creator). An unrelated
 connected Peerbit peer does not count. Retrying a mount of a filesystem nobody
 has written yet needs its creator online, because only the creator publishes
 new evidence for it. A fresh no-snapshot join can count namespace rows

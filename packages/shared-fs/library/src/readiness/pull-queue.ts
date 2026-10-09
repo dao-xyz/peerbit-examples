@@ -13,10 +13,16 @@ import type { Rejection, RejectionRecord } from "./explain.js";
  *   arrives while the owner still classifies waits for it. Hashes already
  *   in flight in another owner's batch are not joined again; the report
  *   waits for that batch.
- * - **Join.** One `join(heads, { timeout })` per batch, the scope log's
- *   `SharedLog.join`. It reports nothing per hash, so the owner classifies
- *   every hash afterwards (explain.ts). Its timeout is the only bound; the
- *   queue arms no timer.
+ * - **Join.** One `join(heads, { timeout, signal })` per batch, the scope
+ *   log's `SharedLog.join` (ports.ts joins the heads one by one on two
+ *   lanes shared by every batch, within one deadline, so a batch settles
+ *   within about one timeout whatever its size). It reports nothing per
+ *   hash, so the owner classifies every hash afterwards (explain.ts). Its
+ *   timeout is the only bound; the queue arms no timer.
+ * - **Dispose** aborts every join in flight (`signal`), and `whenIdle`
+ *   settles once they did: the store must not close while a join of the
+ *   queue still commits (`Log.close` refuses while a mutation callback
+ *   runs, `@peerbit/log log.js:4104-4111`).
  * - **Failed hashes** are kept per owner. They are retried on events only:
  *   a sign of life from the owner's peer (`retry(owner)`), any local index
  *   change (`noteIndexChange`), and a batch of another owner that made
@@ -33,10 +39,15 @@ import type { Rejection, RejectionRecord } from "./explain.js";
 /** The scope's log, as the queue uses it. */
 export interface PullPorts {
     /**
-     * `SharedLog.join(heads, { timeout })` on the scope's log. Resolves or
-     * rejects; no per-hash result.
+     * `SharedLog.join(heads, { timeout, signal })` on the scope's log.
+     * Resolves or rejects; no per-hash result. Settles within about one
+     * `timeout` whatever the batch's size (the queue's only bound), and soon
+     * after `signal` aborts.
      */
-    join(heads: string[], options: { timeout: number }): Promise<void>;
+    join(
+        heads: string[],
+        options: { timeout: number; signal: AbortSignal }
+    ): Promise<void>;
     /**
      * Calls `listener` on every local index change of the scope (the retry
      * trigger); returns its removal.
@@ -107,6 +118,10 @@ export class PullQueue {
     private readonly owners = new Map<string, Owner>();
     /** Head -> the batch whose join carries it now. */
     private readonly inFlight = new Map<string, Batch>();
+    /** Every batch whose join has not settled (`whenIdle`). */
+    private readonly running = new Set<Batch>();
+    /** Aborts the joins in flight on `dispose`. */
+    private readonly aborting = new AbortController();
     private readonly unsubscribe?: () => void;
     private disposed = false;
 
@@ -276,6 +291,18 @@ export class PullQueue {
         } catch {
             // The scope's sink set is gone with its tap: nothing to remove.
         }
+        this.aborting.abort(new Error("readiness: the pull queue is disposed"));
+    }
+
+    /**
+     * Settles once every join the queue started has settled (at once when
+     * none runs). After `dispose` no join starts, so this is the moment the
+     * scope's store may close. Never rejects.
+     */
+    whenIdle(): Promise<void> {
+        return Promise.all([...this.running].map((batch) => batch.done)).then(
+            () => undefined
+        );
     }
 
     private ownerOf(owner: string): Owner {
@@ -319,12 +346,16 @@ export class PullQueue {
         // In flight before `join` runs: an index change it causes may make
         // another owner pull the same heads at once, and they must ride.
         for (const head of heads) this.inFlight.set(head, batch);
+        this.running.add(batch);
         this.stats.batches++;
         this.stats.joined += heads.length;
         let joining: Promise<void>;
         try {
             joining = Promise.resolve(
-                this.ports.join([...heads], { timeout: this.timeoutMs })
+                this.ports.join([...heads], {
+                    timeout: this.timeoutMs,
+                    signal: this.aborting.signal,
+                })
             );
         } catch (error) {
             joining = Promise.reject(error);
@@ -334,6 +365,7 @@ export class PullQueue {
                 () => this.finish(batch, false, undefined),
                 (error) => this.finish(batch, true, error)
             )
+            .finally(() => this.running.delete(batch))
             .then(settle, settle);
         return batch;
     }

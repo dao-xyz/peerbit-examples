@@ -10,6 +10,7 @@ import {
     PULL_BATCH,
     PULL_TIMEOUT_MS,
     PUSH_MAX,
+    SESSION_IDLE_MS,
     T_SYNC,
 } from "../readiness/constants.js";
 import { headDigest } from "../readiness/digest.js";
@@ -21,6 +22,7 @@ import {
 import {
     ATTEMPT_DELAYS_MS,
     FIRST_LADDER,
+    JoinerSession,
     MAX_RENEWALS,
     SYNC_WINDOW_MS,
     cellPrefix,
@@ -31,6 +33,7 @@ import {
     qualifies,
     type LocalScope,
     type SessionInit,
+    type SessionEvents,
     type SessionOutcome,
     type SessionResult,
 } from "../readiness/session.js";
@@ -468,6 +471,155 @@ describe("readiness joiner session", () => {
             expect(w.sent(OpenV1)).toHaveLength(4);
         });
 
+        describe("onAttempt (PR-3 commit 2, G2-3)", () => {
+            /** A session reporting its attempts; the oracle checks its outcome. */
+            const attempting = (
+                w: JoinerWorld,
+                onAttempt?: SessionEvents["onAttempt"]
+            ) => {
+                const attempts: Array<{ attempt: number; last: boolean }> = [];
+                const outcomes: SessionOutcome[] = [];
+                const session = new JoinerSession(
+                    w.init(),
+                    w.ports({
+                        onOutcome: (done, outcome) => {
+                            w.sessions.delete(done);
+                            outcomes.push(outcome);
+                            w.checkOutcome(outcome);
+                        },
+                        onAttempt: (session, info) => {
+                            attempts.push(info);
+                            onAttempt?.(session, info);
+                        },
+                    })
+                );
+                // Routed: R's answers reach it (`JoinerWorld.toJ`).
+                w.sessions.add(session);
+                return { session, attempts, outcomes };
+            };
+
+            it("reports each attempt that ended without a header: 1 and 2 before the next OPEN, 3 as the last, then silent", async () => {
+                const w = await world({ common: 10 });
+                w.hooks.toR = (m) => (m instanceof OpenV1 ? null : m);
+                // Called before the next OPEN goes out, and before the
+                // scopes go silent.
+                const sentAtCall: number[] = [];
+                const stateAtCall: unknown[] = [];
+                const { session, attempts } = attempting(w, (s) => {
+                    stateAtCall.push(s.state(SCOPE_NAMESPACE_V1));
+                    sentAtCall.push(w.sent(OpenV1).length);
+                });
+                session.start();
+                await settle();
+                expect(attempts).toEqual([]);
+                w.timers.advance(ATTEMPT_DELAYS_MS[0]);
+                await settle();
+                expect(attempts).toEqual([{ attempt: 1, last: false }]);
+                w.timers.advance(ATTEMPT_DELAYS_MS[1]);
+                await settle();
+                w.timers.advance(ATTEMPT_DELAYS_MS[2]);
+                await settle();
+                expect(attempts).toEqual([
+                    { attempt: 1, last: false },
+                    { attempt: 2, last: false },
+                    { attempt: 3, last: true },
+                ]);
+                expect(sentAtCall).toEqual([1, 2, 3]);
+                expect(stateAtCall).toEqual(["asking", "asking", "asking"]);
+                expect(session.state(SCOPE_NAMESPACE_V1)).toBe("silent");
+                expect(session.debug().armedTimers).toBe(0);
+                // A resumed series counts from 1 again.
+                session.resume();
+                w.timers.advance(ATTEMPT_DELAYS_MS[0]);
+                await settle();
+                expect(attempts.at(-1)).toEqual({ attempt: 1, last: false });
+                session.close();
+            });
+
+            it("reports nothing once every scope holds a header", async () => {
+                const w = await world({ common: 10 });
+                const { session, attempts, outcomes } = attempting(w);
+                session.start();
+                await w.until(() => outcomes.length > 0, "outcome");
+                expect(outcomes[0].kind).toBe("contained");
+                w.timers.advance(60_000);
+                await settle();
+                expect(attempts).toEqual([]);
+                // A header that arrives before the timer fires also ends
+                // the attempts: attempt 1 is answered at 4 s.
+                const late = await world({ common: 10 });
+                late.hooks.delayToR = (m) => (m instanceof OpenV1 ? 4_000 : 0);
+                const second = attempting(late);
+                second.session.start();
+                await settle();
+                expect(late.sent(OpenV1)).toHaveLength(1);
+                late.timers.advance(4_000);
+                await late.until(() => second.outcomes.length > 0, "outcome");
+                late.timers.advance(60_000);
+                await settle();
+                expect(second.attempts).toEqual([]);
+            });
+
+            it("an owner that closes the session in the call stops it: no further OPEN, no timer, no silent", async () => {
+                for (const closeAt of [1, 3]) {
+                    const w = await world({ common: 10 });
+                    w.hooks.toR = (m) => (m instanceof OpenV1 ? null : m);
+                    const states: string[] = [];
+                    const { session, attempts, outcomes } = attempting(
+                        w,
+                        (s, info) => {
+                            if (info.attempt === closeAt) s.close();
+                        }
+                    );
+                    session.start();
+                    for (const delay of ATTEMPT_DELAYS_MS) {
+                        w.timers.advance(delay);
+                        await settle();
+                        states.push(String(session.state(SCOPE_NAMESPACE_V1)));
+                    }
+                    expect(attempts.map((a) => a.attempt)).toEqual(
+                        Array.from({ length: closeAt }, (_, i) => i + 1)
+                    );
+                    expect(w.sent(OpenV1)).toHaveLength(closeAt);
+                    expect(outcomes).toEqual([{ kind: "closed" }]);
+                    expect(states).not.toContain("silent");
+                    expect(session.debug().armedTimers).toBe(0);
+                }
+            });
+
+            it("an owner that resumes the session in the call starts one new series, not two OPENs", async () => {
+                const w = await world({ common: 10 });
+                w.hooks.toR = (m) => (m instanceof OpenV1 ? null : m);
+                let resumed = 0;
+                const { session, attempts } = attempting(w, (s, info) => {
+                    if (info.last && resumed++ === 0) s.resume();
+                });
+                session.start();
+                w.timers.advance(35_000);
+                await settle();
+                expect(attempts.map((a) => a.attempt)).toEqual([1, 2, 3]);
+                expect(w.sent(OpenV1).map((m) => m.attempt)).toEqual([
+                    1, 2, 3, 4,
+                ]);
+                expect(session.state(SCOPE_NAMESPACE_V1)).toBe("asking");
+                expect(session.debug().armedTimers).toBe(1);
+                // A listener that throws changes nothing.
+                const v = await world({ common: 10 });
+                v.hooks.toR = (m) => (m instanceof OpenV1 ? null : m);
+                const throwing = attempting(v, () => {
+                    throw new Error("listener bug");
+                });
+                throwing.session.start();
+                v.timers.advance(35_000);
+                await settle();
+                expect(v.sent(OpenV1)).toHaveLength(3);
+                expect(throwing.session.state(SCOPE_NAMESPACE_V1)).toBe(
+                    "silent"
+                );
+                session.close();
+            });
+        });
+
         it("a lost cells answer is asked again, then the scope is silent until resume()", async () => {
             const w = await world({ common: 10, rOnly: 300 });
             let drop = true;
@@ -546,6 +698,48 @@ describe("readiness joiner session", () => {
                 list: false,
                 scopes: [SCOPE_NAMESPACE_V1],
             });
+            expect(w.sent(CloseV1)).toHaveLength(0);
+            expect(session.debug().armedTimers).toBe(0);
+        });
+
+        it("a session silent on a freeze that outlived R's idle renews on R's EXPIRED", async () => {
+            // R is alive but busy: its freeze waits on a replace verify for
+            // longer than its 30 s idle after J's last OPEN (a large write
+            // under load). R sends J nothing else, so this answer is what
+            // re-asks R.
+            const w = await world({ common: 5 });
+            const tap = w.r.scope().tap;
+            let verifying = true;
+            let release!: () => void;
+            const verified = new Promise<void>(
+                (resolve) => (release = resolve)
+            );
+            Object.defineProperty(tap, "pendingVerify", {
+                configurable: true,
+                get: () => (verifying ? 1 : 0),
+            });
+            tap.verifyIdle = () => verified;
+            const session = w.session(w.init());
+            session.start();
+            await w.until(() => w.sent(OpenV1).length === 1, "open");
+            await w.timers.advanceSettled(
+                ATTEMPT_DELAYS_MS.reduce((sum, ms) => sum + ms, 0)
+            );
+            expect(w.sent(OpenV1)).toHaveLength(ATTEMPT_DELAYS_MS.length);
+            expect(session.state(SCOPE_NAMESPACE_V1)).toBe("silent");
+            expect(session.debug().armedTimers).toBe(0);
+            await w.timers.advanceSettled(SESSION_IDLE_MS);
+            expect(w.responder.debug().sessions).toBe(0);
+            expect(session.outcome).toBeUndefined();
+
+            verifying = false;
+            release();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(session.outcome).toMatchObject({
+                kind: "renew",
+                reason: "expired",
+            });
+            expect(w.sentToJ.filter((m) => m instanceof HeaderV1)).toEqual([]);
             expect(w.sent(CloseV1)).toHaveLength(0);
             expect(session.debug().armedTimers).toBe(0);
         });

@@ -108,22 +108,36 @@ export class FakeTimers implements Timers {
     armed() {
         return this.due.size;
     }
+    /** Fires the earliest timer due by `end`; false when none is. */
+    private fireNext(end: number): boolean {
+        let next: [number, { at: number; fn: () => void }] | undefined;
+        for (const entry of this.due) {
+            if (entry[1].at <= end && (!next || entry[1].at < next[1].at)) {
+                next = entry;
+            }
+        }
+        if (!next) return false;
+        this.due.delete(next[0]);
+        this.now = Math.max(this.now, next[1].at);
+        next[1].fn();
+        return true;
+    }
     /** Moves the clock, firing every timer due on the way, in order. */
     advance(ms: number) {
         const end = this.now + ms;
-        for (;;) {
-            let next: [number, { at: number; fn: () => void }] | undefined;
-            for (const entry of this.due) {
-                if (entry[1].at <= end && (!next || entry[1].at < next[1].at)) {
-                    next = entry;
-                }
-            }
-            if (!next) break;
-            this.due.delete(next[0]);
-            this.now = Math.max(this.now, next[1].at);
-            next[1].fn();
-        }
+        while (this.fireNext(end));
         this.now = end;
+    }
+    /**
+     * As `advance`, letting each timer's effects settle before the next one
+     * fires (a timer whose handler sends, and whose answer arms or clears
+     * another timer).
+     */
+    async advanceSettled(ms: number) {
+        const end = this.now + ms;
+        while (this.fireNext(end)) await settle();
+        this.now = end;
+        await settle();
     }
 }
 
@@ -203,7 +217,8 @@ export class FakeScope {
     readonly inspected: string[] = [];
 
     constructor(
-        readonly world: JoinerWorld,
+        /** What a scope reads of its world: the cell key and the blocks. */
+        readonly world: Pick<JoinerWorld, "cellKey" | "blocks">,
         readonly scope: ScopeId,
         readonly logId: Uint8Array,
         host: AnchorHost

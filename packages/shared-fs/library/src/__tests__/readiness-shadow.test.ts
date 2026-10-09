@@ -7,10 +7,15 @@ import { DIGEST_BYTES, M } from "../readiness/constants.js";
 import { digestToHead } from "../readiness/digest.js";
 import type { IdKey } from "../readiness/id-map.js";
 import type { ScopeState } from "../readiness/runtime.js";
-import { NAMESPACE_V1 } from "../readiness/scopes.js";
+import {
+    NAMESPACE_V1,
+    SCOPE_NAMESPACE_V1,
+    type ScopeId,
+} from "../readiness/scopes.js";
 import {
     compareScope,
     createShadowRegistry,
+    runSessionShadowCheck,
     runShadowCheck,
     takeShadowFailures,
     type ShadowRegistry,
@@ -326,6 +331,85 @@ describe("readiness shadow verdict", () => {
         ]);
         moving.close();
         starting.close();
+    });
+
+    it("checks the scopes a session contained, stamped with the joining test", async () => {
+        const s = await scope();
+        for (let i = 0; i < 3; i++) s.arrive(`n${i}`);
+        const program = {};
+        const runtime = {
+            address: "session-test",
+            anchorHost: s.host,
+            cellKey: s.key,
+            program,
+            blocked: false,
+            disposed: false,
+            scope: (id: ScopeId) =>
+                id === SCOPE_NAMESPACE_V1 ? s.state : undefined,
+        };
+        const scopes = new Set<ScopeId>([SCOPE_NAMESPACE_V1]);
+        const joining = { file: "a.test.ts", test: "join", id: "t1" };
+        const registry = createShadowRegistry();
+        // Opened in another test than the one whose join contained it.
+        registry.live.set(runtime, { file: "a.test.ts", test: "open" });
+        await runSessionShadowCheck(runtime, registry, scopes, joining, {
+            eventWaitMs: 50,
+        });
+        expect(registry.counts).toMatchObject({
+            checks: 1,
+            sessionChecks: 1,
+            compared: 1,
+            failed: 0,
+        });
+
+        // A difference fails the joining test, with the session's prefix.
+        s.tap.map.delete("n0");
+        registry.current = { file: "a.test.ts", test: "later", id: "t2" };
+        await runSessionShadowCheck(runtime, registry, scopes, joining, {
+            eventWaitMs: 50,
+        });
+        expect(registry.counts).toMatchObject({
+            checks: 2,
+            sessionChecks: 2,
+            failed: 1,
+        });
+        expect(registry.failures).toEqual([
+            expect.objectContaining({
+                owner: { file: "a.test.ts", test: "open" },
+                recordedIn: joining,
+                scope: "namespace-v1",
+                message: expect.stringMatching(
+                    /^readiness shadow \(session\): namespace-v1 of session-test differs from its index/
+                ),
+            }),
+        ]);
+        expect(takeShadowFailures(registry, "a.test.ts", "t2").mine).toEqual(
+            []
+        );
+        expect(
+            takeShadowFailures(registry, "a.test.ts", "t1").mine
+        ).toHaveLength(1);
+
+        // Left to the close-path check: a blocked (closing) runtime, an
+        // opted-out filesystem, a scope it no longer holds.
+        const left = createShadowRegistry();
+        await runSessionShadowCheck(
+            { ...runtime, blocked: true },
+            left,
+            scopes,
+            joining
+        );
+        left.optedOut.add(program);
+        await runSessionShadowCheck(runtime, left, scopes, joining);
+        await runSessionShadowCheck(
+            { ...runtime, program: undefined, scope: () => undefined },
+            createShadowRegistry(),
+            scopes,
+            joining
+        );
+        expect(left.counts).toMatchObject({ checks: 0, failed: 0 });
+        expect(left.failures).toEqual([]);
+        s.close();
     });
 
     it("leaves a difference recorded in a suite hook to the file, not the next test", async () => {

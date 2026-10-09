@@ -1172,6 +1172,53 @@ describe("readiness tap", () => {
                 }
             });
 
+            it("onCountVerified fires once per verification, after the state says so, and not for the close's own comparison", async () => {
+                const { tap, index, write } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: () => false,
+                });
+                const seen: boolean[] = [];
+                const off = tap.onCountVerified(() =>
+                    seen.push(tap.countVerified)
+                );
+                // A throwing listener is contained; the others still run.
+                tap.onCountVerified(() => {
+                    throw new Error("listener bug");
+                });
+                await tap.seedChecked();
+                expect(tap.countVerified).toBe(true);
+                expect(seen).toEqual([true]);
+                // Changes to a verified count fire nothing.
+                write(3);
+                await tap.countSettled();
+                expect(seen).toEqual([true]);
+                // A reseed clears the verification; the next one fires.
+                await tap.reseed();
+                expect(tap.countVerified).toBe(false);
+                tap.requestCount();
+                await tap.countSettled();
+                expect(tap.countVerified).toBe(true);
+                expect(seen).toEqual([true, true]);
+                // A comparison that does not verify fires nothing.
+                const count = index.count;
+                index.count = async () => (await count.call(index)) + 1;
+                await tap.checkCount();
+                expect(tap.countVerified).toBe(false);
+                expect(seen).toEqual([true, true]);
+                // The close's comparison verifies without firing.
+                index.count = count;
+                await tap.confirmCount();
+                expect(tap.countVerified).toBe(true);
+                expect(seen).toEqual([true, true]);
+                // A removed listener is not called.
+                off();
+                await tap.reseed();
+                await tap.confirmCountNow();
+                expect(tap.countVerified).toBe(true);
+                expect(seen).toEqual([true, true]);
+                tap.dispose();
+            });
+
             it("confirms an unverified count once at close", async () => {
                 const { tap } = offsetIndex({
                     deletes: () => false,

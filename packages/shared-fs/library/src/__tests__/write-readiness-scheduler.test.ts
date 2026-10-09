@@ -36,6 +36,26 @@ const readinessFixture = () => {
     program.bootstrapStatus = vi.fn(() => ({
         writeReady: program.writesReady,
     }));
+    // Prerequisite mode (PR-3 commit 2): the tracker also requires the
+    // readiness coordinator's containment (`satisfied()`). These cases pin
+    // the tracker's own scheduling, so the coordinator is satisfied unless
+    // a case says otherwise; `onEvaluate` is the hook the tracker gave it.
+    const readiness = {
+        satisfied: true,
+        onEvaluate: undefined as
+            | undefined
+            | ((evaluation: { satisfied: boolean; changed: boolean }) => void),
+    };
+    program.readinessRuntime = {
+        startJoin: vi.fn((options: any) => {
+            readiness.onEvaluate = options.onEvaluate;
+        }),
+        satisfied: vi.fn(() => readiness.satisfied),
+        evaluate: vi.fn(),
+        markReady: vi.fn(),
+        status: vi.fn(() => undefined),
+    };
+    program.readinessFixture = readiness;
     return program;
 };
 
@@ -94,6 +114,8 @@ describe("shared fs write-readiness scheduler", () => {
         settleDecision();
         await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
         expect(program.writeReadinessDecisionSettled).toBe(true);
+        // The #403 hook also re-evaluates the coordinator.
+        expect(program.readinessRuntime.evaluate).toHaveBeenCalledTimes(1);
         expect(program.writeReadinessQuietChecks).toBe(1);
         await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
 
@@ -314,6 +336,56 @@ describe("shared fs write-readiness scheduler", () => {
         expect(program.writesReady).toBe(true);
         expect(program.writeBootstrapState).toHaveBeenCalledTimes(2);
         expect(program.writeReadinessTimer).toBeUndefined();
+    });
+
+    it("waits for the coordinator's containment, pulled forward when it is satisfied", async () => {
+        const program = readinessFixture();
+        program.readinessFixture.satisfied = false;
+        program.startWriteReadinessTracking(program.openGeneration);
+        expect(program.readinessRuntime.startJoin).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+        // Every condition of today's tracker holds; the containment does
+        // not, so no quiet check counts.
+        expect(program.writeReadinessQuietChecks).toBe(0);
+        expect(program.writesReady).toBe(false);
+        expect(program.hasConnectedRemoteReplicator).not.toHaveBeenCalled();
+
+        // An evaluation that turns satisfied pulls the next check forward
+        // (the interval tick is at 6 s); the two checks still apply.
+        program.readinessFixture.satisfied = true;
+        program.readinessFixture.onEvaluate({
+            satisfied: true,
+            changed: true,
+        });
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+        expect(program.writeReadinessQuietChecks).toBe(1);
+        expect(program.writesReady).toBe(false);
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+        expect(program.writesReady).toBe(true);
+        expect(program.readinessRuntime.markReady).toHaveBeenCalledTimes(1);
+        expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+    });
+
+    it("decides on the containment in the transition: lost between the checks, it stays gated", async () => {
+        const program = readinessFixture();
+        program.startWriteReadinessTracking(program.openGeneration);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(SETTLE_MS);
+        expect(program.writeReadinessQuietChecks).toBe(1);
+
+        // A new required peer appears before the confirmation.
+        program.readinessFixture.satisfied = false;
+        await vi.advanceTimersByTimeAsync(CONFIRMATION_GAP_MS);
+        expect(program.writeReadinessQuietChecks).toBe(0);
+        // Even a check already past its prerequisites does not commit:
+        // markWriteReady reads the predicate again in its slot.
+        program.writeReadinessQuietChecks = 2;
+        await program.markWriteReady(program.openGeneration);
+        expect(program.writesReady).toBe(false);
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+        expect(program.readinessRuntime.markReady).not.toHaveBeenCalled();
+        program.clearBootstrapTimers();
     });
 
     it("cancels an owned deadline across a lifecycle change", async () => {
