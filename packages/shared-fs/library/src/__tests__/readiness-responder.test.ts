@@ -150,6 +150,11 @@ const fakeResponder = async (
         started?: Promise<void>;
         /** Runs during the `count`-th count read's await. */
         onCount?: (count: number) => void;
+        /**
+         * Seed only, and leave the count check to the test (the runtime
+         * seeds and checks: `seedChecked`).
+         */
+        unchecked?: boolean;
     } = {}
 ) => {
     const heads = new Map<string, string>();
@@ -187,7 +192,8 @@ const fakeResponder = async (
         apply: (digest, sign) => laneSet.apply(digest, sign),
         reset: () => laneSet.reset(tap.epoch),
     });
-    await tap.seedFromScan();
+    if (options.unchecked) await tap.seedFromScan();
+    else await tap.seedChecked();
     const logId = new Uint8Array(32).fill(7);
     const scope = {
         descriptor: NAMESPACE_V1,
@@ -233,6 +239,9 @@ const fakeResponder = async (
         network,
         responder,
         add,
+        /** The fake index (id to head), and its port. */
+        heads,
+        port,
         scopes: [{ scope: SCOPE_NAMESPACE_V1, logId, count: 0 }],
         logId,
         close: () => {
@@ -823,6 +832,7 @@ describe("readiness responder", () => {
                     onCount: (count) => {
                         if (count <= 4) r.add(`late${count}`);
                     },
+                    unchecked: true,
                 });
             expect(await r.tap.checkCount()).toBeUndefined();
             await r.tap.countSettled();
@@ -837,6 +847,84 @@ describe("readiness responder", () => {
             await r.tap.countSettled();
             expect(r.tap.stats.countReads).toBe(reads + 1);
             expect(r.tap.countVerified).toBe(true);
+            r.close();
+        });
+
+        it("freezes only at a verified count: a row the seed scan missed is in the snapshot", async () => {
+            // The check's comparisons all race a row, so the count stays
+            // unverified; then the store goes quiet.
+            const r: Awaited<ReturnType<typeof fakeResponder>> =
+                await fakeResponder(20, "inline", undefined, {
+                    onCount: (count) => {
+                        if (count <= 4) r.add(`late${count}`);
+                    },
+                    unchecked: true,
+                });
+            await r.tap.checkCount();
+            await r.tap.countSettled();
+            expect(r.tap.countVerified).toBe(false);
+            // A row the index holds that the seed scan missed (no event
+            // ever names it).
+            r.heads.set("missed", digestToHead(randomBytes(DIGEST_BYTES)));
+            expect(r.tap.count).toBe(24);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const header = await client.next(HeaderV1);
+            // The freeze compared, found the difference and scanned again.
+            expect(header.count).toBe(25);
+            expect(r.tap.countVerified).toBe(true);
+            expect(r.tap.stats.rescans).toBe(1);
+            r.close();
+        });
+
+        it("compares again while changes race its reads, and answers once a read is quiet", async () => {
+            // Every read of the check and of the freeze's first two
+            // comparisons races a row.
+            const r: Awaited<ReturnType<typeof fakeResponder>> =
+                await fakeResponder(20, "inline", undefined, {
+                    onCount: (count) => {
+                        if (count <= 6) r.add(`late${count}`);
+                    },
+                    unchecked: true,
+                });
+            await r.tap.checkCount();
+            await r.tap.countSettled();
+            expect(r.tap.countVerified).toBe(false);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const header = await client.next(HeaderV1);
+            expect(header.count).toBe(26);
+            expect(r.tap.countVerified).toBe(true);
+            expect(r.responder.stats.busy).toBe(0);
+            r.close();
+        });
+
+        it("answers BUSY, never a short snapshot, for a count its clean scans never match", async () => {
+            // The index counts a row its scans never return (a bug): the
+            // check scans again once, and the difference stays.
+            const r = await fakeResponder(20, "inline", undefined, {
+                unchecked: true,
+            });
+            const count = r.port.count;
+            r.port.count = async () => (await count()) + 1;
+            await r.tap.checkCount();
+            expect(r.tap.countVerified).toBe(false);
+            expect(r.tap.stats.rescans).toBe(1);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const error = await client.next(ErrorV1);
+            expect(error.code).toBe(ERROR_CODE.BUSY);
+            expect(
+                r.network.sent.some(
+                    ({ message }) => message instanceof HeaderV1
+                )
+            ).toBe(false);
+            // Bounded: the clean rescans the tap allows, then its fault.
+            expect(r.tap.stats.rescans).toBe(3);
+            expect(String(r.tap.faulted)).toMatch(/clean rescans/);
             r.close();
         });
 

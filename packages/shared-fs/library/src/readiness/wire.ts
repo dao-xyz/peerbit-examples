@@ -46,6 +46,8 @@ export const READINESS_WIRE_VERSION = 1;
 export const SESSION_ID_BYTES = 16;
 export const OPEN_NONCE_BYTES = 16;
 export const LOG_ID_BYTES = 32;
+/** `HeaderV1.freezeId`: random per freeze of a session (see there). */
+export const FREEZE_ID_BYTES = 8;
 
 /**
  * Bits of `OpenV1.caps` and `ProvenanceV1.caps`: optional variants, codes
@@ -233,6 +235,16 @@ export class HeaderV1 extends ReadinessMessage {
     @field({ type: ProvenanceV1 })
     provenance: ProvenanceV1;
 
+    /**
+     * Names the freeze that answered: random, the same in every header of
+     * one session, and new when a responder that ended a session freezes
+     * again for an OPEN with the same id. A joiner holds every scope of a
+     * session to one freeze (the trust snapshot after the namespace one,
+     * design 2.2(4)) and renews on another.
+     */
+    @field({ type: fixedArray("u8", FREEZE_ID_BYTES) })
+    freezeId: Uint8Array;
+
     @field({ type: "u32" })
     count: number;
 
@@ -260,6 +272,7 @@ export class HeaderV1 extends ReadinessMessage {
         scope: number;
         logId: Uint8Array;
         provenance: ProvenanceV1;
+        freezeId: Uint8Array;
         count: number;
         anchor: Uint8Array;
         hlc: bigint;
@@ -274,6 +287,7 @@ export class HeaderV1 extends ReadinessMessage {
             this.scope = properties.scope;
             this.logId = properties.logId;
             this.provenance = properties.provenance;
+            this.freezeId = properties.freezeId;
             this.count = properties.count;
             this.anchor = properties.anchor;
             this.hlc = properties.hlc;

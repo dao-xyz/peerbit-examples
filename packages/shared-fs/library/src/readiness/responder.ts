@@ -1,5 +1,5 @@
 import type { PublicSignKey } from "@peerbit/crypto";
-import { toHexString } from "@peerbit/crypto";
+import { randomBytes, toHexString } from "@peerbit/crypto";
 import { AnchorUnavailableError, type LaneSet } from "./anchor-host.js";
 import {
     CELL_BYTES,
@@ -21,6 +21,7 @@ import {
     CloseV1,
     ERROR_CODE,
     ErrorV1,
+    FREEZE_ID_BYTES,
     HeaderV1,
     ListPageV1,
     ListV1,
@@ -45,14 +46,17 @@ import {
  * - **Snapshots.** One per scope and epoch, shared by every session opened
  *   at that epoch: the count, `hlc`, and the cells and D_R from one
  *   `stateNow("digest")` of the lane set, all taken in one synchronous step
- *   at a point where the scope's replace-verify queue is empty (S10,
- *   deviation k), so the worker answers both for that epoch, in one reply.
- *   The trust scope is frozen after the namespace scope.
+ *   at a point where the scope's replace-verify queue is empty and its count
+ *   is verified (S10, deviation k), so the worker answers both for that
+ *   epoch, in one reply. A count the tap cannot verify while the store is
+ *   quiet gets `BUSY`. The trust scope is frozen after the namespace scope.
  * - **Sessions** are keyed by (peer, sessionId). Every attempt of a session
  *   gets the same snapshot and the same provenance, read in the synchronous
  *   step that took its first snapshot: a later state never vouches for an
  *   earlier snapshot (design 2.2(3)). First-flight cells go with the header
- *   when 0 < gapEst <= 256. A session expires after 30 s without a request.
+ *   when 0 < gapEst <= 256. A session expires after 30 s without a request;
+ *   an OPEN that reaches it later with the same id freezes again, under a
+ *   new `freezeId`, so the joiner never mixes the two freezes.
  * - **Caps.** 4 sessions per peer and 16 in total, and one list-mode
  *   session (deviation c). Beyond a cap the answer is `BUSY`, and the
  *   requester gets a directed `StateNoticeV1{CAPACITY}` when a session that
@@ -160,6 +164,8 @@ interface Session {
     readonly peer: PublicSignKey;
     readonly peerHash: string;
     readonly sessionId: Uint8Array;
+    /** Every header of this session carries it (`HeaderV1.freezeId`). */
+    readonly freezeId: Uint8Array;
     readonly hlcProved: bigint;
     list: boolean;
     /** Resolves to the frozen scopes, or to an error code to answer. */
@@ -454,6 +460,9 @@ export class Responder {
                 peer: from,
                 peerHash,
                 sessionId: Uint8Array.from(open.sessionId),
+                // A session ended and opened again under the same id is
+                // another freeze, and its headers say so.
+                freezeId: randomBytes(FREEZE_ID_BYTES),
                 hlcProved: open.hlcProved,
                 list,
                 frozen: undefined as any,
@@ -517,6 +526,7 @@ export class Responder {
                 scope: frozen.scope.descriptor.id,
                 logId: frozen.scope.logId,
                 provenance: this.provenance(frozen.provenance),
+                freezeId: session.freezeId,
                 count: snapshot.count,
                 anchor: frozen.anchor,
                 hlc: snapshot.hlc,
@@ -530,10 +540,10 @@ export class Responder {
 
     /**
      * Freezes every scope of a session in order. Each freeze waits for its
-     * scope's start and for an empty replace-verify queue, then takes the
-     * snapshot in one synchronous step (S10); a session that ended during a
-     * wait stops there (`EXPIRED`). A worker restart (EAGAIN) is retried at
-     * once: the lane sets were rebuilt before it rejected.
+     * scope's start, an empty replace-verify queue and a verified count, then
+     * takes the snapshot in one synchronous step (S10); a session that ended
+     * during a wait stops there (`EXPIRED`). A worker restart (EAGAIN) is
+     * retried at once: the lane sets were rebuilt before it rejected.
      */
     private async freeze(
         session: Session,
@@ -569,8 +579,22 @@ export class Responder {
                     if (tap.faulted !== undefined || tap.state !== "live") {
                         throw new Refused(ERROR_CODE.BUSY);
                     }
-                    if (tap.pendingVerify === 0) break;
-                    await tap.verifyIdle();
+                    if (tap.pendingVerify > 0) {
+                        await tap.verifyIdle();
+                        continue;
+                    }
+                    if (tap.countVerified) break;
+                    // A verified count too, as the joiner's certificate
+                    // needs (deviation k): a seed scan the count check found
+                    // short misses a row the index holds, and a snapshot of
+                    // it would under-report that row.
+                    const epoch = tap.epoch;
+                    await tap.confirmCountNow();
+                    // A change during the comparison is the next chance.
+                    if (tap.countVerified || tap.epoch !== epoch) continue;
+                    // Quiet and still unverified (the tap cannot compare, or
+                    // its scans keep differing): nothing to answer from.
+                    throw new Refused(ERROR_CODE.BUSY);
                 }
                 const snapshot = this.snapshotOf(scope);
                 // In the same synchronous step as the first snapshot: a
@@ -665,10 +689,6 @@ export class Responder {
         };
         this.stats.freezes++;
         this.snapshots.set(scope.descriptor.id, snapshot);
-        // A consumer of the state: an unverified count is compared now
-        // rather than at the tap's next stride (shadow mode: the answer does
-        // not wait for it).
-        tap.requestCount();
         return snapshot;
     }
 

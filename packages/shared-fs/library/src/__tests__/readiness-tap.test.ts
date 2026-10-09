@@ -272,6 +272,67 @@ describe("readiness tap", () => {
             expect(tap.hlc).toBe(2n);
         });
 
+        it("passes each element's modified to its sinks: the added row's, or the removed row's", async () => {
+            // A joiner session keeps its count of rows above R's hlc from
+            // these (PR-3, deviation a), so a removal must carry the time of
+            // the row it removed, not of the event.
+            const index = new FakeIndex();
+            const [a, b, c, d] = [head(), head(), head(), head()];
+            index.set("seeded", d, 4n);
+            const tap = new ScopeTap(NAMESPACE_V1, index);
+            const seen: Array<[string, 1 | -1, bigint]> = [];
+            tap.addSink({
+                apply: (digest, sign, modified) =>
+                    seen.push([hex(digest), sign, modified]),
+                reset: () => seen.push(["reset", 1, 0n]),
+            });
+            await tap.seedFromScan();
+            expect(seen).toEqual([[hex(headDigest(d)), 1, 4n]]);
+            seen.length = 0;
+
+            // An add, then a replace (Documents sends only `added`).
+            index.set("x", a, 5n);
+            tap.onChange(change([remoteNaming("x", a, 5n)]));
+            index.set("x", b, 7n);
+            tap.onChange(change([remoteNaming("x", b, 7n)]));
+            await tap.verifyIdle();
+            // A removal whose event carries another time.
+            index.rows.delete("x");
+            tap.onChange(change([], [remoteNaming("x", b, 99n)]));
+            expect(seen).toEqual([
+                [hex(headDigest(a)), 1, 5n],
+                [hex(headDigest(a)), -1, 5n],
+                [hex(headDigest(b)), 1, 7n],
+                [hex(headDigest(b)), -1, 7n],
+            ]);
+            seen.length = 0;
+
+            // A late replace whose verify finds no indexed row: the repair
+            // removes the row it put, with that row's time.
+            const e = head();
+            index.set("y", c, 3n);
+            tap.onChange(change([remoteNaming("y", c, 3n)]));
+            index.rows.delete("y");
+            tap.onChange(change([remoteNaming("y", e, 2n)]));
+            await tap.verifyIdle();
+            expect(tap.stats.repairs).toBe(1);
+            expect(seen).toEqual([
+                [hex(headDigest(c)), 1, 3n],
+                [hex(headDigest(c)), -1, 3n],
+                [hex(headDigest(e)), 1, 2n],
+                [hex(headDigest(e)), -1, 2n],
+            ]);
+            seen.length = 0;
+
+            // A rescan resets the sinks, then re-adds each row with its time.
+            await tap.reseed();
+            expect(seen).toEqual([
+                ["reset", 1, 0n],
+                [hex(headDigest(d)), 1, 4n],
+            ]);
+            expectTapEqualsIndex(tap, index);
+        });
+
         it("verifies an add of an id an event removed lately (a delete racing a re-put)", async () => {
             // A local delete reads the removed value, deletes the id's whole
             // row and dispatches; a re-put indexed inside that window
@@ -751,6 +812,90 @@ describe("readiness tap", () => {
                 await tap.countSettled();
                 expect(tap.stats.rescans).toBe(2);
                 expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+
+            it("confirmCountNow reads again after a raced read, never held to the stride", async () => {
+                const { tap } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: (count) => count <= 5,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                // A consumer's read races a row; asking again waits for
+                // changes to start a comparison (`requestCount`).
+                tap.requestCount();
+                await tap.countSettled();
+                tap.requestCount();
+                await tap.countSettled();
+                expect(tap.stats.countReads).toBe(5);
+                expect(tap.countVerified).toBe(false);
+                // One that needs it now reads now, and the store is quiet.
+                await tap.confirmCountNow();
+                expect(tap.stats.countReads).toBe(6);
+                expect(tap.countVerified).toBe(true);
+                // Verified: nothing more to read.
+                await tap.confirmCountNow();
+                expect(tap.stats.countReads).toBe(6);
+                tap.dispose();
+            });
+
+            it("confirmCountNow scans again for a difference it reads twice at one epoch", async () => {
+                // As above: both scans miss a row, and the first conclusive
+                // difference since the rescan is seen once.
+                const { tap, write } = offsetIndex({
+                    deletes: (scan) => scan <= 2,
+                    arrivals: (count) => count >= 2 && count <= 5,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                write();
+                await tap.countSettled();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.stats.countReads).toBe(6);
+                // A store that stays quiet never confirms it by a change; a
+                // consumer that needs the count reads it again and scans.
+                await tap.confirmCountNow();
+                expect(tap.stats.countReads).toBe(8);
+                expect(tap.stats.rescans).toBe(2);
+                expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+
+            it("confirmCountNow reads a difference first seen by its own read twice, then scans", async () => {
+                // Both scans miss a row and every read after the rescan
+                // races a row: no conclusive difference since the rescan.
+                const { tap } = offsetIndex({
+                    deletes: (scan) => scan <= 2,
+                    arrivals: (count) => count >= 2 && count <= 5,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                expect(tap.stats.rescans).toBe(1);
+                expect(tap.stats.countReads).toBe(5);
+                // Quiet from here: the first read sees the difference, the
+                // second at the same epoch confirms it.
+                await tap.confirmCountNow();
+                expect(tap.stats.rescans).toBe(2);
+                expect(tap.stats.countReads).toBe(8);
+                expect(tap.countVerified).toBe(true);
+                tap.dispose();
+            });
+
+            it("confirmCountNow stops at a change during its read, for its caller to ask again", async () => {
+                // Every read races a row: one read per call, never a loop.
+                const { tap } = offsetIndex({
+                    deletes: () => false,
+                    arrivals: () => true,
+                });
+                await tap.seedChecked();
+                await tap.countSettled();
+                const reads = tap.stats.countReads;
+                await tap.confirmCountNow();
+                expect(tap.stats.countReads).toBe(reads + 1);
+                expect(tap.countVerified).toBe(false);
+                await tap.confirmCountNow();
+                expect(tap.stats.countReads).toBe(reads + 2);
                 tap.dispose();
             });
 
