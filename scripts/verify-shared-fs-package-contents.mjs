@@ -19,7 +19,7 @@ const packages = [
     {
         directory: "packages/shared-fs/library",
         name: "@peerbit/shared-fs",
-        maxUnpackedBytes: 2_750_000,
+        maxUnpackedBytes: 3_300_000,
         requiredPaths: [
             "LICENSE",
             "README.md",

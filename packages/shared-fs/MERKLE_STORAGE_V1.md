@@ -158,7 +158,8 @@ MerkleFileVersionV1 {
 }
 ```
 
-v9.1 added `mode: u32` (git tree mode) and `mtime: u64` (ms) to `FileVersion`.
+v9.1 added `mode: u32` (git tree mode) and `mtime: u64` (ms) to `FileVersion`
+(v9.2, the readiness format break, leaves `FileVersion` unchanged).
 V10 carries both here and in the index projection, and the no-op tuple below
 gains `mode, mtime`; the validators and golden vectors follow.
 

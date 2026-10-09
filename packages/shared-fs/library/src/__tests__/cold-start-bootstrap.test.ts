@@ -2870,4 +2870,54 @@ describe("shared fs cold-start bootstrap", () => {
             await expect(joiner.namingConflicts()).resolves.toBeDefined();
         }
     );
+
+    it("waits for a bootstrap the open is still deciding on", async () => {
+        const donor = await populatedDonor(20);
+        const joinerPeer = await createPeer();
+        await joinerPeer.dial(donor.peer);
+        // The open returns before it decides whether to bootstrap, and its
+        // phase reads "off" until its read of the pre-open store answers.
+        // Hold that read, so the call below lands inside the window.
+        const contentStoredBeforeOpen = (SharedFileSystem.prototype as any)
+            .contentStoredBeforeOpen;
+        let reached!: () => void;
+        const deciding = new Promise<void>((resolve) => (reached = resolve));
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => (release = resolve));
+        const probe = vi
+            .spyOn(SharedFileSystem.prototype as any, "contentStoredBeforeOpen")
+            .mockImplementation(async function (this: any, ...args: any[]) {
+                if (this.node === joinerPeer) {
+                    reached();
+                    await released;
+                }
+                return contentStoredBeforeOpen.apply(this, args);
+            });
+        try {
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address: donor.fs.address,
+                machineLabel: "joiner",
+            });
+            await deciding;
+            expect(joiner.bootstrapStatus().phase).toBe("off");
+            let answer: { verified: boolean } | undefined;
+            const converged = joiner
+                .awaitBootstrapConverged()
+                .then((value) => (answer = value));
+            // An answer that does not wait has settled by the next turn.
+            await new Promise((resolve) => setImmediate(resolve));
+            expect(answer).toBeUndefined();
+            release();
+            await converged;
+            expect(answer).toEqual({ verified: true });
+            expect(joiner.bootstrapStatus()).toMatchObject({
+                phase: "converged",
+                snapshotCoverageVerified: true,
+            });
+        } finally {
+            release();
+            probe.mockRestore();
+        }
+    });
 });

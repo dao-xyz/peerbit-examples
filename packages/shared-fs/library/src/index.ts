@@ -40,6 +40,7 @@ import {
     type ProgramClient,
     type ProgramInitializationOptions,
 } from "@peerbit/program";
+import { RPC } from "@peerbit/rpc";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
@@ -94,6 +95,10 @@ import {
     type SharedFsWriteFileProfileHook,
     type SharedFsWriteFileProfiler,
 } from "./mount-profile.js";
+import { READINESS_TOPIC_SALT } from "./readiness/constants.js";
+import type { ProvenanceState } from "./readiness/responder.js";
+import { ReadinessRuntime, logIdOf } from "./readiness/runtime.js";
+import { ReadinessMessage } from "./readiness/wire.js";
 
 export * from "./model.js";
 export {
@@ -2728,7 +2733,7 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
     return true;
 };
 
-@variant("peerbit_shared_fs_v9_1")
+@variant("peerbit_shared_fs_v9_2")
 export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     @field({ type: Uint8Array })
     id: Uint8Array;
@@ -2750,6 +2755,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      */
     @field({ type: vec("string") })
     sealedIgnoredNames: string[];
+
+    /**
+     * Write-readiness exchange (src/readiness/): one-way directed messages
+     * between replicas of this filesystem. Part of the address since v9.2.
+     */
+    @field({ type: RPC })
+    readiness: RPC<ReadinessMessage, ReadinessMessage>;
+
+    /** Readiness state of the current open generation (not serialized). */
+    private readinessRuntime: ReadinessRuntime | undefined;
+    /** This generation became ready from a trusted warm sidecar (set in open). */
+    private readinessWarmOpen: boolean | undefined;
 
     machineLabel = "unknown-machine";
     replicate: OpenReplicateOptions | undefined;
@@ -3115,12 +3132,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 properties.sealedIgnoredNames ?? DEFAULT_SEALED_IGNORED_NAMES
             ),
         ].sort();
-        // v9.1: FileVersion mode and mtime — the salt bump guarantees older
-        // peers can never attach to the same log and fail confusingly
-        // mid-replication.
+        // v9.2: the readiness RPC (v9.1 added FileVersion mode and mtime).
+        // The salt bump guarantees older peers can never attach to the same
+        // log and fail confusingly mid-replication.
         this.entries = new Documents({
-            id: sha256Sync(concat([this.id, fromString("/shared-fs/v9.1")])),
+            id: sha256Sync(concat([this.id, fromString("/shared-fs/v9.2")])),
         });
+        this.readiness = new RPC();
         this.constructedLocally = true;
     }
 
@@ -3164,6 +3182,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             (this.lifecycleRequestGeneration ?? 0) + 1;
         const requestGeneration = this.lifecycleRequestGeneration;
         this.writeReadinessLifecycleBlocked = true;
+        // The readiness responder stops answering at once; its state stays
+        // maintained until the close transition persists or drops it.
+        this.readinessRuntime?.block();
 
         const lifecycleError = new SharedFsError(
             "ECLOSED",
@@ -3376,6 +3397,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.writesReady = !addressOpen || partialWriteOverride;
         this.partialWriteOverride = partialWriteOverride;
+        this.readinessWarmOpen = false;
         this.writeReadinessRequired = addressOpen && !partialWriteOverride;
         this.viewProven = !addressOpen;
         this.writeReadinessDecisionSettled =
@@ -3414,12 +3436,47 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 timeoutMs: args.remoteChunkFetch.timeoutMs,
             };
         }
+        // Readiness state of this generation. The directory and address are
+        // captured now: the persist step runs after super.close() and must
+        // not read this.node. Persisted structures are read and unlinked
+        // beside the trust graph's open, and before the entries store
+        // ingests.
+        this.readinessRuntime?.disposeWithoutPersist();
+        this.readinessRuntime = undefined;
+        const readinessRuntime = await ReadinessRuntime.create({
+            address: this.address.toString(),
+            directory: (this.node as any)?.directory as string | undefined,
+            stores: {
+                namespace: logIdOf(this.entries),
+                trust: this.trustGraph
+                    ? logIdOf(this.trustGraph.trustGraph)
+                    : undefined,
+            },
+            ports: {
+                send: (message, to) =>
+                    this.readiness.send(message, { to: [to] }),
+                provenance: () => this.readinessProvenance(),
+            },
+        });
+        this.readinessRuntime = readinessRuntime;
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        // The trust tap listens before the trust log opens, so every batch
+        // that log replicates dispatches its change event.
+        if (this.trustGraph) {
+            readinessRuntime.attachTrust(this.trustGraph.trustGraph);
+        }
         // The trust graph is tiny and gates every write; always keep a full
         // copy so signature checks never depend on which peer holds a relation.
         await this.trustGraph?.open({
             replicate: { factor: 1 } as any,
         });
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        if (this.trustGraph) {
+            // TrustedNetwork.open replaces trustGraph.trustGraph with the
+            // instance node.open returned: seed the tap there by a scan
+            // that starts after the attach.
+            readinessRuntime.startTrust(this.trustGraph.trustGraph);
+        }
         this.clock = args?.clock ?? Date.now;
         this.skipHorizonMs = Math.max(
             5 * 60 * 1000,
@@ -3596,6 +3653,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.writeReadinessRequired = false;
             this.viewProven = true;
             this.writeReadinessDecisionSettled = true;
+            this.readinessWarmOpen = true;
         }
         if (addressOpen && !trustedWarmWriteReady) {
             // Clear any proof from an earlier full-replica generation before
@@ -3743,6 +3801,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (freshOpenListener) {
             this.entries.events.addEventListener("change", freshOpenListener);
         }
+        // The namespace structures file is gone durably before the store
+        // ingests (taken since the runtime was created). The namespace tap
+        // buffers from before ingest starts; it restores or seeds once
+        // entries.open() resolves. The readiness RPC opens beside the store
+        // (its topic is known up front) and is joined after it.
+        await readinessRuntime.whenTaken();
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        readinessRuntime.attachNamespace(this.entries);
+        const readinessOpen = this.readiness.open({
+            topic: toBase64(
+                sha256Sync(concat([this.id, fromString(READINESS_TOPIC_SALT)]))
+            ),
+            queryType: ReadinessMessage,
+            responseType: ReadinessMessage,
+            responseHandler: (message, context) => {
+                // One-way messages only: the handler never responds.
+                readinessRuntime.onMessage(message, context.from);
+                return undefined;
+            },
+        });
+        // Rethrown by the await after the change listener registers; never
+        // unhandled.
+        readinessOpen.catch(() => {});
         if (this.bootstrapTelemetry) {
             const clockMs = this.bootstrapTelemetryNow!();
             this.bootstrapTelemetryDocumentsOpenStartedAtMs = clockMs;
@@ -3784,6 +3865,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     ),
                 });
             }
+        } catch (error) {
+            // Join the RPC open on failure too, so it cannot subscribe after
+            // a close has already run.
+            await Promise.allSettled([readinessOpen]);
+            throw error;
         } finally {
             delete entrySyncOptions.profile;
             // Native defaults clone SyncOptions before SharedLog retains it.
@@ -3805,7 +3891,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         }
+        if (lifecycleRequestGeneration !== this.lifecycleRequestGeneration) {
+            // About to throw: join the RPC open first, as above.
+            await Promise.allSettled([readinessOpen]);
+        }
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
+        readinessRuntime.startNamespace();
         // Cache maintenance runs on every peer; the resurrection guard only
         // on full replicas (and only while armed — see guardArmed).
         // Registering a change consumer also makes Documents materialize
@@ -3909,6 +4000,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         };
         this.changeListener = changeListener;
         this.entries.events.addEventListener("change", changeListener);
+        // The readiness RPC is joined only now: no await may separate the
+        // fresh-open listener's removal from this registration, or a change
+        // dispatched in between reaches neither.
+        await readinessOpen;
+        this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         this.bootstrapDecision = Promise.resolve();
         if (bootstrapCandidate) {
             const bootstrapAbortController = new AbortController();
@@ -4299,6 +4395,32 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     private isFullReplica() {
         return this.replicate !== false && this.replicate?.factor === 1;
+    }
+
+    /**
+     * What the readiness responder reports about this open (honest
+     * provenance, WRITE_READINESS_V2.md 4.4). A warm reopen of a proven
+     * view reports `warm`, not the source it persisted. Today's timer
+     * (`remote-settled`) is no proof and has no v1 source code: such a peer
+     * reports `writeReady` with source `none`, and so does a warm reopen of
+     * its sidecar (`warm` qualifies a donor in PR-3), until PR-3 replaces
+     * the timer by `reconciled`.
+     */
+    private readinessProvenance(): ProvenanceState {
+        const writeReady = this.writesReady === true;
+        const proven = this.writeReadinessSource === "creator";
+        return {
+            writeReady,
+            source: this.partialWriteOverride
+                ? "partial-override"
+                : !writeReady || !proven
+                  ? "none"
+                  : this.readinessWarmOpen
+                    ? "warm"
+                    : "creator",
+            fullReplica: this.isFullReplica(),
+            phase: this.bootstrapPhase,
+        };
     }
 
     private authorKey() {
@@ -6324,12 +6446,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Every raw local index read goes through here. `read` drives one
-     * iterator over `query`; this opens and closes it and reads nothing
-     * itself, so a lone `all()` stays one statement. The raw index answers
-     * a closing store with no rows rather than an error, so a read that
-     * starts, or is in flight, while the store closes can come back short
-     * or empty. The DocumentIndex is marked closed before its index starts
+     * Every raw local index read of the filesystem goes through here; the
+     * readiness taps fail closed through their own port (readiness/tap.ts).
+     * `read` drives one iterator over `query`; this opens and closes it and
+     * reads nothing itself, so a lone `all()` stays one statement. The raw
+     * index answers a closing store with no rows rather than an error, so a
+     * read that starts, or is in flight, while the store closes can come
+     * back short or empty. The DocumentIndex is marked closed before its index starts
      * closing, and close() moves to a new open generation before either,
      * so a read that starts or returns on a closed program, a closed
      * DocumentIndex or a later generation throws ClosedError, as a
@@ -11324,6 +11447,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
+    /**
+     * Program.drop ends the stores without close(): release this open's
+     * readiness state here (lane sets on the process-wide anchor host, the
+     * taps' listeners), as close() does whatever Program.close returns.
+     * Never persisted: the store is gone, and the open already removed the
+     * file.
+     */
+    async drop(from?: any): Promise<boolean> {
+        const readinessRuntime = this.readinessRuntime;
+        readinessRuntime?.block();
+        try {
+            return await super.drop(from);
+        } finally {
+            if (this.readinessRuntime === readinessRuntime) {
+                this.readinessRuntime = undefined;
+            }
+            readinessRuntime?.disposeWithoutPersist();
+        }
+    }
+
     private async closeLifecycleTransition(from?: any): Promise<boolean> {
         // The public wrapper synchronously stopped admission and aborted
         // background work. The serialized transition now joins every owner
@@ -11407,7 +11550,28 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.watchHub = undefined;
         this.changesetHub = undefined;
         this.resolveBootstrapWaiters({ verified: false });
-        return super.close(from);
+        const readinessRuntime = this.readinessRuntime;
+        this.readinessRuntime = undefined;
+        // Writes have drained: let queued replace verifies finish, run the
+        // shadow check (tests only) and seal the readiness taps before the
+        // stores close under them.
+        await readinessRuntime?.prepareClose(this);
+        let closed: boolean;
+        try {
+            closed = await super.close(from);
+        } catch (error) {
+            readinessRuntime?.disposeWithoutPersist();
+            throw error;
+        }
+        // Persist only when the stores really closed: with another parent
+        // still holding the program, entries stays open and keeps emitting,
+        // so a snapshot taken now could be stale by the next open.
+        if (closed) {
+            await readinessRuntime?.persistAndDispose();
+        } else {
+            readinessRuntime?.disposeWithoutPersist();
+        }
+        return closed;
     }
 
     /**
@@ -13340,10 +13504,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * Wait until any active snapshot overlay retires. `verified` narrowly
      * means the accepted snapshot's ids were covered before retirement; it is
      * false when bootstrap is off/plain-join or retirement was unverified.
+     * A bootstrap still deciding whether to run is waited for.
      */
     awaitBootstrapConverged(): Promise<{ verified: boolean }> {
         if (this.bootstrapPhase === "off") {
-            return Promise.resolve({ verified: false });
+            // A candidate open decides in the background after open()
+            // returns, and stays "off" until its index probe answers
+            // (contentStoredBeforeOpen), which queues behind whatever else
+            // reads the index. "off" is only an answer once that decision
+            // has settled; a reopen's decision is joined in turn.
+            const decision = this.bootstrapDecision;
+            const decided = (): Promise<{ verified: boolean }> =>
+                this.bootstrapPhase === "off" &&
+                this.bootstrapDecision === decision
+                    ? Promise.resolve({ verified: false })
+                    : this.awaitBootstrapConverged();
+            return Promise.resolve(decision).then(decided, decided);
         }
         if (this.bootstrapPhase === "converged") {
             return Promise.resolve({ verified: this.bootstrapVerified });
