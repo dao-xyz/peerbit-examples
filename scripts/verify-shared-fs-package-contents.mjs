@@ -19,7 +19,9 @@ const packages = [
     {
         directory: "packages/shared-fs/library",
         name: "@peerbit/shared-fs",
-        maxUnpackedBytes: 3_800_000,
+        // Windows checkouts measure about 1.3% larger (CRLF line endings);
+        // the published tarball is packed on Linux.
+        maxUnpackedBytes: 3_950_000,
         requiredPaths: [
             "LICENSE",
             "README.md",
