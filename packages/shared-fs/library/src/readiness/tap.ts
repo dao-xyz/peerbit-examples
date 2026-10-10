@@ -830,7 +830,7 @@ export class ScopeTap {
      *   coarse on purpose, TODO(perf) upstream): on 5.4.10 no stable read
      *   started from a change event differed (review probe: 0 of 8.5k under
      *   local writers and replication). The real-store case in
-     *   `readiness-tap.test.ts` fails without that barrier;
+     *   `readiness-tap.isolated.test.ts` fails without that barrier;
      * - anything else keeps the state unverified. The next comparison starts
      *   from the changes that follow (`countOnChange`, at most one running
      *   and one per `countStride` changes) or from a consumer

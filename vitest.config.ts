@@ -15,7 +15,21 @@ const SHARED = {
         : undefined,
 };
 
-// Node project: runs generic + *.node.* (but not *.dom.*)
+// A file that installs a fake clock (vi.useFakeTimers) is named
+// *.isolated.test.ts and runs alone in a fresh process. Under isolate:false
+// a worker's earlier files can leave real work running, such as a stopped
+// libp2p's peer-store lock queues and debounces, and any timer that work
+// arms through the global setTimeout lands in the fake clock.
+const ISOLATED = "**/src/__tests__/**/*.isolated.test.ts";
+const NODE_EXCLUDE = [
+    "**/src/__tests__/**/*.dom.test.ts",
+    "**/src/__tests__/**/*.dom.spec.ts",
+    "**/node_modules/**",
+    "**/frontend/**",
+    "**/*.timestamp-*.mjs",
+];
+
+// Node project: runs generic + *.node.* (but not *.dom.* or *.isolated.*)
 const NODE = defineConfig({
     test: {
         ...SHARED,
@@ -29,14 +43,19 @@ const NODE = defineConfig({
             "src/__tests__/**/*.test.ts",
             "src/__tests__/**/*.spec.ts",
         ],
-        exclude: [
-            "**/src/__tests__/**/*.dom.test.ts",
-            "**/src/__tests__/**/*.dom.spec.ts",
-            "**/node_modules/**",
-            "**/frontend/**",
-            "**/*.timestamp-*.mjs",
-        ],
+        exclude: [...NODE_EXCLUDE, ISOLATED],
         setupFiles: ["./vitest.setup.ts"],
+    },
+});
+
+// Node project for *.isolated.test.ts: one fresh process per file.
+const NODE_ISOLATED = defineConfig({
+    test: {
+        ...NODE.test,
+        name: "node-isolated",
+        isolate: true,
+        include: [ISOLATED],
+        exclude: NODE_EXCLUDE,
     },
 });
 
@@ -77,6 +96,6 @@ const JSDOM = defineConfig({
 export default defineConfig({
     // This keeps your original root behavior available as a project
     test: {
-        projects: [/* ROOT, */ NODE, JSDOM],
+        projects: [/* ROOT, */ NODE, NODE_ISOLATED, JSDOM],
     },
 });
