@@ -1,5 +1,98 @@
 # @peerbit/shared-fs
 
+## 0.17.0
+
+### Minor Changes
+
+- 64805ab: A joining full replica now becomes writable when it proves its view, instead
+  of after a quiet window. It asks every peer it can see running the filesystem
+  for a signed summary of that peer's namespace rows, pulls the rows it lacks,
+  explains the rows it will never index (superseded, older or refused), and
+  checks a set hash against the peer's. It turns writable once every such peer
+  is contained, has left, or was caught in a provable lie, at least one contained
+  peer answered as a write-ready full replica, and any snapshot bootstrap has
+  settled. The proof is persisted before the first write. There is no 5-second
+  floor, and a donor that writes continuously no longer keeps a joiner gated. A
+  donor that answered and then left still counts, where a live replicator used to
+  be required.
+
+    In an access-controlled store the joiner also reconciles the trust graph with
+    each peer, explains a revoked writer's rows only once every peer's trust graph
+    is reconciled, and counts a peer as a donor only if it trusts that peer's
+    identity. Readiness does not wait out the window in which a stale peer can
+    re-introduce a revoked grant.
+
+    Some joins that were released before are now held: one next to a reachable
+    peer that never answers, one whose only peers are not write-ready themselves
+    (gated joiners, observers or partial replicas), and, in an access-controlled
+    store, one whose only write-ready peers have identities it does not trust.
+    `assumeComplete()` is the operator escape: it persists source `operator` and
+    makes the replica writable. Readiness covers namespace rows, not chunk bytes,
+    so a joiner can now be writable while file contents are still replicating.
+    Reads fetch missing chunks from peers (`remoteChunkFetch`, on by default); with
+    `remoteChunkFetch: false` a read can return an older complete version or fail
+    with `EIO` until the chunks arrive.
+    - `bootstrapStatus().readiness` (`ReadinessStatus`, `ReadinessState`) names
+      the peers a join waits for and why. `awaitWriteReady({ timeout })` rejects
+      with `SharedFsWriteReadyTimeoutError` (`ETIMEDOUT`), whose message gives the
+      reason and whose `readiness` carries the snapshot. The CLI's timeout
+      messages carry that reason and advice that fits it.
+    - `writeReadinessSource` is `creator`, `reconciled` or `operator`;
+      `remote-settled` is gone, here and in the `write-ready` telemetry event. The
+      local state file stores the proof with a `reconciled` source.
+    - Telemetry adds `readiness-session`, one event each time an exchange contains
+      a peer's scope, and removes `synchronizer-idle`; a `BootstrapTelemetryEvent`
+      consumer that switches on it must drop that case.
+    - `drop()` now stops readiness work as `close()` does.
+    - `peerbit-fs create`'s error when it cannot publish the genesis manifest now
+      names what the genesis is for: a joiner's snapshot bootstrap discovery.
+
+- 9f080b5: Maintain proof-based write readiness state on every replica, in shadow mode.
+  This change by itself moves no write readiness decision; the proof-based write
+  readiness entry of this release describes what does.
+
+    This is a format break. The program variant is now `peerbit_shared_fs_v9_2`,
+    the entries salt is `/shared-fs/v9.2`, and the program gains a `readiness`
+    RPC. Filesystems created by earlier releases, including those the CLI
+    created, fail loudly when opened and must be recreated; shared-fs has no
+    production users, so no migration is kept.
+    - Every open replica keeps, per scope (namespace rows, and trust relations in
+      access-controlled stores), the live set of entry heads from the store's
+      change events, with a keyed id map, IBLT cells and an anchor digest kept by
+      a worker thread.
+    - Every open replica answers readiness requests from peers with a snapshot of
+      that state and an honest report of how it became writable. This entry adds
+      nothing that reads the answers.
+    - The namespace state is written to `<directory>/shared-fs-readiness/` at a
+      clean close and restored at the next open; a missing, torn, foreign or
+      stale file is rebuilt from the index. The trust state is rebuilt from the
+      index at every open.
+    - `@peerbit/rpc` is now a direct dependency.
+
+### Patch Changes
+
+- 9f080b5: `awaitBootstrapConverged()` called right after a joining replica opens now
+  waits for the snapshot bootstrap that the open is still deciding on. The open
+  decides in the background, after it checks the local index for content. A
+  call made before that check answered resolved `{ verified: false }` at once,
+  as if no bootstrap would run. The CLI's conflict listings and its snapshot
+  command make this call right after opening, so they could read a view that
+  was still partial.
+- 64805ab: `drop()` puts the local state file back to gated before the store goes. A
+  write-ready replica, a creator included, that was dropped and then opened by
+  address in the same directory used to reopen writable over the empty store,
+  admitting writes that clash with rows its peers hold and answering other
+  joiners as a write-ready donor. It now joins afresh.
+
+    Garbage collection's heal step repairs a missing chunk only once a version
+    naming it arrived on the replica at least `chunkGraceMs` ago. A younger one
+    may still be replicating, as on a replica that just turned writable or is
+    catching up a backlog: healing it re-put the chunk as a new entry that every
+    replica received again in full, and with `remoteChunkFetch: false` reported
+    the node as having unrecoverable missing chunks. Such a node is now only kept
+    out of deletion for the run, with a warning. A chunk that arrives while its
+    heal fetch runs is no longer put again.
+
 ## 0.16.6
 
 ### Patch Changes
