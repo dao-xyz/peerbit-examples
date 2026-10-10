@@ -2,6 +2,7 @@ import type {
     BootstrapStatus,
     MergeDirectoryResolutionResult,
     PrepareForDisposalResult,
+    ReadinessStatus,
     ResolveNamingAction,
     SharedFsConflict,
     SharedFsMountProfileWriter,
@@ -610,12 +611,104 @@ const openCliFs = async (
     }
 };
 
+/** awaitWriteReady's ETIMEDOUT text; the readiness reason follows ": ". */
+const WRITE_READY_TIMEOUT_TEXT =
+    "timed out awaiting shared filesystem write readiness";
+
+const KEEP_REPLICATOR_CONNECTED =
+    "keep a complete replicator connected and retry";
+
+/**
+ * What ends a write-readiness wait, by the state of the snapshot its
+ * ETIMEDOUT carries (bootstrapStatus().readiness). A complete replicator
+ * helps while the join has no peer, or waits for entries, trust or the
+ * bootstrap phase. It does not release a silent peer, peers that are not
+ * write-ready themselves, this replica's own fault, or a readiness proof
+ * this replica could not persist. A timeout without a snapshot (no
+ * readiness join ran) keeps the old advice.
+ */
+const writeReadyTimeoutAdvice = (readiness?: ReadinessStatus) => {
+    switch (readiness?.state) {
+        case "waiting-silent":
+            return `a required peer that does not answer blocks while it is reachable, and another replicator does not change that: restart the silent peer${
+                readiness.silent?.some(({ refused }) => refused)
+                    ? " (run this shared-fs release on one that refused)"
+                    : ""
+            } or stop it, and retry`;
+        case "no-qualified-donor":
+            return "the peers that answered are not write-ready themselves (gated, partial or observers), so another such replica does not help: connect a write-ready replica, such as the filesystem's creator, and retry";
+        case "waiting-left":
+            return "a required peer left before it answered and blocks only until its request attempt ends: reconnect it, or retry";
+        case "reconciling":
+            if (readiness.fault !== undefined) {
+                return "this replica's own readiness state failed, which no peer fixes: rerun the command to reopen the filesystem";
+            }
+            if (!readiness.satisfied) {
+                return "the join is still reconciling with the required peers: keep them connected and retry with a longer --write-ready-timeout-ms";
+            }
+            return "every required peer is accounted for and the filesystem was persisting its readiness proof: retry; if this repeats, check that the Peerbit directory is writable";
+        case "ready":
+            return "the filesystem became write-ready as the wait ended: retry";
+        default:
+            return KEEP_REPLICATOR_CONNECTED;
+    }
+};
+
+/**
+ * A command's message for awaitWriteReady's ETIMEDOUT: the library's
+ * readiness reason (its describeReadiness line, from the error's message)
+ * and advice that fits it. Without a reason it keeps the old form.
+ */
+export const writeReadyTimeoutMessage = (
+    subject: string,
+    error: { message?: unknown; readiness?: ReadinessStatus }
+) => {
+    const message = typeof error.message === "string" ? error.message : "";
+    const reason = message.startsWith(`${WRITE_READY_TIMEOUT_TEXT}: `)
+        ? message.slice(WRITE_READY_TIMEOUT_TEXT.length + 2)
+        : message === WRITE_READY_TIMEOUT_TEXT
+          ? ""
+          : message;
+    const advice = writeReadyTimeoutAdvice(error.readiness);
+    return reason
+        ? `${subject}: ${reason}. ${advice[0].toUpperCase()}${advice.slice(1)}.`
+        : `${subject}; ${advice}.`;
+};
+
+/**
+ * awaitWriteReady for a command. An ETIMEDOUT becomes
+ * writeReadyTimeoutMessage plus `note`; the library error is its cause.
+ */
+const awaitCliWriteReady = async (
+    fsHandle: Pick<Awaited<ReturnType<typeof openCliFs>>, "awaitWriteReady">,
+    timeout: number,
+    subject: string,
+    note = ""
+) => {
+    try {
+        await fsHandle.awaitWriteReady({ timeout });
+    } catch (error: any) {
+        if (error?.code === "ETIMEDOUT") {
+            throw new Error(
+                `${writeReadyTimeoutMessage(`${subject} within ${timeout} ms`, error)}${note}`,
+                { cause: error }
+            );
+        }
+        throw error;
+    }
+};
+
 const awaitConflictResolutionReady = async (
     fsHandle: Awaited<ReturnType<typeof openCliFs>>,
     peerbit: Peerbit,
-    timeout: number
+    timeout: number,
+    command: string
 ) => {
-    await fsHandle.awaitWriteReady({ timeout });
+    await awaitCliWriteReady(
+        fsHandle,
+        timeout,
+        `${command} did not establish a safe write view`
+    );
     await fsHandle.awaitBootstrapConverged();
     if (
         fsHandle.accessControlled &&
@@ -685,8 +778,10 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             : undefined,
                     });
                     // Opening as the creator published the signed
-                    // zero-document genesis manifest. Without it, remote
-                    // peers could not join this still-empty filesystem.
+                    // zero-document genesis manifest, which a joiner's
+                    // snapshot bootstrap discovery reads (nothing written
+                    // yet). Joiners turn write-ready without it, by
+                    // containing the creator.
                     const { encodePublicSignKey } = await loadSharedFsRuntime();
                     if (
                         !(await fsHandle.program.entries.index.get(
@@ -695,7 +790,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         ))
                     ) {
                         throw new Error(
-                            "create could not publish the genesis manifest, so no other peer could join the new filesystem"
+                            "create could not publish the genesis manifest that a joiner's snapshot bootstrap discovery reads"
                         );
                     }
                     console.log(fsHandle.address);
@@ -954,20 +1049,14 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     // A fresh address-open can serve bootstrap-overlay reads
                     // before its namespace is safe to mutate. Do not expose a
                     // writable OS mount until the full-replica readiness fence
-                    // has settled (warm reopens resolve immediately).
-                    try {
-                        await fsHandle.awaitWriteReady({
-                            timeout: argv.writeReadyTimeoutMs,
-                        });
-                    } catch (error: any) {
-                        if (error?.code === "ETIMEDOUT") {
-                            throw new Error(
-                                `mount did not establish a safe initial write view within ${argv.writeReadyTimeoutMs} ms; keep a complete replicator connected and retry. --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`,
-                                { cause: error }
-                            );
-                        }
-                        throw error;
-                    }
+                    // has settled (warm reopens resolve immediately). A
+                    // timeout names the readiness reason and fitting advice.
+                    await awaitCliWriteReady(
+                        fsHandle,
+                        argv.writeReadyTimeoutMs,
+                        "mount did not establish a safe initial write view",
+                        " --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass."
+                    );
                     let nativeProfileFile: string | undefined;
                     if (mountProfileDirectory) {
                         const profileFiles = await openMountProfileFiles(
@@ -1422,7 +1511,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     await awaitConflictResolutionReady(
                         fsHandle,
                         peerbit,
-                        argv.writeReadyTimeoutMs
+                        argv.writeReadyTimeoutMs,
+                        "resolve-conflict"
                     );
                     const normalizedPath = await normalizeCliFsPath(argv.path);
                     const visible = await fsHandle.conflicts(normalizedPath);
@@ -1546,7 +1636,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     await awaitConflictResolutionReady(
                         fsHandle,
                         peerbit,
-                        argv.writeReadyTimeoutMs
+                        argv.writeReadyTimeoutMs,
+                        "resolve-naming-conflict"
                     );
                     const observedConflicts = conflictsInvolvingNode(
                         await fsHandle.namingConflicts(),

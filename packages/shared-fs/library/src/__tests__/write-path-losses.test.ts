@@ -131,8 +131,6 @@ describe("write-path losses", () => {
                 peerbit: b,
                 address: A.address!,
                 machineLabel: "B",
-                // No test here checks readiness; each waits for sync.
-                writeReadinessSettleMs: 100,
                 ...options,
             } as any);
         });
@@ -211,7 +209,6 @@ describe("write-path losses", () => {
                     peerbit: nodes[i],
                     address: A.address!,
                     machineLabel: String.fromCharCode(65 + i),
-                    writeReadinessSettleMs: 100,
                     // No test here checks bootstrap: a joiner's manifest
                     // discovery would wait out its timeout on the replicas
                     // that open after it.
@@ -305,6 +302,29 @@ describe("write-path losses", () => {
         paths.push("/from-b.txt");
         await synced();
 
+        // B's saves below reuse only chunks B holds locally. Write
+        // readiness proves the namespace, not chunk bytes (design 2.3), and
+        // since PR-3 commit 4 it no longer waits for the synchronizer, so B
+        // can be ready while the seed's chunks still sync: wait for them
+        // before the cut, as this case pins chunk reuse, not readiness.
+        await waitUntil(async () => {
+            for (const path of paths) {
+                const versionId = (await B.stat(path))!.versionId!;
+                const version = (await B.program.entries.index.get(versionId, {
+                    local: true,
+                    remote: false,
+                })) as unknown as FileVersion;
+                for (const chunkId of version.chunkIds) {
+                    expect(
+                        await B.program.entries.index.get(chunkId, {
+                            local: true,
+                            remote: false,
+                        }),
+                        `${path}: chunk ${chunkId} local on B`
+                    ).toBeDefined();
+                }
+            }
+        });
         const mount = (await B.stat("/mount.txt"))!;
         await cut();
         await A.writeFile("/same.txt", "Y");

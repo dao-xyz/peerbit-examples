@@ -305,14 +305,19 @@ mkdir -p "$HOME/PeerbitShared"
 peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
 ```
 
-`mount` opens a full replica and waits until the initial namespace has settled
-before exposing a writable filesystem. During that window library mutations and
-writable backend opens return retryable `EAGAIN`; reads remain available.
+`mount` opens a full replica and waits until it has proven its initial view
+before exposing a writable filesystem: every peer it can see running the
+filesystem has been reconciled with, has left, or was caught in a provable lie,
+and at least one of them is a write-ready full replica. See the library
+README's "Write readiness on joins" section. During that window library
+mutations and writable backend opens return retryable `EAGAIN`; reads remain
+available. A mount from a state directory that was already writable for this
+filesystem, such as the creator's, is writable at once, also offline.
 `mount --no-replicate` is rejected because an observer cannot establish the
-complete namespace required for safe mounted writes. For now readiness is a
-settled-view heuristic rather than a protocol log-frontier proof, so deployments
-requiring a strict frontier should keep writers stopped until Peerbit exposes
-that upstream barrier.
+complete namespace required for safe mounted writes. Readiness covers the peers
+a mount can see, not a global log frontier, so deployments requiring a strict
+frontier should keep writers stopped until Peerbit exposes that upstream
+barrier.
 
 Mounted `flush` publishes one frozen buffer generation. `fsync` and close drain
 every mutation accepted before their fence, while mutations racing a closing
@@ -332,37 +337,47 @@ proof. The trusted-writer graph converges separately and entries do not carry
 an authorization epoch, so quiesce and isolate a revoked machine/key, wait for
 every serving replica to report it untrusted, and keep an already-converged
 durable replica online. A signed trust frontier and entry-bound authorization
-epoch are still needed upstream for protocol-grade revocation.
+epoch are still needed upstream for protocol-grade revocation. Readiness does
+not wait out the revocation window either: a mount that never held a revoked
+grant can become writable while a stale peer's copy of that grant makes it
+trust the revoked writer, until a peer holding the revocation offers it (about
+a second while such a peer is connected).
 
-`create` requires a full replica and publishes a signed zero-document genesis
-manifest, so a newly created empty filesystem can be mounted locally, and its
-replication gives a connected joiner the evidence it needs to become
-write-ready; `create` fails if it cannot publish it. Until something is
-written, the creator publishes it again whenever another peer opens the
-filesystem. `create --no-replicate` is rejected.
+`create` requires a full replica and records it as the filesystem's creator,
+so a `mount` from the same state directory is writable at once. It also
+publishes a signed zero-document genesis manifest, which tells a joiner's
+snapshot bootstrap discovery that nothing has been written yet; `create` fails
+if it cannot publish it. Until something is written, the creator publishes it
+again whenever another peer opens the filesystem. `create --no-replicate` is
+rejected.
 `mount` waits up to 120 seconds by default; tune this with
-`--write-ready-timeout-ms`. A timeout is not permission to write: keep a
-complete replicator for this filesystem connected and retry. An unrelated
-connected Peerbit peer does not count. Retrying a mount of a filesystem nobody
-has written yet needs its creator online, because only the creator publishes
-new evidence for it. A fresh no-snapshot join can count namespace rows
-materialized during the initial store open only when they are paired with the
-lower log's successful network-commit phase. Local replay has no such phase, so
-a populated store with a missing sidecar cannot certify itself; when it is
-already identical to its donor, one later donor mutation or a verified snapshot
-is still required.
+`--write-ready-timeout-ms`. A timeout is not permission to write. Its error
+names what the mount waited for and the advice that fits: usually keep a
+complete replicator for this filesystem connected and retry. Another replicator
+does not help when a required peer is reachable but does not answer (restart
+or stop that peer) or when the peers that answered are not write-ready
+themselves (connect a write-ready replica, such as the creator). When every
+required peer was accounted for and the mount was still persisting its
+readiness proof, retry; if that repeats, check that the Peerbit directory is
+writable. An unrelated connected Peerbit peer does not count, and a fresh mount
+always needs a write-ready replica online, such as the creator. A populated
+state directory whose readiness state was lost cannot certify itself: it is
+gated like a fresh mount until it reconciles with such a replica.
 
-A replica that missed writes while offline, such as a creator restarting after
-another machine wrote and left, still vouches that the filesystem is empty, so
-a mount that reaches only that replica becomes writable on an empty view.
-The missed writes merge when a peer holding them comes back, and no stored
-version is deleted: clashing edits become conflict copies and clashing paths
-naming conflicts, whose visible choice can flip. Files can still end up
-inconsistent with each other, such as a git repository's refs and objects.
-Today's readiness can also certify a partial view at scale; proof-based write
-readiness ([#406](https://github.com/dao-xyz/peerbit-examples/pull/406)) is
-replacing it. See the library README's "Conflicts" section for which saves
-on a stale view are kept.
+Readiness proves a mount's view against the peers it can see, not against
+writers that are offline or rows a peer received after it answered. A replica
+that missed writes while offline, such as a creator restarting after another
+machine wrote and left, answers from its own view, so a mount that reaches only
+that replica becomes writable on a stale view; a remount from a writable state
+directory is likewise writable offline from its own state. The missed writes
+merge when a peer holding them comes back, and no stored version is deleted:
+clashing edits become conflict copies and clashing paths naming conflicts,
+whose visible choice can flip. Files can still end up inconsistent with each
+other, such as a git repository's refs and objects. Readiness covers paths and
+file versions, not file contents: a new mount can be writable while content is
+still arriving, and reading such a file fetches it from a peer. See the library
+README's "Write readiness on joins" section for what readiness proves and its
+"Conflicts" section for which saves on a stale view are kept.
 
 The `--allow-partial-writes` mount escape hatch is a session-only recovery
 bypass. It can manufacture duplicate paths or overwrite from stale state, does

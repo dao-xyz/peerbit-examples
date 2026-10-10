@@ -5,6 +5,7 @@ import { DIGEST_BYTES, M } from "./constants.js";
 import { headDigest } from "./digest.js";
 import type { IdHeadMap, IdKey } from "./id-map.js";
 import type { ScopeState } from "./runtime.js";
+import type { ScopeId } from "./scopes.js";
 import { CloseFault } from "./tap.js";
 
 /**
@@ -19,6 +20,10 @@ import { CloseFault } from "./tap.js";
  * scope that could not be compared for a reason the close did not cause (a
  * faulted tap, a failed start, an error in the check): a fault must not
  * turn the check into a silent skip.
+ *
+ * A joiner also checks the scopes each readiness session contained, on its
+ * own runtime and on the responder's when it runs in this process
+ * (`runSessionShadowCheck`, PR-3 commit 2), in the background.
  *
  * Switched on by `globalThis.__SFS_READINESS_SHADOW__`, which the library's
  * `vitest.setup.ts` sets to a registry. Product code never sets it, and
@@ -59,12 +64,21 @@ export interface ShadowRegistry {
     skips: ShadowSkip[];
     /** Live runtimes and the test that opened them. */
     readonly live: WeakMap<object, ShadowOwner>;
+    /**
+     * Live runtimes by `openNonce` (hex), so a joiner's per-session check
+     * can also compare the responder's side when R runs in this process
+     * (`live` is a WeakMap and cannot be listed). Weak: a runtime a test
+     * never closes is still collected.
+     */
+    readonly runtimes: Map<string, WeakRef<object>>;
     /** Filesystems whose closes skip the check (fault injection). */
     readonly optedOut: WeakSet<object>;
     /** Filesystems allowed to run on an inline process-wide host. */
     readonly inlineAllowed: WeakSet<object>;
     readonly counts: {
         checks: number;
+        /** Of `checks`, those of a joiner session's contained scopes. */
+        sessionChecks: number;
         compared: number;
         /** Checks whose differing rows kept moving through every scan. */
         unstable: number;
@@ -85,10 +99,12 @@ export const createShadowRegistry = (): ShadowRegistry => ({
     failures: [],
     skips: [],
     live: new WeakMap(),
+    runtimes: new Map(),
     optedOut: new WeakSet(),
     inlineAllowed: new WeakSet(),
     counts: {
         checks: 0,
+        sessionChecks: 0,
         compared: 0,
         unstable: 0,
         unconfirmed: 0,
@@ -557,4 +573,85 @@ export const runShadowCheck = async (
         );
     }
     return outcomes;
+};
+
+/** What the per-session check reads of a runtime (`ReadinessRuntime`). */
+export interface SessionCheckedRuntime {
+    readonly address: string;
+    readonly anchorHost: AnchorHost | undefined;
+    readonly cellKey: [number, number];
+    /** The filesystem, for the opt-outs. */
+    readonly program?: object;
+    readonly blocked: boolean;
+    readonly disposed: boolean;
+    scope(id: ScopeId): ScopeState | undefined;
+}
+
+/**
+ * The per-session check (commit-1 gap G18) of the scopes a readiness session
+ * contained, on one runtime: as `runShadowCheck` for those scopes only,
+ * recording into the registry and never throwing. A scope the runtime no
+ * longer holds, or that its close or reopen overtook, is left to the
+ * close-path check, which compares it again before the stores close; so is
+ * a runtime without readiness state (the close-path check records it). A
+ * failure is stamped with the test that ran the join (`recordedIn`): the
+ * check runs in the background and may outlive that test.
+ */
+export const runSessionShadowCheck = async (
+    runtime: SessionCheckedRuntime,
+    registry: ShadowRegistry,
+    scopes: ReadonlySet<ScopeId>,
+    recordedIn: ShadowOwner,
+    options?: CompareOptions
+): Promise<void> => {
+    const owner = registry.live.get(runtime) ?? recordedIn;
+    const program = runtime.program;
+    if (!runtime.anchorHost || (program && registry.optedOut.has(program))) {
+        return;
+    }
+    const overtaken = (state: ScopeState) =>
+        runtime.blocked ||
+        runtime.disposed ||
+        runtime.scope(state.descriptor.id) !== state;
+    for (const id of scopes) {
+        const state = runtime.scope(id);
+        if (!state || overtaken(state)) continue;
+        registry.counts.checks++;
+        registry.counts.sessionChecks++;
+        const outcome = await compareScope(state, runtime.cellKey, options);
+        const scope = state.descriptor.name;
+        if (outcome.kind === "equal") {
+            registry.counts.compared++;
+            continue;
+        }
+        if (outcome.kind === "unstable") {
+            registry.counts.unstable++;
+            if (outcome.difference) registry.counts.unconfirmed++;
+            continue;
+        }
+        if (
+            (outcome.kind === "skipped" && outcome.expected) ||
+            overtaken(state)
+        ) {
+            registry.counts.skipped++;
+            registry.skips.push({
+                owner,
+                address: runtime.address,
+                scope,
+                reason: `session check: ${outcome.kind === "skipped" ? outcome.reason : "overtaken by a close"}`,
+            });
+            continue;
+        }
+        registry.counts.failed++;
+        registry.failures.push({
+            owner,
+            recordedIn,
+            address: runtime.address,
+            scope,
+            message:
+                outcome.kind === "skipped"
+                    ? `readiness shadow (session): ${scope} of ${runtime.address} was not compared: ${outcome.reason}`
+                    : `readiness shadow (session): ${scope} of ${runtime.address} differs from its index after ${outcome.attempts} scans: ${outcome.difference}`,
+        });
+    }
 };

@@ -1,9 +1,17 @@
-import { randomBytes, sha256Sync } from "@peerbit/crypto";
+import { randomBytes, sha256Sync, toHexString } from "@peerbit/crypto";
 import type { PublicSignKey } from "@peerbit/crypto";
 import type { DocumentsLike } from "@peerbit/document";
 import { AnchorHost, type LaneSet } from "./anchor-host.js";
 import { cellKey } from "./cells.js";
-import { M } from "./constants.js";
+import { M, NOTICE_TARGETS } from "./constants.js";
+import {
+    Coordinator,
+    type CoordinatorDebug,
+    type CoordinatorTransport,
+    type ReadinessStatus,
+    type StatusContext,
+} from "./coordinator.js";
+import type { ExplainedReason, RejectionReason } from "./explain.js";
 import {
     encodeStructures,
     takeStructures,
@@ -12,23 +20,46 @@ import {
     type PersistedScope,
 } from "./persist.js";
 import {
+    rejectionOf,
+    sessionScopeOf,
+    type ExplainStore,
+    type PullStore,
+    type SessionScopeBundle,
+} from "./ports.js";
+import type { Proof, ProofScope } from "./proof.js";
+import { LifeRecorder } from "./reachability.js";
+import {
     Responder,
     type ResponderPorts,
     type ResponderScope,
+    type Timers,
 } from "./responder.js";
 import {
     NAMESPACE_V1,
     SCOPE_NAMESPACE_V1,
     SCOPE_TRUST_V1,
     TRUST_V1,
+    scopeDescriptor,
     type ScopeDescriptor,
     type ScopeId,
 } from "./scopes.js";
-import { runShadowCheck, shadowRegistry } from "./shadow.js";
+import type { SessionMode, SessionResult } from "./session.js";
+import {
+    runSessionShadowCheck,
+    runShadowCheck,
+    shadowRegistry,
+} from "./shadow.js";
 import { ScopeTap, documentsIndexPort } from "./tap.js";
 import {
+    CellsReqV1,
+    CloseV1,
+    ListPageV1,
     LOG_ID_BYTES,
+    NOTICE_REASON,
     OPEN_NONCE_BYTES,
+    OpenV1,
+    encodeReadinessMessage,
+    type ProvenanceSource,
     type ReadinessMessage,
 } from "./wire.js";
 
@@ -54,6 +85,115 @@ export interface ScopeState extends ResponderScope {
     readonly started: Promise<void>;
 }
 
+/**
+ * One contained scope of one session (design 7 `readiness-session`): plain
+ * data for the host's telemetry. `durationMs` is the design's `ms`;
+ * `scope`, `explainedBy`, `untrusted`, `qualified` and `source` are added.
+ */
+export interface ReadinessSessionRecord {
+    /** The peer's `hashcode()`. */
+    peer: string;
+    scope: ProofScope;
+    mode: SessionMode;
+    /** The peer's snapshot count. */
+    count: number;
+    /** The gap estimate at the matching certificate; 0 when none was made. */
+    gapEst: number;
+    /** Cells received from the peer. */
+    cells: number;
+    missingAtStart: number;
+    pulled: number;
+    explained: number;
+    explainedBy: Partial<Record<ExplainedReason, number>>;
+    /** Provisional `rejected-untrusted` heads, when above 0. */
+    untrusted?: number;
+    recoveries: number;
+    roundTrips: number;
+    /** Fractional ms on the monotonic clock, not the injected `clock`. */
+    durationMs: number;
+    /** Qualified in the header of this session. */
+    qualified: boolean;
+    source: ProvenanceSource;
+}
+
+/** A session result as telemetry carries it (plain data, no bytes). */
+export const sessionRecord = (
+    result: SessionResult
+): ReadinessSessionRecord => ({
+    peer: result.peer,
+    scope: scopeDescriptor(result.scope).name,
+    mode: result.mode,
+    count: result.count,
+    gapEst: result.gapEst,
+    cells: result.cells,
+    missingAtStart: result.missingAtStart,
+    pulled: result.pulled,
+    explained: result.explained,
+    explainedBy: { ...result.explainedBy },
+    ...((result.untrusted?.heads ?? 0) > 0
+        ? { untrusted: result.untrusted!.heads }
+        : {}),
+    recoveries: result.recoveries,
+    roundTrips: result.roundTrips,
+    durationMs: result.ms,
+    qualified: result.qualified,
+    source: result.source,
+});
+
+/** What `startJoin` needs from the host. */
+export interface JoinOptions {
+    /**
+     * Builds the readiness topic's view of the network (production:
+     * `PeerbitTransport`), only when the join starts; a throw faults the
+     * join (gated), never the open.
+     */
+    transport(): CoordinatorTransport;
+    /** From the sidecar's `hlcProved` (design 4.10); 0 when absent. */
+    hlcProved: bigint;
+    /**
+     * The host's phase clause of the predicate (design 4.8): its bootstrap
+     * decision settled and the phase `off` or `converged`.
+     */
+    phaseSettled(): boolean;
+    /**
+     * The host's decision after a satisfied evaluation (production:
+     * `markWriteReady`): read the predicate and its proof
+     * (`proofIfSatisfied`), persist, flip. A rejection leaves J gated and
+     * the next trigger retries (M9).
+     */
+    onSatisfied(): Promise<void>;
+    /** A session contained a scope (telemetry); never awaited. */
+    onSession?(record: ReadinessSessionRecord): void;
+    /** Bounded timers for the sessions (`systemTimers` by default). */
+    timers?: Timers;
+    now?(): number;
+    /**
+     * J's trust graph, access-controlled stores only (PR-3 commit 3):
+     * `TrustedNetwork.isTrusted` of this open, read at call time; it
+     * rejects once the open is gone (G3-13). An access-controlled join
+     * without it faults (gated): `no trust view`.
+     */
+    trust?: { isTrusted(key: PublicSignKey): Promise<boolean> };
+}
+
+/** `ReadinessRuntime.debug()`: what is armed and in flight. */
+export interface RuntimeDebug {
+    /** The responder's idle timers plus the coordinator's sessions' timers. */
+    armedTimers: number;
+    responder?: ReturnType<Responder["debug"]>;
+    coordinator?: CoordinatorDebug;
+    /** Why this generation's join cannot be satisfied (G2-11). */
+    joinFault?: string;
+    /** Joiner sends that failed (the coordinator's sessions). */
+    sendFailures: number;
+}
+
+const isRequest = (message: ReadinessMessage) =>
+    message instanceof OpenV1 ||
+    message instanceof CellsReqV1 ||
+    message instanceof ListPageV1 ||
+    message instanceof CloseV1;
+
 /** The 32-byte id of a store's log (the wire's `logId`). */
 export const logIdOf = (documents: DocumentsLike<any, any>): Uint8Array => {
     const id: Uint8Array | undefined = (documents as any).log?.log?.id;
@@ -69,14 +209,27 @@ export const logIdOf = (documents: DocumentsLike<any, any>): Uint8Array => {
  * Readiness state of one open generation of a filesystem: the scope taps,
  * their lane sets (anchor lanes and cells), the responder, and their
  * persistence. The filesystem creates one per open and talks only to this
- * object; nothing here reads the program after close. In shadow mode it
- * maintains the structures and answers on every peer but decides nothing.
+ * object; nothing here reads the program after close. It maintains the
+ * structures and answers on every peer. On a fresh full address-open it
+ * also runs the joiner's coordinator (`startJoin`): its predicate (design
+ * 4.8) decides when the filesystem turns ready, through the host's decision
+ * (`markWriteReady`), which reads the predicate and its proof at one
+ * synchronous point (`proofIfSatisfied`) and persists the proof first.
  */
 export class ReadinessRuntime {
     readonly openNonce: Uint8Array = randomBytes(OPEN_NONCE_BYTES);
     readonly starts = new Map<ScopeDescriptor["name"], ScopeStart>();
     readonly responder?: Responder;
     private readonly scopes = new Map<ScopeId, ScopeState>();
+    /** The store each scope's tap listens on (the session bundles read it). */
+    private readonly stores = new Map<ScopeId, DocumentsLike<any, any>>();
+    /** Session ports per scope, built on the first `sessionScope(id)`. */
+    private readonly bundles = new Map<
+        ScopeId,
+        { state: ScopeState; bundle: SessionScopeBundle }
+    >();
+    /** Disposed bundles' pull queues until their aborted joins settle. */
+    private readonly pullsSettling = new Set<Promise<void>>();
     readonly cellKey: [number, number];
     private blockedValue = false;
     private disposedValue = false;
@@ -85,6 +238,24 @@ export class ReadinessRuntime {
     private sealedStart?: ScopeStart;
     /** Messages received while this generation was live (diagnostics). */
     messagesReceived = 0;
+    /** The joiner's coordinator of this generation (`startJoin`). */
+    private coordinatorValue?: Coordinator;
+    private joinStarted = false;
+    /**
+     * Set when `startJoin` ran but no coordinator could: J cannot contain
+     * anyone this open, so `satisfied()` stays false (G2-11).
+     */
+    private joinFault?: string;
+    /** READY notices went out (`markReady`); once per generation. */
+    private readyNoticed = false;
+    /** A failed decision was logged (`decideFor`); once per generation. */
+    private decisionWarned = false;
+    /**
+     * Signs of life from the namespace attach until the coordinator's start
+     * takes them (an open that may run a join, `attachNamespace`).
+     */
+    private lifeRecorder?: LifeRecorder;
+    private sendFailures = 0;
 
     /**
      * The decoded structures file until the namespace start takes it; then
@@ -97,6 +268,14 @@ export class ReadinessRuntime {
 
     private constructor(
         readonly address: string,
+        /**
+         * The store is access-controlled (the program has a trust graph, part
+         * of its address): a join opens the trust scope too and needs J's
+         * trust view (design 4.2 `TRUST_V1`, G3-9). Never inferred from the
+         * scopes that exist: a trust scope whose creation failed must fault
+         * the join, not skip the trust clauses.
+         */
+        readonly accessControlled: boolean,
         readonly directory: string | undefined,
         /** The namespace store's log id: its structures file's name. */
         readonly namespaceStore: Uint8Array,
@@ -105,9 +284,11 @@ export class ReadinessRuntime {
          * browser): the generation then maintains and answers nothing.
          */
         readonly anchorHost: AnchorHost | undefined,
-        ports: ResponderPorts | undefined,
+        private readonly ports: ResponderPorts | undefined,
         taking: Promise<DecodeResult | undefined>,
-        readonly unavailable?: string
+        readonly unavailable?: string,
+        /** The filesystem, for the test-mode shadow opt-outs. */
+        readonly program?: object
     ) {
         this.taking = taking.then((persisted) => {
             this.persisted = persisted;
@@ -118,6 +299,7 @@ export class ReadinessRuntime {
         // state across files).
         const registry = shadowRegistry();
         registry?.live.set(this, { ...registry.current });
+        registry?.runtimes.set(toHexString(this.openNonce), new WeakRef(this));
         if (ports && anchorHost) {
             this.responder = new Responder(
                 {
@@ -150,6 +332,8 @@ export class ReadinessRuntime {
         stores: { namespace: Uint8Array; trust?: Uint8Array };
         ports?: ResponderPorts;
         anchorHost?: AnchorHost;
+        /** The filesystem (test-mode shadow opt-outs; never read otherwise). */
+        program?: object;
     }): Promise<ReadinessRuntime> {
         const { address, directory, stores } = properties;
         const take = async (store: Uint8Array, scope: ScopeDescriptor) =>
@@ -176,12 +360,14 @@ export class ReadinessRuntime {
         }
         return new ReadinessRuntime(
             address,
+            stores.trust !== undefined,
             directory,
             stores.namespace,
             host,
             properties.ports,
             taking,
-            unavailable
+            unavailable,
+            properties.program
         );
     }
 
@@ -225,9 +411,70 @@ export class ReadinessRuntime {
         );
     }
 
-    /** Synchronous: a close or reopen began; answer nothing from now on. */
+    /**
+     * Synchronous: a close or reopen began; answer nothing from now on. The
+     * coordinator goes first, while sends still pass, so each session it
+     * closes can tell R (`CloseV1`); then the session bundles, so no pull
+     * queue sink stays on a tap that the close will seal, and their joins
+     * in flight abort (`whenPullsSettled` joins them).
+     */
     block() {
+        this.disposeJoin();
         this.blockedValue = true;
+    }
+
+    /** The coordinator and the session bundles; idempotent, never throws. */
+    private disposeJoin() {
+        this.disposeLifeRecorder();
+        const coordinator = this.coordinatorValue;
+        if (coordinator) {
+            try {
+                coordinator.dispose();
+            } catch (error: any) {
+                console.warn(
+                    "shared-fs: readiness coordinator dispose failed:",
+                    error?.message ?? error
+                );
+            }
+        }
+        for (const id of [...this.bundles.keys()]) this.disposeBundle(id);
+    }
+
+    private disposeLifeRecorder() {
+        const recorder = this.lifeRecorder;
+        this.lifeRecorder = undefined;
+        try {
+            recorder?.dispose();
+        } catch {
+            // Removing its listeners never throws.
+        }
+    }
+
+    private disposeBundle(id: ScopeId) {
+        const held = this.bundles.get(id);
+        if (!held) return;
+        this.bundles.delete(id);
+        try {
+            held.bundle.dispose();
+        } catch {
+            // A pull queue's dispose only unsubscribes and aborts.
+        }
+        const settling = held.bundle.pulls.whenIdle();
+        this.pullsSettling.add(settling);
+        void settling.finally(() => this.pullsSettling.delete(settling));
+    }
+
+    /**
+     * Settles once every pull join of this generation's session bundles has
+     * settled; a bundle's dispose (`block`, `prepareClose`) aborts them
+     * first. Await it before the stores close or drop: `Log.close` and
+     * `Log.drop` refuse while a join of ours still runs a mutation callback
+     * (`@peerbit/log log.js:4104-4111`, `4193-4197`). Never rejects.
+     */
+    async whenPullsSettled(): Promise<void> {
+        while (this.pullsSettling.size > 0) {
+            await Promise.all([...this.pullsSettling]);
+        }
     }
 
     /**
@@ -256,6 +503,9 @@ export class ReadinessRuntime {
             // A discarded restore: the tap keeps counting its epoch.
             reset: () => laneSet.reset(tap.epoch),
         });
+        // A `BUSY` answered while the count was unverified promised a notice
+        // that no session end would send (G2-9): the verified count is room.
+        tap.onCountVerified(() => this.responder?.noticeCapacity());
         let settle!: () => void;
         const started = new Promise<void>((resolve) => (settle = resolve));
         const state: ScopeState = {
@@ -267,6 +517,7 @@ export class ReadinessRuntime {
         };
         tap.attach(documents.events as any);
         this.scopes.set(descriptor.id, state);
+        this.stores.set(descriptor.id, documents);
         this.starts.set(descriptor.name, { kind: "pending" });
         return { state, settle };
     }
@@ -274,6 +525,9 @@ export class ReadinessRuntime {
     private readonly settlers = new Map<ScopeId, () => void>();
 
     private disposeScope(id: ScopeId) {
+        // Its session ports read the tap and the store being replaced.
+        this.disposeBundle(id);
+        this.stores.delete(id);
         const state = this.scopes.get(id);
         if (!state) return;
         this.scopes.delete(id);
@@ -283,11 +537,31 @@ export class ReadinessRuntime {
         this.settlers.delete(id);
     }
 
-    /** Attach before `entries.open()`, so events during open are buffered. */
-    attachNamespace(entries: DocumentsLike<any, any>) {
+    /**
+     * Attach before `entries.open()`, so events during open are buffered.
+     * `join`: this open may run the joiner's coordinator (a fresh full
+     * address-open); the replication announcements and readiness messages
+     * that arrive from now on are recorded for it as signs of life, since
+     * the coordinator only starts after the store opened.
+     */
+    attachNamespace(
+        entries: DocumentsLike<any, any>,
+        options: { join?: boolean } = {}
+    ) {
         if (this.disposedValue) return;
         const created = this.createScope(NAMESPACE_V1, entries);
         if (created) this.settlers.set(SCOPE_NAMESPACE_V1, created.settle);
+        if (options.join && !this.joinStarted) {
+            this.lifeRecorder?.dispose();
+            let events: unknown;
+            try {
+                events = (entries as any).log?.events;
+            } catch {
+                // No events: the coordinator then sees no sign of life from
+                // before its start.
+            }
+            this.lifeRecorder = new LifeRecorder(events);
+        }
     }
 
     /**
@@ -394,11 +668,394 @@ export class ReadinessRuntime {
         await Promise.all(this.seeding);
     }
 
-    /** The readiness RPC handler. Never throws. */
-    onMessage(message: ReadinessMessage, from: PublicSignKey | undefined) {
-        if (this.disposedValue || this.blockedValue) return;
+    /**
+     * The readiness RPC handler. Requests go to the responder; every message
+     * also goes to the coordinator, if one runs: answers and notices to its
+     * sessions, and any message as a sign of life of its signer. `bytes` is
+     * the RPC envelope's size (at least the message's own; the sessions cap
+     * answers by it, G2-14); without it the message is encoded again. Never
+     * throws.
+     */
+    onMessage(
+        message: ReadinessMessage,
+        from: PublicSignKey | undefined,
+        bytes?: number
+    ) {
+        if (!from || this.disposedValue || this.blockedValue) return;
         this.messagesReceived++;
-        this.responder?.onMessage(message, from);
+        if (isRequest(message)) this.responder?.onMessage(message, from);
+        // Until the coordinator's start takes the record: a sign of life
+        // its discovery counts.
+        this.lifeRecorder?.noteMessage(from);
+        const coordinator = this.coordinatorValue;
+        if (!coordinator) return;
+        try {
+            const size =
+                typeof bytes === "number" && bytes > 0
+                    ? bytes
+                    : encodeReadinessMessage(message).length;
+            coordinator.onMessage(message, from.hashcode(), size, from);
+        } catch (error: any) {
+            console.warn(
+                "shared-fs: readiness coordinator error:",
+                error?.message ?? error
+            );
+        }
+    }
+
+    /**
+     * The session ports of scope `id` for this generation: built on first
+     * use over the scope's tap, lane set and store (ports.ts), and kept
+     * until the scope or the generation goes. Undefined when the scope is
+     * absent or the generation blocked or disposed.
+     */
+    sessionScope(id: ScopeId): SessionScopeBundle | undefined {
+        if (this.blockedValue || this.disposedValue) return undefined;
+        const state = this.scopes.get(id);
+        const store = this.stores.get(id);
+        if (!state || !store) return undefined;
+        const held = this.bundles.get(id);
+        if (held?.state === state) return held.bundle;
+        if (held) this.disposeBundle(id);
+        // Documents satisfies both (its `log` is the SharedLog, whose `log`
+        // is the Log; its `index` carries the value encoding).
+        const bundle = sessionScopeOf(
+            state,
+            store as unknown as ExplainStore & PullStore,
+            this.cellKey
+        );
+        this.bundles.set(id, { state, bundle });
+        return bundle;
+    }
+
+    /**
+     * `canPerformEntry`'s hook, and the trust graph's (`ports.ts`
+     * `installTrustRejectionNotes`): a refusal of `head` in scope `scope`,
+     * with the keys whose trust would reverse a trust refusal. Kept only
+     * while a pull of this generation tracks the head (one map lookup
+     * otherwise). Never throws.
+     */
+    noteRejection(
+        scope: ScopeId,
+        head: unknown,
+        reason: RejectionReason,
+        signers?: readonly PublicSignKey[]
+    ) {
+        if (this.disposedValue || typeof head !== "string") return;
+        try {
+            this.bundles
+                .get(scope)
+                ?.bundle.rejections.note(head, rejectionOf(reason, signers));
+        } catch {
+            // Diagnostics of a pull; never the admission's concern.
+        }
+    }
+
+    /**
+     * Whether rows of `scope` arrive by sync in this open (design 4.5 step
+     * 5): a change event in scope since the tap attached. The seed scan and
+     * a restore count none, and a gated joiner writes nothing itself.
+     */
+    syncDelivering(scope: ScopeId): boolean {
+        return (this.scopes.get(scope)?.tap.stats.events ?? 0) > 0;
+    }
+
+    /**
+     * Starts the joiner's coordinator, once per generation: the host calls
+     * it for a fresh full address-open only (never a creator, a warm
+     * reopen, an observer or `allowPartialWrites`; deviation h). Sessions
+     * open the namespace scope, and the trust scope too in an
+     * access-controlled store (PR-3 commit 3), and wait for those scopes'
+     * starts. Without readiness state (no anchor host), or in an
+     * access-controlled store without a trust scope or J's trust view,
+     * nothing can be contained this open: `satisfied()` stays false and the
+     * status names the fault (G2-11, G3-9); `assumeComplete` is the escape.
+     */
+    startJoin(options: JoinOptions): void {
+        if (this.joinStarted || this.blockedValue || this.disposedValue) {
+            return;
+        }
+        this.joinStarted = true;
+        const namespace = this.scopes.get(SCOPE_NAMESPACE_V1);
+        const trust = this.accessControlled
+            ? this.scopes.get(SCOPE_TRUST_V1)
+            : undefined;
+        const fault = !this.anchorHost
+            ? `no readiness state: ${this.unavailable ?? "no anchor host"}`
+            : !this.ports
+              ? "no readiness transport"
+              : !namespace
+                ? "no namespace scope"
+                : this.accessControlled && !trust
+                  ? "no trust scope"
+                  : this.accessControlled && !options.trust
+                    ? "no trust view"
+                    : undefined;
+        if (fault !== undefined) {
+            this.joinFault = fault;
+            this.disposeLifeRecorder();
+            return;
+        }
+        let transport: CoordinatorTransport;
+        try {
+            transport = options.transport();
+        } catch (error: any) {
+            // Gated, never a failed open: the join cannot see its peers.
+            this.joinFault = `readiness transport: ${error?.message ?? error}`;
+            this.disposeLifeRecorder();
+            return;
+        }
+        const registry = shadowRegistry();
+        const scopes = trust ? [namespace!, trust] : [namespace!];
+        const coordinator = new Coordinator({
+            transport,
+            // Taken once, by `start` (after its listeners attached). No
+            // recorder (the host did not mark this open as a join): unknown,
+            // so the coordinator counts every replicator row live.
+            signsOfLife: () => {
+                const recorder = this.lifeRecorder;
+                this.lifeRecorder = undefined;
+                return recorder?.take();
+            },
+            send: (message, to) => this.sendTo(message, to),
+            scopes: scopes.map(({ descriptor }) => descriptor.id),
+            scope: (id) => this.sessionScope(id)?.ports,
+            // Both scopes' starts; a failed one still settles, and the first
+            // session then ends `local-unavailable` (a fault, gated).
+            started: () =>
+                Promise.all(scopes.map(({ started }) => started)).then(
+                    () => {}
+                ),
+            trust: trust ? options.trust : undefined,
+            hlcProved: options.hlcProved,
+            syncDelivering: (scope) => this.syncDelivering(scope),
+            timers: options.timers,
+            now: options.now,
+            phaseSettled: () => options.phaseSettled(),
+            decide: () => this.decideFor(options),
+            onContained: (_peer, results) => {
+                if (registry) this.checkContained(results);
+                for (const result of results) {
+                    try {
+                        options.onSession?.(sessionRecord(result));
+                    } catch {
+                        // Telemetry never reaches the join.
+                    }
+                }
+            },
+        });
+        this.coordinatorValue = coordinator;
+        try {
+            coordinator.start();
+        } catch (error: any) {
+            // A bug, never a reason to release: the join stays unsatisfied.
+            this.joinFault = `coordinator: ${error?.message ?? error}`;
+            this.disposeJoin();
+        }
+    }
+
+    /**
+     * The host's decision; a rejection (the proof could not be persisted)
+     * is logged once per generation and goes back to the coordinator, which
+     * counts it (`debug().coordinator.decisions`) and asks again on the next
+     * trigger.
+     */
+    private async decideFor(options: JoinOptions): Promise<void> {
+        try {
+            await options.onSatisfied();
+        } catch (error: any) {
+            if (!this.decisionWarned) {
+                this.decisionWarned = true;
+                console.warn(
+                    "shared-fs: write readiness could not persist its proof; the next readiness event retries:",
+                    error?.message ?? error
+                );
+            }
+            throw error;
+        }
+    }
+
+    /** A directed one-way send of the coordinator's sessions. */
+    private sendTo(message: ReadinessMessage, to: string) {
+        if (this.blockedValue || this.disposedValue || !this.ports) return;
+        try {
+            void this.ports.send(message, to).catch(() => {
+                this.sendFailures++;
+            });
+        } catch {
+            this.sendFailures++;
+        }
+    }
+
+    /** Coalesced re-evaluation of the predicate (the #403 hook). */
+    evaluate(): void {
+        try {
+            this.coordinatorValue?.evaluate();
+        } catch {
+            // Never surfaces into the host's settle path.
+        }
+    }
+
+    /**
+     * The predicate (design 4.8, `Coordinator.satisfied`): false when no
+     * join ran or it faulted, so a caller that requires it fails closed.
+     */
+    satisfied(): boolean {
+        if (this.joinFault !== undefined || this.disposedValue) return false;
+        return this.coordinatorValue?.satisfied() === true;
+    }
+
+    /**
+     * The decision's read (design 2.2(2), "at the moment of the decision"):
+     * the predicate and, when it holds, the proof of the same records, at
+     * one synchronous point. Undefined when no join ran or it faulted, the
+     * generation is blocked or disposed, or the predicate does not hold.
+     */
+    proofIfSatisfied(): Proof | undefined {
+        if (
+            this.joinFault !== undefined ||
+            this.disposedValue ||
+            this.blockedValue
+        ) {
+            return undefined;
+        }
+        const coordinator = this.coordinatorValue;
+        if (!coordinator || !coordinator.satisfied()) return undefined;
+        return coordinator.proof();
+    }
+
+    /**
+     * A status snapshot of this generation's join, or undefined when none
+     * ran (a creator, a warm reopen, an observer, `allowPartialWrites`).
+     */
+    status(context: StatusContext): ReadinessStatus | undefined {
+        if (!this.joinStarted) return undefined;
+        if (this.joinFault !== undefined) {
+            return {
+                state: context.writeReady ? "ready" : "reconciling",
+                satisfied: false,
+                required: [],
+                contained: [],
+                excluded: [],
+                silent: [],
+                inFlight: [],
+                busy: [],
+                fetchPending: [],
+                gaps: [],
+                unconfirmed: [],
+                fault: this.joinFault,
+            };
+        }
+        return this.coordinatorValue?.status(context);
+    }
+
+    /**
+     * J turned ready (the decision, `markWriteReady`, or `assumeComplete`),
+     * after the host flipped its state, so the provenance the notices carry
+     * says ready: the coordinator finishes (sessions closed, records kept
+     * for `status`), and every peer that had a session or a `BUSY` with J,
+     * either way, gets a READY notice (a trigger for peers J's view may now
+     * qualify; never evidence). Once per generation.
+     */
+    markReady(): void {
+        if (this.disposedValue || this.readyNoticed) return;
+        this.readyNoticed = true;
+        const coordinator = this.coordinatorValue;
+        let joined: string[] = [];
+        if (coordinator) {
+            try {
+                joined = coordinator.noticeTargets();
+                coordinator.finish();
+            } catch (error: any) {
+                console.warn(
+                    "shared-fs: readiness coordinator finish failed:",
+                    error?.message ?? error
+                );
+            }
+        }
+        const responder = this.responder;
+        if (!responder || this.blockedValue) return;
+        const targets = new Map<string, PublicSignKey | string>(
+            responder.noticeTargets
+        );
+        for (const hash of joined) {
+            if (targets.size >= NOTICE_TARGETS) break;
+            if (!targets.has(hash)) targets.set(hash, hash);
+        }
+        if (targets.size === 0) return;
+        try {
+            responder.sendNotice(
+                [...targets.values()].slice(0, NOTICE_TARGETS),
+                NOTICE_REASON.READY
+            );
+        } catch {
+            // Sends never throw; a notice is a trigger, never needed.
+        }
+    }
+
+    /**
+     * J's trust graph changed (any `change` event): the coordinator's trust
+     * epoch moves, live sessions check their parked hashes again, and
+     * contained peers' trust is checked again (`Coordinator.trustChanged`,
+     * design 4.9). Never throws.
+     */
+    onTrustChange(): void {
+        try {
+            this.coordinatorValue?.trustChanged();
+        } catch {
+            // The trust listener must not fail.
+        }
+    }
+
+    /** Armed timers and in-flight state (tests and diagnostics). */
+    debug(): RuntimeDebug {
+        const responder = this.responder?.debug();
+        const coordinator = this.coordinatorValue?.debug();
+        return {
+            armedTimers:
+                (responder?.armedTimers ?? 0) + (coordinator?.armedTimers ?? 0),
+            responder,
+            coordinator,
+            joinFault: this.joinFault,
+            sendFailures: this.sendFailures,
+        };
+    }
+
+    /** The joiner's coordinator of this generation, if one runs (tests). */
+    get coordinator(): Coordinator | undefined {
+        return this.coordinatorValue;
+    }
+
+    /**
+     * Test mode: a session contained scopes of R. Compares J's maintained
+     * state of those scopes with its index and, when R's runtime lives in
+     * this process, R's too, in the background (C1 G18).
+     */
+    private checkContained(results: readonly SessionResult[]) {
+        const registry = shadowRegistry();
+        if (!registry || this.blockedValue || this.disposedValue) return;
+        const recordedIn = { ...registry.current };
+        const scopes = new Set(results.map((result) => result.scope));
+        const remotes = new Set<ReadinessRuntime>();
+        for (const result of results) {
+            const remote = registry.runtimes
+                .get(toHexString(result.openNonce))
+                ?.deref();
+            if (remote instanceof ReadinessRuntime && remote !== this) {
+                remotes.add(remote);
+            }
+        }
+        void (async () => {
+            await runSessionShadowCheck(this, registry, scopes, recordedIn);
+            for (const remote of remotes) {
+                await runSessionShadowCheck(
+                    remote,
+                    registry,
+                    scopes,
+                    recordedIn
+                );
+            }
+        })().catch(() => {});
     }
 
     /**
@@ -411,12 +1068,19 @@ export class ReadinessRuntime {
      * index. A verify pending at the seal faults its tap, and a start
      * (restore or seed scan) that has not finished by now is not persisted:
      * the next open rebuilds. `program` is the filesystem, for the shadow
-     * opt-outs. A count never verified is compared once more before the
-     * seal. Never throws.
+     * opt-outs (the one `create` was given by default). A count never
+     * verified is compared once more before the seal. The coordinator is
+     * gone by now (`block`); no session sink stays on a tap, and the pull
+     * joins it aborted have settled before this returns, so none still
+     * commits when the stores close. Never throws.
      */
-    async prepareClose(program?: object): Promise<void> {
+    async prepareClose(
+        program: object | undefined = this.program
+    ): Promise<void> {
         if (this.disposedValue || this.sealedStart) return;
+        this.disposeJoin();
         this.blockedValue = true;
+        await this.whenPullsSettled();
         const drain = async () => {
             try {
                 await Promise.all(
@@ -514,9 +1178,15 @@ export class ReadinessRuntime {
     }
 
     disposeWithoutPersist() {
+        this.disposeJoin();
         this.blockedValue = true;
         this.disposedValue = true;
-        shadowRegistry()?.live.delete(this);
+        const registry = shadowRegistry();
+        registry?.live.delete(this);
+        const nonce = toHexString(this.openNonce);
+        if (registry?.runtimes.get(nonce)?.deref() === this) {
+            registry.runtimes.delete(nonce);
+        }
         this.responder?.dispose();
         for (const id of [...this.scopes.keys()]) this.disposeScope(id);
         this.trustDocuments = undefined;

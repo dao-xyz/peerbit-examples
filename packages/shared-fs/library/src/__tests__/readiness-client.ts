@@ -216,7 +216,7 @@ export class DirectNetwork {
 
     /** The send port for a responder under test. */
     readonly send: ResponderPorts["send"] = async (message, to) => {
-        const hash = to.hashcode();
+        const hash = typeof to === "string" ? to : to.hashcode();
         this.sent.push({ to: hash, message });
         this.clients.get(hash)?.receive(message);
     };

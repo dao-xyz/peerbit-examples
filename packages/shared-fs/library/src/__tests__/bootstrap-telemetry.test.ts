@@ -57,6 +57,43 @@ const expectOrdered = (
     }
 };
 
+/**
+ * The joiner's readiness sessions (PR-3 commit 4, design 7): at least one
+ * `readiness-session` per contained peer and scope, the donor's namespace
+ * session among them, all before `write-ready`. Sessions run beside the
+ * bootstrap, so they are not ordered against its milestones, and a
+ * qualification session may add one, so the count is not pinned.
+ */
+const expectSessionsBeforeWriteReady = (
+    events: BootstrapTelemetryEvent[],
+    donor: string
+) => {
+    const sessions = eventsOf(events, "readiness-session");
+    expect(sessions.length).toBeGreaterThanOrEqual(1);
+    const writeReady = events.findIndex(
+        (event) => event.type === "write-ready"
+    );
+    expect(writeReady).not.toBe(-1);
+    expect(
+        events.findIndex((event) => event.type === "readiness-session")
+    ).toBeLessThan(writeReady);
+    expect(sessions).toContainEqual(
+        expect.objectContaining({
+            peer: donor,
+            scope: "namespace-v1",
+            qualified: true,
+            source: "creator",
+            count: expect.any(Number),
+            gapEst: expect.any(Number),
+            cells: expect.any(Number),
+            pulled: expect.any(Number),
+            explainedBy: expect.any(Object),
+            roundTrips: expect.any(Number),
+            durationMs: expect.any(Number),
+        })
+    );
+};
+
 const waitForSnapshotOverlay = async (
     joiner: { bootstrapStatus(): { phase: string } },
     events: BootstrapTelemetryEvent[]
@@ -157,7 +194,6 @@ describe("shared fs bootstrap telemetry", () => {
                 "overlay-ready",
                 "pending-drained",
                 "overlay-retired",
-                "synchronizer-idle",
                 "write-ready",
             ] as const;
             expectOrdered(events, [...expectedMilestones]);
@@ -187,8 +223,12 @@ describe("shared fs bootstrap telemetry", () => {
                 verified: true,
             });
             expect(eventsOf(events, "write-ready")[0]).toMatchObject({
-                source: "remote-settled",
+                source: "reconciled",
             });
+            expectSessionsBeforeWriteReady(
+                events,
+                donor.peer.identity.publicKey.hashcode()
+            );
             expect(
                 eventsOf(events, "manifest-discovery:end")[0].trusted
             ).toBeGreaterThan(0);
@@ -379,7 +419,6 @@ describe("shared fs bootstrap telemetry", () => {
                 "manifest-discovery:start",
                 "manifest-discovery:end",
                 "fallback",
-                "synchronizer-idle",
                 "write-ready",
             ]);
             const fallback = eventsOf(events, "fallback");
@@ -387,8 +426,12 @@ describe("shared fs bootstrap telemetry", () => {
             expect(fallback[0].posture).toBe("plain-join");
             expect(fallback[0].reason.length).toBeGreaterThan(0);
             expect(eventsOf(events, "write-ready")[0]).toMatchObject({
-                source: "remote-settled",
+                source: "reconciled",
             });
+            expectSessionsBeforeWriteReady(
+                events,
+                donorPeer.identity.publicKey.hashcode()
+            );
             expect(eventsOf(events, "segments-fetch:start")).toHaveLength(0);
             expect(eventsOf(events, "overlay-ready")).toHaveLength(0);
             expect(

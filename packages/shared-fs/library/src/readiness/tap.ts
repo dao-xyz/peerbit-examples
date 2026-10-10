@@ -31,8 +31,13 @@ import type { ScopeDescriptor } from "./scopes.js";
 
 /** Receives every element change, in order. */
 export interface ScopeSink {
-    /** `digest` is valid during the call only: the tap reuses it. */
-    apply(digest: Uint8Array, sign: 1 | -1): void;
+    /**
+     * `digest` is valid during the call only: the tap reuses it. `modified`
+     * is the row's `__context.modified`: the added row's for +1, the removed
+     * row's for -1 (a joiner session keeps its count of rows above R's `hlc`
+     * from it, deviation a).
+     */
+    apply(digest: Uint8Array, sign: 1 | -1, modified: bigint): void;
     /** Drops everything applied so far (a discarded restore). */
     reset?(): void;
 }
@@ -147,6 +152,19 @@ const toBigInt = (value: unknown): bigint =>
 
 const keyString = (key: IdKey) =>
     typeof key === "string" ? key : "b:" + toBase64(key);
+
+/**
+ * The map key of a document value of `scope`: `null` when the value is not a
+ * row of the scope (by class, `ScopeDescriptor.classify`), `undefined` when
+ * it is one without a usable id. The tap keys every change-event value by
+ * it, and the explainer's `inspect` (ports.ts) keys a logged entry's decoded
+ * value by it, so both name a document the same way.
+ */
+export const scopeRowKey = (
+    scope: ScopeDescriptor,
+    value: unknown
+): IdKey | null | undefined =>
+    scope.classify(value) ? scope.key(value) : null;
 
 /** The raw index of a store (`Documents.index.index`), read at call time. */
 const rawIndex = (documents: Pick<DocumentsLike<any, any>, "index">) => {
@@ -330,6 +348,8 @@ export class ScopeTap {
     private countDemanded = false;
     /** Called with every id an event or a verify names (the shadow check). */
     private readonly watchers: Array<(key: IdKey) => void> = [];
+    /** Called when a comparison verifies the count (`onCountVerified`). */
+    private readonly countListeners: Array<() => void> = [];
     /** The element an event names, and the head it replaced or removed. */
     private readonly digest = new Uint8Array(DIGEST_BYTES);
     private readonly prev = new Uint8Array(DIGEST_BYTES);
@@ -380,6 +400,33 @@ export class ScopeTap {
 
     private notify(key: IdKey) {
         for (const watcher of this.watchers) watcher(key);
+    }
+
+    /**
+     * Calls `listener` synchronously each time a comparison that ingest or a
+     * consumer started (`checkCount`, `requestCount`, `confirmCountNow`)
+     * verifies the count, after the state says so. A seed, restore or
+     * reseed clears the verification, so the next one calls it again; the
+     * close's own comparison (`confirmCount`) does not. The responder's
+     * `BUSY` for an unverified count promised a notice, and this is the
+     * moment it has an answer (PR-3 commit 2, G2-9). Returns the removal.
+     */
+    onCountVerified(listener: () => void): () => void {
+        this.countListeners.push(listener);
+        return () => {
+            const at = this.countListeners.indexOf(listener);
+            if (at >= 0) this.countListeners.splice(at, 1);
+        };
+    }
+
+    private countVerifiedNow() {
+        for (const listener of [...this.countListeners]) {
+            try {
+                listener();
+            } catch {
+                // A listener's error is the listener's.
+            }
+        }
     }
 
     addSink(sink: ScopeSink): () => void {
@@ -438,19 +485,18 @@ export class ScopeTap {
         }
         const captured: Captured = { removed: [], added: [] };
         for (const value of removed) {
-            if (!this.scope.classify(value)) continue;
-            const key = this.scope.key(value);
-            if (key === undefined) continue;
+            const key = scopeRowKey(this.scope, value);
+            if (key == null) continue;
             captured.removed.push({
                 key,
                 head: (value as any).__context?.head,
             });
         }
         for (const value of added) {
-            if (!this.scope.classify(value)) continue;
-            const key = this.scope.key(value);
+            const key = scopeRowKey(this.scope, value);
+            if (key == null) continue;
             const head = (value as any).__context?.head;
-            if (key === undefined || typeof head !== "string") continue;
+            if (typeof head !== "string") continue;
             captured.added.push({
                 key,
                 head,
@@ -469,10 +515,10 @@ export class ScopeTap {
         if (this.countDue) this.countOnChange();
     }
 
-    private emit(digest: Uint8Array, sign: 1 | -1) {
+    private emit(digest: Uint8Array, sign: 1 | -1, modified: bigint) {
         this.epoch++;
         for (const sink of this.sinks) {
-            sink.apply(digest, sign);
+            sink.apply(digest, sign, modified);
         }
     }
 
@@ -512,8 +558,9 @@ export class ScopeTap {
                 headDigestInto(head, this.digest);
                 stale = !this.map.headEquals(slot, this.digest);
             }
+            const modified = this.map.modified(slot);
             this.map.remove(key, this.prev);
-            this.emit(this.prev, -1);
+            this.emit(this.prev, -1, modified);
             this.stats.removes++;
             if (stale) {
                 this.stats.staleRemoves++;
@@ -550,14 +597,16 @@ export class ScopeTap {
             this.stats.idempotentSkips++;
             return "same";
         }
+        // The replaced row's time, before `put` overwrites it.
+        const prevModified = slot >= 0 ? this.map.modified(slot) : 0n;
         const replaced = this.map.put(key, this.digest, modified, this.prev);
         if (replaced) {
-            this.emit(this.prev, -1);
+            this.emit(this.prev, -1, prevModified);
             this.stats.replaces++;
         } else {
             this.stats.adds++;
         }
-        this.emit(this.digest, 1);
+        this.emit(this.digest, 1, modified);
         if (modified > this.hlc) {
             this.hlc = modified;
         }
@@ -640,8 +689,11 @@ export class ScopeTap {
 
     private reconcile(key: IdKey, indexed: IndexedHead | undefined) {
         if (indexed === undefined) {
-            if (this.map.remove(key, this.prev)) {
-                this.emit(this.prev, -1);
+            const slot = this.map.get(key);
+            if (slot >= 0) {
+                const modified = this.map.modified(slot);
+                this.map.remove(key, this.prev);
+                this.emit(this.prev, -1, modified);
                 this.stats.repairs++;
             }
             return;
@@ -778,11 +830,12 @@ export class ScopeTap {
      *   coarse on purpose, TODO(perf) upstream): on 5.4.10 no stable read
      *   started from a change event differed (review probe: 0 of 8.5k under
      *   local writers and replication). The real-store case in
-     *   `readiness-tap.test.ts` fails without that barrier;
+     *   `readiness-tap.isolated.test.ts` fails without that barrier;
      * - anything else keeps the state unverified. The next comparison starts
      *   from the changes that follow (`countOnChange`, at most one running
      *   and one per `countStride` changes) or from a consumer
-     *   (`requestCount`, `confirmCount`); never from a timer.
+     *   (`requestCount`, `confirmCountNow`, `confirmCount`); never from a
+     *   timer.
      *
      * So ingest drives the check instead of starving it: a comparison is
      * conclusive unless a change applies during its one count read, and the
@@ -795,7 +848,8 @@ export class ScopeTap {
      * after `COUNT_RESCANS` of them faults the tap. A store that stays quiet
      * after a difference cannot tell, without a clock, a missed row from a
      * batch still being indexed: its state stays unverified (never
-     * persisted) until a change confirms the difference or the next open
+     * persisted) until a change confirms the difference, a consumer that
+     * needs the count reads it twice (`confirmCountNow`), or the next open
      * scans. Resolves with the first comparison (false: the tap has scanned
      * again).
      */
@@ -811,11 +865,14 @@ export class ScopeTap {
     }
 
     /** Runs `settleCount`, one at a time (`countRun`). */
-    private runCount(atStart: boolean): Promise<boolean | undefined> {
+    private runCount(
+        atStart: boolean,
+        demanded = false
+    ): Promise<boolean | undefined> {
         let settled!: () => void;
         const running = new Promise<void>((resolve) => (settled = resolve));
         this.countRun = running;
-        return this.settleCount(atStart).finally(() => {
+        return this.settleCount(atStart, demanded).finally(() => {
             if (this.countRun === running) this.countRun = undefined;
             settled();
             // Changes applied during the run may have made the next
@@ -827,9 +884,14 @@ export class ScopeTap {
     /**
      * One comparison and what follows from it (`checkCount`). The start's
      * comparison waits for the verify queue and tries three times; any other
-     * reads once, from the point it starts.
+     * reads once, from the point it starts. A `demanded` one
+     * (`confirmCountNow`) also scans again for a difference it reads a second
+     * time at the same epoch.
      */
-    private async settleCount(atStart: boolean): Promise<boolean | undefined> {
+    private async settleCount(
+        atStart: boolean,
+        demanded: boolean
+    ): Promise<boolean | undefined> {
         let from = this.epoch;
         let difference = atStart
             ? await this.countDifference(3)
@@ -845,8 +907,10 @@ export class ScopeTap {
                 return first;
             }
             if (difference === 0) {
+                const was = this.countVerifiedValue;
                 this.countVerifiedValue = true;
                 this.countDue = false;
+                if (!was) this.countVerifiedNow();
                 return first;
             }
             let rescan = false;
@@ -855,7 +919,8 @@ export class ScopeTap {
                 rescan =
                     this.countFirst ||
                     (seen?.difference === difference &&
-                        seen.epoch < this.countReadAt);
+                        (seen.epoch < this.countReadAt ||
+                            (demanded && seen.epoch === this.countReadAt)));
                 this.countFirst = false;
                 this.countSeen = { difference, epoch: this.countReadAt };
             }
@@ -906,15 +971,51 @@ export class ScopeTap {
     }
 
     /**
-     * A consumer reads the state now (the responder's freeze): an
-     * unverified count is compared at once, before `countNext`. At most once
-     * between two comparisons that changes started, so consumers add at most
-     * one count read per stride.
+     * A consumer reads the state now and does not wait: an unverified count
+     * is compared at once, before `countNext`. At most once between two
+     * comparisons that changes started, so consumers add at most one count
+     * read per stride. A consumer that needs the count verified before it
+     * goes on uses `confirmCountNow`.
      */
     requestCount() {
         if (this.countDemanded || !this.countMayStart()) return;
         this.countDemanded = true;
         this.startCount();
+    }
+
+    /**
+     * A consumer needs a verified count before it goes on (the responder's
+     * freeze, a joiner's certificate): waits for a comparison that runs,
+     * then compares while the count is unverified, at most twice, and a
+     * second time only when no change applied during the first. It is not
+     * held to one read per stride: its callers ask again only after a change
+     * they saw, so it adds at most two reads per such change.
+     *
+     * A difference read twice at the same epoch scans again, where
+     * comparisons that changes start wait for a later epoch: a store that
+     * stays quiet never confirms its difference otherwise, and a consumer
+     * asking is the reason to scan. A clean scan of a quiet store is right
+     * either way: a batch indexed and not yet dispatched is in the scan, and
+     * its event then changes nothing. Resolves once that is settled; the
+     * caller reads `countVerified`.
+     */
+    async confirmCountNow(): Promise<void> {
+        for (let reads = 0; reads < 2; reads++) {
+            while (this.countRun) await this.countRun;
+            if (this.countVerifiedValue || !this.countMayStart()) return;
+            const epoch = this.epoch;
+            this.countDemanded = true;
+            try {
+                await this.runCount(false, true);
+            } catch (error) {
+                // As `startCount`: a failed read faults the tap.
+                if (!this.is("disposed") && !this.sealedValue) {
+                    this.faulted ??= error;
+                }
+                return;
+            }
+            if (this.epoch !== epoch) return;
+        }
     }
 
     private countMayStart(): boolean {

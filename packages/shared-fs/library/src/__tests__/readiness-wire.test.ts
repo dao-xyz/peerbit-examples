@@ -72,6 +72,7 @@ const fixtures = (): Record<string, ReadinessMessage> => ({
         scope: 0,
         logId,
         provenance: provenance(),
+        freezeId: bytes(8, 0xa0),
         count: 1000,
         anchor: bytes(32, 0xc0),
         hlc: 1_800_000_000_123_456_789n,
@@ -118,12 +119,12 @@ const GOLDEN: Record<string, string> = {
     HeaderV1:
         "0101101112131415161718191a1b1c1d1e1f00404142434445464748494a4b4c" +
         "4d4e4f505152535455565758595a5b5c5d5e5f0e7368617265642d66732f7639" +
-        "2e3201020103808182838485868788898a8b8c8d8e8f04030201e8030000c0c1" +
-        "c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf15cd" +
-        "0f9b76e2fa18030000000800000058000000000102030405060708090a0b0c0d" +
-        "0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d" +
-        "2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d" +
-        "4e4f5051525354555657",
+        "2e3201020103808182838485868788898a8b8c8d8e8f04030201a0a1a2a3a4a5" +
+        "a6a7e8030000c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9" +
+        "dadbdcdddedf15cd0f9b76e2fa18030000000800000058000000000102030405" +
+        "060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425" +
+        "262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445" +
+        "464748494a4b4c4d4e4f5051525354555657",
     CellsReqV1:
         "0201101112131415161718191a1b1c1d1e1f01404142434445464748494a4b4c" +
         "4d4e4f505152535455565758595a5b5c5d5e5f0000000000100000",
@@ -331,6 +332,7 @@ describe("readiness wire v1", () => {
                 scope: 0,
                 logId,
                 provenance: Object.assign(provenance(), patch),
+                freezeId: new Uint8Array(8),
                 count: 0,
                 anchor: new Uint8Array(32),
                 hlc: 0n,
@@ -439,6 +441,7 @@ describe("readiness wire v1", () => {
                 scope: 0,
                 logId,
                 provenance: provenance(),
+                freezeId: new Uint8Array(8),
                 count: 0,
                 anchor: new Uint8Array(32),
                 hlc: 0n,

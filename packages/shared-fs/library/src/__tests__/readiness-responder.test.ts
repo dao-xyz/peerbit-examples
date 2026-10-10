@@ -150,6 +150,11 @@ const fakeResponder = async (
         started?: Promise<void>;
         /** Runs during the `count`-th count read's await. */
         onCount?: (count: number) => void;
+        /**
+         * Seed only, and leave the count check to the test (the runtime
+         * seeds and checks: `seedChecked`).
+         */
+        unchecked?: boolean;
     } = {}
 ) => {
     const heads = new Map<string, string>();
@@ -187,7 +192,8 @@ const fakeResponder = async (
         apply: (digest, sign) => laneSet.apply(digest, sign),
         reset: () => laneSet.reset(tap.epoch),
     });
-    await tap.seedFromScan();
+    if (options.unchecked) await tap.seedFromScan();
+    else await tap.seedChecked();
     const logId = new Uint8Array(32).fill(7);
     const scope = {
         descriptor: NAMESPACE_V1,
@@ -197,6 +203,7 @@ const fakeResponder = async (
         started: options.started ?? Promise.resolve(),
     };
     const network = new DirectNetwork();
+    const timers = new FakeTimers();
     const responder = new Responder(
         {
             openNonce: new Uint8Array(16),
@@ -213,7 +220,7 @@ const fakeResponder = async (
                     fullReplica: true,
                     phase: "off",
                 })),
-            timers: new FakeTimers(),
+            timers,
         }
     );
     network.responder = responder;
@@ -232,7 +239,12 @@ const fakeResponder = async (
         host,
         network,
         responder,
+        /** The responder's idle timers. */
+        timers,
         add,
+        /** The fake index (id to head), and its port. */
+        heads,
+        port,
         scopes: [{ scope: SCOPE_NAMESPACE_V1, logId, count: 0 }],
         logId,
         close: () => {
@@ -672,6 +684,69 @@ describe("readiness responder", () => {
             });
         });
 
+        it("notices the BUSY of an unverified count once the count verifies (PR-3 commit 2, G2-9)", async () => {
+            for (const hooked of [true, false]) {
+                // Seeded and never compared: a quiet, unverified tap.
+                const r = await fakeResponder(10, "inline", undefined, {
+                    unchecked: true,
+                });
+                // As the runtime binds it (runtime.ts createScope).
+                const off = hooked
+                    ? r.tap.onCountVerified(() => r.responder.noticeCapacity())
+                    : () => {};
+                const [key] = await keys(1);
+                const client = r.network.client(key);
+                const first = client.open({ scopes: r.scopes });
+                const busy = await client.next(ErrorV1, (message) =>
+                    sameBytes(message.sessionId, first.sessionId)
+                );
+                expect(busy.code).toBe(ERROR_CODE.BUSY);
+                expect(r.tap.countVerified).toBe(false);
+                expect(r.responder.debug()).toMatchObject({
+                    sessions: 0,
+                    busyWaiters: 1,
+                });
+                // No answered session ends, so nothing else notices it.
+                await settle();
+                expect(
+                    client.inbox.some((m) => m instanceof StateNoticeV1)
+                ).toBe(false);
+                // A comparison that ingest or a consumer starts verifies it.
+                await r.tap.checkCount();
+                expect(r.tap.countVerified).toBe(true);
+                await settle();
+                const notices = client.inbox.filter(
+                    (m): m is StateNoticeV1 => m instanceof StateNoticeV1
+                );
+                if (!hooked) {
+                    // Without the hook the waiter would wait for a session
+                    // end that never comes.
+                    expect(notices).toHaveLength(0);
+                    expect(r.responder.debug().busyWaiters).toBe(1);
+                    r.close();
+                    continue;
+                }
+                expect(notices.map((notice) => notice.reason)).toEqual([
+                    NOTICE_REASON.CAPACITY,
+                ]);
+                expect(r.responder.debug().busyWaiters).toBe(0);
+                // The re-ask is answered from the verified count.
+                const again = client.open({ scopes: r.scopes });
+                await client.next(HeaderV1, (message) =>
+                    sameBytes(message.sessionId, again.sessionId)
+                );
+                // Later verifications notice nobody: the waiter was served.
+                r.add("late");
+                await r.tap.checkCount();
+                await settle();
+                expect(
+                    client.inbox.filter((m) => m instanceof StateNoticeV1)
+                ).toHaveLength(1);
+                off();
+                r.close();
+            }
+        });
+
         it("notices a waiter only when the cap that refused it has room", async () => {
             const r = await fakeResponder(20, "inline");
             const [holder, churner, ...waiting] = await keys(7);
@@ -754,9 +829,91 @@ describe("readiness responder", () => {
                     ({ message }) => message instanceof HeaderV1
                 )
             ).toEqual([]);
+            // A CLOSE needs no answer, not even EXPIRED.
+            expect(
+                r.network.sent.filter(
+                    ({ message }) => message instanceof ErrorV1
+                )
+            ).toEqual([]);
             // A live session is still answered.
             client.open({ scopes: r.scopes });
             await client.next(HeaderV1);
+            r.close();
+        });
+
+        it("answers EXPIRED, once, to an OPEN whose session idled out while its freeze waited", async () => {
+            // A freeze that outlives the idle timer: the joiner's three
+            // attempts (5, 10 and 20 s) end unanswered meanwhile, and only
+            // an answer from R re-asks it (a static donor sends nothing
+            // else).
+            let start!: () => void;
+            const started = new Promise<void>((resolve) => (start = resolve));
+            const r = await fakeResponder(20, "inline", undefined, {
+                started,
+            });
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            const { sessionId } = client.open({ scopes: r.scopes });
+            for (const attempt of [2, 3]) {
+                client.open({ sessionId, attempt, scopes: r.scopes });
+            }
+            await settle();
+            expect(r.responder.debug().sessions).toBe(1);
+            r.timers.advance(SESSION_IDLE_MS);
+            expect(r.responder.debug().sessions).toBe(0);
+            expect(r.network.sent).toEqual([]);
+
+            start();
+            await settle();
+            expect(r.responder.stats.freezes).toBe(0);
+            const answers = r.network.sent.map(({ message }) => message);
+            expect(answers).toHaveLength(1);
+            expect(answers[0]).toBeInstanceOf(ErrorV1);
+            expect((answers[0] as ErrorV1).code).toBe(ERROR_CODE.EXPIRED);
+            expect(
+                sameBytes((answers[0] as ErrorV1).sessionId, sessionId)
+            ).toBe(true);
+            expect(r.responder.stats.expired).toBe(1);
+            expect(r.timers.armed()).toBe(0);
+
+            // The joiner's next session is answered.
+            const next = client.open({ scopes: r.scopes });
+            await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, next.sessionId)
+            );
+            r.close();
+        });
+
+        it("answers no EXPIRED over a later session under the same id", async () => {
+            let start!: () => void;
+            const started = new Promise<void>((resolve) => (start = resolve));
+            const r = await fakeResponder(20, "inline", undefined, {
+                started,
+            });
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            const { sessionId } = client.open({ scopes: r.scopes });
+            await settle();
+            r.timers.advance(SESSION_IDLE_MS);
+            expect(r.responder.debug().sessions).toBe(0);
+            // The joiner re-sends the OPEN (a resume): a new session, a new
+            // freeze, under the same id.
+            client.open({ sessionId, attempt: 4, scopes: r.scopes });
+            await settle();
+            expect(r.responder.debug().sessions).toBe(1);
+
+            start();
+            const header = await client.next(HeaderV1, (message) =>
+                sameBytes(message.sessionId, sessionId)
+            );
+            await settle();
+            expect(header.count).toBe(20);
+            expect(
+                r.network.sent.filter(
+                    ({ message }) => message instanceof ErrorV1
+                )
+            ).toEqual([]);
+            expect(r.responder.debug().sessions).toBe(1);
             r.close();
         });
 
@@ -823,6 +980,7 @@ describe("readiness responder", () => {
                     onCount: (count) => {
                         if (count <= 4) r.add(`late${count}`);
                     },
+                    unchecked: true,
                 });
             expect(await r.tap.checkCount()).toBeUndefined();
             await r.tap.countSettled();
@@ -837,6 +995,84 @@ describe("readiness responder", () => {
             await r.tap.countSettled();
             expect(r.tap.stats.countReads).toBe(reads + 1);
             expect(r.tap.countVerified).toBe(true);
+            r.close();
+        });
+
+        it("freezes only at a verified count: a row the seed scan missed is in the snapshot", async () => {
+            // The check's comparisons all race a row, so the count stays
+            // unverified; then the store goes quiet.
+            const r: Awaited<ReturnType<typeof fakeResponder>> =
+                await fakeResponder(20, "inline", undefined, {
+                    onCount: (count) => {
+                        if (count <= 4) r.add(`late${count}`);
+                    },
+                    unchecked: true,
+                });
+            await r.tap.checkCount();
+            await r.tap.countSettled();
+            expect(r.tap.countVerified).toBe(false);
+            // A row the index holds that the seed scan missed (no event
+            // ever names it).
+            r.heads.set("missed", digestToHead(randomBytes(DIGEST_BYTES)));
+            expect(r.tap.count).toBe(24);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const header = await client.next(HeaderV1);
+            // The freeze compared, found the difference and scanned again.
+            expect(header.count).toBe(25);
+            expect(r.tap.countVerified).toBe(true);
+            expect(r.tap.stats.rescans).toBe(1);
+            r.close();
+        });
+
+        it("compares again while changes race its reads, and answers once a read is quiet", async () => {
+            // Every read of the check and of the freeze's first two
+            // comparisons races a row.
+            const r: Awaited<ReturnType<typeof fakeResponder>> =
+                await fakeResponder(20, "inline", undefined, {
+                    onCount: (count) => {
+                        if (count <= 6) r.add(`late${count}`);
+                    },
+                    unchecked: true,
+                });
+            await r.tap.checkCount();
+            await r.tap.countSettled();
+            expect(r.tap.countVerified).toBe(false);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const header = await client.next(HeaderV1);
+            expect(header.count).toBe(26);
+            expect(r.tap.countVerified).toBe(true);
+            expect(r.responder.stats.busy).toBe(0);
+            r.close();
+        });
+
+        it("answers BUSY, never a short snapshot, for a count its clean scans never match", async () => {
+            // The index counts a row its scans never return (a bug): the
+            // check scans again once, and the difference stays.
+            const r = await fakeResponder(20, "inline", undefined, {
+                unchecked: true,
+            });
+            const count = r.port.count;
+            r.port.count = async () => (await count()) + 1;
+            await r.tap.checkCount();
+            expect(r.tap.countVerified).toBe(false);
+            expect(r.tap.stats.rescans).toBe(1);
+            const [key] = await keys(1);
+            const client = r.network.client(key);
+            client.open({ scopes: r.scopes });
+            const error = await client.next(ErrorV1);
+            expect(error.code).toBe(ERROR_CODE.BUSY);
+            expect(
+                r.network.sent.some(
+                    ({ message }) => message instanceof HeaderV1
+                )
+            ).toBe(false);
+            // Bounded: the clean rescans the tap allows, then its fault.
+            expect(r.tap.stats.rescans).toBe(3);
+            expect(String(r.tap.faulted)).toMatch(/clean rescans/);
             r.close();
         });
 
@@ -1250,14 +1486,58 @@ describe("readiness responder", () => {
             expect(hex(header.anchor)).toBe(await anchorOfIndex(warm));
             await stopPeer(peer);
 
-            // A warm reopen of a timer-made sidecar (`remote-settled`) is
-            // writable but proves nothing: `none`, never `warm`.
+            // A warm reopen of a `reconciled` sidecar (the source the
+            // readiness decision persists with its proof, PR-3 commit 4)
+            // reports `warm`: every accepted source does. The proof is for
+            // audit only and never re-read to decide.
             const sidecar = join(
                 directory,
                 "shared-fs-bootstrap",
                 `${address}.json`
             );
             const proven = await readFile(sidecar, "utf8");
+            const proof = {
+                v: 1,
+                scopes: ["namespace-v1"],
+                contained: [
+                    {
+                        peer: "donor",
+                        scope: "namespace-v1",
+                        source: "creator",
+                        qualified: true,
+                        count: 5,
+                        hlc: "7",
+                        anchor: "ab".repeat(32),
+                    },
+                ],
+                excluded: [],
+                gaps: [],
+            };
+            await writeFile(
+                sidecar,
+                JSON.stringify({
+                    ...JSON.parse(proven),
+                    writeReadySource: "reconciled",
+                    proof,
+                    hlcProved: "7",
+                })
+            );
+            peer = await createPeer(directory);
+            const reconciled = await openSharedFs({ peerbit: peer, address });
+            expect(provenanceOf(reconciled)).toMatchObject({
+                writeReady: true,
+                source: "warm",
+                fullReplica: true,
+            });
+            expect(reconciled.bootstrapStatus().writeReadinessSource).toBe(
+                "reconciled"
+            );
+            await stopPeer(peer);
+
+            // `remote-settled` (written only by unreleased builds of this
+            // cycle) is no longer an accepted source: the sidecar reads as
+            // malformed and the reopen fails closed, gated and not warm
+            // (SPEC4 G4-7).
             await writeFile(
                 sidecar,
                 JSON.stringify({
@@ -1266,11 +1546,19 @@ describe("readiness responder", () => {
                 })
             );
             peer = await createPeer(directory);
-            const settled = await openSharedFs({ peerbit: peer, address });
-            expect(provenanceOf(settled)).toMatchObject({
-                writeReady: true,
+            const retired = await openSharedFs({
+                peerbit: peer,
+                address,
+                bootstrap: false,
+            });
+            expect(provenanceOf(retired)).toMatchObject({
+                writeReady: false,
                 source: "none",
                 fullReplica: true,
+            });
+            expect(retired.bootstrapStatus()).toMatchObject({
+                writeReady: false,
+                guardArmed: false,
             });
             await stopPeer(peer);
             await writeFile(sidecar, proven);
