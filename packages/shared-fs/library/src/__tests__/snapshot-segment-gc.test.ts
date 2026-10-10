@@ -85,6 +85,32 @@ const waitUntil = async (
     throw lastError;
 };
 
+/**
+ * Runs `advance` after every change that adds entries to `handle`'s store,
+ * until the returned stop runs. The filesystem's own change listener is
+ * registered during open, so it runs first and records each arrival at the
+ * current (manual) time; `advance` then moves the clock on, as a real clock
+ * would. The flag covers a removal that may not detach the listener (see
+ * the changeListener note in index.ts).
+ */
+const advanceAfterEachArrival = (
+    handle: SharedFsHandle,
+    advance: () => void
+) => {
+    let active = true;
+    const events = handle.program.entries.events;
+    const onChange = (event: any) => {
+        if (active && (event?.detail?.added?.length ?? 0) > 0) {
+            advance();
+        }
+    };
+    events.addEventListener("change", onChange);
+    return () => {
+        active = false;
+        events.removeEventListener("change", onChange);
+    };
+};
+
 describe("snapshot segment reclamation", () => {
     let peer: Peerbit;
     let fs: SharedFsHandle;
@@ -1286,10 +1312,27 @@ describe("snapshot segment reclamation", () => {
             await waitUntil(async () => {
                 expect((await fsB.list("/")).length).toBe(6);
             });
-            // The injected clock is intentionally manual in this suite;
-            // advance it past the quiet window after B has seen the write.
-            fakeNow += 1_000;
-            await fsB.awaitWriteReady({ timeout: DEFAULT_WAIT_MS });
+            // The injected clock is intentionally manual in this suite, and
+            // B's write-readiness quiet window runs on it from B's last
+            // remote arrival. Listing all six files does not mean B has
+            // received everything A replicates: the readiness pulls fetch
+            // the namespace rows ahead of ordinary replication, whose later
+            // batch carries A's genesis manifest (write-readiness evidence
+            // outside the pulled scope). On a frozen clock an arrival after
+            // the advance would hold the window open for good; a real clock
+            // moves on. So advance past the window now and, until B is
+            // ready, again after each arrival B records. B still needs a
+            // satisfied coordinator and two quiet checks after its last
+            // arrival.
+            const stopAdvancing = advanceAfterEachArrival(fsB, () => {
+                fakeNow += 1_000;
+            });
+            try {
+                fakeNow += 1_000;
+                await fsB.awaitWriteReady({ timeout: DEFAULT_WAIT_MS });
+            } finally {
+                stopAdvancing();
+            }
 
             // Same document set on both sides: B's snapshot dedups to the
             // very cids A published.
