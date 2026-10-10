@@ -1,3 +1,4 @@
+import type { PublicSignKey } from "@peerbit/crypto";
 import {
     Cells,
     decodeCellsInto,
@@ -84,7 +85,8 @@ import {
  *   the design text, proposed for owner ack as plan section 11 item m.
  * - **Ports.** Every effect goes through `SessionPorts`: the directed send,
  *   J's maintained state (`LocalScope`), the scope's pull queue and
- *   explainer, and bounded timers. No Peerbit import.
+ *   explainer, J's trust view in access-controlled stores, and bounded
+ *   timers. No Peerbit import (key types aside).
  * - **Timers** bound requests in flight only: the 5, 10 and 20 s attempts of
  *   an OPEN, a cells request or a list page, and the sync-wait window
  *   (design 4.9). None is armed while the session waits for rows, pulls
@@ -155,15 +157,19 @@ export type SessionMode = "empty" | "fast" | "peel" | "sync-wait" | "list";
  * Why a session asks for a fresh one: R ended it (`expired`), R restarted
  * under it (`restarted`: a header with another `openNonce`, or another
  * snapshot under the same id), the certificate did not match after a
- * re-peel (`mismatch`), the first fetch failure (`fetch-failed`), or the
- * list must come from a list-mode session (`list`, deviation c).
+ * re-peel (`mismatch`), the first fetch failure (`fetch-failed`), the list
+ * must come from a list-mode session (`list`, deviation c), or a
+ * `rejected-untrusted` row of a contained scope may be reversed by J's trust
+ * graph now (`trust`: a contained scope never resumes work, so every scope
+ * is asked again, G3-7).
  */
 export type RenewReason =
     | "expired"
     | "restarted"
     | "mismatch"
     | "fetch-failed"
-    | "list";
+    | "list"
+    | "trust";
 
 /**
  * Recovery state carried across the sessions of one peer chain (design 4.5
@@ -236,6 +242,17 @@ export interface SessionResult {
     roundTrips: number;
     certificates: number;
     ms: number;
+    /**
+     * E's provisional `rejected-untrusted` rows (design 4.6): their distinct
+     * recorded signers, how many heads, and the trust epoch the certificate
+     * checked them at. The coordinator re-checks them on every trust change
+     * (2.6). Absent when E holds none.
+     */
+    untrusted?: {
+        signers: PublicSignKey[];
+        heads: number;
+        checkedAt: number;
+    };
 }
 
 /** A session's terminal outcome, reported once. */
@@ -352,6 +369,35 @@ export interface SessionEvents {
         session: JoinerSession,
         info: { attempt: number; last: boolean }
     ): void;
+    /**
+     * A `draining` scope started or stopped waiting only for trust
+     * (`parked`), which its state does not show: the owner's slot count and
+     * fetch-waiting flag read it (G2-4).
+     */
+    onParked?(session: JoinerSession, scope: ScopeId, parked: boolean): void;
+}
+
+/**
+ * J's trust view (access-controlled stores, PR-3 commit 3; design 4.5 step
+ * 8, 4.6, 4.9). The coordinator provides it.
+ */
+export interface SessionTrustPort {
+    /**
+     * The trust epoch: bumped on every trust-graph change. A check applies
+     * its result only while the epoch it read is still current.
+     */
+    epoch(): number;
+    /**
+     * Whether `signer` is trusted in J's trust graph now (uncached). A throw
+     * or a rejection is unknown: a refusal is then never explained.
+     */
+    isTrusted(signer: PublicSignKey): Promise<boolean>;
+    /**
+     * Every peer that is Required or contained has its trust scope
+     * contained (design 4.5 step 8, G3-1): the namespace run's promotion
+     * clause.
+     */
+    scopesContained(): boolean;
 }
 
 export interface SessionPorts {
@@ -365,6 +411,12 @@ export interface SessionPorts {
     syncDelivering(scope: ScopeId): boolean;
     scope(id: ScopeId): SessionScopePorts | undefined;
     events: SessionEvents;
+    /**
+     * J's trust view (access-controlled stores). Without it (open mode, and
+     * unit harnesses) a `trust` hash is never explained and `reclassify`
+     * pulls it again (commit 2).
+     */
+    trust?: SessionTrustPort;
 }
 
 /** Per-scope state for tests and status. */
@@ -376,6 +428,10 @@ export interface SessionScopeDebug {
     /** A lookup failed or the pull was refused: waiting for a retry. */
     retry: number;
     trustPending: number;
+    /** E's provisional `rejected-untrusted` entries. */
+    untrusted: number;
+    /** A trust pass is in flight (2.4). */
+    trustChecking: boolean;
     explained: number;
     xPeel: number;
     have: number;
@@ -509,9 +565,9 @@ export const newSessionInit = (
  * The recovery ladder (design 4.5 steps 8 and 10, deviation c): the next
  * session after a `renew`, with a fresh `sessionId`, or undefined when the
  * outcome is not a renew or the chain reached `MAX_RENEWALS`.
- * `expired`/`restarted` keep the stage (list mode when the outcome asks for
- * it); `mismatch` moves `first` to `fresh` and `fresh` to `list`; `list`
- * asks for list mode; `fetch-failed` sets `fetchRenewed`.
+ * `expired`/`restarted`/`trust` keep the stage (list mode when the outcome
+ * asks for it); `mismatch` moves `first` to `fresh` and `fresh` to `list`;
+ * `list` asks for list mode; `fetch-failed` sets `fetchRenewed`.
  */
 export const nextSessionInit = (
     previous: SessionInit,
@@ -525,6 +581,7 @@ export const nextSessionInit = (
     switch (outcome.reason) {
         case "expired":
         case "restarted":
+        case "trust":
             list = list || outcome.list;
             break;
         case "mismatch":
@@ -699,6 +756,20 @@ interface PendingHash {
     readonly digest: Uint8Array;
     readonly head: string;
     status: Status;
+    /** A `trust` hash: the keys whose trust would reverse its refusal (2.2). */
+    signers?: readonly PublicSignKey[];
+    /** The trust epoch at which a pass found none of `signers` trusted. */
+    checkedAt?: number;
+    /** The trust epoch at which a pass last sent it back to a pull. */
+    repulledAt?: number;
+}
+
+/** A hash of E: why J will never index it (design 4.6). */
+interface ExplainedHash {
+    readonly digest: Uint8Array;
+    readonly reason: ExplainedReason;
+    /** `rejected-untrusted`: the signers its re-checks read. */
+    readonly signers?: readonly PublicSignKey[];
 }
 
 /** The one request (cells or list page) a scope has in flight. */
@@ -765,10 +836,7 @@ class ScopeRun {
         retry: new Set(),
     };
     /** E: R's hashes J explains (never in S_J; the sink removes indexed ones). */
-    readonly explained = new Map<
-        string,
-        { digest: Uint8Array; reason: ExplainedReason }
-    >();
+    readonly explained = new Map<string, ExplainedHash>();
     /** J\R from the last peel. */
     xPeel = new Map<string, Uint8Array>();
     /** R's hashes the last peel named (pending again when J loses one). */
@@ -797,6 +865,20 @@ class ScopeRun {
     localErrors = 0;
     /** J's tap re-seeded (R1): recompute from its new state once trusted. */
     rebuildNeeded = false;
+    /** The trust epoch at which E's `rejected-untrusted` entries were checked. */
+    untrustedCheckedAt = -1;
+    /** A trust pass is in flight (2.4); `trustAgain`: run it once more after. */
+    trustChecking = false;
+    trustAgain = false;
+    /** The trust epoch C2 read (2.7). */
+    certTrustEpoch = -1;
+    /**
+     * C2's digest counted provisional `rejected-untrusted` entries of E: a
+     * trust change before the match may have moved them back to D (2.7).
+     */
+    certUntrusted = false;
+    /** Last reported `parked` (the owner's `onParked`). */
+    parked = false;
     kicked = false;
     pulled = 0;
     cells = 0;
@@ -883,6 +965,17 @@ export class JoinerSession {
         return this.runs.find((run) => run.id === scope)?.state;
     }
 
+    /**
+     * `scope` is `draining` with hashes parked for J's trust graph and
+     * nothing to pull, classify or wait for in J's own log (a lookup's retry
+     * aside): it waits for a trust change or other peers' trust scopes, and
+     * holds no request and no local work.
+     */
+    parked(scope: ScopeId): boolean {
+        const run = this.runs.find((candidate) => candidate.id === scope);
+        return run !== undefined && this.parkedNow(run);
+    }
+
     debug(): SessionDebug {
         const scopes: SessionDebug["scopes"] = {};
         for (const run of this.runs) {
@@ -893,6 +986,8 @@ export class JoinerSession {
                 failed: run.sets.failed.size,
                 retry: run.sets.retry.size,
                 trustPending: run.sets.trust.size,
+                untrusted: this.untrustedOf(run).length,
+                trustChecking: run.trustChecking,
                 explained: run.explained.size,
                 xPeel: run.xPeel.size,
                 have: run.have,
@@ -995,18 +1090,30 @@ export class JoinerSession {
     }
 
     /**
-     * Classifies `trust-pending` and `logged` hashes again (a trust-graph
-     * change, a trust scope contained, the contained set grew).
+     * A trust-graph change, a trust scope contained, or the contained set
+     * grew (design 4.9): `logged` hashes are classified again, and so is a
+     * `trust` hash without recorded signers (pulled again). With J's trust
+     * view (`ports.trust`), a `trust` hash with signers stays parked, and the
+     * run's trust pass checks its signers at the current epoch: it is pulled
+     * again only when one is trusted, and explained once the promotion
+     * clause holds (2.5). So a trust change costs one `isTrusted` per
+     * distinct signer, not a pull per head. Without the port, every `trust`
+     * hash is pulled again (commit 2).
      */
     reclassify(): void {
         if (!this.started || this.ended) return;
         this.guard(() => {
+            const trust = this.ports.trust;
             for (const run of this.runs) {
-                for (const status of ["trust", "logged"] as const) {
-                    for (const key of [...run.sets[status]]) {
+                for (const key of [...run.sets.logged]) {
+                    this.setStatus(run, key, "untried");
+                }
+                for (const key of [...run.sets.trust]) {
+                    if (!trust || !run.pending.get(key)?.signers) {
                         this.setStatus(run, key, "untried");
                     }
                 }
+                if (trust && run.header) this.trustPass(run);
                 this.kick(run);
             }
         });
@@ -1185,11 +1292,12 @@ export class JoinerSession {
     /**
      * T13: a fresh session for every scope not contained, and the trust
      * scope whenever the namespace scope renews (its snapshot must not be
-     * older than the namespace one, design 2.2(4)).
+     * older than the namespace one, design 2.2(4)). `trust` reopens every
+     * scope: a contained one never resumes work (G3-7).
      */
     private renew(reason: RenewReason, list = this.init.list) {
         const scopes = this.runs
-            .filter((run) => run.state !== "contained")
+            .filter((run) => reason === "trust" || run.state !== "contained")
             .map((run) => run.id);
         if (
             scopes.includes(SCOPE_NAMESPACE_V1) &&
@@ -1712,6 +1820,8 @@ export class JoinerSession {
         }
         run.mode ??= run.waitedSync ? "sync-wait" : "peel";
         this.afterPending(run);
+        // Hashes still parked for trust are checked in their new state.
+        if (run.sets.trust.size > 0) this.trustPass(run);
     }
 
     // -------------------------------------------------------- steps 7-8
@@ -1778,6 +1888,24 @@ export class JoinerSession {
                   ? "failed-fetch-wait"
                   : "draining"
         );
+        const parked = this.parkedNow(run);
+        if (parked === run.parked) return;
+        run.parked = parked;
+        try {
+            this.ports.events.onParked?.(this, run.id, parked);
+        } catch {
+            // A listener's error is the listener's.
+        }
+    }
+
+    private parkedNow(run: ScopeRun): boolean {
+        const { sets } = run;
+        return (
+            run.state === "draining" &&
+            !run.classifying &&
+            sets.untried.size + sets.flight.size + sets.logged.size === 0 &&
+            sets.trust.size > 0
+        );
     }
 
     /** D1 and D9: the next batch of untried hashes, one at a time. */
@@ -1800,7 +1928,18 @@ export class JoinerSession {
                 if (++n >= PULL_BATCH) break;
             }
         }
-        if (sets.untried.size === 0) return this.updateDrainState(run);
+        if (sets.untried.size === 0) {
+            // The trust run's fixpoint may hold now (2.4, G3-2): the last
+            // hash that moved left.
+            if (
+                run.id === SCOPE_TRUST_V1 &&
+                sets.trust.size > 0 &&
+                this.trustSettled(run)
+            ) {
+                this.trustPass(run);
+            }
+            return this.updateDrainState(run);
+        }
         const keys: string[] = [];
         for (const key of sets.untried) {
             keys.push(key);
@@ -1903,6 +2042,7 @@ export class JoinerSession {
         const failed: string[] = [];
         const retry: string[] = [];
         let lie: string | undefined;
+        let parked = false;
         for (let i = 0; i < still.length; i++) {
             const key = still[i];
             const pending = run.pending.get(key);
@@ -1917,7 +2057,16 @@ export class JoinerSession {
                     progressed = true;
                     break;
                 case "trust-pending":
+                    // Checked afresh at the current trust epoch (2.4), never
+                    // on the verdict of the graph the pull ran against
+                    // (G3-5).
+                    pending.signers =
+                        verdict.signers && verdict.signers.length > 0
+                            ? [...verdict.signers]
+                            : undefined;
+                    pending.checkedAt = undefined;
                     this.setStatus(run, key, "trust");
+                    parked = true;
                     break;
                 case "failed":
                     failed.push(key);
@@ -1955,6 +2104,7 @@ export class JoinerSession {
             // false hint. One fresh session.
             return this.renew("fetch-failed");
         }
+        if (parked) this.trustPass(run);
     }
 
     /**
@@ -2009,6 +2159,205 @@ export class JoinerSession {
             }
         }
         this.kick(run);
+    }
+
+    // -------------------------------------------------------- trust (2.4-2.7)
+
+    /** E's provisional `rejected-untrusted` entries. */
+    private untrustedOf(run: ScopeRun): ExplainedHash[] {
+        const out: ExplainedHash[] = [];
+        for (const entry of run.explained.values()) {
+            if (entry.reason === "rejected-untrusted") out.push(entry);
+        }
+        return out;
+    }
+
+    /** No hash of `run` moves: only `trust` hashes are left (G3-2). */
+    private trustSettled(run: ScopeRun): boolean {
+        const { sets } = run;
+        return (
+            !run.classifying &&
+            sets.untried.size +
+                sets.flight.size +
+                sets.logged.size +
+                sets.failed.size +
+                sets.retry.size ===
+                0
+        );
+    }
+
+    /**
+     * The promotion clause (2.4): whether a `trust` hash of `run` that no
+     * trusted signer could reverse may be explained now. The namespace run:
+     * every trust scope that counts is contained (`scopesContained()`, R's
+     * own included, and this session's trust run), design 4.5 step 8 and
+     * G3-1. The trust run: a run-local fixpoint, no other hash of it
+     * moving, so J's graph holds every row of R's trust snapshot that it
+     * accepts (G3-2; a cross-peer clause would deadlock).
+     */
+    private promotable(run: ScopeRun, trust: SessionTrustPort): boolean {
+        if (
+            run.state !== "draining" &&
+            run.state !== "failed-fetch-wait" &&
+            run.state !== "certifying"
+        ) {
+            return false;
+        }
+        if (run.id === SCOPE_TRUST_V1) return this.trustSettled(run);
+        const own = this.runs.find(
+            (candidate) => candidate.id === SCOPE_TRUST_V1
+        );
+        if (own && own.state !== "contained") return false;
+        try {
+            return trust.scopesContained() === true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * The trust pass of `run` (2.4, 2.6), coalesced: one in flight per run,
+     * and a request meanwhile runs it once more. It reads J's trust graph,
+     * never a timer; a parked verdict, `reclassify`, the certificate, the
+     * trust run's fixpoint and its containment ask for it. Its end certifies
+     * again when the certificate waited for it (2.7).
+     */
+    private trustPass(run: ScopeRun) {
+        const trust = this.ports.trust;
+        if (!trust || this.ended) return;
+        if (run.trustChecking) {
+            run.trustAgain = true;
+            return;
+        }
+        run.trustChecking = true;
+        void this.runTrustPass(run, trust)
+            .catch((error) => this.internal(error))
+            .finally(() => {
+                run.trustChecking = false;
+                if (this.ended || run.state !== "certifying") return;
+                this.guard(() => this.certify(run));
+            });
+    }
+
+    /**
+     * Steps 1-6 of 2.4 at one trust epoch `e0`: one `isTrusted` per distinct
+     * signer of the parked hashes and of E's provisional entries (a throw is
+     * unknown, which may reverse). Nothing applies if the session ended or
+     * the epoch moved; then it runs again.
+     *
+     * - A parked hash with a signer trusted (or unknown) goes back to a pull,
+     *   at most once per epoch, so a head `canPerform` refuses again with
+     *   that signer trusted waits for the next change instead of looping;
+     *   otherwise it is checked at `e0`.
+     * - A provisional E entry with such a signer leaves E for D in a run that
+     *   is not contained ("the head goes back into D", design 4.6); in a
+     *   contained run of a live session it renews the session (G3-7).
+     * - Once the promotion clause holds, every hash checked at `e0` is
+     *   explained `rejected-untrusted`, provisionally, with its signers.
+     */
+    private async runTrustPass(run: ScopeRun, trust: SessionTrustPort) {
+        do {
+            run.trustAgain = false;
+            if (this.ended) return;
+            const e0 = trust.epoch();
+            const parked: Array<{
+                key: string;
+                pending: PendingHash;
+                signers: readonly PublicSignKey[];
+            }> = [];
+            for (const key of run.sets.trust) {
+                const pending = run.pending.get(key)!;
+                if (pending.signers) {
+                    parked.push({ key, pending, signers: pending.signers });
+                }
+            }
+            const provisional =
+                run.untrustedCheckedAt === e0
+                    ? []
+                    : [...run.explained].filter(
+                          ([, entry]) => entry.reason === "rejected-untrusted"
+                      );
+            const keys = new Map<string, PublicSignKey>();
+            for (const { signers } of parked) {
+                for (const key of signers) keys.set(key.hashcode(), key);
+            }
+            for (const [, entry] of provisional) {
+                for (const key of entry.signers ?? []) {
+                    keys.set(key.hashcode(), key);
+                }
+            }
+            /** true: trusted; false: not trusted; undefined: unknown. */
+            const verdicts = new Map<string, boolean | undefined>();
+            await Promise.all(
+                [...keys].map(async ([hash, key]) => {
+                    let verdict: boolean | undefined;
+                    try {
+                        verdict = (await trust.isTrusted(key)) === true;
+                    } catch {
+                        verdict = undefined;
+                    }
+                    verdicts.set(hash, verdict);
+                })
+            );
+            if (this.ended) return;
+            if (trust.epoch() !== e0) {
+                run.trustAgain = true;
+                continue;
+            }
+            /** Some recorded signer may reverse the refusal now. */
+            const mayReverse = (signers: readonly PublicSignKey[] = []) =>
+                signers.length === 0 ||
+                signers.some((key) => verdicts.get(key.hashcode()) !== false);
+            let changed = false;
+            for (const { key, pending, signers } of parked) {
+                if (
+                    run.pending.get(key) !== pending ||
+                    pending.status !== "trust" ||
+                    pending.signers !== signers
+                ) {
+                    // Pulled or parked again meanwhile: its own pass reads it.
+                    continue;
+                }
+                if (!mayReverse(signers)) {
+                    pending.checkedAt = e0;
+                    continue;
+                }
+                pending.checkedAt = undefined;
+                if (pending.repulledAt === e0) continue;
+                pending.repulledAt = e0;
+                this.setStatus(run, key, "untried");
+                changed = true;
+            }
+            const flipped = provisional.filter(
+                ([key, entry]) =>
+                    run.explained.get(key) === entry &&
+                    mayReverse(entry.signers)
+            );
+            if (flipped.length > 0) {
+                if (run.state === "contained") return this.renew("trust");
+                for (const [key, entry] of flipped) {
+                    run.explained.delete(key);
+                    this.addPending(run, key, entry.digest);
+                    run.pending.get(key)!.repulledAt = e0;
+                }
+                changed = true;
+            }
+            run.untrustedCheckedAt = e0;
+            if (this.promotable(run, trust)) {
+                for (const key of [...run.sets.trust]) {
+                    const pending = run.pending.get(key)!;
+                    if (pending.checkedAt !== e0 || !pending.signers) continue;
+                    this.dropPending(run, key);
+                    run.explained.set(key, {
+                        digest: pending.digest,
+                        reason: "rejected-untrusted",
+                        signers: pending.signers,
+                    });
+                    changed = true;
+                }
+            }
+            if (changed) this.kick(run);
+        } while (run.trustAgain);
     }
 
     // -------------------------------------------------------- sink
@@ -2184,6 +2533,19 @@ export class JoinerSession {
                 return;
             }
             if (run.pending.size > 0) return this.afterPending(run);
+            // E's provisional rows count only as checked at the current
+            // trust epoch (2.7): a pass in flight, or one due at this epoch,
+            // goes first, and its end certifies again. No timer.
+            const trust = this.ports.trust;
+            if (trust) {
+                if (run.trustChecking) return;
+                const untrusted = this.untrustedOf(run).length > 0;
+                if (untrusted && run.untrustedCheckedAt !== trust.epoch()) {
+                    return this.trustPass(run);
+                }
+                run.certTrustEpoch = trust.epoch();
+                run.certUntrusted = untrusted;
+            }
             // C2: one synchronous step.
             const certificate = this.certificateNow(run);
             if (certificate.seq !== local.epoch) {
@@ -2208,6 +2570,17 @@ export class JoinerSession {
             if (this.ended) return;
             // C3: a match proves containment at `seq`, whatever changed since.
             if (sameBytes(digest, run.header!.anchor)) {
+                if (
+                    trust &&
+                    run.certUntrusted &&
+                    trust.epoch() !== run.certTrustEpoch
+                ) {
+                    // A trust change since C2 may have moved a row the digest
+                    // counted in E back to D, so E now may hold none: what C2
+                    // counted decides. Again from the top: the row is pulled,
+                    // or E checked at this epoch, before another certificate.
+                    continue;
+                }
                 return this.contain(
                     run,
                     certificate.mode,
@@ -2351,11 +2724,37 @@ export class JoinerSession {
             certificates: run.certificates,
             ms: this.clock() - this.startedAt,
         };
+        const untrusted =
+            mode === "empty" || mode === "fast" ? [] : this.untrustedOf(run);
+        if (untrusted.length > 0) {
+            const signers = new Map<string, PublicSignKey>();
+            for (const entry of untrusted) {
+                for (const key of entry.signers ?? []) {
+                    signers.set(key.hashcode(), key);
+                }
+            }
+            run.result.untrusted = {
+                signers: [...signers.values()],
+                heads: untrusted.length,
+                checkedAt: run.certTrustEpoch,
+            };
+        }
         if (run.request) this.disarm(run.request.timer);
         run.request = undefined;
         this.disarm(run.windowTimer);
         run.windowTimer = undefined;
         this.setState(run, "contained");
+        if (run.id === SCOPE_TRUST_V1) {
+            // R's trust scope is contained: the namespace run's parked
+            // hashes may be explained now (design 4.5 step 8, test 37). The
+            // coordinator's flip covers other sessions.
+            const namespace = this.runs.find(
+                (candidate) => candidate.id === SCOPE_NAMESPACE_V1
+            );
+            if (namespace && namespace.state !== "contained") {
+                this.trustPass(namespace);
+            }
+        }
         // T11.
         if (this.runs.every((candidate) => candidate.state === "contained")) {
             this.finish({
@@ -2494,5 +2893,6 @@ export class JoinerSession {
         run.plusAll = undefined;
         run.listReady = true;
         this.afterPending(run);
+        if (run.sets.trust.size > 0) this.trustPass(run);
     }
 }

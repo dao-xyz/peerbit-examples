@@ -6,7 +6,12 @@ import {
     type ProofScope,
 } from "./proof.js";
 import { systemTimers, type Timers } from "./responder.js";
-import { scopeDescriptor, type ScopeId } from "./scopes.js";
+import {
+    SCOPE_NAMESPACE_V1,
+    SCOPE_TRUST_V1,
+    scopeDescriptor,
+    type ScopeId,
+} from "./scopes.js";
 import {
     JoinerSession,
     classifyNotice,
@@ -20,6 +25,7 @@ import {
     type SessionResult,
     type SessionScopePorts,
     type SessionState,
+    type SessionTrustPort,
 } from "./session.js";
 import {
     CellsV1,
@@ -35,17 +41,27 @@ import {
  * The joiner's coordinator (WRITE_READINESS_V2.md sections 4.7-4.9, M1 plan
  * sections 3 and 7.3): one per fresh full address-open, never under
  * `allowPartialWrites` (deviation h). It keeps one record per visible peer,
- * runs at most `SESSIONS_IN_FLIGHT` joiner sessions at a time, follows each
- * peer through the states of design 4.7, and answers one question:
- * `satisfied()`, every Required peer contained, left or excluded, and at
- * least one contained peer qualified in the header of the session that
- * contained it.
+ * runs at most `SESSIONS_IN_FLIGHT` joiner sessions with work in flight at a
+ * time (a silent, busy or fetch-waiting session, or one that waits only for
+ * trust, holds no slot: G2-4), follows each peer through the states of
+ * design 4.7, and answers one question: `satisfied()`, every Required peer
+ * contained, left or excluded, and at least one contained peer qualified in
+ * the header of the session that contained it.
  *
  * - **Prerequisite mode (PR-3 commit 2).** Today's tracker still decides
  *   when J turns ready; it additionally requires `satisfied()`. The
  *   coordinator never makes J ready by itself, so it can only gate a joiner
  *   that today's tracker would release, never release one earlier. Commit 4
  *   makes `evaluate()` the predicate.
+ * - **Access-controlled stores (PR-3 commit 3).** Sessions open both scopes
+ *   and read J's trust view (`ports.trust`). The predicate adds the trust
+ *   clauses of design 4.8: every contained peer's trust scope contained and
+ *   frozen no earlier than its namespace scope, its trust checked at the
+ *   current trust epoch, and a qualified donor whose identity J trusts
+ *   (design 2.1). The trust epoch moves on every trust-graph change
+ *   (`trustChanged`); every check reads one epoch and applies only while it
+ *   is current. A contained peer whose provisional `rejected-untrusted`
+ *   rows a trust change may reverse is asked again (G3-6).
  * - **Visible peers** come from the readiness topic's subscribers (filtered
  *   by reachability, as `visibleFilesystemPeers` does), from the namespace
  *   log's replicators, and from any readiness message a peer sends J. A
@@ -57,7 +73,10 @@ import {
  *   records who showed a sign of life before the listeners attached
  *   (`signsOfLife`), and discovery counts those peers live. Visibility is
  *   still discovery's read, so a peer that left before `start` is no
- *   record.
+ *   record. Access-controlled stores read the namespace log only, not the
+ *   trust graph's: its address has no format salt, so its replicators can
+ *   be peers of another format, which never answer (design case 28;
+ *   deviation aq, for the owner).
  * - **Departure is reachability (D3 = A').** Every reachability event (libp2p
  *   `peer:disconnect` and `peer:connect`, a route table's `peer:reachable` and
  *   `peer:unreachable`) re-reads every record, so a relayed peer whose relay
@@ -172,8 +191,20 @@ export interface PeerRecord {
     openNonce?: Uint8Array;
     /** Contained scopes, by scope, from the session that contained each. */
     readonly results: Map<ScopeId, SessionResult>;
-    /** Every contained scope's session qualified R (`SessionResult.qualified`). */
+    /**
+     * Every contained scope's session qualified R in its header
+     * (`SessionResult.qualified`). In access-controlled stores the predicate
+     * also needs `identity` trusted at the current trust epoch.
+     */
     qualified: boolean;
+    /**
+     * Access-controlled stores: R's identity in J's trust graph (design 2.1
+     * `D:128`), checked once R is contained and again at every trust epoch;
+     * `checking` until the check at the current epoch completes.
+     */
+    identity?: "trusted" | "untrusted" | "checking";
+    /** The trust epoch of R's last completed record check (4.2). */
+    trustCheckedAt?: number;
     /** A peer that left with rows J may still lack (D4). */
     gap?: { missing: number | "unknown" };
     excluded?: { reason: ExclusionReason; scope: ScopeId; detail: string };
@@ -276,8 +307,19 @@ export interface CoordinatorPorts {
     signsOfLife?(): Iterable<string> | undefined;
     /** Directed one-way send to `to` (a hashcode); never throws. */
     send(message: ReadinessMessage, to: string): void;
-    /** Scopes every session opens, namespace first (commit 3 adds trust). */
+    /**
+     * Scopes every session opens, namespace first: both in an
+     * access-controlled store, which `trust` marks (the runtime reads it
+     * from the program, never from this list); `start` faults when the two
+     * disagree.
+     */
     readonly scopes: readonly ScopeId[];
+    /**
+     * J's trust graph (access-controlled stores only, PR-3 commit 3):
+     * `TrustedNetwork.isTrusted`, uncached. A throw or rejection resolves
+     * toward gating (G3-13).
+     */
+    trust?: { isTrusted(key: PublicSignKey): Promise<boolean> };
     /** The session ports of a scope (runtime `sessionScope`). */
     scope(id: ScopeId): SessionScopePorts | undefined;
     /** Settles once every scope's local state started (session precondition). */
@@ -333,10 +375,17 @@ export interface ReadinessStatus {
     required: string[];
     contained: Array<{
         peer: string;
+        /**
+         * The predicate's view: qualified by its header and, in
+         * access-controlled stores, an identity J trusts at the current
+         * trust epoch.
+         */
         qualified: boolean;
         source: ProvenanceSource;
         scopes: ProofScope[];
         departed: boolean;
+        /** Access-controlled stores: R's identity in J's trust graph. */
+        identity?: "trusted" | "untrusted" | "checking";
     }>;
     excluded: Array<{ peer: string; reason: ExclusionReason; detail: string }>;
     /**
@@ -362,6 +411,16 @@ export interface ReadinessStatus {
     busy: string[];
     /** Peers whose sessions wait for a fetch nobody served (`waiting-fetch`). */
     fetchPending: Array<{ peer: string; hashes: number }>;
+    /**
+     * Required peers whose session holds hashes parked until J's trust graph
+     * decides them (`waiting-trust`), access-controlled stores.
+     */
+    trustPending?: Array<{ peer: string; hashes: number }>;
+    /**
+     * Contained peers whose trust check at the current trust epoch has not
+     * completed (`waiting-trust`), access-controlled stores.
+     */
+    trustChecking?: string[];
     gaps: Array<{ peer: string; missing: number | "unknown" }>;
     /** Replicator rows asked once and unanswered (not Required). */
     unconfirmed: string[];
@@ -387,6 +446,15 @@ export interface CoordinatorDebug {
     /** Discovery reads that failed (each retried on the next event). */
     discoveryFailures: number;
     phase: CoordinatorPhase;
+    /** Trust-graph changes seen (`trustChanged`). */
+    trustEpoch: number;
+    /** Record trust checks in flight (4.2). */
+    trustChecks: number;
+    /**
+     * What made sessions classify their parked hashes again: a trust
+     * change, every counted trust scope turning contained, or C growing.
+     */
+    trustTriggers: { change: number; scopesContained: number; grew: number };
 }
 
 /** Peers `describeReadiness` names before "and N more". */
@@ -447,10 +515,23 @@ export const describeReadiness = (status: ReadinessStatus): string => {
             );
             return `waiting-fetch: ${plural(hashes, "hash", "hashes")} no peer served, named by ${of(status.fetchPending.length)}: ${named(status.fetchPending.map(({ peer }) => peer))}`;
         }
-        case "waiting-trust":
+        case "waiting-trust": {
+            const pending = status.trustPending ?? [];
+            if (pending.length > 0) {
+                const hashes = pending.reduce(
+                    (sum, { hashes }) => sum + hashes,
+                    0
+                );
+                return `waiting-trust: ${plural(hashes, "hash", "hashes")} wait for J's trust graph, named by ${of(pending.length)}: ${named(pending.map(({ peer }) => peer))}`;
+            }
+            const checking = status.trustChecking ?? [];
+            if (checking.length > 0) {
+                return `waiting-trust: checking J's trust graph for ${plural(checking.length, "contained peer")}: ${named(checking)}`;
+            }
             return `waiting-trust: ${of(required)} wait for J's trust graph: ${named(status.required)}`;
+        }
         case "no-qualified-donor":
-            return `no-qualified-donor: ${plural(status.contained.length, "peer")} contained, none qualified: ${named(status.contained.map(({ peer, source }) => `${peer} (${source})`))}`;
+            return `no-qualified-donor: ${plural(status.contained.length, "peer")} contained, none qualified: ${named(status.contained.map(({ peer, source, identity }) => `${peer} (${source}${identity === "untrusted" ? ", untrusted identity" : ""})`))}`;
         case "waiting-phase":
             return "waiting-phase: every required peer is accounted for; the bootstrap phase has not settled";
         case "reconciling": {
@@ -482,6 +563,12 @@ const RECONCILING_SCOPE: ReadonlySet<SessionState> = new Set<SessionState>([
     "recovering",
 ]);
 
+/** Session scope states that hold a request or local work (Q1). */
+const IN_FLIGHT_SCOPE: ReadonlySet<SessionState> = new Set<SessionState>([
+    "asking",
+    ...RECONCILING_SCOPE,
+]);
+
 /** Session scope states that mean R's header arrived. */
 const HEADER_SCOPE: ReadonlySet<SessionState> = new Set<SessionState>([
     ...RECONCILING_SCOPE,
@@ -491,6 +578,20 @@ const HEADER_SCOPE: ReadonlySet<SessionState> = new Set<SessionState>([
 ]);
 
 const resolved = Promise.resolve();
+
+/** `isTrusted` as a promise: a synchronous throw rejects it. */
+const askTrust = (
+    trust: { isTrusted(key: PublicSignKey): Promise<boolean> },
+    key: PublicSignKey
+): Promise<boolean> => {
+    try {
+        return Promise.resolve(trust.isTrusted(key)).then(
+            (trusted) => trusted === true
+        );
+    } catch (error) {
+        return Promise.reject(error);
+    }
+};
 
 const sameBytes = (a: Uint8Array, b: Uint8Array) => {
     if (a.length !== b.length) return false;
@@ -515,6 +616,16 @@ interface Entry extends PeerRecord {
     ticket: number;
     /** The D6 `replicators()` re-read is running. */
     visibilityRead: boolean;
+    /**
+     * The session ordinal (`sessionsOpened`) of each held result: one
+     * session freezes trust after namespace, a later session later (G3-12).
+     */
+    readonly ordinals: Map<ScopeId, number>;
+    /** Bumped whenever the results change: a record check of older ones is stale. */
+    trustToken: number;
+    /** A record trust check is in flight; `trustAgain`: run it once more. */
+    trustChecking: boolean;
+    trustAgain: boolean;
 }
 
 export class Coordinator {
@@ -559,10 +670,32 @@ export class Coordinator {
     private finalSatisfied = false;
     private evaluations = 0;
     private dropped = 0;
+    /** Bumped on every trust-graph change (`trustChanged`, design 4.9). */
+    private trustEpoch = 0;
+    private trustChecks = 0;
+    private readonly trustTriggers = {
+        change: 0,
+        scopesContained: 0,
+        grew: 0,
+    };
+    /** `trustScopesContained()` at the last `settle()` (its flip classifies). */
+    private trustScopesWere = true;
+    /** `satisfied()` found a record unchecked at this epoch (3.2). */
+    private trustRecheckPending = false;
+    /** The sessions' trust view (access-controlled stores). */
+    private readonly sessionTrust?: SessionTrustPort;
 
     constructor(readonly ports: CoordinatorPorts) {
         this.timers = ports.timers ?? systemTimers;
         this.clock = ports.now ?? (() => performance.now());
+        const trust = ports.trust;
+        if (trust) {
+            this.sessionTrust = {
+                epoch: () => this.trustEpoch,
+                isTrusted: (key) => askTrust(trust, key),
+                scopesContained: () => this.trustScopesContained(),
+            };
+        }
     }
 
     get phase(): CoordinatorPhase {
@@ -593,6 +726,12 @@ export class Coordinator {
             this.onTransport(event);
         };
         this.listener = listener;
+        // An access-controlled join opens the trust scope and reads J's
+        // trust graph, or it cannot be satisfied (gated, G3-9).
+        const trustScope = this.ports.scopes.includes(SCOPE_TRUST_V1);
+        if (trustScope !== (this.ports.trust !== undefined)) {
+            this.setFault(trustScope ? "no trust view" : "no trust scope");
+        }
         try {
             this.detach = this.ports.transport.listen(listener);
         } catch {
@@ -687,11 +826,42 @@ export class Coordinator {
     }
 
     /**
-     * J's trust graph changed, or the contained set grew: every live session
-     * classifies its trust-pending and logged hashes again (design 4.9).
+     * The contained set grew: every live session classifies its
+     * trust-pending and logged hashes again (design 4.9).
      */
     reclassify(): void {
         if (!this.running) return;
+        this.trustTriggers.grew++;
+        this.reclassifySessions();
+    }
+
+    /**
+     * J's trust graph changed (any `change` event, added-only and empty ones
+     * included; design 4.9): the trust epoch moves, so a check in flight is
+     * stale; every live session classifies its parked hashes again (2.5);
+     * every contained record's trust is checked again (4.2). The event's
+     * content is never read: a revocation may never arrive as a delete (M0
+     * P3). After `finish` it is ignored: readiness is never withdrawn.
+     */
+    trustChanged(): void {
+        if (!this.running) return;
+        this.trustEpoch++;
+        this.trustTriggers.change++;
+        try {
+            this.reclassifySessions();
+            if (this.ports.trust) {
+                for (const entry of [...this.entries.values()]) {
+                    if (entry.state !== "contained") continue;
+                    entry.identity = "checking";
+                    this.checkRecordTrust(entry);
+                }
+            }
+        } finally {
+            this.settle();
+        }
+    }
+
+    private reclassifySessions() {
         for (const session of [...this.owners.keys()]) session.reclassify();
     }
 
@@ -715,10 +885,17 @@ export class Coordinator {
     }
 
     /**
-     * The commit-2 predicate, synchronous: running, the first discovery
-     * read succeeded, no local fault, every record in a non-blocking state,
-     * and some contained record qualified. The phase clause stays the
-     * tracker's in commit 2; the trust clause is commit 3's.
+     * The predicate, synchronous: running, the first discovery read
+     * succeeded, no local fault, every record in a non-blocking state, and
+     * some contained record qualified. The phase clause stays the tracker's
+     * until commit 4.
+     *
+     * In an access-controlled store (design 4.8, 2.2(3), 2.2(4)) every
+     * contained record also holds both scopes, its trust result from a
+     * session no earlier than its namespace result (G3-12), and a trust
+     * check completed at the current trust epoch (a microtask starts a
+     * missing one); and a record counts as qualified only with an identity
+     * J trusts at that epoch (design 2.1).
      *
      * Required is read at the moment of evaluation (design 2.1): a `left`
      * peer, or a subscriber that was unreachable when J saw it, that reads
@@ -730,11 +907,24 @@ export class Coordinator {
         if (!this.running || !this.discovered || this.fault !== undefined) {
             return false;
         }
+        const acl = this.ports.trust !== undefined;
         let qualified = false;
+        let unchecked = false;
         for (const entry of this.entries.values()) {
             if (BLOCKING_STATES.has(entry.state)) return false;
-            if (entry.state === "contained" && entry.qualified)
-                qualified = true;
+            if (entry.state !== "contained") continue;
+            if (acl) {
+                if (!this.trustFirst(entry)) return false;
+                if (!this.trustChecked(entry)) {
+                    unchecked = true;
+                    continue;
+                }
+            }
+            if (this.qualifiedNow(entry)) qualified = true;
+        }
+        if (unchecked) {
+            this.recheckTrust();
+            return false;
         }
         if (!qualified) return false;
         if (this.reachableAgain()) {
@@ -742,6 +932,36 @@ export class Coordinator {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Trust first (design 4.8): both scopes contained, the trust result
+     * from a session no earlier than the namespace one. It holds by
+     * construction (one freeze puts trust after namespace, and a namespace
+     * renewal reopens trust); this fails closed if a path ever breaks it.
+     */
+    private trustFirst(entry: Entry): boolean {
+        const namespace = entry.ordinals.get(SCOPE_NAMESPACE_V1);
+        const trust = entry.ordinals.get(SCOPE_TRUST_V1);
+        return (
+            entry.results.has(SCOPE_NAMESPACE_V1) &&
+            entry.results.has(SCOPE_TRUST_V1) &&
+            namespace !== undefined &&
+            trust !== undefined &&
+            trust >= namespace
+        );
+    }
+
+    /** The record trust check of `entry` completed at the current epoch. */
+    private trustChecked(entry: Entry): boolean {
+        return !entry.trustChecking && entry.trustCheckedAt === this.trustEpoch;
+    }
+
+    /** Qualified for the predicate: its header and, in ACL stores, its identity. */
+    private qualifiedNow(entry: Entry): boolean {
+        if (!entry.qualified) return false;
+        if (!this.ports.trust) return true;
+        return this.trustChecked(entry) && entry.identity === "trusted";
     }
 
     /** A peer counted as gone or invisible reads reachable now. */
@@ -822,7 +1042,9 @@ export class Coordinator {
             unconfirmed: [],
         };
         if (this.fault !== undefined) status.fault = this.fault;
-        let trustPending = false;
+        const acl = this.ports.trust !== undefined;
+        const trustPending: Array<{ peer: string; hashes: number }> = [];
+        const trustChecking: string[] = [];
         for (const entry of entries) {
             const { hash: peer, state, session } = entry;
             if (state === "contained") {
@@ -831,14 +1053,23 @@ export class Coordinator {
                     entry.results.get(this.ports.scopes[0])?.source ??
                     results[0]?.source ??
                     "none";
+                const checked = this.trustChecked(entry);
+                if (acl && !checked) trustChecking.push(peer);
                 status.contained.push({
                     peer,
-                    qualified: entry.qualified,
+                    qualified: this.qualifiedNow(entry),
                     source,
                     scopes: results.map(
                         (result) => scopeDescriptor(result.scope).name
                     ),
                     departed: entry.departed,
+                    ...(acl
+                        ? {
+                              identity: checked
+                                  ? (entry.identity ?? "checking")
+                                  : "checking",
+                          }
+                        : {}),
                 });
             } else if (entry.excluded && state.startsWith("excluded-")) {
                 status.excluded.push({
@@ -876,15 +1107,21 @@ export class Coordinator {
                 status.gaps.push({ peer, missing: entry.gap.missing });
             if (session && BLOCKING_STATES.has(state)) {
                 let failed = 0;
+                let parked = 0;
                 for (const scope of Object.values(session.debug().scopes)) {
                     failed += scope?.failed ?? 0;
-                    if ((scope?.trustPending ?? 0) > 0) trustPending = true;
+                    parked += scope?.trustPending ?? 0;
                 }
                 if (failed > 0)
                     status.fetchPending.push({ peer, hashes: failed });
+                if (parked > 0) trustPending.push({ peer, hashes: parked });
             }
         }
-        status.state = this.stateOf(context, status, blocking, trustPending);
+        if (acl || trustPending.length > 0) {
+            status.trustPending = trustPending;
+            status.trustChecking = trustChecking;
+        }
+        status.state = this.stateOf(context, status, blocking);
         return status;
     }
 
@@ -892,8 +1129,7 @@ export class Coordinator {
     private stateOf(
         context: StatusContext,
         status: ReadinessStatus,
-        blocking: Entry[],
-        trustPending: boolean
+        blocking: Entry[]
     ): ReadinessState {
         if (context.writeReady) return "ready";
         if (this.fault !== undefined) return "reconciling";
@@ -913,7 +1149,7 @@ export class Coordinator {
                 return "waiting-fetch";
             }
             if (
-                trustPending &&
+                blocking.some((entry) => this.trustStalled(entry)) &&
                 blocking.every(
                     (entry) => entry.fetchWaiting || this.trustStalled(entry)
                 )
@@ -922,6 +1158,8 @@ export class Coordinator {
             }
             return "reconciling";
         }
+        // A contained peer's trust check at this epoch is still running.
+        if ((status.trustChecking ?? []).length > 0) return "waiting-trust";
         if (!status.contained.some(({ qualified }) => qualified)) {
             return "no-qualified-donor";
         }
@@ -932,37 +1170,39 @@ export class Coordinator {
     }
 
     /**
-     * Every unfinished scope of the entry's session waits only for J's
-     * trust graph or a fetch: nothing to classify, nothing logged.
+     * The entry's namespace run waits only for J's trust graph (or a
+     * fetch): parked hashes, nothing to classify, nothing logged. Its trust
+     * run may still pull: the namespace waits for trust either way (M2).
      */
     private trustStalled(entry: Entry): boolean {
-        const session = entry.session;
-        if (!session) return false;
-        let trust = false;
-        for (const scope of Object.values(session.debug().scopes)) {
-            if (!scope || scope.state === "contained") continue;
-            if (
-                scope.state !== "draining" &&
-                scope.state !== "failed-fetch-wait"
-            ) {
-                return false;
-            }
-            const moving =
-                scope.pending - scope.trustPending - scope.failed - scope.retry;
-            if (moving > 0) return false;
-            if (scope.trustPending > 0) trust = true;
+        const scope = entry.session?.debug().scopes[SCOPE_NAMESPACE_V1];
+        if (!scope) return false;
+        if (scope.state !== "draining" && scope.state !== "failed-fetch-wait") {
+            return false;
         }
-        return trust;
+        const moving =
+            scope.pending - scope.trustPending - scope.failed - scope.retry;
+        return moving === 0 && scope.trustPending > 0;
     }
 
-    /** The proof of the current records (`buildProof`); commit 4 persists it. */
+    /**
+     * The proof of the current records (`buildProof`); commit 4 persists it.
+     * A record's `qualified` is the predicate's view, as in `status()`: in
+     * access-controlled stores also an identity J trusts at this epoch
+     * (design 2.1), so the cut keeps the donor the predicate counted.
+     */
     proof(): Proof {
         const entries = [...this.entries.values()];
         return buildProof({
             scopes: this.ports.scopes,
             contained: entries
                 .filter(({ state }) => state === "contained")
-                .flatMap((entry) => [...entry.results.values()]),
+                .flatMap((entry) => {
+                    const results = [...entry.results.values()];
+                    if (!this.ports.trust) return results;
+                    const qualified = this.qualifiedNow(entry);
+                    return results.map((result) => ({ ...result, qualified }));
+                }),
             excluded: entries.flatMap((entry) =>
                 entry.excluded && entry.state.startsWith("excluded-")
                     ? [{ peer: entry.hash, reason: entry.excluded.reason }]
@@ -1028,6 +1268,9 @@ export class Coordinator {
             discovered: this.discovered,
             discoveryFailures: this.discoveryFailures,
             phase: this.phaseValue,
+            trustEpoch: this.trustEpoch,
+            trustChecks: this.trustChecks,
+            trustTriggers: { ...this.trustTriggers },
         };
     }
 
@@ -1120,8 +1363,7 @@ export class Coordinator {
                         scope: outcome.scope,
                         detail: outcome.detail,
                     };
-                    entry.results.clear();
-                    entry.qualified = false;
+                    this.clearResults(entry);
                     entry.parked = false;
                     entry.gap = undefined;
                     return this.reaskBusy();
@@ -1159,7 +1401,7 @@ export class Coordinator {
                 case "renew": {
                     // O4: a new session at once, in the same slot.
                     for (const result of outcome.results) {
-                        entry.results.set(result.scope, result);
+                        this.setResult(entry, result);
                     }
                     const next = nextSessionInit(session.init, outcome);
                     if (next) return this.openSession(entry, next);
@@ -1199,6 +1441,38 @@ export class Coordinator {
                 return;
             }
             this.fromSession(entry, session);
+        } finally {
+            this.settle();
+        }
+    }
+
+    /**
+     * A session's run started or stopped waiting only for trust
+     * (`SessionEvents.onParked`): the record's fetch-waiting flag and the
+     * slot count read it (G2-4). A namespace run parked while not every
+     * counted trust scope is contained is also B3's trigger: the trust scope
+     * it waits for may be a busy peer's, and no session of J completes
+     * before that peer is asked again.
+     */
+    protected onSessionParked(
+        session: JoinerSession,
+        scope: ScopeId,
+        parked: boolean
+    ): void {
+        if (!this.running) return;
+        const entry = this.owners.get(session);
+        if (!entry || entry.session !== session || session.outcome) return;
+        try {
+            if (!entry.qualifying && !entry.departed) {
+                this.fromSession(entry, session);
+            }
+            if (
+                parked &&
+                scope === SCOPE_NAMESPACE_V1 &&
+                !this.trustScopesContained()
+            ) {
+                this.reaskBusy();
+            }
         } finally {
             this.settle();
         }
@@ -1260,6 +1534,11 @@ export class Coordinator {
         this.reaskBusy();
         // C grew (design 4.9): parked trust-pending and logged hashes again.
         this.reclassify();
+        // R's identity and its provisional rows, now that R's trust scope
+        // is contained (4.2): "checked after the trust scope is contained".
+        if (entry.state === "contained" && !this.trustChecked(entry)) {
+            this.checkRecordTrust(entry);
+        }
         try {
             this.ports.onContained?.(entry.hash, results);
         } catch {
@@ -1269,11 +1548,34 @@ export class Coordinator {
 
     private mergeResults(entry: Entry, results: readonly SessionResult[]) {
         for (const result of results) {
-            entry.results.set(result.scope, result);
+            this.setResult(entry, result);
             entry.openNonce = Uint8Array.from(result.openNonce);
         }
         const held = [...entry.results.values()];
         entry.qualified = held.length > 0 && held.every((r) => r.qualified);
+    }
+
+    /**
+     * Holds a contained scope's result, stamped with the ordinal of the
+     * session that contained it (the record's newest, G3-12). A record
+     * check of the earlier results is stale from now on.
+     */
+    private setResult(entry: Entry, result: SessionResult) {
+        entry.results.set(result.scope, result);
+        entry.ordinals.set(result.scope, entry.sessionsOpened);
+        entry.trustToken++;
+        entry.trustCheckedAt = undefined;
+        if (this.ports.trust) entry.identity = "checking";
+    }
+
+    /** The record holds no containment (an exclusion, a trust reopen). */
+    private clearResults(entry: Entry) {
+        entry.results.clear();
+        entry.ordinals.clear();
+        entry.qualified = false;
+        entry.identity = undefined;
+        entry.trustCheckedAt = undefined;
+        entry.trustToken++;
     }
 
     /**
@@ -1296,6 +1598,11 @@ export class Coordinator {
         let fetchWaiting = false;
         if (states.some((s) => RECONCILING_SCOPE.has(s))) {
             state = "reconciling";
+            // S4 beside runs parked for trust: the fetch is what R can
+            // help, so R's sign of life retries it (design 4.5 step 8).
+            fetchWaiting =
+                states.includes("failed-fetch-wait") &&
+                !this.holdsWork(session);
         } else if (states.includes("silent")) {
             state = "silent";
         } else if (states.includes("busy")) {
@@ -1633,6 +1940,10 @@ export class Coordinator {
             storeClosed: false,
             ticket: 0,
             visibilityRead: false,
+            ordinals: new Map(),
+            trustToken: 0,
+            trustChecking: false,
+            trustAgain: false,
         };
         this.entries.set(hash, entry);
         this.enqueue(entry, this.freshInit(hash));
@@ -1754,7 +2065,11 @@ export class Coordinator {
         return undefined;
     }
 
-    /** Q1: a session holds a request or local work for a peer that blocks. */
+    /**
+     * Q1: a session holds a request or local work for a peer that blocks. A
+     * run parked for trust holds neither (G2-4): it waits for other peers'
+     * trust scopes, so counting it could keep the peer it waits for queued.
+     */
     private inFlight(entry: Entry): boolean {
         const session = entry.session;
         if (!session || session.outcome) return false;
@@ -1764,9 +2079,19 @@ export class Coordinator {
         ) {
             return false;
         }
-        return Object.values(this.scopeStates(session)).some(
-            (state) => state === "asking" || RECONCILING_SCOPE.has(state)
-        );
+        return this.holdsWork(session);
+    }
+
+    /** Some run of `session` asks or works, and is not parked for trust. */
+    private holdsWork(session: JoinerSession): boolean {
+        return session.init.scopes.some((id) => {
+            const state = session.state(id);
+            return (
+                state !== undefined &&
+                IN_FLIGHT_SCOPE.has(state) &&
+                !session.parked(id)
+            );
+        });
     }
 
     private inFlightCount(): number {
@@ -1803,10 +2128,168 @@ export class Coordinator {
         }
     }
 
-    /** Runs after every handler: queued sessions, then one evaluation. */
+    /**
+     * Runs after every handler: queued sessions, then one evaluation. In an
+     * access-controlled store, every counted trust scope turning contained
+     * classifies the sessions' parked hashes again (design 4.5 step 8, test
+     * 37): no trust change may follow when the last trust scope adds
+     * nothing, and a Required peer's departure counts too.
+     */
     private settle() {
         this.pump();
+        if (this.ports.trust && this.running) {
+            const contained = this.trustScopesContained();
+            if (contained && !this.trustScopesWere) {
+                this.trustTriggers.scopesContained++;
+                this.reclassifySessions();
+            }
+            this.trustScopesWere = contained;
+        }
         this.evaluate();
+    }
+
+    /**
+     * Every peer that is Required or contained has its trust scope
+     * contained: a trust result the record holds, or the trust run of its
+     * live session contained when that session reopened trust. `left`,
+     * excluded and unconfirmed peers do not count. True in open mode. The
+     * namespace runs' promotion clause (design 4.5 step 8, G3-1).
+     */
+    private trustScopesContained(): boolean {
+        if (!this.ports.trust) return true;
+        for (const entry of this.entries.values()) {
+            if (
+                entry.state !== "contained" &&
+                !BLOCKING_STATES.has(entry.state)
+            ) {
+                continue;
+            }
+            const session = entry.session;
+            if (
+                session &&
+                !session.outcome &&
+                !entry.qualifying &&
+                session.init.scopes.includes(SCOPE_TRUST_V1)
+            ) {
+                if (session.state(SCOPE_TRUST_V1) !== "contained") return false;
+            } else if (!entry.results.has(SCOPE_TRUST_V1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The record trust check (4.2), one in flight per record (a request
+     * meanwhile runs it once more), at one trust epoch: R's identity
+     * (`isTrusted` of the record's key, the readiness signer, which must
+     * hash to R; none, or a throw, is untrusted), and the re-check of every
+     * held result's `rejected-untrusted` signers (a signer trusted, or a
+     * throw, may reverse them). It applies only while the coordinator runs,
+     * the record is contained with the same results, and the epoch is
+     * unchanged; otherwise it runs again. A possible reversal reopens the
+     * record (G3-6). No timer: local reads of J's trust graph.
+     */
+    private checkRecordTrust(entry: Entry) {
+        const trust = this.ports.trust;
+        if (!trust || !this.running || entry.state !== "contained") return;
+        if (entry.trustChecking) {
+            entry.trustAgain = true;
+            return;
+        }
+        entry.trustChecking = true;
+        this.trustChecks++;
+        const run = async () => {
+            do {
+                entry.trustAgain = false;
+                const e0 = this.trustEpoch;
+                const token = entry.trustToken;
+                const key = entry.key;
+                const signers = new Map<string, PublicSignKey>();
+                for (const result of entry.results.values()) {
+                    for (const signer of result.untrusted?.signers ?? []) {
+                        signers.set(signer.hashcode(), signer);
+                    }
+                }
+                const [identity, reversible] = await Promise.all([
+                    key !== undefined && key.hashcode() === entry.hash
+                        ? askTrust(trust, key).catch(() => false)
+                        : Promise.resolve(false),
+                    Promise.all(
+                        [...signers.values()].map((signer) =>
+                            askTrust(trust, signer).catch(() => true)
+                        )
+                    ),
+                ]);
+                if (
+                    !this.running ||
+                    this.entries.get(entry.hash) !== entry ||
+                    entry.state !== "contained"
+                ) {
+                    return;
+                }
+                if (entry.trustToken !== token || this.trustEpoch !== e0) {
+                    entry.trustAgain = true;
+                    continue;
+                }
+                entry.trustCheckedAt = e0;
+                entry.identity = identity ? "trusted" : "untrusted";
+                if (reversible.some(Boolean)) return this.reopenForTrust(entry);
+            } while (entry.trustAgain);
+        };
+        void run()
+            .catch(() => {
+                // Unreachable (every read is caught); the record stays
+                // unchecked, which gates.
+            })
+            .finally(() => {
+                entry.trustChecking = false;
+                this.trustChecks--;
+                if (this.running) this.settle();
+            });
+    }
+
+    /** `satisfied()` found a contained record unchecked at this epoch (3.2). */
+    private recheckTrust() {
+        if (this.trustRecheckPending) return;
+        this.trustRecheckPending = true;
+        void resolved.then(() => {
+            this.trustRecheckPending = false;
+            if (!this.running) return;
+            for (const entry of [...this.entries.values()]) {
+                if (
+                    entry.state === "contained" &&
+                    !entry.trustChecking &&
+                    entry.trustCheckedAt !== this.trustEpoch
+                ) {
+                    this.checkRecordTrust(entry);
+                }
+            }
+        });
+    }
+
+    /**
+     * A contained record whose provisional `rejected-untrusted` rows a
+     * signer trusted now may reverse (2.6, G3-6): its results go, its
+     * qualification with them. Reachable: asked again on both scopes with a
+     * fresh chain. Departed: `left`, with the heads it explained by trust as
+     * its gap (D4): J keeps whatever sync delivers, and the gap is named.
+     */
+    private reopenForTrust(entry: Entry) {
+        let heads = 0;
+        for (const result of entry.results.values()) {
+            heads += result.untrusted?.heads ?? 0;
+        }
+        this.clearResults(entry);
+        entry.qualifying = false;
+        entry.qualifyAfter = undefined;
+        if (entry.departed) {
+            this.closeSession(entry);
+            entry.state = "left";
+            entry.gap = { missing: heads };
+            return;
+        }
+        this.renewChain(entry);
     }
 
     private openSession(entry: Entry, init: SessionInit) {
@@ -1822,6 +2305,8 @@ export class Coordinator {
             onState: (session, scope, state) =>
                 this.onSessionState(session, scope, state),
             onAttempt: (session, info) => this.onAttempt(session, info.last),
+            onParked: (session, scope, parked) =>
+                this.onSessionParked(session, scope, parked),
         };
         const ports: SessionPorts = {
             send: (message) => {
@@ -1836,6 +2321,7 @@ export class Coordinator {
             syncDelivering: (scope) => this.ports.syncDelivering(scope),
             scope: (id) => this.ports.scope(id),
             events,
+            ...(this.sessionTrust ? { trust: this.sessionTrust } : {}),
         };
         let session: JoinerSession;
         try {

@@ -1,3 +1,4 @@
+import { Ed25519Keypair } from "@peerbit/crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { CELL_BYTES, PULL_TIMEOUT_MS } from "../readiness/constants.js";
 import { headDigest } from "../readiness/digest.js";
@@ -15,6 +16,7 @@ import {
 } from "../readiness/session.js";
 import { HeaderV1, ListPageV1, ListV1, OpenV1 } from "../readiness/wire.js";
 import {
+    FakeTrust,
     JoinerWorld,
     bytesOf,
     headOf,
@@ -563,6 +565,57 @@ describe.each(["inline", "worker"] as const)(
             expect(w.j.scope().index.get(rOnly[1].id!)?.head).toBe(
                 rOnly[1].head
             );
+        });
+
+        it("X1: a namespace row refused for a key R's trust snapshot never grants is rejected-untrusted once the trust run contains, and the certificate matches with it in E", async () => {
+            const { w, rOnly } = await build({
+                common: 10,
+                rOnly: 2,
+                scopes: [SCOPE_NAMESPACE_V1, SCOPE_TRUST_V1],
+            });
+            const [refused] = rOnly;
+            expect(refused.scope).toBe(NS);
+            const writer = (await Ed25519Keypair.create()).publicKey;
+            w.rejected.set(refused.head, {
+                permanent: false,
+                reason: "untrusted",
+                signers: [writer],
+            });
+            const anchors = [
+                await anchorOf(w.r.scope(SCOPE_NAMESPACE_V1)),
+                await anchorOf(w.r.scope(SCOPE_TRUST_V1)),
+            ];
+            // J's trust view: R's trust run is the only trust scope that
+            // counts, and the writer is in no row of it.
+            const trust = new FakeTrust();
+            const session = w.session(w.init(), { ports: { trust } });
+            trust.contained = () =>
+                session.state(SCOPE_TRUST_V1) === "contained";
+            session.start();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const outcome = session.outcome!;
+            if (outcome.kind !== "contained") throw new Error(outcome.kind);
+            const [namespace, trustResult] = outcome.results;
+            expect(outcome.results.map((r) => hex(r.anchor))).toEqual(anchors);
+            expect(namespace).toMatchObject({
+                pulled: 2,
+                explained: 1,
+                explainedBy: { "rejected-untrusted": 1 },
+                untrusted: { heads: 1, checkedAt: 0 },
+            });
+            expect(
+                namespace.untrusted!.signers.map((k) => k.hashcode())
+            ).toEqual([writer.hashcode()]);
+            expect(trustResult).toMatchObject({ pulled: 2, explained: 0 });
+            expect(trustResult.untrusted).toBeUndefined();
+            // The oracle accepted both: R's refused row is in E, never in
+            // J's index.
+            expect(w.contained).toEqual(outcome.results);
+            expect(w.j.scope(NS).index.has(refused.id!)).toBe(false);
+            expect(indexOf(w.j, SCOPE_TRUST_V1)).toEqual(
+                indexOf(w.r, SCOPE_TRUST_V1)
+            );
+            expect(session.debug().armedTimers).toBe(0);
         });
 
         describe("a lying responder is never contained", () => {

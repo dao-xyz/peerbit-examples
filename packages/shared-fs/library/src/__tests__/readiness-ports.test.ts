@@ -8,13 +8,14 @@ import {
 } from "@peerbit/crypto";
 import { DeleteOperation, PutOperation } from "@peerbit/document";
 import { Timestamp } from "@peerbit/log";
-import { IdentityRelation } from "@peerbit/trusted-network";
+import { IdentityRelation, TrustedNetwork } from "@peerbit/trusted-network";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+    SharedFileSystem,
     encodePublicSignKey,
     openSharedFs,
     type SharedFsHandle,
@@ -39,6 +40,7 @@ import {
 import type { IdKey } from "../readiness/id-map.js";
 import {
     documentsExplainPorts,
+    installTrustRejectionNotes,
     rejectionOf,
     sessionScopeOf,
     sharedLogPullPorts,
@@ -77,7 +79,9 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * the key the tap holds for the same head, for every row class of both
  * scopes, for local puts and remote arrivals, for CUTs, and for entries
  * that are not rows. The `canPerformEntry` split (index.ts) is pinned here
- * too: each refusal records its own reason through the real runtime hook.
+ * too: each refusal records its own reason through the real runtime hook,
+ * with the signers a trust refusal names; and so are the trust graph's own
+ * refusals, noted by the wrapper of its `canPerform` (PR-3 commit 3).
  */
 
 const until = async (
@@ -131,6 +135,10 @@ const explainOf = async (
 };
 
 const randomHead = () => digestToHead(randomBytes(DIGEST_BYTES));
+
+/** Keys by hashcode, for comparing decoded and original instances. */
+const hashesOf = (keys: readonly PublicSignKey[] | undefined) =>
+    keys?.map((key) => key.hashcode());
 
 const NAMESPACE_CLASSES = [NamingEvent, FileVersion, ChangesetManifest];
 
@@ -1399,20 +1407,33 @@ describe("readiness ports", () => {
                 reason: "structure",
                 permanent: true,
             });
-            expect(report.rejections.get(untrusted.entry.hash)).toEqual({
-                reason: "untrusted",
-                permanent: false,
-            });
+            // A trust refusal names its signers (PR-3 commit 3).
+            const { signers, ...refusal } = report.rejections.get(
+                untrusted.entry.hash
+            )!;
+            expect(refusal).toEqual(rejectionOf("untrusted"));
+            expect(hashesOf(signers)).toEqual([stranger.publicKey.hashcode()]);
             for (const head of heads) {
                 expect(await entriesOf(j).log.log.has(head)).toBe(false);
             }
             // Released with the batch: a later refusal starts unrecorded.
             expect(bundle.rejections.size).toBe(0);
-            expect(
-                await bundle.explainer.afterPull(heads, report.rejections)
-            ).toEqual([
-                { kind: "explained", reason: "rejected-structure" },
-                { kind: "trust-pending" },
+            const verdicts = await bundle.explainer.afterPull(
+                heads,
+                report.rejections
+            );
+            expect(verdicts).toHaveLength(2);
+            expect(verdicts[0]).toEqual({
+                kind: "explained",
+                reason: "rejected-structure",
+            });
+            expect(verdicts[1]).toEqual({
+                kind: "trust-pending",
+                reason: "untrusted",
+                signers: expect.any(Array),
+            });
+            expect(hashesOf((verdicts[1] as any).signers)).toEqual([
+                stranger.publicKey.hashcode(),
             ]);
             bundle.pulls.settled("s", false);
         });
@@ -1663,7 +1684,7 @@ describe("readiness ports", () => {
                 "trust-cache",
                 "transient",
             ];
-            expect(reasons.map(rejectionOf)).toEqual([
+            expect(reasons.map((reason) => rejectionOf(reason))).toEqual([
                 { reason: "structure", permanent: true },
                 { reason: "untrusted", permanent: false },
                 { reason: "trust-cache", permanent: false },
@@ -1676,6 +1697,25 @@ describe("readiness ports", () => {
             expect(record.take(["h"]).get("h")).not.toBe(
                 rejectionOf("structure")
             );
+        });
+
+        it("P1: rejectionOf carries a trust refusal's signers in a new object; other refusals, and none, keep the shared one", async () => {
+            const key = (await Ed25519Keypair.create()).publicKey;
+            for (const reason of ["untrusted", "trust-cache"] as const) {
+                const named = rejectionOf(reason, [key]);
+                expect(named).toEqual({
+                    reason,
+                    permanent: false,
+                    signers: [key],
+                });
+                expect(named).not.toBe(rejectionOf(reason));
+                expect(rejectionOf(reason, [key])).not.toBe(named);
+                expect(rejectionOf(reason, [])).toBe(rejectionOf(reason));
+                expect(rejectionOf(reason)).not.toHaveProperty("signers");
+            }
+            for (const reason of ["structure", "transient"] as const) {
+                expect(rejectionOf(reason, [key])).toBe(rejectionOf(reason));
+            }
         });
     });
 
@@ -1705,11 +1745,16 @@ describe("readiness ports", () => {
             const bundle = runtimeOf(fs).sessionScope(SCOPE_NAMESPACE_V1)!;
             const stranger = await Ed25519Keypair.create();
 
-            /** Refused, with `reason` noted for the tracked head. */
+            /**
+             * Refused, with `reason` noted for the tracked head; a trust
+             * refusal names `signers`, by default every entry signer (the
+             * keys whose trust would reverse it).
+             */
             const refused = async (
                 operation: ReturnType<typeof putOperation>,
                 reason: RejectionReason | undefined,
-                during?: () => void
+                during?: () => void,
+                signers?: PublicSignKey[]
             ) => {
                 const head = operation.entry.hash;
                 bundle.rejections.track([head]);
@@ -1718,8 +1763,19 @@ describe("readiness ports", () => {
                     during?.();
                     expect(await verdict).toBe(reason === undefined);
                     const noted = bundle.rejections.take([head]).get(head);
-                    expect(noted).toEqual(
-                        reason === undefined ? undefined : rejectionOf(reason)
+                    if (reason === undefined) {
+                        expect(noted).toBeUndefined();
+                        return;
+                    }
+                    const { signers: named, ...rest } = noted!;
+                    expect(rest).toEqual(rejectionOf(reason));
+                    expect(hashesOf(named)).toEqual(
+                        reason === "untrusted" || reason === "trust-cache"
+                            ? hashesOf(
+                                  signers ??
+                                      (await operation.entry.getPublicKeys())
+                              )
+                            : undefined
                     );
                 } finally {
                     bundle.rejections.release([head]);
@@ -1800,6 +1856,7 @@ describe("readiness ports", () => {
                 "structure"
             );
             const strangerSignature = await stranger.sign(bm.payloadBytes);
+            // The inner signer is the one whose trust would reverse it.
             await refused(
                 op(
                     copyOf(bm, {
@@ -1807,7 +1864,9 @@ describe("readiness ports", () => {
                         signatureBytes: serialize(strangerSignature),
                     } as any)
                 ),
-                "untrusted"
+                "untrusted",
+                undefined,
+                [stranger.publicKey]
             );
 
             // ChangesetManifest: 4556 cap, 4570 decode, the split `||`, and
@@ -1900,7 +1959,12 @@ describe("readiness ports", () => {
                 ),
                 "structure"
             );
-            await refused(op(await signedManifest({}, stranger)), "untrusted");
+            await refused(
+                op(await signedManifest({}, stranger)),
+                "untrusted",
+                undefined,
+                [stranger.publicKey]
+            );
 
             // 4604: the trust state moved during an inner signer check.
             const trustGraph = program.trustGraph;
@@ -1983,6 +2047,280 @@ describe("readiness ports", () => {
                 rejectionOf("structure")
             );
             bundle.rejections.release([twice]);
+        });
+    });
+
+    describe("trust graph notes (SPEC3 5)", () => {
+        /** A put of `relation` as Documents hands it to `canPerform`. */
+        const relationPut = (
+            relation: IdentityRelation,
+            signers: PublicSignKey[],
+            head = randomHead(),
+            keysRead: Promise<void> = Promise.resolve()
+        ) => ({
+            type: "put",
+            value: relation,
+            entry: {
+                hash: head,
+                getPublicKeys: async () => {
+                    await keysRead;
+                    return signers;
+                },
+            },
+        });
+
+        it("P3: the trust graph's own refusals reach J's trust bundle through a real pull: an untrusted owner, a relation its owner never signed; accepted puts and deletes note nothing; the boolean is the prototype's", async () => {
+            const dPeer = await createPeer();
+            const d = await openSharedFs({
+                peerbit: dPeer,
+                machineLabel: "d",
+                rootKey: dPeer.identity.publicKey,
+                gc: false,
+            });
+            const { fs: j } = await joinFs(dPeer, d, {
+                replicate: false,
+                machineLabel: "observer",
+            });
+            const owner = dPeer.identity.publicKey;
+            const [stranger, x, y, z] = await Promise.all(
+                [0, 1, 2, 3].map(() => Ed25519Keypair.create())
+            );
+            // A donor that keeps what J refuses: its trust store's
+            // canPerform is bypassed for the test.
+            const dTrust = trustStoreOf(d);
+            dTrust._optionCanPerform = async () => true;
+            // Owned and signed by a key J's graph does not trust.
+            const owned = await dTrust.put(
+                new IdentityRelation({
+                    from: stranger.publicKey,
+                    to: x.publicKey,
+                }),
+                { signers: [stranger.sign.bind(stranger)] }
+            );
+            // Owned by the stranger, signed by D: its owner never signed it.
+            const forged = await dTrust.put(
+                new IdentityRelation({
+                    from: stranger.publicKey,
+                    to: y.publicKey,
+                })
+            );
+            // D's own grant: J accepts it.
+            const granted = await dTrust.put(
+                new IdentityRelation({ from: owner, to: z.publicKey })
+            );
+            // A revocation of the stranger's relation, which J never held.
+            const revoked = await dTrust.del(
+                IdentityRelation.id(x.publicKey, stranger.publicKey)
+            );
+
+            const bundle = runtimeOf(j).sessionScope(SCOPE_TRUST_V1)!;
+            expect(bundle).toBeDefined();
+            const heads = [
+                owned.entry.hash,
+                forged.entry.hash,
+                granted.entry.hash,
+                revoked.entry.hash,
+            ];
+            const report = await bundle.pulls.pull("s", heads);
+            const untrusted = report.rejections.get(owned.entry.hash)!;
+            expect({
+                reason: untrusted.reason,
+                permanent: untrusted.permanent,
+            }).toEqual({ reason: "untrusted", permanent: false });
+            expect(hashesOf(untrusted.signers)).toEqual([
+                stranger.publicKey.hashcode(),
+            ]);
+            expect(report.rejections.get(forged.entry.hash)).toEqual({
+                reason: "structure",
+                permanent: true,
+            });
+            expect(report.rejections.has(granted.entry.hash)).toBe(false);
+            expect(report.rejections.has(revoked.entry.hash)).toBe(false);
+            const jTrust = trustStoreOf(j);
+            await until(async () => {
+                expect(await jTrust.log.log.has(granted.entry.hash)).toBe(true);
+            });
+            for (const refused of [owned, forged, revoked]) {
+                expect(await jTrust.log.log.has(refused.entry.hash)).toBe(
+                    false
+                );
+            }
+            const verdicts = await bundle.explainer.afterPull(
+                [owned.entry.hash, forged.entry.hash],
+                report.rejections
+            );
+            expect(verdicts[0]).toMatchObject({
+                kind: "trust-pending",
+                reason: "untrusted",
+            });
+            expect(verdicts[1]).toEqual({
+                kind: "explained",
+                reason: "rejected-structure",
+            });
+            bundle.pulls.settled("s", false);
+
+            // The wrapper never changes the boolean.
+            const network = programOf(j).trustGraph;
+            expect(network.canPerform).not.toBe(
+                TrustedNetwork.prototype.canPerform
+            );
+            const cases = [
+                relationPut(
+                    new IdentityRelation({
+                        from: stranger.publicKey,
+                        to: x.publicKey,
+                    }),
+                    [stranger.publicKey]
+                ),
+                relationPut(
+                    new IdentityRelation({
+                        from: stranger.publicKey,
+                        to: y.publicKey,
+                    }),
+                    [owner]
+                ),
+                relationPut(
+                    new IdentityRelation({ from: owner, to: x.publicKey }),
+                    [owner]
+                ),
+                {
+                    type: "delete",
+                    operation: {
+                        key: IdentityRelation.id(z.publicKey, owner),
+                    },
+                    entry: {
+                        hash: randomHead(),
+                        getPublicKeys: async () => [owner],
+                    },
+                },
+            ];
+            const outcomes: boolean[] = [];
+            for (const properties of cases) {
+                const wrapped = await network.canPerform(properties);
+                outcomes.push(wrapped);
+                expect(wrapped).toBe(
+                    await TrustedNetwork.prototype.canPerform.call(
+                        network,
+                        properties as any
+                    )
+                );
+            }
+            expect(outcomes).toEqual([false, false, true, true]);
+        });
+
+        /** The install marks on a trust graph instance (one per wrapper). */
+        const notesMarks = (network: object) =>
+            Object.getOwnPropertySymbols(network).filter(
+                (symbol) =>
+                    symbol.description === "shared-fs readiness trust notes"
+            ).length;
+
+        it("P4: installed once per instance, a reinstall (every open) replaces only its runtime; the program's bytes and address are unchanged; a check notes into the runtime of its start", async () => {
+            const peer = await createPeer();
+            const fs = await openSharedFs({
+                peerbit: peer,
+                machineLabel: "notes",
+                rootKey: peer.identity.publicKey,
+                gc: false,
+            });
+            const program = programOf(fs);
+            const network = program.trustGraph;
+            const wrapper = network.canPerform;
+            expect(
+                Object.getOwnPropertyDescriptor(network, "canPerform")?.value
+            ).toBe(wrapper);
+            expect(wrapper).not.toBe(TrustedNetwork.prototype.canPerform);
+            expect(notesMarks(network)).toBe(1);
+
+            // No borsh field: the program's bytes, which its address names,
+            // equal those of a copy without the wrapper, and a joiner that
+            // opens the address decodes the same bytes (and installs its
+            // own wrapper on its own instance).
+            const bytes = serialize(program);
+            const copy: any = deserialize(bytes, SharedFileSystem);
+            expect(
+                Object.getOwnPropertyDescriptor(copy.trustGraph, "canPerform")
+            ).toBeUndefined();
+            expect(serialize(copy)).toEqual(bytes);
+            const { fs: joiner } = await joinFs(peer, fs, {
+                replicate: false,
+                machineLabel: "address-check",
+            });
+            expect(joiner.address).toBe(fs.address);
+            expect(serialize(programOf(joiner))).toEqual(bytes);
+            expect(notesMarks(programOf(joiner).trustGraph)).toBe(1);
+
+            // A refusal whose entry keys are read only after the next open
+            // installed again (as `open` does before the trust graph opens).
+            const [stranger, x] = await Promise.all([
+                Ed25519Keypair.create(),
+                Ed25519Keypair.create(),
+            ]);
+            const first = runtimeOf(fs);
+            const notedFirst = vi.spyOn(first, "noteRejection");
+            let readKeys!: () => void;
+            const keysRead = new Promise<void>(
+                (resolve) => (readKeys = resolve)
+            );
+            const spanning = relationPut(
+                new IdentityRelation({
+                    from: stranger.publicKey,
+                    to: x.publicKey,
+                }),
+                [stranger.publicKey],
+                randomHead(),
+                keysRead
+            );
+            const verdict = network.canPerform(spanning);
+            const next = {
+                noteRejection: vi.fn(),
+            };
+            installTrustRejectionNotes(network, () => next);
+            // One wrapper, its runtime getter replaced.
+            expect(network.canPerform).toBe(wrapper);
+            expect(notesMarks(network)).toBe(1);
+            readKeys();
+            expect(await verdict).toBe(false);
+            expect(notedFirst).toHaveBeenCalledTimes(1);
+            expect(notedFirst.mock.calls[0].slice(0, 3)).toEqual([
+                SCOPE_TRUST_V1,
+                spanning.entry.hash,
+                "untrusted",
+            ]);
+            expect(hashesOf(notedFirst.mock.calls[0][3])).toEqual([
+                stranger.publicKey.hashcode(),
+            ]);
+            expect(next.noteRejection).not.toHaveBeenCalled();
+            // A check that starts now notes into the new runtime.
+            const later = relationPut(
+                new IdentityRelation({
+                    from: stranger.publicKey,
+                    to: x.publicKey,
+                }),
+                [stranger.publicKey]
+            );
+            expect(await network.canPerform(later)).toBe(false);
+            expect(next.noteRejection).toHaveBeenCalledTimes(1);
+            expect(next.noteRejection.mock.calls[0].slice(0, 3)).toEqual([
+                SCOPE_TRUST_V1,
+                later.entry.hash,
+                "untrusted",
+            ]);
+            expect(notedFirst).toHaveBeenCalledTimes(1);
+            // Without a runtime nothing is noted, and the boolean holds.
+            installTrustRejectionNotes(network, () => undefined);
+            expect(
+                await network.canPerform(
+                    relationPut(
+                        new IdentityRelation({
+                            from: stranger.publicKey,
+                            to: x.publicKey,
+                        }),
+                        [stranger.publicKey]
+                    )
+                )
+            ).toBe(false);
+            expect(next.noteRejection).toHaveBeenCalledTimes(1);
         });
     });
 });

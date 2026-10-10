@@ -101,6 +101,7 @@ import {
     type ReadinessStatus,
 } from "./readiness/coordinator.js";
 import type { RejectionReason } from "./readiness/explain.js";
+import { installTrustRejectionNotes } from "./readiness/ports.js";
 import { PeerbitTransport } from "./readiness/reachability.js";
 import type { ProvenanceState } from "./readiness/responder.js";
 import { ReadinessRuntime, logIdOf } from "./readiness/runtime.js";
@@ -3521,6 +3522,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // that log replicates dispatches its change event.
         if (this.trustGraph) {
             readinessRuntime.attachTrust(this.trustGraph.trustGraph);
+            // Its own refusals tell the readiness runtime why, as
+            // canPerformEntry's do: a wrapper of this instance's canPerform,
+            // which the open binds (no borsh field).
+            installTrustRejectionNotes(
+                this.trustGraph,
+                () => this.readinessRuntime
+            );
         }
         // The trust graph is tiny and gates every write; always keep a full
         // copy so signature checks never depend on which peer holds a relation.
@@ -3680,8 +3688,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 if (this.disposalPreparationRunning) {
                     this.disposalContentGeneration++;
                 }
-                // Hashes a readiness session parked as trust-pending are
-                // classified again (G2-10).
+                // The readiness join's trust epoch moves: parked hashes and
+                // contained peers' trust are checked again (G2-10).
                 this.readinessRuntime?.onTrustChange();
             };
             this.trustChangeListener = trustChangeListener;
@@ -4535,11 +4543,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // boolean never depends on it. Captured now, so a check that spans
         // a reopen notes into its own generation (G2-23).
         const readiness = this.readinessRuntime;
-        const reject = (reason: RejectionReason) => {
+        // `signers`: for a trust refusal, the keys whose trust would reverse
+        // it.
+        const reject = (
+            reason: RejectionReason,
+            signers?: readonly PublicSignKey[]
+        ) => {
             readiness?.noteRejection(
                 SCOPE_NAMESPACE_V1,
                 operation?.entry?.hash,
-                reason
+                reason,
+                signers
             );
             return false;
         };
@@ -4629,7 +4643,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.trustGraph &&
                     !(await this.trustGraph.isTrusted(signature.publicKey))
                 ) {
-                    return reject("untrusted");
+                    return reject("untrusted", [signature.publicKey]);
                 }
             }
             if (value instanceof ChangesetManifest) {
@@ -4695,7 +4709,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     this.trustGraph &&
                     !(await this.trustGraph.isTrusted(signature.publicKey))
                 ) {
-                    return reject("untrusted");
+                    return reject("untrusted", [signature.publicKey]);
                 }
             }
         }
@@ -4752,7 +4766,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 return true;
             }
         }
-        return reject(judged ? "untrusted" : "trust-cache");
+        return reject(judged ? "untrusted" : "trust-cache", keys);
     }
 
     get accessControlled() {
@@ -11348,6 +11362,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     log: this.entries.log,
                 }),
             hlcProved: 0n,
+            // An access-controlled store's join reads this open's trust
+            // graph; once the open is gone it rejects, which gates.
+            ...(this.trustGraph
+                ? {
+                      trust: {
+                          isTrusted: async (key: PublicSignKey) => {
+                              const trustGraph = this.trustGraph;
+                              if (
+                                  !trustGraph ||
+                                  generation !== this.openGeneration
+                              ) {
+                                  throw new Error(
+                                      "readiness: this open's trust graph is gone"
+                                  );
+                              }
+                              return trustGraph.isTrusted(key);
+                          },
+                      },
+                  }
+                : {}),
             onEvaluate: ({ satisfied, changed }) => {
                 if (
                     satisfied &&

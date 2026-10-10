@@ -16,10 +16,19 @@ import {
     type StatusContext,
     type TransportEvent,
 } from "../readiness/coordinator.js";
-import { Explainer, RejectionRecord } from "../readiness/explain.js";
+import {
+    Explainer,
+    RejectionRecord,
+    type Rejection,
+} from "../readiness/explain.js";
+import { PROOF_MAX_RECORDS } from "../readiness/proof.js";
 import { PullQueue } from "../readiness/pull-queue.js";
 import { Responder, type ProvenanceState } from "../readiness/responder.js";
-import { SCOPE_NAMESPACE_V1, type ScopeId } from "../readiness/scopes.js";
+import {
+    SCOPE_NAMESPACE_V1,
+    SCOPE_TRUST_V1,
+    type ScopeId,
+} from "../readiness/scopes.js";
 import {
     JoinerSession,
     MAX_RENEWALS,
@@ -49,7 +58,9 @@ import {
     FakePeer,
     FakeScope,
     FakeTimers,
+    FakeTrust,
     bytesOf,
+    checkExplainedAtContainment,
     copyMessage,
     headOf,
     hex,
@@ -70,9 +81,14 @@ import {
  * Every contained session is checked by an oracle against the fake stores
  * (R's snapshot within J's index plus E at the certificate's sequence
  * point), and every finished session must hold no armed timer.
+ *
+ * An access-controlled world (PR-3 commit 3, SPEC3 9.5) adds the trust scope
+ * to J and every peer, a `canPerform` hook on J's join, and J's trust graph
+ * as a `FakeTrust`.
  */
 
 const NS = SCOPE_NAMESPACE_V1;
+const TRUST = SCOPE_TRUST_V1;
 
 const CREATOR: ProvenanceState = {
     writeReady: true,
@@ -187,6 +203,14 @@ type Holder = FakePeer;
 
 class World {
     static readonly created: World[] = [];
+    /** The scopes of J and every peer: the trust scope in an ACL world. */
+    scopeIds: ScopeId[] = [NS];
+    /** J's trust graph (an ACL world); the coordinator's `trust` port. */
+    trust?: FakeTrust;
+    /** canPerform on J's join: heads it refuses, and why. */
+    readonly rejected = new Map<string, Rejection>();
+    /** A join of one scope waits for this too (or its timeout). */
+    readonly scopeGates = new Map<ScopeId, Promise<void>>();
     readonly clock = new FakeTimers();
     readonly blocks = new Map<string, Entry>();
     readonly cellKey = cellKey("readiness-coordinator-test");
@@ -216,43 +240,51 @@ class World {
     started: Promise<void> = Promise.resolve();
     private labels = 0;
 
-    static async create(): Promise<World> {
+    static async create(options: { trust?: boolean } = {}): Promise<World> {
         const world = new World();
         World.created.push(world);
+        if (options.trust) {
+            world.scopeIds = [NS, TRUST];
+            world.trust = new FakeTrust();
+        }
         world.host = await AnchorHost.create({ mode: "inline" });
         world.j = new FakePeer("J", (await Ed25519Keypair.create()).publicKey);
         world.transport.self = world.j.hash;
-        const scope = world.addScope(world.j);
-        world.pulls.set(
-            NS,
-            new PullQueue(
-                {
-                    join: (heads, options) => world.join(NS, heads, options),
-                    subscribe: (listener) =>
-                        scope.tap.addSink({ apply: () => listener() }),
-                },
-                new RejectionRecord()
-            )
-        );
-        world.explainers.set(NS, new Explainer(scope.explainPorts()));
+        for (const id of world.scopeIds) {
+            const scope = world.addScope(world.j, id);
+            world.pulls.set(
+                id,
+                new PullQueue(
+                    {
+                        join: (heads, options) =>
+                            world.join(id, heads, options),
+                        subscribe: (listener) =>
+                            scope.tap.addSink({ apply: () => listener() }),
+                    },
+                    new RejectionRecord()
+                )
+            );
+            world.explainers.set(id, new Explainer(scope.explainPorts()));
+        }
         return world;
     }
 
-    private addScope(peer: FakePeer): FakeScope {
-        const scope = new FakeScope(this, NS, bytesOf(`log-${NS}`), this.host);
-        peer.scopes.set(NS, scope);
+    private addScope(peer: FakePeer, id: ScopeId = NS): FakeScope {
+        const scope = new FakeScope(this, id, bytesOf(`log-${id}`), this.host);
+        peer.scopes.set(id, scope);
         return scope;
     }
 
     async peer(name: string, options: PeerOptions = {}): Promise<Peer> {
         const key = (await Ed25519Keypair.create()).publicKey;
         const peer = new Peer(name, key, options.provenance ?? CREATOR);
-        const scope = this.addScope(peer);
+        for (const id of this.scopeIds) this.addScope(peer, id);
         peer.responder = new Responder(
             {
                 openNonce: peer.openNonce,
-                scope: (id) =>
-                    id === NS
+                scope: (id) => {
+                    const scope = peer.scopes.get(id);
+                    return scope
                         ? {
                               descriptor: scope.descriptor,
                               tap: scope.tap,
@@ -260,7 +292,8 @@ class World {
                               logId: scope.logId,
                               started: Promise.resolve(),
                           }
-                        : undefined,
+                        : undefined;
+                },
                 answering: () => peer.up,
             },
             {
@@ -280,10 +313,12 @@ class World {
 
     // ---------------------------------------------------------------- rows
 
-    row(id: string, modified: bigint): Entry {
+    row(id: string, modified: bigint, scope: ScopeId = NS): Entry {
         const entry: Entry = {
-            head: headOf(`row:${id}:${modified}:${this.labels++}`),
-            scope: NS,
+            head: headOf(
+                `row:${scope === NS ? "" : `${scope}:`}${id}:${modified}:${this.labels++}`
+            ),
+            scope,
             kind: "row",
             id,
             modified,
@@ -293,12 +328,18 @@ class World {
         return entry;
     }
 
-    /** `n` rows on every holder (ids `${prefix}${i}`). */
-    rows(holders: Holder[], n: number, prefix: string, base = 1000): Entry[] {
+    /** `n` rows of `scope` on every holder (ids `${prefix}${i}`). */
+    rows(
+        holders: Holder[],
+        n: number,
+        prefix: string,
+        base = 1000,
+        scope: ScopeId = NS
+    ): Entry[] {
         const out: Entry[] = [];
         for (let i = 0; i < n; i++) {
-            const entry = this.row(`${prefix}${i}`, BigInt(base + i));
-            for (const holder of holders) holder.scope(NS).receive(entry);
+            const entry = this.row(`${prefix}${i}`, BigInt(base + i), scope);
+            for (const holder of holders) holder.scope(scope).receive(entry);
             out.push(entry);
         }
         return out;
@@ -307,7 +348,7 @@ class World {
     /** Seeds every tap and verifies its count. */
     async start() {
         for (const holder of [this.j, ...this.peers]) {
-            await holder.scope(NS).start();
+            for (const scope of holder.scopes.values()) await scope.start();
         }
     }
 
@@ -326,7 +367,7 @@ class World {
     ) {
         this.joins.push([...heads]);
         await Promise.resolve();
-        const gate = this.joinGate;
+        const gate = this.scopeGates.get(scope) ?? this.joinGate;
         if (gate) {
             let handle: unknown;
             const timedOut = new Promise<void>((_, reject) => {
@@ -350,6 +391,11 @@ class World {
                     (peer) => peer.up && peer.scopes.get(scope)?.log.has(head)
                 )
             ) {
+                continue;
+            }
+            const rejection = this.rejected.get(head);
+            if (rejection) {
+                this.pulls.get(scope)!.rejections.note(head, rejection);
                 continue;
             }
             target.receive(entry);
@@ -474,7 +520,8 @@ class World {
         const coordinator = new Coordinator({
             transport: this.transport,
             send: (message, to) => this.toPeer(to, message),
-            scopes: [NS],
+            scopes: this.scopeIds,
+            ...(this.trust ? { trust: this.trust } : {}),
             scope: (id) => this.scopePorts(id),
             started: () => this.started,
             hlcProved: 0n,
@@ -581,8 +628,9 @@ class World {
     }
 
     /**
-     * S_R is a subset of J's index plus E at the certificate's seq, and E
-     * holds nothing J indexed then (read from the fake stores).
+     * S_R is a subset of J's index plus E at the certificate's seq, E
+     * holds nothing J indexed then, and E at containment still explains
+     * every row of it J does not index (read from the fake stores).
      */
     private oracle(result: SessionResult) {
         const peer = this.peerOf(result.peer);
@@ -620,6 +668,12 @@ class World {
                 throw new Error("oracle: E holds a row J indexed");
             }
         }
+        checkExplainedAtContainment(result, certificate, j);
+    }
+
+    /** A peer's session's debug of `scope` (its live session). */
+    scopeDebug(peer: FakePeer, scope: ScopeId = NS) {
+        return this.record(peer).session?.debug().scopes[scope];
     }
 
     dispose() {
@@ -2398,6 +2452,11 @@ class ScriptedSession {
         return scope === NS ? this.state0 : undefined;
     }
 
+    /** A scripted run never parks for trust. */
+    parked() {
+        return false;
+    }
+
     debug() {
         return {
             scopes: {
@@ -2466,12 +2525,16 @@ class ScriptedSession {
     }
 
     /** A contained result of this session. */
-    result(qualified: boolean, source: SessionResult["source"] = "creator") {
+    result(
+        qualified: boolean,
+        source: SessionResult["source"] = "creator",
+        scope: ScopeId = NS
+    ) {
         const result: SessionResult = {
             peer: this.peer,
             sessionId: this.sessionId,
             openNonce: bytesOf(`scripted-nonce-${this.peer}`).slice(0, 16),
-            scope: NS,
+            scope,
             count: 0,
             hlc: 0n,
             anchor: new Uint8Array(32),
@@ -2873,5 +2936,1033 @@ describe("readiness coordinator: scripted sessions", () => {
         w.transport.emit({ kind: "subscribe", peer: a.hash, key: a.key });
         await settle();
         expect(of(a)).toHaveLength(1);
+    });
+});
+
+describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
+    const keyOf = async () => (await Ed25519Keypair.create()).publicKey;
+
+    /**
+     * An access-controlled world: J and `peers`, `common` rows of both
+     * scopes on everyone, every peer's identity trusted by J's graph.
+     */
+    const aclWorldWith = async (
+        peers: Array<[string, PeerOptions?]>,
+        common = 8
+    ) => {
+        const w = await World.create({ trust: true });
+        const out: Peer[] = [];
+        for (const [name, options] of peers) {
+            out.push(await w.peer(name, options));
+        }
+        w.rows([w.j, ...out], common, "c");
+        w.rows([w.j, ...out], common, "tc", 1000, TRUST);
+        for (const peer of out) w.trust!.trusted.add(peer.hash);
+        return { w, trust: w.trust!, peers: out };
+    };
+
+    /** A namespace row only `peer` holds, which J refuses for `writer`. */
+    const refusedRow = (w: World, peer: Peer, writer: PublicSignKey) => {
+        const [row] = w.rows([peer], 1, `x-${peer.name}-`, 5000);
+        w.rejected.set(row.head, {
+            permanent: false,
+            reason: "untrusted",
+            signers: [writer],
+        });
+        return row;
+    };
+
+    /** `peer`'s namespace run holds the parked hash, no pass in flight. */
+    const parked = (w: World, peer: Peer) => {
+        const debug = w.scopeDebug(peer);
+        return debug?.trustPending === 1 && !debug.trustChecking;
+    };
+
+    describe("C1: every counted trust scope contained classifies the parked hashes again", () => {
+        it("the last trust run contains", async () => {
+            const { w, peers } = await aclWorldWith([["A"], ["B"]]);
+            const [a, b] = peers;
+            refusedRow(w, b, await keyOf());
+            await w.start();
+            // A's trust header takes a slow route.
+            a.hooks.delayToJ = (m) =>
+                m instanceof HeaderV1 && m.scope === TRUST ? 1000 : 0;
+            const coordinator = w.run();
+            await w.until(
+                () =>
+                    parked(w, b) &&
+                    w.record(b).session?.state(TRUST) === "contained",
+                "B parked, its own trust contained"
+            );
+            await settle();
+            expect(w.scopeDebug(b)).toMatchObject({
+                state: "draining",
+                untrusted: 0,
+            });
+            expect(w.stateOf(a)).toBe("asking");
+            const reclassify = vi.spyOn(w.record(b).session!, "reclassify");
+            const before = coordinator.debug().trustTriggers;
+            await w.clock.advanceSettled(1000);
+            await w.until(() => w.stateOf(b) === "contained", "B contained");
+            expect(coordinator.debug().trustTriggers).toMatchObject({
+                change: 0,
+                scopesContained: before.scopesContained + 1,
+            });
+            expect(reclassify).toHaveBeenCalled();
+            expect(w.record(b).results.get(NS)?.explainedBy).toEqual({
+                "rejected-untrusted": 1,
+            });
+            await w.until(() => coordinator.satisfied(), "satisfied");
+        });
+
+        it("the last Required peer without a trust scope leaves", async () => {
+            const { w, peers } = await aclWorldWith([["A"], ["B"]]);
+            const [a, b] = peers;
+            refusedRow(w, b, await keyOf());
+            await w.start();
+            a.hooks.toPeer = () => null;
+            const coordinator = w.run();
+            await w.until(() => parked(w, b), "B parked");
+            const before = coordinator.debug().trustTriggers.scopesContained;
+            w.transport.reachable.set(a.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: a.hash,
+            });
+            await settle();
+            // Blocking until its attempt ends: it still counts.
+            expect(w.stateOf(a)).toBe("left-unanswered");
+            expect(w.scopeDebug(b)!.untrusted).toBe(0);
+            await w.clock.advanceSettled(5000);
+            await w.until(() => w.stateOf(b) === "contained", "B contained");
+            expect(w.stateOf(a)).toBe("left");
+            expect(coordinator.debug().trustTriggers.scopesContained).toBe(
+                before + 1
+            );
+            await w.until(() => coordinator.satisfied(), "satisfied");
+        });
+
+        it("an unconfirmed peer never counts", async () => {
+            const { w, peers } = await aclWorldWith([
+                ["U", { subscriber: false, replicator: true }],
+                ["B"],
+            ]);
+            const [u, b] = peers;
+            refusedRow(w, b, await keyOf());
+            await w.start();
+            u.hooks.toPeer = () => null;
+            const coordinator = w.run();
+            await w.until(() => parked(w, b), "B parked");
+            expect(w.stateOf(u)).toBe("asking");
+            const before = coordinator.debug().trustTriggers.scopesContained;
+            await w.clock.advanceSettled(5000);
+            await w.until(() => w.stateOf(b) === "contained", "B contained");
+            expect(w.stateOf(u)).toBe("unconfirmed");
+            expect(coordinator.debug().trustTriggers.scopesContained).toBe(
+                before + 1
+            );
+            await w.until(() => coordinator.satisfied(), "satisfied");
+        });
+
+        it("an excluded peer never counts", async () => {
+            const { w, peers } = await aclWorldWith([["X"], ["B"]]);
+            const [x, b] = peers;
+            refusedRow(w, b, await keyOf());
+            await w.start();
+            // X's headers come late and claim an empty set over a non-empty
+            // set hash: excluded-inconsistent, with no trust result.
+            x.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 1000 : 0);
+            x.hooks.toJ = (m) => {
+                if (m instanceof HeaderV1) m.count = 0;
+                return m;
+            };
+            const coordinator = w.run();
+            await w.until(
+                () =>
+                    parked(w, b) &&
+                    w.record(b).session?.state(TRUST) === "contained",
+                "B parked, its own trust contained"
+            );
+            await settle();
+            expect(w.stateOf(x)).toBe("asking");
+            expect(w.scopeDebug(b)!.untrusted).toBe(0);
+            const before = coordinator.debug().trustTriggers.scopesContained;
+            await w.clock.advanceSettled(1000);
+            await w.until(() => w.stateOf(b) === "contained", "B contained");
+            expect(w.stateOf(x)).toBe("excluded-inconsistent");
+            expect(coordinator.debug().trustTriggers.scopesContained).toBe(
+                before + 1
+            );
+            expect(w.record(b).results.get(NS)?.explainedBy).toEqual({
+                "rejected-untrusted": 1,
+            });
+            await w.until(() => coordinator.satisfied(), "satisfied");
+        });
+    });
+
+    it("C2: a header-qualified donor qualifies only with an identity J trusts at the current epoch; granted, revoked and unreadable", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        trust.trusted.delete(r.hash);
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => w.record(r).identity === "untrusted", "checked");
+        expect(w.stateOf(r)).toBe("contained");
+        // `qualified` keeps its header meaning; the predicate reads both.
+        expect(w.record(r).qualified).toBe(true);
+        expect(coordinator.satisfied()).toBe(false);
+        const status = w.status();
+        expect(status.state).toBe("no-qualified-donor");
+        expect(status.contained).toEqual([
+            expect.objectContaining({
+                peer: r.hash,
+                qualified: false,
+                identity: "untrusted",
+            }),
+        ]);
+        expect(describeReadiness(status)).toBe(
+            `no-qualified-donor: 1 peer contained, none qualified: ${r.hash} (creator, untrusted identity)`
+        );
+        expect(coordinator.debug().armedTimers).toBe(0);
+
+        // Granted: one trust change qualifies it.
+        trust.trusted.add(r.hash);
+        coordinator.trustChanged();
+        expect(w.record(r).identity).toBe("checking");
+        expect(coordinator.satisfied()).toBe(false);
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(w.status().contained[0]).toMatchObject({
+            qualified: true,
+            identity: "trusted",
+        });
+
+        // Revoked again.
+        trust.trusted.delete(r.hash);
+        coordinator.trustChanged();
+        await w.until(() => w.record(r).identity === "untrusted", "revoked");
+        expect(coordinator.satisfied()).toBe(false);
+
+        // A read that throws is untrusted.
+        trust.trusted.add(r.hash);
+        trust.throwing.add(r.hash);
+        coordinator.trustChanged();
+        await w.until(
+            () => w.record(r).trustCheckedAt === coordinator.debug().trustEpoch,
+            "checked at epoch 3"
+        );
+        expect(w.record(r).identity).toBe("untrusted");
+        expect(coordinator.satisfied()).toBe(false);
+    });
+
+    it("C2: the identity is R's own key: a record whose key hashes to another peer is untrusted whatever J's graph says", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        const other = await keyOf();
+        w.transport.subscribed.set(r.hash, other);
+        trust.isTrusted = async () => true;
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => w.record(r).identity === "untrusted", "checked");
+        expect(w.record(r).key?.hashcode()).toBe(other.hashcode());
+        expect(coordinator.satisfied()).toBe(false);
+    });
+
+    it("C2: the proof records the predicate's view: a header-qualified donor J does not trust is not qualified there either", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        trust.trusted.delete(r.hash);
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => w.record(r).identity === "untrusted", "checked");
+        expect(w.record(r).qualified).toBe(true);
+        expect(w.status().contained[0].qualified).toBe(false);
+        expect(
+            coordinator.proof().contained.map(({ scope, qualified }) => ({
+                scope,
+                qualified,
+            }))
+        ).toEqual([
+            { scope: "namespace-v1", qualified: false },
+            { scope: "trust-v1", qualified: false },
+        ]);
+        trust.trusted.add(r.hash);
+        coordinator.trustChanged();
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(
+            coordinator.proof().contained.map(({ qualified }) => qualified)
+        ).toEqual([true, true]);
+    });
+
+    it("C2: with more records than the proof holds, the cut keeps the donor the predicate counted, ahead of newer replicas J does not trust", async () => {
+        const w = await World.create({ trust: true });
+        const untrusted: Peer[] = [];
+        for (let i = 0; i < PROOF_MAX_RECORDS; i++) {
+            untrusted.push(await w.peer(`U${i}`));
+        }
+        const donor = await w.peer("D");
+        w.rows([w.j, ...untrusted, donor], 4, "c");
+        w.rows([w.j, ...untrusted, donor], 2, "tc", 1000, TRUST);
+        // Each unauthorized replica holds one newer row J accepts, so its
+        // snapshot hlc is above the donor's.
+        untrusted.forEach((peer, i) => w.rows([peer], 1, `n${i}-`, 9000 + i));
+        w.trust!.trusted.add(donor.hash);
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => coordinator.satisfied(), "satisfied", 200_000);
+        expect(
+            w
+                .status()
+                .contained.filter(({ qualified }) => qualified)
+                .map(({ peer }) => peer)
+        ).toEqual([donor.hash]);
+        const proof = coordinator.proof();
+        expect(proof.contained).toHaveLength(PROOF_MAX_RECORDS);
+        expect(
+            proof.contained
+                .filter(({ qualified }) => qualified)
+                .map(({ peer, scope }) => ({ peer, scope }))
+        ).toEqual([
+            { peer: donor.hash, scope: "namespace-v1" },
+            { peer: donor.hash, scope: "trust-v1" },
+        ]);
+    });
+
+    describe("C3: a contained record whose rejected-untrusted signer may be trusted now", () => {
+        /** R contained with one row explained by trust; J satisfied. */
+        const explained = async () => {
+            const { w, trust, peers } = await aclWorldWith([["R"]]);
+            const [r] = peers;
+            const writer = await keyOf();
+            const row = refusedRow(w, r, writer);
+            await w.start();
+            const coordinator = w.run();
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            expect(w.record(r).results.get(NS)?.untrusted).toMatchObject({
+                heads: 1,
+            });
+            return { w, trust, r, writer, row, coordinator };
+        };
+
+        it("reachable: its results go and it is asked again on both scopes with a fresh chain", async () => {
+            const { w, trust, r, writer, row, coordinator } = await explained();
+            trust.trusted.add(writer.hashcode());
+            w.rejected.delete(row.head);
+            // The new session's pull is held, so the reopened record shows.
+            let open!: () => void;
+            w.joinGate = new Promise<void>((resolve) => (open = resolve));
+            coordinator.trustChanged();
+            await w.until(
+                () =>
+                    w.sessionsOf(r).length === 2 &&
+                    w.stateOf(r) === "reconciling",
+                "asked again"
+            );
+            const record = w.record(r);
+            expect(record.results.size).toBe(0);
+            expect(record.qualified).toBe(false);
+            expect(record.identity).toBeUndefined();
+            const second = w.sessionsOf(r)[1];
+            expect(second.init.scopes).toEqual([NS, TRUST]);
+            expect(second.init.ladder).toEqual({
+                stage: "first",
+                fetchRenewed: false,
+                renewals: 0,
+            });
+            expect(coordinator.satisfied()).toBe(false);
+            open();
+            await w.until(() => coordinator.satisfied(), "satisfied again");
+            expect(w.record(r).results.get(NS)?.explainedBy).toEqual({});
+            expect(w.record(r).results.get(NS)?.untrusted).toBeUndefined();
+            expect(w.jIndex().get(row.id!)).toBe(row.head);
+        });
+
+        it("departed: left, with the rows it explained by trust as its gap", async () => {
+            const { w, trust, r, writer, coordinator } = await explained();
+            w.transport.reachable.set(r.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: r.hash,
+            });
+            await settle();
+            expect(w.stateOf(r)).toBe("contained");
+            expect(w.record(r).departed).toBe(true);
+            trust.trusted.add(writer.hashcode());
+            coordinator.trustChanged();
+            await w.until(() => w.stateOf(r) === "left", "left");
+            expect(w.record(r).gap).toEqual({ missing: 1 });
+            expect(w.record(r).results.size).toBe(0);
+            expect(w.status().gaps).toEqual([{ peer: r.hash, missing: 1 }]);
+            expect(coordinator.proof().gaps).toEqual([
+                { peer: r.hash, missing: 1 },
+            ]);
+            expect(coordinator.satisfied()).toBe(false);
+            expect(w.sessionsOf(r)).toHaveLength(1);
+        });
+
+        it("a re-check that throws reopens it too", async () => {
+            const { w, trust, r, writer, coordinator } = await explained();
+            trust.throwing.add(writer.hashcode());
+            coordinator.trustChanged();
+            await w.until(() => w.sessionsOf(r).length === 2, "asked again");
+            await settle(100);
+            // The new session cannot read the writer either: the row is
+            // pulled again once, then waits (never explained on a throw).
+            expect(w.stateOf(r)).toBe("reconciling");
+            expect(w.scopeDebug(r)).toMatchObject({
+                trustPending: 1,
+                untrusted: 0,
+            });
+            expect(coordinator.satisfied()).toBe(false);
+        });
+
+        it("a trust change between R's C2 and the digest's match: R is contained only once J indexes the row, never satisfied without it", async () => {
+            const { w, trust, peers } = await aclWorldWith([["R"]]);
+            const [r] = peers;
+            const writer = await keyOf();
+            const row = refusedRow(w, r, writer);
+            await w.start();
+            // R's namespace C2 with the provisional row in E: its digest
+            // waits (in production a worker round trip).
+            const lanes = w.j.scope(NS).laneSet;
+            const digestNow = lanes.digestNow.bind(lanes);
+            let release!: () => void;
+            const gate = new Promise<void>((resolve) => (release = resolve));
+            let held = false;
+            lanes.digestNow = (sub, add) => {
+                const answer = digestNow(sub, add);
+                if (held || (add?.length ?? 0) === 0) return answer;
+                held = true;
+                return {
+                    seq: answer.seq,
+                    digest: answer.digest.then(async (digest) => {
+                        await gate;
+                        return digest;
+                    }),
+                };
+            };
+            const coordinator = w.run();
+            await w.until(() => held, "R's C2 with the row in E");
+            expect(w.scopeDebug(r)!.untrusted).toBe(1);
+            // The writer's grant reaches J's graph while the digest is out.
+            trust.trusted.add(writer.hashcode());
+            w.rejected.delete(row.head);
+            coordinator.trustChanged();
+            await w.until(() => {
+                const debug = w.scopeDebug(r);
+                return debug?.untrusted === 0 && !debug.trustChecking;
+            }, "the pass moved the row back to D");
+            release();
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            expect(w.jIndex().get(row.id!)).toBe(row.head);
+            const result = w.record(r).results.get(NS)!;
+            expect(result.explainedBy).toEqual({});
+            expect(result.untrusted).toBeUndefined();
+            expect(result.certificates).toBe(2);
+        });
+
+        it("a reopen while R's qualification session runs: the record leaves the qualification, and is contained and qualified again", async () => {
+            const { w, trust, peers } = await aclWorldWith([
+                ["G", { provenance: GATED }],
+            ]);
+            const [g] = peers;
+            const writer = await keyOf();
+            const row = refusedRow(w, g, writer);
+            await w.start();
+            const coordinator = w.run();
+            await w.until(
+                () =>
+                    w.stateOf(g) === "contained" &&
+                    w.record(g).identity === "trusted",
+                "G contained and checked"
+            );
+            const record = w.record(g);
+            expect(record.qualified).toBe(false);
+            expect(record.results.get(NS)?.untrusted).toMatchObject({
+                heads: 1,
+            });
+            // G turns ready; its qualification session's headers come late.
+            g.provenance = RECONCILED;
+            g.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 1000 : 0);
+            g.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
+            await w.until(
+                () => record.sessionsOpened === 2 && record.qualifying,
+                "qualification session"
+            );
+            // The writer is trusted now: the record reopens mid-qualification.
+            trust.trusted.add(writer.hashcode());
+            w.rejected.delete(row.head);
+            coordinator.trustChanged();
+            await w.until(() => record.sessionsOpened === 3, "reopened");
+            expect(record.qualifying).toBe(false);
+            expect(record.results.size).toBe(0);
+            expect(record.state).toBe("asking");
+            await w.clock.advanceSettled(1000);
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            expect(record).toMatchObject({
+                state: "contained",
+                qualified: true,
+                identity: "trusted",
+            });
+            expect(w.jIndex().get(row.id!)).toBe(row.head);
+            expect(coordinator.debug().armedTimers).toBe(0);
+        });
+    });
+
+    it("C5: a record check in flight is waiting-trust with nothing armed; it completes and J is satisfied", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        await w.start();
+        const release = trust.hold();
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(r) === "contained", "R contained");
+        await settle();
+        expect(coordinator.satisfied()).toBe(false);
+        const status = w.status();
+        expect(status.state).toBe("waiting-trust");
+        expect(status.trustChecking).toEqual([r.hash]);
+        expect(status.trustPending).toEqual([]);
+        expect(status.contained[0]).toMatchObject({
+            qualified: false,
+            identity: "checking",
+        });
+        expect(describeReadiness(status)).toBe(
+            `waiting-trust: checking J's trust graph for 1 contained peer: ${r.hash}`
+        );
+        expect(coordinator.debug()).toMatchObject({
+            armedTimers: 0,
+            trustChecks: 1,
+        });
+        release();
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(coordinator.debug().trustChecks).toBe(0);
+        expect(w.status().trustChecking).toEqual([]);
+    });
+
+    it("C6: a trust change moves the epoch and re-checks; a check overtaken by another change runs again; after finish nothing", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(coordinator.debug().trustEpoch).toBe(0);
+        const asked = () => trust.calls.filter((hash) => hash === r.hash);
+        const before = asked().length;
+        const release = trust.hold();
+        coordinator.trustChanged();
+        expect(coordinator.debug()).toMatchObject({
+            trustEpoch: 1,
+            trustChecks: 1,
+        });
+        expect(w.record(r).identity).toBe("checking");
+        expect(coordinator.satisfied()).toBe(false);
+        await settle();
+        // Another change while the read of epoch 1 is held.
+        coordinator.trustChanged();
+        release();
+        await w.until(() => coordinator.satisfied(), "satisfied at epoch 2");
+        expect(w.record(r).trustCheckedAt).toBe(2);
+        // The read of epoch 1 was discarded, one more ran at epoch 2.
+        expect(asked().length - before).toBe(2);
+        expect(coordinator.debug().trustTriggers.change).toBe(2);
+        // Ready: trust changes are ignored, readiness is never withdrawn.
+        coordinator.finish();
+        trust.trusted.delete(r.hash);
+        coordinator.trustChanged();
+        await settle();
+        expect(coordinator.debug().trustEpoch).toBe(2);
+        expect(w.record(r).identity).toBe("trusted");
+    });
+
+    it("C6: a re-check overtaken by a trust change never acts on the old graph's answer", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        const writer = await keyOf();
+        refusedRow(w, r, writer);
+        await w.start();
+        // Verdicts of the graph each read started on.
+        const graph = new Set(trust.trusted);
+        let held: Promise<void> | undefined;
+        trust.isTrusted = async (key) => {
+            const trusted = graph.has(key.hashcode());
+            trust.calls.push(key.hashcode());
+            await held;
+            return trusted;
+        };
+        const coordinator = w.run();
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        let release!: () => void;
+        held = new Promise<void>((resolve) => (release = resolve));
+        // A grant that a second change revokes while the first re-check
+        // reads: its "trusted" belongs to a graph that is gone.
+        graph.add(writer.hashcode());
+        coordinator.trustChanged();
+        await settle();
+        graph.delete(writer.hashcode());
+        coordinator.trustChanged();
+        held = undefined;
+        release();
+        await w.until(() => coordinator.satisfied(), "satisfied at epoch 2");
+        expect(w.record(r).trustCheckedAt).toBe(2);
+        // Never reopened on the stale reversal.
+        expect(w.sessionsOf(r)).toHaveLength(1);
+        expect(w.record(r).results.get(NS)?.untrusted?.heads).toBe(1);
+    });
+
+    it("C6: a result that lands after dispose is ignored", async () => {
+        const { w, trust, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        const release = trust.hold();
+        coordinator.trustChanged();
+        await settle();
+        coordinator.dispose();
+        release();
+        await settle();
+        expect(w.record(r).trustCheckedAt).toBe(0);
+        expect(w.record(r).identity).toBe("checking");
+        expect(coordinator.debug().trustChecks).toBe(0);
+    });
+
+    it("C7 (M2): a real session's namespace run parked for trust while its trust run still pulls is waiting-trust, named with its count", async () => {
+        const { w, peers } = await aclWorldWith([["R"]]);
+        const [r] = peers;
+        refusedRow(w, r, await keyOf());
+        const [grant] = w.rows([r], 1, "tx", 5000, TRUST);
+        await w.start();
+        let open!: () => void;
+        w.scopeGates.set(
+            TRUST,
+            new Promise<void>((resolve) => (open = resolve))
+        );
+        const coordinator = w.run();
+        await w.until(
+            () => parked(w, r) && w.scopeDebug(r, TRUST)?.state === "draining",
+            "namespace parked, trust pulling"
+        );
+        await settle();
+        const status = w.status();
+        expect(status.state).toBe("waiting-trust");
+        expect(status.trustPending).toEqual([{ peer: r.hash, hashes: 1 }]);
+        expect(describeReadiness(status)).toBe(
+            `waiting-trust: 1 hash wait for J's trust graph, named by 1 of 1 required peer: ${r.hash}`
+        );
+        expect(coordinator.debug().armedTimers).toBe(0);
+        expect(w.scopeDebug(r)!.untrusted).toBe(0);
+        open();
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(w.record(r).results.get(NS)?.explainedBy).toEqual({
+            "rejected-untrusted": 1,
+        });
+        expect(w.j.scope(TRUST).index.get(grant.id!)?.head).toBe(grant.head);
+    });
+
+    it("C7: a namespace run that waits only for a lookup's retry, nothing parked for trust, is reconciling, in an access-controlled store and in open mode", async () => {
+        for (const acl of [true, false]) {
+            const { w, peers } = acl
+                ? await aclWorldWith([["R"]])
+                : await worldWith([["R"]]);
+            const [r] = peers;
+            const [row] = w.rows([r], 1, "lookup-", 5000);
+            w.j.scope(NS).throwing.add(row.head);
+            await w.start();
+            const coordinator = w.run();
+            await w.until(
+                () =>
+                    w.scopeDebug(r)?.retry === 1 &&
+                    (!acl || w.record(r).session?.state(TRUST) === "contained"),
+                "a retry hash only"
+            );
+            await settle();
+            expect(w.scopeDebug(r)).toMatchObject({
+                state: "draining",
+                pending: 1,
+                retry: 1,
+                failed: 0,
+                trustPending: 0,
+            });
+            expect(w.record(r).fetchWaiting).toBe(false);
+            expect(w.status().state).toBe("reconciling");
+            w.j.scope(NS).throwing.delete(row.head);
+            w.record(r).session!.resume();
+            await w.until(() => coordinator.satisfied(), "satisfied");
+        }
+    });
+
+    describe("C9: a session that waits only for trust frees its slot (G2-4)", () => {
+        /** One row of a revoked writer on each of `holders`, refused by J. */
+        const revokedRow = async (w: World, holders: Peer[]) => {
+            const [row] = w.rows(holders, 1, "w-", 5000);
+            w.rejected.set(row.head, {
+                permanent: false,
+                reason: "untrusted",
+                signers: [await keyOf()],
+            });
+            return row;
+        };
+
+        it("more Required peers than slots, each holding the row: four parked sessions let the fifth peer in, and every row is explained", async () => {
+            const names = ["A", "B", "C", "D", "E"];
+            expect(names.length).toBeGreaterThan(SESSIONS_IN_FLIGHT);
+            const { w, peers } = await aclWorldWith(
+                names.map((name) => [name] as [string])
+            );
+            await revokedRow(w, peers);
+            await w.start();
+            const fifth = peers[SESSIONS_IN_FLIGHT];
+            // The fifth peer's trust header takes a slow route.
+            fifth.hooks.delayToJ = (m) =>
+                m instanceof HeaderV1 && m.scope === TRUST ? 1000 : 0;
+            const coordinator = w.run();
+            await w.until(
+                () => peers.every((peer) => parked(w, peer)),
+                "every namespace run parked"
+            );
+            await settle();
+            expect(coordinator.debug()).toMatchObject({
+                sessions: names.length,
+                inFlight: 1,
+                queued: 0,
+            });
+            const status = w.status();
+            expect(status.state).toBe("waiting-trust");
+            expect(status.trustPending).toHaveLength(names.length);
+            expect(describeReadiness(status)).toMatch(
+                /^waiting-trust: 5 hashes wait for J's trust graph, named by 5 of 5 required peers: /
+            );
+            await w.clock.advanceSettled(1000);
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            for (const peer of peers) {
+                expect(w.record(peer).results.get(NS)?.explainedBy).toEqual({
+                    "rejected-untrusted": 1,
+                });
+            }
+            expect(coordinator.debug().armedTimers).toBe(0);
+        });
+
+        it("four parked sessions and a fifth peer without the row: a clean subscriber, or a replicator row that never answers", async () => {
+            for (const fifth of [
+                ["E"],
+                ["U", { subscriber: false, replicator: true }],
+            ] as Array<[string, PeerOptions?]>) {
+                const { w, peers } = await aclWorldWith([
+                    ["A"],
+                    ["B"],
+                    ["C"],
+                    ["D"],
+                    fifth,
+                ]);
+                const holders = peers.slice(0, SESSIONS_IN_FLIGHT);
+                await revokedRow(w, holders);
+                await w.start();
+                const other = peers[SESSIONS_IN_FLIGHT];
+                if (fifth[1]) other.hooks.toPeer = () => null;
+                const coordinator = w.run();
+                await w.until(
+                    () => w.sessionsOf(other).length === 1,
+                    "the fifth peer asked"
+                );
+                // A confirm-only row gets its one attempt.
+                await w.clock.advanceSettled(5000);
+                await w.until(() => coordinator.satisfied(), "satisfied");
+                expect(w.stateOf(other)).toBe(
+                    fifth[1] ? "unconfirmed" : "contained"
+                );
+                for (const peer of holders) {
+                    expect(w.record(peer).results.get(NS)?.explainedBy).toEqual(
+                        { "rejected-untrusted": 1 }
+                    );
+                }
+            }
+        });
+
+        it("a BUSY peer whose notice is lost is re-asked once a session parks for its trust scope (B3)", async () => {
+            const { w, peers } = await aclWorldWith([["A"], ["B"]]);
+            const [a, b] = peers;
+            await revokedRow(w, peers);
+            await w.start();
+            // B's first OPEN is answered BUSY; its notice never comes.
+            b.refuse = { code: ERROR_CODE.BUSY, times: 1 };
+            const coordinator = w.run();
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            expect(w.sessionsOf(b)).toHaveLength(2);
+            for (const peer of [a, b]) {
+                expect(w.record(peer).results.get(NS)?.explainedBy).toEqual({
+                    "rejected-untrusted": 1,
+                });
+            }
+            expect(coordinator.debug().armedTimers).toBe(0);
+        });
+    });
+
+    it("C10: a trust row nobody served in two sessions while the namespace run waits for trust: waiting-fetch, and R's sign of life retries the pull", async () => {
+        const { w, peers } = await aclWorldWith([["D"]]);
+        const [d] = peers;
+        refusedRow(w, d, await keyOf());
+        const [grant] = w.rows([d], 1, "grant-", 5000, TRUST);
+        w.unserved.add(grant.head);
+        await w.start();
+        const coordinator = w.run();
+        await w.until(
+            () =>
+                w.record(d).sessionsOpened === 2 &&
+                w.scopeDebug(d, TRUST)?.state === "failed-fetch-wait" &&
+                parked(w, d),
+            "the trust fetch failed twice, the namespace run parked"
+        );
+        await settle();
+        expect(w.record(d)).toMatchObject({
+            state: "reconciling",
+            fetchWaiting: true,
+        });
+        const status = w.status();
+        expect(status.state).toBe("waiting-fetch");
+        expect(status.fetchPending).toEqual([{ peer: d.hash, hashes: 1 }]);
+        expect(coordinator.debug()).toMatchObject({
+            armedTimers: 0,
+            inFlight: 0,
+        });
+        const joins = w.joins.length;
+        w.unserved.delete(grant.head);
+        // D's sign of life retries the failed pull (design 4.5 step 8).
+        w.transport.emit({ kind: "subscribe", peer: d.hash, key: d.key });
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(w.joins.length).toBeGreaterThan(joins);
+        expect(w.record(d).sessionsOpened).toBe(2);
+        expect(w.j.scope(TRUST).index.get(grant.id!)?.head).toBe(grant.head);
+        expect(w.record(d).results.get(NS)?.explainedBy).toEqual({
+            "rejected-untrusted": 1,
+        });
+    });
+
+    it("C8: an open-mode store keeps commit 2: no trust port, no trust fields, and a trust change only reclassifies", async () => {
+        const { w, peers } = await worldWith([["S"], ["D"]]);
+        const [s, d] = peers;
+        await w.start();
+        s.hooks.toPeer = () => null;
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        const status = w.status();
+        expect(status).not.toHaveProperty("trustPending");
+        expect(status).not.toHaveProperty("trustChecking");
+        expect(status.contained[0]).not.toHaveProperty("identity");
+        expect(w.record(d).identity).toBeUndefined();
+        const [session] = w.sessionsOf(s);
+        const reclassify = vi.spyOn(session, "reclassify");
+        coordinator.trustChanged();
+        expect(reclassify).toHaveBeenCalledTimes(1);
+        expect(coordinator.debug()).toMatchObject({
+            trustEpoch: 1,
+            trustChecks: 0,
+            trustTriggers: { change: 1, scopesContained: 0 },
+        });
+        expect(w.record(d).identity).toBeUndefined();
+        expect(w.record(d).trustCheckedAt).toBeUndefined();
+    });
+
+    it("an ACL join without J's trust view, or a trust view without the trust scope, faults: gated and named", async () => {
+        {
+            const { w } = await worldWith([["D"]]);
+            await w.start();
+            const coordinator = w.run({ scopes: [NS, TRUST] });
+            await settle();
+            expect(coordinator.satisfied()).toBe(false);
+            expect(w.status().fault).toBe("no trust view");
+            expect(w.sessions).toHaveLength(0);
+        }
+        {
+            const { w } = await worldWith([["D"]]);
+            await w.start();
+            const coordinator = w.run({ trust: new FakeTrust() });
+            await settle();
+            expect(coordinator.satisfied()).toBe(false);
+            expect(w.status().fault).toBe("no trust scope");
+            expect(w.sessions).toHaveLength(0);
+        }
+    });
+
+    it("describeReadiness names the hashes waiting for trust, the peers being checked, and an untrusted identity", () => {
+        const base: ReadinessStatus = {
+            state: "waiting-trust",
+            satisfied: false,
+            required: ["a", "b"],
+            contained: [],
+            excluded: [],
+            silent: [],
+            inFlight: [],
+            busy: [],
+            fetchPending: [],
+            gaps: [],
+            unconfirmed: [],
+        };
+        expect(
+            describeReadiness({
+                ...base,
+                trustPending: [
+                    { peer: "a", hashes: 10 },
+                    { peer: "b", hashes: 2 },
+                ],
+            })
+        ).toBe(
+            "waiting-trust: 12 hashes wait for J's trust graph, named by 2 of 2 required peers: a, b"
+        );
+        expect(
+            describeReadiness({
+                ...base,
+                required: [],
+                trustPending: [],
+                trustChecking: ["c", "d"],
+            })
+        ).toBe(
+            "waiting-trust: checking J's trust graph for 2 contained peers: c, d"
+        );
+        expect(
+            describeReadiness({
+                ...base,
+                state: "no-qualified-donor",
+                required: [],
+                contained: [
+                    {
+                        peer: "c",
+                        qualified: false,
+                        source: "reconciled",
+                        scopes: ["namespace-v1", "trust-v1"],
+                        departed: false,
+                        identity: "untrusted",
+                    },
+                    {
+                        peer: "d",
+                        qualified: false,
+                        source: "none",
+                        scopes: ["namespace-v1", "trust-v1"],
+                        departed: false,
+                        identity: "trusted",
+                    },
+                ],
+            })
+        ).toBe(
+            "no-qualified-donor: 2 peers contained, none qualified: c (reconciled, untrusted identity), d (none)"
+        );
+    });
+
+    describe("scripted sessions", () => {
+        /** An ACL world whose sessions are `ScriptedSession`s. */
+        const scriptedAcl = async (peers: Array<[string, PeerOptions?]>) => {
+            const { w, trust, peers: out } = await aclWorldWith(peers, 0);
+            const made: ScriptedSession[] = [];
+            const coordinator = w.run({
+                createSession: (init, ports) => {
+                    const session = new ScriptedSession(init, ports);
+                    made.push(session);
+                    return session as unknown as JoinerSession;
+                },
+            });
+            await settle();
+            const of = (peer: FakePeer) =>
+                made.filter((session) => session.peer === peer.hash);
+            return { w, trust, peers: out, coordinator, of };
+        };
+
+        afterEach(() => {
+            // Scripted containment has no oracle record.
+            for (const w of World.created) {
+                for (const record of w.coordinator?.records() ?? []) {
+                    w.checked.add(record.hash);
+                }
+            }
+        });
+
+        it("C4: a contained record without a trust result, or whose trust result comes from an earlier session than its namespace result, is never satisfied", async () => {
+            {
+                const { w, peers, coordinator, of } = await scriptedAcl([
+                    ["R"],
+                ]);
+                const [r] = peers;
+                const [session] = of(r);
+                expect(session.init.scopes).toEqual([NS, TRUST]);
+                session.finish({
+                    kind: "contained",
+                    results: [session.result(true)],
+                });
+                await w.until(
+                    () => w.record(r).identity === "trusted",
+                    "checked"
+                );
+                expect(coordinator.satisfied()).toBe(false);
+            }
+            {
+                const { w, peers, coordinator, of } = await scriptedAcl([
+                    ["R"],
+                ]);
+                const [r] = peers;
+                const [first] = of(r);
+                // Trust kept from session 1, namespace from session 2: a
+                // path the session never takes (a namespace renewal reopens
+                // trust), so the clause fails closed.
+                first.finish({
+                    kind: "renew",
+                    reason: "fetch-failed",
+                    list: false,
+                    scopes: [NS],
+                    results: [first.result(true, "creator", TRUST)],
+                });
+                await settle();
+                const [, second] = of(r);
+                second.finish({
+                    kind: "contained",
+                    results: [second.result(true)],
+                });
+                await w.until(
+                    () => w.record(r).identity === "trusted",
+                    "checked"
+                );
+                expect([...w.record(r).results.keys()].sort()).toEqual([
+                    NS,
+                    TRUST,
+                ]);
+                expect(coordinator.satisfied()).toBe(false);
+            }
+            {
+                // The control: both from one session.
+                const { w, peers, coordinator, of } = await scriptedAcl([
+                    ["R"],
+                ]);
+                const [r] = peers;
+                const [session] = of(r);
+                session.finish({
+                    kind: "contained",
+                    results: [
+                        session.result(true),
+                        session.result(true, "creator", TRUST),
+                    ],
+                });
+                await w.until(() => coordinator.satisfied(), "satisfied");
+            }
+        });
+
+        it("C2: a record with no key has an untrusted identity", async () => {
+            const { w, peers, coordinator, of } = await scriptedAcl([
+                ["N", { subscriber: false, replicator: true }],
+            ]);
+            const [n] = peers;
+            const [session] = of(n);
+            session.finish({
+                kind: "contained",
+                results: [
+                    session.result(true),
+                    session.result(true, "creator", TRUST),
+                ],
+            });
+            await w.until(
+                () => w.record(n).identity === "untrusted",
+                "checked"
+            );
+            expect(w.record(n).key).toBeUndefined();
+            expect(coordinator.satisfied()).toBe(false);
+            expect(w.status().state).toBe("no-qualified-donor");
+        });
     });
 });

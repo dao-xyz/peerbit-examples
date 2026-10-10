@@ -54,6 +54,7 @@ import {
     type SessionPorts,
     type SessionResult,
     type SessionScopePorts,
+    type SessionTrustPort,
 } from "../readiness/session.js";
 import {
     ScopeTap,
@@ -87,6 +88,55 @@ export const settle = async (rounds = 50) => {
         await new Promise((resolve) => setImmediate(resolve));
     }
 };
+
+/**
+ * J's trust view as a session reads it (the coordinator's
+ * `SessionTrustPort`, faked; PR-3 commit 3): a settable trust epoch,
+ * verdicts per key hashcode (untrusted unless listed), reads that throw, a
+ * hold on the reads, and the promotion clause as a function.
+ */
+export class FakeTrust implements SessionTrustPort {
+    epochValue = 0;
+    /** `scopesContained()`; true unless a case sets it. */
+    contained: () => boolean = () => true;
+    readonly trusted = new Set<string>();
+    readonly throwing = new Set<string>();
+    /** Hashcodes asked, in order. */
+    readonly calls: string[] = [];
+    private held?: Promise<void>;
+
+    epoch() {
+        return this.epochValue;
+    }
+
+    async isTrusted(key: PublicSignKey) {
+        const hash = key.hashcode();
+        this.calls.push(hash);
+        if (this.held) await this.held;
+        if (this.throwing.has(hash)) throw new Error("trust graph unreadable");
+        return this.trusted.has(hash);
+    }
+
+    scopesContained() {
+        return this.contained();
+    }
+
+    /** Holds every read that starts from now on; returns the release. */
+    hold(): () => void {
+        let release!: () => void;
+        this.held = new Promise<void>((resolve) => (release = resolve));
+        return () => {
+            this.held = undefined;
+            release();
+        };
+    }
+
+    /** A trust-graph change: the epoch moves and each session reclassifies. */
+    change(...sessions: JoinerSession[]) {
+        this.epochValue++;
+        for (const session of sessions) session.reclassify();
+    }
+}
 
 /** A shared fake clock for the session's and the responder's timers. */
 export class FakeTimers implements Timers {
@@ -179,11 +229,36 @@ const eventValue = (
 };
 
 /** A certificate J posted: its seq, J's index heads then, and E. */
-interface CertificateRecord {
+export interface CertificateRecord {
     seq: number;
     index: Set<string>;
     add: Set<string>;
 }
+
+/**
+ * E at containment (the oracles' second half): a row the certificate
+ * counted in E that J does not index when the outcome lands must still be
+ * explained. Between C2 and the digest's match a row only leaves E when J
+ * indexes it, or when a trust change moves it back to D, which must never
+ * contain R (SPEC3 2.7, session S10b). Counts only: E's members are the
+ * session's.
+ */
+export const checkExplainedAtContainment = (
+    result: SessionResult,
+    certificate: CertificateRecord,
+    j: FakeScope
+) => {
+    const indexed = j.indexDigests();
+    let unindexed = 0;
+    for (const digest of certificate.add) {
+        if (!indexed.has(digest)) unindexed++;
+    }
+    if (result.explained < unindexed) {
+        throw new Error(
+            `oracle: E lost ${unindexed - result.explained} row(s) J does not index since the certificate`
+        );
+    }
+};
 
 /**
  * One peer's store of one scope: a fake index behind a real `ScopeTap`, a
@@ -856,6 +931,7 @@ export class JoinerWorld {
                         options.events?.onOutcome?.(done, outcome);
                     },
                     onState: options.events?.onState,
+                    onParked: options.events?.onParked,
                 },
                 options.ports
             )
@@ -953,9 +1029,10 @@ export class JoinerWorld {
     }
 
     /**
-     * S_R is a subset of J's index plus E at the certificate's seq, and E
-     * holds nothing J indexed then. Read from the fake stores, independent
-     * of cells and anchors.
+     * S_R is a subset of J's index plus E at the certificate's seq, E
+     * holds nothing J indexed then, and E at containment still explains
+     * every row of it J does not index. Read from the fake stores,
+     * independent of cells and anchors.
      */
     oracle(result: SessionResult) {
         const r = this.r.scope(result.scope);
@@ -991,6 +1068,7 @@ export class JoinerWorld {
                 throw new Error("oracle: E holds a row J indexed");
             }
         }
+        checkExplainedAtContainment(result, certificate, j);
         this.contained.push(result);
     }
 

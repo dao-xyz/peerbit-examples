@@ -39,7 +39,10 @@ export interface ProofContained {
     peer: string;
     scope: ProofScope;
     source: ProvenanceSource;
-    /** Qualified in the header of the session that contained it. */
+    /**
+     * Qualified in the header of the session that contained it and, in
+     * access-controlled stores, with an identity J trusts (design 2.1).
+     */
     qualified: boolean;
     count: number;
     /** The snapshot's `hlc`, a decimal u64. */

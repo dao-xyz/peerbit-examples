@@ -11,6 +11,7 @@ import {
     type BootstrapTelemetryEvent,
     type SharedFsHandle,
 } from "../index.js";
+import { describeReadiness } from "../readiness/coordinator.js";
 import type { Timers } from "../readiness/responder.js";
 import type { ReadinessRuntime } from "../readiness/runtime.js";
 import {
@@ -30,7 +31,8 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * tests pin the escape (`assumeComplete`), the reason (`bootstrapStatus()
  * .readiness`) and the timeout that carries it, and the coordinator's
  * lifecycle inside the filesystem (close, same-instance reopen and drop
- * while a session is in flight).
+ * while a session is in flight). PR-3 commit 3 adds the trusted-identity
+ * clause of an access-controlled store (G3-8) and its escape.
  */
 
 const runtimeOf = (fs: SharedFsHandle): ReadinessRuntime | undefined =>
@@ -517,6 +519,80 @@ describe("write readiness escape and status", () => {
             );
             hung.restore();
         });
+    });
+
+    it("releases an access-controlled joiner whose only donor is a ready full replica J's graph does not trust (G3-8)", async () => {
+        const ownerPeer = await createPeer();
+        const owner = await openSharedFs({
+            peerbit: ownerPeer,
+            machineLabel: "escape-owner",
+            rootKey: ownerPeer.identity.publicKey,
+            gc: false,
+        });
+        await owner.writeFile("/owner.txt", "from the owner");
+        // A reader that replicates in full and is never authorized.
+        const readerPeer = await createPeer();
+        await readerPeer.dial(ownerPeer);
+        const reader = await openSharedFs({
+            peerbit: readerPeer,
+            address: owner.address,
+            machineLabel: "escape-reader",
+            bootstrap: false,
+            gc: false,
+            writeReadinessSettleMs: 100,
+        } as any);
+        await reader.awaitWriteReady({ timeout: 60_000 });
+        await waitUntil(async () =>
+            expect(
+                new TextDecoder().decode(await reader.readFile("/owner.txt"))
+            ).toBe("from the owner")
+        );
+        await stopPeer(ownerPeer);
+
+        const joinerPeer = await createPeer();
+        await joinerPeer.dial(readerPeer);
+        const joiner = await openSharedFs({
+            peerbit: joinerPeer,
+            address: owner.address,
+            machineLabel: "escape-acl-joiner",
+            bootstrap: false,
+            gc: false,
+            writeReadinessSettleMs: 100,
+        } as any);
+        const readerHash = hashOf(readerPeer);
+        // The reader is contained on both scopes and qualifies by its
+        // header, but J's trust graph does not hold its identity.
+        await waitUntil(() => {
+            const readiness = joiner.bootstrapStatus().readiness!;
+            expect(readiness.state).toBe("no-qualified-donor");
+            expect(readiness.contained).toEqual([
+                expect.objectContaining({
+                    peer: readerHash,
+                    qualified: false,
+                    identity: "untrusted",
+                    scopes: ["namespace-v1", "trust-v1"],
+                }),
+            ]);
+        }, 60_000);
+        const record = runtimeOf(joiner)!.coordinator!.record(readerHash)!;
+        expect(record.qualified).toBe(true);
+        const error = await timeoutOf(joiner, 1_500);
+        expect(error.readiness?.state).toBe("no-qualified-donor");
+        expect(describeReadiness(error.readiness!)).toContain(
+            `${readerHash} (reconciled, untrusted identity)`
+        );
+        expect(joiner.bootstrapStatus().writeReady).toBe(false);
+        expect(runtimeOf(joiner)!.debug().armedTimers).toBe(0);
+
+        // The escape: the operator assumes completeness.
+        await joiner.assumeComplete();
+        expect(joiner.bootstrapStatus()).toMatchObject({
+            writeReady: true,
+            writeReadinessSource: "operator",
+        });
+        expect(
+            new TextDecoder().decode(await joiner.readFile("/owner.txt"))
+        ).toBe("from the owner");
     });
 
     describe("status", () => {

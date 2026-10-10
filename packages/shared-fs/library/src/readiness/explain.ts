@@ -1,3 +1,4 @@
+import type { PublicSignKey } from "@peerbit/crypto";
 import type { IdKey } from "./id-map.js";
 import type { IndexedHead } from "./tap.js";
 
@@ -44,9 +45,12 @@ export type ExplainedReason =
     | "rejected-untrusted";
 
 /**
- * The trust classes of design 4.6 and 4.5 step 8. Types only in this commit:
- * an untrusted rejection is always `trust-pending` until the trust scopes
- * are consumed (PR-3 commit 3), which adds `rejected-untrusted`.
+ * The trust classes of design 4.6 and 4.5 step 8, which the session consumes
+ * (PR-3 commit 3): an `untrusted` or `trust-cache` rejection is
+ * `trust-pending` until a fresh signer check at an unchanged trust epoch,
+ * with every trust scope that counts contained, finds no recorded signer
+ * trusted. Then it is `rejected-untrusted`, provisionally: re-checked on
+ * every trust-graph change, and back into D when a signer turns trusted.
  */
 export type TrustClass = "trust-pending" | "rejected-untrusted";
 
@@ -79,6 +83,14 @@ export type RejectionReason =
 export interface Rejection {
     readonly permanent: boolean;
     readonly reason: RejectionReason;
+    /**
+     * `untrusted` and `trust-cache` only: the keys whose trust would reverse
+     * the refusal (every entry signer, or a manifest's inner signer, or a
+     * trust relation's owner). The session checks them against J's trust
+     * graph (design 4.6 "re-checked ... if its signer is trusted"). Omitted,
+     * never empty, when unknown.
+     */
+    readonly signers?: readonly PublicSignKey[];
 }
 
 /**
@@ -132,7 +144,15 @@ export type AfterPullVerdict =
     | { kind: "explained"; reason: ExplainedReason }
     | { kind: "logged" }
     | IndexedVerdict
-    | { kind: "trust-pending" }
+    /**
+     * Refused for trust: parked (design 4.5 step 8). `signers` and `reason`
+     * come with a rejection that recorded its signers.
+     */
+    | {
+          kind: "trust-pending";
+          reason?: "untrusted" | "trust-cache";
+          signers?: readonly PublicSignKey[];
+      }
     /** Not in J's log and not rejected: fetch-failed. */
     | { kind: "failed" }
     | { kind: "lie"; detail: string }
@@ -170,6 +190,19 @@ const REJECTION_RANK: Readonly<Record<RejectionReason, number>> = {
 
 const rankOf = (rejection: Rejection) => REJECTION_RANK[rejection.reason] ?? -1;
 
+/** A copy the record keeps: signers only when there are some. */
+const copyRejection = (
+    rejection: Rejection,
+    signers: readonly PublicSignKey[] | undefined
+): Rejection =>
+    signers !== undefined && signers.length > 0
+        ? {
+              permanent: rejection.permanent,
+              reason: rejection.reason,
+              signers: [...signers],
+          }
+        : { permanent: rejection.permanent, reason: rejection.reason };
+
 /**
  * `canPerform` rejections of the hashes in flight in pull batches (design
  * 4.6 "Rejections"). Bounded by the heads tracked, never by history: a
@@ -204,16 +237,30 @@ export class RejectionRecord {
 
     /**
      * The `canPerform` hook: records the rejection of a tracked head and
-     * returns true; an untracked head costs one lookup and returns false.
+     * returns true; an untracked head costs one lookup and returns false. A
+     * refusal at the same rank adds its signers (by `hashcode()`), so the
+     * record holds at most the entry's signers.
      */
     note(head: string, rejection: Rejection): boolean {
         if (!this.refs.has(head)) return false;
         const previous = this.noted.get(head);
         if (!previous || rankOf(rejection) > rankOf(previous)) {
-            this.noted.set(head, {
-                permanent: rejection.permanent,
-                reason: rejection.reason,
-            });
+            this.noted.set(head, copyRejection(rejection, rejection.signers));
+        } else if (
+            rankOf(rejection) === rankOf(previous) &&
+            rejection.signers !== undefined
+        ) {
+            const signers = new Map<string, PublicSignKey>();
+            for (const key of [
+                ...(previous.signers ?? []),
+                ...rejection.signers,
+            ]) {
+                signers.set(key.hashcode(), key);
+            }
+            this.noted.set(
+                head,
+                copyRejection(previous, [...signers.values()])
+            );
         }
         return true;
     }
@@ -303,8 +350,8 @@ export class Explainer {
      * Design 4.5 step 8, per head: the checks of `beforePull` first
      * (superseded, then what J's log holds); for an entry J's log still
      * lacks, a recorded rejection (a permanent `structure` one →
-     * `rejected-structure`; `untrusted` and `trust-cache` → `trust-pending`),
-     * else `failed`.
+     * `rejected-structure`; `untrusted` and `trust-cache` → `trust-pending`,
+     * with the rejection's signers), else `failed`.
      */
     afterPull(
         heads: readonly string[],
@@ -352,7 +399,16 @@ export class Explainer {
                     : FAILED;
             case "untrusted":
             case "trust-cache":
-                return TRUST_PENDING;
+                // The session checks the signers against J's trust graph
+                // (design 4.5 step 8); without them it can only re-pull.
+                return rejection.signers !== undefined &&
+                    rejection.signers.length > 0
+                    ? {
+                          kind: "trust-pending",
+                          reason: rejection.reason,
+                          signers: rejection.signers,
+                      }
+                    : TRUST_PENDING;
             default:
                 // No rejection, or a transient one: fetch-failed.
                 return FAILED;

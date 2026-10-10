@@ -1,5 +1,5 @@
-import { field, variant } from "@dao-xyz/borsh";
-import { randomBytes } from "@peerbit/crypto";
+import { deserialize, field, serialize, variant } from "@dao-xyz/borsh";
+import { Ed25519Keypair, PublicSignKey, randomBytes } from "@peerbit/crypto";
 import { Documents } from "@peerbit/document";
 import { Timestamp } from "@peerbit/log";
 import { Program } from "@peerbit/program";
@@ -22,8 +22,8 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * Explained rows (design 4.6, M1 plan section 7.3): the unit halves of
  * tests 39 (a CUT J holds supersedes the head it names), 41 (a re-put of a
  * cut id is required), 52 (ignored-older), 44 (a logged head waits for its
- * event and is never pulled), the rejection record and the order of the
- * verdicts. The explainer runs on a fake log and index here; commit 2 binds
+ * event and is never pulled), the rejection record with the signers a trust
+ * refusal records (PR-3 commit 3) and the order of the verdicts. The explainer runs on a fake log and index here; commit 2 binds
  * the ports to the store and runs 39, 41 and 52 end to end.
  *
  * The newest-wins pin runs Documents itself (`@peerbit/document` 15.1.11):
@@ -268,6 +268,54 @@ describe("readiness explain", () => {
         }
     });
 
+    it("E1: a trust refusal with signers is trust-pending with its reason and signers; without them, plain", async () => {
+        const j = new FakeJoiner();
+        const explainer = new Explainer(j.ports);
+        const [w1, w2] = await Promise.all([
+            Ed25519Keypair.create(),
+            Ed25519Keypair.create(),
+        ]);
+        const signers = [w1.publicKey, w2.publicKey];
+        for (const reason of ["untrusted", "trust-cache"] as const) {
+            const [verdict] = await explainer.afterPull(
+                ["h"],
+                new Map([["h", { permanent: false, reason, signers }]])
+            );
+            expect(verdict).toEqual({ kind: "trust-pending", reason, signers });
+            // The session reads the signers; never a copy that drops one.
+            expect((verdict as any).signers).toBe(signers);
+            // Without signers (and with none) the verdict is the plain one.
+            expect(await explainer.afterPull(["h"], rejected(reason))).toEqual([
+                { kind: "trust-pending" },
+            ]);
+            expect(
+                await explainer.afterPull(
+                    ["h"],
+                    new Map([["h", { permanent: false, reason, signers: [] }]])
+                )
+            ).toEqual([{ kind: "trust-pending" }]);
+        }
+        // Signers say nothing about another class of refusal, or an entry
+        // J's log holds.
+        expect(
+            await explainer.afterPull(
+                ["h"],
+                new Map([
+                    ["h", { permanent: true, reason: "structure", signers }],
+                ])
+            )
+        ).toEqual([{ kind: "explained", reason: "rejected-structure" }]);
+        j.put("h", "x", 1n);
+        expect(
+            await explainer.afterPull(
+                ["h"],
+                new Map([
+                    ["h", { permanent: false, reason: "untrusted", signers }],
+                ])
+            )
+        ).toEqual([{ kind: "logged" }]);
+    });
+
     it("orders its verdicts: not-row is a lie, undecodable is logged, a failing port is unknown", async () => {
         const j = new FakeJoiner();
         j.log.set("chunk", {
@@ -391,6 +439,75 @@ describe("readiness explain", () => {
                     ["b", structure],
                 ])
             );
+        });
+
+        it("E2: unions the signers at an equal rank by hashcode, replaces them at a higher one, and copies them", async () => {
+            const [a, b, c] = await Promise.all(
+                [0, 1, 2].map(() => Ed25519Keypair.create())
+            );
+            const hashes = (rejection?: Rejection) =>
+                rejection?.signers?.map((key: PublicSignKey) => key.hashcode());
+            const record = new RejectionRecord();
+            record.track(["h", "g"]);
+            const first: Rejection = {
+                permanent: false,
+                reason: "trust-cache",
+                signers: [a.publicKey, b.publicKey],
+            };
+            record.note("h", first);
+            // Equal rank: the union, each key once (b decoded again is
+            // another instance of the same key).
+            const bAgain = deserialize(serialize(b.publicKey), PublicSignKey);
+            expect(bAgain).not.toBe(b.publicKey);
+            record.note("h", {
+                permanent: false,
+                reason: "trust-cache",
+                signers: [bAgain, c.publicKey],
+            });
+            expect(hashes(record.take(["h"]).get("h"))).toEqual([
+                a.publicKey.hashcode(),
+                b.publicKey.hashcode(),
+                c.publicKey.hashcode(),
+            ]);
+            // Equal rank without signers keeps them.
+            record.note("h", { permanent: false, reason: "trust-cache" });
+            expect(hashes(record.take(["h"]).get("h"))).toHaveLength(3);
+            // A higher rank replaces them, a lower one changes nothing.
+            record.note("h", {
+                permanent: false,
+                reason: "untrusted",
+                signers: [c.publicKey],
+            });
+            record.note("h", {
+                permanent: false,
+                reason: "trust-cache",
+                signers: [a.publicKey],
+            });
+            const held = record.take(["h"]).get("h")!;
+            expect(held.reason).toBe("untrusted");
+            expect(hashes(held)).toEqual([c.publicKey.hashcode()]);
+            // A structural refusal outranks a trust one and has no signers.
+            record.note("h", { permanent: true, reason: "structure" });
+            expect(record.take(["h"]).get("h")).toEqual({
+                permanent: true,
+                reason: "structure",
+            });
+            // `take` copies: the record holds its own array.
+            const noted: Rejection = {
+                permanent: false,
+                reason: "untrusted",
+                signers: [a.publicKey],
+            };
+            record.note("g", noted);
+            const taken = record.take(["g"]).get("g")!;
+            expect(taken).not.toBe(noted);
+            expect(taken.signers).not.toBe(noted.signers);
+            (noted.signers as PublicSignKey[]).push(b.publicKey);
+            expect(hashes(record.take(["g"]).get("g"))).toEqual([
+                a.publicKey.hashcode(),
+            ]);
+            record.release(["h", "g"]);
+            expect(record.size).toBe(0);
         });
 
         it("sets no cap of its own: the joins in flight bound it", () => {

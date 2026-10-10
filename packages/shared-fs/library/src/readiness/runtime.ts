@@ -98,6 +98,13 @@ export interface JoinOptions {
     /** Bounded timers for the sessions (`systemTimers` by default). */
     timers?: Timers;
     now?(): number;
+    /**
+     * J's trust graph, access-controlled stores only (PR-3 commit 3):
+     * `TrustedNetwork.isTrusted` of this open, read at call time; it
+     * rejects once the open is gone (G3-13). An access-controlled join
+     * without it faults (gated): `no trust view`.
+     */
+    trust?: { isTrusted(key: PublicSignKey): Promise<boolean> };
 }
 
 /** `ReadinessRuntime.debug()`: what is armed and in flight. */
@@ -190,6 +197,14 @@ export class ReadinessRuntime {
 
     private constructor(
         readonly address: string,
+        /**
+         * The store is access-controlled (the program has a trust graph, part
+         * of its address): a join opens the trust scope too and needs J's
+         * trust view (design 4.2 `TRUST_V1`, G3-9). Never inferred from the
+         * scopes that exist: a trust scope whose creation failed must fault
+         * the join, not skip the trust clauses.
+         */
+        readonly accessControlled: boolean,
         readonly directory: string | undefined,
         /** The namespace store's log id: its structures file's name. */
         readonly namespaceStore: Uint8Array,
@@ -274,6 +289,7 @@ export class ReadinessRuntime {
         }
         return new ReadinessRuntime(
             address,
+            stores.trust !== undefined,
             directory,
             stores.namespace,
             host,
@@ -642,16 +658,23 @@ export class ReadinessRuntime {
     }
 
     /**
-     * `canPerformEntry`'s hook: a refusal of `head` in scope `scope`. Kept
-     * only while a pull of this generation tracks the head (one map lookup
+     * `canPerformEntry`'s hook, and the trust graph's (`ports.ts`
+     * `installTrustRejectionNotes`): a refusal of `head` in scope `scope`,
+     * with the keys whose trust would reverse a trust refusal. Kept only
+     * while a pull of this generation tracks the head (one map lookup
      * otherwise). Never throws.
      */
-    noteRejection(scope: ScopeId, head: unknown, reason: RejectionReason) {
+    noteRejection(
+        scope: ScopeId,
+        head: unknown,
+        reason: RejectionReason,
+        signers?: readonly PublicSignKey[]
+    ) {
         if (this.disposedValue || typeof head !== "string") return;
         try {
             this.bundles
                 .get(scope)
-                ?.bundle.rejections.note(head, rejectionOf(reason));
+                ?.bundle.rejections.note(head, rejectionOf(reason, signers));
         } catch {
             // Diagnostics of a pull; never the admission's concern.
         }
@@ -670,10 +693,12 @@ export class ReadinessRuntime {
      * Starts the joiner's coordinator, once per generation: the host calls
      * it for a fresh full address-open only (never a creator, a warm
      * reopen, an observer or `allowPartialWrites`; deviation h). Sessions
-     * wait for the namespace scope's start; commit 2 opens the namespace
-     * scope only. Without readiness state (no anchor host) nothing can be
-     * contained this open: `satisfied()` stays false and the status names
-     * the fault (G2-11); `assumeComplete` is the escape.
+     * open the namespace scope, and the trust scope too in an
+     * access-controlled store (PR-3 commit 3), and wait for those scopes'
+     * starts. Without readiness state (no anchor host), or in an
+     * access-controlled store without a trust scope or J's trust view,
+     * nothing can be contained this open: `satisfied()` stays false and the
+     * status names the fault (G2-11, G3-9); `assumeComplete` is the escape.
      */
     startJoin(options: JoinOptions): void {
         if (this.joinStarted || this.blockedValue || this.disposedValue) {
@@ -681,13 +706,20 @@ export class ReadinessRuntime {
         }
         this.joinStarted = true;
         const namespace = this.scopes.get(SCOPE_NAMESPACE_V1);
+        const trust = this.accessControlled
+            ? this.scopes.get(SCOPE_TRUST_V1)
+            : undefined;
         const fault = !this.anchorHost
             ? `no readiness state: ${this.unavailable ?? "no anchor host"}`
             : !this.ports
               ? "no readiness transport"
               : !namespace
                 ? "no namespace scope"
-                : undefined;
+                : this.accessControlled && !trust
+                  ? "no trust scope"
+                  : this.accessControlled && !options.trust
+                    ? "no trust view"
+                    : undefined;
         if (fault !== undefined) {
             this.joinFault = fault;
             this.disposeLifeRecorder();
@@ -703,6 +735,7 @@ export class ReadinessRuntime {
             return;
         }
         const registry = shadowRegistry();
+        const scopes = trust ? [namespace!, trust] : [namespace!];
         const coordinator = new Coordinator({
             transport,
             // Taken once, by `start` (after its listeners attached). No
@@ -714,9 +747,15 @@ export class ReadinessRuntime {
                 return recorder?.take();
             },
             send: (message, to) => this.sendTo(message, to),
-            scopes: [SCOPE_NAMESPACE_V1],
+            scopes: scopes.map(({ descriptor }) => descriptor.id),
             scope: (id) => this.sessionScope(id)?.ports,
-            started: () => namespace!.started,
+            // Both scopes' starts; a failed one still settles, and the first
+            // session then ends `local-unavailable` (a fault, gated).
+            started: () =>
+                Promise.all(scopes.map(({ started }) => started)).then(
+                    () => {}
+                ),
+            trust: trust ? options.trust : undefined,
             hlcProved: options.hlcProved,
             syncDelivering: (scope) => this.syncDelivering(scope),
             timers: options.timers,
@@ -836,12 +875,14 @@ export class ReadinessRuntime {
     }
 
     /**
-     * J's trust graph changed: live sessions classify their trust-pending
-     * and logged hashes again (G2-10). Never throws.
+     * J's trust graph changed (any `change` event): the coordinator's trust
+     * epoch moves, live sessions check their parked hashes again, and
+     * contained peers' trust is checked again (`Coordinator.trustChanged`,
+     * design 4.9). Never throws.
      */
     onTrustChange(): void {
         try {
-            this.coordinatorValue?.reclassify();
+            this.coordinatorValue?.trustChanged();
         } catch {
             // The trust listener must not fail.
         }

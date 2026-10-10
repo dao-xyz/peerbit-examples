@@ -1,3 +1,10 @@
+import {
+    ExchangeHeadsMessage,
+    RawExchangeHeadsMessage,
+    SharedLog,
+    StashBackedRawExchangeHeadsMessage,
+} from "@peerbit/shared-log";
+import { TrustedNetwork } from "@peerbit/trusted-network";
 import { fork, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -10,15 +17,29 @@ import {
 } from "../index.js";
 import {
     Coordinator,
+    type CoordinatorDebug,
     type PeerRecord,
     type PeerState,
     type ReadinessStatus,
     type TransportEvent,
 } from "../readiness/coordinator.js";
-import type { ReadinessRuntime } from "../readiness/runtime.js";
+import { headDigest } from "../readiness/digest.js";
+import type { IdKey } from "../readiness/id-map.js";
+import type { PullQueueStats } from "../readiness/pull-queue.js";
+import { ReadinessRuntime } from "../readiness/runtime.js";
+import {
+    NAMESPACE_V1,
+    SCOPE_NAMESPACE_V1,
+    SCOPE_TRUST_V1,
+    TRUST_V1,
+    type ScopeDescriptor,
+} from "../readiness/scopes.js";
+import type { SessionResult } from "../readiness/session.js";
+import { documentsIndexPort, type ScopeTap } from "../readiness/tap.js";
 import type {
     DepartureCommand,
     DepartureReport,
+    DepartureRow,
 } from "./readiness-departure.protocol.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
@@ -56,6 +77,17 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * same set on every peer) and connection gaters, and each test asserts its
  * topology before the fault, so a Peerbit change that moves the fanout
  * parent fails loudly instead of testing something else.
+ *
+ * - **38, an access-controlled store across processes** (PR-3 commit 3,
+ *   SPEC3 9.7). R, in the child, owns the store and answers; it granted one
+ *   writer W, which wrote a file and stopped, so R's trust graph holds one
+ *   edge and its namespace rows of W's are admitted only by a peer holding
+ *   that edge. J withholds sync of its trust log (exchange heads dropped)
+ *   and `isTrusted`'s remote warmup, so the readiness `TRUST_V1` pull from
+ *   `trustGraph.log` is the only way the edge reaches J. J lacks exactly the
+ *   edge when R's trust run starts, pulls it, and contains R's namespace
+ *   scope only after the edge landed; J turns ready holding the edge and
+ *   W's rows, none explained `rejected-untrusted`.
  */
 
 // Fixed on every OS: a slow departure is evidence, not a reason to wait
@@ -391,12 +423,235 @@ const unsubscribesOf = (peer: Peerbit, r: string) => {
     return seen;
 };
 
+const hexOf = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+
+/** A row of the child's report as the tap keys it (trust keys are bytes). */
+const tapRow = (
+    row: DepartureRow,
+    scope: ScopeDescriptor
+): { key: IdKey; head: string; label: string } => ({
+    key:
+        scope === TRUST_V1
+            ? Uint8Array.from(Buffer.from(row.key, "hex"))
+            : row.key,
+    head: row.head,
+    label: row.key,
+});
+
+/** The rows of `rows` whose head `tap` does not hold, read synchronously. */
+const missingFromTap = (
+    tap: ScopeTap | undefined,
+    rows: ReadonlyArray<ReturnType<typeof tapRow>>
+) =>
+    rows
+        .filter(({ key, head }) => {
+            const slot = tap ? tap.map.get(key) : -1;
+            return !(slot >= 0 && tap!.map.headEquals(slot, headDigest(head)));
+        })
+        .map(({ label }) => label);
+
+/** A scope's index rows (id to head; trust ids in hex), as R reports them. */
+const indexRows = async (documents: any, scope: ScopeDescriptor) => {
+    const rows = new Map<string, string>();
+    for await (const page of documentsIndexPort(documents, scope).scan()) {
+        for (const { key, head } of page) {
+            rows.set(typeof key === "string" ? key : hexOf(key), head);
+        }
+    }
+    return rows;
+};
+
+/** J's view when it turned ready (`ReadinessRuntime.markReady`). */
+type Decision = {
+    at: number;
+    satisfied: boolean;
+    /** R's namespace rows J's tap did not hold (W's included). */
+    missingNamespace: string[];
+    /** R's trust rows J's tap did not hold (the edge). */
+    missingTrust: string[];
+    /** J's trust pull queue (the `TRUST_V1` bundle). */
+    trustPulls?: PullQueueStats;
+    debug: CoordinatorDebug;
+};
+
+/** What J did about R's one trust edge, recorded from before J opened. */
+type TrustProbe = {
+    /** Exchange-heads messages of J's trust log dropped (sync withheld). */
+    withheld: number[];
+    /** Joins into J's trust log naming the edge: held before and after. */
+    joins: Array<{ at: number; before: boolean; after: boolean }>;
+    /** J's trust graph `change` events that added a row. */
+    trustAdded: number[];
+    /** Every scope result J's coordinator held, in order. */
+    results: Array<{ at: number; peer: string; result: SessionResult }>;
+    /** J's namespace refusals for trust (the trust lag, logged only). */
+    trustRefusals: Array<{ at: number; signers: string[] }>;
+    decision?: Decision;
+    restore(): void;
+};
+
+/**
+ * Test 38's hooks, on prototypes so J's open is covered too (only J runs
+ * shared-fs in this process; R and W are in the child):
+ *
+ * - sync of J's trust log is withheld: `SharedLog.onMessage` drops exchange
+ *   heads (raw and stash-backed ones too) for J's node and R's trust log id.
+ *   The shared-log `responseHandler` calls `this.onMessage` late, so the
+ *   prototype patch sees them (SPEC3 G3-18). Block fetches still pass, and
+ *   with them the readiness pull (`SharedLog.join` of a hash);
+ * - `isTrusted`'s remote warmup searches R's graph with `replicate: true`,
+ *   a second delivery path, so J's `TrustedNetwork` opens with it off
+ *   (G3-14: a decoded instance never warms up anyway);
+ * - records: joins naming the edge, J's trust graph additions, every
+ *   coordinator result, trust refusals, and J's view at its decision.
+ */
+const installTrustProbe = (options: {
+    joiner: string;
+    trustLogId: string;
+    edge: string;
+    namespace: ReadonlyArray<ReturnType<typeof tapRow>>;
+    trust: ReadonlyArray<ReturnType<typeof tapRow>>;
+}): TrustProbe => {
+    const logProto = SharedLog.prototype as any;
+    const trustProto = TrustedNetwork.prototype as any;
+    const runtimeProto = ReadinessRuntime.prototype as any;
+    const coordinatorProto = Coordinator.prototype as any;
+    const onMessage = logProto.onMessage;
+    const join = logProto.join;
+    const open = trustProto.open;
+    const noteRejection = runtimeProto.noteRejection;
+    const markReady = runtimeProto.markReady;
+    const setResult = coordinatorProto.setResult;
+    const probe: TrustProbe = {
+        withheld: [],
+        joins: [],
+        trustAdded: [],
+        results: [],
+        trustRefusals: [],
+        restore: () => {
+            logProto.onMessage = onMessage;
+            logProto.join = join;
+            trustProto.open = open;
+            runtimeProto.noteRejection = noteRejection;
+            runtimeProto.markReady = markReady;
+            coordinatorProto.setResult = setResult;
+        },
+    };
+    const isJoinersTrustLog = (log: any) => {
+        try {
+            return (
+                log.node?.identity?.publicKey?.hashcode() === options.joiner &&
+                log.log?.id instanceof Uint8Array &&
+                hexOf(log.log.id) === options.trustLogId
+            );
+        } catch {
+            return false;
+        }
+    };
+    logProto.onMessage = function (this: any, message: unknown, context: any) {
+        if (
+            (message instanceof ExchangeHeadsMessage ||
+                message instanceof RawExchangeHeadsMessage) &&
+            isJoinersTrustLog(this)
+        ) {
+            probe.withheld.push(performance.now());
+            // A stash-backed message holds its bytes until released.
+            if (message instanceof StashBackedRawExchangeHeadsMessage) {
+                message.release();
+            }
+            return Promise.resolve();
+        }
+        return onMessage.call(this, message, context);
+    };
+    logProto.join = function (this: any, entries: unknown[], ...rest: any[]) {
+        const namesEdge =
+            Array.isArray(entries) &&
+            entries.some(
+                (entry) =>
+                    (typeof entry === "string"
+                        ? entry
+                        : (entry as any)?.hash) === options.edge
+            );
+        if (!namesEdge || !isJoinersTrustLog(this)) {
+            return join.call(this, entries, ...rest);
+        }
+        return (async () => {
+            const before = await this.log.has(options.edge);
+            try {
+                return await join.call(this, entries, ...rest);
+            } finally {
+                probe.joins.push({
+                    at: performance.now(),
+                    before,
+                    after: await this.log.has(options.edge).catch(() => false),
+                });
+            }
+        })();
+    };
+    trustProto.open = async function (this: any, ...args: any[]) {
+        this._lastWarmupAt = Number.POSITIVE_INFINITY;
+        await open.apply(this, args);
+        // Attached before shared-fs's own trust listener, so it fires
+        // before the coordinator's `trustChanged`.
+        this.trustGraph.events.addEventListener("change", (event: any) => {
+            if ((event.detail?.added?.length ?? 0) > 0) {
+                probe.trustAdded.push(performance.now());
+            }
+        });
+    };
+    runtimeProto.noteRejection = function (
+        this: ReadinessRuntime,
+        scope: number,
+        head: unknown,
+        reason: string,
+        signers?: readonly { hashcode(): string }[]
+    ) {
+        if (
+            scope === SCOPE_NAMESPACE_V1 &&
+            (reason === "untrusted" || reason === "trust-cache")
+        ) {
+            probe.trustRefusals.push({
+                at: performance.now(),
+                signers: (signers ?? []).map((key) => key.hashcode()),
+            });
+        }
+        return noteRejection.call(this, scope, head, reason, signers);
+    };
+    runtimeProto.markReady = function (this: ReadinessRuntime) {
+        const coordinator = this.coordinator;
+        if (!probe.decision && coordinator) {
+            const pulls = this.sessionScope(SCOPE_TRUST_V1)?.pulls.stats;
+            probe.decision = {
+                at: performance.now(),
+                satisfied: this.satisfied(),
+                missingNamespace: missingFromTap(
+                    this.namespace,
+                    options.namespace
+                ),
+                missingTrust: missingFromTap(this.trust, options.trust),
+                trustPulls: pulls && { ...pulls },
+                debug: coordinator.debug(),
+            };
+        }
+        return markReady.call(this);
+    };
+    coordinatorProto.setResult = function (
+        this: Coordinator,
+        entry: { hash: string },
+        result: SessionResult
+    ) {
+        probe.results.push({ at: performance.now(), peer: entry.hash, result });
+        return setResult.call(this, entry, result);
+    };
+    return probe;
+};
+
 type Topology = "parent" | "no-parent" | "relayed";
 
 describe("readiness departure across processes", () => {
     const children = new Set<RunningChild>();
     const peers: Peerbit[] = [];
-    const probes: Probe[] = [];
+    const probes: Array<Pick<Probe, "restore">> = [];
 
     afterEach(async () => {
         for (const probe of probes.splice(0)) probe.restore();
@@ -966,6 +1221,211 @@ describe("readiness departure across processes", () => {
                 gaps: [{ peer: r, missing: "unknown" }],
             });
             report("54", world, stoppedAt);
+        }
+    );
+
+    it(
+        "38: an access-controlled store across processes; J lacks R's one trust edge: TRUST_V1 pulls it from trustGraph.log, then the namespace scope contains; ready with the edge and the writer's rows",
+        { timeout: TEST_TIMEOUT_MS },
+        async () => {
+            const running = startChild();
+            children.add(running);
+            const hello = await reportOf(running, "hello");
+            const r = hello.hash;
+            const joinerPeer = await createPeer();
+            const joiner = hashOf(joinerPeer);
+            // R roots every shard: the one peer present throughout.
+            const candidates = [r];
+            (joinerPeer.services.pubsub as any).setTopicRootCandidates(
+                candidates
+            );
+            const openAcl: DepartureCommand = { type: "open-acl", candidates };
+            running.child.send(openAcl);
+            const acl = await reportOf(running, "acl-opened");
+            // S13: R's anchor worker runs under tsx, so R can answer.
+            expect(acl.anchorMode).toBe("worker");
+            const w = acl.writer;
+            // The scenario: one edge (R grants W); R holds rows of its own
+            // and of W's, and W's are admitted only with the edge.
+            expect(acl.trust).toHaveLength(1);
+            const edge = acl.trust[0].head;
+            expect(new Set(acl.namespace.map(({ signer }) => signer))).toEqual(
+                new Set([r, w])
+            );
+            const writerRows = acl.namespace.filter(
+                ({ signer }) => signer === w
+            );
+            expect(writerRows.length).toBeGreaterThan(0);
+
+            const probe = installTrustProbe({
+                joiner,
+                trustLogId: acl.trustLogId,
+                edge,
+                namespace: acl.namespace.map((row) =>
+                    tapRow(row, NAMESPACE_V1)
+                ),
+                trust: acl.trust.map((row) => tapRow(row, TRUST_V1)),
+            });
+            probes.push(probe);
+            expect(hello.addrs.length).toBeGreaterThan(0);
+            await joinerPeer.dial(hello.addrs[0]);
+            const openedAt = performance.now();
+            const fs = await openSharedFs({
+                peerbit: joinerPeer,
+                address: acl.address,
+                machineLabel: "departure-j",
+                bootstrap: false,
+                gc: false,
+                writeReadinessSettleMs: 100,
+            } as any);
+            const runtime = runtimeOf(fs)!;
+            expect(runtime.accessControlled).toBe(true);
+            let coordinator!: Coordinator;
+            await waitUntil(() => {
+                coordinator = runtime.coordinator!;
+                expect(coordinator).toBeDefined();
+            });
+            expect(coordinator.ports.scopes).toEqual([
+                SCOPE_NAMESPACE_V1,
+                SCOPE_TRUST_V1,
+            ]);
+
+            await fs.awaitWriteReady({ timeout: WAIT_TIMEOUT_MS });
+            const decision = probe.decision!;
+            expect(decision).toBeDefined();
+            // At the decision J held every row R listed, W's included, and
+            // the edge.
+            expect(decision).toMatchObject({
+                satisfied: true,
+                missingNamespace: [],
+                missingTrust: [],
+            });
+            // The edge moved J's trust epoch while the join ran.
+            expect(decision.debug.trustTriggers.change).toBeGreaterThan(0);
+            expect(decision.debug.trustEpoch).toBeGreaterThan(0);
+
+            // TRUST_V1 pulled it: J lacked exactly the edge when R's first
+            // trust run started, and its trust pull queue joined it.
+            const ofR = probe.results.filter(({ peer }) => peer === r);
+            const trustResults = ofR.filter(
+                ({ result }) => result.scope === SCOPE_TRUST_V1
+            );
+            const namespaceResults = ofR.filter(
+                ({ result }) => result.scope === SCOPE_NAMESPACE_V1
+            );
+            expect(trustResults.length).toBeGreaterThan(0);
+            expect(trustResults[0].result).toMatchObject({
+                count: 1,
+                missingAtStart: 1,
+                qualified: true,
+            });
+            expect(trustResults[0].result.pulled).toBeGreaterThan(0);
+            expect(decision.trustPulls?.joined).toBeGreaterThan(0);
+            // From trustGraph.log, by one join: the edge was absent before
+            // it and present after, and nothing else delivered it.
+            const delivered = probe.joins.filter(
+                ({ before, after }) => !before && after
+            );
+            expect(delivered, JSON.stringify(probe.joins)).toHaveLength(1);
+            expect(probe.trustAdded.length).toBeGreaterThan(0);
+            const edgeAt = probe.trustAdded[0];
+            expect(edgeAt).toBeLessThanOrEqual(delivered[0].at);
+
+            // Then the namespace scope contains: every namespace result for
+            // R came after the edge landed (W's rows need it), and it
+            // admitted W's rows rather than explaining them.
+            expect(namespaceResults.length).toBeGreaterThan(0);
+            for (const { at } of namespaceResults) {
+                expect(at).toBeGreaterThan(edgeAt);
+            }
+            expect(decision.at).toBeGreaterThan(namespaceResults[0].at);
+            const record = coordinator.record(r)!;
+            expect(record).toMatchObject({
+                state: "contained",
+                qualified: true,
+                identity: "trusted",
+                departed: false,
+            });
+            const namespace = record.results.get(SCOPE_NAMESPACE_V1)!;
+            expect(namespace.explainedBy["rejected-untrusted"] ?? 0).toBe(0);
+            expect(namespace.untrusted).toBeUndefined();
+            expect(record.results.get(SCOPE_TRUST_V1)).toBeDefined();
+            expect(
+                coordinator
+                    .proof()
+                    .contained.map(({ peer, scope }) => `${scope} ${peer}`)
+                    .sort()
+            ).toEqual([`namespace-v1 ${r}`, `trust-v1 ${r}`]);
+            const status = fs.bootstrapStatus();
+            expect(status.writeReady).toBe(true);
+            expect(status.readiness).toMatchObject({
+                state: "ready",
+                satisfied: true,
+                required: [],
+                excluded: [],
+                gaps: [],
+                trustPending: [],
+                trustChecking: [],
+            });
+            expect(status.readiness!.contained).toEqual([
+                expect.objectContaining({
+                    peer: r,
+                    qualified: true,
+                    identity: "trusted",
+                    source: "creator",
+                    departed: false,
+                }),
+            ]);
+            expect([...status.readiness!.contained[0].scopes].sort()).toEqual([
+                "namespace-v1",
+                "trust-v1",
+            ]);
+
+            // J's indexes: its trust rows are R's (the edge alone), and it
+            // holds every namespace row of R's, W's included.
+            const program = fs.program as any;
+            const trustRows = await indexRows(
+                program.trustGraph.trustGraph,
+                TRUST_V1
+            );
+            expect(Object.fromEntries(trustRows)).toEqual(
+                Object.fromEntries(
+                    acl.trust.map(({ key, head }) => [key, head])
+                )
+            );
+            const namespaceRows = await indexRows(
+                program.entries,
+                NAMESPACE_V1
+            );
+            for (const { key, head } of acl.namespace) {
+                expect(namespaceRows.get(key), key).toBe(head);
+            }
+
+            console.log(
+                "readiness-departure:",
+                JSON.stringify({
+                    test: "38",
+                    edgeMs: Math.round(edgeAt - openedAt),
+                    namespaceMs: Math.round(namespaceResults[0].at - openedAt),
+                    readyMs: Math.round(decision.at - openedAt),
+                    writerRows: writerRows.length,
+                    // Trust exchange-heads sync tried to deliver, and when
+                    // the first came (before `edgeMs`: sync would have won).
+                    withheld: probe.withheld.length,
+                    withheldMs: probe.withheld.map((at) =>
+                        Math.round(at - openedAt)
+                    ),
+                    edgeJoins: probe.joins.length,
+                    // W's rows J refused for trust before the edge (the
+                    // order of sync and the pulls decides; not asserted).
+                    trustRefusals: probe.trustRefusals.filter(({ signers }) =>
+                        signers.includes(w)
+                    ).length,
+                    sessionsOpened: record.sessionsOpened,
+                    trustTriggers: decision.debug.trustTriggers,
+                    trustPulls: decision.trustPulls,
+                })
+            );
         }
     );
 });

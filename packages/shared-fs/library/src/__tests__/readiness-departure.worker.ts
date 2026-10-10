@@ -4,13 +4,21 @@
 // tsx, and `opened` reports the host mode. This process is the peer R that
 // departs: it opens the filesystem as a full replica whose responder drops
 // every OPEN (R never answers), and the parent kills it with SIGKILL or
-// freezes it with SIGSTOP. It never closes cleanly.
+// freezes it with SIGSTOP. It never closes cleanly. In test 38 (`open-acl`)
+// R is instead the owner of an access-controlled store that answers.
 import { Peerbit } from "peerbit";
 import { openSharedFs } from "../index.js";
+import {
+    NAMESPACE_V1,
+    TRUST_V1,
+    type ScopeDescriptor,
+} from "../readiness/scopes.js";
+import { documentsIndexPort } from "../readiness/tap.js";
 import { OpenV1, type ReadinessMessage } from "../readiness/wire.js";
 import type {
     DepartureCommand,
     DepartureReport,
+    DepartureRow,
 } from "./readiness-departure.protocol.js";
 
 // The parent is the only lifecycle owner: losing the IPC channel must never
@@ -77,6 +85,109 @@ const open = async (
     });
 };
 
+/** Resolves once `check` holds (setup only; the parent bounds the test). */
+const until = async (
+    check: () => Promise<boolean>,
+    what: string,
+    timeoutMs = 60_000
+) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await check().catch(() => false))) {
+        if (Date.now() > deadline) throw new Error(`timed out: ${what}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+};
+
+/** A scope's index rows, read through the tap's own index port. */
+const rowsOf = async (documents: any, scope: ScopeDescriptor) => {
+    const rows: DepartureRow[] = [];
+    for await (const page of documentsIndexPort(documents, scope).scan()) {
+        for (const { key, head } of page) {
+            rows.push({
+                key:
+                    typeof key === "string"
+                        ? key
+                        : Buffer.from(key).toString("hex"),
+                head,
+            });
+        }
+    }
+    return rows;
+};
+
+const decode = (bytes: Uint8Array | undefined) =>
+    bytes ? new TextDecoder().decode(bytes) : undefined;
+
+const openAcl = async (
+    peer: Peerbit,
+    command: Extract<DepartureCommand, { type: "open-acl" }>
+) => {
+    (peer.services.pubsub as any).setTopicRootCandidates(command.candidates);
+    const fs = await openSharedFs({
+        peerbit: peer,
+        rootKey: peer.identity.publicKey,
+        machineLabel: "departure-r",
+        gc: false,
+    });
+    await fs.writeFile("/owner.txt", "from the owner");
+    // W, the writer R grants: its rows are admitted only by a peer holding
+    // R's edge. It stops before R reports.
+    const writerPeer = await Peerbit.create();
+    try {
+        (writerPeer.services.pubsub as any).setTopicRootCandidates(
+            command.candidates
+        );
+        await writerPeer.dial(peer);
+        const writerFs = await openSharedFs({
+            peerbit: writerPeer,
+            address: fs.address!,
+            machineLabel: "departure-w",
+            bootstrap: false,
+            gc: false,
+            // W writes once it holds R's edge; it never joins for readiness.
+            allowPartialWrites: true,
+        });
+        await fs.authorizeWriter(writerPeer.identity.publicKey);
+        await until(
+            () => writerFs.isTrustedWriter(writerPeer.identity.publicKey),
+            "W holds R's edge"
+        );
+        await until(async () => {
+            await writerFs.writeFile("/writer.txt", "from the writer");
+            return true;
+        }, "W's write");
+        await until(
+            async () =>
+                decode(await fs.readFile("/writer.txt")) === "from the writer",
+            "R holds W's file"
+        );
+    } finally {
+        await writerPeer.stop();
+    }
+    const program = fs.program as any;
+    const runtime = program.readinessRuntime;
+    await runtime.whenStarted();
+    const trustDocuments = program.trustGraph.trustGraph;
+    const namespace: Array<DepartureRow & { signer: string }> = [];
+    for (const row of await rowsOf(program.entries, NAMESPACE_V1)) {
+        const entry = await program.entries.log.log.get(row.head);
+        const keys = entry ? await entry.getPublicKeys() : [];
+        namespace.push({
+            ...row,
+            signer: keys.map((key: any) => key.hashcode()).join(","),
+        });
+    }
+    await send({
+        type: "acl-opened",
+        address: fs.address!,
+        trustLogId: Buffer.from(trustDocuments.log.log.id).toString("hex"),
+        writer: writerPeer.identity.publicKey.hashcode(),
+        trust: await rowsOf(trustDocuments, TRUST_V1),
+        namespace,
+        anchorMode: runtime.anchorHost?.mode ?? "none",
+    });
+};
+
 const main = async () => {
     const peer = await Peerbit.create({
         libp2p: {
@@ -101,6 +212,9 @@ const main = async () => {
         const command = raw as DepartureCommand;
         if (command?.type === "connect") connect(peer, command).catch(fail);
         else if (command?.type === "open") open(peer, command).catch(fail);
+        else if (command?.type === "open-acl") {
+            openAcl(peer, command).catch(fail);
+        }
     });
     await send({
         type: "hello",

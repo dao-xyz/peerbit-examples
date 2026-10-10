@@ -1,3 +1,5 @@
+import { deserialize } from "@dao-xyz/borsh";
+import { PublicSignKey, getPublicKeyFromPeerId } from "@peerbit/crypto";
 import { isDeleteOperation, isPutOperation } from "@peerbit/document";
 import { PULL_LANES } from "./constants.js";
 import {
@@ -14,7 +16,11 @@ import {
     type PullQueueOptions,
 } from "./pull-queue.js";
 import type { ResponderScope } from "./responder.js";
-import type { ScopeDescriptor, ScopeId } from "./scopes.js";
+import {
+    SCOPE_TRUST_V1,
+    type ScopeDescriptor,
+    type ScopeId,
+} from "./scopes.js";
 import { localScopeOf, type SessionScopePorts } from "./session.js";
 import { scopeRowKey, type ScopeIndexPort, type ScopeTap } from "./tap.js";
 
@@ -45,10 +51,24 @@ const REJECTIONS: Readonly<Record<RejectionReason, Rejection>> = {
 
 /**
  * A `canPerform` refusal as the rejection record stores it: only a
- * structural one is permanent (explain.ts `RejectionReason`).
+ * structural one is permanent (explain.ts `RejectionReason`). An
+ * `untrusted` or `trust-cache` refusal carries the keys whose trust would
+ * reverse it, when given (a new object); otherwise the shared frozen one.
  */
-export const rejectionOf = (reason: RejectionReason): Rejection =>
-    REJECTIONS[reason] ?? REJECTIONS.transient;
+export const rejectionOf = (
+    reason: RejectionReason,
+    signers?: readonly PublicSignKey[]
+): Rejection => {
+    const rejection = REJECTIONS[reason] ?? REJECTIONS.transient;
+    if (
+        signers === undefined ||
+        signers.length === 0 ||
+        (rejection.reason !== "untrusted" && rejection.reason !== "trust-cache")
+    ) {
+        return rejection;
+    }
+    return { ...rejection, signers: [...signers] };
+};
 
 /** The log entry fields `inspect` reads (`@peerbit/log` `Entry`). */
 export interface LoggedEntry {
@@ -461,4 +481,157 @@ export const sessionScopeOf = (
         rejections,
         dispose: () => pulls.dispose(),
     };
+};
+
+/**
+ * A key as `@peerbit/trusted-network` coerces a relation's `from` and an
+ * entry's signer (`controller.js` `coercePublicKey`); throws when it cannot.
+ */
+const coerceKey = (key: unknown): PublicSignKey => {
+    if (key instanceof PublicSignKey) return key;
+    const bytes = (key as any)?.bytes;
+    if (bytes instanceof Uint8Array) return deserialize(bytes, PublicSignKey);
+    return getPublicKeyFromPeerId(key as any);
+};
+
+/** What the trust graph's own `canPerform` was asked (Documents' properties). */
+export interface TrustCanPerformProperties {
+    readonly type?: string;
+    readonly value?: { readonly from?: unknown } | undefined;
+    readonly entry?: {
+        readonly hash?: string;
+        getPublicKeys(): Promise<readonly unknown[]> | readonly unknown[];
+    };
+}
+
+/**
+ * Why `TrustedNetwork.canPerform` refused a put of a trust relation, by the
+ * rule it applies (`@peerbit/trusted-network controller.js:67-104`
+ * `canPerformByRelation`): the relation's owner (`from`) must have signed
+ * it and be trusted.
+ *
+ * - no value, or a `from` that is not a key, or no entry signer equal to
+ *   `from`: `structure`, permanent (the entry alone decides it);
+ * - a signer equal to `from`: the owner is not trusted, `untrusted` with
+ *   signers `[from]`.
+ *
+ * Undefined for a delete: a CUT is never a row of the trust scope, so a
+ * pulled head is never one (a CUT a peer lists is a lie). Classification
+ * only, after the refusal: the boolean is `canPerform`'s. Throws when the
+ * entry's keys cannot be read (the head is then `failed`).
+ */
+export const trustRelationRejection = async (
+    properties: TrustCanPerformProperties
+): Promise<
+    { reason: RejectionReason; signers?: PublicSignKey[] } | undefined
+> => {
+    if (properties?.type !== "put") return undefined;
+    let owner: PublicSignKey;
+    try {
+        if (!properties.value) return { reason: "structure" };
+        owner = coerceKey(properties.value.from);
+    } catch {
+        return { reason: "structure" };
+    }
+    const keys = (await properties.entry?.getPublicKeys()) ?? [];
+    for (const key of keys) {
+        let signer: PublicSignKey;
+        try {
+            signer = coerceKey(key);
+        } catch {
+            continue;
+        }
+        if (owner.equals(signer)) {
+            return { reason: "untrusted", signers: [owner] };
+        }
+    }
+    return { reason: "structure" };
+};
+
+/** Where trust-graph refusals are noted (`ReadinessRuntime.noteRejection`). */
+export interface TrustRejectionSink {
+    noteRejection(
+        scope: ScopeId,
+        head: unknown,
+        reason: RejectionReason,
+        signers?: readonly PublicSignKey[]
+    ): void;
+}
+
+/** The part of `TrustedNetwork` the notes wrap. */
+export interface TrustCanPerformer {
+    canPerform(properties: any): Promise<boolean>;
+}
+
+const TRUST_NOTES = Symbol("shared-fs readiness trust notes");
+
+interface TrustNotes {
+    runtimeOf: () => TrustRejectionSink | undefined;
+    readonly original: (properties: any) => Promise<boolean>;
+}
+
+/**
+ * Notes the trust graph's own refusals into the readiness runtime, scope
+ * `TRUST_V1` (design 4.6 "Rejections", 4.2 `TRUST_V1`, review R11): without
+ * them a pulled trust row that J's graph refuses is unlabelled, `failed`,
+ * and gates J until the caller's timeout.
+ *
+ * `TrustedNetwork.open` binds `this.canPerform` into its Documents' open
+ * arguments (`controller.js:198-211`), so an own property set before the
+ * open is the one Documents calls. It calls the `canPerform` it replaced and
+ * returns its boolean unchanged; on `false` it labels the refusal
+ * (`trustRelationRejection`) and notes it into the runtime read at entry,
+ * as `canPerformEntry` captures its runtime (G2-23). A throw of the
+ * original propagates; a labelling that throws notes nothing.
+ *
+ * Idempotent: a symbol marks the installed wrapper, and a second install
+ * (every open of the program) only replaces `runtimeOf`. The property is no
+ * borsh field, so the program's serialization and address are unchanged.
+ * A trust Documents reused from another opener (`existing: "reuse"`) keeps
+ * that opener's binding, and this runtime then gets no trust notes: a
+ * refused trust row is `failed` and gates (liveness only, G3-10).
+ */
+export const installTrustRejectionNotes = (
+    network: TrustCanPerformer,
+    runtimeOf: () => TrustRejectionSink | undefined
+): void => {
+    const target = network as TrustCanPerformer & {
+        [TRUST_NOTES]?: TrustNotes;
+    };
+    const installed = target[TRUST_NOTES];
+    if (installed) {
+        installed.runtimeOf = runtimeOf;
+        return;
+    }
+    const notes: TrustNotes = { runtimeOf, original: target.canPerform };
+    Object.defineProperty(target, TRUST_NOTES, { value: notes });
+    Object.defineProperty(target, "canPerform", {
+        configurable: true,
+        writable: true,
+        value: async function canPerform(this: unknown, properties: any) {
+            let runtime: TrustRejectionSink | undefined;
+            try {
+                runtime = notes.runtimeOf();
+            } catch {
+                // No runtime: nothing to note.
+            }
+            const allowed = await notes.original.call(this, properties);
+            if (allowed === false && runtime) {
+                try {
+                    const label = await trustRelationRejection(properties);
+                    if (label) {
+                        runtime.noteRejection(
+                            SCOPE_TRUST_V1,
+                            properties?.entry?.hash,
+                            label.reason,
+                            label.signers
+                        );
+                    }
+                } catch {
+                    // Diagnostics of a pull; never the admission's concern.
+                }
+            }
+            return allowed;
+        },
+    });
 };

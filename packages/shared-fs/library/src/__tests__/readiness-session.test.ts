@@ -1,4 +1,8 @@
-import { randomBytes } from "@peerbit/crypto";
+import {
+    Ed25519Keypair,
+    randomBytes,
+    type PublicSignKey,
+} from "@peerbit/crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
     CELL_BYTES,
@@ -55,7 +59,9 @@ import {
     encodeReadinessMessage,
     type ReadinessMessage,
 } from "../readiness/wire.js";
+import type { Rejection } from "../readiness/explain.js";
 import {
+    FakeTrust,
     JoinerWorld,
     bytesOf,
     copyMessage,
@@ -75,7 +81,8 @@ import {
  * outcome is checked by the harness's oracle (S_R within J's index plus E
  * at the certificate's sequence point), so no test here can pass on a wrong
  * ready. Design tests 22, 25, 28, 29, 30, 31 (joiner half), 40, 50, 51 and
- * the unit half of 44.
+ * the unit half of 44; and the trust classes of PR-3 commit 3 (SPEC3 9.3)
+ * against a fake trust view.
  */
 
 const contained = (outcome: SessionOutcome): SessionResult[] => {
@@ -2584,6 +2591,767 @@ describe("readiness joiner session", () => {
             expect(session.debug().armedTimers).toBe(0);
             session.close();
             expect(w.contained).toEqual([]);
+        });
+    });
+
+    describe("trust classes (PR-3 commit 3, SPEC3 9.3)", () => {
+        const NS = SCOPE_NAMESPACE_V1;
+        const TRUST = SCOPE_TRUST_V1;
+
+        const keyOf = async () => (await Ed25519Keypair.create()).publicKey;
+
+        /** A refusal for trust that recorded `signers`. */
+        const refusal = (
+            signers: PublicSignKey[],
+            reason: "untrusted" | "trust-cache" = "untrusted"
+        ): Rejection => ({ permanent: false, reason, signers });
+
+        /**
+         * `common` rows on both peers of every scope, and R-only rows: `ns`
+         * in the namespace scope, `trust` in the trust scope.
+         */
+        const trustWorld = async (options: {
+            scopes?: ScopeId[];
+            ns?: number;
+            trust?: number;
+            common?: number;
+        }) => {
+            const scopes = options.scopes ?? [NS];
+            const w = await JoinerWorld.create({ scopes });
+            const only = new Map<ScopeId, Entry[]>();
+            for (const scope of scopes) {
+                w.rows([w.r, w.j], options.common ?? 20, { scope });
+                only.set(
+                    scope,
+                    w.rows(
+                        [w.r],
+                        (scope === NS ? options.ns : options.trust) ?? 0,
+                        {
+                            scope,
+                            prefix: scope === NS ? "r" : "t",
+                            modified: (i) => BigInt(5000 + i),
+                        }
+                    )
+                );
+            }
+            await w.start();
+            return { w, ns: only.get(NS) ?? [], trust: only.get(TRUST) ?? [] };
+        };
+
+        /** A scope's debug, quiet: no pass in flight. */
+        const quiet = (session: JoinerSession, scope: ScopeId = NS) => {
+            const debug = session.debug().scopes[scope];
+            return debug !== undefined && !debug.trustChecking
+                ? debug
+                : undefined;
+        };
+
+        const hashes = (keys: readonly PublicSignKey[] = []) =>
+            keys.map((key) => key.hashcode()).sort();
+
+        it("S1, S13: a namespace hash refused for trust stays parked until every trust scope counts as contained, nothing armed; then it is rejected-untrusted", async () => {
+            const { w, ns } = await trustWorld({ ns: 3 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            const view = new FakeTrust();
+            let contained = false;
+            view.contained = () => contained;
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            await w.until(
+                () =>
+                    quiet(session)?.trustPending === 1 && view.calls.length > 0,
+                "parked and checked"
+            );
+            await settle();
+            expect(session.outcome).toBeUndefined();
+            expect(session.state(NS)).toBe("draining");
+            expect(session.debug().scopes[NS]).toMatchObject({
+                pending: 1,
+                trustPending: 1,
+                untrusted: 0,
+                explained: 0,
+            });
+            // S13: the run waits for trust only, with nothing armed.
+            expect(session.debug().armedTimers).toBe(0);
+            expect(w.joins).toHaveLength(1);
+
+            // Every trust scope that counts is contained now; no trust
+            // change came (the coordinator's flip, test 37).
+            contained = true;
+            session.reclassify();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.explainedBy).toEqual({ "rejected-untrusted": 1 });
+            expect(result.explained).toBe(1);
+            expect(hashes(result.untrusted?.signers)).toEqual(hashes([writer]));
+            expect(result.untrusted).toMatchObject({ heads: 1, checkedAt: 0 });
+            // Checked by its signer; never pulled again.
+            expect(w.joins).toHaveLength(1);
+            expect(new Set(view.calls)).toEqual(new Set([writer.hashcode()]));
+            expect(w.j.scope().index.has(ns[0].id!)).toBe(false);
+        });
+
+        it("S13b: a draining run whose hashes all wait for trust is parked, reported once, with nothing armed; the promotion ends it", async () => {
+            const { w, ns } = await trustWorld({ ns: 3 });
+            w.rejected.set(ns[0].head, refusal([await keyOf()]));
+            const view = new FakeTrust();
+            let contained = false;
+            view.contained = () => contained;
+            const reports: Array<[ScopeId, boolean]> = [];
+            const session = w.session(w.init(), {
+                ports: { trust: view },
+                events: {
+                    onParked: (_, scope, parked) =>
+                        reports.push([scope, parked]),
+                },
+            });
+            session.start();
+            await w.until(() => quiet(session)?.trustPending === 1, "parked");
+            await settle();
+            expect(session.state(NS)).toBe("draining");
+            expect(session.parked(NS)).toBe(true);
+            expect(reports).toEqual([[NS, true]]);
+            expect(session.debug().armedTimers).toBe(0);
+            contained = true;
+            session.reclassify();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(only(session.outcome!).explainedBy).toEqual({
+                "rejected-untrusted": 1,
+            });
+            // Certifying, then contained: the states report the rest.
+            expect(reports).toEqual([[NS, true]]);
+            expect(session.parked(NS)).toBe(false);
+        });
+
+        it("S2: a trust row refused for an untrusted owner is explained only at the trust run's fixpoint; a failed sibling keeps it parked", async () => {
+            const { w, trust } = await trustWorld({
+                scopes: [TRUST],
+                trust: 2,
+            });
+            const owner = await keyOf();
+            w.rejected.set(trust[0].head, refusal([owner]));
+            w.unserved.add(trust[1].head);
+            const view = new FakeTrust();
+            // The trust run's clause is its own fixpoint: it never asks.
+            view.contained = () => {
+                throw new Error("a trust run read the cross-peer clause");
+            };
+            const init = w.init();
+            init.ladder = { ...init.ladder, fetchRenewed: true };
+            const session = w.session(init, { ports: { trust: view } });
+            session.start();
+            await w.until(
+                () =>
+                    session.state(TRUST) === "failed-fetch-wait" &&
+                    quiet(session, TRUST)?.trustPending === 1,
+                "parked beside a failed fetch"
+            );
+            await settle();
+            expect(session.debug().scopes[TRUST]).toMatchObject({
+                failed: 1,
+                trustPending: 1,
+                untrusted: 0,
+            });
+            expect(session.outcome).toBeUndefined();
+            expect(session.debug().armedTimers).toBe(0);
+            // The sibling lands: nothing else of the run moves.
+            w.unserved.delete(trust[1].head);
+            session.resume();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.scope).toBe(TRUST);
+            expect(result.explainedBy).toEqual({ "rejected-untrusted": 1 });
+            expect(hashes(result.untrusted?.signers)).toEqual(hashes([owner]));
+            expect(w.j.scope(TRUST).index.get(trust[1].id!)?.head).toBe(
+                trust[1].head
+            );
+        });
+
+        it("S3 (test 37, unit): the trust run contains with an empty D and the namespace pass promotes, with no trust change", async () => {
+            const w = await JoinerWorld.create({ scopes: [NS, TRUST] });
+            w.rows([w.r, w.j], 10, { scope: NS });
+            const [extra] = w.rows([w.r], 1, {
+                scope: NS,
+                prefix: "r",
+                modified: (i) => BigInt(5000 + i),
+            });
+            w.rows([w.r, w.j], 4, { scope: TRUST });
+            await w.start();
+            const writer = await keyOf();
+            w.rejected.set(extra.head, refusal([writer]));
+            // R's trust header takes a slow route: the namespace hash parks
+            // first.
+            w.hooks.delayToJ = (m) =>
+                m instanceof HeaderV1 && m.scope === TRUST ? 1000 : 0;
+            const view = new FakeTrust();
+            const session = w.session(w.init(), { ports: { trust: view } });
+            view.contained = () => session.state(TRUST) === "contained";
+            session.start();
+            await w.until(
+                () => quiet(session)?.trustPending === 1,
+                "namespace parked"
+            );
+            await settle();
+            expect(session.state(TRUST)).toBe("asking");
+            expect(session.debug().scopes[NS]!.untrusted).toBe(0);
+            await w.timers.advanceSettled(1000);
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const [namespace, trust] = contained(session.outcome!);
+            expect(trust).toMatchObject({
+                mode: "fast",
+                missingAtStart: 0,
+                pulled: 0,
+            });
+            expect(namespace.explainedBy).toEqual({ "rejected-untrusted": 1 });
+            expect(view.epochValue).toBe(0);
+        });
+
+        /**
+         * S3b: every other trust scope already counts as contained, as the
+         * coordinator answers for a qualifying session (the record's older
+         * trust result) or a departed one (not counted). The namespace pass
+         * still waits for this session's own trust run (G3-1): R's newer
+         * trust snapshot may hold the writer's grant.
+         */
+        const ownTrustWorld = async (grant: boolean) => {
+            const w = await JoinerWorld.create({ scopes: [NS, TRUST] });
+            w.rows([w.r, w.j], 10, { scope: NS });
+            const modified = (i: number) => BigInt(5000 + i);
+            const [extra] = w.rows([w.r], 1, {
+                scope: NS,
+                prefix: "r",
+                modified,
+            });
+            w.rows([w.r, w.j], 4, { scope: TRUST });
+            const [edge] = grant
+                ? w.rows([w.r], 1, { scope: TRUST, prefix: "g", modified })
+                : [];
+            await w.start();
+            const writer = await keyOf();
+            w.rejected.set(extra.head, refusal([writer]));
+            w.hooks.delayToJ = (m) =>
+                m instanceof HeaderV1 && m.scope === TRUST ? 1000 : 0;
+            const view = new FakeTrust();
+            view.contained = () => true;
+            const session = w.session(w.init(), { ports: { trust: view } });
+            return { w, extra, edge, writer, view, session };
+        };
+
+        it("S3b: the namespace pass waits for the session's own trust run although every other trust scope counts as contained", async () => {
+            const { w, view, session } = await ownTrustWorld(false);
+            session.start();
+            await w.until(
+                () =>
+                    quiet(session)?.trustPending === 1 && view.calls.length > 0,
+                "namespace parked and checked"
+            );
+            await settle();
+            expect(session.state(TRUST)).toBe("asking");
+            expect(session.state(NS)).toBe("draining");
+            expect(session.debug().scopes[NS]).toMatchObject({
+                trustPending: 1,
+                untrusted: 0,
+            });
+            await w.timers.advanceSettled(1000);
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const [namespace] = contained(session.outcome!);
+            expect(namespace.explainedBy).toEqual({ "rejected-untrusted": 1 });
+        });
+
+        it("S3b: the writer's grant in R's own trust snapshot reaches J's graph first: the row is indexed, never explained provisionally, no renewal", async () => {
+            const { w, extra, edge, writer, view, session } =
+                await ownTrustWorld(true);
+            // The grant lands at J: J's graph trusts the writer, and canPerform
+            // accepts the row, from the trust change on.
+            w.onJoin = (scope, heads) => {
+                if (scope !== TRUST || !heads.includes(edge!.head)) return;
+                queueMicrotask(() => {
+                    w.rejected.delete(extra.head);
+                    view.trusted.add(writer.hashcode());
+                    view.change(session);
+                });
+            };
+            session.start();
+            await w.until(
+                () =>
+                    quiet(session)?.trustPending === 1 && view.calls.length > 0,
+                "namespace parked and checked"
+            );
+            await settle();
+            expect(session.debug().scopes[NS]!.untrusted).toBe(0);
+            await w.timers.advanceSettled(1000);
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const [namespace, trust] = contained(session.outcome!);
+            expect(namespace.explainedBy).toEqual({});
+            expect(namespace.untrusted).toBeUndefined();
+            expect(trust.pulled).toBe(1);
+            expect(w.j.scope().index.get(extra.id!)?.head).toBe(extra.head);
+        });
+
+        it("S4:a trust change while a pass reads J's graph discards its result; the pass runs again at the new epoch", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            // No certificate (whose own guard re-checks E): a hash nobody
+            // serves keeps the run draining.
+            w.unserved.add(ns[1].head);
+            const view = new FakeTrust();
+            let graph = "old";
+            view.isTrusted = async (key) => {
+                // The verdict of the graph the read started on.
+                const trusted = graph === "new";
+                view.calls.push(key.hashcode());
+                await held;
+                return trusted;
+            };
+            let release!: () => void;
+            const held = new Promise<void>((resolve) => (release = resolve));
+            const init = w.init();
+            init.ladder = { ...init.ladder, fetchRenewed: true };
+            const session = w.session(init, { ports: { trust: view } });
+            session.start();
+            await w.until(() => view.calls.length === 1, "a read in flight");
+            // The change lands: the writer is trusted now, although the
+            // read in flight answers for the old graph.
+            graph = "new";
+            view.epochValue = 1;
+            release();
+            await w.until(
+                () =>
+                    w.joins.length === 2 && quiet(session)?.trustPending === 1,
+                "read again, pulled again"
+            );
+            await settle(100);
+            // Never explained on the old graph's answer.
+            expect(session.debug().scopes[NS]).toMatchObject({
+                untrusted: 0,
+                trustPending: 1,
+                failed: 1,
+            });
+            // The discarded read, the read again at epoch 1 (trusted: pulled
+            // again), and the check of the refusal that pull brought back
+            // (pulled once per epoch, so it waits).
+            expect(view.calls).toEqual([
+                writer.hashcode(),
+                writer.hashcode(),
+                writer.hashcode(),
+            ]);
+            w.rejected.delete(ns[0].head);
+            w.unserved.delete(ns[1].head);
+            view.change(session);
+            await w.until(
+                () => w.j.scope().index.has(ns[0].id!),
+                "accepted at the next change"
+            );
+            session.resume();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.explainedBy).toEqual({});
+            expect(result.untrusted).toBeUndefined();
+        });
+
+        it("S4b: a hash parked by another pull batch while a pass reads J's graph runs the pass once more: both are explained, nothing armed", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            const [a, b] = ns;
+            w.rejected.set(a.head, refusal([writer]));
+            // B is not served at first: it fails, and a resume pulls it in a
+            // batch of its own.
+            w.unserved.add(b.head);
+            const view = new FakeTrust();
+            const release = view.hold();
+            const init = w.init();
+            init.ladder = { ...init.ladder, fetchRenewed: true };
+            const session = w.session(init, { ports: { trust: view } });
+            session.start();
+            await w.until(() => {
+                const debug = session.debug().scopes[NS];
+                return (
+                    debug?.trustPending === 1 &&
+                    debug.trustChecking &&
+                    debug.failed === 1
+                );
+            }, "A parked with its pass held, B failed");
+            w.unserved.delete(b.head);
+            w.rejected.set(b.head, refusal([writer]));
+            session.resume();
+            await w.until(
+                () => session.debug().scopes[NS]?.trustPending === 2,
+                "B parked while A's pass reads J's graph"
+            );
+            expect(session.debug().scopes[NS]!.trustChecking).toBe(true);
+            release();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.explainedBy).toEqual({ "rejected-untrusted": 2 });
+            expect(session.debug().armedTimers).toBe(0);
+            expect(w.joins).toHaveLength(2);
+        });
+
+        it("S5: a signer trusted now sends the hash back to a pull once per epoch; refused again, it waits for the next change", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            const view = new FakeTrust();
+            view.contained = () => false;
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            const parkedAfter = (joins: number) =>
+                w.until(
+                    () =>
+                        w.joins.length === joins &&
+                        quiet(session)?.trustPending === 1,
+                    `parked after ${joins} joins`
+                );
+            await parkedAfter(1);
+            view.trusted.add(writer.hashcode());
+            view.change(session);
+            // Pulled again; `canPerform` still refuses it (its graph lags).
+            await parkedAfter(2);
+            await settle(100);
+            expect(w.joins).toHaveLength(2);
+            expect(session.outcome).toBeUndefined();
+            view.change(session);
+            await parkedAfter(3);
+            await settle(100);
+            expect(w.joins).toHaveLength(3);
+            // `canPerform` accepts it now.
+            w.rejected.delete(ns[0].head);
+            view.change(session);
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.explainedBy).toEqual({});
+            expect(w.joins).toHaveLength(4);
+            expect(w.j.scope().index.get(ns[0].id!)?.head).toBe(ns[0].head);
+        });
+
+        it("S6: a refusal with no recorded signer is never explained; each reclassify pulls it again", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            w.rejected.set(ns[0].head, {
+                permanent: false,
+                reason: "untrusted",
+            });
+            const view = new FakeTrust();
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            const parkedAfter = (joins: number) =>
+                w.until(
+                    () =>
+                        w.joins.length === joins &&
+                        quiet(session)?.trustPending === 1,
+                    `parked after ${joins} joins`
+                );
+            await parkedAfter(1);
+            await settle(100);
+            expect(session.debug().scopes[NS]!.untrusted).toBe(0);
+            expect(session.outcome).toBeUndefined();
+            // Nothing to check against J's graph.
+            expect(view.calls).toEqual([]);
+            session.reclassify();
+            await parkedAfter(2);
+            session.reclassify();
+            await parkedAfter(3);
+            w.rejected.delete(ns[0].head);
+            session.reclassify();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(only(session.outcome!).explainedBy).toEqual({});
+            expect(w.joins).toHaveLength(4);
+        });
+
+        it("S7: a read of J's graph that throws never explains: the hash is pulled again, then waits", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            const view = new FakeTrust();
+            view.throwing.add(writer.hashcode());
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            await w.until(
+                () =>
+                    w.joins.length === 2 && quiet(session)?.trustPending === 1,
+                "pulled again, parked"
+            );
+            await settle(100);
+            expect(w.joins).toHaveLength(2);
+            expect(session.debug().scopes[NS]).toMatchObject({
+                trustPending: 1,
+                untrusted: 0,
+            });
+            expect(session.outcome).toBeUndefined();
+        });
+
+        /**
+         * A run that explained `ns[0]` (refused for `writer`) and waits for
+         * `ns[1]`, which nobody serves: it stays live with a provisional
+         * entry in E.
+         */
+        const provisionalWorld = async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            w.unserved.add(ns[1].head);
+            const view = new FakeTrust();
+            const init = w.init();
+            init.ladder = { ...init.ladder, fetchRenewed: true };
+            const session = w.session(init, { ports: { trust: view } });
+            session.start();
+            await w.until(
+                () =>
+                    session.state(NS) === "failed-fetch-wait" &&
+                    quiet(session)?.untrusted === 1,
+                "explained beside a failed fetch"
+            );
+            expect(w.joins).toHaveLength(1);
+            return { w, ns, writer, view, session };
+        };
+
+        it("S7: a throw on re-check sends a provisional entry back to D", async () => {
+            const { w, writer, view, session } = await provisionalWorld();
+            view.throwing.add(writer.hashcode());
+            view.change(session);
+            await w.until(
+                () =>
+                    w.joins.length === 2 && quiet(session)?.trustPending === 1,
+                "back in D, pulled, parked"
+            );
+            await settle(100);
+            expect(session.debug().scopes[NS]).toMatchObject({
+                untrusted: 0,
+                trustPending: 1,
+                failed: 1,
+            });
+            // Once per epoch: it waits for the next change.
+            expect(w.joins).toHaveLength(2);
+        });
+
+        it("S8: a provisional entry whose signer turns trusted leaves E and is pulled", async () => {
+            const { w, ns, writer, view, session } = await provisionalWorld();
+            view.trusted.add(writer.hashcode());
+            w.rejected.delete(ns[0].head);
+            view.change(session);
+            await w.until(
+                () => w.j.scope().index.get(ns[0].id!)?.head === ns[0].head,
+                "pulled and indexed"
+            );
+            await settle();
+            expect(session.debug().scopes[NS]).toMatchObject({
+                untrusted: 0,
+                explained: 0,
+                trustPending: 0,
+                failed: 1,
+            });
+            w.unserved.delete(ns[1].head);
+            session.resume();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(only(session.outcome!).explainedBy).toEqual({});
+        });
+
+        it("S9: a provisional entry of a contained run that flips renews the live session on every scope", async () => {
+            const { w, ns, trust } = await trustWorld({
+                scopes: [NS, TRUST],
+                ns: 1,
+                trust: 1,
+                common: 8,
+            });
+            const owner = await keyOf();
+            w.rejected.set(trust[0].head, refusal([owner]));
+            // The namespace run stays live: a hash nobody serves.
+            w.unserved.add(ns[0].head);
+            const view = new FakeTrust();
+            view.contained = () => false;
+            const init = w.init();
+            init.ladder = { ...init.ladder, fetchRenewed: true };
+            const session = w.session(init, { ports: { trust: view } });
+            session.start();
+            await w.until(
+                () =>
+                    session.state(TRUST) === "contained" &&
+                    session.state(NS) === "failed-fetch-wait",
+                "trust contained, namespace waiting"
+            );
+            expect(session.debug().scopes[TRUST]!.untrusted).toBe(1);
+            view.trusted.add(owner.hashcode());
+            view.change(session);
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(session.outcome).toMatchObject({
+                kind: "renew",
+                reason: "trust",
+                list: false,
+                scopes: [NS, TRUST],
+                results: [],
+            });
+            const next = nextSessionInit(init, session.outcome!)!;
+            expect(next.scopes).toEqual([NS, TRUST]);
+            expect(next.list).toBe(false);
+            expect(next.ladder).toEqual({
+                stage: "first",
+                fetchRenewed: true,
+                renewals: 1,
+            });
+        });
+
+        it("S10: a trust change between C2 and the digest's match contains nothing; the pass runs and the next certificate contains", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            const view = new FakeTrust();
+            const lanes = w.j.scope().laneSet;
+            const digestNow = lanes.digestNow.bind(lanes);
+            let moved = false;
+            lanes.digestNow = (sub, add) => {
+                const answer = digestNow(sub, add);
+                if (!moved && (add?.length ?? 0) > 0) {
+                    // After C2 read the epoch, before the digest answers.
+                    moved = true;
+                    view.epochValue++;
+                }
+                return answer;
+            };
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(moved).toBe(true);
+            const result = only(session.outcome!);
+            expect(result.certificates).toBe(2);
+            expect(result.untrusted?.checkedAt).toBe(1);
+            expect(result.explainedBy).toEqual({ "rejected-untrusted": 1 });
+        });
+
+        /**
+         * S10b: `scope`'s run explains R's row provisionally and C2 counts it
+         * in E; the digest is held. J's graph then trusts the key (and
+         * `canPerform` accepts), so the pass moves the row back to D before
+         * the digest answers. The digest still matches R's anchor, since it
+         * counted the row in E: the run must pull the row before it contains
+         * R, never contain with it pending.
+         */
+        const flipWhileDigestOut = async (scope: ScopeId) => {
+            const { w, ns, trust } = await trustWorld({
+                scopes: [scope],
+                ns: 2,
+                trust: 2,
+            });
+            const [row] = scope === NS ? ns : trust;
+            const key = await keyOf();
+            w.rejected.set(row.head, refusal([key]));
+            const view = new FakeTrust();
+            const lanes = w.j.scope(scope).laneSet;
+            const digestNow = lanes.digestNow.bind(lanes);
+            let release!: () => void;
+            const gate = new Promise<void>((resolve) => (release = resolve));
+            let held = false;
+            lanes.digestNow = (sub, add) => {
+                const answer = digestNow(sub, add);
+                if (held || (add?.length ?? 0) === 0) return answer;
+                // C2 with the provisional row in E: its digest waits.
+                held = true;
+                return {
+                    seq: answer.seq,
+                    digest: answer.digest.then(async (digest) => {
+                        await gate;
+                        return digest;
+                    }),
+                };
+            };
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            await w.until(() => held, "C2 with the provisional row in E");
+            expect(session.debug().scopes[scope]!.untrusted).toBe(1);
+            view.trusted.add(key.hashcode());
+            w.rejected.delete(row.head);
+            view.change(session);
+            await w.until(() => {
+                const debug = quiet(session, scope);
+                return debug?.untrusted === 0 && debug.pending === 1;
+            }, "the pass moved the row back to D");
+            release();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.explainedBy).toEqual({});
+            expect(result.untrusted).toBeUndefined();
+            expect(result.certificates).toBe(2);
+            expect(session.debug().scopes[scope]!.pending).toBe(0);
+            // Pulled again (one join each) and indexed before containment.
+            expect(w.joins).toHaveLength(2);
+            expect(w.j.scope(scope).index.get(row.id!)?.head).toBe(row.head);
+        };
+
+        it("S10b: a trust change between C2 and the digest's match that moves every provisional row back to D: the row is pulled before R is contained", async () => {
+            await flipWhileDigestOut(NS);
+        });
+
+        it("S10b: the same on the trust scope: a relation whose owner J trusts now is pulled before R's trust scope is contained", async () => {
+            await flipWhileDigestOut(TRUST);
+        });
+
+        it("S11:the result names E's provisional rows by distinct signer, head count and epoch; a trust-cache refusal needs the same fresh check", async () => {
+            const { w, ns } = await trustWorld({ ns: 4 });
+            const [a, b] = await Promise.all([keyOf(), keyOf()]);
+            w.rejected.set(ns[0].head, refusal([a]));
+            w.rejected.set(ns[1].head, refusal([a, b]));
+            w.rejected.set(ns[2].head, refusal([b], "trust-cache"));
+            const view = new FakeTrust();
+            view.epochValue = 7;
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.explainedBy).toEqual({ "rejected-untrusted": 3 });
+            expect(result.untrusted?.heads).toBe(3);
+            expect(result.untrusted?.checkedAt).toBe(7);
+            expect(hashes(result.untrusted?.signers)).toEqual(hashes([a, b]));
+            expect(w.j.scope().index.get(ns[3].id!)?.head).toBe(ns[3].head);
+        });
+
+        it("S12: without a trust view, reclassify pulls every parked hash again, signers or not (commit 2)", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            const session = w.session(w.init());
+            session.start();
+            await w.until(
+                () => session.debug().scopes[NS]!.trustPending === 1,
+                "parked"
+            );
+            await settle(100);
+            expect(session.debug().scopes[NS]!.untrusted).toBe(0);
+            expect(w.joins).toHaveLength(1);
+            session.reclassify();
+            await w.until(
+                () =>
+                    w.joins.length === 2 &&
+                    session.debug().scopes[NS]!.trustPending === 1,
+                "pulled again"
+            );
+            w.rejected.delete(ns[0].head);
+            session.reclassify();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(only(session.outcome!).explainedBy).toEqual({});
+        });
+
+        it("S14: a trust change while the head's pull is in flight: the old graph's refusal is checked at the new epoch and pulled again, never left parked", async () => {
+            const { w, ns } = await trustWorld({ ns: 2 });
+            const writer = await keyOf();
+            w.rejected.set(ns[0].head, refusal([writer]));
+            // The first join runs against the old graph; later ones accept.
+            w.onJoin = () => {
+                if (w.joins.length > 1) w.rejected.delete(ns[0].head);
+            };
+            let open!: () => void;
+            w.joinGate = new Promise<void>((resolve) => (open = resolve));
+            const view = new FakeTrust();
+            view.contained = () => false;
+            const session = w.session(w.init(), { ports: { trust: view } });
+            session.start();
+            await w.until(() => w.joins.length === 1, "pull in flight");
+            view.trusted.add(writer.hashcode());
+            view.change(session);
+            open();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(only(session.outcome!).explainedBy).toEqual({});
+            expect(w.joins).toHaveLength(2);
+            expect(w.j.scope().index.get(ns[0].id!)?.head).toBe(ns[0].head);
         });
     });
 });
