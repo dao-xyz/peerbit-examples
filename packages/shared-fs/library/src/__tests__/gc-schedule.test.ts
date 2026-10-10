@@ -533,7 +533,6 @@ describe("scheduled garbage collection", () => {
                 peerbit: peer,
                 address,
                 clock,
-                writeReadinessSettleMs: 100,
                 gc: {
                     intervalMs: 5_000,
                     initialDelayMs: 60,
@@ -752,7 +751,6 @@ describe("scheduled garbage collection", () => {
                 address,
                 machineLabel: "gc-schedule-untrusted",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
                 gc: {
                     intervalMs: 20_000,
                     initialDelayMs: 20_000,
@@ -760,7 +758,8 @@ describe("scheduled garbage collection", () => {
                     testOverrides: { noFloors: true },
                 } as any,
             } as any);
-            // Prove a settled full-replica view independently of local writer
+            // Readiness comes from containing the owner (a write-ready
+            // creator J's graph trusts), independently of local writer
             // trust; the test below remains solely about the trust gate.
             await ownerFs.writeFile("/gc-readiness.txt", "seed");
             await waitUntil(async () => {

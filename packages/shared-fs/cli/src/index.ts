@@ -621,11 +621,11 @@ const KEEP_REPLICATOR_CONNECTED =
 /**
  * What ends a write-readiness wait, by the state of the snapshot its
  * ETIMEDOUT carries (bootstrapStatus().readiness). A complete replicator
- * helps while the join has no peer, or waits for entries, trust, the
- * bootstrap phase or the write-readiness tracker. It does not release a
- * silent peer, peers that are not write-ready themselves, or this replica's
- * own fault. A timeout without a snapshot (no readiness join ran) keeps the
- * old advice.
+ * helps while the join has no peer, or waits for entries, trust or the
+ * bootstrap phase. It does not release a silent peer, peers that are not
+ * write-ready themselves, this replica's own fault, or a readiness proof
+ * this replica could not persist. A timeout without a snapshot (no
+ * readiness join ran) keeps the old advice.
  */
 const writeReadyTimeoutAdvice = (readiness?: ReadinessStatus) => {
     switch (readiness?.state) {
@@ -646,7 +646,7 @@ const writeReadyTimeoutAdvice = (readiness?: ReadinessStatus) => {
             if (!readiness.satisfied) {
                 return "the join is still reconciling with the required peers: keep them connected and retry with a longer --write-ready-timeout-ms";
             }
-            return KEEP_REPLICATOR_CONNECTED;
+            return "every required peer is accounted for and the filesystem was persisting its readiness proof: retry; if this repeats, check that the Peerbit directory is writable";
         case "ready":
             return "the filesystem became write-ready as the wait ended: retry";
         default:
@@ -778,8 +778,10 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             : undefined,
                     });
                     // Opening as the creator published the signed
-                    // zero-document genesis manifest. Without it, remote
-                    // peers could not join this still-empty filesystem.
+                    // zero-document genesis manifest, which a joiner's
+                    // snapshot bootstrap discovery reads (nothing written
+                    // yet). Joiners turn write-ready without it, by
+                    // containing the creator.
                     const { encodePublicSignKey } = await loadSharedFsRuntime();
                     if (
                         !(await fsHandle.program.entries.index.get(
@@ -788,7 +790,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         ))
                     ) {
                         throw new Error(
-                            "create could not publish the genesis manifest, so no other peer could join the new filesystem"
+                            "create could not publish the genesis manifest that a joiner's snapshot bootstrap discovery reads"
                         );
                     }
                     console.log(fsHandle.address);

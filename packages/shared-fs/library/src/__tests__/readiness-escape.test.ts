@@ -12,6 +12,7 @@ import {
     type SharedFsHandle,
 } from "../index.js";
 import { describeReadiness } from "../readiness/coordinator.js";
+import { hlcProvedOf, validateProof } from "../readiness/proof.js";
 import type { Timers } from "../readiness/responder.js";
 import type { ReadinessRuntime } from "../readiness/runtime.js";
 import {
@@ -20,19 +21,21 @@ import {
     StateNoticeV1,
     type ReadinessMessage,
 } from "../readiness/wire.js";
+import { holdFlips } from "./readiness-flip-hold.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
  * The operator escape and the readiness status of PR-3 commit 2 (M1 plan
- * 7.3 item 2, skeptic S1; design section 7 and test 47). In prerequisite
- * mode today's tracker still decides when a fresh full address-open turns
- * ready and additionally requires the coordinator's containment, so a
- * joiner whose only peers are absent, gated or silent stays gated: these
- * tests pin the escape (`assumeComplete`), the reason (`bootstrapStatus()
- * .readiness`) and the timeout that carries it, and the coordinator's
- * lifecycle inside the filesystem (close, same-instance reopen and drop
- * while a session is in flight). PR-3 commit 3 adds the trusted-identity
- * clause of an access-controlled store (G3-8) and its escape.
+ * 7.3 item 2, skeptic S1; design section 7 and test 47). Since PR-3 commit
+ * 4 the coordinator's predicate (design 4.8) decides when a fresh full
+ * address-open turns ready, with no timer of its own, so a joiner whose
+ * only peers are absent, gated or silent stays gated: these tests pin the
+ * escape (`assumeComplete`), the reason (`bootstrapStatus().readiness`) and
+ * the timeout that carries it, and the coordinator's lifecycle inside the
+ * filesystem (close, same-instance reopen and drop while a session or the
+ * decision's sidecar write is in flight). PR-3 commit 3 adds the
+ * trusted-identity clause of an access-controlled store (G3-8) and its
+ * escape.
  */
 
 const runtimeOf = (fs: SharedFsHandle): ReadinessRuntime | undefined =>
@@ -94,23 +97,18 @@ const dropOpens = (donor: SharedFsHandle) => {
 };
 
 /**
- * Watches the readiness timers of one open from now on: the write-readiness
- * tracker's (the program's `writeReadinessTimer`) and the runtime's (the
- * Timers of its responder, its coordinator and every session in flight).
- * Counts the arms after `mark()` and knows which handles are still armed.
- * Handles a session armed before the watch began show in its own
- * `debug().armedTimers`. `unwatchTracker()` hands the program's field back
- * (a same-instance reopen arms its own tracker there); the runtime's
- * wrappers stay on the old instances and keep counting.
+ * Watches the readiness timers of one open from now on: the Timers of its
+ * runtime's responder, its coordinator and every session in flight (the
+ * only readiness timers there are: write readiness arms none of its own
+ * since PR-3 commit 4). Counts the arms after `mark()` and knows which
+ * handles are still armed. Handles a session armed before the watch began
+ * show in its own `debug().armedTimers`. The wrappers stay on the old
+ * instances after a reopen and keep counting.
  */
-const watchReadinessTimers = (program: any, runtime: ReadinessRuntime) => {
+const watchReadinessTimers = (runtime: ReadinessRuntime) => {
     const armed = new Set<unknown>();
-    const cleared = new WeakSet<object>();
-    const counts = { trackerArms: 0, armsSinceMark: 0 };
+    const counts = { armsSinceMark: 0 };
     let marked = false;
-    const arm = () => {
-        if (marked) counts.armsSinceMark++;
-    };
     const wrap = (timers: Timers): Timers => ({
         set: (fn, ms) => {
             const handle = timers.set(() => {
@@ -118,7 +116,7 @@ const watchReadinessTimers = (program: any, runtime: ReadinessRuntime) => {
                 fn();
             }, ms);
             armed.add(handle);
-            arm();
+            if (marked) counts.armsSinceMark++;
             return handle;
         },
         clear: (handle) => {
@@ -132,54 +130,15 @@ const watchReadinessTimers = (program: any, runtime: ReadinessRuntime) => {
     coordinator.timers = wrap(coordinator.timers);
     const sessions = [...coordinator.owners.keys()];
     for (const session of sessions) session.timers = wrap(session.timers);
-
-    // The tracker arms with the global setTimeout and clears with the
-    // global clearTimeout: its field records each arm, a clear wrapper
-    // whether the last one was cleared.
-    let tracker = program.writeReadinessTimer;
-    Object.defineProperty(program, "writeReadinessTimer", {
-        configurable: true,
-        enumerable: true,
-        get: () => tracker,
-        set: (value) => {
-            if (value !== undefined) {
-                counts.trackerArms++;
-                arm();
-            }
-            tracker = value;
-        },
-    });
-    const clearTimeoutOf = globalThis.clearTimeout;
-    globalThis.clearTimeout = ((handle?: any) => {
-        if (handle && typeof handle === "object") cleared.add(handle);
-        return clearTimeoutOf(handle);
-    }) as typeof clearTimeout;
-    let lastTracker: unknown;
-    let watching = true;
     return {
         counts,
         sessions,
         /** Arms after this call are counted in `armsSinceMark`. */
         mark: () => {
-            lastTracker = tracker;
             marked = true;
         },
         /** The runtime's handles still armed. */
         armed: () => armed.size,
-        /** The tracker's handle at `mark()` was cleared (or none was armed). */
-        trackerCleared: () =>
-            lastTracker === undefined || cleared.has(lastTracker as object),
-        unwatchTracker: () => {
-            if (!watching) return;
-            watching = false;
-            globalThis.clearTimeout = clearTimeoutOf;
-            Object.defineProperty(program, "writeReadinessTimer", {
-                configurable: true,
-                enumerable: true,
-                writable: true,
-                value: tracker,
-            });
-        },
     };
 };
 
@@ -198,9 +157,13 @@ const recordMessages = (fs: SharedFsHandle) => {
 describe("write readiness escape and status", () => {
     const peers: Peerbit[] = [];
     const roots: string[] = [];
+    const holds: Array<ReturnType<typeof holdFlips>> = [];
 
     afterEach(async () => {
         await stopTestPeers(peers);
+        // After the peers stopped: a decision still parked then finds its
+        // open ended and flips nothing.
+        for (const hold of holds.splice(0)) hold.restore();
         for (const root of roots.splice(0)) {
             await rm(root, { recursive: true, force: true });
         }
@@ -230,22 +193,30 @@ describe("write readiness escape and status", () => {
         return { peer, fs };
     };
 
-    /** A fresh full joiner of `donor`'s filesystem, dialed to it. */
+    /**
+     * A fresh full joiner of `donor`'s filesystem, dialed to it. With
+     * `holdFlips` its write-ready decisions park until `hold.release()`
+     * (readiness-flip-hold.ts), installed before the open.
+     */
     const joinDonor = async (
         donor: { peer: Peerbit; fs: SharedFsHandle },
-        options: { writeReadinessSettleMs?: number } = {}
+        options: { holdFlips?: boolean } = {}
     ) => {
         const peer = await createPeer();
         await peer.dial(donor.peer);
+        let hold: ReturnType<typeof holdFlips> | undefined;
+        if (options.holdFlips) {
+            hold = holdFlips(peer);
+            holds.push(hold);
+        }
         const fs = await openSharedFs({
             peerbit: peer,
             address: donor.fs.address,
             machineLabel: "escape-joiner",
             bootstrap: false,
             gc: false,
-            writeReadinessSettleMs: options.writeReadinessSettleMs ?? 100,
-        } as any);
-        return { peer, fs };
+        });
+        return { peer, fs, hold };
     };
 
     /**
@@ -300,9 +271,14 @@ describe("write readiness escape and status", () => {
                 })
             );
             // Gated with nothing in flight: no timer armed, however long it
-            // waits (M1 plan 10.5; the tracker's own poll is commit 4's).
+            // waits (M1 plan 10.5), and no decision asked.
             expect(runtime.debug().armedTimers).toBe(0);
             expect(runtime.coordinator!.debug().sessions).toBe(0);
+            expect(runtime.coordinator!.debug().decisions).toEqual({
+                started: 0,
+                failed: 0,
+                inFlight: false,
+            });
 
             const error = await timeoutOf(fs, 500);
             expect(error.code).toBe("ETIMEDOUT");
@@ -492,12 +468,21 @@ describe("write readiness escape and status", () => {
             expect(error.message).toContain(
                 "timed out awaiting shared filesystem write readiness: "
             );
-            // Today's tracker alone would have released this joiner: remote
-            // evidence, a settled decision and a live replicator. The
-            // coordinator is what gates it (prerequisite mode, S23).
-            expect(program.writeReadinessRemoteEvidence).toBe(true);
+            // The coordinator is the only gate: the bootstrap decision
+            // settled and the phase is off, so the predicate is false only
+            // because the donor is Required and still being asked, and no
+            // decision was ever asked of the host.
+            const coordinator = runtimeOf(joiner.fs)!.coordinator!;
             expect(program.writeReadinessDecisionSettled).toBe(true);
-            expect(await program.hasConnectedRemoteReplicator()).toBe(true);
+            expect(joiner.fs.bootstrapStatus().phase).toBe("off");
+            expect(coordinator.record(hashOf(donor.peer))?.state).toBe(
+                "asking"
+            );
+            expect(runtimeOf(joiner.fs)!.satisfied()).toBe(false);
+            expect(coordinator.debug().decisions).toMatchObject({
+                started: 0,
+                inFlight: false,
+            });
             expect(joiner.fs.bootstrapStatus().writeReady).toBe(false);
 
             await joiner.fs.assumeComplete();
@@ -539,14 +524,33 @@ describe("write readiness escape and status", () => {
             machineLabel: "escape-reader",
             bootstrap: false,
             gc: false,
-            writeReadinessSettleMs: 100,
-        } as any);
+        });
         await reader.awaitWriteReady({ timeout: 60_000 });
         await waitUntil(async () =>
             expect(
                 new TextDecoder().decode(await reader.readFile("/owner.txt"))
             ).toBe("from the owner")
         );
+        // J reads the file from the reader once the owner stopped, so the
+        // reader must hold its chunk. Readiness proves the namespace, not
+        // chunk bytes (design 2.3), and a remote read does not store the
+        // chunk: wait for the reader's own copy.
+        await waitUntil(async () => {
+            const versionId = (await reader.stat("/owner.txt"))!.versionId!;
+            const version: any = await reader.program.entries.index.get(
+                versionId,
+                { local: true, remote: false }
+            );
+            expect(version.chunkIds.length).toBeGreaterThan(0);
+            for (const chunkId of version.chunkIds) {
+                expect(
+                    await reader.program.entries.index.get(chunkId, {
+                        local: true,
+                        remote: false,
+                    })
+                ).toBeDefined();
+            }
+        });
         await stopPeer(ownerPeer);
 
         const joinerPeer = await createPeer();
@@ -557,8 +561,7 @@ describe("write readiness escape and status", () => {
             machineLabel: "escape-acl-joiner",
             bootstrap: false,
             gc: false,
-            writeReadinessSettleMs: 100,
-        } as any);
+        });
         const readerHash = hashOf(readerPeer);
         // The reader is contained on both scopes and qualifies by its
         // header, but J's trust graph does not hold its identity.
@@ -607,7 +610,7 @@ describe("write readiness escape and status", () => {
             const status = joiner.fs.bootstrapStatus();
             expect(status).toMatchObject({
                 writeReady: true,
-                writeReadinessSource: "remote-settled",
+                writeReadinessSource: "reconciled",
                 guardArmed: true,
             });
             expect(status.readiness).toMatchObject({ state: "ready" });
@@ -646,39 +649,71 @@ describe("write readiness escape and status", () => {
             );
         });
 
-        it("reports reconciling while the tracker still waits, and waiting-phase while the phase is unsettled", async () => {
+        it("reports reconciling while the decision is persisting, and waiting-phase, not satisfied, while the phase is unsettled", async () => {
             const donor = await createDonor();
-            // A quiet window the test outlives: the coordinator is satisfied
-            // long before today's tracker would decide.
-            const joiner = await joinDonor(donor, {
-                writeReadinessSettleMs: 600_000,
-            });
-            await waitUntil(() =>
-                expect(joiner.fs.bootstrapStatus().readiness).toMatchObject({
-                    state: "reconciling",
-                    satisfied: true,
-                    required: [],
-                })
-            );
+            // The joiner's decision parks (holdFlips): the predicate holds
+            // and the flip has not happened, as while its proof is written.
+            const joiner = await joinDonor(donor, { holdFlips: true });
+            const hold = joiner.hold!;
+            await waitUntil(() => expect(hold.parked()).toBe(1));
             const program = programOf(joiner.fs);
-            expect(runtimeOf(joiner.fs)!.satisfied()).toBe(true);
+            const runtime = runtimeOf(joiner.fs)!;
+            const readiness = joiner.fs.bootstrapStatus().readiness!;
+            expect(readiness).toMatchObject({
+                state: "reconciling",
+                satisfied: true,
+                required: [],
+            });
+            expect(describeReadiness(readiness)).toBe(
+                "reconciling: every required peer is accounted for; the write-readiness proof is being persisted"
+            );
+            expect(runtime.satisfied()).toBe(true);
+            expect(runtime.coordinator!.debug().decisions).toEqual({
+                started: 1,
+                failed: 0,
+                inFlight: true,
+            });
             expect(joiner.fs.bootstrapStatus().writeReady).toBe(false);
-            // The phase is the tracker's clause in commit 2; the status
-            // names it once nothing else blocks (read synchronously).
+            // The phase clause is the predicate's (design 4.8, G4-5): with
+            // the phase unsettled the status names it and `satisfied` is
+            // false (read synchronously).
             program.bootstrapPhase = "overlay-active";
             const overlay = joiner.fs.bootstrapStatus().readiness;
+            const overlaySatisfied = runtime.satisfied();
             program.bootstrapPhase = "off";
             expect(overlay).toMatchObject({
                 state: "waiting-phase",
-                satisfied: true,
+                satisfied: false,
             });
+            expect(overlaySatisfied).toBe(false);
             program.writeReadinessDecisionSettled = false;
             const deciding = joiner.fs.bootstrapStatus().readiness;
+            const decidingSatisfied = runtime.satisfied();
             program.writeReadinessDecisionSettled = true;
-            expect(deciding).toMatchObject({ state: "waiting-phase" });
-            // Only an idle coordinator: nothing armed while it waits.
-            expect(runtimeOf(joiner.fs)!.coordinator!.debug().armedTimers).toBe(
-                0
+            expect(deciding).toMatchObject({
+                state: "waiting-phase",
+                satisfied: false,
+            });
+            expect(decidingSatisfied).toBe(false);
+            // Nothing armed while the decision is held, and nothing asked
+            // twice.
+            expect(runtime.debug().armedTimers).toBe(0);
+            expect(hold.parked()).toBe(1);
+
+            // The held decision alone flips it: no other event is needed.
+            hold.release();
+            await joiner.fs.awaitWriteReady({ timeout: 10_000 });
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+            });
+            // The waiters resolve inside the decision; it ends just after.
+            await waitUntil(() =>
+                expect(runtime.coordinator!.debug().decisions).toEqual({
+                    started: 1,
+                    failed: 0,
+                    inFlight: false,
+                })
             );
         });
 
@@ -726,7 +761,6 @@ describe("write readiness escape and status", () => {
                     addressOpen: true,
                     bootstrap: false,
                     gc: false,
-                    writeReadinessSettleMs: 100,
                 },
             });
             expect(reopened).toBe(program);
@@ -756,7 +790,10 @@ describe("write readiness escape and status", () => {
                 expect(coordinator.debug().sessions).toBeGreaterThan(0)
             );
             const program = programOf(joiner.fs);
-            expect(program.writeReadinessTimer).toBeDefined();
+            // Write readiness has no timer of its own (PR-3 commit 4): the
+            // session's attempt is the only one armed.
+            expect("writeReadinessTimer" in program).toBe(false);
+            expect(runtime.debug().armedTimers).toBeGreaterThan(0);
             const waiting = joiner.fs.awaitWriteReady({ timeout: 10_000 }).then(
                 () => undefined,
                 (error: unknown) => error
@@ -767,11 +804,10 @@ describe("write readiness escape and status", () => {
             expect(runtime.disposed).toBe(true);
             expect(runtimeOf(joiner.fs)).toBeUndefined();
             expect(runtime.satisfied()).toBe(false);
-            // The drop ends the wait and the tracker. Its poll would
-            // otherwise outlive the drop (the predicate stays false) and
-            // arm timers in whichever file this worker runs next.
+            // The drop ends the wait and leaves nothing armed that could
+            // fire in whichever file this worker runs next.
             expect(await waiting).toMatchObject({ code: "ECLOSED" });
-            expect(program.writeReadinessTimer).toBeUndefined();
+            expect(runtime.debug().armedTimers).toBe(0);
             hung.restore();
         });
 
@@ -789,9 +825,10 @@ describe("write readiness escape and status", () => {
                     await readFile(join(stateDirectory, name), "utf8")
                 );
             };
-            // Hold J's {writeReady: true} write inside the real I/O, where
-            // the flip's decision already queued it on the sidecar chain
-            // (markWriteReady decides and queues in one synchronous step).
+            // Hold J's {writeReady: true} write (the decision's, with its
+            // proof) inside the real I/O, where the decision already queued
+            // it on the sidecar chain (markWriteReady reads the predicate
+            // and the proof, and queues, in one synchronous step).
             const prototype = SharedFileSystem.prototype as any;
             const replace = prototype.replaceBootstrapState;
             const self = hashOf(peer);
@@ -821,8 +858,7 @@ describe("write readiness escape and status", () => {
                     machineLabel: "escape-joiner",
                     bootstrap: false,
                     gc: false,
-                    writeReadinessSettleMs: 100,
-                } as any);
+                });
                 const program = programOf(fs);
                 const events: unknown[] = [];
                 program.events.addEventListener("write:ready", (event: any) =>
@@ -832,6 +868,33 @@ describe("write readiness escape and status", () => {
                 expect(program.writesReady).toBe(false);
                 expect(program.guardArmed).toBe(false);
                 expect(await sidecar()).toEqual({ writeReady: false });
+                // The held write is the decision's: the source, the proof
+                // of the records the predicate read and its hlcProved.
+                const decided = JSON.parse(written.at(-1)!);
+                expect(decided).toEqual({
+                    writeReady: true,
+                    writeReadySource: "reconciled",
+                    proof: expect.objectContaining({
+                        v: 1,
+                        scopes: ["namespace-v1"],
+                        contained: [
+                            expect.objectContaining({
+                                peer: hashOf(donor.peer),
+                                scope: "namespace-v1",
+                                source: "creator",
+                                qualified: true,
+                            }),
+                        ],
+                        excluded: [],
+                        gaps: [],
+                    }),
+                    hlcProved: expect.stringMatching(/^[1-9][0-9]*$/),
+                });
+                const validation = validateProof(decided.proof);
+                expect(validation.ok).toBe(true);
+                expect(decided.hlcProved).toBe(
+                    hlcProvedOf((validation as any).proof).toString()
+                );
 
                 // drop() begins (its synchronous half runs at the call)
                 // before the held write lands.
@@ -848,10 +911,11 @@ describe("write readiness escape and status", () => {
                 } while (pending !== program.stateWriteChain);
 
                 // The flip never happened: not in memory, not as an event,
-                // and not in the proof, which the drop withdrew before it
-                // returned.
+                // and not on disk: the drop withdrew the source, the proof
+                // and its hlcProved before it returned (SPEC4 G4-8), so the
+                // sidecar is exactly the gate again.
                 expect(program.writesReady).toBe(false);
-                expect(program.writeReadinessSource).not.toBe("remote-settled");
+                expect(program.writeReadinessSource).toBeUndefined();
                 expect(program.guardArmed).toBe(false);
                 expect(events).toEqual([]);
                 expect(await sidecar()).toEqual({ writeReady: false });
@@ -872,19 +936,154 @@ describe("write readiness escape and status", () => {
                 machineLabel: "escape-joiner-after-drop",
                 bootstrap: false,
                 gc: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             expect(programOf(reopened).readinessWarmOpen).toBe(false);
             expect(reopened.bootstrapStatus().writeReady).toBe(false);
             expect(runtimeOf(reopened)!.coordinator).toBeDefined();
             await reopened.awaitWriteReady({ timeout: 60_000 });
             expect(reopened.bootstrapStatus()).toMatchObject({
                 writeReady: true,
-                writeReadinessSource: "remote-settled",
+                writeReadinessSource: "reconciled",
             });
             expect(
                 new TextDecoder().decode(await reopened.readFile("/donor.txt"))
             ).toBe("from the donor");
+        });
+
+        /** The sidecar of the one filesystem `directory` holds. */
+        const sidecarIn = async (directory: string) => {
+            const stateDirectory = join(directory, "shared-fs-bootstrap");
+            const [name] = await readdir(stateDirectory);
+            return JSON.parse(
+                await readFile(join(stateDirectory, name), "utf8")
+            );
+        };
+
+        it("withdraws a ready joiner's proof on drop: a reopen in the same directory joins afresh instead of vouching for the dropped store", async () => {
+            const donor = await createDonor();
+            const root = await mkdtemp(join(tmpdir(), "shared-fs-escape-"));
+            roots.push(root);
+            const directory = join(root, "joiner");
+            const peer = await createPeer(directory);
+            await peer.dial(donor.peer);
+            const fs = await openSharedFs({
+                peerbit: peer,
+                address: donor.fs.address,
+                machineLabel: "escape-joiner",
+                bootstrap: false,
+                gc: false,
+            });
+            await fs.awaitWriteReady({ timeout: 60_000 });
+            expect(await sidecarIn(directory)).toMatchObject({
+                writeReady: true,
+                writeReadySource: "reconciled",
+                proof: expect.objectContaining({ v: 1 }),
+                hlcProved: expect.stringMatching(/^[1-9][0-9]*$/),
+            });
+
+            expect(await programOf(fs).drop()).toBe(true);
+            // The store is gone, so the proof and its hint are false: drop()
+            // leaves exactly the gate (SPEC4 G4-8).
+            expect(await sidecarIn(directory)).toEqual({ writeReady: false });
+
+            // The donor, visible and honest, still holds /donor.txt: a reopen
+            // there is no warm replica over the empty store, which would
+            // admit a clashing write at once and vouch for nothing as a
+            // donor. It joins afresh, to ready.
+            const reopened = await openSharedFs({
+                peerbit: peer,
+                address: donor.fs.address,
+                machineLabel: "escape-joiner-after-drop",
+                bootstrap: false,
+                gc: false,
+            });
+            expect(programOf(reopened).readinessWarmOpen).toBe(false);
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                writeReady: false,
+                guardArmed: false,
+            });
+            await expect(
+                reopened.writeFile("/donor.txt", "too early")
+            ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+            expect(runtimeOf(reopened)!.coordinator).toBeDefined();
+            await reopened.awaitWriteReady({ timeout: 60_000 });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+            });
+            expect(
+                new TextDecoder().decode(await reopened.readFile("/donor.txt"))
+            ).toBe("from the donor");
+            expect(await reopened.namingConflicts()).toEqual([]);
+        });
+
+        it("withdraws a creator's sidecar on drop: a reopen by address in the same directory joins afresh from a replica holding its rows", async () => {
+            const root = await mkdtemp(join(tmpdir(), "shared-fs-escape-"));
+            roots.push(root);
+            const directory = join(root, "creator");
+            const creatorPeer = await createPeer(directory);
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "escape-creator",
+                gc: false,
+            });
+            for (let i = 0; i < 3; i++) {
+                await creator.writeFile(`/c${i}.txt`, `creator ${i}`);
+            }
+            expect(await sidecarIn(directory)).toEqual({
+                writeReady: true,
+                writeReadySource: "creator",
+            });
+            // A ready joiner holds every row the creator wrote.
+            const joinerPeer = await createPeer();
+            await joinerPeer.dial(creatorPeer);
+            const joiner = await openSharedFs({
+                peerbit: joinerPeer,
+                address: creator.address,
+                machineLabel: "escape-joiner",
+                bootstrap: false,
+                gc: false,
+                remoteChunkFetch: false,
+            });
+            await joiner.awaitWriteReady({ timeout: 60_000 });
+            // Bytes included, read locally (readiness proves rows, not
+            // chunks, design 2.3): after the drop the joiner is their only
+            // holder.
+            await waitUntil(async () => {
+                for (let i = 0; i < 3; i++) {
+                    expect(
+                        new TextDecoder().decode(
+                            await joiner.readFile(`/c${i}.txt`)
+                        )
+                    ).toBe(`creator ${i}`);
+                }
+            });
+
+            const address = creator.address!;
+            expect(await programOf(creator).drop()).toBe(true);
+            expect(await sidecarIn(directory)).toEqual({ writeReady: false });
+
+            const reopened = await openSharedFs({
+                peerbit: creatorPeer,
+                address,
+                machineLabel: "escape-creator-after-drop",
+                bootstrap: false,
+                gc: false,
+            });
+            expect(programOf(reopened).readinessWarmOpen).toBe(false);
+            expect(reopened.bootstrapStatus().writeReady).toBe(false);
+            await expect(
+                reopened.writeFile("/c0.txt", "too early")
+            ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+            await reopened.awaitWriteReady({ timeout: 60_000 });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+            });
+            expect(
+                new TextDecoder().decode(await reopened.readFile("/c0.txt"))
+            ).toBe("creator 0");
+            expect(await reopened.namingConflicts()).toEqual([]);
         });
 
         it.each(["close", "drop"] as const)(
@@ -900,14 +1099,18 @@ describe("write readiness escape and status", () => {
                     expect(hung.state.dropped).toBeGreaterThan(0);
                     expect(coordinator.debug().sessions).toBeGreaterThan(0);
                 });
-                const timers = watchReadinessTimers(program, runtime);
+                const timers = watchReadinessTimers(runtime);
                 try {
-                    // The gated tracker polls (every 100 ms here): wait for
-                    // an arm the watch saw, so its handle is the one known.
-                    await waitUntil(() =>
-                        expect(timers.counts.trackerArms).toBeGreaterThan(0)
-                    );
+                    // Write readiness has no timer of its own (PR-3 commit
+                    // 4): no tracker field, and the sessions' attempts are
+                    // the only readiness timers armed.
+                    expect("writeReadinessTimer" in program).toBe(false);
                     expect(timers.sessions.length).toBeGreaterThan(0);
+                    expect(
+                        timers.sessions.some(
+                            (session) => session.debug().armedTimers > 0
+                        )
+                    ).toBe(true);
                     const waiting = joiner.fs
                         .awaitWriteReady({ timeout: 10_000 })
                         .then(
@@ -923,8 +1126,6 @@ describe("write readiness escape and status", () => {
                     ).toBe(true);
                     // Then: nothing the open armed is still armed, and the
                     // wait ends.
-                    expect(program.writeReadinessTimer).toBeUndefined();
-                    expect(timers.trackerCleared()).toBe(true);
                     expect(coordinator.phase).toBe("disposed");
                     expect(coordinator.debug().sessions).toBe(0);
                     expect(runtime.disposed).toBe(true);
@@ -937,15 +1138,13 @@ describe("write readiness escape and status", () => {
                     expect(await waiting).toMatchObject({ code: "ECLOSED" });
 
                     // Later: the donor answers again and a second joiner
-                    // reconciles with it to ready, over seconds of the old
-                    // tracker's period. The ended open arms nothing.
+                    // reconciles with it to ready. The ended open arms
+                    // nothing.
                     hung.restore();
                     const other = await joinDonor(donor);
                     await other.fs.awaitWriteReady({ timeout: 60_000 });
-                    expect(program.writeReadinessTimer).toBeUndefined();
                     expect(timers.armed()).toBe(0);
                     expect(timers.counts.armsSinceMark).toBe(0);
-                    timers.unwatchTracker();
 
                     // A reopen runs a join of its own to ready: the same
                     // instance after a close, a new one after a drop (the
@@ -960,7 +1159,6 @@ describe("write readiness escape and status", () => {
                                     addressOpen: true,
                                     bootstrap: false,
                                     gc: false,
-                                    writeReadinessSettleMs: 100,
                                 },
                             })
                         ).toBe(program);
@@ -972,10 +1170,8 @@ describe("write readiness escape and status", () => {
                             machineLabel: "escape-joiner-after-drop",
                             bootstrap: false,
                             gc: false,
-                            writeReadinessSettleMs: 100,
-                        } as any);
+                        });
                         expect(reopened.program).not.toBe(program);
-                        expect(program.writeReadinessTimer).toBeUndefined();
                     }
                     const next = runtimeOf(reopened)!;
                     expect(next).not.toBe(runtime);
@@ -992,9 +1188,17 @@ describe("write readiness escape and status", () => {
                     );
                     expect(next.coordinator!.phase).toBe("finished");
                     expect(next.coordinator!.debug().armedTimers).toBe(0);
+                    // Its own decision flipped it, and none failed (the
+                    // waiters resolve inside the decision; it ends just
+                    // after).
+                    await waitUntil(() =>
+                        expect(
+                            next.coordinator!.debug().decisions
+                        ).toMatchObject({ failed: 0, inFlight: false })
+                    );
                     expect(
-                        programOf(reopened).writeReadinessTimer
-                    ).toBeUndefined();
+                        next.coordinator!.debug().decisions.started
+                    ).toBeGreaterThanOrEqual(1);
                     // The old generation still armed nothing.
                     expect(timers.armed()).toBe(0);
                     expect(timers.counts.armsSinceMark).toBe(0);
@@ -1002,7 +1206,6 @@ describe("write readiness escape and status", () => {
                         expect(session.debug().armedTimers).toBe(0);
                     }
                 } finally {
-                    timers.unwatchTracker();
                     hung.restore();
                 }
             }

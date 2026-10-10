@@ -232,8 +232,9 @@ describe("timers after a peer stops", () => {
         expect(timers).toEqual(NONE);
     });
 
-    // A joiner gated on a donor that drops every OPEN: the write-readiness
-    // tracker polls and a readiness session waits on its OPEN attempts.
+    // A joiner gated on a donor that drops every OPEN: a readiness session
+    // waits on its OPEN attempts (bounded in-flight timers; write readiness
+    // itself arms none since PR-3 commit 4).
     it.each(["close", "drop", "stop"] as const)(
         "a joiner gated mid-session and ended by %s arms none once its peers stopped",
         async (end) => {
@@ -259,8 +260,7 @@ describe("timers after a peer stops", () => {
                     machineLabel: "stop-timers-joiner",
                     bootstrap: false,
                     gc: false,
-                    writeReadinessSettleMs: 100,
-                } as any);
+                });
                 await waitUntil(
                     () =>
                         (runtimeOf(joiner)?.coordinator?.debug().sessions ??

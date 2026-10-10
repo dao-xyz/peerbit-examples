@@ -7,12 +7,16 @@ import {
     StashBackedRawExchangeHeadsMessage,
 } from "@peerbit/shared-log";
 import { IdentityRelation, TrustedNetwork } from "@peerbit/trusted-network";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+    SharedFileSystem,
+    SharedFsHandle,
     SharedFsWriteReadyTimeoutError,
     openSharedFs,
-    type SharedFsHandle,
 } from "../index.js";
 import {
     Coordinator,
@@ -20,6 +24,7 @@ import {
     describeReadiness,
 } from "../readiness/coordinator.js";
 import { headDigest } from "../readiness/digest.js";
+import { validateProof, type Proof } from "../readiness/proof.js";
 import { ReadinessRuntime, logIdOf } from "../readiness/runtime.js";
 import {
     NAMESPACE_V1,
@@ -35,27 +40,25 @@ import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
  * The joiner's trust-scope design tests on in-process Peerbit peers, real
- * filesystems and access-controlled (ACL) stores, in the prerequisite mode
- * of PR-3 commit 3 (M1 plan 7.3 item 3, SPEC3 9.6; WRITE_READINESS_V2.md
- * section 8): tests 34, 35, 36 (split as 36a and 36b, G3-17), 37, 42 and 55
- * (55a and 55b, G3-16), the S8 attach rule, the M1 ACL gap and the M2 trust
- * reclassify of the commit 3 handoff, R's identity turning trusted by a
- * trust change (I1), the scopes an ACL join opens (R1) and its fault
- * without J's trust view (R2).
+ * filesystems and access-controlled (ACL) stores (M1 plan 7.3 items 3 and
+ * 4, SPEC3 9.6, SPEC4 9.4(2); WRITE_READINESS_V2.md section 8): tests 34,
+ * 35, 36 (split as 36a and 36b, G3-17), 37, 42 and 55 (55a and 55b, G3-16,
+ * G4-12), design 4.12 #17 end to end, the S8 attach rule, the M1 ACL gap
+ * and the M2 trust reclassify of the commit 3 handoff, R's identity turning
+ * trusted by a trust change (I1), the scopes an ACL join opens (R1) and its
+ * fault without J's trust view (R2).
  *
- * In prerequisite mode today's tracker still decides when a fresh full
- * address-open turns ready, and `markWriteReady` additionally requires the
- * coordinator's `satisfied()`. So ready implies containment: the tests read
+ * Since PR-3 commit 4 the coordinator's predicate decides when a fresh full
+ * address-open turns ready, so ready implies containment: the tests read
  * J's maintained set inside the `write:ready` dispatch and containment from
- * `bootstrapStatus().readiness`, the coordinator's records and its proof.
- * They assert readiness only where the tracker's own conditions hold (a
- * live qualified donor with rows of its own, and no row J refuses for
- * good); everywhere else they assert the coordinator's half. A donor that
- * holds a revoked writer's rows (tests 35, 37) is the case that matters
- * here: sync keeps re-requesting the rows J refuses, so the tracker's
- * `synchronizerIdle()` stays false for a minute or more after the
- * coordinator is satisfied. Those tests read the coordinator's half at its
- * first satisfied evaluation, with a quiet window the test outlives.
+ * `bootstrapStatus().readiness`, the coordinator's records, its proof and
+ * the proof the decision persisted. A donor that holds a revoked writer's
+ * rows (tests 35, 37, #17) is the case that matters here: sync keeps
+ * re-requesting the rows J refuses, and shared-log's sync claim TTLs held
+ * such a join for 64 to 123 s on master and through commit 3, whose
+ * tracker waited for the synchronizer to go idle (U-67, U-68). Now J turns
+ * ready about when the coordinator is first satisfied; the tests log that
+ * gap (`firstSatisfied`) and assert the ready form within 30 s.
  *
  * Fault injection stays in the test, patched by name, filtered by node and
  * log id, and undone after each test:
@@ -234,31 +237,6 @@ const atReady = <T>(fs: SharedFsHandle, capture: () => T): Promise<T> =>
         );
     });
 
-/**
- * Runs `capture` in the coordinator's first evaluation that finds it
- * satisfied (the host's decision point; `ports.onEvaluate`), or at once if
- * it already is.
- */
-const atSatisfied = <T>(fs: SharedFsHandle, capture: () => T): Promise<T> => {
-    const coordinator = coordinatorOf(fs);
-    if (coordinator.satisfied()) return Promise.resolve().then(capture);
-    const ports = coordinator.ports as any;
-    const onEvaluate = ports.onEvaluate;
-    return new Promise((resolve, reject) => {
-        ports.onEvaluate = (evaluation: { satisfied: boolean }) => {
-            if (evaluation.satisfied) {
-                ports.onEvaluate = onEvaluate;
-                try {
-                    resolve(capture());
-                } catch (error) {
-                    reject(error);
-                }
-            }
-            return onEvaluate?.(evaluation);
-        };
-    });
-};
-
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** `promise`, or a rejection naming `what` after `ms`. */
@@ -343,8 +321,9 @@ const recordHeaders = (donor: SharedFsHandle) => {
     return { headers, restore: () => (ports.send = send) };
 };
 
-describe("readiness trust scope (in-process, prerequisite mode)", () => {
+describe("readiness trust scope (in-process)", () => {
     const peers: Peerbit[] = [];
+    const roots: string[] = [];
     /** Undone first in afterEach: held gates, patched prototypes, hooks. */
     const restores: Array<() => void> = [];
 
@@ -357,21 +336,133 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
             }
         }
         await stopTestPeers(peers);
+        for (const root of roots.splice(0)) {
+            await rm(root, { recursive: true, force: true });
+        }
     });
 
     type Node = { peer: Peerbit; fs: SharedFsHandle };
 
-    const createPeer = async (options: { connectionGater?: object } = {}) => {
-        const peer = await Peerbit.create(
-            options.connectionGater
-                ? ({
-                      libp2p: { connectionGater: options.connectionGater },
-                  } as any)
-                : undefined
-        );
+    /**
+     * A peer, in memory unless `disk` (then the decision's sidecar, and
+     * the proof it persists, are on disk).
+     */
+    const createPeer = async (
+        options: { connectionGater?: object; disk?: boolean } = {}
+    ) => {
+        let directory: string | undefined;
+        if (options.disk) {
+            const root = await mkdtemp(joinPath(tmpdir(), "shared-fs-trust-"));
+            roots.push(root);
+            directory = joinPath(root, "peer");
+        }
+        const peer = await Peerbit.create({
+            ...(directory ? { directory } : {}),
+            ...(options.connectionGater
+                ? { libp2p: { connectionGater: options.connectionGater } }
+                : {}),
+        } as any);
         peers.push(peer);
         return peer;
     };
+
+    /** The sidecar of the filesystem a disk peer opened (one per peer). */
+    const sidecarOf = async (peer: Peerbit) => {
+        const directory = joinPath(
+            (peer as any).directory as string,
+            "shared-fs-bootstrap"
+        );
+        const [name] = await readdir(directory);
+        return JSON.parse(await readFile(joinPath(directory, name), "utf8"));
+    };
+
+    /** The proof the decision persisted, checked for shape. */
+    const persistedProof = async (peer: Peerbit): Promise<Proof> => {
+        const sidecar = await sidecarOf(peer);
+        expect(sidecar).toMatchObject({
+            writeReady: true,
+            writeReadySource: "reconciled",
+        });
+        const checked = validateProof(sidecar.proof);
+        if (!checked.ok) throw new Error(`malformed proof: ${checked.reason}`);
+        return checked.proof;
+    };
+
+    /**
+     * Runs `capture` inside the `write:ready` dispatch of the first flip of
+     * a filesystem opened on `peer` from now on, given that filesystem.
+     * Installed before the open: a flip can land before `openSharedFs`
+     * returns.
+     */
+    const atReadyOn = <T>(
+        peer: Peerbit,
+        capture: (fs: SharedFsHandle) => T
+    ): Promise<T> => {
+        const prototype = SharedFileSystem.prototype as any;
+        const commitWriteReady = prototype.commitWriteReady;
+        let installed = true;
+        const uninstall = () => {
+            if (!installed) return;
+            installed = false;
+            prototype.commitWriteReady = commitWriteReady;
+        };
+        restores.push(uninstall);
+        return new Promise((resolve, reject) => {
+            prototype.commitWriteReady = function (
+                this: any,
+                ...args: unknown[]
+            ) {
+                if (this.node === peer) {
+                    uninstall();
+                    this.events.addEventListener(
+                        "write:ready",
+                        () => {
+                            try {
+                                resolve(capture(new SharedFsHandle(this)));
+                            } catch (error) {
+                                reject(error);
+                            }
+                        },
+                        { once: true }
+                    );
+                }
+                return commitWriteReady.apply(this, args);
+            };
+        });
+    };
+
+    /**
+     * When the coordinator of the next join on `peer` first found its
+     * predicate satisfied (`performance.now()`): observed through
+     * `ports.onEvaluate`, installed as the coordinator starts. For the log
+     * only: nothing waits on it.
+     */
+    const firstSatisfied = (peer: Peerbit) => {
+        const seen: { at?: number } = {};
+        const start = Coordinator.prototype.start;
+        Coordinator.prototype.start = function (this: Coordinator) {
+            if (this.ports.transport.self === hashOf(peer)) {
+                Coordinator.prototype.start = start;
+                const ports = this.ports as any;
+                const onEvaluate = ports.onEvaluate;
+                ports.onEvaluate = (evaluation: { satisfied: boolean }) => {
+                    if (evaluation.satisfied && seen.at === undefined) {
+                        seen.at = performance.now();
+                    }
+                    return onEvaluate?.(evaluation);
+                };
+            }
+            return start.call(this);
+        };
+        restores.push(() => (Coordinator.prototype.start = start));
+        return seen;
+    };
+
+    /** The log line for the gap between `satisfied` and the flip at `at`. */
+    const logGap = (name: string, seen: { at?: number }, at: number) =>
+        console.info(
+            `readiness-trust ${name}: first satisfied evaluation to the flip: ${seen.at === undefined ? "not observed" : `${(at - seen.at).toFixed(1)} ms`}`
+        );
 
     /**
      * A peer that refuses connections to and from the peers in `refused`
@@ -431,10 +522,7 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         { path: "/writer-b.txt", content: "second from the writer" },
     ];
 
-    /**
-     * The root owner O of an access-controlled store, with a file of its own
-     * (a joiner's remote evidence for today's tracker).
-     */
+    /** The root owner O of an access-controlled store, with a file of its own. */
     const createOwner = async (label = "trust-owner"): Promise<Node> => {
         const peer = await createPeer();
         const fs = await openSharedFs({
@@ -495,12 +583,11 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
 
     /**
      * A fresh full address-open of `donors[0]`'s filesystem, dialed to each
-     * donor (none: the caller dials). `settleMs` is today's quiet window,
-     * which the tracker keeps in prerequisite mode.
+     * donor.
      */
     const joinOf = async (
         donors: Node[],
-        options: { settleMs?: number; label?: string; peer?: Peerbit } = {}
+        options: { label?: string; peer?: Peerbit } = {}
     ): Promise<Node> => {
         const peer = options.peer ?? (await createPeer());
         for (const donor of donors) await peer.dial(donor.peer);
@@ -510,8 +597,7 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
             machineLabel: options.label ?? "trust-joiner",
             bootstrap: false,
             gc: false,
-            writeReadinessSettleMs: options.settleMs ?? 100,
-        } as any);
+        });
         return { peer, fs };
     };
 
@@ -806,7 +892,7 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         await expectFiles(joiner.fs, WRITER_FILES);
     }, 180_000);
 
-    it("35 + M1: a revoked writer's live rows at the donor are explained rejected-untrusted once every counted trust scope is contained; the coordinator no longer gates a fresh full joiner", async () => {
+    it("35 + M1: a revoked writer's live rows at the donor are explained rejected-untrusted once every counted trust scope is contained, and the fresh full joiner turns ready on its own", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
         await writeAsWriter(writer, owner);
@@ -821,30 +907,29 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         expect(revoked.size).toBeGreaterThan(0);
         const ownerTrust = await trustRows(owner.fs);
 
-        // A quiet window the test outlives: today's tracker never
-        // decides here, so the coordinator's half is read without a race.
-        // J's release then waits for the tracker alone (its
-        // `synchronizerIdle()` stays false while sync re-requests W's
-        // rows, which J refuses); commit 4 removes it.
         const promotions = watchPromotions();
-        const joiner = await joinOf([owner], { settleMs: 600_000 });
-        const coordinator = coordinatorOf(joiner.fs);
+        const peer = await createPeer({ disk: true });
+        const satisfied = firstSatisfied(peer);
+        const flip = atReadyOn(peer, (fs) => ({
+            at: performance.now(),
+            missing: missingFromTap(fs, ownerRows),
+            status: readinessOf(fs)!,
+            proof: coordinatorOf(fs).proof(),
+        }));
+        const joiner = await joinOf([owner], { peer });
         const ownerHash = hashOf(owner.peer);
-        // M1: commit 2 kept J gated here until the caller's timeout or
-        // `assumeComplete()` (plan, commit 3 handoff).
-        const atFlip = await within(
-            atSatisfied(joiner.fs, () => ({
-                missing: missingFromTap(joiner.fs, ownerRows),
-                status: readinessOf(joiner.fs)!,
-            })),
-            60_000,
-            "the coordinator satisfied"
-        );
-        // Every row the owner holds that J lacks when the coordinator is
-        // satisfied is one W signed, and J lacks each of them.
+        // M1: master and commit 3 held this join 64 to 123 s (U-67,
+        // U-68), commit 2 until the caller's timeout; no assumeComplete().
+        await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+        const atFlip = await flip;
+        logGap("35", satisfied, atFlip.at);
+        expect(satisfied.at).toBeDefined();
+        const coordinator = coordinatorOf(joiner.fs);
+        // Every row the owner holds that J lacked at the flip is one W
+        // signed, and J lacked each of them.
         expect(atFlip.missing).toEqual([...revoked].sort());
         expect(atFlip.status).toMatchObject({
-            state: "reconciling",
+            state: "ready",
             satisfied: true,
             required: [],
             excluded: [],
@@ -852,9 +937,6 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
             trustPending: [],
             trustChecking: [],
         });
-        expect(describeReadiness(atFlip.status)).toBe(
-            "reconciling: every required peer is accounted for; the write-readiness tracker decides"
-        );
         expect(atFlip.status.contained).toEqual([
             {
                 peer: ownerHash,
@@ -870,7 +952,10 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
             qualified: true,
             identity: "trusted",
         });
-        // Nothing armed while J waits for the tracker alone.
+        expect(joiner.fs.bootstrapStatus()).toMatchObject({
+            writeReady: true,
+            writeReadinessSource: "reconciled",
+        });
         expect(runtimeOf(joiner.fs)!.debug().armedTimers).toBe(0);
 
         // Test 35: explained only once the trust scope was contained, and
@@ -892,24 +977,38 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
             count: ownerTrust.size,
             qualified: true,
         });
-        expect(coordinator.proof()).toMatchObject({
+        // The persisted proof is the decision's, and states the exposure
+        // (G4-2): the donor's identity verdict and the rows explained by
+        // trust on its namespace record.
+        const proof = await persistedProof(peer);
+        expect(proof).toEqual(atFlip.proof);
+        expect(proof).toMatchObject({
             scopes: ["namespace-v1", "trust-v1"],
             excluded: [],
             gaps: [],
         });
-        expect(coordinator.proof().contained).toEqual([
-            expect.objectContaining({
+        expect(proof.contained).toEqual([
+            {
                 peer: ownerHash,
                 scope: "namespace-v1",
-                count: ownerRows.size,
+                source: "creator",
                 qualified: true,
-            }),
-            expect.objectContaining({
+                count: ownerRows.size,
+                hlc: expect.any(String),
+                anchor: expect.any(String),
+                identity: "trusted",
+                untrusted: revoked.size,
+            },
+            {
                 peer: ownerHash,
                 scope: "trust-v1",
-                count: ownerTrust.size,
+                source: "creator",
                 qualified: true,
-            }),
+                count: ownerTrust.size,
+                hlc: expect.any(String),
+                anchor: expect.any(String),
+                identity: "trusted",
+            },
         ]);
         // J never indexed a revoked row and does not trust W.
         expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(false);
@@ -919,10 +1018,9 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         expect(missingFromTap(joiner.fs, ownerRows)).toEqual(
             [...revoked].sort()
         );
-        expect(joiner.fs.bootstrapStatus().writeReady).toBe(false);
     }, 180_000);
 
-    it("M1 with more donors than session slots: every donor holds the revoked writer's rows; sessions parked for trust free their slots, and the coordinator is satisfied", async () => {
+    it("M1 with more donors than session slots: every donor holds the revoked writer's rows; sessions parked for trust free their slots, and J turns ready on its own", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
         await writeAsWriter(writer, owner);
@@ -952,14 +1050,18 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         const donors = [owner, ...replicas];
         expect(donors.length).toBeGreaterThan(SESSIONS_IN_FLIGHT);
 
-        // As in 35: a quiet window the test outlives.
-        const joiner = await joinOf(donors, { settleMs: 600_000 });
+        const peer = await createPeer({ disk: true });
+        const satisfied = firstSatisfied(peer);
+        const flip = atReadyOn(peer, (fs) => ({
+            at: performance.now(),
+            missing: missingFromTap(fs, ownerRows),
+        }));
+        const joiner = await joinOf(donors, { peer });
+        await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+        const atFlip = await flip;
+        logGap("M1 with more donors", satisfied, atFlip.at);
+        expect(atFlip.missing).toEqual([...revoked].sort());
         const coordinator = coordinatorOf(joiner.fs);
-        await within(
-            atSatisfied(joiner.fs, () => undefined),
-            60_000,
-            "the coordinator satisfied"
-        );
         for (const donor of donors) {
             expect(coordinator.record(hashOf(donor.peer))).toMatchObject({
                 state: "contained",
@@ -973,6 +1075,22 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         }
         expect(runtimeOf(joiner.fs)!.debug().armedTimers).toBe(0);
         expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(false);
+        // Every donor's namespace record in the persisted proof carries
+        // the trust results (G4-2).
+        const proof = await persistedProof(peer);
+        const namespaceRecords = proof.contained.filter(
+            ({ scope }) => scope === "namespace-v1"
+        );
+        expect(namespaceRecords.map(({ peer }) => peer).sort()).toEqual(
+            donors.map(({ peer }) => hashOf(peer)).sort()
+        );
+        for (const record of namespaceRecords) {
+            expect(record).toMatchObject({
+                qualified: true,
+                identity: "trusted",
+                untrusted: revoked.size,
+            });
+        }
     }, 240_000);
 
     describe("36: trust frozen after namespace; a rejection re-checked", () => {
@@ -1225,14 +1343,14 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         );
         const replicaTrust = await trustRows(replica.fs);
 
-        // R2's OPENs wait. A quiet window the test outlives: W's rows are
-        // refused for good, so today's tracker never decides here (see
-        // 35); the coordinator's half is read at its first satisfied
-        // evaluation.
+        // R2's OPENs wait. W's rows are refused for good, and J turns
+        // ready on its own once R2 answers (see 35).
         const busy = holdOpens(replica.fs);
         restores.push(busy.release);
         const promotions = watchPromotions();
-        const joiner = await joinOf([owner, replica], { settleMs: 600_000 });
+        const peer = await createPeer({ disk: true });
+        const satisfiedAt = firstSatisfied(peer);
+        const joiner = await joinOf([owner, replica], { peer });
         const coordinator = coordinatorOf(joiner.fs);
         const ownerHash = hashOf(owner.peer);
         const replicaHash = hashOf(replicaPeer);
@@ -1258,18 +1376,17 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         ]);
 
         const triggers = coordinator.debug().trustTriggers;
-        const satisfied = atSatisfied(joiner.fs, () => ({
+        const flip = atReady(joiner.fs, () => ({
+            at: performance.now(),
             triggers: coordinator.debug().trustTriggers,
             missing: missingFromTap(joiner.fs, ownerRows),
             status: readinessOf(joiner.fs)!,
             armedTimers: runtimeOf(joiner.fs)!.debug().armedTimers,
         }));
         busy.release();
-        const atFlip = await within(
-            satisfied,
-            60_000,
-            "the coordinator satisfied"
-        );
+        await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+        const atFlip = await flip;
+        logGap("37", satisfiedAt, atFlip.at);
         // No trust change; the last counted trust scope turning
         // contained classified the parked hashes again, once.
         expect(atFlip.triggers.change).toBe(triggers.change);
@@ -1279,11 +1396,15 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         expect(atFlip.armedTimers).toBe(0);
         expect(atFlip.missing).toEqual([...revoked].sort());
         expect(atFlip.status).toMatchObject({
-            state: "reconciling",
+            state: "ready",
             satisfied: true,
             required: [],
             trustPending: [],
             trustChecking: [],
+        });
+        expect(joiner.fs.bootstrapStatus()).toMatchObject({
+            writeReady: true,
+            writeReadinessSource: "reconciled",
         });
         expect(
             coordinator.record(replicaHash)!.results.get(SCOPE_TRUST_V1)
@@ -1299,6 +1420,26 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
         }
         expect(promotions.promoted).toBeGreaterThan(0);
         expect(promotions.early).toEqual([]);
+        // Both donors' namespace records in the persisted proof carry the
+        // trust results (G4-2).
+        const proof = await persistedProof(peer);
+        expect(
+            proof.contained
+                .filter(({ scope }) => scope === "namespace-v1")
+                .map(({ peer, identity, untrusted }) => ({
+                    peer,
+                    identity,
+                    untrusted,
+                }))
+                .sort((a, b) => (a.peer < b.peer ? -1 : 1))
+        ).toEqual(
+            [ownerHash, replicaHash].sort().map((peer) => ({
+                peer,
+                identity: "trusted",
+                untrusted: revoked.size,
+            }))
+        );
+        expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(false);
     }, 240_000);
 
     it("42: revoke then re-grant of a writer during a join: the re-grant is required and pulled; the writer's rows are held", async () => {
@@ -1423,23 +1564,26 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
             expect(readinessOf(joiner.fs)!.state).toBe("ready");
         }, 240_000);
 
-        it("55b: J sees the stale peer and the CUT holder at once: the coordinator is satisfied and J eventually stops trusting the writer; whether the decision fell inside the window is recorded, not asserted (G3-16)", async () => {
+        it("55b: J sees the stale peer and the CUT holder at once: J turns ready and eventually stops trusting the writer; whether the flip fell inside the window is recorded, not asserted (G3-16, G4-12)", async () => {
             const { owner, stale, writerKey } = await staleSetup();
-            const joiner = await joinOf([stale, owner]);
-            const satisfied = await within(
-                atSatisfied(joiner.fs, () => ({
-                    status: readinessOf(joiner.fs)!,
-                    trusted: joiner.fs.isTrustedWriter(writerKey),
-                })),
-                60_000,
-                "the coordinator satisfied"
-            );
-            const contained = satisfied.status.contained.map(
-                ({ peer }) => peer
-            );
-            expect(contained.sort()).toEqual(
-                [hashOf(stale.peer), hashOf(owner.peer)].sort()
-            );
+            const peer = await createPeer();
+            const flip = atReadyOn(peer, (fs) => ({
+                status: readinessOf(fs)!,
+                // Read now: nothing else J could hear of runs before it.
+                trusted: fs.isTrustedWriter(writerKey),
+            }));
+            const joiner = await joinOf([stale, owner], { peer });
+            await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+            const atFlip = await flip;
+            expect(atFlip.status).toMatchObject({
+                state: "ready",
+                required: [],
+                excluded: [],
+                gaps: [],
+            });
+            expect(
+                atFlip.status.contained.map(({ peer }) => peer).sort()
+            ).toEqual([hashOf(stale.peer), hashOf(owner.peer)].sort());
             await waitUntil(
                 async () =>
                     expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(
@@ -1447,13 +1591,119 @@ describe("readiness trust scope (in-process, prerequisite mode)", () => {
                     ),
                 30_000
             );
-            // Recorded, not asserted: the CUT's re-offer races the
-            // decision (design 4.12 #43).
+            // Readiness is never withdrawn (design 2.3, L7).
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+            });
+            expect(readinessOf(joiner.fs)!.state).toBe("ready");
+            // Recorded, not asserted: the CUT's re-offer races the flip
+            // (design 4.12 #43; the window is about a second, and the flip
+            // follows the satisfied evaluation at once).
             console.info(
-                `readiness-trust 55b: W trusted when the coordinator was satisfied: ${await satisfied.trusted}; write-ready now: ${joiner.fs.bootstrapStatus().writeReady}`
+                `readiness-trust 55b: W trusted at the flip: ${await atFlip.trusted}`
             );
         }, 240_000);
     });
+
+    it("design 4.12 #17: a writer revoked between the namespace and trust freezes of J's session: its rows are explained rejected-untrusted once every counted trust scope is contained; J turns ready, never indexed them and does not trust the writer", async () => {
+        const owner = await createOwner();
+        const writer = await createWriter(owner);
+        await writeAsWriter(writer, owner);
+        const writerKey = keyOf(writer.peer);
+        await stopPeer(writer.peer);
+        const ownerRows = await namespaceRows(owner.fs);
+        const writerRows = await rowsSignedBy(owner.fs, ownerRows, writerKey);
+        expect(writerRows.size).toBeGreaterThan(0);
+        const writerHeads = [...writerRows].map((id) => ownerRows.get(id)!);
+
+        // J's trust graph learns only what its sessions pull, so W's grant
+        // reaches J only if a frozen trust view holds it.
+        const trustLogId = logIdOf(trustStoreOf(owner.fs));
+        const joinerPeer = await createPeer();
+        withholdTrustSync(joinerPeer, trustLogId);
+        disableTrustWarmup(joinerPeer);
+        await runtimeOf(owner.fs)!.whenStarted();
+        const start = holdTrustStart(owner.fs);
+        const promotions = watchPromotions();
+        const joiner = await joinOf([owner], { peer: joinerPeer });
+        const ownerHash = hashOf(owner.peer);
+        await within(start.read, 30_000, "the owner's trust freeze");
+        // The owner's namespace view for J is frozen with W's rows in it,
+        // while the owner still trusts W.
+        expect(start.namespaceCount).toBe(ownerRows.size);
+        expect(await owner.fs.isTrustedWriter(writerKey)).toBe(true);
+
+        // W is revoked before the trust view freezes.
+        await owner.fs.revokeWriter(writerKey);
+        expect(await owner.fs.isTrustedWriter(writerKey)).toBe(false);
+        const ownerTrust = await trustRows(owner.fs);
+        const flip = atReady(joiner.fs, () => ({
+            missing: missingFromTap(joiner.fs, ownerRows),
+            status: readinessOf(joiner.fs)!,
+            proof: coordinatorOf(joiner.fs).proof(),
+        }));
+        start.release();
+        await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+        const atFlip = await flip;
+        expect(atFlip.missing).toEqual([...writerRows].sort());
+        expect(atFlip.status).toMatchObject({
+            state: "ready",
+            satisfied: true,
+            required: [],
+            excluded: [],
+            gaps: [],
+            trustPending: [],
+            trustChecking: [],
+            contained: [
+                {
+                    peer: ownerHash,
+                    qualified: true,
+                    source: "creator",
+                    scopes: ["namespace-v1", "trust-v1"],
+                    departed: false,
+                    identity: "trusted",
+                },
+            ],
+        });
+        // One session: its namespace view holds W's rows, its trust view
+        // lacks W's grant; the rows were explained by trust, once the trust
+        // scope was contained, provisionally, with W as their signer.
+        const namespace = resultOf(joiner.fs, owner.peer)!;
+        expect(namespace).toMatchObject({
+            count: ownerRows.size,
+            qualified: true,
+        });
+        expect(namespace.explainedBy["rejected-untrusted"]).toBe(
+            writerRows.size
+        );
+        expect(namespace.untrusted).toMatchObject({ heads: writerRows.size });
+        expect(hashesOf(namespace.untrusted!.signers)).toEqual([
+            writerKey.hashcode(),
+        ]);
+        expect(resultOf(joiner.fs, owner.peer, SCOPE_TRUST_V1)).toMatchObject({
+            count: ownerTrust.size,
+        });
+        expect(coordinatorOf(joiner.fs).record(ownerHash)!.sessionsOpened).toBe(
+            1
+        );
+        expect(promotions.promoted).toBeGreaterThan(0);
+        expect(promotions.early).toEqual([]);
+        expect(atFlip.proof.contained[0]).toMatchObject({
+            peer: ownerHash,
+            scope: "namespace-v1",
+            identity: "trusted",
+            untrusted: writerRows.size,
+        });
+        // Never indexed: J's log never admitted one of W's entries.
+        for (const head of writerHeads) {
+            expect(await entriesOf(joiner.fs).log.log.has(head)).toBe(false);
+        }
+        expect(missingFromTap(joiner.fs, ownerRows)).toEqual(
+            [...writerRows].sort()
+        );
+        expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(false);
+    }, 180_000);
 
     it("S8: the trust tap, the trust session's bundle, the trust listener and the trust notes follow the instance TrustedNetwork.open returns, not the one the tap first attached to", async () => {
         const owner = await createOwner();

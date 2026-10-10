@@ -395,7 +395,9 @@ describe("peerbit-fs cli", () => {
                 reopened.awaitWriteReady({ timeout: 100 })
             ).resolves.toBeUndefined();
             // The still-empty filesystem carries the creator's genesis
-            // manifest, whose replication lets remote peers become ready.
+            // manifest, which a joiner's snapshot bootstrap discovery reads.
+            // Joiners do not need it to become ready: they contain the
+            // creator, whose summary lists no rows.
             expect(
                 await (reopened.program as any).getDocument(
                     `bootstrap:${encodePublicSignKey(reopenedPeer.identity.publicKey)}`
@@ -417,7 +419,7 @@ describe("peerbit-fs cli", () => {
             .mockRejectedValueOnce(new Error("genesis put failed"));
         try {
             await expect(runCli(["create", "--directory", ""])).rejects.toThrow(
-                "create could not publish the genesis manifest, so no other peer could join the new filesystem"
+                "create could not publish the genesis manifest that a joiner's snapshot bootstrap discovery reads"
             );
             expect(genesis).toHaveBeenCalledTimes(1);
             expect(log).not.toHaveBeenCalled();
@@ -602,19 +604,25 @@ describe("peerbit-fs cli", () => {
         },
         {
             label: "the bootstrap phase",
+            // Since PR-3 commit 4 the phase clause is part of the predicate
+            // (design 4.8): `satisfied` is false while it waits.
             readiness: readinessSnapshot({
                 state: "waiting-phase",
-                satisfied: true,
+                satisfied: false,
             }),
             names: "the bootstrap phase has not settled",
         },
         {
-            label: "the write-readiness tracker",
+            label: "a readiness proof being persisted",
+            // The predicate holds and the decision is persisting its proof,
+            // or that write failed and waits for the next trigger (M9): a
+            // replicator does not help.
             readiness: readinessSnapshot({
                 state: "reconciling",
                 satisfied: true,
             }),
-            names: "the write-readiness tracker decides",
+            names: "every required peer is accounted for; the write-readiness proof is being persisted",
+            advice: "the filesystem was persisting its readiness proof: retry; if this repeats, check that the Peerbit directory is writable.",
         },
     ] as Array<{
         label: string;

@@ -1486,18 +1486,58 @@ describe("readiness responder", () => {
             expect(hex(header.anchor)).toBe(await anchorOfIndex(warm));
             await stopPeer(peer);
 
-            // A warm reopen of a `remote-settled` sidecar reports `warm`
-            // (G2-1): since PR-3 commit 2 only markWriteReady() writes that
-            // source, after the coordinator contained every required peer
-            // (a non-warm one reports `reconciled`, readiness-escape.test.ts).
-            // Caveat: one a PR-2-era build wrote (timer only) reopens as
-            // `warm` too; such sidecars exist only on developer disks.
+            // A warm reopen of a `reconciled` sidecar (the source the
+            // readiness decision persists with its proof, PR-3 commit 4)
+            // reports `warm`: every accepted source does. The proof is for
+            // audit only and never re-read to decide.
             const sidecar = join(
                 directory,
                 "shared-fs-bootstrap",
                 `${address}.json`
             );
             const proven = await readFile(sidecar, "utf8");
+            const proof = {
+                v: 1,
+                scopes: ["namespace-v1"],
+                contained: [
+                    {
+                        peer: "donor",
+                        scope: "namespace-v1",
+                        source: "creator",
+                        qualified: true,
+                        count: 5,
+                        hlc: "7",
+                        anchor: "ab".repeat(32),
+                    },
+                ],
+                excluded: [],
+                gaps: [],
+            };
+            await writeFile(
+                sidecar,
+                JSON.stringify({
+                    ...JSON.parse(proven),
+                    writeReadySource: "reconciled",
+                    proof,
+                    hlcProved: "7",
+                })
+            );
+            peer = await createPeer(directory);
+            const reconciled = await openSharedFs({ peerbit: peer, address });
+            expect(provenanceOf(reconciled)).toMatchObject({
+                writeReady: true,
+                source: "warm",
+                fullReplica: true,
+            });
+            expect(reconciled.bootstrapStatus().writeReadinessSource).toBe(
+                "reconciled"
+            );
+            await stopPeer(peer);
+
+            // `remote-settled` (written only by unreleased builds of this
+            // cycle) is no longer an accepted source: the sidecar reads as
+            // malformed and the reopen fails closed, gated and not warm
+            // (SPEC4 G4-7).
             await writeFile(
                 sidecar,
                 JSON.stringify({
@@ -1506,11 +1546,19 @@ describe("readiness responder", () => {
                 })
             );
             peer = await createPeer(directory);
-            const settled = await openSharedFs({ peerbit: peer, address });
-            expect(provenanceOf(settled)).toMatchObject({
-                writeReady: true,
-                source: "warm",
+            const retired = await openSharedFs({
+                peerbit: peer,
+                address,
+                bootstrap: false,
+            });
+            expect(provenanceOf(retired)).toMatchObject({
+                writeReady: false,
+                source: "none",
                 fullReplica: true,
+            });
+            expect(retired.bootstrapStatus()).toMatchObject({
+                writeReady: false,
+                guardArmed: false,
             });
             await stopPeer(peer);
             await writeFile(sidecar, proven);

@@ -209,6 +209,13 @@ describe("shared fs persistent multi-writer lifecycle", () => {
 
             const labels = ["owner", "writer-two", "writer-three"];
             const expectedFiles = new Map<string, Uint8Array>();
+            // The seed's bytes too: readiness proves namespace rows, not
+            // chunk bytes (design 2.3), so a joiner can turn writable
+            // before the seed's chunk arrives.
+            expectedFiles.set(
+                "/seed.txt",
+                new TextEncoder().encode("readiness evidence")
+            );
             const changesets = handles.map((_, writer) => {
                 const entries = [0, 1].map((file) => {
                     const path = `/rounds/${labels[writer]}/file-${file}.bin`;
@@ -268,7 +275,8 @@ describe("shared fs persistent multi-writer lifecycle", () => {
             const allBatchBytesReadableMs = performance.now() - batchStartedAt;
 
             // Cleanly restart writer three and prove both its identity and its
-            // write-readiness evidence survive in the same state directory.
+            // persisted write-readiness proof survive in the same state
+            // directory.
             await stopPeer(network[2]);
             const warmPeerCreateStartedAt = performance.now();
             const reopenedPeer = await trackPeer(directories[2]);
@@ -289,10 +297,11 @@ describe("shared fs persistent multi-writer lifecycle", () => {
             expect(reopenedWriter.bootstrapStatus()).toMatchObject({
                 writeReady: true,
                 partialWriteOverride: false,
-                writeReadinessSource: "remote-settled",
+                writeReadinessSource: "reconciled",
             });
             // No peer has been dialed yet: these reads and the ready state can
-            // only come from the same directory's persisted local evidence.
+            // only come from the same directory's persisted local state (the
+            // sidecar's `reconciled` source with its proof).
             for (const [path, expected] of expectedFiles) {
                 expect(
                     bytesEqual(await reopenedWriter.readFile(path), expected)
@@ -341,6 +350,19 @@ describe("shared fs persistent multi-writer lifecycle", () => {
 
             await waitUntil(async () => {
                 for (const fs of handles) {
+                    // The base's bytes too: its chunk replicates on its own
+                    // (its manifest proves only the version and naming
+                    // members), and the disposal barrier below fails on any
+                    // content that arrives while it runs.
+                    expect(
+                        bytesEqual(
+                            await fs.readVersion(
+                                "/contested.bin",
+                                baseVersion!.id
+                            ),
+                            new TextEncoder().encode("base")
+                        )
+                    ).toBe(true);
                     const conflicts = await fs.conflicts("/contested.bin");
                     expect(conflicts).toHaveLength(1);
                     expect(

@@ -41,6 +41,7 @@ import type {
     DepartureReport,
     DepartureRow,
 } from "./readiness-departure.protocol.js";
+import { holdFlips } from "./readiness-flip-hold.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
@@ -652,9 +653,11 @@ describe("readiness departure across processes", () => {
     const children = new Set<RunningChild>();
     const peers: Peerbit[] = [];
     const probes: Array<Pick<Probe, "restore">> = [];
+    const holds: Array<ReturnType<typeof holdFlips>> = [];
 
     afterEach(async () => {
         for (const probe of probes.splice(0)) probe.restore();
+        for (const hold of holds.splice(0)) hold.restore();
         const stops = await Promise.allSettled(
             [...children].map(async (running) => {
                 const { child } = running;
@@ -777,14 +780,21 @@ describe("readiness departure across processes", () => {
 
         const probe = installProbe(r);
         probes.push(probe);
+        // J's decisions wait until R is in J's view. R reaches it by its
+        // readiness subscription (relayed through D in the relayed
+        // topology), which can land after J contained D, and a peer
+        // visible only after the decision is not waited for (design 2.3).
+        // Held, J cannot turn ready on D alone first; released below, a
+        // parked decision finds R Required and flips nothing.
+        const flips = holdFlips(joinerPeer);
+        holds.push(flips);
         const fs = await openSharedFs({
             peerbit: joinerPeer,
             address: donorFs.address!,
             machineLabel: "departure-j",
             bootstrap: false,
             gc: false,
-            writeReadinessSettleMs: 100,
-        } as any);
+        });
         probe.fs = fs;
         let coordinator!: Coordinator;
         await waitUntil(() => {
@@ -823,6 +833,18 @@ describe("readiness departure across processes", () => {
             required: [r],
         });
         expect(probe.ready).toEqual([]);
+        // Whether this run took the race the hold covers: a decision parked
+        // before R turned Required, which the release must not flip.
+        console.info(
+            `readiness-departure setup: ${flips.parked()} decision(s) parked at release`
+        );
+        flips.release();
+        await waitUntil(() =>
+            expect(runtimeOf(fs)!.debug().coordinator!.decisions.inFlight).toBe(
+                false
+            )
+        );
+        expect(fs.bootstrapStatus().writeReady).toBe(false);
         return {
             running,
             donorPeer,
@@ -1186,8 +1208,8 @@ describe("readiness departure across processes", () => {
                     gaps: [],
                 });
                 expect(late.message).toContain(`reachable and silent: ${r}`);
-                // Gated with nothing in flight: no timer armed (design 4.9;
-                // the tracker's own poll is commit 4's).
+                // Gated with nothing in flight: no timer armed (design 4.9,
+                // M1 plan 10.5).
                 expect(runtime.debug().armedTimers).toBe(0);
                 expect(fs.bootstrapStatus().writeReady).toBe(false);
                 expect(probe.ready).toEqual([]);
@@ -1276,8 +1298,7 @@ describe("readiness departure across processes", () => {
                 machineLabel: "departure-j",
                 bootstrap: false,
                 gc: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             const runtime = runtimeOf(fs)!;
             expect(runtime.accessControlled).toBe(true);
             let coordinator!: Coordinator;

@@ -1,6 +1,7 @@
 import type { PublicSignKey } from "@peerbit/crypto";
 import {
     buildProof,
+    type ContainedInput,
     type ExclusionReason,
     type Proof,
     type ProofScope,
@@ -45,14 +46,18 @@ import {
  * time (a silent, busy or fetch-waiting session, or one that waits only for
  * trust, holds no slot: G2-4), follows each peer through the states of
  * design 4.7, and answers one question: `satisfied()`, every Required peer
- * contained, left or excluded, and at least one contained peer qualified in
- * the header of the session that contained it.
+ * contained, left or excluded, at least one contained peer qualified in
+ * the header of the session that contained it, and the bootstrap phase
+ * settled.
  *
- * - **Prerequisite mode (PR-3 commit 2).** Today's tracker still decides
- *   when J turns ready; it additionally requires `satisfied()`. The
- *   coordinator never makes J ready by itself, so it can only gate a joiner
- *   that today's tracker would release, never release one earlier. Commit 4
- *   makes `evaluate()` the predicate.
+ * - **The decision (PR-3 commit 4).** `evaluate()` is design 4.8's
+ *   predicate, phase clause included (`ports.phaseSettled`). When it holds,
+ *   the coordinator asks the host to decide (`ports.decide`): the host reads
+ *   the predicate and its proof again at one synchronous point, persists the
+ *   proof and flips. At most one decision runs at a time; a satisfied
+ *   evaluation that lands meanwhile reruns the evaluation once after it, so
+ *   a decision that failed to persist is retried by the next trigger, never
+ *   by a timer (M9).
  * - **Access-controlled stores (PR-3 commit 3).** Sessions open both scopes
  *   and read J's trust view (`ports.trust`). The predicate adds the trust
  *   clauses of design 4.8: every contained peer's trust scope contained and
@@ -111,8 +116,9 @@ import {
  *   `debug().armedTimers` sums them, so a test can assert that nothing is
  *   armed while J is gated with nothing in flight (M1 plan section 10.5).
  * - **`evaluate()`** runs once per microtask however many events asked for
- *   it, computes `satisfied()` and reports it to the host (`onEvaluate`). No
- *   polling and no quiet window.
+ *   it, computes `satisfied()`, reports it (`onEvaluate`) and, when it
+ *   holds, asks the host to decide (`decide`). No polling and no quiet
+ *   window.
  * - **Lifecycle.** Every listener is detached on `finish`/`dispose`, and
  *   every handler first checks that this coordinator is still running (as
  *   the entries change listener checks its identity: a removed listener can
@@ -324,7 +330,7 @@ export interface CoordinatorPorts {
     scope(id: ScopeId): SessionScopePorts | undefined;
     /** Settles once every scope's local state started (session precondition). */
     started(): Promise<void>;
-    /** From the sidecar (commit 4); 0 in commit 2. */
+    /** From the sidecar (`hlcProved`, design 4.10); 0 when absent. */
     readonly hlcProved: bigint;
     /** A row of `scope` arrived by sync since this open (design 4.5 step 5). */
     syncDelivering(scope: ScopeId): boolean;
@@ -332,11 +338,26 @@ export interface CoordinatorPorts {
     timers?: Timers;
     /** Milliseconds for stats only. */
     now?(): number;
-    /** The host's hook after each evaluation (prerequisite mode: a recheck). */
+    /**
+     * The host's phase clause (design 4.8 line 2): its bootstrap decision
+     * settled and the phase `off` or `converged`. Read last by
+     * `satisfied()`. Absent: settled (unit tests that run no bootstrap).
+     */
+    phaseSettled?(): boolean;
+    /**
+     * The host's decision (production: `markWriteReady`), asked after a
+     * satisfied evaluation, at most one at a time. It may resolve without
+     * flipping (the host found the predicate false, or its lifecycle moved)
+     * or reject (its proof could not be persisted); either way the next
+     * trigger asks again.
+     */
+    decide?(): Promise<void>;
+    /** After each evaluation; tests observe the decision points. */
     onEvaluate?(evaluation: Evaluation): void;
     /**
-     * Test mode: a session contained `results` for `peer` (the per-session
-     * K2 shadow check, G18). Called after the record changed; never awaited.
+     * A session contained `results` for `peer` (telemetry, and in test mode
+     * the per-session K2 shadow check, G18). Called after the record
+     * changed, for qualification sessions too; never awaited.
      */
     onContained?(peer: string, results: readonly SessionResult[]): void;
     /** Tests: builds sessions (default `new JoinerSession`). */
@@ -369,7 +390,7 @@ export interface StatusContext {
  */
 export interface ReadinessStatus {
     state: ReadinessState;
-    /** The coordinator's predicate; in prerequisite mode the tracker decides when. */
+    /** Design 4.8's predicate, phase clause included. */
     satisfied: boolean;
     /** Required peers now (hashcodes). */
     required: string[];
@@ -455,6 +476,16 @@ export interface CoordinatorDebug {
      * change, every counted trust scope turning contained, or C growing.
      */
     trustTriggers: { change: number; scopesContained: number; grew: number };
+    /**
+     * The host's decisions (`ports.decide`): asked, rejected, one in flight
+     * now, and the last rejection's message.
+     */
+    decisions: {
+        started: number;
+        failed: number;
+        inFlight: boolean;
+        lastError?: string;
+    };
 }
 
 /** Peers `describeReadiness` names before "and N more". */
@@ -539,7 +570,7 @@ export const describeReadiness = (status: ReadinessStatus): string => {
                 return `reconciling: J's readiness state is unavailable (${status.fault})`;
             }
             if (status.satisfied) {
-                return "reconciling: every required peer is accounted for; the write-readiness tracker decides";
+                return "reconciling: every required peer is accounted for; the write-readiness proof is being persisted";
             }
             const parts = [
                 status.inFlight.length > 0 &&
@@ -684,6 +715,12 @@ export class Coordinator {
     private trustRecheckPending = false;
     /** The sessions' trust view (access-controlled stores). */
     private readonly sessionTrust?: SessionTrustPort;
+    /** A `ports.decide` call is in flight (`requestDecision`). */
+    private deciding = false;
+    /** A satisfied evaluation landed while deciding: evaluate once after it. */
+    private decideAgain = false;
+    private readonly decisions = { started: 0, failed: 0 };
+    private lastDecisionError?: string;
 
     constructor(readonly ports: CoordinatorPorts) {
         this.timers = ports.timers ?? systemTimers;
@@ -865,7 +902,11 @@ export class Coordinator {
         for (const session of [...this.owners.keys()]) session.reclassify();
     }
 
-    /** Coalesced: one evaluation per microtask, then `ports.onEvaluate`. */
+    /**
+     * Coalesced: one evaluation per microtask, then `ports.onEvaluate`, then,
+     * when it holds, the host's decision (`requestDecision`), whether or not
+     * the answer changed (M9).
+     */
     evaluate(): void {
         if (!this.running || this.evaluationPending) return;
         this.evaluationPending = true;
@@ -879,16 +920,60 @@ export class Coordinator {
             try {
                 this.ports.onEvaluate?.({ satisfied, changed });
             } catch {
-                // The host's error is the host's.
+                // An observer's error is the observer's.
             }
+            if (satisfied && this.running) this.requestDecision();
         });
     }
 
     /**
-     * The predicate, synchronous: running, the first discovery read
-     * succeeded, no local fault, every record in a non-blocking state, and
-     * some contained record qualified. The phase clause stays the tracker's
-     * until commit 4.
+     * Asks the host to decide (design 4.8: persist the proof, then flip), at
+     * most once at a time. A satisfied evaluation that lands while a decision
+     * runs reruns the evaluation once after it, so a decision that found the
+     * predicate false or failed to persist is retried by the next trigger,
+     * never by a timer (M9). Never rejects.
+     */
+    private requestDecision() {
+        const decide = this.ports.decide;
+        if (!decide) return;
+        if (this.deciding) {
+            this.decideAgain = true;
+            return;
+        }
+        this.deciding = true;
+        this.decideAgain = false;
+        this.decisions.started++;
+        let decision: Promise<void>;
+        try {
+            decision = Promise.resolve(decide.call(this.ports));
+        } catch (error) {
+            decision = Promise.reject(error);
+        }
+        const settled = (failed: boolean, error?: unknown) => {
+            this.deciding = false;
+            if (failed) {
+                this.decisions.failed++;
+                this.lastDecisionError =
+                    error instanceof Error ? error.message : String(error);
+            }
+            if (this.decideAgain) {
+                this.decideAgain = false;
+                // A no-op once the decision finished this coordinator.
+                this.evaluate();
+            }
+        };
+        decision.then(
+            () => settled(false),
+            (error) => settled(true, error)
+        );
+    }
+
+    /**
+     * Design 4.8's predicate, synchronous: running, the first discovery read
+     * succeeded, no local fault, every record in a non-blocking state, some
+     * contained record qualified, and, last, the host's phase clause
+     * (`ports.phaseSettled`), so the decision-time reads below still run
+     * while only the phase is pending.
      *
      * In an access-controlled store (design 4.8, 2.2(3), 2.2(4)) every
      * contained record also holds both scopes, its trust result from a
@@ -931,7 +1016,16 @@ export class Coordinator {
             this.refresh();
             return false;
         }
-        return true;
+        return this.phaseSettled();
+    }
+
+    /** The host's phase clause; a throw reads as unsettled (gates). */
+    private phaseSettled(): boolean {
+        try {
+            return this.ports.phaseSettled?.() !== false;
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -1164,8 +1258,8 @@ export class Coordinator {
             return "no-qualified-donor";
         }
         if (!context.phaseSettled) return "waiting-phase";
-        // Prerequisite mode: satisfied, and today's tracker still waits for
-        // its own conditions (G2-19; commit 4 removes this case).
+        // The predicate holds and the host is persisting its proof, or its
+        // write failed and waits for the next trigger (G2-19, M9).
         return "reconciling";
     }
 
@@ -1186,22 +1280,44 @@ export class Coordinator {
     }
 
     /**
-     * The proof of the current records (`buildProof`); commit 4 persists it.
-     * A record's `qualified` is the predicate's view, as in `status()`: in
-     * access-controlled stores also an identity J trusts at this epoch
-     * (design 2.1), so the cut keeps the donor the predicate counted.
+     * The proof of the current records (`buildProof`), which the host
+     * persists at its decision. A record's `qualified` is the predicate's
+     * view, as in `status()`: in access-controlled stores also an identity J
+     * trusts at this epoch (design 2.1), so the cut keeps the donor the
+     * predicate counted. Access-controlled records also carry that identity
+     * (when checked at this epoch) and the provisional `rejected-untrusted`
+     * heads their result explained (design 2.3; G4-2).
      */
     proof(): Proof {
         const entries = [...this.entries.values()];
+        const acl = this.ports.trust !== undefined;
         return buildProof({
             scopes: this.ports.scopes,
             contained: entries
                 .filter(({ state }) => state === "contained")
                 .flatMap((entry) => {
-                    const results = [...entry.results.values()];
-                    if (!this.ports.trust) return results;
                     const qualified = this.qualifiedNow(entry);
-                    return results.map((result) => ({ ...result, qualified }));
+                    const identity = this.trustChecked(entry)
+                        ? entry.identity
+                        : undefined;
+                    return [...entry.results.values()].map(
+                        (result): ContainedInput => ({
+                            peer: result.peer,
+                            scope: result.scope,
+                            source: result.source,
+                            qualified: acl ? qualified : result.qualified,
+                            count: result.count,
+                            hlc: result.hlc,
+                            anchor: result.anchor,
+                            ...(acl &&
+                            (identity === "trusted" || identity === "untrusted")
+                                ? { identity }
+                                : {}),
+                            ...(acl && (result.untrusted?.heads ?? 0) > 0
+                                ? { untrusted: result.untrusted!.heads }
+                                : {}),
+                        })
+                    );
                 }),
             excluded: entries.flatMap((entry) =>
                 entry.excluded && entry.state.startsWith("excluded-")
@@ -1271,6 +1387,13 @@ export class Coordinator {
             trustEpoch: this.trustEpoch,
             trustChecks: this.trustChecks,
             trustTriggers: { ...this.trustTriggers },
+            decisions: {
+                ...this.decisions,
+                inFlight: this.deciding,
+                ...(this.lastDecisionError !== undefined
+                    ? { lastError: this.lastDecisionError }
+                    : {}),
+            },
         };
     }
 
@@ -1542,7 +1665,7 @@ export class Coordinator {
         try {
             this.ports.onContained?.(entry.hash, results);
         } catch {
-            // Test mode only; failures are recorded by the hook.
+            // A telemetry or test hook; its failure never reaches the join.
         }
     }
 

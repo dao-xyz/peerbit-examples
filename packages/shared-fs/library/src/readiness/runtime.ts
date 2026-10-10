@@ -8,11 +8,10 @@ import {
     Coordinator,
     type CoordinatorDebug,
     type CoordinatorTransport,
-    type Evaluation,
     type ReadinessStatus,
     type StatusContext,
 } from "./coordinator.js";
-import type { RejectionReason } from "./explain.js";
+import type { ExplainedReason, RejectionReason } from "./explain.js";
 import {
     encodeStructures,
     takeStructures,
@@ -27,6 +26,7 @@ import {
     type PullStore,
     type SessionScopeBundle,
 } from "./ports.js";
+import type { Proof, ProofScope } from "./proof.js";
 import { LifeRecorder } from "./reachability.js";
 import {
     Responder,
@@ -39,10 +39,11 @@ import {
     SCOPE_NAMESPACE_V1,
     SCOPE_TRUST_V1,
     TRUST_V1,
+    scopeDescriptor,
     type ScopeDescriptor,
     type ScopeId,
 } from "./scopes.js";
-import type { SessionResult } from "./session.js";
+import type { SessionMode, SessionResult } from "./session.js";
 import {
     runSessionShadowCheck,
     runShadowCheck,
@@ -58,6 +59,7 @@ import {
     OPEN_NONCE_BYTES,
     OpenV1,
     encodeReadinessMessage,
+    type ProvenanceSource,
     type ReadinessMessage,
 } from "./wire.js";
 
@@ -83,7 +85,62 @@ export interface ScopeState extends ResponderScope {
     readonly started: Promise<void>;
 }
 
-/** What `startJoin` needs from the host (PR-3 commit 2, prerequisite mode). */
+/**
+ * One contained scope of one session (design 7 `readiness-session`): plain
+ * data for the host's telemetry. `durationMs` is the design's `ms`;
+ * `scope`, `explainedBy`, `untrusted`, `qualified` and `source` are added.
+ */
+export interface ReadinessSessionRecord {
+    /** The peer's `hashcode()`. */
+    peer: string;
+    scope: ProofScope;
+    mode: SessionMode;
+    /** The peer's snapshot count. */
+    count: number;
+    /** The gap estimate at the matching certificate; 0 when none was made. */
+    gapEst: number;
+    /** Cells received from the peer. */
+    cells: number;
+    missingAtStart: number;
+    pulled: number;
+    explained: number;
+    explainedBy: Partial<Record<ExplainedReason, number>>;
+    /** Provisional `rejected-untrusted` heads, when above 0. */
+    untrusted?: number;
+    recoveries: number;
+    roundTrips: number;
+    /** Fractional ms on the monotonic clock, not the injected `clock`. */
+    durationMs: number;
+    /** Qualified in the header of this session. */
+    qualified: boolean;
+    source: ProvenanceSource;
+}
+
+/** A session result as telemetry carries it (plain data, no bytes). */
+export const sessionRecord = (
+    result: SessionResult
+): ReadinessSessionRecord => ({
+    peer: result.peer,
+    scope: scopeDescriptor(result.scope).name,
+    mode: result.mode,
+    count: result.count,
+    gapEst: result.gapEst,
+    cells: result.cells,
+    missingAtStart: result.missingAtStart,
+    pulled: result.pulled,
+    explained: result.explained,
+    explainedBy: { ...result.explainedBy },
+    ...((result.untrusted?.heads ?? 0) > 0
+        ? { untrusted: result.untrusted!.heads }
+        : {}),
+    recoveries: result.recoveries,
+    roundTrips: result.roundTrips,
+    durationMs: result.ms,
+    qualified: result.qualified,
+    source: result.source,
+});
+
+/** What `startJoin` needs from the host. */
 export interface JoinOptions {
     /**
      * Builds the readiness topic's view of the network (production:
@@ -91,10 +148,22 @@ export interface JoinOptions {
      * join (gated), never the open.
      */
     transport(): CoordinatorTransport;
-    /** From the sidecar (commit 4); 0 until then. */
+    /** From the sidecar's `hlcProved` (design 4.10); 0 when absent. */
     hlcProved: bigint;
-    /** After each evaluation (prerequisite mode: the tracker's recheck). */
-    onEvaluate?(evaluation: Evaluation): void;
+    /**
+     * The host's phase clause of the predicate (design 4.8): its bootstrap
+     * decision settled and the phase `off` or `converged`.
+     */
+    phaseSettled(): boolean;
+    /**
+     * The host's decision after a satisfied evaluation (production:
+     * `markWriteReady`): read the predicate and its proof
+     * (`proofIfSatisfied`), persist, flip. A rejection leaves J gated and
+     * the next trigger retries (M9).
+     */
+    onSatisfied(): Promise<void>;
+    /** A session contained a scope (telemetry); never awaited. */
+    onSession?(record: ReadinessSessionRecord): void;
     /** Bounded timers for the sessions (`systemTimers` by default). */
     timers?: Timers;
     now?(): number;
@@ -142,10 +211,10 @@ export const logIdOf = (documents: DocumentsLike<any, any>): Uint8Array => {
  * persistence. The filesystem creates one per open and talks only to this
  * object; nothing here reads the program after close. It maintains the
  * structures and answers on every peer. On a fresh full address-open it
- * also runs the joiner's coordinator (`startJoin`, PR-3 commit 2): in
- * prerequisite mode today's tracker still decides when the filesystem turns
- * ready and additionally requires `satisfied()`, so the coordinator can only
- * keep a joiner gated longer, never release it earlier.
+ * also runs the joiner's coordinator (`startJoin`): its predicate (design
+ * 4.8) decides when the filesystem turns ready, through the host's decision
+ * (`markWriteReady`), which reads the predicate and its proof at one
+ * synchronous point (`proofIfSatisfied`) and persists the proof first.
  */
 export class ReadinessRuntime {
     readonly openNonce: Uint8Array = randomBytes(OPEN_NONCE_BYTES);
@@ -179,6 +248,8 @@ export class ReadinessRuntime {
     private joinFault?: string;
     /** READY notices went out (`markReady`); once per generation. */
     private readyNoticed = false;
+    /** A failed decision was logged (`decideFor`); once per generation. */
+    private decisionWarned = false;
     /**
      * Signs of life from the namespace attach until the coordinator's start
      * takes them (an open that may run a join, `attachNamespace`).
@@ -760,10 +831,18 @@ export class ReadinessRuntime {
             syncDelivering: (scope) => this.syncDelivering(scope),
             timers: options.timers,
             now: options.now,
-            onEvaluate: options.onEvaluate,
-            onContained: registry
-                ? (_peer, results) => this.checkContained(results)
-                : undefined,
+            phaseSettled: () => options.phaseSettled(),
+            decide: () => this.decideFor(options),
+            onContained: (_peer, results) => {
+                if (registry) this.checkContained(results);
+                for (const result of results) {
+                    try {
+                        options.onSession?.(sessionRecord(result));
+                    } catch {
+                        // Telemetry never reaches the join.
+                    }
+                }
+            },
         });
         this.coordinatorValue = coordinator;
         try {
@@ -772,6 +851,27 @@ export class ReadinessRuntime {
             // A bug, never a reason to release: the join stays unsatisfied.
             this.joinFault = `coordinator: ${error?.message ?? error}`;
             this.disposeJoin();
+        }
+    }
+
+    /**
+     * The host's decision; a rejection (the proof could not be persisted)
+     * is logged once per generation and goes back to the coordinator, which
+     * counts it (`debug().coordinator.decisions`) and asks again on the next
+     * trigger.
+     */
+    private async decideFor(options: JoinOptions): Promise<void> {
+        try {
+            await options.onSatisfied();
+        } catch (error: any) {
+            if (!this.decisionWarned) {
+                this.decisionWarned = true;
+                console.warn(
+                    "shared-fs: write readiness could not persist its proof; the next readiness event retries:",
+                    error?.message ?? error
+                );
+            }
+            throw error;
         }
     }
 
@@ -797,12 +897,31 @@ export class ReadinessRuntime {
     }
 
     /**
-     * The commit-2 predicate (`Coordinator.satisfied`): false when no join
-     * ran or it faulted, so a caller that requires it fails closed.
+     * The predicate (design 4.8, `Coordinator.satisfied`): false when no
+     * join ran or it faulted, so a caller that requires it fails closed.
      */
     satisfied(): boolean {
         if (this.joinFault !== undefined || this.disposedValue) return false;
         return this.coordinatorValue?.satisfied() === true;
+    }
+
+    /**
+     * The decision's read (design 2.2(2), "at the moment of the decision"):
+     * the predicate and, when it holds, the proof of the same records, at
+     * one synchronous point. Undefined when no join ran or it faulted, the
+     * generation is blocked or disposed, or the predicate does not hold.
+     */
+    proofIfSatisfied(): Proof | undefined {
+        if (
+            this.joinFault !== undefined ||
+            this.disposedValue ||
+            this.blockedValue
+        ) {
+            return undefined;
+        }
+        const coordinator = this.coordinatorValue;
+        if (!coordinator || !coordinator.satisfied()) return undefined;
+        return coordinator.proof();
     }
 
     /**
@@ -831,10 +950,10 @@ export class ReadinessRuntime {
     }
 
     /**
-     * J turned ready (the tracker's decision or `assumeComplete`), after
-     * the host flipped its state, so the provenance the notices carry says
-     * ready: the coordinator finishes (sessions closed, records kept for
-     * `status`), and every peer that had a session or a `BUSY` with J,
+     * J turned ready (the decision, `markWriteReady`, or `assumeComplete`),
+     * after the host flipped its state, so the provenance the notices carry
+     * says ready: the coordinator finishes (sessions closed, records kept
+     * for `status`), and every peer that had a session or a `BUSY` with J,
      * either way, gets a READY notice (a trigger for peers J's view may now
      * qualify; never evidence). Once per generation.
      */

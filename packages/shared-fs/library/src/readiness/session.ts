@@ -229,6 +229,12 @@ export interface SessionResult {
     mode: SessionMode;
     /** J's lane-set sequence point of the matching certificate. */
     seq: number;
+    /**
+     * The run's gap estimate (`gapEstimate`) when the matching certificate
+     * was made; 0 when none was made (`empty`, `fast`). Telemetry only
+     * (design 7 `readiness-session`).
+     */
+    gapEst: number;
     missingAtStart: number;
     pulled: number;
     explained: number;
@@ -2712,6 +2718,7 @@ export class JoinerSession {
             qualified: false,
             mode,
             seq,
+            gapEst: run.gapEst ?? 0,
             missingAtStart: run.missingAtStart,
             pulled: run.pulled,
             explained:

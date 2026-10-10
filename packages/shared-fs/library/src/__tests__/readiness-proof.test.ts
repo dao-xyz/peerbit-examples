@@ -13,8 +13,9 @@ import { SCOPE_NAMESPACE_V1, SCOPE_TRUST_V1 } from "../readiness/scopes.js";
 
 /**
  * The readiness proof (M1 plan section 7.3, design 4.10): bounded and
- * deterministic records, a shape check that never throws, and `hlcProved`
- * as a hint that reads as 0 when malformed.
+ * deterministic records, a shape check that never throws, `hlcProved` as a
+ * hint that reads as 0 when malformed, and the trust results an
+ * access-controlled store's records carry (PR-3 commit 4, SPEC4 G4-2).
  */
 
 const U64_MAX = (1n << 64n) - 1n;
@@ -384,6 +385,143 @@ describe("readiness proof", () => {
             for (const value of values) {
                 expect(() => validateProof(value)).not.toThrow();
                 expect(validateProof(value).ok).toBe(false);
+            }
+        });
+    });
+
+    describe("trust results (G4-2)", () => {
+        /** An access-controlled proof: a trusted donor, an untrusted one. */
+        const aclProof = () =>
+            buildProof({
+                scopes: [SCOPE_NAMESPACE_V1, SCOPE_TRUST_V1],
+                contained: [
+                    contained("a", {
+                        qualified: true,
+                        source: "creator",
+                        identity: "trusted",
+                        untrusted: 3,
+                    }),
+                    contained("a", {
+                        scope: SCOPE_TRUST_V1,
+                        qualified: true,
+                        source: "creator",
+                        identity: "trusted",
+                    }),
+                    contained("b", { identity: "untrusted" }),
+                ],
+                excluded: [],
+                gaps: [],
+            });
+
+        it("buildProof writes identity and untrusted, and validateProof round-trips them", () => {
+            const proof = aclProof();
+            expect(proof.contained).toEqual([
+                expect.objectContaining({
+                    peer: "a",
+                    scope: "namespace-v1",
+                    identity: "trusted",
+                    untrusted: 3,
+                }),
+                expect.objectContaining({
+                    peer: "a",
+                    scope: "trust-v1",
+                    identity: "trusted",
+                }),
+                expect.objectContaining({ peer: "b", identity: "untrusted" }),
+            ]);
+            // `untrusted` only above 0, so the trust records carry none.
+            expect(proof.contained[1]).not.toHaveProperty("untrusted");
+            expect(proof.contained[2]).not.toHaveProperty("untrusted");
+            expect(validateProof(json(proof))).toEqual({ ok: true, proof });
+            // The u32 bound itself is accepted.
+            const edge = json(proof);
+            edge.contained[0].untrusted = 0xffff_ffff;
+            const checked = validateProof(edge);
+            expect(checked.ok).toBe(true);
+            if (checked.ok) {
+                expect(checked.proof.contained[0].untrusted).toBe(0xffff_ffff);
+            }
+        });
+
+        it("open mode, a check still running and no untrusted heads write neither key", () => {
+            const proof = buildProof({
+                scopes: [SCOPE_NAMESPACE_V1],
+                contained: [
+                    contained("a", { qualified: true }),
+                    contained("b", { identity: undefined, untrusted: 0 }),
+                ],
+                excluded: [],
+                gaps: [],
+            });
+            for (const record of proof.contained) {
+                expect(record).not.toHaveProperty("identity");
+                expect(record).not.toHaveProperty("untrusted");
+            }
+            expect(validateProof(json(proof))).toEqual({ ok: true, proof });
+            // Values the coordinator never passes are not written either.
+            const odd = buildProof({
+                scopes: [SCOPE_NAMESPACE_V1],
+                contained: [
+                    contained("a", {
+                        identity: "checking" as any,
+                        untrusted: -1,
+                    }),
+                    contained("b", { untrusted: 1.5 }),
+                    contained("c", { untrusted: 2 ** 32 }),
+                ],
+                excluded: [],
+                gaps: [],
+            });
+            for (const record of odd.contained) {
+                expect(record).not.toHaveProperty("identity");
+                expect(record).not.toHaveProperty("untrusted");
+            }
+        });
+
+        it("rejects a bad identity or untrusted as malformed", () => {
+            const bad: Array<[string, (value: any) => void]> = [
+                [
+                    "identity checking",
+                    (v) => (v.contained[0].identity = "checking"),
+                ],
+                [
+                    "identity as a boolean",
+                    (v) => (v.contained[0].identity = true),
+                ],
+                ["identity null", (v) => (v.contained[0].identity = null)],
+                [
+                    "untrusted as a string",
+                    (v) => (v.contained[0].untrusted = "3"),
+                ],
+                ["untrusted negative", (v) => (v.contained[0].untrusted = -1)],
+                [
+                    "untrusted fractional",
+                    (v) => (v.contained[0].untrusted = 1.5),
+                ],
+                [
+                    "untrusted above u32",
+                    (v) => (v.contained[0].untrusted = 2 ** 32),
+                ],
+                ["untrusted null", (v) => (v.contained[0].untrusted = null)],
+            ];
+            for (const [name, mutate] of bad) {
+                const value = json(aclProof());
+                mutate(value);
+                expect(validateProof(value).ok, name).toBe(false);
+            }
+            // Absent keys are fine: a record of a check still running.
+            const value = json(aclProof());
+            delete value.contained[0].identity;
+            delete value.contained[0].untrusted;
+            const checked = validateProof(value);
+            expect(checked.ok).toBe(true);
+            if (checked.ok) {
+                expect(checked.proof.contained[0]).not.toHaveProperty(
+                    "identity"
+                );
+                expect(checked.proof.contained[0]).not.toHaveProperty(
+                    "untrusted"
+                );
             }
         });
     });

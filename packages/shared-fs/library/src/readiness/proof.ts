@@ -49,6 +49,17 @@ export interface ProofContained {
     hlc: string;
     /** D_R, 64 lowercase hex characters. */
     anchor: string;
+    /**
+     * Access-controlled stores only: the peer's identity in J's trust graph
+     * at the decision (design 2.1), absent while a check was still running.
+     */
+    identity?: "trusted" | "untrusted";
+    /**
+     * Access-controlled stores only: the provisional `rejected-untrusted`
+     * heads this result explained (design 2.3: the stale-grant and
+     * revocation exposure the proof states), only when above 0.
+     */
+    untrusted?: number;
 }
 
 export interface ProofExcluded {
@@ -70,7 +81,10 @@ export interface Proof {
     gaps: ProofGap[];
 }
 
-/** A contained session result, as the proof needs it (`SessionResult` fits). */
+/**
+ * A contained session result, as the proof needs it. `identity` and
+ * `untrusted` are the coordinator's, in access-controlled stores only.
+ */
 export interface ContainedInput {
     peer: string;
     scope: ScopeId;
@@ -79,6 +93,8 @@ export interface ContainedInput {
     count: number;
     hlc: bigint;
     anchor: Uint8Array;
+    identity?: "trusted" | "untrusted";
+    untrusted?: number;
 }
 
 export type ProofValidation =
@@ -149,6 +165,13 @@ export const buildProof = (input: {
                 count: record.count,
                 hlc: formatHlc(record.hlc),
                 anchor: hexOf(record.anchor),
+                ...(record.identity === "trusted" ||
+                record.identity === "untrusted"
+                    ? { identity: record.identity }
+                    : {}),
+                ...(isU32(record.untrusted) && record.untrusted > 0
+                    ? { untrusted: record.untrusted }
+                    : {}),
             } satisfies ProofContained,
         }))
         // Qualified first, so the cut keeps one whenever one exists (the
@@ -244,6 +267,7 @@ const validate = (value: unknown): ProofValidation => {
     const contained: ProofContained[] = [];
     for (const record of containedIn.records) {
         const { peer, scope, source, qualified, count, hlc, anchor } = record;
+        const { identity, untrusted } = record;
         if (
             !isPeer(peer) ||
             !scopes.includes(scope as ProofScope) ||
@@ -252,7 +276,11 @@ const validate = (value: unknown): ProofValidation => {
             !isU32(count) ||
             !isHlc(hlc) ||
             typeof anchor !== "string" ||
-            !ANCHOR_PATTERN.test(anchor)
+            !ANCHOR_PATTERN.test(anchor) ||
+            (identity !== undefined &&
+                identity !== "trusted" &&
+                identity !== "untrusted") ||
+            (untrusted !== undefined && !isU32(untrusted))
         ) {
             return { ok: false, reason: "contained record" };
         }
@@ -264,6 +292,8 @@ const validate = (value: unknown): ProofValidation => {
             count,
             hlc,
             anchor,
+            ...(identity !== undefined ? { identity } : {}),
+            ...(untrusted !== undefined ? { untrusted } : {}),
         });
     }
     const excluded: ProofExcluded[] = [];
@@ -294,7 +324,8 @@ const validate = (value: unknown): ProofValidation => {
  * two distinct known scopes, at most `PROOF_MAX_RECORDS` records per array,
  * and records whose fields have the right types and bounds (peer 1-128
  * characters, a scope listed in `scopes`, a known source and reason, `count`
- * and `missing` u32, `hlc` a decimal u64, `anchor` 64 lowercase hex). Keys it
+ * and `missing` u32, `hlc` a decimal u64, `anchor` 64 lowercase hex, and when
+ * present `identity` `trusted` or `untrusted` and `untrusted` a u32). Keys it
  * does not know are ignored and not copied.
  */
 export const validateProof = (value: unknown): ProofValidation => {

@@ -3,8 +3,18 @@ import { Ed25519Keypair, PublicSignKey, randomBytes } from "@peerbit/crypto";
 import { Documents } from "@peerbit/document";
 import { Timestamp } from "@peerbit/log";
 import { Program } from "@peerbit/program";
+import {
+    ExchangeHeadsMessage,
+    RawExchangeHeadsMessage,
+    SharedLog,
+    StashBackedRawExchangeHeadsMessage,
+} from "@peerbit/shared-log";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { Peerbit } from "peerbit";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { openSharedFs, type SharedFsHandle } from "../index.js";
 import { PULL_BATCH } from "../readiness/constants.js";
 import {
     Explainer,
@@ -15,7 +25,11 @@ import {
     type Rejection,
 } from "../readiness/explain.js";
 import type { IdKey } from "../readiness/id-map.js";
-import type { IndexedHead } from "../readiness/tap.js";
+import { validateProof } from "../readiness/proof.js";
+import { logIdOf, type ReadinessRuntime } from "../readiness/runtime.js";
+import { NAMESPACE_V1, SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
+import { documentsIndexPort, type IndexedHead } from "../readiness/tap.js";
+import { holdFlips } from "./readiness-flip-hold.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
@@ -24,7 +38,10 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * cut id is required), 52 (ignored-older), 44 (a logged head waits for its
  * event and is never pulled), the rejection record with the signers a trust
  * refusal records (PR-3 commit 3) and the order of the verdicts. The explainer runs on a fake log and index here; commit 2 binds
- * the ports to the store and runs 39, 41 and 52 end to end.
+ * the ports to the store and runs 39, 41 and 52 end to end. Design test 9
+ * runs here end to end (PR-3 commit 4): a crash between containment and
+ * the sidecar write, then a lagging donor that still lists a head J
+ * retired before the crash.
  *
  * The newest-wins pin runs Documents itself (`@peerbit/document` 15.1.11):
  * `newestWinsIgnores` must make the same decision as
@@ -757,4 +774,303 @@ describe("newest-wins pin: @peerbit/document 15.1.11 program.js:3814-3832", () =
         expect(await hasNext(reput.entry.hash)).toBe(false);
         expect((await indexed(onJ, "y")).head).toBe(reput.entry.hash);
     });
+});
+
+// ------------------------------------------- design test 9, end to end
+
+const runtimeOf = (fs: SharedFsHandle): ReadinessRuntime =>
+    (fs.program as any).readinessRuntime;
+const entriesOf = (fs: SharedFsHandle): any => (fs.program as any).entries;
+const hashOf = (peer: Peerbit) => peer.identity.publicKey.hashcode();
+
+const waitUntil = async (
+    assertion: () => Promise<void> | void,
+    timeoutMs = process.env.CI ? 60_000 : 30_000
+) => {
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+        try {
+            await assertion();
+            return;
+        } catch (error) {
+            lastError = error;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+    }
+    throw lastError;
+};
+
+/** The namespace rows of `fs`'s index (id to head). */
+const namespaceRows = async (fs: SharedFsHandle) => {
+    const port = documentsIndexPort(entriesOf(fs), NAMESPACE_V1);
+    const rows = new Map<string, string>();
+    for await (const page of port.scan()) {
+        for (const row of page) rows.set(row.key as string, row.head);
+    }
+    return rows;
+};
+
+/** An entry of `fs`'s namespace log names `head` in its `next`. */
+const logNames = async (fs: SharedFsHandle, head: string) => {
+    const iterator = entriesOf(fs).log.log.entryIndex.getHasNext(head, false);
+    try {
+        return (await iterator.next(1)).length > 0;
+    } finally {
+        await iterator.close();
+    }
+};
+
+const sameBytes = (a: Uint8Array | undefined, b: Uint8Array) =>
+    a instanceof Uint8Array &&
+    a.length === b.length &&
+    a.every((byte, i) => byte === b[i]);
+
+describe("design test 9: a crash between containment and the sidecar write; a lagging donor lists a head J retired", () => {
+    const peers: Peerbit[] = [];
+    const roots: string[] = [];
+    const restores: Array<() => void> = [];
+
+    afterEach(async () => {
+        for (const restore of restores.splice(0).reverse()) {
+            try {
+                restore();
+            } catch {
+                // Best effort; the peers stop next either way.
+            }
+        }
+        await stopTestPeers(peers);
+        for (const root of roots.splice(0)) {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    const createPeer = async (
+        options: { directory?: string; connectionGater?: object } = {}
+    ) => {
+        const peer = await Peerbit.create({
+            ...(options.directory ? { directory: options.directory } : {}),
+            ...(options.connectionGater
+                ? { libp2p: { connectionGater: options.connectionGater } }
+                : {}),
+        } as any);
+        peers.push(peer);
+        return peer;
+    };
+
+    const stopPeer = async (peer: Peerbit) => {
+        const index = peers.indexOf(peer);
+        if (index >= 0) peers.splice(index, 1);
+        await peer.stop();
+    };
+
+    /**
+     * Drops the exchange heads `peer`'s shared log of `logId` receives (a
+     * replica that sync does not bring up to date), as readiness-trust's
+     * `withholdTrustSync` does for the trust log.
+     */
+    const withholdSync = (peer: Peerbit, logId: Uint8Array) => {
+        const owner = SharedLog.prototype as any;
+        const onMessage = owner.onMessage;
+        owner.onMessage = function (
+            this: any,
+            message: unknown,
+            context: unknown
+        ) {
+            if (
+                (message instanceof ExchangeHeadsMessage ||
+                    message instanceof RawExchangeHeadsMessage ||
+                    message instanceof StashBackedRawExchangeHeadsMessage) &&
+                this?.node?.identity?.publicKey?.hashcode?.() ===
+                    hashOf(peer) &&
+                sameBytes(this?.log?.id, logId)
+            ) {
+                return Promise.resolve();
+            }
+            return onMessage.call(this, message, context);
+        };
+        restores.push(() => (owner.onMessage = onMessage));
+    };
+
+    it("9: gated on reopen with no proof on disk; the lagging donor's retired head is superseded (not pulled, not indexed, the donor not excluded); then ready", async () => {
+        // D, the creator: /x.txt edited once, so its first version is a
+        // superseded row, plus files that never change.
+        const donorPeer = await createPeer();
+        const donor = await openSharedFs({
+            peerbit: donorPeer,
+            machineLabel: "explain-donor",
+            gc: false,
+        });
+        await donor.writeFile("/x.txt", "one");
+        const first = await namespaceRows(donor);
+        const [retiredKey] = [...first.keys()].filter((key) =>
+            key.startsWith("version:")
+        );
+        expect(retiredKey).toBeDefined();
+        const retiredHead = first.get(retiredKey)!;
+        await donor.writeFile("/x.txt", "two");
+        for (let i = 0; i < 4; i++) {
+            await donor.writeFile(`/keep-${i}.txt`, `kept ${i}`);
+        }
+        expect((await namespaceRows(donor)).get(retiredKey)).toBe(retiredHead);
+
+        // L: a ready replica of D, then cut off from it.
+        const refused = new Set<string>();
+        const deny = (peerId: unknown) => refused.has(String(peerId));
+        const laggingPeer = await createPeer({
+            connectionGater: {
+                denyDialPeer: deny,
+                denyOutboundConnection: deny,
+                denyInboundEncryptedConnection: deny,
+                denyOutboundEncryptedConnection: deny,
+                denyInboundUpgradedConnection: deny,
+                denyOutboundUpgradedConnection: deny,
+            },
+        });
+        await laggingPeer.dial(donorPeer);
+        const lagging = await openSharedFs({
+            peerbit: laggingPeer,
+            address: donor.address,
+            machineLabel: "explain-lagging",
+            bootstrap: false,
+            gc: false,
+        });
+        await lagging.awaitWriteReady({ timeout: 30_000 });
+        const donorRows = await namespaceRows(donor);
+        await waitUntil(async () =>
+            expect(await namespaceRows(lagging)).toEqual(donorRows)
+        );
+        for (const peer of [donorPeer, laggingPeer]) {
+            peer.services.fanout.setBootstraps([]);
+        }
+        refused.add(donorPeer.peerId.toString());
+        await laggingPeer.hangUp(donorPeer.identity.publicKey);
+        await donorPeer.hangUp(laggingPeer.identity.publicKey).catch(() => {});
+        await waitUntil(() =>
+            expect(
+                laggingPeer.libp2p.getConnections(donorPeer.peerId)
+            ).toHaveLength(0)
+        );
+        // Nothing L meets later brings it D's CUT either.
+        withholdSync(laggingPeer, logIdOf(entriesOf(lagging)));
+
+        // D retires the superseded version as GC does: a CUT naming it.
+        await entriesOf(donor).del(retiredKey);
+        expect((await namespaceRows(donor)).has(retiredKey)).toBe(false);
+        expect((await namespaceRows(lagging)).get(retiredKey)).toBe(
+            retiredHead
+        );
+
+        // J, on disk, contains D; its decision is parked, and J stops
+        // before the sidecar write (the in-process stand-in for a crash
+        // between containment and that write).
+        const root = await mkdtemp(joinPath(tmpdir(), "shared-fs-explain-"));
+        roots.push(root);
+        const directory = joinPath(root, "joiner");
+        const firstPeer = await createPeer({ directory });
+        const hold = holdFlips(firstPeer);
+        restores.push(hold.restore);
+        await firstPeer.dial(donorPeer);
+        const firstOpen = await openSharedFs({
+            peerbit: firstPeer,
+            address: donor.address,
+            machineLabel: "explain-joiner",
+            bootstrap: false,
+            gc: false,
+        });
+        const donorHash = hashOf(donorPeer);
+        await waitUntil(() => {
+            expect(hold.parked()).toBe(1);
+            expect(firstOpen.bootstrapStatus().readiness).toMatchObject({
+                state: "reconciling",
+                satisfied: true,
+                contained: [{ peer: donorHash, qualified: true }],
+            });
+        });
+        // J's containment needs no CUT (neither side lists the retired
+        // row); sync brings it, and J retires the row before the crash.
+        await waitUntil(async () =>
+            expect(await logNames(firstOpen, retiredHead)).toBe(true)
+        );
+        expect((await namespaceRows(firstOpen)).has(retiredKey)).toBe(false);
+        expect(hold.parked()).toBe(1);
+        expect(firstOpen.bootstrapStatus().writeReady).toBe(false);
+        await stopPeer(firstPeer);
+        // The parked decision of the stopped open runs now and must not
+        // write: its lifecycle is blocked and its runtime disposed.
+        hold.restore();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const stateDirectory = joinPath(directory, "shared-fs-bootstrap");
+        const statePath = joinPath(
+            stateDirectory,
+            (await readdir(stateDirectory))[0]
+        );
+        const crashed = JSON.parse(await readFile(statePath, "utf8"));
+        expect(crashed.writeReady).toBe(false);
+        expect(crashed).not.toHaveProperty("proof");
+        expect(crashed).not.toHaveProperty("writeReadySource");
+        await stopPeer(donorPeer);
+
+        // J reopens in the same directory and sees L only.
+        const reopenedPeer = await createPeer({ directory });
+        expect(hashOf(reopenedPeer)).toBe(hashOf(firstPeer));
+        await reopenedPeer.dial(laggingPeer);
+        const joiner = await openSharedFs({
+            peerbit: reopenedPeer,
+            address: donor.address,
+            machineLabel: "explain-joiner",
+            bootstrap: false,
+            gc: false,
+        });
+        // No proof on disk: a fresh join, gated at open.
+        expect(joiner.bootstrapStatus().writeReady).toBe(false);
+        expect(joiner.bootstrapStatus().readiness).toBeDefined();
+        await joiner.awaitWriteReady({ timeout: 30_000 });
+
+        const laggingHash = hashOf(laggingPeer);
+        const record = runtimeOf(joiner).coordinator!.record(laggingHash)!;
+        expect(record).toMatchObject({ state: "contained", qualified: true });
+        const result = record.results.get(SCOPE_NAMESPACE_V1)!;
+        // L listed the retired head; J explained it by the CUT it holds.
+        expect(result).toMatchObject({
+            count: donorRows.size,
+            source: "reconciled",
+            pulled: 0,
+        });
+        expect(result.missingAtStart).toBeGreaterThanOrEqual(1);
+        expect(result.explainedBy).toEqual({ superseded: 1 });
+        expect(joiner.bootstrapStatus().readiness).toMatchObject({
+            state: "ready",
+            excluded: [],
+            gaps: [],
+            contained: [
+                {
+                    peer: laggingHash,
+                    qualified: true,
+                    source: "reconciled",
+                },
+            ],
+        });
+        // Not resurrected: J's index never held the retired row again.
+        expect((await namespaceRows(joiner)).has(retiredKey)).toBe(false);
+        expect((await namespaceRows(lagging)).get(retiredKey)).toBe(
+            retiredHead
+        );
+        expect(joiner.bootstrapStatus()).toMatchObject({
+            writeReady: true,
+            writeReadinessSource: "reconciled",
+        });
+        const ready = JSON.parse(await readFile(statePath, "utf8"));
+        const proof = validateProof(ready.proof);
+        expect(proof.ok).toBe(true);
+        if (proof.ok) {
+            expect(proof.proof.contained).toEqual([
+                expect.objectContaining({
+                    peer: laggingHash,
+                    qualified: true,
+                    count: donorRows.size,
+                }),
+            ]);
+        }
+    }, 180_000);
 });

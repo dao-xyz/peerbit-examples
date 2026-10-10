@@ -60,6 +60,7 @@ import {
     type ReadinessMessage,
 } from "../readiness/wire.js";
 import type { Rejection } from "../readiness/explain.js";
+import { sessionRecord } from "../readiness/runtime.js";
 import {
     FakeTrust,
     JoinerWorld,
@@ -3352,6 +3353,105 @@ describe("readiness joiner session", () => {
             expect(only(session.outcome!).explainedBy).toEqual({});
             expect(w.joins).toHaveLength(2);
             expect(w.j.scope().index.get(ns[0].id!)?.head).toBe(ns[0].head);
+        });
+    });
+
+    describe("the result as telemetry (PR-3 commit 4, design 7 `readiness-session`)", () => {
+        it("gapEst is 0 when no estimate was made: empty and fast", async () => {
+            const empty = await world({ common: 0, jOnly: 3 });
+            expect(only((await empty.drive()).final)).toMatchObject({
+                mode: "empty",
+                gapEst: 0,
+            });
+            const fast = await world({ common: 50 });
+            expect(only((await fast.drive()).final)).toMatchObject({
+                mode: "fast",
+                gapEst: 0,
+            });
+        });
+
+        it("gapEst is the estimate that sized the peel", async () => {
+            const w = await world({ common: 40, rOnly: 5 });
+            const result = only((await w.drive()).final);
+            expect(result.mode).toBe("peel");
+            // |countR - countJ|: no hlcProved, so the above terms are off.
+            expect(result.gapEst).toBe(5);
+            expect(cellPrefix(result.gapEst)).toBe(result.cells);
+        });
+
+        it("gapEst is the gap that ended a wait for sync", async () => {
+            const w = await JoinerWorld.create();
+            const old = w.rows([w.r], 5000);
+            await w.start();
+            w.syncDelivering.add(SCOPE_NAMESPACE_V1);
+            const session = w.session(w.init());
+            session.start();
+            await w.until(
+                () => session.state(SCOPE_NAMESPACE_V1) === "waiting-sync",
+                "waiting-sync"
+            );
+            const j = w.j.scope();
+            let delivered = 0;
+            while (w.sent(CellsReqV1).length === 0) {
+                for (let i = 0; i < 125; i++) j.receive(old[delivered++]);
+                await settle(5);
+            }
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.mode).toBe("sync-wait");
+            expect(result.gapEst).toBe(5000 - delivered);
+            expect(result.gapEst).toBeLessThanOrEqual(T_SYNC);
+        });
+
+        it("sessionRecord is plain data with the design's fields", async () => {
+            const w = await world({ common: 40, rOnly: 5 });
+            const result = only((await w.drive()).final);
+            const record = sessionRecord(result);
+            expect(record).toEqual({
+                peer: result.peer,
+                scope: "namespace-v1",
+                mode: "peel",
+                count: 45,
+                gapEst: 5,
+                cells: 64,
+                missingAtStart: 5,
+                pulled: 5,
+                explained: 0,
+                explainedBy: {},
+                recoveries: 0,
+                roundTrips: 1,
+                durationMs: result.ms,
+                qualified: true,
+                source: result.source,
+            });
+            // No bytes or bigints: it survives JSON unchanged.
+            expect(JSON.parse(JSON.stringify(record))).toEqual(record);
+            // A copy: the result's own counters are not shared.
+            expect(record.explainedBy).not.toBe(result.explainedBy);
+        });
+
+        it("sessionRecord carries untrusted heads only above 0, and the trust scope's name", async () => {
+            const w = await world({
+                common: 10,
+                scopes: [SCOPE_NAMESPACE_V1, SCOPE_TRUST_V1],
+            });
+            const [namespace, trust] = contained((await w.drive()).final);
+            expect(sessionRecord(trust).scope).toBe("trust-v1");
+            const signers = [(await Ed25519Keypair.create()).publicKey];
+            expect(
+                sessionRecord({
+                    ...namespace,
+                    untrusted: { signers, heads: 2, checkedAt: 0 },
+                }).untrusted
+            ).toBe(2);
+            expect(
+                "untrusted" in
+                    sessionRecord({
+                        ...namespace,
+                        untrusted: { signers, heads: 0, checkedAt: 0 },
+                    })
+            ).toBe(false);
+            expect("untrusted" in sessionRecord(namespace)).toBe(false);
         });
     });
 });

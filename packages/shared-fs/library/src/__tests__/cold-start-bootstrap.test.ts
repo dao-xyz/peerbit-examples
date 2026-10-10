@@ -29,9 +29,33 @@ import {
     SharedFsEntry,
     SnapshotManifestPayload,
 } from "../model.js";
+import type { ReadinessRuntime } from "../readiness/runtime.js";
+import { SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
+import { OpenV1 } from "../readiness/wire.js";
+import { holdFlips } from "./readiness-flip-hold.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
+
+const runtimeOf = (fs: { program: unknown }): ReadinessRuntime =>
+    (fs.program as any).readinessRuntime;
+const runtimeOfProgram = (program: SharedFileSystem): ReadinessRuntime =>
+    (program as any).readinessRuntime;
+
+/**
+ * The namespace result of the readiness session that contained `peer` in
+ * `fs`'s join (records stay readable after the flip).
+ */
+const containedNamespace = (fs: { program: unknown }, peer: Peerbit) => {
+    const record = runtimeOf(fs).coordinator?.record(
+        peer.identity.publicKey.hashcode()
+    );
+    return {
+        state: record?.state,
+        sessionsOpened: record?.sessionsOpened,
+        result: record?.results.get(SCOPE_NAMESPACE_V1),
+    };
+};
 
 const waitUntil = async (
     assertion: () => Promise<void> | void,
@@ -55,6 +79,7 @@ const waitUntil = async (
 
 describe("shared fs cold-start bootstrap", () => {
     const peers: Peerbit[] = [];
+    const holds: Array<ReturnType<typeof holdFlips>> = [];
 
     afterEach(async () => {
         await Promise.allSettled(
@@ -66,7 +91,21 @@ describe("shared fs cold-start bootstrap", () => {
                 }
             })
         );
+        // After the peers stopped: a decision still parked then finds its
+        // open ended and flips nothing.
+        for (const hold of holds.splice(0)) hold.restore();
     });
+
+    /**
+     * Parks the write-ready decisions of `peer`'s filesystems until
+     * `release()` (readiness-flip-hold.ts): a joiner whose predicate holds
+     * stays gated, as a long quiet window held it before PR-3 commit 4.
+     */
+    const holdFlipsOf = (peer: Peerbit) => {
+        const hold = holdFlips(peer);
+        holds.push(hold);
+        return hold;
+    };
 
     const createPeer = async () => {
         const peer = await Peerbit.create();
@@ -104,31 +143,21 @@ describe("shared fs cold-start bootstrap", () => {
      * Documents.open has run.
      *
      * The hold releases on the batch's commit diagnostic, not its change
-     * event: shared-fs records a during-open batch's readiness evidence at
-     * that diagnostic, so the open resolves with the evidence recorded. With
-     * `deferCommit` the open resolves between the two instead: the first
-     * matching batch's diagnostic is withheld and handed to shared-fs only
-     * when it registers its steady-state change listener.
+     * event, so the open resolves with the batch committed to the store.
      */
     const holdOpenUntilHistory = (
         peer: Peerbit,
         matches: (value: unknown) => boolean = (value) =>
             value instanceof FileVersion,
-        options: { inLog?: boolean; deferCommit?: boolean } = {}
+        options: { inLog?: boolean } = {}
     ) => {
         const documentsOpen = Documents.prototype.open;
-        let restoreAddListener: (() => void) | undefined;
         const held = {
             arrived: false,
             /** Change events, and those matching `matches`, during the hold. */
             changes: 0,
             batches: 0,
-            delivered: false,
-            evidenceBeforeDelivery: undefined as boolean | undefined,
-            restore: () => {
-                spy.mockRestore();
-                restoreAddListener?.();
-            },
+            restore: () => spy.mockRestore(),
         };
         const spy = vi
             .spyOn(Documents.prototype, "open")
@@ -154,19 +183,12 @@ describe("shared fs cold-start bootstrap", () => {
                         held.batches++;
                     }
                 };
-                let deliver: (() => void) | undefined;
                 const sync = args[0].sync;
                 const profile = sync.profile;
                 sync.profile = (event: { name: string }) => {
                     const commit =
                         event.name === "log.joinPreparedFacts.change" ||
                         event.name === "log.joinIndependent.change";
-                    if (commit && pending && options.deferCommit && !deliver) {
-                        pending = false;
-                        deliver = () => profile?.(event);
-                        committed();
-                        return;
-                    }
                     profile?.(event);
                     if (!commit) {
                         return;
@@ -210,39 +232,6 @@ describe("shared fs cold-start bootstrap", () => {
                     if (!options.inLog) {
                         await hold();
                     }
-                    if (deliver) {
-                        // shared-fs registers that listener as soon as the
-                        // store's open resolved, before anything else arrives.
-                        const events = this.events as any;
-                        const store = this as any;
-                        const add = events.addEventListener;
-                        const ownAdd = Object.hasOwn(
-                            events,
-                            "addEventListener"
-                        );
-                        restoreAddListener = () => {
-                            restoreAddListener = undefined;
-                            if (ownAdd) {
-                                events.addEventListener = add;
-                            } else {
-                                delete events.addEventListener;
-                            }
-                        };
-                        events.addEventListener = function (
-                            this: unknown,
-                            ...listenerArgs: unknown[]
-                        ) {
-                            const added = add.apply(this, listenerArgs);
-                            if (listenerArgs[0] === "change") {
-                                restoreAddListener?.();
-                                held.evidenceBeforeDelivery =
-                                    store.parents?.[0]?.writeReadinessRemoteEvidence;
-                                held.delivered = true;
-                                deliver!();
-                            }
-                            return added;
-                        };
-                    }
                     return result;
                 } finally {
                     clearTimeout(bound);
@@ -257,50 +246,22 @@ describe("shared fs cold-start bootstrap", () => {
         return held;
     };
 
-    /** Mirrors shared-fs's readiness-evidence predicate. */
-    const isReadinessEvidence = (value: unknown) =>
-        value instanceof NamingEvent ||
-        value instanceof FileVersion ||
-        value instanceof BootstrapManifest;
-
     /**
-     * Captures the commit-diagnostic sink of `peer`'s next filesystem store
-     * open (the latest one). Calling it after open stands in for the late
-     * diagnostic of a message received during open. The open ends with a
-     * metadata change event that no diagnostic follows, as a local replay's
-     * would (this cohort's persisted index replays none on its own).
+     * Makes `donor`'s responder drop every OPEN it receives (a hung or
+     * overloaded peer that still holds the store and stays reachable).
      */
-    const captureOpenSink = (peer: Peerbit) => {
-        const documentsOpen = Documents.prototype.open;
-        const captured = {
-            sink: undefined as ((event: { name: string }) => void) | undefined,
-            restore: () => spy.mockRestore(),
+    const dropOpens = (donor: SharedFsHandle) => {
+        const responder = runtimeOf(donor).responder!;
+        const onMessage = responder.onMessage;
+        const state = { dropped: 0 };
+        responder.onMessage = (message, from) => {
+            if (message instanceof OpenV1) {
+                state.dropped++;
+                return;
+            }
+            onMessage.call(responder, message, from);
         };
-        const spy = vi
-            .spyOn(Documents.prototype, "open")
-            .mockImplementation(async function (
-                this: Documents<any, any>,
-                ...args: any[]
-            ) {
-                if (
-                    (this as any).node !== peer ||
-                    args[0]?.type !== SharedFsEntry
-                ) {
-                    return documentsOpen.apply(this, args as any);
-                }
-                captured.sink = args[0].sync.profile;
-                const result = await documentsOpen.apply(this, args as any);
-                this.events.dispatchEvent(
-                    new CustomEvent("change", {
-                        detail: {
-                            added: [Object.create(FileVersion.prototype)],
-                            removed: [],
-                        },
-                    })
-                );
-                return result;
-            });
-        return captured;
+        return state;
     };
 
     it("keeps creators and proven warm persisted reopens immediately writable", async () => {
@@ -355,22 +316,27 @@ describe("shared fs cold-start bootstrap", () => {
 
             // Opening as an observer invalidates the old persisted proof;
             // changing back to a full replica cannot resurrect it without
-            // fresh remote evidence.
+            // proving its view again.
             postObserverPeer = await Peerbit.create({ directory });
             const postObserver = await openSharedFs({
                 peerbit: postObserverPeer,
                 address,
                 machineLabel: "post-observer-full",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             expect(postObserver.bootstrapStatus().writeReady).toBe(false);
             await expect(
                 postObserver.writeFile("/creator.txt", "unsafe")
             ).rejects.toBeInstanceOf(SharedFsWritePendingError);
-            // Even if delayed local replay/repair is misclassified as
-            // metadata evidence, a disconnected store cannot self-certify.
-            (postObserver.program as any).writeReadinessRemoteEvidence = true;
+            // A disconnected store cannot self-certify, whatever its local
+            // replay holds: the predicate needs a qualified contained peer
+            // (design 4.8), and there is none to ask.
+            await waitUntil(() =>
+                expect(postObserver.bootstrapStatus().readiness).toMatchObject({
+                    state: "no-peer",
+                    satisfied: false,
+                })
+            );
             await expect(
                 postObserver.awaitWriteReady({ timeout: 350 })
             ).rejects.toMatchObject({ code: "ETIMEDOUT" });
@@ -748,8 +714,7 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "after-override",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             expect(final.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 partialWriteOverride: false,
@@ -767,7 +732,7 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
-    it("does not count local replay when a populated store lost its sidecar", async () => {
+    it("does not count local replay when a populated store lost its sidecar: gated with no peer, ready after one answer once a donor is reachable", async () => {
         const root = await mkdtemp(
             join(tmpdir(), "shared-fs-missing-sidecar-")
         );
@@ -797,6 +762,9 @@ describe("shared fs cold-start bootstrap", () => {
                     "local replay"
                 );
             });
+            // The donor proves its own view while the original is online,
+            // so it is a qualified donor once the original is gone.
+            await donor.awaitWriteReady({ timeout: 60_000 });
             await originalPeer.stop();
             originalPeer = undefined;
 
@@ -804,42 +772,73 @@ describe("shared fs cold-start bootstrap", () => {
             const [stateName] = await readdir(stateDirectory);
             await rm(join(stateDirectory, stateName));
 
-            reopenedPeer = await Peerbit.create({ directory });
-            await reopenedPeer.dial(donorPeer);
-            const captured = captureOpenSink(reopenedPeer);
-            let reopened: SharedFsHandle;
-            try {
-                reopened = await openSharedFs({
-                    peerbit: reopenedPeer,
-                    address,
-                    machineLabel: "missing-sidecar-reopen",
-                    bootstrap: false,
-                    writeReadinessSettleMs: 100,
-                } as any);
-            } finally {
-                captured.restore();
-            }
+            // Reopened with no peer reachable (its peer store still knows
+            // the donor, so a gater keeps it away): the local replay holds
+            // the whole store, and it still never certifies itself.
+            let cut = true;
+            const gater = {
+                denyDialPeer: () => cut,
+                denyDialMultiaddr: () => cut,
+                denyInboundConnection: () => cut,
+                denyOutboundConnection: () => cut,
+                denyInboundEncryptedConnection: () => cut,
+                denyOutboundEncryptedConnection: () => cut,
+                denyInboundUpgradedConnection: () => cut,
+                denyOutboundUpgradedConnection: () => cut,
+            };
+            reopenedPeer = await Peerbit.create({
+                directory,
+                libp2p: { connectionGater: gater },
+            });
+            const reopened = await openSharedFs({
+                peerbit: reopenedPeer,
+                address,
+                machineLabel: "missing-sidecar-reopen",
+                bootstrap: false,
+            });
             expect(decode(await reopened.readFile("/persisted.txt"))).toBe(
                 "local replay"
             );
-            // A message received during open whose evidence-free change and
-            // commit diagnostic land after open must not pair with the
-            // replay's classification.
-            (reopened.program as any).entries.events.dispatchEvent(
-                new CustomEvent("change", {
-                    detail: { added: [], removed: [] },
+            await waitUntil(() =>
+                expect(reopened.bootstrapStatus().readiness).toMatchObject({
+                    state: "no-peer",
+                    satisfied: false,
                 })
-            );
-            captured.sink!({ name: "log.joinIndependent.change" });
-            expect((reopened.program as any).writeReadinessRemoteEvidence).toBe(
-                false
             );
             await expect(
                 reopened.awaitWriteReady({ timeout: 500 })
-            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            ).rejects.toMatchObject({
+                code: "ETIMEDOUT",
+                readiness: { state: "no-peer" },
+            });
             expect(reopened.bootstrapStatus()).toMatchObject({
                 writeReady: false,
                 guardArmed: false,
+            });
+
+            // A reachable donor makes it ready after one answer (design test
+            // 7): it already holds every row, so one round trip, no pull.
+            cut = false;
+            await reopenedPeer.dial(donorPeer);
+            await reopened.awaitWriteReady({ timeout: 60_000 });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+            });
+            const contained = containedNamespace(reopened, donorPeer);
+            expect(contained.state).toBe("contained");
+            // J's persisted replication index may still list the donor, and
+            // such a row gets one attempt while the gater keeps it away (it
+            // ends unconfirmed, design test 21); the session that contained
+            // it is the next one.
+            expect(contained.sessionsOpened).toBeLessThanOrEqual(2);
+            expect(contained.result).toMatchObject({
+                source: "reconciled",
+                qualified: true,
+                mode: "fast",
+                pulled: 0,
+                roundTrips: 1,
             });
         } finally {
             await reopenedPeer?.stop().catch(() => {});
@@ -849,7 +848,7 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
-    it("does not reuse a prior listener as evidence on same-program reopen", async () => {
+    it("keeps a same-program reopen with no peer gated; the old generation's join is disposed and acts on nothing", async () => {
         const root = await mkdtemp(
             join(tmpdir(), "shared-fs-same-program-replay-")
         );
@@ -866,6 +865,8 @@ describe("shared fs cold-start bootstrap", () => {
             const address = original.address!;
             const originalProgram = original.program;
 
+            // A peer that replicated the store, then left: what it held
+            // proves nothing for a later open.
             donorPeer = await Peerbit.create();
             await donorPeer.dial(localPeer);
             const donor = await openSharedFs({
@@ -879,36 +880,39 @@ describe("shared fs cold-start bootstrap", () => {
                     "local replay"
                 );
             });
+            await donorPeer.stop();
+            donorPeer = undefined;
 
-            // Program.open(existing:"reuse") retains the Documents EventTarget.
-            // The old generation's listener must be detached before the local
-            // index replays, and the temporary listener may accept only a
-            // document change paired with a successful network commit phase.
+            // Program.open(existing:"reuse") retains the Documents
+            // EventTarget and the instance's fields; each open gets its own
+            // readiness runtime and join.
             await original.program.close();
             const stateDirectory = join(directory, "shared-fs-bootstrap");
             const [stateName] = await readdir(stateDirectory);
             await rm(join(stateDirectory, stateName));
-            const captured = captureOpenSink(localPeer);
-            let reopened: SharedFileSystem;
-            try {
-                reopened = await localPeer.open(originalProgram, {
+            const reopen = (machineLabel: string) =>
+                localPeer!.open(originalProgram, {
                     existing: "reuse",
                     args: {
                         addressOpen: true,
-                        machineLabel: "same-program-reopen",
+                        machineLabel,
                         bootstrap: false,
-                        writeReadinessSettleMs: 100,
                     } as any,
                 });
-            } finally {
-                captured.restore();
-            }
-            const staleSink = captured.sink;
+            const reopened = await reopen("same-program-reopen");
             expect(reopened === originalProgram).toBe(true);
             expect(decode(await reopened.readFile("/persisted.txt"))).toBe(
                 "local replay"
             );
-            expect((reopened as any).writeReadinessRemoteEvidence).toBe(false);
+            const first = runtimeOfProgram(reopened);
+            const firstCoordinator = first.coordinator!;
+            expect(firstCoordinator).toBeDefined();
+            await waitUntil(() =>
+                expect(reopened.bootstrapStatus().readiness).toMatchObject({
+                    state: "no-peer",
+                    satisfied: false,
+                })
+            );
             await expect(
                 reopened.awaitWriteReady({ timeout: 500 })
             ).rejects.toMatchObject({ code: "ETIMEDOUT" });
@@ -917,23 +921,33 @@ describe("shared fs cold-start bootstrap", () => {
                 guardArmed: false,
             });
 
-            // The replay left that open's classification set. A commit
-            // diagnostic still in flight from it must not mark the next open.
+            // Closed, the generation's join is disposed; the next reopen
+            // runs its own, and the old one acts on nothing.
             await reopened.close();
-            const again = await localPeer.open(originalProgram, {
-                existing: "reuse",
-                args: {
-                    addressOpen: true,
-                    machineLabel: "same-program-again",
-                    bootstrap: false,
-                    writeReadinessSettleMs: 100,
-                } as any,
-            });
-            staleSink!({ name: "log.joinIndependent.change" });
-            expect((again as any).writeReadinessRemoteEvidence).toBe(false);
+            expect(first.disposed).toBe(true);
+            expect(firstCoordinator.phase).toBe("disposed");
+            const received = first.messagesReceived;
+            const again = await reopen("same-program-again");
+            const second = runtimeOfProgram(again);
+            expect(second).not.toBe(first);
+            expect(second.coordinator).toBeDefined();
+            expect(second.coordinator).not.toBe(firstCoordinator);
+            await waitUntil(() =>
+                expect(again.bootstrapStatus().readiness).toMatchObject({
+                    state: "no-peer",
+                    satisfied: false,
+                })
+            );
             await expect(
                 again.awaitWriteReady({ timeout: 500 })
             ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            expect(firstCoordinator.phase).toBe("disposed");
+            expect(firstCoordinator.debug()).toMatchObject({
+                sessions: 0,
+                armedTimers: 0,
+                decisions: { started: 0, inFlight: false },
+            });
+            expect(first.messagesReceived).toBe(received);
         } finally {
             await donorPeer?.stop().catch(() => {});
             await localPeer?.stop().catch(() => {});
@@ -1057,45 +1071,103 @@ describe("shared fs cold-start bootstrap", () => {
             await retiredKeysPeer.stop();
             retiredKeysPeer = undefined;
 
-            // The removed operator-assertion provenance is no longer a valid
-            // source: the sidecar is malformed and the reopen fails closed
-            // until remote-settled readiness.
+            // The readiness decision's source, with the proof it persists
+            // beside it (PR-3 commit 4), is accepted: a warm reopen. The
+            // proof is checked for shape only and never decides.
             await writeFile(
                 statePath,
                 JSON.stringify({
-                    openedBefore: true,
                     writeReady: true,
-                    legacyUnproven: false,
-                    writeReadySource: "legacy-operator-assertion",
+                    writeReadySource: "reconciled",
+                    proof: {
+                        v: 1,
+                        scopes: ["namespace-v1"],
+                        contained: [
+                            {
+                                peer: "donor",
+                                scope: "namespace-v1",
+                                source: "creator",
+                                qualified: true,
+                                count: 2,
+                                hlc: "7",
+                                anchor: "ab".repeat(32),
+                            },
+                        ],
+                        excluded: [],
+                        gaps: [],
+                    },
+                    hlcProved: "7",
                 })
             );
-            retiredSourcePeer = await Peerbit.create({ directory });
-            const retiredSource = await openSharedFs({
-                peerbit: retiredSourcePeer,
-                address,
-                machineLabel: "retired-source-reopen",
-                bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
-            expect(retiredSource.bootstrapStatus()).toMatchObject({
-                writeReady: false,
-                guardArmed: false,
-            });
-            expect(retiredSource.bootstrapStatus().writeReadinessSource).toBe(
-                undefined
-            );
-            await expect(
-                retiredSource.writeFile("/kept.txt", "unsafe")
-            ).rejects.toBeInstanceOf(SharedFsWritePendingError);
-            await expect(
-                retiredSource.awaitWriteReady({ timeout: 350 })
-            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
-            expect(decode(await retiredSource.readFile("/kept.txt"))).toBe(
-                "still writable"
-            );
-            const gatedState = JSON.parse(await readFile(statePath, "utf8"));
-            expect(gatedState).toMatchObject({ writeReady: false });
-            expect(gatedState).not.toHaveProperty("writeReadySource");
+            const reconciledPeer = await Peerbit.create({ directory });
+            try {
+                const reconciled = await openSharedFs({
+                    peerbit: reconciledPeer,
+                    address,
+                    machineLabel: "reconciled-reopen",
+                    bootstrap: false,
+                });
+                expect(reconciled.bootstrapStatus()).toMatchObject({
+                    writeReady: true,
+                    writeReadinessSource: "reconciled",
+                    guardArmed: true,
+                });
+                // A warm reopen runs no join.
+                expect(reconciled.bootstrapStatus().readiness).toBeUndefined();
+                await reconciled.writeFile("/kept.txt", "still writable");
+            } finally {
+                await reconciledPeer.stop();
+            }
+
+            // A retired source is no longer valid: the removed
+            // operator-assertion provenance, and `remote-settled`, which
+            // only unreleased builds of PR-3 wrote before the decision
+            // persisted its proof (SPEC4 G4-7). The sidecar is malformed and
+            // the reopen fails closed until it proves its view again.
+            for (const retired of [
+                "legacy-operator-assertion",
+                "remote-settled",
+            ]) {
+                await writeFile(
+                    statePath,
+                    JSON.stringify({
+                        openedBefore: true,
+                        writeReady: true,
+                        legacyUnproven: false,
+                        writeReadySource: retired,
+                    })
+                );
+                retiredSourcePeer = await Peerbit.create({ directory });
+                const retiredSource = await openSharedFs({
+                    peerbit: retiredSourcePeer,
+                    address,
+                    machineLabel: "retired-source-reopen",
+                    bootstrap: false,
+                });
+                expect(retiredSource.bootstrapStatus(), retired).toMatchObject({
+                    writeReady: false,
+                    guardArmed: false,
+                });
+                expect(
+                    retiredSource.bootstrapStatus().writeReadinessSource
+                ).toBe(undefined);
+                await expect(
+                    retiredSource.writeFile("/kept.txt", "unsafe")
+                ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+                await expect(
+                    retiredSource.awaitWriteReady({ timeout: 350 })
+                ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+                expect(decode(await retiredSource.readFile("/kept.txt"))).toBe(
+                    "still writable"
+                );
+                await retiredSourcePeer.stop();
+                retiredSourcePeer = undefined;
+                const gatedState = JSON.parse(
+                    await readFile(statePath, "utf8")
+                );
+                expect(gatedState).toMatchObject({ writeReady: false });
+                expect(gatedState).not.toHaveProperty("writeReadySource");
+            }
         } finally {
             await retiredSourcePeer?.stop().catch(() => {});
             await retiredKeysPeer?.stop().catch(() => {});
@@ -1104,7 +1176,7 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
-    it("counts a replicated empty snapshot as evidence without bootstrapping from it", async () => {
+    it("makes a joiner of a filesystem holding only an empty snapshot ready by containing the creator, without bootstrapping from it", async () => {
         const donorPeer = await createPeer();
         const donor = await openSharedFs({
             peerbit: donorPeer,
@@ -1120,12 +1192,20 @@ describe("shared fs cold-start bootstrap", () => {
             peerbit: joinerPeer,
             address: donor.address,
             machineLabel: "empty-joiner",
-            writeReadinessSettleMs: 100,
-        } as any);
+        });
 
         expect(await joiner.list("/")).toEqual([]);
         await joiner.awaitWriteReady({ timeout: 10_000 });
         expect(joiner.bootstrapStatus().manifest).toBeUndefined();
+        // Ready by containing the creator, whose namespace set is empty.
+        expect(joiner.bootstrapStatus().writeReadinessSource).toBe(
+            "reconciled"
+        );
+        expect(containedNamespace(joiner, donorPeer).result).toMatchObject({
+            source: "creator",
+            qualified: true,
+            count: 0,
+        });
         await joiner.writeFile("/first.txt", "first safe write");
         await waitUntil(async () => {
             expect(decode(await donor.readFile("/first.txt"))).toBe(
@@ -1136,8 +1216,9 @@ describe("shared fs cold-start bootstrap", () => {
 
     it("makes joiners of a never-written filesystem write-ready", async () => {
         // The most basic onboarding flow: create, share the address, other
-        // machines join. Nothing was ever written, so the creator's genesis
-        // manifest is the only entry whose replication can prove sync.
+        // machines join. Nothing was ever written: a joiner proves its view
+        // by containing the creator's empty namespace set (the genesis
+        // manifest is no namespace row).
         const creatorPeer = await createPeer();
         const creator = await openSharedFs({
             peerbit: creatorPeer,
@@ -1151,7 +1232,6 @@ describe("shared fs cold-start bootstrap", () => {
                 address: creator.address,
                 machineLabel,
                 bootstrap,
-                writeReadinessSettleMs: 100,
             } as any);
         };
         const joiners = [
@@ -1161,10 +1241,15 @@ describe("shared fs cold-start bootstrap", () => {
         for (const joiner of joiners) {
             expect(await joiner.list("/")).toEqual([]);
             await joiner.awaitWriteReady({ timeout: 20_000 });
-            // The genesis is replication evidence, not a snapshot to
-            // bootstrap from.
-            expect(joiner.bootstrapStatus()).toMatchObject({ phase: "off" });
+            // The genesis is never a snapshot to bootstrap from.
+            expect(joiner.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReadinessSource: "reconciled",
+            });
             expect(joiner.bootstrapStatus().manifest).toBeUndefined();
+            expect(
+                containedNamespace(joiner, creatorPeer).result
+            ).toMatchObject({ source: "creator", qualified: true, count: 0 });
         }
         await joiners[0].writeFile("/first.txt", "first safe write");
         await waitUntil(async () => {
@@ -1189,23 +1274,32 @@ describe("shared fs cold-start bootstrap", () => {
             peerbit: joinerPeer,
             address: creator.address,
             machineLabel: "early-joiner",
-            writeReadinessSettleMs: 100,
-        } as any);
+        });
         await expect(
             joiner.writeFile("/too-early.txt", "unsafe")
         ).rejects.toBeInstanceOf(SharedFsWritePendingError);
         await expect(
             joiner.awaitWriteReady({ timeout: 1_000 })
-        ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+        ).rejects.toMatchObject({
+            code: "ETIMEDOUT",
+            readiness: { state: "no-peer" },
+        });
         expect(joiner.bootstrapStatus()).toMatchObject({
             writeReady: false,
             guardArmed: false,
         });
 
-        // Reaching the creator replicates its genesis manifest, the evidence
-        // that opens the gate.
+        // Reaching the creator is the event that asks it; containing it
+        // opens the gate.
         await joinerPeer.dial(creatorPeer);
         await joiner.awaitWriteReady({ timeout: 20_000 });
+        expect(joiner.bootstrapStatus().writeReadinessSource).toBe(
+            "reconciled"
+        );
+        expect(containedNamespace(joiner, creatorPeer).result).toMatchObject({
+            source: "creator",
+            qualified: true,
+        });
         await joiner.writeFile("/after-join.txt", "safe");
         await waitUntil(async () => {
             expect(decode(await creator.readFile("/after-join.txt"))).toBe(
@@ -1214,7 +1308,7 @@ describe("shared fs cold-start bootstrap", () => {
         });
     });
 
-    it("never bootstraps from a zero-document manifest or counts finding one as evidence", async () => {
+    it("never bootstraps from a zero-document manifest; readiness counts containment, not a manifest found", async () => {
         const root = await mkdtemp(
             join(tmpdir(), "shared-fs-genesis-discovery-")
         );
@@ -1224,7 +1318,7 @@ describe("shared fs cold-start bootstrap", () => {
             // The genesis manifest is older than the data and describes none
             // of it; an overlay from it would retire without any log
             // coverage. A joiner that holds it locally, from an earlier
-            // session that never became ready, must not use or count it.
+            // session that never became ready, must not use it.
             const creatorPeer = await createPeer();
             const creator = await openSharedFs({
                 peerbit: creatorPeer,
@@ -1237,13 +1331,15 @@ describe("shared fs cold-start bootstrap", () => {
 
             joinerPeer = await Peerbit.create({ directory });
             await joinerPeer.dial(creatorPeer);
+            // That earlier session never became ready: its decision is
+            // held while it receives the data and the genesis.
+            const hold = holdFlipsOf(joinerPeer);
             const first = await openSharedFs({
                 peerbit: joinerPeer,
                 address: creator.address,
                 machineLabel: "genesis-joiner",
                 bootstrap: false,
-                writeReadinessSettleMs: 60_000,
-            } as any);
+            });
             await waitUntil(async () => {
                 expect(decode(await first.readFile("/data.txt"))).toBe(
                     "written after genesis"
@@ -1254,22 +1350,45 @@ describe("shared fs cold-start bootstrap", () => {
             });
             expect(first.bootstrapStatus().writeReady).toBe(false);
             await joinerPeer.stop();
+            hold.restore();
 
+            // Reopened, it never installs the local genesis, and the content
+            // its earlier session stored makes it a resumed bootstrap: the
+            // unverified posture.
             joinerPeer = await Peerbit.create({ directory });
             const reopened = await openSharedFs({
                 peerbit: joinerPeer,
                 address: creator.address,
                 machineLabel: "genesis-joiner-reopen",
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             await (reopened.program as any).bootstrapDecision;
             expect(reopened.bootstrapStatus().manifest).toBeUndefined();
-            expect((reopened.program as any).writeReadinessRemoteEvidence).toBe(
-                false
+            expect(reopened.bootstrapStatus().phase).toBe("unverified");
+
+            // Readiness counts what peers answer, never a manifest found:
+            // the creator is contained and qualified, and the posture's
+            // phase is what still gates it (design 4.8).
+            await joinerPeer.dial(creatorPeer);
+            await waitUntil(() =>
+                expect(reopened.bootstrapStatus().readiness).toMatchObject({
+                    state: "waiting-phase",
+                    satisfied: false,
+                    contained: [
+                        expect.objectContaining({
+                            peer: creatorPeer.identity.publicKey.hashcode(),
+                            qualified: true,
+                            source: "creator",
+                        }),
+                    ],
+                })
             );
             await expect(
                 reopened.awaitWriteReady({ timeout: 500 })
-            ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            ).rejects.toMatchObject({
+                code: "ETIMEDOUT",
+                readiness: { state: "waiting-phase" },
+            });
+            expect(reopened.bootstrapStatus().manifest).toBeUndefined();
         } finally {
             await joinerPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
@@ -1318,8 +1437,8 @@ describe("shared fs cold-start bootstrap", () => {
 
     it("gates a program loaded from an address, whichever API opens it", async () => {
         // Only the constructor marks a creation. A program loaded from an
-        // address has seen none of the data: it settles a remote view before
-        // it may write, and never publishes a manifest of its own.
+        // address has seen none of the data: it proves its view before it
+        // may write, and never publishes a manifest of its own.
         const creatorPeer = await createPeer();
         const creator = await openSharedFs({
             peerbit: creatorPeer,
@@ -1340,8 +1459,7 @@ describe("shared fs cold-start bootstrap", () => {
                 args: {
                     replicate: { factor: 1 },
                     bootstrap: false,
-                    writeReadinessSettleMs: 100,
-                } as any,
+                },
             }
         );
         expect(loaded.bootstrapStatus()).toMatchObject({
@@ -1354,7 +1472,7 @@ describe("shared fs cold-start bootstrap", () => {
         ).rejects.toBeInstanceOf(SharedFsWritePendingError);
         await loaded.awaitWriteReady({ timeout: 20_000 });
         expect(loaded.bootstrapStatus().writeReadinessSource).toBe(
-            "remote-settled"
+            "reconciled"
         );
         await waitUntil(async () => {
             expect(decode(await loaded.readFile("/data/file-49.txt"))).toBe(
@@ -1395,25 +1513,26 @@ describe("shared fs cold-start bootstrap", () => {
             });
             const [genesis] = await heads(creator);
             const address = creator.address;
-            const join = async (directory: string, settleMs: number) => {
+            const join = async (directory: string, hold = false) => {
                 const peer = await start(directory);
                 await peer.dial(creatorPeer);
+                const flips = hold ? holdFlipsOf(peer) : undefined;
                 const fs = await openSharedFs({
                     peerbit: peer,
                     address,
                     machineLabel: directory,
                     bootstrap: { discoveryTimeoutMs: 500 },
-                    writeReadinessSettleMs: settleMs,
-                } as any);
-                return { peer, fs };
+                });
+                return { peer, fs, flips };
             };
-            // Each first join ends inside its quiet window (Ctrl-C, a crash,
-            // a mount timeout) holding everything the creator has, including
-            // the re-publication for its own session. Nothing is written, so
-            // a retry has nothing new to replicate but a re-publication.
+            // Each first join ends before it turned ready (Ctrl-C, a crash,
+            // a mount timeout; its decision is held here) holding
+            // everything the creator has, including the re-publication for
+            // its own session. Nothing is written, so a retry has nothing
+            // new to replicate but a re-publication.
             const interrupt = async (directory: string, crash: boolean) => {
                 const before = logOf(creator).length;
-                const { peer, fs } = await join(directory, 60_000);
+                const { peer, fs, flips } = await join(directory, true);
                 await waitUntil(async () => {
                     expect(logOf(creator).length).toBe(before + 1);
                     for (const hash of await heads(creator)) {
@@ -1428,14 +1547,22 @@ describe("shared fs cold-start bootstrap", () => {
                     await (peer as any).libp2p.stop();
                 }
                 await stop(peer);
+                flips!.restore();
             };
             await interrupt("joiner-a", true);
 
-            // Retried while the creator stays online: its re-publication for
-            // the joiner's new session is the new evidence. A linked put, so
-            // the chain stays whole for the first real snapshot to CUT.
-            const retried = await join("joiner-a", 100);
+            // Retried while the creator stays online: ready by containing
+            // the creator's empty namespace set, whatever its re-publication
+            // for the joiner's new session does. A linked put, so the chain
+            // stays whole for the first real snapshot to CUT.
+            const retried = await join("joiner-a");
             await retried.fs.awaitWriteReady({ timeout: 20_000 });
+            expect(retried.fs.bootstrapStatus().writeReadinessSource).toBe(
+                "reconciled"
+            );
+            expect(
+                containedNamespace(retried.fs, creatorPeer).result
+            ).toMatchObject({ source: "creator", qualified: true, count: 0 });
             expect(await logOf(creator).has(genesis)).toBe(true);
             expect(await heads(creator)).toHaveLength(1);
             expect(logOf(creator).length).toBe(3);
@@ -1455,10 +1582,10 @@ describe("shared fs cold-start bootstrap", () => {
             expect(await heads(alone)).toEqual(before);
             await stop(creatorPeer);
 
-            // Retried across a creator restart: the joiner waits, gated, and
-            // the creator's reopen re-publishes for it. The reopen's store is
-            // held open a moment, so the joiner's subscription lands before
-            // the reopen listens for new ones.
+            // Retried across a creator restart: the joiner waits, gated with
+            // no peer to ask, and the creator's reopen re-publishes for it.
+            // The reopen's store is held open a moment, so the joiner's
+            // subscription lands before the reopen listens for new ones.
             const waitingPeer = await start("joiner-b");
             creatorPeer = await start("creator");
             await waitingPeer.dial(creatorPeer);
@@ -1467,8 +1594,7 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "joiner-b-waiting",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             const documentsOpen = Documents.prototype.open;
             const heldOpen = vi
                 .spyOn(Documents.prototype, "open")
@@ -1492,6 +1618,10 @@ describe("shared fs cold-start bootstrap", () => {
                 heldOpen.mockRestore();
             }
             await waiting.awaitWriteReady({ timeout: 20_000 });
+            // The restarted creator is a warm reopen of its directory.
+            expect(
+                containedNamespace(waiting, creatorPeer).result
+            ).toMatchObject({ source: "warm", qualified: true, count: 0 });
             expect(logOf(reopened).length).toBe(5);
             await waiting.writeFile("/first.txt", "after retry");
             await waitUntil(async () => {
@@ -1580,8 +1710,7 @@ describe("shared fs cold-start bootstrap", () => {
 
             // It stored no content, so a retry with bootstrap off is a plain
             // join, not a partial store held unverified for ten minutes or
-            // more: the creator's re-publication for its session makes it
-            // write-ready.
+            // more: containing the creator makes it write-ready.
             joinerPeer = await Peerbit.create({ directory });
             await joinerPeer.dial(creatorPeer);
             const retried = await openSharedFs({
@@ -1589,8 +1718,7 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "undecided-retry",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             expect(retried.bootstrapStatus().phase).toBe("off");
             await (retried.program as any).stateWriteChain;
             expect(await state()).not.toHaveProperty("bootstrap");
@@ -1666,7 +1794,6 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "opening-joiner",
                 bootstrap: { discoveryTimeoutMs: 500 },
-                writeReadinessSettleMs: 100,
                 ...options,
             } as any);
             expect(held.arrived).toBe(true);
@@ -1691,9 +1818,8 @@ describe("shared fs cold-start bootstrap", () => {
                 { inLog }
             );
             // Nothing was stored before this open, so a failed discovery is
-            // a plain join, gated by the usual evidence and quiet window,
-            // not a resumed partial bootstrap held unverified for ten
-            // minutes or more.
+            // a plain join, gated until it contains the donor, not a resumed
+            // partial bootstrap held unverified for ten minutes or more.
             expect(joiner.bootstrapStatus().phase).toBe("off");
             await joiner.awaitWriteReady({ timeout: 20_000 });
             await joiner.writeFile("/after-join.txt", "written");
@@ -1787,9 +1913,10 @@ describe("shared fs cold-start bootstrap", () => {
         });
     });
 
-    it("keeps the evidence of a batch committed just after its store opened", async () => {
-        // A quiet donor: what it wrote reaches the joiner in one batch, so
-        // that batch is the joiner's only readiness evidence.
+    it("makes a joiner whose whole store arrived during its open ready after one answer", async () => {
+        // A quiet donor: what it wrote reaches the joiner in one batch,
+        // before the joiner's open resolves. Nothing else arrives later, so
+        // only the readiness session can make it ready.
         const donorPeer = await createPeer();
         const donor = await openSharedFs({
             peerbit: donorPeer,
@@ -1799,11 +1926,14 @@ describe("shared fs cold-start bootstrap", () => {
         const joinerPeer = await createPeer();
         await joinerPeer.dial(donorPeer);
 
-        // The joiner's store open resolves after that batch's change event
-        // and before its commit diagnostic.
-        const held = holdOpenUntilHistory(joinerPeer, isReadinessEvidence, {
-            deferCommit: true,
-        });
+        // The joiner's store open resolves after that batch committed.
+        const held = holdOpenUntilHistory(
+            joinerPeer,
+            (value) =>
+                value instanceof NamingEvent ||
+                value instanceof FileVersion ||
+                value instanceof BootstrapManifest
+        );
         let joiner: SharedFsHandle;
         try {
             joiner = await openSharedFs({
@@ -1811,22 +1941,26 @@ describe("shared fs cold-start bootstrap", () => {
                 address: donor.address,
                 machineLabel: "late-commit-joiner",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
         } finally {
             held.restore();
         }
-        expect(held).toMatchObject({
-            delivered: true,
-            changes: 1,
-            batches: 1,
-            evidenceBeforeDelivery: false,
-        });
-        expect((joiner.program as any).writeReadinessRemoteEvidence).toBe(true);
+        expect(held).toMatchObject({ arrived: true, changes: 1, batches: 1 });
         expect(decode(await joiner.readFile("/quiet.txt"))).toBe("quiet");
-        // Nothing else arrives on a quiet filesystem, so without that
-        // batch's evidence the joiner would wait for a new write forever.
         await joiner.awaitWriteReady({ timeout: 20_000 });
+        // One session, one round trip, nothing pulled (design test 7).
+        const contained = containedNamespace(joiner, donorPeer);
+        expect(contained).toMatchObject({
+            state: "contained",
+            sessionsOpened: 1,
+        });
+        expect(contained.result).toMatchObject({
+            source: "creator",
+            qualified: true,
+            mode: "fast",
+            pulled: 0,
+            roundTrips: 1,
+        });
         await joiner.writeFile("/after-join.txt", "written");
         expect(decode(await joiner.readFile("/after-join.txt"))).toBe(
             "written"
@@ -1887,8 +2021,7 @@ describe("shared fs cold-start bootstrap", () => {
                             address,
                             machineLabel: label,
                             bootstrap,
-                            writeReadinessSettleMs: 100,
-                        } as any);
+                        });
                     } finally {
                         held.restore();
                     }
@@ -2075,8 +2208,7 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "gated-author-full",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             expect(gated.bootstrapStatus().writeReady).toBe(false);
             const log = (gated.program as any).entries.log.log;
             const heads = async () =>
@@ -2088,8 +2220,8 @@ describe("shared fs cold-start bootstrap", () => {
             // A fresh peer opens it and contains the author's genesis, but
             // the gated author is no qualified donor, so the joiner stays
             // gated (design test 32). It brings nothing new, and the author
-            // may not re-publish: its own put would count as an arrival and
-            // open its gate on no evidence.
+            // may not re-publish: a gated view cannot vouch that nothing was
+            // written.
             const joinerPeer = await createPeer();
             await joinerPeer.dial(creatorPeer);
             const joiner = await openSharedFs({
@@ -2097,10 +2229,9 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "gated-author-joiner",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
-            // Prerequisite mode (PR-3 commit 2, S23): the gated author is the
-            // joiner's only peer and does not qualify as a donor.
+            });
+            // The gated author is the joiner's only peer and does not
+            // qualify as a donor.
             const author = creatorPeer.identity.publicKey.hashcode();
             await waitUntil(() =>
                 expect(joiner.bootstrapStatus().readiness).toMatchObject({
@@ -2124,9 +2255,12 @@ describe("shared fs cold-start bootstrap", () => {
                 gated.awaitWriteReady({ timeout: 1_000 })
             ).rejects.toMatchObject({ code: "ETIMEDOUT" });
             expect(await heads()).toEqual(before);
-            expect((gated.program as any).writeReadinessRemoteEvidence).toBe(
-                false
-            );
+            // Neither can prove the other: the author contains the gated
+            // joiner, which does not qualify either.
+            expect(gated.bootstrapStatus().readiness).toMatchObject({
+                state: "no-qualified-donor",
+                satisfied: false,
+            });
         } finally {
             await creatorPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
@@ -2175,8 +2309,7 @@ describe("shared fs cold-start bootstrap", () => {
                 address,
                 machineLabel: "listener-joiner",
                 bootstrap: false,
-                writeReadinessSettleMs: 100,
-            } as any);
+            });
             await waitUntil(() => expect(listening(reopened)).toBe(false));
             // Neither a peer without its own genesis nor the author of a
             // snapshot with documents listens.
@@ -2227,75 +2360,115 @@ describe("shared fs cold-start bootstrap", () => {
         );
     });
 
-    it("keeps normal remote readiness gated until its durable marker succeeds", async () => {
+    it("keeps a reconciled joiner gated until its durable proof is written; the next readiness event retries it", async () => {
         const root = await mkdtemp(
             join(tmpdir(), "shared-fs-ready-write-failure-")
         );
         let donorPeer: Peerbit | undefined;
         let joinerPeer: Peerbit | undefined;
+        let otherPeer: Peerbit | undefined;
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
         try {
             donorPeer = await Peerbit.create();
             const donor = await openSharedFs({
                 peerbit: donorPeer,
                 machineLabel: "marker-failure-donor",
             });
-            await donor.writeFile("/evidence.txt", "remote evidence");
+            await donor.writeFile("/donor.txt", "from the donor");
 
             joinerPeer = await Peerbit.create({
                 directory: join(root, "joiner"),
             });
             await joinerPeer.dial(donorPeer);
-            const joiner = await openSharedFs({
-                peerbit: joinerPeer,
-                address: donor.address,
-                machineLabel: "marker-failure-joiner",
-                bootstrap: false,
-                writeReadinessSettleMs: 500,
-            } as any);
-            const program: any = joiner.program;
-            const writeBootstrapState =
-                program.writeBootstrapState.bind(program);
+            // The decision's sidecar write fails once, wherever the join is
+            // by then: the hook is on the prototype, for the joiner only.
+            const prototype = SharedFileSystem.prototype as any;
+            const writeBootstrapState = prototype.writeBootstrapState;
             let failedMarker!: () => void;
             const markerFailed = new Promise<void>((resolve) => {
                 failedMarker = resolve;
             });
             let failOnce = true;
-            program.writeBootstrapState = async (
+            const joiner = joinerPeer;
+            prototype.writeBootstrapState = async function (
+                this: any,
                 patch: any,
                 ...rest: any[]
-            ) => {
-                if (failOnce && patch?.writeReadySource === "remote-settled") {
+            ) {
+                if (
+                    this.node === joiner &&
+                    failOnce &&
+                    patch?.writeReadySource === "reconciled"
+                ) {
                     failOnce = false;
                     failedMarker();
-                    throw new Error("simulated remote marker failure");
+                    throw new Error("simulated proof write failure");
                 }
-                return writeBootstrapState(patch, ...rest);
+                return writeBootstrapState.call(this, patch, ...rest);
             };
+            let fs: SharedFsHandle;
+            try {
+                fs = await openSharedFs({
+                    peerbit: joinerPeer,
+                    address: donor.address,
+                    machineLabel: "marker-failure-joiner",
+                    bootstrap: false,
+                });
+                await markerFailed;
+                expect(fs.bootstrapStatus()).toMatchObject({
+                    writeReady: false,
+                    guardArmed: false,
+                });
+                await expect(
+                    fs.writeFile("/still-gated.txt", "no")
+                ).rejects.toBeInstanceOf(SharedFsWritePendingError);
+                const coordinator = runtimeOf(fs).coordinator!;
+                await waitUntil(() =>
+                    expect(coordinator.debug().decisions).toMatchObject({
+                        failed: 1,
+                        lastError: "simulated proof write failure",
+                    })
+                );
+            } finally {
+                prototype.writeBootstrapState = writeBootstrapState;
+            }
+            // Logged once, with the error; the predicate still holds.
+            expect(
+                warn.mock.calls.filter(([message]) =>
+                    String(message).includes(
+                        "write readiness could not persist its proof"
+                    )
+                )
+            ).toEqual([
+                [
+                    "shared-fs: write readiness could not persist its proof; the next readiness event retries:",
+                    "simulated proof write failure",
+                ],
+            ]);
 
-            await markerFailed;
-            expect(joiner.bootstrapStatus()).toMatchObject({
-                writeReady: false,
-                guardArmed: false,
-            });
-            await expect(
-                joiner.writeFile("/still-gated.txt", "no")
-            ).rejects.toBeInstanceOf(SharedFsWritePendingError);
-
-            program.writeBootstrapState = writeBootstrapState;
-            await joiner.awaitWriteReady({ timeout: 10_000 });
-            expect(joiner.bootstrapStatus()).toMatchObject({
+            // The next design 4.9 trigger (here a new connection) retries
+            // it; nothing is polled.
+            otherPeer = await Peerbit.create();
+            await otherPeer.dial(joinerPeer);
+            await fs.awaitWriteReady({ timeout: 30_000 });
+            expect(fs.bootstrapStatus()).toMatchObject({
                 writeReady: true,
                 guardArmed: true,
-                writeReadinessSource: "remote-settled",
+                writeReadinessSource: "reconciled",
             });
             const stateDirectory = join(root, "joiner", "shared-fs-bootstrap");
             const [stateName] = await readdir(stateDirectory);
-            expect(
-                JSON.parse(
-                    await readFile(join(stateDirectory, stateName), "utf8")
-                ).writeReadySource
-            ).toBe("remote-settled");
+            const persisted = JSON.parse(
+                await readFile(join(stateDirectory, stateName), "utf8")
+            );
+            expect(persisted).toMatchObject({
+                writeReady: true,
+                writeReadySource: "reconciled",
+                proof: expect.objectContaining({ v: 1 }),
+            });
         } finally {
+            warn.mockRestore();
+            await otherPeer?.stop().catch(() => {});
             await joinerPeer?.stop().catch(() => {});
             await donorPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
@@ -2308,7 +2481,13 @@ describe("shared fs cold-start bootstrap", () => {
             peerbit: donorPeer,
             machineLabel: "readiness-donor",
         });
-        await donor.writeFile("/evidence.txt", "arrived before disconnect");
+        await donor.writeFile(
+            "/before-disconnect.txt",
+            "arrived before disconnect"
+        );
+        // The donor never answers a readiness OPEN, so the joiner cannot
+        // contain it while it is there.
+        const dropped = dropOpens(donor);
 
         const joinerPeer = await createPeer();
         await joinerPeer.dial(donorPeer);
@@ -2317,14 +2496,13 @@ describe("shared fs cold-start bootstrap", () => {
             address: donor.address,
             machineLabel: "readiness-joiner",
             bootstrap: false,
-            writeReadinessSettleMs: 3_000,
-        } as any);
-        await waitUntil(async () => {
-            expect(decode(await joiner.readFile("/evidence.txt"))).toBe(
-                "arrived before disconnect"
-            );
         });
-        expect((joiner.program as any).writeReadinessRemoteEvidence).toBe(true);
+        await waitUntil(async () => {
+            expect(
+                decode(await joiner.readFile("/before-disconnect.txt"))
+            ).toBe("arrived before disconnect");
+            expect(dropped.dropped).toBeGreaterThan(0);
+        });
         expect(joiner.bootstrapStatus().writeReady).toBe(false);
 
         const unrelatedPeer = await createPeer();
@@ -2340,20 +2518,42 @@ describe("shared fs cold-start bootstrap", () => {
             expect(connected.has(donorHash)).toBe(false);
         });
 
-        await expect(
-            joiner.awaitWriteReady({ timeout: 3_500 })
-        ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+        // Only the unrelated peer is connected: the donor left before it
+        // answered and is no longer required, and nothing qualifies.
+        const error: any = await joiner
+            .awaitWriteReady({ timeout: 3_500 })
+            .then(
+                () => {
+                    throw new Error("awaitWriteReady resolved");
+                },
+                (error: unknown) => error
+            );
+        expect(error.code).toBe("ETIMEDOUT");
+        expect(["no-peer", "waiting-left"]).toContain(error.readiness.state);
+        expect(error.readiness).toMatchObject({ satisfied: false });
+        expect(error.readiness.contained).toEqual([]);
+        const unrelated = unrelatedPeer.identity.publicKey.hashcode();
+        expect(error.readiness.required).not.toContain(unrelated);
         expect(joiner.bootstrapStatus()).toMatchObject({
             writeReady: false,
             guardArmed: false,
         });
+        // Once its attempt ends the donor is a gap: J lacks what it held.
+        await waitUntil(() =>
+            expect(joiner.bootstrapStatus().readiness).toMatchObject({
+                state: "no-peer",
+                satisfied: false,
+                gaps: [expect.objectContaining({ peer: donorHash })],
+            })
+        );
+        expect(joiner.bootstrapStatus().writeReady).toBe(false);
     });
 
     it("accepts a current routed donor without requiring a direct stream", async () => {
         const peer = await createPeer();
         const fs = await openSharedFs({
             peerbit: peer,
-            machineLabel: "routed-readiness-probe",
+            machineLabel: "routed-discovery-probe",
         });
         const program: any = fs.program;
         const pubsub: any = peer.services.pubsub;
@@ -2377,10 +2577,12 @@ describe("shared fs cold-start bootstrap", () => {
                 ? { nextHop: relayHash, distance: 2, updatedAt: Date.now() }
                 : undefined;
         try {
+            // Bootstrap discovery's liveness rule (write readiness no longer
+            // reads it, PR-3 commit 4).
             expect(pubsub.peers.has(donorHash)).toBe(false);
-            await expect(program.hasConnectedRemoteReplicator()).resolves.toBe(
-                true
-            );
+            await expect(program.liveRemoteReplicators()).resolves.toEqual([
+                donorHash,
+            ]);
 
             pubsub.routes.getBestRouteHint = () => ({
                 nextHop: relayHash,
@@ -2388,9 +2590,7 @@ describe("shared fs cold-start bootstrap", () => {
                 updatedAt: Date.now() - 20_000,
                 expiresAt: Date.now() + 1_000,
             });
-            await expect(program.hasConnectedRemoteReplicator()).resolves.toBe(
-                false
-            );
+            await expect(program.liveRemoteReplicators()).resolves.toEqual([]);
         } finally {
             program.entries.log.getReplicators = getReplicators;
             pubsub.routes.isReachable = isReachable;
@@ -2409,6 +2609,10 @@ describe("shared fs cold-start bootstrap", () => {
 
             const joinerPeer = await createPeer();
             await joinerPeer.dial(donor.peer);
+            // The decision is held until the overlay's convergence is
+            // asserted: since PR-3 commit 4 the joiner may otherwise flip as
+            // soon as the phase converges, within the poll below.
+            const flips = holdFlipsOf(joinerPeer);
             const joiner = await openSharedFs({
                 peerbit: joinerPeer,
                 address: donor.fs.address,
@@ -2488,6 +2692,7 @@ describe("shared fs cold-start bootstrap", () => {
             expect(statusAfter.snapshotCoverageVerified).toBe(true);
             expect(statusAfter.guardArmed).toBe(false);
             expect(statusAfter.pendingDocs).toBe(0);
+            flips.release();
             await joiner.awaitWriteReady();
             expect(joiner.bootstrapStatus().writeReady).toBe(true);
             expect(joiner.bootstrapStatus().guardArmed).toBe(true);
@@ -2529,6 +2734,10 @@ describe("shared fs cold-start bootstrap", () => {
                 sync: { rawExchangeHeads: true },
             };
             await joinerPeer.dial(donorPeer);
+            // Held across the gated-phase assertions below: since PR-3
+            // commit 4 a small plain join may otherwise be ready before
+            // them.
+            const flips = holdFlipsOf(joinerPeer);
             const joiner = await openSharedFs({
                 peerbit: joinerPeer,
                 address: donorFs.address,
@@ -2554,11 +2763,14 @@ describe("shared fs cold-start bootstrap", () => {
                 verified: false,
             });
             expect(joiner.bootstrapStatus().guardArmed).toBe(false);
-            // The donor is intentionally quiescent after the join starts. A
-            // successful network log commit is correlated with its immediately
-            // preceding Documents change during open, so this fresh small join
-            // can become writable without manufacturing another mutation.
+            // The donor is intentionally quiescent after the join starts:
+            // containing it makes this fresh small join writable without
+            // another mutation.
+            flips.release();
             await joiner.awaitWriteReady({ timeout: 20_000 });
+            expect(joiner.bootstrapStatus().writeReadinessSource).toBe(
+                "reconciled"
+            );
             expect(joiner.bootstrapStatus().guardArmed).toBe(true);
             await expect(
                 joiner.writeFile("/after-catchup.txt", "safe")
@@ -2591,8 +2803,7 @@ describe("shared fs cold-start bootstrap", () => {
                 address: donor.address,
                 machineLabel: "large-plain-joiner",
                 bootstrap: false,
-                writeReadinessSettleMs: 1_000,
-            } as any);
+            });
             const backend = createSharedFsMountBackend(joiner);
             await expect(
                 backend.open(targetPath, { read: true, write: true })
@@ -2637,15 +2848,13 @@ describe("shared fs cold-start bootstrap", () => {
                 peerbit: joinerPeer,
                 address: donor.fs.address,
                 machineLabel: "joiner",
-                // A short but non-zero deterministic test window. Production
-                // keeps the five-second default.
-                writeReadinessSettleMs: 1_000,
-            } as any);
+            });
 
             expect(joiner.bootstrapStatus().writeReady).toBe(false);
-            // This mutation is newer than the selected snapshot. Its arrival
-            // must restart the readiness quiet window instead of allowing the
-            // snapshot's own coverage retirement to false-ready the joiner.
+            // This mutation is newer than the selected snapshot. The
+            // snapshot's own coverage retirement does not make the joiner
+            // ready: readiness also needs the donor's set contained, which
+            // holds every row the donor had when the joiner asked.
             await donor.fs.writeFile("/after-snapshot.txt", "late v1");
             await waitUntil(async () => {
                 expect(

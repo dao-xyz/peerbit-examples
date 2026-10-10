@@ -195,12 +195,12 @@ not store content — reads then fall back to bounded remote chunk fetches
 
 ## Write readiness on joins
 
-Opening an existing address is readable immediately but starts write-gated
-until a full replica has received unambiguous remotely committed namespace data
-(or a verified snapshot), bootstrap has retired, a replicator for this specific
-log is still reachable, synchronization is idle, and arrivals have stayed
-quiet. Every mutating API fails early with retryable `EAGAIN` while gated. Wait
-before starting a writer or service:
+Opening an existing address is readable immediately, but a full replica opened
+that way (other than a warm reopen, below) starts write-gated until it proves
+its view: that it holds, or can explain, every namespace row of every peer it
+can see. Every mutating API fails early with retryable `EAGAIN`
+(`SharedFsWritePendingError`) while gated; the attempted mutation made no
+change. Wait before starting a writer or service:
 
 ```ts
 const fs = await openSharedFs({
@@ -212,8 +212,12 @@ await fs.awaitWriteReady({ timeout: 120_000, signal });
 await fs.writeFile("/docs/hello.txt", "hello from workstation-b");
 ```
 
-Newly created filesystems and previously proven warm full-replica reopens are
-ready immediately. `replicate: false` handles cannot establish a complete
+Newly created filesystems are ready immediately. So is a warm reopen: a full
+replica reopening a state directory in which it was already writable (as the
+creator, through a join's proof, or through `assumeComplete()`), also offline.
+A reopen whose state records an interrupted bootstrap joins again instead,
+and so does one after `program.drop()`, which gates the state first.
+`replicate: false` handles and partial replicas cannot establish a complete
 namespace and remain write-gated. `allowPartialWrites: true` is an explicit
 unsafe, session-only recovery escape hatch: it can create duplicate paths or
 base a write on stale state, and it never persists a readiness proof. The
@@ -222,44 +226,98 @@ garbage collection (manual or scheduled), ACL changes, and disposal
 certification still require genuine readiness. Unless the open is a proven
 warm reopen, the override also leaves the resurrection guard disarmed: a
 partial view must not judge removals. Closing and reopening without the
-override returns to the write gate.
+override returns to the write gate. Use it for exporting or repairing data
+during one session; it never restores durable readiness.
 
-The current readiness fence is deliberately a settled-view heuristic, not a
-cryptographic or protocol-level remote log frontier: Peerbit does not expose
-such a frontier yet. Late arrivals restart the quiet window, but a sufficiently
-long synchronization pause can still arrive after readiness. If the actual
-donor disconnects, an unrelated connected Peerbit peer cannot satisfy the
-fence. A fast no-snapshot join may receive its namespace while `entries.open()`
-is running; that data counts only when the document change is paired with the
-lower log's successful network-commit phase. Local replay has no such phase, so
-a populated store whose sidecar was lost cannot certify itself merely by
-reopening. If that store and its donor are already identical, it remains gated
-until a later normal donor mutation or verified snapshot supplies new evidence.
-A never-written filesystem has no namespace evidence either, so a creating
-open publishes a signed zero-document genesis manifest (unless
-`snapshot: { disabled: true }`) before it returns, and a replicated snapshot
-manifest counts like replicated metadata. A creating open never bootstraps.
-Only a program constructed locally creates; one loaded from an address is an
-address open whichever API opens it: gated until it settles a remote view, and
-it never publishes a genesis. Until something is written, the creator puts
-the manifest again whenever a peer session subscribes (also after a crash), so
-a joiner whose earlier join ended before it was ready gets a new arrival when
-it retries with the creator online. That adds one small entry per peer session
-while the filesystem stays never-written. The first real snapshot CUTs that
-chain, but a peer that was offline across it can bring older entries back as
-orphan log heads, which cost a little log space and nothing else (removing
-them needs upstream log support). A zero-document manifest is never a
-bootstrap snapshot: it covers no log entry, so finding one by discovery is not
-evidence, and a `mode: "require"` join of a never-written filesystem fails with
-that reason. A joiner that reaches no replicator stays closed.
+### What a join proves
 
-The genesis proves only that sync with some replica started, and a replica
-vouches from its own view. One that missed writes while it was offline, such
-as a creator restarting after another machine wrote and left, still serves the
-genesis and no data, so a joiner that reaches only that replica becomes
-write-ready on an empty view. The missed writes merge when a peer holding
-them, such as their author, comes back, and the merge deletes no stored
-version: edits made on the partial view become content conflicts
+A joining full replica asks each peer it can see running this filesystem for a
+signed summary of that peer's namespace rows (naming events, file versions and
+changeset manifests) as they stand when the request arrives. It pulls the rows
+it lacks and explains the rows it will never index: superseded by an entry it
+holds, older than the row it holds for the same document, or refused by its
+validation or access rules. A peer is _contained_ when the joiner's rows, minus
+those the peer's summary lacks, plus the explained ones, hash exactly to the
+peer's set hash. Short of a set-hash collision, a shortened, reordered or
+invented answer cannot pass that check.
+
+The peers a join accounts for are the visible ones: subscribed to this
+filesystem's readiness topic and reachable, or replicating its namespace log
+and seen alive since the open (a replication announcement or a readiness
+message). A replicator listed with no sign of life is asked once and, if it does
+not answer, no longer blocks. An unrelated connected Peerbit peer, such as a
+relay, is not visible.
+
+The joiner turns writable, with source `reconciled`, at the first moment all of
+these hold:
+
+- Every visible peer is contained, excluded for a provable lie (an answer that
+  contradicts its own signed summary, or names an entry that turns out not to
+  be a row of this filesystem), or gone. A peer is gone once it is unreachable
+  or has closed the filesystem; one that left before answering stops blocking
+  when its request attempt ends. A gone peer whose rows the joiner may still
+  lack is listed in `readiness.gaps`. Silence, `BUSY` answers, refusals and
+  fetches that no peer serves never release a join.
+- At least one contained peer answered, in the exchange that contained it, as
+  a write-ready full replica: a creator, a reconciled join, a warm reopen or an
+  operator's `assumeComplete()`. A peer that was still gated when it answered
+  is asked again once it announces that it turned ready, and qualifies only
+  through that new answer. A join that sees only gated joiners, observers or
+  partial replicas stays gated, so two fresh joiners never certify each other.
+- In an access-controlled filesystem, the trust rules below hold.
+- Any snapshot bootstrap has settled: its decision is made and its phase is
+  `off` or `converged`.
+
+There is no quiet window and no polling. The condition is checked again on every
+readiness event (an answer, a peer arriving, leaving or becoming reachable, a
+pulled row, a trust-graph change, the bootstrap decision or a phase change),
+and the joiner turns writable as soon as it holds. A join takes a few round
+trips beyond receiving the rows it lacked. A peer that keeps writing does not
+hold it back: each peer is compared at the summary it took when asked. Once
+contained, a peer that leaves still counts, because the joiner holds or has
+explained everything that peer listed.
+
+Before it accepts its first write, a node with a directory writes the proof,
+with an fsync, to its state file
+(`<directory>/shared-fs-bootstrap/<address>.json`). The proof lists the peers
+the join contained (with each one's row count, set hash and source), excluded
+or listed as gaps, at most 32 records of each kind. It is kept for audit;
+nothing reads it back to decide readiness. A crash before that write leaves the
+next open gated, and the join runs again. A populated store whose state file
+was lost is gated the same way: its own rows never certify it, and a join with
+a write-ready peer then proves it.
+
+### What a join does not prove
+
+- Rows held only by peers the joiner cannot see: writers that are offline, a
+  stale replica that is the only one visible, or a peer whose readiness
+  subscription never reached the joiner and that sends it nothing else.
+- Rows a peer received after its summary, and rows of a peer that becomes
+  visible only after the decision. They arrive by normal synchronization and
+  merge as concurrent writes.
+- Rows of a peer that left before it answered and did not come back. It is
+  listed in `readiness.gaps` with `missing: "unknown"`.
+- That a peer told the truth. A peer can under-report its rows, which looks
+  like a lagging replica, and in a filesystem without access control any peer
+  can claim to be write-ready. Every visible peer must be contained, so one
+  dishonest peer decides a join only when it is the only peer visible.
+- That chunk bytes are present. Readiness covers namespace rows, not the
+  content chunks they name, so a joiner can turn writable while its chunks are
+  still replicating. Reads fetch missing chunks from peers (`remoteChunkFetch`,
+  on by default) and otherwise behave as described for partial replication
+  above.
+- That a warm reopen is fresh. It is writable offline from its own state file
+  and learns of writes made elsewhere only as they arrive.
+- That garbage collection is safe. GC keeps its own retention rules (see
+  [Unattended lifecycle](#unattended-lifecycle)) and also requires readiness.
+- That a revocation is enforced; see the access-controlled rules below.
+
+These are the ways a writable view can still be stale. A replica that missed
+writes while it was offline, such as a creator restarting after another
+machine wrote and left, answers truthfully from its own view, so a joiner that
+sees only that replica becomes writable on it. The missed writes merge when a
+peer holding them, such as their author, comes back, and the merge deletes no
+stored version: edits made on the stale view become content conflicts
 (`conflicts()`), and clashing creates and directories become naming conflicts
 (`namingConflicts()`) whose visible choice can flip to the other side.
 Earlier releases lost two kinds of write made on such a view: saving the bytes
@@ -268,38 +326,146 @@ conflict listed, and of a concurrent `chmod` and `touch` the next write kept
 one. Both are now kept, within the limits listed under
 [Conflicts](#conflicts). Consistency across files, such as a git repository's
 refs, index and objects, is not kept: each file merges on its own, so work
-done on a partial view can leave such a repository inconsistent.
+done on a stale view can leave such a repository inconsistent. Covering rows
+of peers a joiner cannot see needs a log frontier, which Peerbit's shared log
+does not expose yet.
 
-This is the same exposure as settling on any donor's partial view, and it
-grows with scale. Today's write readiness waits for a quiet window on a live,
-idle donor, which proves nothing about completeness: with many peers and
-documents it can certify a partial view (a 6,000-file join became write-ready
-with 3-4% of the namespace rows still missing). It is being replaced by
-proof-based write readiness (design in
-[#406](https://github.com/dao-xyz/peerbit-examples/pull/406)), where a
-replica becomes write-ready only once it proves its view contains the
-snapshot of every connected peer it can see. Stale views stay possible after
-that, for example on a warm reopen, which is ready offline, or when a peer
-holding newer writes is not visible. Protocol-grade empty-log and
-no-late-arrival proofs likewise require an upstream shared-log
-frontier/barrier API.
+A creating open never bootstraps, and it publishes a signed zero-document
+genesis manifest (unless `snapshot: { disabled: true }`) before it returns.
+The genesis serves snapshot bootstrap discovery only: it covers no log entry,
+so it is never a bootstrap snapshot, and a `mode: "require"` join of a
+never-written filesystem fails with that reason. A joiner of a never-written
+filesystem becomes writable by containing a write-ready replica such as the
+creator, whose summary lists no rows. Until something is written, the creator
+puts the manifest again whenever a peer session subscribes (also after a
+crash), which adds one small entry per peer session. The first real snapshot
+CUTs that chain, but a peer that was offline across it can bring older entries
+back as orphan log heads, which cost a little log space and nothing else
+(removing them needs upstream log support). Only a program constructed locally
+creates. One loaded from an address is an address open whichever API opens it,
+so it joins (or reopens warm) as described above and never creates a genesis.
 
-Access-controlled filesystems have an additional upstream limitation: write
-readiness fences the namespace log, not an authoritative trusted-writer
-frontier. Trust changes converge eventually, and filesystem entries carry no
-authorization epoch, so a cold replica after revocation cannot distinguish the
-writer's legitimate pre-revocation history from post-revocation writes. Do not
-use `awaitWriteReady()` as proof that a revocation is globally enforced.
-Quiesce and isolate the revoked machine/key, wait until every serving replica
-reports `isTrustedWriter(key) === false`, and retain at least one already
-converged durable replica before disposal. A signed trust frontier plus
-entry-bound authorization epochs is required upstream to close this gap.
+### Access-controlled filesystems
 
-The genesis gives the normal empty create/mount/share flow that evidence.
-`bootstrapStatus()` reports `writeReadinessSource` (`creator` or
-`remote-settled`) for audit and diagnosis. `allowPartialWrites` is for
-exporting or repairing data during one session; it never restores durable
-readiness.
+In an access-controlled filesystem each exchange also reconciles the
+trusted-writer graph. A peer summarizes its trust graph right after its
+namespace rows, so the trust view the joiner checks against is no older than
+the rows the peer listed. Rows of a writer the joiner's graph does not trust
+wait (`waiting-trust`) until the joiner has reconciled the trust graph of every
+peer it counts; only then are they explained as refused, and provisionally: a
+change to the joiner's trust graph before the decision checks them again. A
+donor qualifies only if the joiner's graph trusts its identity, checked once
+that donor's trust graph is reconciled and again after every change to the
+graph. A write-ready full replica the joiner does not trust never qualifies
+(`no-qualified-donor`, "untrusted identity"); `assumeComplete()` is the escape
+when an operator vouches for the view. The persisted proof also records, per
+contained peer, that identity verdict and how many of its rows were explained
+as refused for an untrusted writer.
+
+What this does not cover:
+
+- The revocation window. A fresh joiner never receives the revocation of a
+  grant it never held, so a stale peer that still holds the grant can
+  re-introduce it, and the joiner trusts the revoked writer until a peer
+  holding the revocation offers it (about a second while such a peer is
+  connected). A join can turn writable inside that window; readiness does not
+  wait it out.
+- A grant held only by a peer that left before the joiner reconciled its trust
+  graph. The writer's rows are explained as refused, and that peer is listed in
+  `readiness.gaps`.
+- Trust-graph entries held only by a peer the joiner cannot see as running this
+  filesystem. Visibility comes from this filesystem's readiness topic and
+  namespace log, also with access control: the trust graph's own replicators
+  can include peers that never answer readiness requests.
+- Trust changes after the joiner turned writable. They do not withdraw
+  readiness.
+
+Write readiness therefore fences what each visible peer held, not an
+authoritative trusted-writer frontier. Trust changes converge eventually, and
+filesystem entries carry no authorization epoch, so a cold replica after
+revocation cannot distinguish the writer's legitimate pre-revocation history
+from post-revocation writes. Do not use `awaitWriteReady()` as proof that a
+revocation is globally enforced. Quiesce and isolate the revoked machine/key,
+wait until every serving replica reports `isTrustedWriter(key) === false`, and
+retain at least one already converged durable replica before disposal. A
+signed trust frontier plus entry-bound authorization epochs is required
+upstream to close this gap.
+
+### When a join cannot finish
+
+A visible peer that stays reachable but never answers keeps the joiner gated
+until the caller's timeout: a hung peer whose connections stay open never
+counts as gone. Its answer counts whenever it arrives. A peer that refuses the
+request (`UNSUPPORTED` or `SCOPE`) blocks the same way and is asked again on
+its notice or when it comes back after leaving. A peer that answered `BUSY` is
+asked again on its notice, on any message or sign of life from it, or when
+another of the joiner's exchanges completes; one that answered `BUSY` while
+the joiner's exchanges waited only for trust is asked again on its own notice
+or next sign of life.
+
+`assumeComplete()` is the operator escape for a join that cannot finish: no
+write-ready replica will ever be reachable, or a reachable peer stays silent
+and the operator vouches for the view. The caller asserts what the join could
+not prove: rows held only by absent peers are not here. It persists source
+`operator`, so a later reopen is warm, arms the resurrection guard, resolves
+pending `awaitWriteReady()` calls, and tells the peers it exchanged readiness
+requests with that it is ready. It is refused with `EINVAL` on observers, on
+partial replicas and under `allowPartialWrites`; it waits for the bootstrap
+decision, then fails with retryable `EAGAIN` while a snapshot overlay is
+fetching, active or unverified; it fails with `ECLOSED` once a close or reopen
+began. On a handle that is already writable it does nothing.
+
+### Diagnosing a gated join
+
+`awaitWriteReady({ timeout })` rejects with `SharedFsWriteReadyTimeoutError`
+(`code: "ETIMEDOUT"`) once the timeout passes. Its message names the reason,
+such as `waiting-silent: 1 of 2 required peers reachable and silent: <peer>`,
+and its `readiness` property carries the status snapshot at that moment. A
+timeout is not permission to write. Closing, reopening or dropping the handle
+rejects pending waiters with `ECLOSED`.
+
+`bootstrapStatus().readiness` returns the same snapshot (`ReadinessStatus`)
+at any time for an open that runs a join. It is undefined for a creator, a
+warm reopen, an observer or partial replica, under `allowPartialWrites`, and
+after close. Its `state` (`ReadinessState`) is one of:
+
+- `ready`: writable.
+- `no-peer`: no visible peer to reconcile with. Peers that left and replicator
+  rows that never answered are noted.
+- `waiting-left`: a required peer left before answering; it blocks until its
+  request attempt in flight ends.
+- `waiting-silent`: a required peer is silent. Every attempt to ask it missed
+  while it stayed reachable, it refused, or it is parked (its exchange
+  restarted too often and waits for its notice).
+- `waiting-fetch`: every required peer's exchange waits for entries no peer
+  served.
+- `waiting-trust`: rows wait for the joiner's trust graph, or a contained
+  peer's identity is being checked.
+- `reconciling`: exchanges are in flight or peers answered `BUSY`. With
+  `satisfied: true`, every required peer is accounted for and the proof is
+  being written, or its write failed and the next readiness event retries it.
+  With `fault` set, this replica's own readiness state failed, which no peer
+  fixes; reopen the filesystem.
+- `no-qualified-donor`: every visible peer is accounted for, but no contained
+  peer is a write-ready full replica or, with access control, one whose
+  identity the joiner trusts.
+- `waiting-phase`: every required peer is accounted for; the snapshot
+  bootstrap has not settled.
+
+`satisfied` is the whole condition above at that moment, bootstrap phase
+included. `required` lists the peers that block now. `contained` gives each
+contained peer with `qualified`, its `source`, the `scopes` contained,
+`departed` and, with access control, its `identity`. `excluded`, `silent`
+(with `reachable`, `refused` and `parked`), `inFlight`, `busy`,
+`fetchPending`, `gaps` and `unconfirmed` (replicators asked once that never
+answered and do not block) list the rest; with access control, `trustPending`
+and `trustChecking` name the peers waiting for trust. Peers are named by their
+public key's `hashcode()`.
+
+`bootstrapStatus().writeReadinessSource` records what made a full replica
+writable: `creator`, `reconciled` (a join's proof, stored with it in the state
+file) or `operator` (`assumeComplete()`). A warm reopen reports the source it
+reopened with; its peers see it as `warm`, which also qualifies it as a donor.
 
 ## Cold-join telemetry
 
@@ -327,12 +493,25 @@ started (`open:start` is zero). Stage events additionally report their own
 `durationMs` and relevant counts. The stream covers document-store open,
 manifest discovery, segment fetch, overlay installation and readiness,
 pending-document drain, verified or unverified overlay retirement,
-synchronizer idle, write readiness, fallback, and abort. A callback exception
+readiness sessions, write readiness, fallback, and abort. A callback exception
 or rejected return is ignored so observability cannot change filesystem
 behavior. Callbacks run inline and returned promises are not awaited, so keep
 the handler lightweight and hand events to an external queue for slower work.
 When no callback is supplied, Shared FS does not read telemetry clocks or
 allocate telemetry events.
+
+A fresh full join emits one `readiness-session` event each time an exchange
+contains a peer's scope (`namespace-v1`, plus `trust-v1` with access control),
+including the later exchange that qualifies a peer which turned ready after it
+first answered; events are not deduplicated. Each reports the `peer`, the
+exchange's `mode` (`empty`, `fast`, `peel`, `sync-wait` or `list`), the peer's
+row `count`, the gap estimate `gapEst`, the `cells` received,
+`missingAtStart`, `pulled`, `explained` with its reasons in `explainedBy`
+(and `untrusted` when rows were refused for an untrusted writer),
+`recoveries`, `roundTrips`, whether the peer `qualified`, its `source`, and
+`durationMs`: the exchange's own duration in fractional milliseconds from the
+process's monotonic clock, not the injected `clock`. `write-ready` reports the
+`source` (`creator`, `reconciled` or `operator`).
 
 `telemetry.openProfile` forwards Peerbit's advisory
 `sharedLog.open.localState`, `blockStore`, `remoteBlocks`, `lowerLog`,
@@ -340,9 +519,8 @@ allocate telemetry events.
 `synchronizer`, and `total` spans. It also forwards every
 `sharedLog.blocks.resolveProviders` span, so one open can emit several provider
 resolution records. These spans describe setup work; they are not tree-readable,
-write-ready, replication-complete, or durability barriers. Shared FS composes
-this callback with its internal fresh-arrival classifier, isolates callback
-failures, and releases the composite profiler as soon as the Documents open
+write-ready, replication-complete, or durability barriers. Shared FS isolates
+callback failures and releases the profiler as soon as the Documents open
 settles.
 
 The manual benchmark creates one 500-file donor and 15 sequential fresh
@@ -1502,6 +1680,9 @@ Notes on scheduled runs:
 - Every run inherits the HEAL phase's full chunk probe (each chunk of
   each surviving version), so the default cadence probes the store four
   times a day — budget disk latency accordingly on very large stores.
+- HEAL repairs a missing chunk only once a version naming it arrived at
+  least `chunkGraceMs` ago; until then it may still be replicating (as right
+  after a join), and the run only keeps that node out of deletion.
 - A replica that is not yet write-ready, or that was opened with
   `allowPartialWrites`, skips scheduled runs and tries again an interval
   later; manual runs refuse in the same states.

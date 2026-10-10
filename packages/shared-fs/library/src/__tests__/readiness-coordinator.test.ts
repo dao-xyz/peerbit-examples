@@ -1,5 +1,7 @@
+import { fileURLToPath } from "node:url";
 import { Ed25519Keypair, type PublicSignKey } from "@peerbit/crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SharedFileSystem } from "../index.js";
 import { AnchorHost } from "../readiness/anchor-host.js";
 import { cellKey } from "../readiness/cells.js";
 import { PULL_TIMEOUT_MS } from "../readiness/constants.js";
@@ -21,9 +23,18 @@ import {
     RejectionRecord,
     type Rejection,
 } from "../readiness/explain.js";
-import { PROOF_MAX_RECORDS } from "../readiness/proof.js";
+import {
+    PROOF_MAX_RECORDS,
+    hlcProvedOf,
+    type Proof,
+} from "../readiness/proof.js";
 import { PullQueue } from "../readiness/pull-queue.js";
 import { Responder, type ProvenanceState } from "../readiness/responder.js";
+import {
+    ReadinessRuntime,
+    type JoinOptions,
+    type ReadinessSessionRecord,
+} from "../readiness/runtime.js";
 import {
     SCOPE_NAMESPACE_V1,
     SCOPE_TRUST_V1,
@@ -85,6 +96,10 @@ import {
  * An access-controlled world (PR-3 commit 3, SPEC3 9.5) adds the trust scope
  * to J and every peer, a `canPerform` hook on J's join, and J's trust graph
  * as a `FakeTrust`.
+ *
+ * PR-3 commit 4 (SPEC4 9.3) adds the host's phase clause and the decision
+ * loop (M8, M9), and the host's half of the decision in index.ts ("host
+ * decision", the cases of the deleted write-readiness-scheduler test).
  */
 
 const NS = SCOPE_NAMESPACE_V1;
@@ -2369,13 +2384,18 @@ describe("readiness coordinator: status", () => {
         expect(
             describeReadiness({ ...base, state: "waiting-phase" })
         ).toContain("bootstrap phase");
+        // Since PR-3 commit 4: the predicate holds and the host is
+        // persisting its proof (or its write failed and waits for the next
+        // trigger, M9); no tracker decides any more.
         expect(
             describeReadiness({
                 ...base,
                 state: "reconciling",
                 satisfied: true,
             })
-        ).toContain("tracker");
+        ).toBe(
+            "reconciling: every required peer is accounted for; the write-readiness proof is being persisted"
+        );
         expect(
             describeReadiness({
                 ...base,
@@ -2400,24 +2420,289 @@ describe("readiness coordinator: status", () => {
         );
     });
 
-    it("waiting-phase once satisfied and the phase is not settled; ready once the host says so (G2-19)", async () => {
-        const { w } = await worldWith([["D"]]);
+    it("waiting-phase, not satisfied, while the phase is unsettled; reconciling and satisfied while the host's decision persists its proof; ready once the host says so (G2-19, G4-5)", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
         await w.start();
-        const coordinator = w.run();
-        await w.until(() => coordinator.satisfied(), "satisfied");
-        expect(w.status({ writeReady: false, phaseSettled: false }).state).toBe(
-            "waiting-phase"
+        let phaseSettled = false;
+        let persisted!: () => void;
+        const coordinator = w.run({
+            phaseSettled: () => phaseSettled,
+            decide: () => new Promise<void>((resolve) => (persisted = resolve)),
+        });
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await settle();
+        // Every peer is accounted for; the phase clause is the predicate's
+        // (design 4.8), so it is not satisfied.
+        for (const record of coordinator.records()) {
+            expect(BLOCKING_STATES.has(record.state)).toBe(false);
+        }
+        const phasing = w.status({ writeReady: false, phaseSettled: false });
+        expect(phasing).toMatchObject({
+            state: "waiting-phase",
+            satisfied: false,
+            required: [],
+        });
+        expect(describeReadiness(phasing)).toContain("bootstrap phase");
+        expect(coordinator.satisfied()).toBe(false);
+
+        // The phase settles: the host's decision is in flight (its proof
+        // being written), and the status says so.
+        phaseSettled = true;
+        coordinator.evaluate();
+        await settle();
+        const deciding = w.status();
+        expect(deciding).toMatchObject({
+            state: "reconciling",
+            satisfied: true,
+        });
+        expect(describeReadiness(deciding)).toBe(
+            "reconciling: every required peer is accounted for; the write-readiness proof is being persisted"
         );
-        const waiting = w.status();
-        expect(waiting.state).toBe("reconciling");
-        expect(waiting.satisfied).toBe(true);
+        expect(coordinator.debug().decisions).toEqual({
+            started: 1,
+            failed: 0,
+            inFlight: true,
+        });
         expect(w.status({ writeReady: true, phaseSettled: true }).state).toBe(
             "ready"
         );
         // Plain data: survives JSON (an error can carry it).
-        expect(JSON.parse(JSON.stringify(waiting))).toEqual(waiting);
-        for (const record of coordinator.records()) {
-            expect(BLOCKING_STATES.has(record.state)).toBe(false);
+        expect(JSON.parse(JSON.stringify(deciding))).toEqual(deciding);
+        persisted();
+        await settle();
+        expect(coordinator.debug().decisions.inFlight).toBe(false);
+    });
+});
+
+describe("readiness coordinator: the phase clause and the decision (PR-3 commit 4, M8, M9)", () => {
+    it("M8: the host's phase clause is checked last; a phase change re-evaluates and decides once", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        let phaseSettled = false;
+        /** D's state at each read of the phase clause. */
+        const phaseReads: Array<string | undefined> = [];
+        const decide = vi.fn(async () => {});
+        const coordinator = w.run({
+            phaseSettled: () => {
+                phaseReads.push(w.stateOf(d));
+                return phaseSettled;
+            },
+            decide,
+        });
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await settle();
+        // Read last: only once every other clause holds (D contained),
+        // and then it gates.
+        expect(phaseReads.length).toBeGreaterThan(0);
+        expect(phaseReads.every((state) => state === "contained")).toBe(true);
+        expect(coordinator.satisfied()).toBe(false);
+        expect(w.evaluations.every((e) => !e.satisfied)).toBe(true);
+        expect(decide).not.toHaveBeenCalled();
+        expect(
+            w.status({ writeReady: false, phaseSettled: false })
+        ).toMatchObject({ state: "waiting-phase", satisfied: false });
+        // Nothing armed and nothing re-evaluates while only the phase waits.
+        expect(coordinator.debug().armedTimers).toBe(0);
+        const evaluations = w.evaluations.length;
+        await w.clock.advanceSettled(HOUR);
+        expect(w.evaluations).toHaveLength(evaluations);
+
+        // The host's phase change (setBootstrapPhase) is an evaluation.
+        phaseSettled = true;
+        coordinator.evaluate();
+        await settle();
+        expect(w.evaluations.slice(evaluations)).toEqual([
+            { satisfied: true, changed: true },
+        ]);
+        expect(decide).toHaveBeenCalledTimes(1);
+        expect(coordinator.debug().decisions).toEqual({
+            started: 1,
+            failed: 0,
+            inFlight: false,
+        });
+    });
+
+    it("M8: a phase clause that throws reads as unsettled: gated, no decision", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const decide = vi.fn(async () => {});
+        const coordinator = w.run({
+            phaseSettled: () => {
+                throw new Error("phase unreadable");
+            },
+            decide,
+        });
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await settle();
+        expect(coordinator.satisfied()).toBe(false);
+        expect(w.evaluations.every((e) => !e.satisfied)).toBe(true);
+        expect(decide).not.toHaveBeenCalled();
+    });
+
+    it("M9: every satisfied evaluation asks the host, not only a change", async () => {
+        const { w } = await worldWith([["D"]]);
+        await w.start();
+        const decide = vi.fn(async () => {});
+        const coordinator = w.run({ decide });
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        await settle();
+        expect(decide).toHaveBeenCalledTimes(1);
+        // A trigger that changes nothing: the predicate still holds,
+        // unchanged, and the host is asked again (a decision that found
+        // the predicate false in its slot, or failed, retries this way).
+        w.transport.emit({ kind: "reachability", source: "connect" });
+        await settle();
+        expect(w.evaluations.at(-1)).toEqual({
+            satisfied: true,
+            changed: false,
+        });
+        expect(decide).toHaveBeenCalledTimes(2);
+        expect(coordinator.debug().decisions).toEqual({
+            started: 2,
+            failed: 0,
+            inFlight: false,
+        });
+    });
+
+    it("M9: at most one decision in flight; satisfied evaluations meanwhile coalesce into one rerun after it", async () => {
+        const { w } = await worldWith([["D"]]);
+        await w.start();
+        const releases: Array<() => void> = [];
+        const decide = vi.fn(
+            () => new Promise<void>((resolve) => releases.push(resolve))
+        );
+        const coordinator = w.run({ decide });
+        await w.until(() => decide.mock.calls.length === 1, "deciding");
+        expect(coordinator.debug().decisions).toEqual({
+            started: 1,
+            failed: 0,
+            inFlight: true,
+        });
+        for (let i = 0; i < 3; i++) {
+            coordinator.evaluate();
+            await settle();
+        }
+        expect(w.evaluations.filter((e) => e.satisfied)).toHaveLength(4);
+        expect(decide).toHaveBeenCalledTimes(1);
+
+        const evaluations = w.evaluations.length;
+        releases[0]();
+        await settle();
+        // One rerun of the evaluation, one more decision.
+        expect(w.evaluations.slice(evaluations)).toEqual([
+            { satisfied: true, changed: false },
+        ]);
+        expect(decide).toHaveBeenCalledTimes(2);
+        // Nothing landed during the second: no third.
+        releases[1]();
+        await settle();
+        expect(decide).toHaveBeenCalledTimes(2);
+        expect(w.evaluations).toHaveLength(evaluations + 1);
+        expect(coordinator.debug().decisions).toEqual({
+            started: 2,
+            failed: 0,
+            inFlight: false,
+        });
+    });
+
+    it("M9: a failed decision is counted and arms nothing; the next trigger retries it", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const decide = vi
+            .fn<() => Promise<void>>()
+            .mockRejectedValueOnce(new Error("sidecar unwritable"))
+            .mockResolvedValue(undefined);
+        const coordinator = w.run({ decide });
+        await w.until(
+            () => coordinator.debug().decisions.failed === 1,
+            "a failed decision"
+        );
+        await settle();
+        expect(coordinator.debug().decisions).toEqual({
+            started: 1,
+            failed: 1,
+            inFlight: false,
+            lastError: "sidecar unwritable",
+        });
+        // Still satisfied, and the status says the proof is being
+        // persisted (it waits for the next trigger).
+        expect(coordinator.satisfied()).toBe(true);
+        expect(w.status()).toMatchObject({
+            state: "reconciling",
+            satisfied: true,
+        });
+        // No retry timer: nothing armed, and hours pass with no
+        // evaluation and no decision.
+        expect(coordinator.debug().armedTimers).toBe(0);
+        const evaluations = w.evaluations.length;
+        await w.clock.advanceSettled(5 * HOUR);
+        expect(w.evaluations).toHaveLength(evaluations);
+        expect(decide).toHaveBeenCalledTimes(1);
+
+        // The next trigger (a design 4.9 event) retries.
+        w.transport.emit({ kind: "subscribe", peer: d.hash, key: d.key });
+        await settle();
+        expect(decide).toHaveBeenCalledTimes(2);
+        expect(w.evaluations.at(-1)).toEqual({
+            satisfied: true,
+            changed: false,
+        });
+        expect(coordinator.debug().decisions).toEqual({
+            started: 2,
+            failed: 1,
+            inFlight: false,
+            lastError: "sidecar unwritable",
+        });
+    });
+
+    it("M9: a decide that throws at once is a failed decision too", async () => {
+        const { w } = await worldWith([["D"]]);
+        await w.start();
+        const coordinator = w.run({
+            decide: () => {
+                throw new Error("no host");
+            },
+        });
+        await w.until(
+            () => coordinator.debug().decisions.failed === 1,
+            "a failed decision"
+        );
+        expect(coordinator.debug().decisions).toMatchObject({
+            started: 1,
+            inFlight: false,
+            lastError: "no host",
+        });
+        expect(coordinator.satisfied()).toBe(true);
+    });
+
+    it("no decision after finish or dispose, not even the rerun of one in flight", async () => {
+        for (const end of ["finish", "dispose"] as const) {
+            const { w } = await worldWith([["D"]]);
+            await w.start();
+            const releases: Array<() => void> = [];
+            const decide = vi.fn(
+                () => new Promise<void>((resolve) => releases.push(resolve))
+            );
+            const coordinator = w.run({ decide });
+            await w.until(() => decide.mock.calls.length === 1, "deciding");
+            // A satisfied evaluation lands meanwhile: a rerun is owed.
+            coordinator.evaluate();
+            await settle();
+            if (end === "finish") coordinator.finish();
+            else coordinator.dispose();
+            releases[0]();
+            await settle();
+            coordinator.evaluate();
+            await settle();
+            expect(decide).toHaveBeenCalledTimes(1);
+            expect(coordinator.debug().decisions).toMatchObject({
+                started: 1,
+                inFlight: false,
+            });
         }
     });
 });
@@ -2553,6 +2838,7 @@ class ScriptedSession {
             explained: 0,
             explainedBy: {},
             x: 0,
+            gapEst: 0,
             cells: 0,
             recoveries: 0,
             roundTrips: 1,
@@ -3177,21 +3463,42 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
         await w.until(() => w.record(r).identity === "untrusted", "checked");
         expect(w.record(r).qualified).toBe(true);
         expect(w.status().contained[0].qualified).toBe(false);
+        // Each record also carries the identity verdict it was qualified
+        // against (G4-2), and no `untrusted` when it explained nothing by
+        // trust.
         expect(
-            coordinator.proof().contained.map(({ scope, qualified }) => ({
-                scope,
-                qualified,
-            }))
+            coordinator
+                .proof()
+                .contained.map(({ scope, qualified, identity }) => ({
+                    scope,
+                    qualified,
+                    identity,
+                }))
         ).toEqual([
-            { scope: "namespace-v1", qualified: false },
-            { scope: "trust-v1", qualified: false },
+            { scope: "namespace-v1", qualified: false, identity: "untrusted" },
+            { scope: "trust-v1", qualified: false, identity: "untrusted" },
         ]);
+        for (const record of coordinator.proof().contained) {
+            expect(record).not.toHaveProperty("untrusted");
+        }
         trust.trusted.add(r.hash);
         coordinator.trustChanged();
+        // While the check at the new epoch runs, the proof states no
+        // identity: it was not checked at this epoch.
+        expect(w.record(r).identity).toBe("checking");
+        for (const record of coordinator.proof().contained) {
+            expect(record).not.toHaveProperty("identity");
+        }
         await w.until(() => coordinator.satisfied(), "satisfied");
         expect(
-            coordinator.proof().contained.map(({ qualified }) => qualified)
-        ).toEqual([true, true]);
+            coordinator.proof().contained.map(({ qualified, identity }) => ({
+                qualified,
+                identity,
+            }))
+        ).toEqual([
+            { qualified: true, identity: "trusted" },
+            { qualified: true, identity: "trusted" },
+        ]);
     });
 
     it("C2: with more records than the proof holds, the cut keeps the donor the predicate counted, ahead of newer replicas J does not trust", async () => {
@@ -3241,6 +3548,20 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
             expect(w.record(r).results.get(NS)?.untrusted).toMatchObject({
                 heads: 1,
             });
+            // The proof states that exposure (design 2.3, G4-2): the
+            // namespace record explained one head by trust; the trust
+            // record explained none.
+            const proof = coordinator.proof();
+            expect(
+                proof.contained.find(({ scope }) => scope === "namespace-v1")
+            ).toMatchObject({
+                peer: r.hash,
+                identity: "trusted",
+                untrusted: 1,
+            });
+            expect(
+                proof.contained.find(({ scope }) => scope === "trust-v1")
+            ).not.toHaveProperty("untrusted");
             return { w, trust, r, writer, row, coordinator };
         };
 
@@ -3750,6 +4071,11 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
         expect(status).not.toHaveProperty("trustChecking");
         expect(status.contained[0]).not.toHaveProperty("identity");
         expect(w.record(d).identity).toBeUndefined();
+        // Nor does its proof carry the access-controlled fields (G4-2).
+        for (const record of coordinator.proof().contained) {
+            expect(record).not.toHaveProperty("identity");
+            expect(record).not.toHaveProperty("untrusted");
+        }
         const [session] = w.sessionsOf(s);
         const reclassify = vi.spyOn(session, "reclassify");
         coordinator.trustChanged();
@@ -3964,5 +4290,649 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
             expect(coordinator.satisfied()).toBe(false);
             expect(w.status().state).toBe("no-qualified-donor");
         });
+    });
+});
+
+/** The library's `src/` directory: product frames in a stack. */
+const SRC = fileURLToPath(new URL("..", import.meta.url));
+
+/**
+ * Records every real timer armed from product code (`src/index.ts` and
+ * `src/readiness/`) until `restore()`. The world's coordinator, sessions
+ * and responders arm on its fake clock, so a real timer here is the host's
+ * own.
+ */
+const watchProductTimers = () => {
+    const armed: string[] = [];
+    const spies = (["setTimeout", "setInterval"] as const).map((name) => {
+        const original = globalThis[name] as (...args: any[]) => any;
+        return vi.spyOn(globalThis, name).mockImplementation(((
+            ...args: any[]
+        ) => {
+            const limit = Error.stackTraceLimit;
+            Error.stackTraceLimit = 50;
+            const stack = new Error().stack ?? "";
+            Error.stackTraceLimit = limit;
+            if (
+                stack.includes(`${SRC}index.ts`) ||
+                stack.includes(`${SRC}readiness/`)
+            ) {
+                armed.push(name);
+            }
+            return original(...args);
+        }) as any);
+    });
+    return {
+        armed,
+        restore: () => {
+            for (const spy of spies) spy.mockRestore();
+        },
+    };
+};
+
+/**
+ * The host's half of the decision (index.ts, PR-3 commit 4): what the
+ * deleted write-readiness-scheduler.isolated.test.ts pinned for the
+ * tracker, now for `startReadinessJoin`, `markWriteReady` and
+ * `commitWriteReady`. A SharedFileSystem holds the fields they read; its
+ * sidecar write, Guard D and telemetry are stubs. Its runtime is a stub
+ * whose `startJoin` keeps the JoinOptions the host passed and, given a
+ * world, starts that world's real coordinator wired as
+ * `ReadinessRuntime.startJoin` wires it (the host's phase clause, its
+ * decision as `decide`, `markReady` finishing the coordinator). No fake
+ * clock: the host decision has no timer, and the cases assert that.
+ */
+describe("host decision (index.ts)", () => {
+    const GENERATION = 7;
+    const LIFECYCLE = 3;
+    /** The stub runtime's proof when no world runs. */
+    const PROOF: Proof = {
+        v: 1,
+        scopes: ["namespace-v1"],
+        contained: [
+            {
+                peer: "donor",
+                scope: "namespace-v1",
+                source: "creator",
+                qualified: true,
+                count: 3,
+                hlc: "1002",
+                anchor: "ab".repeat(32),
+            },
+        ],
+        excluded: [],
+        gaps: [],
+    };
+    const RECONCILED_PATCH = (proof: Proof) => ({
+        writeReady: true,
+        writeReadySource: "reconciled",
+        bootstrap: null,
+        proof,
+        hlcProved: hlcProvedOf(proof),
+    });
+
+    /**
+     * A ReadinessRuntime whose join ran `coordinator`, with `state` over its
+     * own fields: what the host's decision reads through the runtime's real
+     * `proofIfSatisfied`, not a copy of it.
+     */
+    const runtimeOver = (
+        coordinator: Coordinator,
+        state: {
+            blockedValue?: boolean;
+            disposedValue?: boolean;
+            joinFault?: string;
+        } = {}
+    ): ReadinessRuntime =>
+        Object.assign(Object.create(ReadinessRuntime.prototype), {
+            coordinatorValue: coordinator,
+            blockedValue: false,
+            disposedValue: false,
+            joinFault: undefined,
+            ...state,
+        });
+
+    const host = (w?: World) => {
+        const program: any = new SharedFileSystem();
+        Object.assign(program, {
+            openGeneration: GENERATION,
+            lifecycleRequestGeneration: LIFECYCLE,
+            writeReadinessLifecycleBlocked: false,
+            writeReadinessRequired: true,
+            writesReady: false,
+            viewProven: false,
+            writeReadinessDecisionSettled: true,
+            writeReadinessTransitionChain: Promise.resolve(),
+            dropRequests: 0,
+            bootstrapPhase: "off",
+            replicate: { factor: 1 },
+            clock: vi.fn(() => Date.now()),
+        });
+        // What the flip had done when the sidecar write began.
+        const atWrite: Array<{ writesReady: boolean; guard: number }> = [];
+        program.writeBootstrapState = vi.fn(async () => {
+            atWrite.push({
+                writesReady: program.writesReady,
+                guard: program.setGuardArmed.mock.calls.length,
+            });
+        });
+        program.setGuardArmed = vi.fn();
+        program.emitWriteReadyOnce = vi.fn();
+        program.emitReadinessSession = vi.fn();
+        program.bootstrapStatus = vi.fn(() => ({
+            writeReady: program.writesReady,
+        }));
+        const join = {
+            /** The stub predicate when no world runs. */
+            satisfied: true,
+            options: undefined as JoinOptions | undefined,
+            coordinator: undefined as Coordinator | undefined,
+        };
+        program.readinessRuntime = {
+            startJoin: vi.fn((options: JoinOptions) => {
+                join.options = options;
+                if (!w) return;
+                join.coordinator = w.run({
+                    phaseSettled: () => options.phaseSettled(),
+                    decide: () => options.onSatisfied(),
+                });
+            }),
+            proofIfSatisfied: vi.fn((): Proof | undefined => {
+                const coordinator = join.coordinator;
+                if (!coordinator) return join.satisfied ? PROOF : undefined;
+                // The runtime's own read, over the world's coordinator.
+                return runtimeOver(coordinator).proofIfSatisfied();
+            }),
+            evaluate: vi.fn(() => join.coordinator?.evaluate()),
+            markReady: vi.fn(() => join.coordinator?.finish()),
+            status: vi.fn(() => undefined),
+        };
+        const waiter = { resolve: vi.fn(), reject: vi.fn() };
+        program.writeReadinessWaiters = [waiter];
+        const events: unknown[] = [];
+        program.events.addEventListener("write:ready", (event: any) =>
+            events.push(event.detail)
+        );
+        /** A transition that holds the serialized slot until released. */
+        const holdSlot = () => {
+            let release!: () => void;
+            program.writeReadinessTransitionChain = new Promise<void>(
+                (resolve) => (release = resolve)
+            );
+            return release;
+        };
+        return { program, join, waiter, events, atWrite, holdSlot };
+    };
+
+    it("a satisfied evaluation decides at once: the proof persisted first, then the flip; no clock read, no timer armed", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const { program, join, waiter, events, atWrite } = host(w);
+        const timers = watchProductTimers();
+        try {
+            program.startReadinessJoin(GENERATION, 0n);
+            const coordinator = join.coordinator!;
+            await w.until(() => program.writesReady, "J ready");
+            await settle();
+
+            // One sidecar write, durable (failOnError), with the proof of
+            // the records the predicate read, before anything flipped.
+            expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+            const [patch, generation, failOnError] =
+                program.writeBootstrapState.mock.calls[0];
+            expect(generation).toBe(GENERATION);
+            expect(failOnError).toBe(true);
+            expect(patch).toEqual(RECONCILED_PATCH(coordinator.proof()));
+            expect(patch.proof.contained).toEqual([
+                expect.objectContaining({
+                    peer: d.hash,
+                    scope: "namespace-v1",
+                    source: "creator",
+                    qualified: true,
+                }),
+            ]);
+            expect(patch.hlcProved).toBeGreaterThan(0n);
+            expect(atWrite).toEqual([{ writesReady: false, guard: 0 }]);
+            expect(
+                program.readinessRuntime.proofIfSatisfied
+            ).toHaveBeenCalledTimes(1);
+            // Then memory, Guard D, telemetry, the runtime, the event and
+            // the waiters.
+            expect(program).toMatchObject({
+                writesReady: true,
+                writeReadinessRequired: false,
+                viewProven: true,
+                writeReadinessSource: "reconciled",
+            });
+            expect(program.setGuardArmed).toHaveBeenCalledWith(true);
+            expect(program.emitWriteReadyOnce).toHaveBeenCalledWith(
+                "reconciled"
+            );
+            expect(program.readinessRuntime.markReady).toHaveBeenCalledTimes(1);
+            expect(coordinator.phase).toBe("finished");
+            expect(events).toHaveLength(1);
+            expect(waiter.resolve).toHaveBeenCalledTimes(1);
+            expect(waiter.reject).not.toHaveBeenCalled();
+
+            // At once: no fake time passed, the host read no clock and
+            // armed no timer; one satisfied evaluation, one decision.
+            expect(w.clock.now).toBe(0);
+            expect(program.clock).not.toHaveBeenCalled();
+            expect(timers.armed).toEqual([]);
+            expect(w.evaluations.filter((e) => e.satisfied)).toEqual([
+                { satisfied: true, changed: true },
+            ]);
+            expect(coordinator.debug()).toMatchObject({
+                armedTimers: 0,
+                decisions: { started: 1, failed: 0, inFlight: false },
+            });
+        } finally {
+            timers.restore();
+        }
+    });
+
+    it("decides only on a satisfied evaluation; then it flips at once", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        d.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 1000 : 0);
+        const { program, join } = host(w);
+        program.startReadinessJoin(GENERATION, 0n);
+        const coordinator = join.coordinator!;
+        await settle();
+        // D has not answered: not satisfied, so nothing is decided.
+        expect(coordinator.satisfied()).toBe(false);
+        expect(coordinator.debug().decisions.started).toBe(0);
+        expect(
+            program.readinessRuntime.proofIfSatisfied
+        ).not.toHaveBeenCalled();
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+        expect(program.writesReady).toBe(false);
+
+        // Its header arrives: the evaluation that holds decides.
+        await w.clock.advanceSettled(1000);
+        await w.until(() => program.writesReady, "J ready");
+        expect(w.clock.now).toBe(1000);
+        expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+        expect(program.readinessRuntime.markReady).toHaveBeenCalledTimes(1);
+        expect(coordinator.debug().decisions).toMatchObject({
+            started: 1,
+            failed: 0,
+        });
+    });
+
+    it("settling the bootstrap decision re-evaluates; satisfied then, it decides", async () => {
+        // Both peers called bootstrap(): discovery waits out its deadline,
+        // so the decision settles after D was contained.
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const { program, join } = host(w);
+        program.writeReadinessDecisionSettled = false;
+        let settleDecision!: () => void;
+        program.trackBootstrapDecision(
+            new Promise<void>((resolve) => (settleDecision = resolve)),
+            GENERATION,
+            LIFECYCLE
+        );
+        program.startReadinessJoin(GENERATION, 0n);
+        const coordinator = join.coordinator!;
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await settle();
+        // Everything but the phase clause holds: gated, nothing decided.
+        expect(coordinator.satisfied()).toBe(false);
+        expect(coordinator.debug().decisions.started).toBe(0);
+        expect(
+            coordinator.status({
+                writeReady: false,
+                phaseSettled: program.readinessPhaseSettled(),
+            })
+        ).toMatchObject({ state: "waiting-phase", satisfied: false });
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+
+        settleDecision();
+        await w.until(() => program.writesReady, "J ready");
+        expect(program.writeReadinessDecisionSettled).toBe(true);
+        // The #403 hook re-evaluated; nothing else had to happen.
+        expect(program.readinessRuntime.evaluate).toHaveBeenCalledTimes(1);
+        expect(coordinator.debug().decisions).toMatchObject({
+            started: 1,
+            failed: 0,
+        });
+        expect(w.clock.now).toBe(0);
+    });
+
+    it("a phase change re-evaluates (M8): satisfied before its overlay retires, J turns ready at the change", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const { program, join } = host(w);
+        program.bootstrapPhase = "overlay-active";
+        program.startReadinessJoin(GENERATION, 0n);
+        const coordinator = join.coordinator!;
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await settle();
+        expect(coordinator.satisfied()).toBe(false);
+        expect(coordinator.debug().decisions.started).toBe(0);
+
+        program.setBootstrapPhase("converged");
+        expect(program.bootstrapPhase).toBe("converged");
+        await w.until(() => program.writesReady, "J ready");
+        expect(program.readinessRuntime.evaluate).toHaveBeenCalledTimes(1);
+        expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+    });
+
+    it("starts one join per open generation with the sidecar's hlcProved, the host's phase clause and its telemetry", () => {
+        const { program, join } = host();
+        const startJoin = program.readinessRuntime.startJoin;
+        // A start of an older generation, or of an open that needs none.
+        program.startReadinessJoin(GENERATION - 1, 5n);
+        expect(startJoin).not.toHaveBeenCalled();
+        program.startReadinessJoin(GENERATION, 42n);
+        expect(startJoin).toHaveBeenCalledTimes(1);
+        const options = join.options!;
+        expect(options.hlcProved).toBe(42n);
+        // An open-mode store: no trust view.
+        expect(options).not.toHaveProperty("trust");
+
+        // The phase clause (design 4.8): decision settled, phase off or
+        // converged.
+        for (const [phase, settled] of [
+            ["off", true],
+            ["converged", true],
+            ["fetching", false],
+            ["overlay-active", false],
+            ["unverified", false],
+        ] as const) {
+            program.bootstrapPhase = phase;
+            expect(options.phaseSettled(), phase).toBe(settled);
+        }
+        program.bootstrapPhase = "off";
+        program.writeReadinessDecisionSettled = false;
+        expect(options.phaseSettled()).toBe(false);
+        program.writeReadinessDecisionSettled = true;
+
+        // Every phase change after open's reset is a trigger (M8).
+        program.setBootstrapPhase("unverified");
+        expect(program.bootstrapPhase).toBe("unverified");
+        expect(program.readinessRuntime.evaluate).toHaveBeenCalledTimes(1);
+
+        // A session's record goes to telemetry, for this generation only.
+        const record: ReadinessSessionRecord = {
+            peer: "donor",
+            scope: "namespace-v1",
+            mode: "fast",
+            count: 3,
+            gapEst: 0,
+            cells: 0,
+            missingAtStart: 0,
+            pulled: 0,
+            explained: 0,
+            explainedBy: {},
+            recoveries: 0,
+            roundTrips: 1,
+            durationMs: 2.5,
+            qualified: true,
+            source: "creator",
+        };
+        options.onSession!(record);
+        expect(program.emitReadinessSession).toHaveBeenCalledWith(record);
+        program.openGeneration = GENERATION + 1;
+        options.onSession!(record);
+        expect(program.emitReadinessSession).toHaveBeenCalledTimes(1);
+
+        program.writeReadinessRequired = false;
+        program.startReadinessJoin(GENERATION + 1, 0n);
+        expect(startJoin).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a decision settled for an older lifecycle or open", () => {
+        const { program } = host();
+        program.writeReadinessDecisionSettled = false;
+        program.startReadinessJoin(GENERATION, 0n);
+        program.settleWriteReadinessDecision(GENERATION, LIFECYCLE - 1);
+        program.settleWriteReadinessDecision(GENERATION - 1, LIFECYCLE);
+        expect(program.writeReadinessDecisionSettled).toBe(false);
+        expect(program.readinessRuntime.evaluate).not.toHaveBeenCalled();
+        program.settleWriteReadinessDecision(GENERATION, LIFECYCLE);
+        expect(program.writeReadinessDecisionSettled).toBe(true);
+        expect(program.readinessRuntime.evaluate).toHaveBeenCalledTimes(1);
+    });
+
+    it("a decision of an older generation never flips the reopened one; a decision once ready writes nothing", async () => {
+        const { program, join } = host();
+        program.startReadinessJoin(GENERATION, 0n);
+        const old = join.options!;
+        // A reopen: the next generation's join.
+        program.openGeneration = GENERATION + 1;
+        program.lifecycleRequestGeneration = LIFECYCLE + 1;
+        program.startReadinessJoin(GENERATION + 1, 0n);
+        const current = join.options!;
+        expect(current).not.toBe(old);
+
+        await old.onSatisfied();
+        expect(
+            program.readinessRuntime.proofIfSatisfied
+        ).not.toHaveBeenCalled();
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+        expect(program.writesReady).toBe(false);
+        await program.markWriteReady(GENERATION);
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+
+        await current.onSatisfied();
+        expect(program.writesReady).toBe(true);
+        expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+        expect(program.writeBootstrapState).toHaveBeenCalledWith(
+            RECONCILED_PATCH(PROOF),
+            GENERATION + 1,
+            true
+        );
+
+        // Ready already: a later satisfied evaluation decides nothing.
+        await current.onSatisfied();
+        expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+        expect(program.readinessRuntime.markReady).toHaveBeenCalledTimes(1);
+    });
+
+    it("a failed sidecar write leaves J gated with Guard D disarmed and nothing armed; the next satisfied evaluation writes again and flips (M9)", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const { program, join } = host(w);
+        const write = program.writeBootstrapState;
+        program.writeBootstrapState = vi
+            .fn()
+            .mockRejectedValueOnce(new Error("simulated marker failure"))
+            .mockImplementation(write);
+        const timers = watchProductTimers();
+        try {
+            program.startReadinessJoin(GENERATION, 0n);
+            const coordinator = join.coordinator!;
+            await w.until(
+                () => coordinator.debug().decisions.failed === 1,
+                "the write failed"
+            );
+            await settle();
+            expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+            expect(program.writeBootstrapState.mock.calls[0][0]).toMatchObject({
+                writeReady: true,
+                writeReadySource: "reconciled",
+            });
+            // Gated, Guard D disarmed, the runtime not told, the waiter
+            // still waiting.
+            expect(program.writesReady).toBe(false);
+            expect(program.writeReadinessSource).toBeUndefined();
+            expect(program.setGuardArmed).not.toHaveBeenCalled();
+            expect(program.readinessRuntime.markReady).not.toHaveBeenCalled();
+            expect(program.writeReadinessWaiters).toHaveLength(1);
+            // Nothing armed to retry it: no host timer, no clock read, and
+            // the coordinator holds none.
+            expect(timers.armed).toEqual([]);
+            expect(program.clock).not.toHaveBeenCalled();
+            expect(coordinator.debug()).toMatchObject({
+                armedTimers: 0,
+                decisions: {
+                    started: 1,
+                    failed: 1,
+                    inFlight: false,
+                    lastError: "simulated marker failure",
+                },
+            });
+            expect(coordinator.satisfied()).toBe(true);
+
+            // The next trigger: the evaluation holds unchanged and the
+            // decision runs again, writes and flips.
+            w.transport.emit({ kind: "subscribe", peer: d.hash, key: d.key });
+            await w.until(() => program.writesReady, "J ready");
+            expect(w.evaluations.filter((e) => e.satisfied)).toEqual([
+                { satisfied: true, changed: true },
+                { satisfied: true, changed: false },
+            ]);
+            expect(program.writeBootstrapState).toHaveBeenCalledTimes(2);
+            expect(program.writeBootstrapState.mock.calls[1][0]).toEqual(
+                RECONCILED_PATCH(coordinator.proof())
+            );
+            expect(program.setGuardArmed).toHaveBeenCalledWith(true);
+            expect(program.readinessRuntime.markReady).toHaveBeenCalledTimes(1);
+            expect(coordinator.debug().decisions).toMatchObject({
+                started: 2,
+                failed: 1,
+            });
+            expect(timers.armed).toEqual([]);
+            expect(w.clock.now).toBe(0);
+        } finally {
+            timers.restore();
+        }
+    });
+
+    it("decides in its serialized slot: a predicate lost before the slot writes and flips nothing", async () => {
+        const { program, join, holdSlot } = host();
+        program.startReadinessJoin(GENERATION, 0n);
+        const release = holdSlot();
+        const deciding = join.options!.onSatisfied();
+        // A new Required peer appears after the evaluation, before the
+        // slot runs: the slot reads the predicate again.
+        join.satisfied = false;
+        release();
+        await deciding;
+        expect(program.readinessRuntime.proofIfSatisfied).toHaveBeenCalledTimes(
+            1
+        );
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+        expect(program.writesReady).toBe(false);
+        expect(program.setGuardArmed).not.toHaveBeenCalled();
+        expect(program.readinessRuntime.markReady).not.toHaveBeenCalled();
+    });
+
+    it("the runtime's decision read: the predicate and its proof at one point; nothing while it fails, or when blocked, disposed or faulted", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        d.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 1000 : 0);
+        const coordinator = w.run();
+        const runtime = runtimeOver(coordinator);
+        await settle();
+        expect(w.stateOf(d)).toBe("asking");
+        expect(coordinator.satisfied()).toBe(false);
+        expect(runtime.proofIfSatisfied()).toBeUndefined();
+
+        await w.clock.advanceSettled(1000);
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        const proof = runtime.proofIfSatisfied();
+        expect(proof).toEqual(coordinator.proof());
+        expect(proof!.contained).toEqual([
+            expect.objectContaining({ peer: d.hash, qualified: true }),
+        ]);
+        for (const state of [
+            { blockedValue: true },
+            { disposedValue: true },
+            { joinFault: "coordinator: test" },
+        ]) {
+            expect(
+                runtimeOver(coordinator, state).proofIfSatisfied()
+            ).toBeUndefined();
+        }
+    });
+
+    it("decides in its serialized slot over the runtime's read: a peer Required before the slot runs flips nothing, and its answer then decides", async () => {
+        const { w, peers } = await worldWith([
+            ["D"],
+            ["R", { subscriber: false }],
+        ]);
+        const [d, r] = peers;
+        await w.start();
+        // Once visible, R stays asking until its header lands.
+        r.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 1000 : 0);
+        const { program, join, holdSlot } = host(w);
+        const release = holdSlot();
+        program.startReadinessJoin(GENERATION, 0n);
+        const coordinator = join.coordinator!;
+        await w.until(
+            () => coordinator.debug().decisions.inFlight,
+            "a decision waiting for the slot"
+        );
+        expect(coordinator.satisfied()).toBe(true);
+
+        // R appears after the satisfied evaluation, before the slot runs.
+        w.transport.subscribed.set(r.hash, r.key);
+        w.transport.emit({ kind: "subscribe", peer: r.hash, key: r.key });
+        await w.until(() => w.stateOf(r) === "asking", "R asking");
+        expect(coordinator.satisfied()).toBe(false);
+        expect(w.status().required).toEqual([r.hash]);
+        release();
+        await w.until(
+            () => !coordinator.debug().decisions.inFlight,
+            "the decision settled"
+        );
+        await settle();
+        // Design 2.2(2): read at the moment of the decision, the predicate
+        // fails, so nothing is persisted and nothing flips.
+        expect(program.readinessRuntime.proofIfSatisfied).toHaveBeenCalledTimes(
+            1
+        );
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+        expect(program.writesReady).toBe(false);
+        expect(program.setGuardArmed).not.toHaveBeenCalled();
+        expect(program.readinessRuntime.markReady).not.toHaveBeenCalled();
+        expect(coordinator.debug().decisions).toMatchObject({
+            started: 1,
+            failed: 0,
+            inFlight: false,
+        });
+
+        // R's answer is the next trigger: J contains it and decides, with a
+        // proof of both peers.
+        await w.clock.advanceSettled(1000);
+        await w.until(() => program.writesReady, "J ready");
+        expect(w.stateOf(r)).toBe("contained");
+        expect(program.writeBootstrapState).toHaveBeenCalledTimes(1);
+        const [patch] = program.writeBootstrapState.mock.calls[0];
+        expect(patch).toEqual(RECONCILED_PATCH(coordinator.proof()));
+        expect(
+            patch.proof.contained
+                .map((record: { peer: string }) => record.peer)
+                .sort()
+        ).toEqual([d.hash, r.hash].sort());
+        expect(coordinator.debug().decisions).toMatchObject({
+            started: 2,
+            failed: 0,
+        });
+    });
+
+    it("a lifecycle block between the evaluation and the slot: no write, no flip, the predicate not even read", async () => {
+        const { program, join, holdSlot } = host();
+        program.startReadinessJoin(GENERATION, 0n);
+        const release = holdSlot();
+        const deciding = join.options!.onSatisfied();
+        program.writeReadinessLifecycleBlocked = true;
+        release();
+        await deciding;
+        expect(
+            program.readinessRuntime.proofIfSatisfied
+        ).not.toHaveBeenCalled();
+        expect(program.writeBootstrapState).not.toHaveBeenCalled();
+        expect(program.writesReady).toBe(false);
+        expect(program.readinessRuntime.markReady).not.toHaveBeenCalled();
     });
 });

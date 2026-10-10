@@ -1375,7 +1375,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 });
             expect(offlineReopen.identity).toBe(killedReady.identity);
             expect(offlineReopen.gcScheduled).toBe(true);
-            expect(offlineReopen.writeReadinessSource).toBe("remote-settled");
+            expect(offlineReopen.writeReadinessSource).toBe("reconciled");
             const offlineAuditStartedAt = performance.now();
             await offlineRestarted.request<ProcessSoakVerifyResult>({
                 type: "verify",
@@ -1563,7 +1563,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     timeoutMs: COMMAND_TIMEOUT_MS,
                 });
             expect(networkReopen.identity).toBe(killedReady.identity);
-            expect(networkReopen.writeReadinessSource).toBe("remote-settled");
+            expect(networkReopen.writeReadinessSource).toBe("reconciled");
             await restarted.request({
                 type: "dial",
                 addresses: [dialAddress(ready[0]), dialAddress(ready[1])],
@@ -1732,9 +1732,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 });
             expect(finalOfflineOpen.identity).toBe(killedReady.identity);
             expect(finalOfflineOpen.gcScheduled).toBe(true);
-            expect(finalOfflineOpen.writeReadinessSource).toBe(
-                "remote-settled"
-            );
+            expect(finalOfflineOpen.writeReadinessSource).toBe("reconciled");
             workers = [workers[0], workers[1], finalOffline];
             phaseRuntimeMetrics.beforeFinalOfflineAudit =
                 await captureRuntimeMetrics(workers);
@@ -2061,7 +2059,6 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 "overlay-ready",
                 "pending-drained",
                 "overlay-retired",
-                "synchronizer-idle",
                 "write-ready",
             ];
             const coldJoinSamples: Array<{
@@ -2104,7 +2101,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     phase: "converged",
                     snapshotCoverageVerified: true,
                     writeReady: true,
-                    writeReadinessSource: "remote-settled",
+                    writeReadinessSource: "reconciled",
                     pendingDocs: 0,
                     guardArmed: true,
                     manifest: { docs: "1051" },
@@ -2216,9 +2213,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     remoteChunkFetch: false,
                     gcSchedule: false,
                 });
-            expect(retainedOfflineOpen.writeReadinessSource).toBe(
-                "remote-settled"
-            );
+            expect(retainedOfflineOpen.writeReadinessSource).toBe("reconciled");
             await retainedOffline.request<ProcessSoakVerifyResult>({
                 type: "verify",
                 files: fixtureFiles,
@@ -2251,7 +2246,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                 remoteChunkFetch: false,
                 gcSchedule: false,
             });
-            expect(writerOpen.writeReadinessSource).toBe("remote-settled");
+            expect(writerOpen.writeReadinessSource).toBe("reconciled");
             await owner.request({
                 type: "authorize",
                 publicKeys: [writerReady.publicKey],
@@ -2668,9 +2663,7 @@ manualDescribe("process-isolated Shared FS multi-writer soak (manual)", () => {
                     gcSchedule: false,
                 });
             const crashOfflineOpenMs = performance.now() - crashReopenStartedAt;
-            expect(crashOfflineOpen.writeReadinessSource).toBe(
-                "remote-settled"
-            );
+            expect(crashOfflineOpen.writeReadinessSource).toBe("reconciled");
             await crashOffline.request<ProcessSoakVerifyResult>({
                 type: "verify",
                 files: [

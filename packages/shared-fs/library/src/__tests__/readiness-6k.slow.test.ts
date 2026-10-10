@@ -20,21 +20,20 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * Design test 13 (WRITE_READINESS_V2.md section 8; M1 plan sections 7.4,
  * 10.3 and S17): a fresh full joiner J of a static donor with 6,000 files
  * never reports write-ready while any namespace row of the donor is missing
- * from J's index, and it does turn ready, in the prerequisite mode of PR-3
- * commit 2. Today's timer alone released this join at 62-97 s with 3-4% of
- * the rows missing (D13, `semantic-safety/results.ndjson`). The shape of
- * that harness is kept: 60 directories of 100 files, one `writeBatch` each,
- * then an address-open with `bootstrap: false` (J dials first, see below).
- * J's quiet window is cut to 100 ms (as in readiness-join.test.ts), so the
- * coordinator, not the window, is what holds J.
+ * from J's index, and it does turn ready: since PR-3 commit 4 the
+ * coordinator's predicate (design 4.8) decides, with no quiet window. The
+ * timer alone released this join at 62-97 s with 3-4% of the rows missing
+ * (D13, `semantic-safety/results.ndjson`). The shape of that harness is
+ * kept: 60 directories of 100 files, one `writeBatch` each, then an
+ * address-open with `bootstrap: false` (J dials first, see below).
  *
  * The invariant is sampled on events, never on a poll:
  *
- * - every `satisfied()` of J's coordinator (each evaluation, the tracker's
- *   check, and `markWriteReady`'s one synchronous decision point; commit 4
- *   makes it the predicate), patched on the prototype before J opens. A
- *   true answer is containment of the donor (design 2.1), so it must not
- *   come while a donor row is missing;
+ * - every `satisfied()` of J's coordinator (each evaluation and
+ *   `markWriteReady`'s one synchronous decision point, where the predicate
+ *   and the proof are read together), patched on the prototype before J
+ *   opens. A true answer is containment of the donor (design 2.1), so it
+ *   must not come while a donor row is missing;
  * - every evaluation's `bootstrapStatus()` (its readiness state and
  *   `writeReady`, recorded as transitions), once J's handle exists;
  * - the `write-ready` bootstrap telemetry (inside the flip, armed from the
@@ -68,8 +67,6 @@ const manualDescribe = enabled ? describe : describe.skip;
 const FILES = Number(process.env.PEERBIT_SHARED_FS_READINESS_6K_FILES ?? 6_000);
 const FILES_PER_DIR = 100;
 const out = process.env.PEERBIT_SHARED_FS_READINESS_6K_OUT;
-/** J's quiet window (today's tracker keeps one in commit 2). */
-const SETTLE_MS = 100;
 const READY_TIMEOUT_MS = 480_000;
 
 const runtimeOf = (fs: SharedFsHandle): ReadinessRuntime | undefined =>
@@ -207,7 +204,7 @@ class IndexMirror {
     }
 }
 
-/** How J says it is (or would be, in commit 4) write-ready. */
+/** How J says it is write-ready (`satisfied` is the predicate holding). */
 type Report =
     | "satisfied"
     | "status-ready"
@@ -452,7 +449,6 @@ manualDescribe("readiness 6k join (design test 13, slow lane)", () => {
                     machineLabel: "6k-joiner",
                     bootstrap: false,
                     gc: false,
-                    writeReadinessSettleMs: SETTLE_MS,
                     telemetry: {
                         bootstrap: (event: BootstrapTelemetryEvent) => {
                             if (event.type === "write-ready") {
@@ -508,7 +504,6 @@ manualDescribe("readiness 6k join (design test 13, slow lane)", () => {
                 test: 13,
                 files: FILES,
                 dirs,
-                settleMs: SETTLE_MS,
                 load: [r1(loadAtStart), r1(loadavg()[0])],
                 buildMs: Math.round(buildMs),
                 donorRows: donorRows.size,

@@ -1,19 +1,21 @@
 import { deserialize } from "@dao-xyz/borsh";
 import type { PublicSignKey } from "@peerbit/crypto";
 import { isPutOperation } from "@peerbit/document";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+    SharedFileSystem,
+    SharedFsHandle,
     SharedFsWriteReadyTimeoutError,
     openSharedFs,
-    type SharedFsHandle,
 } from "../index.js";
 import { FileVersion, NamingEvent, SharedFsEntry } from "../model.js";
 import { BLOCKING_STATES, Coordinator } from "../readiness/coordinator.js";
 import { headDigest } from "../readiness/digest.js";
+import { hlcProvedOf, validateProof } from "../readiness/proof.js";
 import type { ReadinessRuntime } from "../readiness/runtime.js";
 import { NAMESPACE_V1, SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import type { SessionResult } from "../readiness/session.js";
@@ -25,27 +27,27 @@ import {
     StateNoticeV1,
     type ReadinessMessage,
 } from "../readiness/wire.js";
+import { holdFlips } from "./readiness-flip-hold.js";
+import { watchTimers } from "./readiness-timer-watch.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
  * The joiner's design tests on in-process Peerbit peers and real
- * filesystems, in the prerequisite mode of PR-3 commit 2 (M1 plan 7.3,
- * SPEC2 7.3; WRITE_READINESS_V2.md section 8): tests 1, 2, 4, 5, 6, 7, 8
- * (also with J1's notice arriving while J2's session with it runs), 10, 14,
- * 16 and 44, plus the per-session K2 row.
+ * filesystems (M1 plan 7.3, SPEC2 7.3, SPEC4 9.4(1); WRITE_READINESS_V2.md
+ * section 8): tests 1 to 8 (8 also with J1's notice arriving while J2's
+ * session with it runs), 10, 14, 16 and 44, plus the per-session K2 row.
  *
- * In prerequisite mode today's tracker still decides when a fresh full
- * address-open turns ready (remote evidence, the bootstrap phase, a live
- * replicator, the quiet window), and `markWriteReady` additionally requires
- * the coordinator's `satisfied()` at its one synchronous decision point. So
- * ready implies containment, and that is what these tests rely on: they
- * check J's maintained set inside the `write:ready` dispatch (the flip, not
- * some time after it) and read containment from `bootstrapStatus()
- * .readiness`, the coordinator's records and its proof. Where today's
- * tracker would have released J and the coordinator holds it, the test says
- * so; where the tracker still holds J that commit 4 would release (tests 4
- * and 7, G2-16), only the coordinator's half is asserted. Design test 3 is
- * a latency claim of commit 4 and is skipped below.
+ * Since PR-3 commit 4 the coordinator's predicate (design 4.8, phase clause
+ * included) decides when a fresh full address-open turns ready:
+ * `markWriteReady` reads it and its proof at one synchronous point,
+ * persists the proof and flips, with no quiet window and no timer. These
+ * tests check J's maintained set inside the `write:ready` dispatch (the
+ * flip, not some time after it) and read containment from
+ * `bootstrapStatus().readiness`, the coordinator's records and its proof. A
+ * flip can now land before `openSharedFs` returns, so a capture at the flip
+ * of an unheld join is installed before the open (`atReadyOn`). Where a
+ * test needs J satisfied but not yet flipped (what a long quiet window gave
+ * before), it parks J's decision (`holdFlips`) and releases it.
  *
  * Fault injection stays in the test: a donor's responder holds OPENs by a
  * monkeypatch of its own runtime's `responder.onMessage`; test 16
@@ -122,6 +124,20 @@ const namespaceRows = async (fs: SharedFsHandle) => {
     return rows;
 };
 
+/** The namespace rows of `fs`'s index with their `__context.modified`. */
+const namespaceRowsWithModified = async (fs: SharedFsHandle) => {
+    const port = documentsIndexPort(entriesOf(fs), NAMESPACE_V1);
+    const rows = new Map<string, { head: string; modified: bigint }>();
+    for await (const page of port.scan()) {
+        for (const { key, head, modified } of page) {
+            rows.set(key as string, { head, modified });
+        }
+    }
+    return rows;
+};
+
+const hexOf = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+
 /**
  * The ids of `rows` whose head `fs`'s namespace tap does not hold, read
  * synchronously. The tap adds a head only from the index's change event,
@@ -154,10 +170,16 @@ const missingFromIndex = async (
 
 /**
  * Runs `capture` inside `fs`'s `write:ready` dispatch: the flip is visible
- * and nothing else has run since the decision's sidecar write.
+ * and nothing else has run since the decision's sidecar write. For a join
+ * something holds (a busy donor, a parked decision); one already flipped
+ * fails at once instead of waiting for a dispatch that never comes.
  */
 const atReady = <T>(fs: SharedFsHandle, capture: () => T): Promise<T> =>
     new Promise((resolve, reject) => {
+        if (fs.bootstrapStatus().writeReady) {
+            reject(new Error("J flipped before the capture was installed"));
+            return;
+        }
         programOf(fs).events.addEventListener(
             "write:ready",
             () => {
@@ -305,7 +327,7 @@ const shadowCounts = () => ({
     ...globalThis.__SFS_READINESS_SHADOW__!.counts,
 });
 
-describe("readiness join (in-process, prerequisite mode)", () => {
+describe("readiness join (in-process)", () => {
     const peers: Peerbit[] = [];
     const roots: string[] = [];
     /** Undone first in afterEach: held gates, patched prototypes, hooks. */
@@ -397,13 +419,11 @@ describe("readiness join (in-process, prerequisite mode)", () => {
 
     /**
      * A fresh full address-open of `donors[0]`'s filesystem, dialed to each
-     * donor. `settleMs` is today's quiet window, which the tracker keeps in
-     * commit 2; `bootstrap` defaults to a plain join.
+     * donor; `bootstrap` defaults to a plain join.
      */
     const joinOf = async (
         donors: Node[],
         options: {
-            settleMs?: number;
             bootstrap?: false | "auto";
             label?: string;
             peer?: Peerbit;
@@ -417,9 +437,51 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             machineLabel: options.label ?? "join-joiner",
             bootstrap: options.bootstrap ?? false,
             gc: false,
-            writeReadinessSettleMs: options.settleMs ?? 100,
-        } as any);
+        });
         return { peer, fs };
+    };
+
+    /**
+     * Runs `capture` inside the `write:ready` dispatch of the first flip of
+     * a filesystem opened on `peer` from now on, given that filesystem. The
+     * hook is installed before the open, as such a flip can land before
+     * `openSharedFs` returns.
+     */
+    const atReadyOn = <T>(
+        peer: Peerbit,
+        capture: (fs: SharedFsHandle) => T
+    ): Promise<T> => {
+        const prototype = SharedFileSystem.prototype as any;
+        const commitWriteReady = prototype.commitWriteReady;
+        let installed = true;
+        const uninstall = () => {
+            if (!installed) return;
+            installed = false;
+            prototype.commitWriteReady = commitWriteReady;
+        };
+        restores.push(uninstall);
+        return new Promise((resolve, reject) => {
+            prototype.commitWriteReady = function (
+                this: any,
+                ...args: unknown[]
+            ) {
+                if (this.node === peer) {
+                    uninstall();
+                    this.events.addEventListener(
+                        "write:ready",
+                        () => {
+                            try {
+                                resolve(capture(new SharedFsHandle(this)));
+                            } catch (error) {
+                                reject(error);
+                            }
+                        },
+                        { once: true }
+                    );
+                }
+                return commitWriteReady.apply(this, args);
+            };
+        });
     };
 
     /** A full replica of `donor` that joined it and turned ready (reconciled). */
@@ -437,11 +499,14 @@ describe("readiness join (in-process, prerequisite mode)", () => {
         return replica;
     };
 
-    /** Lets today's tracker decide with a short quiet window from now on. */
-    const shortenQuietWindow = (fs: SharedFsHandle) => {
-        const program = programOf(fs);
-        program.writeReadinessSettleMs = 100;
-        program.writeReadinessRecheck?.();
+    /**
+     * Parks the decisions of every filesystem opened on `peer` until
+     * `release()` (`holdFlips`); undone in afterEach.
+     */
+    const holdFlipsOf = (peer: Peerbit) => {
+        const hold = holdFlips(peer);
+        restores.push(hold.restore);
+        return hold;
     };
 
     /**
@@ -470,10 +535,9 @@ describe("readiness join (in-process, prerequisite mode)", () => {
                 // A naming event and a version per file, plus directories.
                 expect(rows.size).toBeGreaterThanOrEqual(2 * count);
                 const before = shadowCounts();
-                const joiner = await joinOf([donor]);
-                const flip = atReady(joiner.fs, () =>
-                    missingFromTap(joiner.fs, rows)
-                );
+                const peer = await createPeer();
+                const flip = atReadyOn(peer, (fs) => missingFromTap(fs, rows));
+                const joiner = await joinOf([donor], { peer });
                 await joiner.fs.awaitWriteReady({ timeout: 110_000 });
                 expect(await flip).toEqual([]);
                 expect(await missingFromIndex(joiner.fs, rows)).toEqual([]);
@@ -554,27 +618,115 @@ describe("readiness join (in-process, prerequisite mode)", () => {
         ]);
     });
 
-    // Design test 3 (a donor writing every 100 ms: ready within 2 s) is a
-    // latency claim of commit 4. In prerequisite mode today's quiet window
-    // still decides, and a donor writing every 100 ms never lets it elapse
-    // (M1 plan 7.3; SPEC2 7.3).
-    it.skip("3: a donor writing every 100 ms turns J ready within 2 s (commit 4: the quiet window still decides in prerequisite mode)", () => {});
+    it("3: a donor writing every 100 ms turns J ready within 2 s of its open, on the donor's snapshot (no chase)", async () => {
+        // Design test 3, the starvation regression of the quiet window. It
+        // is timing-sensitive: a failure is rerun alone before it is
+        // triaged, and it counts in the flake budget (SPEC4 9.4(1)).
+        const donor = await createDonor(10);
+        // One new file every 100 ms, from before J opens until after it
+        // turned ready. New paths only, so the donor's rows only grow, and
+        // its clock orders every row written after a snapshot above that
+        // snapshot's `hlc`.
+        let writing = true;
+        let written = 0;
+        let writerError: unknown;
+        const writer = (async () => {
+            while (writing) {
+                const started = Date.now();
+                await donor.fs.writeFile(
+                    `/tree/d0/live-${written}.txt`,
+                    `write ${written}`
+                );
+                written++;
+                await sleep(Math.max(0, 100 - (Date.now() - started)));
+            }
+        })().catch((error) => (writerError = error));
+        restores.push(() => (writing = false));
+        await waitUntil(() => expect(written).toBeGreaterThanOrEqual(5));
+        const peer = await createPeer();
+        await peer.dial(donor.peer);
+        const writtenAtOpen = written;
+        const opened = performance.now();
+        const flip = atReadyOn(peer, (fs) => {
+            // J's maintained set at the flip: every head, and how many
+            // rows lie above the contained snapshot's `hlc`.
+            const result = resultOf(fs, donor.peer)!;
+            const held = new Set<string>();
+            let above = 0;
+            runtimeOf(fs)!.namespace!.map.forEach((digest, modified) => {
+                held.add(hexOf(digest));
+                if (modified > result.hlc) above++;
+            });
+            return {
+                ms: performance.now() - opened,
+                written,
+                result,
+                held,
+                above,
+            };
+        });
+        const joiner = await joinOf([donor], { peer });
+        await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+        const atFlip = await flip;
+        // Two more writes, so rows above the snapshot exist whenever its
+        // freeze came.
+        await waitUntil(() =>
+            expect(written).toBeGreaterThanOrEqual(atFlip.written + 2)
+        );
+        writing = false;
+        await writer;
+        expect(writerError).toBeUndefined();
+        const { result } = atFlip;
+        console.info(
+            `readiness-join 3: ready ${atFlip.ms.toFixed(0)} ms after the open; ${atFlip.written - writtenAtOpen} writes meanwhile; snapshot count ${result.count}, mode ${result.mode}, x ${result.x}, J's rows above the snapshot at the flip ${atFlip.above}`
+        );
+        expect(atFlip.ms).toBeLessThan(2_000);
+        // The writer never paused for J.
+        expect(atFlip.written).toBeGreaterThan(writtenAtOpen);
+        expect(result).toMatchObject({ qualified: true, source: "creator" });
+        // The contained snapshot is exactly the donor's rows at or below
+        // its `hlc`, and J's index held every one of them at the flip.
+        const rows = await namespaceRowsWithModified(donor.fs);
+        const snapshot = [...rows].filter(
+            ([, row]) => row.modified <= result.hlc
+        );
+        expect(snapshot.length).toBe(result.count);
+        expect(
+            snapshot
+                .filter(
+                    ([, row]) => !atFlip.held.has(hexOf(headDigest(row.head)))
+                )
+                .map(([key]) => key)
+        ).toEqual([]);
+        // The snapshot did not chase the writer: it is a prefix of the
+        // donor's rows (rows above its `hlc` exist and are not counted),
+        // and the ones J held at the certificate were subtracted as X
+        // (J's rows only grow).
+        expect(
+            [...rows.values()].filter(({ modified }) => modified > result.hlc)
+                .length
+        ).toBeGreaterThan(0);
+        expect(result.x).toBeLessThanOrEqual(atFlip.above);
+    }, 120_000);
 
     describe("4: a donor that leaves", () => {
-        it("after containment stays contained and never blocks; today's tracker still wants a live replicator", async () => {
+        it("after containment stays contained and never blocks: J's flip, held until the donor left, makes J ready with the departed donor as its qualified containment", async () => {
             const donor = await createDonor(5);
-            // A quiet window the test outlives: J is contained and gated
-            // when the donor leaves.
-            const joiner = await joinOf([donor], { settleMs: 600_000 });
+            const peer = await createPeer();
+            // J's decision waits for the test: J is contained and
+            // satisfied, not flipped, when the donor leaves.
+            const hold = holdFlipsOf(peer);
+            const joiner = await joinOf([donor], { peer });
             const donorHash = hashOf(donor.peer);
-            await waitUntil(() =>
+            await waitUntil(() => {
+                expect(hold.parked()).toBe(1);
                 expect(readinessOf(joiner.fs)).toMatchObject({
                     state: "reconciling",
                     satisfied: true,
                     required: [],
                     contained: [{ peer: donorHash, qualified: true }],
-                })
-            );
+                });
+            });
 
             await stopPeer(donor.peer);
             const coordinator = coordinatorOf(joiner.fs);
@@ -595,29 +747,56 @@ describe("readiness join (in-process, prerequisite mode)", () => {
                     { peer: donorHash, qualified: true, departed: true },
                 ],
             });
-
-            // Today's tracker with a short window: no live replicator is
-            // left, so it holds J although the coordinator is satisfied.
-            // Commit 4 makes this ready (design test 4's full form, G2-16).
-            shortenQuietWindow(joiner.fs);
-            const error = await timeoutOf(joiner.fs, 2_000);
-            expect(error.readiness).toMatchObject({
-                state: "reconciling",
-                satisfied: true,
-                contained: [{ peer: donorHash, departed: true }],
-            });
-            expect(
-                await programOf(joiner.fs).hasConnectedRemoteReplicator()
-            ).toBe(false);
             expect(joiner.fs.bootstrapStatus().writeReady).toBe(false);
+            // No live replicator is left: what held J before commit 4.
+            await waitUntil(async () =>
+                expect(
+                    await programOf(joiner.fs).liveRemoteReplicators()
+                ).toEqual([])
+            );
+
+            // Design 4.12 #12: still ready.
+            const flip = atReady(joiner.fs, () => ({
+                status: readinessOf(joiner.fs)!,
+                proof: coordinator.proof(),
+            }));
+            hold.release();
+            await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+            const atFlip = await flip;
+            expect(atFlip.status).toMatchObject({
+                state: "ready",
+                required: [],
+                excluded: [],
+                gaps: [],
+                contained: [
+                    {
+                        peer: donorHash,
+                        qualified: true,
+                        source: "creator",
+                        departed: true,
+                    },
+                ],
+            });
+            expect(atFlip.proof).toMatchObject({
+                contained: [
+                    { peer: donorHash, qualified: true, source: "creator" },
+                ],
+                gaps: [],
+            });
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+            });
+            await joiner.fs.writeFile("/after-donor.txt", "writable");
         });
 
         it("after containment, with another qualified donor live, lets J turn ready", async () => {
             const donor = await createDonor(5);
             const replica = await readyReplica(donor);
-            const joiner = await joinOf([donor, replica], {
-                settleMs: 600_000,
-            });
+            const peer = await createPeer();
+            const hold = holdFlipsOf(peer);
+            const joiner = await joinOf([donor, replica], { peer });
             const donorHash = hashOf(donor.peer);
             const replicaHash = hashOf(replica.peer);
             await waitUntil(() => {
@@ -626,6 +805,7 @@ describe("readiness join (in-process, prerequisite mode)", () => {
                 expect(status.contained.map(({ peer }) => peer).sort()).toEqual(
                     [donorHash, replicaHash].sort()
                 );
+                expect(hold.parked()).toBe(1);
             });
 
             await stopPeer(donor.peer);
@@ -635,8 +815,8 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             );
             expect(coordinator.satisfied()).toBe(true);
 
-            shortenQuietWindow(joiner.fs);
             const flip = atReady(joiner.fs, () => readinessOf(joiner.fs));
+            hold.release();
             await joiner.fs.awaitWriteReady({ timeout: 60_000 });
             const atFlip = (await flip)!;
             expect(atFlip.state).toBe("ready");
@@ -669,12 +849,12 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             await stopPeer(donor.peer);
             await waitUntil(async () =>
                 expect(
-                    await programOf(joiner.fs).hasConnectedRemoteReplicator()
-                ).toBe(false)
+                    await programOf(joiner.fs).liveRemoteReplicators()
+                ).toEqual([])
             );
             expect(joiner.fs.bootstrapStatus()).toMatchObject({
                 writeReady: true,
-                writeReadinessSource: "remote-settled",
+                writeReadinessSource: "reconciled",
                 guardArmed: true,
             });
             expect(readinessOf(joiner.fs)).toMatchObject({
@@ -855,7 +1035,7 @@ describe("readiness join (in-process, prerequisite mode)", () => {
         });
     });
 
-    it("7: an identical populated store without a proof is contained by one answer (fast)", async () => {
+    it("7: an identical populated store without a proof is ready after one answer (fast)", async () => {
         const donor = await createDonor(30);
         const rows = await namespaceRows(donor.fs);
         const directory = joinPath(await newRoot(), "joiner");
@@ -869,18 +1049,16 @@ describe("readiness join (in-process, prerequisite mode)", () => {
         // next full open there is a fresh join.
         const stateDirectory = joinPath(directory, "shared-fs-bootstrap");
         const [stateName] = await readdir(stateDirectory);
-        await writeFile(
-            joinPath(stateDirectory, stateName),
-            JSON.stringify({ writeReady: false })
-        );
+        const statePath = joinPath(stateDirectory, stateName);
+        await writeFile(statePath, JSON.stringify({ writeReady: false }));
         const joiner = await joinOf([donor], {
             peer: await createPeer({ directory }),
             label: "join-copy",
         });
         expect(await missingFromIndex(joiner.fs, rows)).toEqual([]);
-        const coordinator = coordinatorOf(joiner.fs);
-        await waitUntil(() => expect(coordinator.satisfied()).toBe(true));
+        await joiner.fs.awaitWriteReady({ timeout: 30_000 });
 
+        const donorHash = hashOf(donor.peer);
         expect(resultOf(joiner.fs, donor.peer)).toMatchObject({
             mode: "fast",
             count: rows.size,
@@ -891,29 +1069,58 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             qualified: true,
             source: "creator",
         });
-        expect(coordinator.record(hashOf(donor.peer))!.sessionsOpened).toBe(1);
-        // Ready timing stays today's (remote evidence) in commit 2; the
-        // coordinator's half is what this commit adds (G2-16).
+        expect(coordinatorOf(joiner.fs).record(donorHash)!.sessionsOpened).toBe(
+            1
+        );
         expect(readinessOf(joiner.fs)).toMatchObject({
+            state: "ready",
             satisfied: true,
             required: [],
-            contained: [{ peer: hashOf(donor.peer), qualified: true }],
+            contained: [{ peer: donorHash, qualified: true }],
         });
+        expect(joiner.fs.bootstrapStatus()).toMatchObject({
+            writeReady: true,
+            writeReadinessSource: "reconciled",
+            guardArmed: true,
+        });
+        // The decision persisted its proof: the one answer, contained.
+        const sidecar = JSON.parse(await readFile(statePath, "utf8"));
+        expect(sidecar).toMatchObject({
+            writeReady: true,
+            writeReadySource: "reconciled",
+        });
+        const proof = validateProof(sidecar.proof);
+        expect(proof.ok).toBe(true);
+        if (!proof.ok) return;
+        expect(proof.proof.contained).toEqual([
+            expect.objectContaining({
+                peer: donorHash,
+                scope: "namespace-v1",
+                qualified: true,
+                count: rows.size,
+            }),
+        ]);
+        expect(sidecar.hlcProved).toBe(String(hlcProvedOf(proof.proof)));
     });
 
     it("8: J2 waits for a fresh session with J1 after J1's READY notice; the notice alone never qualifies", async () => {
         const donor = await createDonor(5);
         const donorHash = hashOf(donor.peer);
+        // J1's decision waits for the test: J1 contains the donor and stays
+        // gated while it leaves and J2 joins.
+        const firstPeer = await createPeer();
+        const firstHold = holdFlipsOf(firstPeer);
         const first = await joinOf([donor], {
-            settleMs: 600_000,
             label: "join-j1",
+            peer: firstPeer,
         });
-        await waitUntil(() =>
+        await waitUntil(() => {
             expect(readinessOf(first.fs)).toMatchObject({
                 satisfied: true,
                 contained: [{ peer: donorHash, qualified: true }],
-            })
-        );
+            });
+            expect(firstHold.parked()).toBe(1);
+        });
         // The donor closes before J2 contains it: J2 never sees it.
         await stopPeer(donor.peer);
         await waitUntil(() =>
@@ -964,16 +1171,19 @@ describe("readiness join (in-process, prerequisite mode)", () => {
         );
         const error = await timeoutOf(second.fs, 1_500);
         expect(error.readiness).toMatchObject({ state: "no-qualified-donor" });
-        // Today's tracker alone would have released J2: remote evidence and
-        // a live replicator. The coordinator holds it (S23).
-        expect(programOf(second.fs).writeReadinessRemoteEvidence).toBe(true);
-        expect(await programOf(second.fs).hasConnectedRemoteReplicator()).toBe(
-            true
+        // A live replicator never released anything since commit 4, and
+        // J1 is one: J2's predicate alone holds J2 (S23).
+        await waitUntil(async () =>
+            expect(await programOf(second.fs).liveRemoteReplicators()).toEqual([
+                firstHash,
+            ])
         );
+        expect(runtimeOf(second.fs)!.satisfied()).toBe(false);
+        expect(second.fs.bootstrapStatus().writeReady).toBe(false);
 
         // J1 turns ready (the donor it contained left; J2 is its live
         // replicator) and sends J2 a READY notice.
-        shortenQuietWindow(first.fs);
+        firstHold.release();
         await first.fs.awaitWriteReady({ timeout: 60_000 });
         expect(programOf(first.fs).readinessProvenance()).toMatchObject({
             writeReady: true,
@@ -1002,16 +1212,21 @@ describe("readiness join (in-process, prerequisite mode)", () => {
     it("8 (in flight): J1's READY notice while J2 still waits for J1's gated header opens a fresh session once J2 contains J1", async () => {
         const donor = await createDonor(5);
         const donorHash = hashOf(donor.peer);
+        // J1's decision waits for the test: J1 contains the donor and stays
+        // gated while it leaves and J2 joins.
+        const firstPeer = await createPeer();
+        const firstHold = holdFlipsOf(firstPeer);
         const first = await joinOf([donor], {
-            settleMs: 600_000,
             label: "join-j1",
+            peer: firstPeer,
         });
-        await waitUntil(() =>
+        await waitUntil(() => {
             expect(readinessOf(first.fs)).toMatchObject({
                 satisfied: true,
                 contained: [{ peer: donorHash, qualified: true }],
-            })
-        );
+            });
+            expect(firstHold.parked()).toBe(1);
+        });
         await stopPeer(donor.peer);
         await waitUntil(() =>
             expect(coordinatorOf(first.fs).record(donorHash)?.departed).toBe(
@@ -1055,7 +1270,7 @@ describe("readiness join (in-process, prerequisite mode)", () => {
         restores.push(() => (runtime.onMessage = onMessage));
 
         // J1 turns ready (J2 is its live replicator, and J2 answers it).
-        shortenQuietWindow(first.fs);
+        firstHold.release();
         await first.fs.awaitWriteReady({ timeout: 60_000 });
         expect(programOf(first.fs).readinessProvenance()).toMatchObject({
             writeReady: true,
@@ -1088,9 +1303,10 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             return donor;
         };
 
-        it("is waiting-phase while the overlay is active, even when satisfied", async () => {
+        it("is waiting-phase while the overlay is active, with the predicate unsatisfied; the retirement alone makes J ready (M8)", async () => {
             const donor = await snapshotDonor();
             const rows = await namespaceRows(donor.fs);
+            const donorHash = hashOf(donor.peer);
             const peer = await createPeer();
             // Hold the verified retirement of J's overlay (its last step
             // before `converged`) until the test lets it run.
@@ -1106,33 +1322,73 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             };
             restores.push(() => (owner.retireOverlay = retireOverlay));
             const joiner = await joinOf([donor], { peer, bootstrap: "auto" });
+            const coordinator = coordinatorOf(joiner.fs);
+            // Every peer is accounted for; only the phase clause, now
+            // inside the predicate (G4-5), holds J.
             await waitUntil(() => {
                 expect(retirements.length).toBeGreaterThan(0);
-                expect(runtimeOf(joiner.fs)!.satisfied()).toBe(true);
+                expect(readinessOf(joiner.fs)).toMatchObject({
+                    state: "waiting-phase",
+                    satisfied: false,
+                    required: [],
+                    contained: [{ peer: donorHash, qualified: true }],
+                });
             });
             expect(joiner.fs.bootstrapStatus().phase).toBe("overlay-active");
-            expect(readinessOf(joiner.fs)).toMatchObject({
-                state: "waiting-phase",
-                satisfied: true,
-                required: [],
-            });
+            expect(runtimeOf(joiner.fs)!.satisfied()).toBe(false);
             const error = await timeoutOf(joiner.fs, 1_500);
             expect(error.readiness).toMatchObject({
                 state: "waiting-phase",
-                satisfied: true,
+                satisfied: false,
             });
+            // Nothing was asked to decide, and nothing is armed.
+            expect(coordinator.debug().decisions).toMatchObject({
+                started: 0,
+                inFlight: false,
+            });
+            expect(runtimeOf(joiner.fs)!.debug().armedTimers).toBe(0);
 
-            const flip = atReady(joiner.fs, () => ({
-                phase: joiner.fs.bootstrapStatus().phase,
-                missing: missingFromTap(joiner.fs, rows),
-            }));
+            // The phase change itself schedules the evaluation (M8).
+            const program = programOf(joiner.fs);
+            const setBootstrapPhase = program.setBootstrapPhase;
+            const converged: Array<{ before: boolean; after: boolean }> = [];
+            program.setBootstrapPhase = function (this: any, phase: string) {
+                const before = coordinator.debug().evaluationPending;
+                setBootstrapPhase.call(this, phase);
+                if (phase === "converged") {
+                    converged.push({
+                        before,
+                        after: coordinator.debug().evaluationPending,
+                    });
+                }
+            };
+            restores.push(() => delete program.setBootstrapPhase);
+            const timers = watchTimers();
+            restores.push(timers.stop);
+            const flip = atReady(joiner.fs, () => {
+                timers.stop();
+                return {
+                    phase: joiner.fs.bootstrapStatus().phase,
+                    missing: missingFromTap(joiner.fs, rows),
+                    decisions: coordinator.debug().decisions,
+                };
+            });
             owner.retireOverlay = retireOverlay;
             for (const retire of retirements.splice(0)) retire();
-            await joiner.fs.awaitWriteReady({ timeout: 60_000 });
-            expect(await flip).toEqual({ phase: "converged", missing: [] });
+            await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+            expect(await flip).toEqual({
+                phase: "converged",
+                missing: [],
+                decisions: { started: 1, failed: 0, inFlight: true },
+            });
+            expect(converged).toHaveLength(1);
+            expect(converged[0].after).toBe(true);
+            // Between waiting-phase and the flip the decision armed no
+            // timer of its own (no quiet window, no poll).
+            expect(timers.readiness).toEqual([]);
             expect(readinessOf(joiner.fs)).toMatchObject({
                 state: "ready",
-                contained: [{ peer: hashOf(donor.peer), qualified: true }],
+                contained: [{ peer: donorHash, qualified: true }],
             });
         });
 
@@ -1156,11 +1412,13 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             expect(error.readiness!.inFlight.map(({ peer }) => peer)).toEqual([
                 donorHash,
             ]);
-            // Today's tracker alone would have released J here.
+            // The phase clause holds and the donor is a live replicator:
+            // the donor's containment alone holds J.
             const program = programOf(joiner.fs);
-            expect(program.writeReadinessRemoteEvidence).toBe(true);
             expect(program.writeReadinessDecisionSettled).toBe(true);
-            expect(await program.hasConnectedRemoteReplicator()).toBe(true);
+            expect(program.readinessPhaseSettled()).toBe(true);
+            expect(await program.liveRemoteReplicators()).toEqual([donorHash]);
+            expect(runtimeOf(joiner.fs)!.satisfied()).toBe(false);
 
             const flip = atReady(joiner.fs, () =>
                 missingFromTap(joiner.fs, rows)
@@ -1190,10 +1448,11 @@ describe("readiness join (in-process, prerequisite mode)", () => {
             expect(members).toBeGreaterThan(40);
             if (bootstrap) await donor.fs.snapshotWrite();
 
-            const joiner = await joinOf([donor], { bootstrap });
-            const status = atReady(joiner.fs, () =>
-                joiner.fs.changesetStatus("turn-14")
+            const peer = await createPeer();
+            const status = atReadyOn(peer, (fs) =>
+                fs.changesetStatus("turn-14")
             );
+            const joiner = await joinOf([donor], { bootstrap, peer });
             await joiner.fs.awaitWriteReady({ timeout: 60_000 });
             expect(await await status).toMatchObject({
                 known: true,
