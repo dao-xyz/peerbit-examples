@@ -95,9 +95,17 @@ import {
     type SharedFsWriteFileProfileHook,
     type SharedFsWriteFileProfiler,
 } from "./mount-profile.js";
-import { READINESS_TOPIC_SALT } from "./readiness/constants.js";
+import {
+    READINESS_TOPIC_SALT,
+    REQUEST_TIMEOUT_MAX_MS,
+    REQUEST_TIMEOUT_MS,
+} from "./readiness/constants.js";
 import {
     describeReadiness,
+    type PeerChange,
+    type PeerReason,
+    type PeerState,
+    type ReadinessState,
     type ReadinessStatus,
 } from "./readiness/coordinator.js";
 import type { RejectionReason } from "./readiness/explain.js";
@@ -120,9 +128,12 @@ import { SCOPE_NAMESPACE_V1 } from "./readiness/scopes.js";
 import { ReadinessMessage } from "./readiness/wire.js";
 
 export * from "./model.js";
-export type {
-    ReadinessState,
-    ReadinessStatus,
+export {
+    describeReadiness,
+    type ReadinessState,
+    type ReadinessStatus,
+    type PeerState as ReadinessPeerState,
+    type PeerReason as ReadinessPeerReason,
 } from "./readiness/coordinator.js";
 export type { ReadinessSessionRecord } from "./readiness/runtime.js";
 export {
@@ -339,7 +350,8 @@ const EXPECTED_NAMING_CONFLICT_MAX_TOTAL_STRING_CODE_UNITS = 1_048_576;
  */
 const DISPOSAL_METADATA_BATCH_SIZE = 256;
 const DISPOSAL_CHUNK_BATCH_SIZE = 16;
-const MAX_DELIVERY_TIMEOUT_MS = 2_147_483_647;
+/** Node's setTimeout limit: a longer delay runs after 1 ms instead. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -644,6 +656,69 @@ export type BootstrapTelemetryEvent =
           /** Time since this filesystem open began. */
           durationMs: number;
           source: WriteReadinessSource;
+          /**
+           * Ready at open from this directory's earlier proof (a warm
+           * reopen).
+           */
+          warm: boolean;
+          /**
+           * Peers counted at the decision: for `reconciled`, the persisted
+           * proof (distinct contained peers, excluded and gap records; at
+           * most 32 per array, as the proof keeps); for `operator`, the
+           * readiness status at the flip; 0 for a creator and a warm reopen.
+           */
+          contained: number;
+          excluded: number;
+          gaps: number;
+      }
+    /**
+     * A peer of a fresh full join changed state or reason (design 7): one
+     * event per changed peer per readiness evaluation; intermediate states
+     * inside one evaluation are not reported. None after write readiness.
+     */
+    | {
+          type: "readiness-peer";
+          atMs: number;
+          peer: string;
+          state: PeerState;
+          reason: PeerReason;
+          /**
+           * `excluded` only: what the peer's answer contradicted (at most
+           * 200 characters).
+           */
+          detail?: string;
+      }
+    /**
+     * Access-controlled stores, once after a `reconciled` or `operator`
+     * flip: trusted writer keys (this peer's own excluded, at most 1024
+     * checked) with no row attributed to them (`authorKey`) in this
+     * replica's index.
+     */
+    | {
+          type: "writers-unheard";
+          atMs: number;
+          count: number;
+          /** Trusted writer keys other than this peer's. */
+          trusted: number;
+          /** More trusted keys existed than were checked. */
+          truncated?: true;
+      }
+    /**
+     * An awaitWriteReady() wait of a fresh full join ended on the caller's
+     * timeout (design D14 A): what it still waited for.
+     */
+    | {
+          type: "write-ready-timeout";
+          atMs: number;
+          /** The caller's timeout. */
+          timeoutMs: number;
+          state: ReadinessState;
+          required: number;
+          /** `readiness.silent.length`. */
+          silent: number;
+          /** Silent peers reachable and neither refused nor parked. */
+          reachable: number;
+          busy: number;
       }
     /**
      * A readiness session of a fresh full address-open contained one scope
@@ -770,6 +845,20 @@ export type SharedFsOpenArgs = {
      */
     allowPartialWrites?: boolean;
     /**
+     * Proof-based write readiness of a fresh full address-open (README
+     * "Write readiness on joins"). `requestTimeoutMs` (default 5000, from
+     * 100 to 25000) is how long the join waits for a peer's answer to its
+     * first request attempt; the second and third attempts wait twice and
+     * four times as long. It also bounds the wait for sync to deliver rows
+     * before the join asks for them directly, a wait that has to end within
+     * a peer's 30 s session idle (hence the cap). A shorter value never
+     * releases an unanswered peer sooner: one that never answers still
+     * blocks after its last attempt, and a replicator with no sign of life
+     * is asked for at least 5000 ms. The exception is a peer that left
+     * before answering: it stops blocking when its attempt in flight ends.
+     */
+    writeReadiness?: { requestTimeoutMs?: number };
+    /**
      * Caller assertion for the physical block store. Snapshot segment deletion
      * additionally requires the blocks service to report
      * `localStoreSafety.referenceDomain: "caller-exclusive"`; this option alone
@@ -854,6 +943,12 @@ export type BootstrapPhase =
  */
 type WriteReadinessSource = "creator" | "reconciled" | "operator";
 
+/** The peers a `write-ready` telemetry event counts at the decision. */
+type WriteReadyCounts = { contained: number; excluded: number; gaps: number };
+
+/** Trusted keys `writers-unheard` checks at most. */
+const WRITERS_UNHEARD_MAX = 1024;
+
 export type BootstrapStatus = {
     phase: BootstrapPhase;
     /**
@@ -896,18 +991,24 @@ export type BootstrapStatus = {
     guardArmed: boolean;
     /** Why the last bootstrap fell back to a plain join, when it did. */
     lastFailure?: string;
-    /**
-     * Milliseconds since the last document arrival (Infinity when none
-     * yet); a settle signal for callers that need a quiet store.
-     */
-    msSinceLastArrival: number;
 };
 
 export type AwaitWriteReadyOptions = {
-    /** Reject with ETIMEDOUT if readiness is not reached in this many ms. */
+    /**
+     * Reject with ETIMEDOUT if readiness is not reached in this many ms:
+     * more than 0 and at most 2147483647 (Node's timer limit), else EINVAL.
+     */
     timeout?: number;
     /** Abort only this wait; it does not change filesystem state. */
     signal?: AbortSignal;
+    /**
+     * Called with the readiness snapshot (bootstrapStatus().readiness) when
+     * the wait starts and on every `readiness:progress` event until the
+     * wait settles, never after. Only while this open runs a readiness join
+     * and is not writable yet; a creator, a warm reopen, an observer and
+     * allowPartialWrites never call it. Diagnostic: a throw is ignored.
+     */
+    onProgress?: (readiness: ReadinessStatus) => void;
 };
 
 export type SnapshotWriteResult = {
@@ -1416,6 +1517,28 @@ const localBlockStoreSafety = (node: unknown): BlockStoreSafety =>
             services?: { blocks?: { localStoreSafety?: BlockStoreSafety } };
         }
     )?.services?.blocks?.localStoreSafety ?? UNKNOWN_BLOCK_STORE_SAFETY;
+
+/**
+ * `writeReadiness.requestTimeoutMs` bounds; the cap keeps a sync-wait
+ * window inside the responder's session idle (`REQUEST_TIMEOUT_MAX_MS`).
+ */
+const WRITE_READINESS_REQUEST_TIMEOUT_MIN_MS = 100;
+
+const validateWriteReadiness = (args: SharedFsOpenArgs | undefined) => {
+    const requestTimeoutMs: unknown = args?.writeReadiness?.requestTimeoutMs;
+    if (
+        requestTimeoutMs !== undefined &&
+        (typeof requestTimeoutMs !== "number" ||
+            !Number.isFinite(requestTimeoutMs) ||
+            requestTimeoutMs < WRITE_READINESS_REQUEST_TIMEOUT_MIN_MS ||
+            requestTimeoutMs > REQUEST_TIMEOUT_MAX_MS)
+    ) {
+        throw new SharedFsError(
+            "EINVAL",
+            `writeReadiness.requestTimeoutMs must be a number of milliseconds from ${WRITE_READINESS_REQUEST_TIMEOUT_MIN_MS} to ${REQUEST_TIMEOUT_MAX_MS}`
+        );
+    }
+};
 
 const validateBlockStoreAccess = (
     args: SharedFsOpenArgs | undefined,
@@ -2815,6 +2938,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private readinessRuntime: ReadinessRuntime | undefined;
     /** This generation became ready from a trusted warm sidecar (set in open). */
     private readinessWarmOpen: boolean | undefined;
+    /** `writeReadiness.requestTimeoutMs` of this open (set in open). */
+    private readinessRequestTimeoutMs: number | undefined;
+    /** `write:ready` went out in this open generation (set in open). */
+    private writeReadyDispatched: boolean | undefined;
 
     machineLabel = "unknown-machine";
     replicate: OpenReplicateOptions | undefined;
@@ -3187,6 +3314,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // unsafe reclaim first so an address-loaded instance never poisons
         // the handler cache or enters partially initialized cleanup.
         validateBlockStoreAccess(options?.args, localBlockStoreSafety(node));
+        validateWriteReadiness(options?.args);
         await super.beforeOpen(node, options);
     }
 
@@ -3310,6 +3438,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Validate before beginning a lifecycle request. A rejected unsafe
         // reclaim configuration must leave this program immediately reusable.
         validateBlockStoreAccess(args, localBlockStoreSafety(this.node));
+        validateWriteReadiness(args);
         const requestGeneration = this.beginLifecycleRequest("open");
         this.lifecycleRequestedState = "opening";
         try {
@@ -3414,6 +3543,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.bootstrapTelemetryWriteReadyEmitted = false;
         this.bootstrapTelemetryFallbackEmitted = false;
         this.bootstrapTelemetryAbortedEmitted = false;
+        this.writeReadyDispatched = false;
         if (this.bootstrapTelemetry) {
             const atMs = this.bootstrapTelemetryNow!();
             this.bootstrapTelemetryOpenStartedAtMs = atMs;
@@ -3439,6 +3569,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessDecisionSettled =
             !addressOpen || partialWriteOverride;
         this.writeReadinessSource = undefined;
+        this.readinessRequestTimeoutMs =
+            args?.writeReadiness?.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
         this.machineLabel = args?.machineLabel || "unknown-machine";
         // Default to a full replica: every mount serves the whole namespace
         // from its local index, and a writer must never see its own files
@@ -4084,6 +4216,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             !this.partialWriteOverride &&
             this.writeReadinessSource
         ) {
+            // A creator or a warm reopen: no decision counted anything.
             this.emitWriteReadyOnce(this.writeReadinessSource);
         }
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
@@ -4170,6 +4303,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         }
+        // `write:ready` of a creating open or a warm reopen, as the open's
+        // last step. A fresh join dispatches it at its flip
+        // (commitWriteReady), which may have happened already.
+        this.dispatchWriteReadyOnce();
     }
 
     private emitBootstrapTelemetry(event: BootstrapTelemetryEvent) {
@@ -4281,7 +4418,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         });
     }
 
-    private emitWriteReadyOnce(source: WriteReadinessSource) {
+    /**
+     * `write-ready`, once per open. `counts` (read only when telemetry is
+     * on) are the peers the decision counted; none for a creator or a warm
+     * reopen.
+     */
+    private emitWriteReadyOnce(
+        source: WriteReadinessSource,
+        counts?: () => WriteReadyCounts
+    ) {
         if (
             !this.bootstrapTelemetry ||
             this.bootstrapTelemetryWriteReadyEmitted
@@ -4290,6 +4435,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const clockMs = this.bootstrapTelemetryNow!();
         this.bootstrapTelemetryWriteReadyEmitted = true;
+        let counted: WriteReadyCounts = { contained: 0, excluded: 0, gaps: 0 };
+        try {
+            counted = counts?.() ?? counted;
+        } catch {
+            // Diagnostics must never influence the flip.
+        }
         this.emitBootstrapTelemetry({
             type: "write-ready",
             atMs: this.bootstrapTelemetryElapsed(clockMs),
@@ -4298,6 +4449,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 clockMs
             ),
             source,
+            warm: this.readinessWarmOpen === true,
+            ...counted,
         });
     }
 
@@ -4311,6 +4464,148 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             atMs: this.bootstrapTelemetryElapsed(this.bootstrapTelemetryNow!()),
             ...record,
         });
+    }
+
+    /**
+     * The readiness join's progress report (PR-4): one `readiness-peer`
+     * event per peer whose state or reason changed, then, when anyone
+     * listens, `readiness:progress` with the status snapshot. Nothing once
+     * this open is writable (`write:ready` is the last event of a join).
+     */
+    private onReadinessProgress(changed: readonly PeerChange[]) {
+        if (this.writesReady || this.writeReadinessLifecycleBlocked) {
+            return;
+        }
+        if (this.bootstrapTelemetry && changed.length > 0) {
+            const atMs = this.bootstrapTelemetryElapsed(
+                this.bootstrapTelemetryNow!()
+            );
+            for (const { peer, state, reason, detail } of changed) {
+                this.emitBootstrapTelemetry({
+                    type: "readiness-peer",
+                    atMs,
+                    peer,
+                    state,
+                    reason,
+                    ...(detail !== undefined ? { detail } : {}),
+                });
+            }
+        }
+        if (this.events.listenerCount("readiness:progress") === 0) {
+            return;
+        }
+        const readiness = this.readinessStatus();
+        if (!readiness) {
+            return;
+        }
+        this.events.dispatchEvent(
+            new CustomEvent("readiness:progress", { detail: readiness })
+        );
+    }
+
+    /**
+     * `write-ready-timeout` (design D14 A): an awaitWriteReady() wait of a
+     * join ended on the caller's timeout, with what it still waited for.
+     */
+    private emitWriteReadyTimeout(
+        timeoutMs: number,
+        readiness: ReadinessStatus | undefined
+    ) {
+        if (!this.bootstrapTelemetry || !readiness) {
+            return;
+        }
+        this.emitBootstrapTelemetry({
+            type: "write-ready-timeout",
+            atMs: this.bootstrapTelemetryElapsed(this.bootstrapTelemetryNow!()),
+            timeoutMs,
+            state: readiness.state,
+            required: readiness.required.length,
+            silent: readiness.silent.length,
+            reachable: readiness.silent.filter(
+                ({ reachable, refused, parked }) =>
+                    reachable && !refused && !parked
+            ).length,
+            busy: readiness.busy.length,
+        });
+    }
+
+    /**
+     * `writers-unheard` (access-controlled stores, after a `reconciled` or
+     * `operator` flip): trusted writer keys other than this peer's with no
+     * row attributed to them in this replica's index, one local index read
+     * per key, at most `WRITERS_UNHEARD_MAX` keys. A tracked maintenance
+     * task, never awaited by the flip; it stops silently once this open's
+     * maintenance ends, and any failure drops the event. `authorKey` is
+     * advisory attribution, so this is a hint, not a proof.
+     */
+    private reportWritersUnheard() {
+        if (!this.trustGraph || !this.bootstrapTelemetry) {
+            return;
+        }
+        const context = this.maintenanceContextIfActive();
+        if (!context) {
+            return;
+        }
+        const run = async () => {
+            const own = this.node.identity.publicKey;
+            const trusted = new Map<string, PublicSignKey>();
+            for (const key of await this.trustedWriters()) {
+                if (!key.equals(own)) trusted.set(key.hashcode(), key);
+            }
+            const keys = [...trusted.values()];
+            const checked = keys.slice(0, WRITERS_UNHEARD_MAX);
+            let count = 0;
+            for (const key of checked) {
+                if (!this.maintenanceContextActive(context)) return;
+                const heard = await this.readLocalIndex(
+                    [
+                        new StringMatch({
+                            key: "authorKey",
+                            value: encodePublicSignKey(key),
+                        }),
+                    ],
+                    { id: true },
+                    async (probe) => (await probe.next(1)).length > 0
+                );
+                if (!heard) count++;
+            }
+            if (!this.maintenanceContextActive(context)) return;
+            this.emitBootstrapTelemetry({
+                type: "writers-unheard",
+                atMs: this.bootstrapTelemetryElapsed(
+                    this.bootstrapTelemetryNow!()
+                ),
+                count,
+                trusted: keys.length,
+                ...(keys.length > checked.length
+                    ? { truncated: true as const }
+                    : {}),
+            });
+        };
+        void this.trackMaintenanceTask(run()).catch(() => {});
+    }
+
+    /**
+     * `write:ready`, once per open generation, for every source: a creating
+     * open and a warm reopen at the end of open(), a readiness decision and
+     * assumeComplete() at their flip. Never under allowPartialWrites and
+     * never on an observer (neither has a source).
+     */
+    private dispatchWriteReadyOnce() {
+        if (
+            this.writeReadyDispatched ||
+            !this.writesReady ||
+            this.partialWriteOverride ||
+            this.writeReadinessSource === undefined
+        ) {
+            return;
+        }
+        this.writeReadyDispatched = true;
+        this.events.dispatchEvent(
+            new CustomEvent("write:ready", {
+                detail: this.bootstrapStatus(),
+            })
+        );
     }
 
     private emitBootstrapFallbackOnce(
@@ -11165,17 +11460,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.viewProven = true;
         this.setGuardArmed(true);
         this.writeReadinessSource = source;
-        this.emitWriteReadyOnce(source);
+        this.emitWriteReadyOnce(source, () => {
+            if (proof) {
+                return {
+                    contained: new Set(proof.contained.map(({ peer }) => peer))
+                        .size,
+                    excluded: proof.excluded.length,
+                    gaps: proof.gaps.length,
+                };
+            }
+            const readiness = this.readinessStatus();
+            return {
+                contained: readiness?.contained.length ?? 0,
+                excluded: readiness?.excluded.length ?? 0,
+                gaps: readiness?.gaps.length ?? 0,
+            };
+        });
         this.readinessRuntime?.markReady();
-        this.events.dispatchEvent(
-            new CustomEvent("write:ready", {
-                detail: this.bootstrapStatus(),
-            })
-        );
+        this.dispatchWriteReadyOnce();
         const waiters = this.writeReadinessWaiters.splice(0);
         for (const waiter of waiters) {
             waiter.resolve();
         }
+        this.reportWritersUnheard();
     }
 
     /**
@@ -11227,6 +11534,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             onSession: (record) => {
                 if (generation === this.openGeneration) {
                     this.emitReadinessSession(record);
+                }
+            },
+            requestTimeoutMs: this.readinessRequestTimeoutMs,
+            onProgress: (changed) => {
+                if (generation === this.openGeneration) {
+                    this.onReadinessProgress(changed);
                 }
             },
         });
@@ -13387,10 +13700,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             pendingDocs: this.overlayPending.size,
             guardArmed: this.guardArmed,
             lastFailure: this.bootstrapFailure,
-            msSinceLastArrival:
-                this.lastArrivalMs === 0
-                    ? Number.POSITIVE_INFINITY
-                    : this.clock() - this.lastArrivalMs,
             readiness: this.readinessStatus(),
         };
     }
@@ -13410,16 +13719,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * resolve after the readiness proof (design 2.2) is persisted, or
      * after assumeComplete(); new creators, proven warm reopens, and
      * explicit allowPartialWrites overrides resolve immediately.
-     * Closing/reopening rejects outstanding waiters.
+     * Closing/reopening rejects outstanding waiters. While a fresh join
+     * waits, `onProgress` gets its readiness snapshot at once and on every
+     * `readiness:progress` event, until the wait settles.
      */
     awaitWriteReady(options: AwaitWriteReadyOptions = {}): Promise<void> {
+        // Above Node's timer limit the timeout would fire after 1 ms.
         if (
             options.timeout !== undefined &&
-            (!Number.isFinite(options.timeout) || options.timeout <= 0)
+            (!Number.isFinite(options.timeout) ||
+                options.timeout <= 0 ||
+                options.timeout > MAX_TIMER_DELAY_MS)
         ) {
             throw new SharedFsError(
                 "EINVAL",
-                "awaitWriteReady timeout must be a positive finite number"
+                `awaitWriteReady timeout must be a positive number of milliseconds no greater than ${MAX_TIMER_DELAY_MS}`
             );
         }
         if (this.writeReadinessLifecycleBlocked) {
@@ -13437,12 +13751,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             let timer: ReturnType<typeof setTimeout> | undefined;
             let settled = false;
             const waiters = this.writeReadinessWaiters;
+            // Untyped: `readiness:progress` is not in ProgramEvents.
+            const events: EventTarget = this.events;
+            const onProgress = options.onProgress;
+            const progress = (readiness: ReadinessStatus) => {
+                if (settled) return;
+                try {
+                    onProgress?.(readiness);
+                } catch {
+                    // Diagnostic: the caller's error never ends the wait.
+                }
+            };
+            const onProgressEvent = (event: Event) =>
+                progress((event as CustomEvent<ReadinessStatus>).detail);
             function cleanup() {
                 if (timer) {
                     clearTimeout(timer);
                     timer = undefined;
                 }
                 options.signal?.removeEventListener("abort", onAbort);
+                if (onProgress) {
+                    events.removeEventListener(
+                        "readiness:progress",
+                        onProgressEvent
+                    );
+                }
                 const index = waiters.indexOf(waiter);
                 if (index >= 0) {
                     waiters.splice(index, 1);
@@ -13470,7 +13803,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             const waiter = { resolve: settleResolve, reject: settleReject };
             waiters.push(waiter);
+            if (onProgress) {
+                events.addEventListener("readiness:progress", onProgressEvent);
+                let readiness: ReadinessStatus | undefined;
+                try {
+                    readiness = this.readinessStatus();
+                } catch {
+                    // No first snapshot; the events still come.
+                }
+                if (readiness) progress(readiness);
+            }
             if (options.timeout !== undefined) {
+                const timeout = options.timeout;
                 timer = setTimeout(() => {
                     // The snapshot says which peers it still waited for.
                     let readiness: ReadinessStatus | undefined;
@@ -13479,8 +13823,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     } catch {
                         // The timeout itself must still reject.
                     }
+                    try {
+                        this.emitWriteReadyTimeout(timeout, readiness);
+                    } catch {
+                        // As above.
+                    }
                     settleReject(new SharedFsWriteReadyTimeoutError(readiness));
-                }, options.timeout);
+                }, timeout);
                 (timer as any)?.unref?.();
             }
             options.signal?.addEventListener("abort", onAbort, {
@@ -13607,11 +13956,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             options.timeout !== undefined &&
             (!Number.isFinite(options.timeout) ||
                 options.timeout <= 0 ||
-                options.timeout > MAX_DELIVERY_TIMEOUT_MS)
+                options.timeout > MAX_TIMER_DELAY_MS)
         ) {
             throw new SharedFsError(
                 "EINVAL",
-                `prepareForDisposal timeout must be a positive number no greater than ${MAX_DELIVERY_TIMEOUT_MS}`
+                `prepareForDisposal timeout must be a positive number no greater than ${MAX_TIMER_DELAY_MS}`
             );
         }
     }
@@ -17894,6 +18243,7 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
     // Reject before loading/saving a program or entering ProgramHandler.
     // beforeOpen repeats this for callers that use Peerbit/Program directly.
     validateBlockStoreAccess(options, localBlockStoreSafety(options.peerbit));
+    validateWriteReadiness(options);
     const args: SharedFsOpenArgs = {
         machineLabel: options.machineLabel,
         replicate: options.replicate,
@@ -17907,6 +18257,7 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
             ? options.bootstrap
             : (options.bootstrap ?? false),
         allowPartialWrites: options.allowPartialWrites,
+        writeReadiness: options.writeReadiness,
         blockStoreAccess: options.blockStoreAccess,
         snapshot: options.snapshot,
         gc: options.gc,

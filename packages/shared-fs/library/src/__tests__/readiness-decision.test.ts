@@ -748,8 +748,11 @@ describe("readiness decision (PR-3 commit 4, in-process)", () => {
 
             // Telemetry: the whole sequence of a plain join, with one
             // readiness-session per contained scope before write-ready and
-            // no synchronizer milestone.
-            const types = telemetry.map(({ type }) => type);
+            // no synchronizer milestone. The readiness-peer events (PR-4)
+            // interleave with it; checked below.
+            const types = telemetry
+                .map(({ type }) => type)
+                .filter((type) => type !== "readiness-peer");
             expect(types).toEqual([
                 "open:start",
                 "documents-open:start",
@@ -757,6 +760,24 @@ describe("readiness decision (PR-3 commit 4, in-process)", () => {
                 "readiness-session",
                 "write-ready",
             ]);
+            // PR-4: the donor's readiness-peer events start asked and end
+            // contained and qualified, all before write-ready.
+            const donorChanges = telemetry.filter(
+                (event) =>
+                    event.type === "readiness-peer" && event.peer === donorHash
+            );
+            expect(donorChanges[0]).toMatchObject({
+                state: "asking",
+                reason: "asked",
+            });
+            expect(donorChanges.at(-1)).toMatchObject({
+                state: "contained",
+                reason: "qualified",
+            });
+            const sequence = telemetry.map(({ type }) => type);
+            expect(sequence.lastIndexOf("readiness-peer")).toBeLessThan(
+                sequence.indexOf("write-ready")
+            );
             const sessions = telemetry.filter(
                 (event) => event.type === "readiness-session"
             ) as Array<
@@ -790,7 +811,13 @@ describe("readiness decision (PR-3 commit 4, in-process)", () => {
             expect(sessions[0].durationMs).toBeGreaterThanOrEqual(0);
             expect(
                 telemetry.find(({ type }) => type === "write-ready")
-            ).toMatchObject({ source: "reconciled" });
+            ).toMatchObject({
+                source: "reconciled",
+                warm: false,
+                contained: 1,
+                excluded: 0,
+                gaps: 0,
+            });
             await stopPeer(peer);
 
             // An observer open withdraws the proof and keeps the hint.

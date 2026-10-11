@@ -19,12 +19,14 @@ peerbit-fs revoke <address> <public-key>
 peerbit-fs install-adapter
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
+peerbit-fs mount <address> <mountpoint> --assume-complete
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs naming-conflicts <address>
 peerbit-fs resolve-conflict <address> <path> <version-id>
 peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move|merge-directory>
 peerbit-fs benchmark [address]
+peerbit-fs snapshot <address>
 peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
@@ -40,19 +42,26 @@ byte verification are excluded.
 `status` prints the current native mount adapter, whether its prerequisites are
 available on the host, and any missing pieces before optionally opening an
 address. Address status also reports write readiness and its durable source.
+For a replica that is still joining, the text names what the join waits for,
+such as `write readiness: pending (reconciling: 1 of 1 required peer in
+flight: <peer>)`, as it stands right after the open: `status` does not wait.
 Add `--json` for one JSON document containing `nativeMount` and either a
-`filesystem` object or `null`. Routine status does not scan retained conflict
-metadata; add `--include-conflicts` to include the current local content and
-naming records plus separate `contentCount` and `namingCount` fields. Those
-whole-store scans are deliberately opt-in because they can dominate status
-latency and memory on a large/history-heavy workspace. During bootstrap the
-diagnostic records may be partial; check their `partial` flag and the adjacent
-bootstrap phase before treating them as an operator fence. `partial: false`
-requires a stable, write-ready full replica whose accepted snapshot coverage
-was verified for the entire scan. Observer, off/plain-join, fetching,
-overlay-active, unverified, and changing bootstrap views remain partial. The
-records also report their local-replica scope and before/after phases; even a
-verified local scan is not a global network frontier.
+`filesystem` object or `null`; its `bootstrap.readiness` is the library's
+readiness snapshot (`bootstrapStatus().readiness`: the state and the peers the
+join waits for), or `null` when the open runs no join, such as from a
+creator's or an already writable state directory. Routine status does not
+scan retained conflict metadata; add `--include-conflicts` to include the
+current local content and naming records plus separate `contentCount` and
+`namingCount` fields. Those whole-store scans are deliberately opt-in because
+they can dominate status latency and memory on a large/history-heavy workspace.
+During bootstrap the diagnostic records may be partial; check their `partial`
+flag and the adjacent bootstrap phase before treating them as an operator
+fence. `partial: false` requires a stable, write-ready full replica whose
+accepted snapshot coverage was verified for the entire scan. Observer,
+off/plain-join, fetching, overlay-active, unverified, and changing bootstrap
+views remain partial. The records also report their local-replica scope and
+before/after phases; even a verified local scan is not a global network
+frontier.
 
 `create` creates an access-controlled filesystem rooted at the local Peerbit
 identity. Use `create --no-auth` only for explicitly unauthenticated test/demo
@@ -351,7 +360,9 @@ if it cannot publish it. Until something is written, the creator publishes it
 again whenever another peer opens the filesystem. `create --no-replicate` is
 rejected.
 `mount` waits up to 120 seconds by default; tune this with
-`--write-ready-timeout-ms`. A timeout is not permission to write. Its error
+`--write-ready-timeout-ms`, an integer from 1 to 2147483647 milliseconds
+(Node's timer limit; the same holds wherever the flag appears). A timeout is
+not permission to write. Its error
 names what the mount waited for and the advice that fits: usually keep a
 complete replicator for this filesystem connected and retry. Another replicator
 does not help when a required peer is reachable but does not answer (restart
@@ -363,6 +374,48 @@ writable. An unrelated connected Peerbit peer does not count, and a fresh mount
 always needs a write-ready replica online, such as the creator. A populated
 state directory whose readiness state was lost cannot certify itself: it is
 gated like a fresh mount until it reconciles with such a replica.
+
+While it waits, a mount that is not yet writable shows one progress line on
+stderr, such as `write readiness: reconciling: 1 of 2 required peers in
+flight: <peer> (1 contained)`: the library's readiness state, the peers it
+waits for and how many it has reconciled with. It is updated when a peer's
+state changes, not on a timer. In a terminal it is rewritten in place and
+cleared when the wait ends; otherwise each new readiness state prints one
+line. A mount that is writable at once prints nothing here. Once writable,
+`mount` prints where readiness came from, `write readiness: ready (<source>)`:
+`creator`, `reconciled` (the join proved its view) or `operator`
+(`--assume-complete`). `resolve-conflict` and `resolve-naming-conflict` wait
+the same way and show the same line.
+
+When no write-ready replica will answer, for example because the creator is
+gone for good, or a peer stays silent and cannot be restarted, a join cannot
+prove its view. If you know this replica's view is complete, add
+`--assume-complete` to `mount`, `resolve-conflict` or
+`resolve-naming-conflict`. The command still waits for the proof first. Only if
+`--write-ready-timeout-ms` passes without it, and no required peer can still
+answer (the join has no peer, only peers that are not write-ready, or only
+required peers that refused or stay silent), does the CLI call the library's
+`assumeComplete()` and print a warning with the reason. The replica then
+becomes writable and records source `operator`, so unlike
+`--allow-partial-writes` it persists: later runs from the same state directory
+are writable at once. Rows held only by peers it did not reconcile with are
+missing from its view, and writes made after it can conflict with them. While a
+required peer is still being asked, also beside one that stays silent, it may
+yet answer and the view gain its rows, so the command fails with the timeout
+and says that the flag was not applied. It cannot be combined with
+`--allow-partial-writes`, and it is not applied while a snapshot bootstrap has
+not settled. That phase settles only within one long run: an unverified
+bootstrap converges after about 10 minutes without new rows, and a snapshot
+overlay retires within 15 minutes (one that retires unverified then needs the
+10 quiet minutes too). Every run, including a short `peerbit-fs status`, starts
+again from the phase the last one left, so retrying does not help: keep the
+command open with a `--write-ready-timeout-ms` that covers it, such as 660000
+for an unverified bootstrap or 1560000 for an overlay; the error names the
+phase and the value. Without the flag, a timeout of one of these commands whose
+join has no peer, only peers that are not write-ready, or only required peers
+that refused or stay silent ends with a hint naming `--assume-complete` and,
+while the phase has not settled (including a snapshot fetch, which installs an
+overlay when it succeeds), the wait it needs.
 
 Readiness proves a mount's view against the peers it can see, not against
 writers that are offline or rows a peer received after it answered. A replica
@@ -382,6 +435,19 @@ README's "Write readiness on joins" section for what readiness proves and its
 The `--allow-partial-writes` mount escape hatch is a session-only recovery
 bypass. It can manufacture duplicate paths or overwrite from stale state, does
 not persist proof, and keeps snapshot, GC, ACL, and disposal operations blocked.
+Unlike `--assume-complete`, which records a lasting operator assertion after
+the wait for a proof timed out, it skips the wait and lasts for this session
+only.
+
+`peerbit-fs snapshot <address>` publishes a cold-start snapshot that later
+joiners bootstrap from. It first waits for this replica's write readiness
+(`--write-ready-timeout-ms`, default 120 seconds; there is no
+`--assume-complete`, because a snapshot from an assumed view would take
+precedence over complete ones), then for any snapshot bootstrap to settle, and
+refuses to publish an empty tree. A fresh state directory therefore needs a
+write-ready replica online, as a mount does. From a state directory that is
+already writable, it publishes that replica's current view at once, without
+waiting for newer rows from peers.
 
 Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can

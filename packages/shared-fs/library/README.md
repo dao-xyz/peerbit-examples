@@ -245,8 +245,8 @@ The peers a join accounts for are the visible ones: subscribed to this
 filesystem's readiness topic and reachable, or replicating its namespace log
 and seen alive since the open (a replication announcement or a readiness
 message). A replicator listed with no sign of life is asked once and, if it does
-not answer, no longer blocks. An unrelated connected Peerbit peer, such as a
-relay, is not visible.
+not answer within that attempt (at least 5 s), no longer blocks. An unrelated
+connected Peerbit peer, such as a relay, is not visible.
 
 The joiner turns writable, with source `reconciled`, at the first moment all of
 these hold:
@@ -413,7 +413,14 @@ requests with that it is ready. It is refused with `EINVAL` on observers, on
 partial replicas and under `allowPartialWrites`; it waits for the bootstrap
 decision, then fails with retryable `EAGAIN` while a snapshot overlay is
 fetching, active or unverified; it fails with `ECLOSED` once a close or reopen
-began. On a handle that is already writable it does nothing.
+began. On a handle that is already writable it does nothing. The phase settles
+only inside one open (a reopen resumes the persisted phase): an unverified one
+after two checks 5 minutes apart that saw no new row for a minute, an overlay
+once covered or, unverified, at `retirementTimeoutMs`. The CLI's
+`--assume-complete` calls it only after its `--write-ready-timeout-ms` wait
+timed out with no required peer that can still answer (`no-peer`,
+`no-qualified-donor`, or `waiting-silent` with every required peer silent), so
+a proof that lands in time still makes the replica `reconciled`.
 
 ### Diagnosing a gated join
 
@@ -422,7 +429,8 @@ began. On a handle that is already writable it does nothing.
 such as `waiting-silent: 1 of 2 required peers reachable and silent: <peer>`,
 and its `readiness` property carries the status snapshot at that moment. A
 timeout is not permission to write. Closing, reopening or dropping the handle
-rejects pending waiters with `ECLOSED`.
+rejects pending waiters with `ECLOSED`. A timeout not above 0 or above
+2147483647 ms (Node's timer limit) throws `EINVAL`.
 
 `bootstrapStatus().readiness` returns the same snapshot (`ReadinessStatus`)
 at any time for an open that runs a join. It is undefined for a creator, a
@@ -467,6 +475,36 @@ writable: `creator`, `reconciled` (a join's proof, stored with it in the state
 file) or `operator` (`assumeComplete()`). A warm reopen reports the source it
 reopened with; its peers see it as `warm`, which also qualifies it as a donor.
 
+To follow a join while it waits, pass `onProgress` to
+`awaitWriteReady({ timeout, onProgress })`. It is called with the snapshot
+when the wait starts and again whenever a peer's state or the reason for it,
+`satisfied` or the fault changes, until the wait settles; a throw from it is
+ignored. The same snapshot is dispatched as a `readiness:progress` event
+(`event.detail`) on `fs.program.events`, at most once per readiness evaluation
+and only while something listens. Neither fires for an open that runs no join,
+or once the open is writable. `describeReadiness(status)` turns a snapshot into
+the one-line reason the timeout message uses.
+
+`write:ready` (`event.detail` is `bootstrapStatus()`) is dispatched on
+`fs.program.events` once per open, for every source: when a join's proof
+(`reconciled`) or `assumeComplete()` (`operator`) makes the replica writable,
+and as the last step of a creating open or a warm reopen. A listener sees the
+latter only if it was attached to the program before it opened; an
+`openSharedFs()` caller cannot. It is never dispatched under
+`allowPartialWrites` or on an observer. Listeners of either event must not
+throw: Node reports a listener's throw as an uncaught exception.
+
+The open option `writeReadiness: { requestTimeoutMs }` (default 5000, from 100
+to 25000, otherwise `EINVAL`) sets how long a join waits for a peer's answer to
+its first request attempt; the second and third attempts wait twice and four
+times as long. It also bounds the wait for sync to deliver rows before the join
+asks the peer for them directly, a wait that must end before the peer drops the
+join's session (30 s without a request). A shorter value never releases an
+unanswered peer sooner: a peer that never answers still blocks after its last
+attempt, and a replicator listed with no sign of life is asked for at least
+5000 ms. The one exception is a peer that left before answering, which stops
+blocking when its attempt in flight ends.
+
 ## Cold-join telemetry
 
 Pass an opt-in callback to measure one address-open without retaining a
@@ -510,8 +548,49 @@ row `count`, the gap estimate `gapEst`, the `cells` received,
 (and `untrusted` when rows were refused for an untrusted writer),
 `recoveries`, `roundTrips`, whether the peer `qualified`, its `source`, and
 `durationMs`: the exchange's own duration in fractional milliseconds from the
-process's monotonic clock, not the injected `clock`. `write-ready` reports the
-`source` (`creator`, `reconciled` or `operator`).
+process's monotonic clock, not the injected `clock`.
+
+`write-ready` reports the `source` (`creator`, `reconciled` or `operator`),
+`warm` (ready at open from this directory's earlier proof), and the peers the
+decision counted: `contained` (distinct peers), `excluded` and `gaps`, from the
+persisted proof for `reconciled` (at most 32 records each, as the proof keeps
+them), from the readiness status at the flip for `operator`, and 0 for a
+creator or a warm reopen.
+
+A fresh full join also emits `readiness-peer` when a peer's state or the reason
+for it changes, at most once per peer per readiness evaluation and never after
+write readiness. It names the `peer`, its `state` (`ReadinessPeerState`) and the
+`reason` (`ReadinessPeerReason`):
+
+- `asking`: `asked`, or `confirm-only` for a replicator row with no sign of
+  life, which is asked once.
+- `busy`: `busy`.
+- `reconciling`: `in-flight`, `parked`, `waiting-fetch` or `waiting-trust`.
+- `silent`: `reachable-silent` or `unreachable-silent`.
+- `refused`: `refused-unsupported` or `refused-scope`.
+- `contained`: `qualified`, `not-write-ready`, and with access control
+  `checking-identity` or `untrusted-identity`.
+- `left`: `store-closed` when the peer closed the filesystem, whether or not
+  the joiner may lack its rows; otherwise `gap` when the joiner may lack rows
+  the peer held, else `departed`. A left peer with a recorded gap is in
+  `readiness.gaps` whatever its reason (a `departed` one with `missing: 0`).
+- `left-unanswered`: `left-unanswered`.
+- `unconfirmed`: `no-sign-of-life`.
+- `excluded-inconsistent` and `excluded-unsubstantiated`: `excluded`, with a
+  `detail` (at most 200 characters) saying what the peer's answer contradicted.
+
+`write-ready-timeout` reports each `awaitWriteReady()` wait of a join that ended
+on the caller's timeout: `timeoutMs`, the readiness `state`, and how many peers
+were `required`, `silent`, `reachable` (silent but reachable, neither refused
+nor parked) and `busy`. In an access-controlled filesystem, `writers-unheard`
+follows a `reconciled` or `operator` flip once: `count` is how many of the
+`trusted` writer keys (this peer's own excluded; at most 1024 checked,
+`truncated` when there were more) have no row attributed to them in this
+replica's index. Attribution is the rows' advisory `authorKey`, so this is a
+hint about writers whose rows may be missing, not a proof.
+
+A consumer that switches exhaustively on `type` has to handle the
+`readiness-peer`, `writers-unheard` and `write-ready-timeout` cases.
 
 `telemetry.openProfile` forwards Peerbit's advisory
 `sharedLog.open.localState`, `blockStore`, `remoteBlocks`, `lowerLog`,
@@ -939,7 +1018,10 @@ that descriptor before persisting its cutoff; while a truncate to empty is the
 only change, only the release of the descriptor that emptied the file
 persists. Later writes through sibling descriptors stay dirty for the next fence
 instead of starving the current one. The CLI waits for write readiness before
-exposing the mount and rejects `mount --no-replicate`.
+exposing the mount and rejects `mount --no-replicate`. While it waits it shows
+one progress line on stderr naming what the join waits for, and with
+`--assume-complete` it calls `assumeComplete()` if the wait times out with no
+required peer that can still answer.
 
 This mount fence is not a remote durability quorum. In particular, `fsync`
 does not call `prepareForDisposal()` and does not wait for persisted receipts

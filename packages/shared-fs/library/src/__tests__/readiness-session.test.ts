@@ -29,6 +29,7 @@ import {
     JoinerSession,
     MAX_RENEWALS,
     SYNC_WINDOW_MS,
+    attemptDelaysFor,
     cellPrefix,
     classifyNotice,
     gapEstimate,
@@ -656,6 +657,131 @@ describe("readiness joiner session", () => {
             expect(w.sent(CellsReqV1)).toHaveLength(4);
             await w.until(() => session.outcome !== undefined, "outcome");
             expect(only(session.outcome!).pulled).toBe(300);
+        });
+    });
+
+    describe("requestTimeoutMs (PR-4, writeReadiness.requestTimeoutMs)", () => {
+        const T = 200;
+        const NS = SCOPE_NAMESPACE_V1;
+
+        it("attemptDelaysFor: t, 2t, 4t; the defaults are unchanged", () => {
+            expect(attemptDelaysFor(5_000)).toEqual(ATTEMPT_DELAYS_MS);
+            expect(ATTEMPT_DELAYS_MS).toEqual([5_000, 10_000, 20_000]);
+            expect(SYNC_WINDOW_MS).toBe(5_000);
+            expect(attemptDelaysFor(T)).toEqual([200, 400, 800]);
+        });
+
+        it("OPENs at 0, t and 3t; silent at 7t", async () => {
+            const w = await world({ common: 10 });
+            w.hooks.toR = (m) => (m instanceof OpenV1 ? null : m);
+            const session = w.session(w.init(), {
+                ports: { requestTimeoutMs: T },
+            });
+            session.start();
+            await settle();
+            expect(w.sent(OpenV1)).toHaveLength(1);
+            w.timers.advance(T - 1);
+            await settle();
+            expect(w.sent(OpenV1)).toHaveLength(1);
+            w.timers.advance(1);
+            await settle();
+            expect(w.sent(OpenV1)).toHaveLength(2);
+            w.timers.advance(2 * T);
+            await settle();
+            expect(w.sent(OpenV1)).toHaveLength(3);
+            w.timers.advance(4 * T - 1);
+            await settle();
+            expect(session.state(NS)).toBe("asking");
+            w.timers.advance(1);
+            await settle();
+            expect(session.state(NS)).toBe("silent");
+            expect(session.debug().armedTimers).toBe(0);
+            expect(w.sent(OpenV1)).toHaveLength(3);
+        });
+
+        it("a cells request is asked again at t and 3t; silent at 7t", async () => {
+            const w = await world({ common: 10, rOnly: 300 });
+            let drop = true;
+            w.hooks.toJ = (m) => (drop && m instanceof CellsV1 ? null : m);
+            const session = w.session(w.init(), {
+                ports: { requestTimeoutMs: T },
+            });
+            session.start();
+            await w.until(
+                () => w.sent(CellsReqV1).length === 1,
+                "cells request"
+            );
+            const at = w.timers.now;
+            expect(session.state(NS)).toBe("peeling");
+            w.timers.advance(T - 1);
+            await settle();
+            expect(w.sent(CellsReqV1)).toHaveLength(1);
+            w.timers.advance(1);
+            await settle();
+            expect(w.sent(CellsReqV1)).toHaveLength(2);
+            w.timers.advance(2 * T);
+            await settle();
+            expect(w.sent(CellsReqV1)).toHaveLength(3);
+            w.timers.advance(4 * T - 1);
+            await settle();
+            expect(session.state(NS)).toBe("peeling");
+            w.timers.advance(1);
+            await settle();
+            expect(session.state(NS)).toBe("silent");
+            expect(w.timers.now - at).toBe(7 * T);
+            expect(session.debug().armedTimers).toBe(0);
+            drop = false;
+            session.resume();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            expect(only(session.outcome!).pulled).toBe(300);
+        });
+
+        it("the sync window ends after t without an arrival; a list page is asked again at t and 3t; silent at 7t", async () => {
+            const w = await JoinerWorld.create();
+            w.rows([w.r], 5000);
+            await w.start();
+            w.syncDelivering.add(NS);
+            let drop = true;
+            w.hooks.toJ = (m) => (drop && m instanceof ListV1 ? null : m);
+            const session = w.session(w.init(), {
+                ports: { requestTimeoutMs: T },
+            });
+            session.start();
+            await w.until(
+                () => session.state(NS) === "waiting-sync",
+                "waiting-sync"
+            );
+            expect(session.debug().armedTimers).toBe(1);
+            w.timers.advance(T - 1);
+            await settle();
+            expect(session.state(NS)).toBe("waiting-sync");
+            expect(w.sent(ListPageV1)).toHaveLength(0);
+            w.timers.advance(1);
+            await w.until(
+                () => w.sent(ListPageV1).length === 1,
+                "first list page"
+            );
+            const at = w.timers.now;
+            w.timers.advance(T - 1);
+            await settle();
+            expect(w.sent(ListPageV1)).toHaveLength(1);
+            w.timers.advance(1);
+            await settle();
+            expect(w.sent(ListPageV1)).toHaveLength(2);
+            w.timers.advance(2 * T);
+            await settle();
+            expect(w.sent(ListPageV1)).toHaveLength(3);
+            w.timers.advance(4 * T);
+            await settle();
+            expect(session.state(NS)).toBe("silent");
+            expect(w.timers.now - at).toBe(7 * T);
+            expect(session.debug().armedTimers).toBe(0);
+            drop = false;
+            session.resume();
+            await w.until(() => session.outcome !== undefined, "outcome");
+            const result = only(session.outcome!);
+            expect(result.mode).toBe("list");
+            expect(result.pulled).toBe(5000);
         });
     });
 

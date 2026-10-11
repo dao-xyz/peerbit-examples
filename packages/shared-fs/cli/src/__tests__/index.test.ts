@@ -6,18 +6,25 @@ import {
     Peerbit,
     PrepareForDisposalError,
     SharedFileSystem,
+    SharedFsError,
     SharedFsHandle,
+    SharedFsWritePendingError,
     SharedFsWriteReadyTimeoutError,
+    describeReadiness,
     encodePublicSignKey,
     openSharedFs,
+    type BootstrapStatus,
     type ReadinessStatus,
 } from "@peerbit/shared-fs";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+    assumeCompleteHint,
     conflictScanIsPartial,
     connectMountToNetwork,
+    createReadinessProgress,
     normalizeNativeMountpoint,
     openMountProfileFiles,
+    readinessProgressLine,
     resolveMountProfileDirectory,
     runCli,
     stopMountSession,
@@ -212,8 +219,258 @@ const readinessSnapshot = (
     ...status,
 });
 
+/**
+ * waiting-silent names the first silent required peer; another required
+ * peer can still be asked, reconciled or busy, and may yet answer.
+ */
+const silentBesideAnswering = () => [
+    readinessSnapshot({
+        state: "waiting-silent",
+        required: ["peer-a", "peer-b"],
+        silent: [{ peer: "peer-a", reachable: true }],
+        inFlight: [{ peer: "peer-b", state: "reconciling", scopes: {} }],
+    }),
+    readinessSnapshot({
+        state: "waiting-silent",
+        required: ["peer-a", "peer-b"],
+        silent: [{ peer: "peer-a", reachable: true, refused: "UNSUPPORTED" }],
+        inFlight: [{ peer: "peer-b", state: "asking", scopes: {} }],
+    }),
+    readinessSnapshot({
+        state: "waiting-silent",
+        required: ["peer-a", "peer-b"],
+        silent: [{ peer: "peer-a", reachable: true, parked: true }],
+        busy: ["peer-b"],
+    }),
+];
+
+/** waiting-silent with every required peer silent, refused or parked. */
+const everyRequiredPeerSilent = () =>
+    readinessSnapshot({
+        state: "waiting-silent",
+        required: ["peer-a", "peer-b", "peer-c"],
+        silent: [
+            { peer: "peer-a", reachable: true },
+            { peer: "peer-b", reachable: true, refused: "UNSUPPORTED" },
+            { peer: "peer-c", reachable: true, parked: true },
+        ],
+    });
+
 const WRITE_READY_TIMEOUT_PREFIX =
     "timed out awaiting shared filesystem write readiness: ";
+
+const ASSUME_COMPLETE_HINT =
+    " If no write-ready replica will answer and you vouch that this replica's view is complete, rerun with --assume-complete.";
+
+/**
+ * How an unsettled snapshot bootstrap phase settles, as the CLI words it:
+ * only inside one long run, so a retry or a short status run does not help.
+ */
+const UNVERIFIED_SETTLES =
+    "an unverified snapshot bootstrap converges only after about 10 minutes without new rows within one run";
+const OVERLAY_SETTLES =
+    "a snapshot overlay retires within 15 minutes, and one that retires unverified then needs about 10 more minutes without new rows, all within one run";
+const FETCHING_SETTLES =
+    "a snapshot fetch that succeeds installs an overlay, which retires within 15 minutes, and one that retires unverified then needs about 10 more minutes without new rows, all within one run";
+
+/** The hint while the phase has not settled: assumeComplete() refuses. */
+const unsettledHint = (phase: string, settles: string, timeoutMs: number) =>
+    ` If no write-ready replica will answer and you vouch that this replica's view is complete, rerun with --assume-complete and --write-ready-timeout-ms ${timeoutMs} or more: it is refused until the snapshot bootstrap settles (phase: ${phase}), and ${settles}.`;
+
+/** Why --assume-complete did not act while the phase has not settled. */
+const unsettledNotApplied = (
+    phase: string,
+    settles: string,
+    timeoutMs: number
+) =>
+    ` --assume-complete was not applied: the snapshot bootstrap has not settled (phase: ${phase}), and assumeComplete() is refused until it does. ${settles[0].toUpperCase()}${settles.slice(1)}, so rerun with --write-ready-timeout-ms ${timeoutMs} or more to keep the command open that long.`;
+
+/**
+ * Why --assume-complete did not act on a waiting-silent timeout in which one
+ * of two required peers is silent and the other can still answer.
+ */
+const STILL_ANSWERING_BESIDE_SILENT =
+    " --assume-complete was not applied: a required peer is still answering (waiting-silent, with 1 of 2 required peers in flight or busy), so this replica may yet reconcile with it; it applies only once none can (no-peer, no-qualified-donor, or waiting-silent with every required peer silent).";
+
+/** The warning --assume-complete prints once the view was assumed. */
+const ASSUMED_WARNING =
+    "--assume-complete: assuming this replica's view is complete.";
+
+const SILENT_PEER_ADVICE =
+    "A required peer that does not answer blocks while it is reachable, and another replicator does not change that: restart the silent peer or stop it, and retry.";
+
+/** The ETIMEDOUT of a join waiting for one reachable, silent peer. */
+const silentPeerTimeout = () =>
+    new SharedFsWriteReadyTimeoutError(
+        readinessSnapshot({
+            state: "waiting-silent",
+            required: ["peer-a"],
+            silent: [{ peer: "peer-a", reachable: true }],
+        })
+    );
+
+/**
+ * A creator's closed state directory (open mode, so any CLI identity may
+ * write): a CLI open of its address from there is warm, writable at once.
+ * It holds a file: a reopen of an empty store starts a snapshot bootstrap,
+ * and a CLI run that stops before it decides leaves the marker that gates
+ * the next open.
+ */
+const seedCreatorDirectory = async (
+    label: string,
+    files: Record<string, string> = { "/seeded.txt": "seeded" }
+) => {
+    const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), `peerbit-shared-fs-cli-${label}-`)
+    );
+    const peer = await Peerbit.create({ directory });
+    let seeded = false;
+    try {
+        const shared = await openSharedFs({
+            peerbit: peer,
+            machineLabel: `cli-${label}-seed`,
+            replicate: { factor: 1 },
+            bootstrap: false,
+            gc: false,
+        });
+        for (const [file, content] of Object.entries(files)) {
+            await shared.writeFile(file, content);
+        }
+        seeded = true;
+        return { directory, address: shared.address };
+    } finally {
+        await stopPeer(peer);
+        if (!seeded) {
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    }
+};
+
+/**
+ * Runs `run` with process.stderr.write captured (the progress line and the
+ * --assume-complete warning go there; console output does not) and stderr
+ * not a terminal, so progress comes as one line per readiness state, or
+ * with `terminal` a terminal that wide, so the line is rewritten in place;
+ * and settles with its outcome.
+ */
+const captureStderr = async (
+    run: () => Promise<unknown>,
+    terminal?: { columns: number }
+) => {
+    const chunks: string[] = [];
+    const saved = (["isTTY", "columns"] as const).map(
+        (key) =>
+            [key, Object.getOwnPropertyDescriptor(process.stderr, key)] as const
+    );
+    Object.defineProperty(process.stderr, "isTTY", {
+        value: terminal !== undefined,
+        configurable: true,
+    });
+    if (terminal) {
+        Object.defineProperty(process.stderr, "columns", {
+            value: terminal.columns,
+            configurable: true,
+        });
+    }
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(((
+        chunk: unknown
+    ) => {
+        chunks.push(String(chunk));
+        return true;
+    }) as never);
+    try {
+        const error = await run().then(
+            () => undefined,
+            (error: any) => error
+        );
+        return {
+            error,
+            chunks,
+            /** The progress lines written. */
+            progress: chunks.filter((chunk) =>
+                chunk.startsWith("write readiness: ")
+            ),
+        };
+    } finally {
+        write.mockRestore();
+        for (const [key, descriptor] of saved) {
+            if (descriptor) {
+                Object.defineProperty(process.stderr, key, descriptor);
+            } else {
+                delete (
+                    process.stderr as { isTTY?: boolean; columns?: number }
+                )[key];
+            }
+        }
+    }
+};
+
+/**
+ * Makes every SharedFsHandle's awaitWriteReady reject with `timeout` and its
+ * assumeComplete settle with `assume`; bootstrapStatus() reports `before`
+ * over the real status, and `after` over that once assumeComplete was
+ * called.
+ */
+const mockTimedOutReadiness = (
+    timeout: Error,
+    assume: () => Promise<void>,
+    after: Partial<BootstrapStatus> = {},
+    before: Partial<BootstrapStatus> = {}
+) => {
+    const realStatus = SharedFsHandle.prototype.bootstrapStatus;
+    let assumed = false;
+    const wait = vi
+        .spyOn(SharedFsHandle.prototype, "awaitWriteReady")
+        .mockRejectedValue(timeout);
+    const assumeComplete = vi
+        .spyOn(SharedFsHandle.prototype, "assumeComplete")
+        .mockImplementation(() => {
+            assumed = true;
+            return assume();
+        });
+    const status = vi
+        .spyOn(SharedFsHandle.prototype, "bootstrapStatus")
+        .mockImplementation(function (this: SharedFsHandle) {
+            const real = { ...realStatus.call(this), ...before };
+            return assumed ? { ...real, ...after } : real;
+        });
+    return {
+        wait,
+        assumeComplete,
+        restore: () => {
+            wait.mockRestore();
+            assumeComplete.mockRestore();
+            status.mockRestore();
+        },
+    };
+};
+
+/**
+ * runCli rejected by the parser (yargs strict mode): it reports the error
+ * on console.error and exits, so process.exit throws here instead. No
+ * command handler runs.
+ */
+const parseFailure = async (args: string[]) => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation(((
+        code?: number
+    ) => {
+        throw new Error(`process.exit(${code})`);
+    }) as never);
+    try {
+        const outcome = await runCli(args).then(
+            () => undefined,
+            (rejection: unknown) => rejection
+        );
+        return {
+            outcome,
+            output: error.mock.calls.flat().map(String).join("\n"),
+        };
+    } finally {
+        exit.mockRestore();
+        error.mockRestore();
+    }
+};
 
 describe("mount network connection", () => {
     const fakePeer = (bootstrap: () => Promise<unknown>) => ({
@@ -256,6 +513,219 @@ describe("mount network connection", () => {
         expect(peer.dial).toHaveBeenCalledWith(address);
         expect(peer.bootstrap).not.toHaveBeenCalled();
         expect(peer.enableBootstrapRecovery).not.toHaveBeenCalled();
+    });
+});
+
+describe("write readiness progress line", () => {
+    const contained = (peer: string, qualified = true) => ({
+        peer,
+        qualified,
+        source: qualified ? ("creator" as const) : ("none" as const),
+        scopes: ["namespace-v1" as const],
+        departed: false,
+    });
+    const reconciling = (inFlight: string[], containedPeers: string[] = []) =>
+        readinessSnapshot({
+            state: "reconciling",
+            required: [...inFlight, ...containedPeers],
+            inFlight: inFlight.map((peer) => ({
+                peer,
+                state: "reconciling" as const,
+                scopes: {},
+            })),
+            contained: containedPeers.map((peer) => contained(peer)),
+        });
+    const silent = readinessSnapshot({
+        state: "waiting-silent",
+        required: ["peer-a", "peer-b"],
+        silent: [{ peer: "peer-a", reachable: true }],
+        contained: [contained("peer-b")],
+    });
+    const stream = (tty?: { columns?: number }) => {
+        const chunks: string[] = [];
+        return {
+            chunks,
+            stream: {
+                write: (chunk: string) => chunks.push(chunk),
+                ...(tty ? { isTTY: true, columns: tty.columns } : {}),
+            },
+        };
+    };
+
+    it("is the library's reason plus the contained peers it does not count itself", () => {
+        expect(readinessProgressLine(silent, describeReadiness)).toBe(
+            "write readiness: waiting-silent: 1 of 2 required peers reachable and silent: peer-a (1 contained)"
+        );
+        expect(
+            readinessProgressLine(reconciling(["peer-a"]), describeReadiness)
+        ).toBe(
+            "write readiness: reconciling: 1 of 1 required peer in flight: peer-a"
+        );
+        // no-qualified-donor already counts and names its contained peers.
+        const noDonor = readinessSnapshot({
+            state: "no-qualified-donor",
+            contained: [contained("peer-a", false)],
+        });
+        expect(readinessProgressLine(noDonor, describeReadiness)).toBe(
+            `write readiness: ${describeReadiness(noDonor)}`
+        );
+        expect(
+            readinessProgressLine(
+                readinessSnapshot({
+                    state: "ready",
+                    satisfied: true,
+                    contained: [contained("peer-a")],
+                }),
+                describeReadiness
+            )
+        ).toBe("write readiness: ready");
+    });
+
+    it("rewrites one terminal line, cut to its width, and clears it at the end", () => {
+        const { chunks, stream: tty } = stream({ columns: 40 });
+        const progress = createReadinessProgress(tty, describeReadiness);
+        progress.update(reconciling(["peer-a"]));
+        // The same text is not written again.
+        progress.update(reconciling(["peer-a"]));
+        progress.update(silent);
+        const first = "write readiness: reconciling: 1 of 1 r…";
+        const second = "write readiness: waiting-silent: 1 of …";
+        expect(first).toHaveLength(39);
+        expect(second).toHaveLength(39);
+        expect(chunks).toEqual([`\r\x1b[2K${first}`, `\r\x1b[2K${second}`]);
+        progress.end();
+        progress.end();
+        progress.update(reconciling(["peer-b"]));
+        expect(chunks).toEqual([
+            `\r\x1b[2K${first}`,
+            `\r\x1b[2K${second}`,
+            "\r\x1b[2K",
+        ]);
+
+        // A line that fits is written whole; without updates end() writes
+        // nothing.
+        const wide = stream({ columns: 200 });
+        const fits = createReadinessProgress(wide.stream, describeReadiness);
+        fits.update(silent);
+        expect(wide.chunks).toEqual([
+            `\r\x1b[2K${readinessProgressLine(silent, describeReadiness)}`,
+        ]);
+        const idle = stream({ columns: 40 });
+        createReadinessProgress(idle.stream, describeReadiness).end();
+        expect(idle.chunks).toEqual([]);
+    });
+
+    it("prints one line per readiness state when stderr is not a terminal", () => {
+        const { chunks, stream: pipe } = stream();
+        const progress = createReadinessProgress(pipe, describeReadiness);
+        progress.update(reconciling(["peer-a"]));
+        // Another peer in the same state is not a new line.
+        progress.update(reconciling(["peer-a", "peer-b"], ["peer-c"]));
+        progress.update(silent);
+        progress.update(reconciling(["peer-a"]));
+        progress.end();
+        progress.update(silent);
+        expect(chunks).toEqual([
+            "write readiness: reconciling: 1 of 1 required peer in flight: peer-a\n",
+            `${readinessProgressLine(silent, describeReadiness)}\n`,
+            "write readiness: reconciling: 1 of 1 required peer in flight: peer-a\n",
+        ]);
+    });
+
+    it("names --assume-complete only where no answer is coming", () => {
+        // assumeComplete() acts in these phases.
+        for (const phase of ["off", "converged"] as const) {
+            for (const readiness of [
+                readinessSnapshot({ state: "no-peer" }),
+                readinessSnapshot({ state: "no-qualified-donor" }),
+                readinessSnapshot({ state: "waiting-silent" }),
+                everyRequiredPeerSilent(),
+            ]) {
+                expect(assumeCompleteHint(readiness, phase)).toBe(
+                    ASSUME_COMPLETE_HINT
+                );
+            }
+        }
+        for (const phase of [
+            "off",
+            "converged",
+            "fetching",
+            "unverified",
+            "overlay-active",
+        ] as const) {
+            for (const state of [
+                "reconciling",
+                "waiting-fetch",
+                "waiting-left",
+                "waiting-trust",
+                "waiting-phase",
+                "ready",
+            ] as const) {
+                expect(
+                    assumeCompleteHint(readinessSnapshot({ state }), phase)
+                ).toBe("");
+            }
+            // waiting-silent while another required peer can still answer.
+            // The library lists each required peer in one of silent,
+            // inFlight and busy; the hint does not rely on that: a required
+            // peer not listed as silent, or a peer in flight or busy not
+            // listed as required, can still answer too.
+            for (const readiness of [
+                ...silentBesideAnswering(),
+                readinessSnapshot({
+                    state: "waiting-silent",
+                    required: ["peer-a", "peer-b"],
+                    silent: [{ peer: "peer-a", reachable: true }],
+                }),
+                readinessSnapshot({
+                    state: "waiting-silent",
+                    required: ["peer-a"],
+                    silent: [{ peer: "peer-a", reachable: true }],
+                    inFlight: [{ peer: "peer-b", state: "asking", scopes: {} }],
+                }),
+                readinessSnapshot({
+                    state: "waiting-silent",
+                    required: ["peer-a"],
+                    silent: [{ peer: "peer-a", reachable: true }],
+                    busy: ["peer-b"],
+                }),
+            ]) {
+                expect(
+                    assumeCompleteHint(readiness, phase),
+                    describeReadiness(readiness)
+                ).toBe("");
+            }
+            expect(assumeCompleteHint(undefined, phase)).toBe("");
+        }
+    });
+
+    it("qualifies the --assume-complete hint while the snapshot bootstrap has not settled: it settles only inside one long run", () => {
+        for (const readiness of [
+            readinessSnapshot({ state: "no-peer" }),
+            readinessSnapshot({ state: "no-qualified-donor" }),
+            readinessSnapshot({ state: "waiting-silent" }),
+            everyRequiredPeerSilent(),
+        ]) {
+            expect(assumeCompleteHint(readiness, "unverified")).toBe(
+                unsettledHint("unverified", UNVERIFIED_SETTLES, 660_000)
+            );
+            expect(assumeCompleteHint(readiness, "overlay-active")).toBe(
+                unsettledHint("overlay-active", OVERLAY_SETTLES, 1_560_000)
+            );
+            // assumeComplete() waits out a fetch, and one that succeeds
+            // leaves an overlay it refuses: the long wait up front.
+            expect(assumeCompleteHint(readiness, "fetching")).toBe(
+                unsettledHint("fetching", FETCHING_SETTLES, 1_560_000)
+            );
+        }
+        // Nothing points at peerbit-fs status: a short run starts from the
+        // same persisted phase and never sees it settle.
+        expect(
+            assumeCompleteHint(
+                readinessSnapshot({ state: "no-peer" }),
+                "unverified"
+            )
+        ).not.toContain("status");
     });
 });
 
@@ -689,17 +1159,25 @@ describe("peerbit-fs cli", () => {
                 bootstrap: false,
                 gc: false,
             });
+            // A reopen of an empty store starts a snapshot bootstrap, whose
+            // phase the hint names; one that holds a file stays off.
+            await seeded.writeFile("/seeded.txt", "seeded");
             const address = seeded.address;
             await stopPeer(seedPeer);
             seedPeer = undefined;
 
             // Fault injection tests the CLI's report; the library's readiness
-            // tests time out real joins and check their snapshots.
+            // tests time out real joins and check their snapshots. Every
+            // required peer is silent, so no answer is coming and the
+            // --assume-complete hint is named.
             const timeout = new SharedFsWriteReadyTimeoutError(
                 readinessSnapshot({
                     state: "waiting-silent",
                     required: ["peer-a", "peer-b"],
-                    silent: [{ peer: "peer-a", reachable: true }],
+                    silent: [
+                        { peer: "peer-a", reachable: true },
+                        { peer: "peer-b", reachable: true },
+                    ],
                 })
             );
             const reason = timeout.message.slice(
@@ -729,7 +1207,7 @@ describe("peerbit-fs cli", () => {
             );
             expect(mount).toBeInstanceOf(Error);
             expect(mount.message).toBe(
-                `mount did not establish a safe initial write view within 750 ms: ${reason}. ${advice} --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`
+                `mount did not establish a safe initial write view within 750 ms: ${reason}. ${advice}${ASSUME_COMPLETE_HINT} --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`
             );
             expect(mount.cause).toBe(timeout);
             expect(waitSpy).toHaveBeenLastCalledWith({ timeout: 750 });
@@ -750,7 +1228,7 @@ describe("peerbit-fs cli", () => {
                 );
                 expect(error).toBeInstanceOf(Error);
                 expect(error.message).toBe(
-                    `${args[0]} did not establish a safe write view within 750 ms: ${reason}. ${advice}`
+                    `${args[0]} did not establish a safe write view within 750 ms: ${reason}. ${advice}${ASSUME_COMPLETE_HINT}`
                 );
                 expect(error.cause).toBe(timeout);
             }
@@ -764,6 +1242,715 @@ describe("peerbit-fs cli", () => {
                 await stopPeer(seedPeer);
             }
             await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("takes --assume-complete only on the commands that wait for write readiness", async () => {
+        const createSpy = vi.spyOn(Peerbit, "create");
+        const args = (line: string) => [...line.split(" "), "--directory", ""];
+        try {
+            // Accepted: each handler runs and refuses --no-replicate first.
+            for (const [line, refusal] of [
+                [
+                    "mount zb2rh-not-opened /tmp/peerbit-shared-fs-not-mounted",
+                    "mount requires a full replica",
+                ],
+                [
+                    "resolve-conflict zb2rh-not-opened /file.txt version-missing",
+                    "resolve-conflict requires a full replica",
+                ],
+                [
+                    "resolve-naming-conflict zb2rh-not-opened file:missing keep",
+                    "resolve-naming-conflict requires a full replica",
+                ],
+            ]) {
+                await expect(
+                    runCli(args(`${line} --assume-complete --no-replicate`))
+                ).rejects.toThrow(refusal);
+            }
+            await expect(
+                runCli(
+                    args(
+                        "mount zb2rh-not-opened /tmp/peerbit-shared-fs-not-mounted --assume-complete --allow-partial-writes"
+                    )
+                )
+            ).rejects.toThrow(
+                "--assume-complete cannot be combined with --allow-partial-writes: the override never records a readiness proof, and assumeComplete() is refused under it."
+            );
+            // snapshot has no --assume-complete (a snapshot from an assumed
+            // view would outrank complete ones) and no --settle-seconds.
+            for (const [line, unknown] of [
+                [
+                    "snapshot zb2rh-not-opened --assume-complete",
+                    "assume-complete",
+                ],
+                [
+                    "status zb2rh-not-opened --assume-complete",
+                    "assume-complete",
+                ],
+                [
+                    "snapshot zb2rh-not-opened --settle-seconds 5",
+                    "settle-seconds",
+                ],
+            ]) {
+                const { outcome, output } = await parseFailure(args(line));
+                expect(outcome).toBeInstanceOf(Error);
+                expect(output).toMatch(
+                    new RegExp(`Unknown arguments?: ${unknown}`)
+                );
+            }
+            expect(createSpy).not.toHaveBeenCalled();
+        } finally {
+            createSpy.mockRestore();
+        }
+    });
+
+    it("takes --write-ready-timeout-ms only as an integer from 1 to 2147483647, before Peerbit starts", async () => {
+        const reached = new Error("Peerbit.create reached");
+        const createSpy = vi
+            .spyOn(Peerbit, "create")
+            .mockRejectedValue(reached);
+        const args = (line: string) => [...line.split(" "), "--directory", ""];
+        const commands = [
+            "mount zb2rh-not-opened /tmp/peerbit-shared-fs-not-mounted --native-adapter /tmp/peerbit-shared-fs-adapter-never-started",
+            "resolve-conflict zb2rh-not-opened /file.txt version-missing",
+            "resolve-naming-conflict zb2rh-not-opened file:missing keep",
+            "snapshot zb2rh-not-opened",
+        ];
+        // snapshot has no --assume-complete.
+        const flag = (command: string) =>
+            command.startsWith("snapshot") ? "" : " --assume-complete";
+        try {
+            // Above 2147483647 Node runs the timer after 1 ms: the wait
+            // would time out at once, and --assume-complete would act on it.
+            for (const command of commands) {
+                for (const [value, got] of [
+                    ["2147483648", "2147483648"],
+                    ["4294967296", "4294967296"],
+                    ["0", "0"],
+                    ["-1", "-1"],
+                    ["1.5", "1.5"],
+                    ["abc", "NaN"],
+                ]) {
+                    await expect(
+                        runCli(
+                            args(
+                                `${command}${flag(command)} --write-ready-timeout-ms=${value}`
+                            )
+                        ),
+                        `${command} ${value}`
+                    ).rejects.toThrow(
+                        `--write-ready-timeout-ms must be an integer from 1 to 2147483647 (milliseconds); got ${got}`
+                    );
+                }
+            }
+            expect(createSpy).not.toHaveBeenCalled();
+            // The bounds pass, up to opening Peerbit.
+            for (const command of commands) {
+                for (const value of ["1", "2147483647"]) {
+                    await expect(
+                        runCli(
+                            args(`${command} --write-ready-timeout-ms ${value}`)
+                        ),
+                        `${command} ${value}`
+                    ).rejects.toBe(reached);
+                }
+            }
+            expect(createSpy).toHaveBeenCalledTimes(commands.length * 2);
+        } finally {
+            createSpy.mockRestore();
+        }
+    });
+
+    it("says in its help what --assume-complete risks and that it persists", async () => {
+        const help = async (command: string) => {
+            const log = vi.spyOn(console, "log").mockImplementation(() => {});
+            const exit = vi.spyOn(process, "exit").mockImplementation(((
+                code?: number
+            ) => {
+                throw new Error(`process.exit(${code})`);
+            }) as never);
+            try {
+                await runCli([command, "--help"]).catch(() => {});
+                // yargs wraps the description column inside words.
+                return log.mock.calls
+                    .flat()
+                    .map(String)
+                    .join("")
+                    .replace(/\s+/g, "");
+            } finally {
+                exit.mockRestore();
+                log.mockRestore();
+            }
+        };
+        for (const command of [
+            "mount",
+            "resolve-conflict",
+            "resolve-naming-conflict",
+        ]) {
+            const text = await help(command);
+            expect(text, command).toContain("--assume-complete");
+            for (const phrase of [
+                "and no required peer can still answer (no peer, none write-ready, or every required peer stays silent)",
+                "rows held only by peers it did not reconcile with are missing from its view, and later writes can conflict with them",
+                "Unlike --allow-partial-writes, it persists: the replica stays writable on later runs (source operator)",
+                "Not applied until a snapshot bootstrap settles",
+            ]) {
+                expect(text, `${command}: ${phrase}`).toContain(
+                    phrase.replace(/\s+/g, "")
+                );
+            }
+        }
+    });
+
+    it("assumes the view complete after the wait timed out with --assume-complete, and maps its refusals", async () => {
+        const seed = await seedCreatorDirectory("assume");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const createSpy = mockCliBootstrap();
+        const timeout = silentPeerTimeout();
+        const reason = timeout.message.slice(WRITE_READY_TIMEOUT_PREFIX.length);
+        let mocked: ReturnType<typeof mockTimedOutReadiness> | undefined;
+        const run = (args: string[]) =>
+            captureStderr(() =>
+                runCli([
+                    ...args,
+                    "--directory",
+                    seed.directory,
+                    "--write-ready-timeout-ms",
+                    "750",
+                    "--assume-complete",
+                ])
+            );
+        const resolveArgs = [
+            "resolve-conflict",
+            seed.address,
+            "/file.txt",
+            "version-missing",
+        ];
+        try {
+            // Fault injection on a warm open tests the CLI's flow; the end
+            // to end case below gates a real join.
+            mocked = mockTimedOutReadiness(timeout, async () => {}, {
+                writeReadinessSource: "operator",
+            });
+            const resolved = await run(resolveArgs);
+            // resolve-conflict continues past readiness to its own check.
+            expect(resolved.error?.message).toBe(
+                "Version version-missing is not a current conflict head for /file.txt; rerun peerbit-fs conflicts before retrying"
+            );
+            expect(mocked.wait).toHaveBeenCalledTimes(1);
+            // A warm open shows no progress: the call is exactly { timeout }.
+            expect(mocked.wait).toHaveBeenCalledWith({ timeout: 750 });
+            expect(mocked.assumeComplete).toHaveBeenCalledTimes(1);
+            expect(
+                mocked.wait.mock.invocationCallOrder[0] <
+                    mocked.assumeComplete.mock.invocationCallOrder[0]
+            ).toBe(true);
+            expect(resolved.chunks.join("")).toContain(
+                `Write readiness was not proven within 750 ms: ${reason}. --assume-complete: assuming this replica's view is complete. Rows held only by peers it did not reconcile with are not in it, and writes made now can conflict with them.`
+            );
+            expect(resolved.progress).toEqual([]);
+
+            // mount prints the source before it fails at the fake adapter.
+            const mounted = await run([
+                "mount",
+                seed.address,
+                path.join(seed.directory, "not-mounted"),
+                "--native-adapter",
+                path.join(seed.directory, "adapter-never-started"),
+            ]);
+            expect(mounted.error).toBeInstanceOf(Error);
+            expect(mocked.assumeComplete).toHaveBeenCalledTimes(2);
+            expect(log).toHaveBeenCalledWith(
+                "write readiness: ready (operator)"
+            );
+            expect(
+                log.mock.calls.some(([line]) =>
+                    String(line).includes("Mounted")
+                )
+            ).toBe(false);
+
+            // resolve-naming-conflict passes the flag on too, and continues
+            // past readiness to its own check.
+            const named = await run([
+                "resolve-naming-conflict",
+                seed.address,
+                "node",
+                "keep",
+            ]);
+            expect(named.error?.message).toBe(
+                "Node node is not part of a currently visible naming conflict; rerun peerbit-fs naming-conflicts before retrying"
+            );
+            expect(mocked.wait).toHaveBeenCalledTimes(3);
+            expect(mocked.assumeComplete).toHaveBeenCalledTimes(3);
+            expect(
+                mocked.wait.mock.invocationCallOrder[2] <
+                    mocked.assumeComplete.mock.invocationCallOrder[2]
+            ).toBe(true);
+            mocked.restore();
+
+            const invalid = new SharedFsError(
+                "EINVAL",
+                "assumeComplete needs a full replica; an observer or partial replica never becomes writable"
+            );
+            mocked = mockTimedOutReadiness(timeout, async () => {
+                throw invalid;
+            });
+            const refused = await run(resolveArgs);
+            expect(refused.error?.message).toBe(
+                `--assume-complete was refused: ${invalid.message}`
+            );
+            expect(refused.error?.cause).toBe(invalid);
+            // The warning comes only once the view was assumed.
+            expect(refused.chunks.join("")).not.toContain(ASSUMED_WARNING);
+            mocked.restore();
+
+            const pending = new SharedFsWritePendingError(
+                "assumeComplete",
+                "fetching"
+            );
+            mocked = mockTimedOutReadiness(
+                timeout,
+                async () => {
+                    throw pending;
+                },
+                { phase: "fetching" }
+            );
+            const unsettled = await run(resolveArgs);
+            // The phase settles only inside one long run, so the advice is a
+            // longer wait, never a status check.
+            expect(unsettled.error?.message).toBe(
+                `resolve-conflict did not establish a safe write view within 750 ms: ${reason}. ${SILENT_PEER_ADVICE}${unsettledNotApplied("fetching", FETCHING_SETTLES, 1_560_000)}`
+            );
+            expect(unsettled.error?.cause).toBe(pending);
+            expect(unsettled.chunks.join("")).not.toContain(ASSUMED_WARNING);
+            mocked.restore();
+
+            // Anything else (a close) is the command's own error.
+            const closed = new SharedFsError(
+                "ECLOSED",
+                "filesystem lifecycle changed before assumeComplete"
+            );
+            mocked = mockTimedOutReadiness(timeout, async () => {
+                throw closed;
+            });
+            expect((await run(resolveArgs)).error).toBe(closed);
+        } finally {
+            mocked?.restore();
+            createSpy.mockRestore();
+            log.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
+        }
+    });
+
+    it("mount under --allow-partial-writes says partial writes are allowed instead of naming a source", async () => {
+        const seed = await seedCreatorDirectory("partial");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const createSpy = mockCliBootstrap();
+        try {
+            const error = await runCli([
+                "mount",
+                seed.address,
+                path.join(seed.directory, "not-mounted"),
+                "--native-adapter",
+                path.join(seed.directory, "adapter-never-started"),
+                "--directory",
+                seed.directory,
+                "--allow-partial-writes",
+            ]).then(
+                () => undefined,
+                (error: unknown) => error
+            );
+            // Printed before it fails at the fake adapter.
+            expect(error).toBeInstanceOf(Error);
+            expect(
+                log.mock.calls
+                    .map(([line]) => String(line))
+                    .filter((line) => line.startsWith("write readiness: "))
+            ).toEqual([
+                "write readiness: partial writes allowed for this session (--allow-partial-writes)",
+            ]);
+        } finally {
+            createSpy.mockRestore();
+            log.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
+        }
+    });
+
+    it("names --assume-complete on a timeout only where it applies", async () => {
+        const seed = await seedCreatorDirectory("hint");
+        const createSpy = mockCliBootstrap();
+        const timedOut = async (args: string[], readiness: ReadinessStatus) => {
+            const timeout = new SharedFsWriteReadyTimeoutError(readiness);
+            const mocked = mockTimedOutReadiness(timeout, async () => {});
+            try {
+                const error = await runCli([
+                    ...args,
+                    "--directory",
+                    seed.directory,
+                    "--write-ready-timeout-ms",
+                    "750",
+                ]).then(
+                    () => undefined,
+                    (error) => error
+                );
+                expect(error?.cause).toBe(timeout);
+                // Without the flag the CLI never assumes.
+                expect(mocked.assumeComplete).not.toHaveBeenCalled();
+                return String(error.message);
+            } finally {
+                mocked.restore();
+            }
+        };
+        const resolveConflict = [
+            "resolve-conflict",
+            seed.address,
+            "/file.txt",
+            "version-missing",
+        ];
+        const keep = ["resolve-naming-conflict", seed.address, "node", "keep"];
+        try {
+            const noPeer = await timedOut(
+                keep,
+                readinessSnapshot({ state: "no-peer" })
+            );
+            expect(noPeer).toContain(": no-peer: ");
+            expect(
+                noPeer.endsWith(
+                    `. Keep a complete replicator connected and retry.${ASSUME_COMPLETE_HINT}`
+                )
+            ).toBe(true);
+            // A peer still being asked may answer: no hint (the states are
+            // covered by the assumeCompleteHint unit test).
+            const reconciling = await timedOut(
+                resolveConflict,
+                readinessSnapshot({
+                    state: "reconciling",
+                    required: ["peer-a"],
+                    inFlight: [
+                        { peer: "peer-a", state: "reconciling", scopes: {} },
+                    ],
+                })
+            );
+            expect(reconciling).toContain(": reconciling: ");
+            expect(reconciling).not.toContain("--assume-complete");
+            // snapshot does not take the flag, so it never names it.
+            const timeout = silentPeerTimeout();
+            expect(
+                await timedOut(["snapshot", seed.address], timeout.readiness!)
+            ).toBe(
+                `snapshot did not establish a proven write view within 750 ms: ${timeout.message.slice(WRITE_READY_TIMEOUT_PREFIX.length)}. ${SILENT_PEER_ADVICE}`
+            );
+        } finally {
+            createSpy.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
+        }
+    });
+
+    it("applies --assume-complete only where no answer is coming and the snapshot bootstrap has settled, and says why not otherwise", async () => {
+        const seed = await seedCreatorDirectory("assume-where");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const createSpy = mockCliBootstrap();
+        const notAHead =
+            "Version version-missing is not a current conflict head for /file.txt; rerun peerbit-fs conflicts before retrying";
+        const stillAnswering = (state: string) =>
+            ` --assume-complete was not applied: a required peer is still answering (${state}), so this replica may yet prove its view; it applies only once none can (no-peer, no-qualified-donor, or waiting-silent with every required peer silent).`;
+        const notApplicable =
+            " --assume-complete was not applied: it applies only when the wait ends with no required peer that can still answer (no-peer, no-qualified-donor, or waiting-silent with every required peer silent).";
+        /** resolve-conflict (or mount) timing out with `readiness`. */
+        const timedOut = async (
+            readiness: ReadinessStatus | undefined,
+            options: {
+                flag?: boolean;
+                phase?: BootstrapStatus["phase"];
+                assume?: () => Promise<void>;
+                mount?: boolean;
+            } = {}
+        ) => {
+            const timeout = new SharedFsWriteReadyTimeoutError(readiness);
+            const mocked = mockTimedOutReadiness(
+                timeout,
+                options.assume ?? (async () => {}),
+                { writeReadinessSource: "operator" },
+                options.phase ? { phase: options.phase } : {}
+            );
+            const command = options.mount
+                ? [
+                      "mount",
+                      seed.address,
+                      path.join(seed.directory, "not-mounted"),
+                      "--native-adapter",
+                      path.join(seed.directory, "adapter-never-started"),
+                  ]
+                : [
+                      "resolve-conflict",
+                      seed.address,
+                      "/file.txt",
+                      "version-missing",
+                  ];
+            try {
+                const { error, chunks } = await captureStderr(() =>
+                    runCli([
+                        ...command,
+                        "--directory",
+                        seed.directory,
+                        "--write-ready-timeout-ms",
+                        "750",
+                        ...(options.flag === false
+                            ? []
+                            : ["--assume-complete"]),
+                    ])
+                );
+                return {
+                    error,
+                    timeout,
+                    stderr: chunks.join(""),
+                    assumed: mocked.assumeComplete.mock.calls.length,
+                    /** The timeout message without --assume-complete. */
+                    base: writeReadyTimeoutMessage(
+                        `${options.mount ? "mount did not establish a safe initial write view" : "resolve-conflict did not establish a safe write view"} within 750 ms`,
+                        timeout
+                    ),
+                };
+            } finally {
+                mocked.restore();
+            }
+        };
+        try {
+            // A required peer can still answer: never assumed, in any phase.
+            const inFlight = [
+                {
+                    peer: "peer-a",
+                    state: "reconciling" as const,
+                    scopes: {},
+                },
+            ];
+            for (const readiness of [
+                readinessSnapshot({
+                    state: "reconciling",
+                    required: ["peer-a"],
+                    inFlight,
+                }),
+                readinessSnapshot({
+                    state: "waiting-left",
+                    required: ["peer-a"],
+                    inFlight: [
+                        {
+                            peer: "peer-a",
+                            state: "left-unanswered",
+                            scopes: {},
+                        },
+                    ],
+                }),
+                readinessSnapshot({
+                    state: "waiting-fetch",
+                    required: ["peer-a"],
+                    fetchPending: [{ peer: "peer-a", hashes: 3 }],
+                }),
+                readinessSnapshot({
+                    state: "waiting-trust",
+                    required: ["peer-a"],
+                }),
+            ]) {
+                const outcome = await timedOut(readiness);
+                expect(outcome.assumed, readiness.state).toBe(0);
+                expect(outcome.error?.message).toBe(
+                    `${outcome.base}${stillAnswering(readiness.state)}`
+                );
+                expect(outcome.error?.cause).toBe(outcome.timeout);
+                expect(outcome.stderr).not.toContain(ASSUMED_WARNING);
+            }
+            // waiting-silent names one silent peer while another is still
+            // asked, reconciled or busy: never assumed, and the hint is not
+            // given without the flag either.
+            for (const readiness of silentBesideAnswering()) {
+                const label = describeReadiness(readiness);
+                const outcome = await timedOut(readiness, { phase: "off" });
+                expect(outcome.assumed, label).toBe(0);
+                expect(outcome.error?.message, label).toBe(
+                    `${outcome.base}${STILL_ANSWERING_BESIDE_SILENT}`
+                );
+                expect(outcome.error?.cause).toBe(outcome.timeout);
+                expect(outcome.stderr).not.toContain(ASSUMED_WARNING);
+                const unflagged = await timedOut(readiness, {
+                    flag: false,
+                    phase: "off",
+                });
+                expect(unflagged.assumed, label).toBe(0);
+                expect(unflagged.error?.message, label).toBe(unflagged.base);
+            }
+            // mount's note still comes last.
+            const mounted = await timedOut(
+                readinessSnapshot({
+                    state: "reconciling",
+                    required: ["peer-a"],
+                    inFlight,
+                }),
+                { mount: true }
+            );
+            expect(mounted.assumed).toBe(0);
+            expect(mounted.error?.message).toBe(
+                `${mounted.base}${stillAnswering("reconciling")} --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.`
+            );
+
+            // Not a state where a peer answers either: no snapshot, this
+            // replica's own fault, a proof being persisted, ready.
+            for (const readiness of [
+                undefined,
+                readinessSnapshot({ state: "reconciling", fault: "lost" }),
+                readinessSnapshot({ state: "reconciling", satisfied: true }),
+                readinessSnapshot({ state: "ready", satisfied: true }),
+            ]) {
+                const outcome = await timedOut(readiness);
+                expect(outcome.assumed).toBe(0);
+                expect(outcome.error?.message).toBe(
+                    `${outcome.base}${notApplicable}`
+                );
+                expect(outcome.error?.cause).toBe(outcome.timeout);
+            }
+
+            // Every peer accounted for, the phase not settled: the join
+            // turns writable by itself once it settles, within one run.
+            for (const [phase, settles, timeoutMs] of [
+                ["unverified", UNVERIFIED_SETTLES, 660_000],
+                ["fetching", FETCHING_SETTLES, 1_560_000],
+            ] as const) {
+                const settling = await timedOut(
+                    readinessSnapshot({ state: "waiting-phase" }),
+                    { phase }
+                );
+                expect(settling.assumed).toBe(0);
+                expect(settling.error?.message).toBe(
+                    `${settling.base} --assume-complete was not applied: every required peer is accounted for, and this replica turns writable by itself once the snapshot bootstrap settles (phase: ${phase}). ${settles[0].toUpperCase()}${settles.slice(1)}, so rerun with --write-ready-timeout-ms ${timeoutMs} or more to keep the command open that long.`
+                );
+            }
+
+            // No answer is coming, but assumeComplete() refuses the
+            // unsettled phase: no warning, and advice that ends the loop.
+            const pending = new SharedFsWritePendingError(
+                "assumeComplete",
+                "unverified"
+            );
+            const refused = await timedOut(
+                readinessSnapshot({ state: "no-peer" }),
+                {
+                    phase: "unverified",
+                    assume: async () => {
+                        throw pending;
+                    },
+                }
+            );
+            expect(refused.assumed).toBe(1);
+            expect(refused.error?.message).toBe(
+                `${refused.base}${unsettledNotApplied("unverified", UNVERIFIED_SETTLES, 660_000)}`
+            );
+            expect(refused.error?.cause).toBe(pending);
+            expect(refused.stderr).not.toContain(ASSUMED_WARNING);
+
+            // Without the flag the hint says the same, and asks for the
+            // long wait while a fetch may still leave an overlay.
+            for (const [phase, settles, timeoutMs] of [
+                ["unverified", UNVERIFIED_SETTLES, 660_000],
+                ["overlay-active", OVERLAY_SETTLES, 1_560_000],
+                ["fetching", FETCHING_SETTLES, 1_560_000],
+            ] as const) {
+                const hinted = await timedOut(
+                    readinessSnapshot({ state: "no-peer" }),
+                    { flag: false, phase }
+                );
+                expect(hinted.assumed).toBe(0);
+                expect(hinted.error?.message).toBe(
+                    `${hinted.base}${unsettledHint(phase, settles, timeoutMs)}`
+                );
+            }
+
+            // The three states where no answer is coming, with the phase
+            // settled: assumed, then warned, and the command goes on.
+            for (const [readiness, phase] of [
+                [readinessSnapshot({ state: "no-peer" }), "off"],
+                [
+                    readinessSnapshot({ state: "no-qualified-donor" }),
+                    "converged",
+                ],
+                [readinessSnapshot({ state: "waiting-silent" }), "off"],
+                [everyRequiredPeerSilent(), "off"],
+            ] as const) {
+                const assumed = await timedOut(readiness, { phase });
+                expect(assumed.assumed, describeReadiness(readiness)).toBe(1);
+                expect(assumed.error?.message).toBe(notAHead);
+                expect(assumed.stderr).toContain(ASSUMED_WARNING);
+            }
+        } finally {
+            createSpy.mockRestore();
+            log.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
+        }
+    });
+
+    it("publishes a snapshot once write readiness holds, without a quiet period", async () => {
+        const seed = await seedCreatorDirectory("snapshot");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const createSpy = mockCliBootstrap();
+        const wait = vi.spyOn(SharedFsHandle.prototype, "awaitWriteReady");
+        try {
+            await runCli([
+                "snapshot",
+                seed.address,
+                "--directory",
+                seed.directory,
+                "--json",
+            ]);
+            // A warm creator directory is ready at once; the default
+            // timeout is 120 s.
+            expect(wait).toHaveBeenCalledTimes(1);
+            expect(wait).toHaveBeenCalledWith({ timeout: 120_000 });
+            expect(log).toHaveBeenCalledTimes(1);
+            expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+                manifestId: expect.any(String),
+                docs: expect.stringMatching(/^[1-9]\d*$/),
+                snapshotSeq: expect.stringMatching(/^\d+$/),
+            });
+        } finally {
+            wait.mockRestore();
+            createSpy.mockRestore();
+            log.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
+        }
+    });
+
+    it("prints a creator directory's status with no readiness snapshot", async () => {
+        const seed = await seedCreatorDirectory("status-creator");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const createSpy = mockCliBootstrap();
+        try {
+            await runCli([
+                "status",
+                seed.address,
+                "--json",
+                "--directory",
+                seed.directory,
+            ]);
+            expect(
+                JSON.parse(String(log.mock.calls[0]?.[0])).filesystem.bootstrap
+            ).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "creator",
+                readiness: null,
+            });
+            log.mockClear();
+            await runCli([
+                "status",
+                seed.address,
+                "--directory",
+                seed.directory,
+            ]);
+            expect(log).toHaveBeenCalledWith(
+                "write readiness: ready (creator)"
+            );
+        } finally {
+            createSpy.mockRestore();
+            log.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
         }
     });
 
@@ -1807,6 +2994,443 @@ describe("peerbit-fs cli", () => {
             expect(reader.address).toBe(writer.address);
         } finally {
             await Promise.all([stopPeer(writerPeer), stopPeer(readerPeer)]);
+        }
+    });
+});
+
+describe("write readiness of a join whose only peer never answers", () => {
+    type Seed = { peer: Peerbit; address: string; dial: string };
+    let seed: Seed | undefined;
+    /** Seeds a test started; stopped after all. */
+    const extraSeeds: Seed[] = [];
+    const directories: string[] = [];
+    const freshDirectory = async (label: string) => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), `peerbit-shared-fs-cli-${label}-`)
+        );
+        directories.push(directory);
+        return directory;
+    };
+    /** The open's persisted readiness state (the sidecar). */
+    const stateOf = async (directory: string) => {
+        const stateDirectory = path.join(directory, "shared-fs-bootstrap");
+        const [name] = await fs.readdir(stateDirectory);
+        return JSON.parse(
+            await fs.readFile(path.join(stateDirectory, name), "utf8")
+        );
+    };
+
+    /**
+     * A creator in open mode whose readiness responder handles requests
+     * with `respond(original)` instead: a reachable peer that holds the
+     * filesystem and never proves a join, so a CLI join that reaches only
+     * it stays gated. With `of`, a replica of that seed's filesystem
+     * instead, dialed to it.
+     */
+    const startSeed = async (
+        label: string,
+        respond: (
+            original: (message: any, from: unknown) => void
+        ) => (message: any, from: unknown) => void,
+        of?: Seed
+    ): Promise<Seed> => {
+        const peer = await Peerbit.create();
+        try {
+            if (of) await peer.dial(of.dial);
+            const shared = await openSharedFs({
+                peerbit: peer,
+                ...(of ? { address: of.address } : {}),
+                machineLabel: `cli-${label}-seed`,
+                replicate: { factor: 1 },
+                gc: false,
+            });
+            const responder = (shared.program as any).readinessRuntime
+                .responder;
+            responder.onMessage = respond(responder.onMessage.bind(responder));
+            const addresses = peer.getMultiaddrs().map(String);
+            return {
+                peer,
+                address: shared.address,
+                dial:
+                    addresses.find(
+                        (address) =>
+                            address.includes("/tcp/") &&
+                            !address.includes("/ws")
+                    ) ?? addresses[0],
+            };
+        } catch (error) {
+            await stopPeer(peer);
+            throw error;
+        }
+    };
+
+    /**
+     * Answers every request as a peer on another readiness wire version
+     * would: refused (UNSUPPORTED).
+     */
+    const refuseEveryRequest =
+        (original: (message: any, from: unknown) => void) =>
+        (message: any, from: unknown) =>
+            original(
+                Object.assign(message, { version: message.version + 1 }),
+                from
+            );
+
+    beforeAll(async () => {
+        // Ignores every request: it never answers a join.
+        seed = await startSeed("silent", () => () => {});
+    });
+
+    afterAll(async () => {
+        if (seed) {
+            await stopPeer(seed.peer);
+        }
+        for (const extra of extraSeeds.splice(0)) {
+            await stopPeer(extra.peer);
+        }
+        for (const directory of directories) {
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("shows one progress line per readiness state while a fresh open waits", async () => {
+        const directory = await freshDirectory("progress");
+        const asking = readinessSnapshot({
+            state: "reconciling",
+            required: ["peer-a"],
+            inFlight: [{ peer: "peer-a", state: "reconciling", scopes: {} }],
+        });
+        const busy = readinessSnapshot({
+            state: "reconciling",
+            required: ["peer-a"],
+            busy: ["peer-a"],
+        });
+        const silent = silentPeerTimeout().readiness!;
+        let updates: ReadinessStatus[] = [];
+        const options: unknown[] = [];
+        // The library calls onProgress once at the start of the wait and on
+        // every readiness:progress event; this stands in for both.
+        const wait = vi
+            .spyOn(SharedFsHandle.prototype, "awaitWriteReady")
+            .mockImplementation(async (request) => {
+                options.push(request);
+                for (const update of updates) request?.onProgress?.(update);
+                throw silentPeerTimeout();
+            });
+        // The hint names the snapshot bootstrap phase, and a fresh open's
+        // background decision may start a fetch at any point: pinned off.
+        const realStatus = SharedFsHandle.prototype.bootstrapStatus;
+        const status = vi
+            .spyOn(SharedFsHandle.prototype, "bootstrapStatus")
+            .mockImplementation(function (this: SharedFsHandle) {
+                return { ...realStatus.call(this), phase: "off" };
+            });
+        const run = () =>
+            captureStderr(() =>
+                runCli([
+                    "resolve-conflict",
+                    seed!.address,
+                    "/file.txt",
+                    "version-missing",
+                    "--peer",
+                    seed!.dial,
+                    "--directory",
+                    directory,
+                    "--write-ready-timeout-ms",
+                    "750",
+                ])
+            );
+        const line = (status: ReadinessStatus) =>
+            `${readinessProgressLine(status, describeReadiness)}\n`;
+        try {
+            updates = [asking, silent];
+            const changed = await run();
+            expect(options).toEqual([
+                { timeout: 750, onProgress: expect.any(Function) },
+            ]);
+            expect(changed.progress).toEqual([line(asking), line(silent)]);
+            expect(changed.error?.message).toBe(
+                `resolve-conflict did not establish a safe write view within 750 ms: ${silentPeerTimeout().message.slice(WRITE_READY_TIMEOUT_PREFIX.length)}. ${SILENT_PEER_ADVICE}${ASSUME_COMPLETE_HINT}`
+            );
+
+            updates = [asking, busy];
+            expect((await run()).progress).toEqual([line(asking)]);
+        } finally {
+            wait.mockRestore();
+            status.mockRestore();
+        }
+    });
+
+    it("in a terminal, clears the progress line once the wait ends: before the timeout error, the --assume-complete warning or the command's own output", async () => {
+        const asking = readinessSnapshot({
+            state: "reconciling",
+            required: ["peer-a"],
+            inFlight: [{ peer: "peer-a", state: "reconciling", scopes: {} }],
+        });
+        const line = `\r\x1b[2K${readinessProgressLine(asking, describeReadiness)}`;
+        let ends: "timeout" | "ready" = "timeout";
+        const wait = vi
+            .spyOn(SharedFsHandle.prototype, "awaitWriteReady")
+            .mockImplementation(async (request) => {
+                request?.onProgress?.(asking);
+                if (ends === "timeout") throw silentPeerTimeout();
+            });
+        const assumeComplete = vi
+            .spyOn(SharedFsHandle.prototype, "assumeComplete")
+            .mockResolvedValue(undefined);
+        const run = async (label: string, ...flags: string[]) => {
+            const directory = await freshDirectory(label);
+            const { error, chunks } = await captureStderr(
+                () =>
+                    runCli([
+                        "resolve-conflict",
+                        seed!.address,
+                        "/file.txt",
+                        "version-missing",
+                        "--peer",
+                        seed!.dial,
+                        "--directory",
+                        directory,
+                        "--write-ready-timeout-ms",
+                        "750",
+                        ...flags,
+                    ]),
+                { columns: 400 }
+            );
+            // One rewrite of the line, then the clear right after it.
+            expect(
+                chunks.filter((chunk) =>
+                    chunk.startsWith("\r\x1b[2Kwrite readiness: ")
+                )
+            ).toEqual([line]);
+            return { error, next: chunks.slice(chunks.indexOf(line) + 1) };
+        };
+        try {
+            const timedOut = await run("tty-timeout");
+            expect(timedOut.next[0]).toBe("\r\x1b[2K");
+            expect(timedOut.error?.cause).toBeInstanceOf(
+                SharedFsWriteReadyTimeoutError
+            );
+
+            const assumed = await run("tty-assume", "--assume-complete");
+            expect(assumed.next[0]).toBe("\r\x1b[2K");
+            expect(assumed.next[1]).toContain(
+                "--assume-complete: assuming this replica's view is complete."
+            );
+            expect(assumeComplete).toHaveBeenCalledTimes(1);
+
+            ends = "ready";
+            const ready = await run("tty-ready");
+            expect(ready.next[0]).toBe("\r\x1b[2K");
+            expect(ready.error?.message).toBe(
+                "Version version-missing is not a current conflict head for /file.txt; rerun peerbit-fs conflicts before retrying"
+            );
+        } finally {
+            wait.mockRestore();
+            assumeComplete.mockRestore();
+        }
+    });
+
+    it("leaves a join gated with --assume-complete while its required peer is still being asked", async () => {
+        const directory = await freshDirectory("assume-asking");
+        // The silent peer's first request attempt lasts 5 s, so at 3 s it is
+        // in flight and may still answer.
+        const asking = await captureStderr(() =>
+            runCli([
+                "resolve-conflict",
+                seed!.address,
+                "/file.txt",
+                "version-missing",
+                "--peer",
+                seed!.dial,
+                "--directory",
+                directory,
+                "--write-ready-timeout-ms",
+                "3000",
+                "--assume-complete",
+            ])
+        );
+        expect(asking.error?.message).toMatch(
+            /^resolve-conflict did not establish a safe write view within 3000 ms: reconciling: 1 of 1 required peer in flight: .+ --assume-complete was not applied: a required peer is still answering \(reconciling\), so this replica may yet prove its view; it applies only once none can \(no-peer, no-qualified-donor, or waiting-silent with every required peer silent\)\.$/
+        );
+        expect(asking.error?.cause).toBeInstanceOf(
+            SharedFsWriteReadyTimeoutError
+        );
+        expect(asking.chunks.join("")).not.toContain(ASSUMED_WARNING);
+        // Nothing made it writable.
+        expect(await stateOf(directory)).not.toMatchObject({
+            writeReady: true,
+        });
+    });
+
+    it("leaves a join gated with --assume-complete while one required peer refused and another is still being asked", async () => {
+        // A second replica of the silent creator's filesystem refuses every
+        // request (UNSUPPORTED): the join is waiting-silent once it refused,
+        // while the creator's first 5 s attempt is still in flight at 3 s
+        // and may yet answer.
+        const refusing = await startSeed(
+            "refusing-replica",
+            refuseEveryRequest,
+            seed!
+        );
+        try {
+            const directory = await freshDirectory("assume-silent-asking");
+            const outcome = await captureStderr(() =>
+                runCli([
+                    "resolve-conflict",
+                    seed!.address,
+                    "/file.txt",
+                    "version-missing",
+                    "--peer",
+                    seed!.dial,
+                    "--peer",
+                    refusing.dial,
+                    "--directory",
+                    directory,
+                    "--write-ready-timeout-ms",
+                    "3000",
+                    "--assume-complete",
+                ])
+            );
+            expect(outcome.chunks.join("")).not.toContain(ASSUMED_WARNING);
+            const cause = outcome.error?.cause;
+            expect(cause).toBeInstanceOf(SharedFsWriteReadyTimeoutError);
+            const creator = seed!.peer.identity.publicKey.hashcode();
+            const replica = refusing.peer.identity.publicKey.hashcode();
+            expect(cause.readiness).toMatchObject({
+                state: "waiting-silent",
+                silent: [{ peer: replica, refused: "UNSUPPORTED" }],
+                busy: [],
+            });
+            expect([...cause.readiness.required].sort()).toEqual(
+                [creator, replica].sort()
+            );
+            expect(
+                cause.readiness.inFlight.map(
+                    ({ peer }: { peer: string }) => peer
+                )
+            ).toEqual([creator]);
+            expect(outcome.error?.message).toBe(
+                `${writeReadyTimeoutMessage("resolve-conflict did not establish a safe write view within 3000 ms", cause)}${STILL_ANSWERING_BESIDE_SILENT}`
+            );
+            // Nothing made it writable.
+            expect(await stateOf(directory)).not.toMatchObject({
+                writeReady: true,
+            });
+        } finally {
+            await stopPeer(refusing.peer);
+        }
+    });
+
+    it("makes a gated join writable with --assume-complete once its wait timed out with no answer coming", async () => {
+        // A peer on another readiness wire version refuses every request
+        // (UNSUPPORTED): the join is waiting-silent as soon as it asked.
+        const refusing = await startSeed("refusing", refuseEveryRequest);
+        extraSeeds.push(refusing);
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        try {
+            const directory = await freshDirectory("assume-resolve");
+            const resolved = await captureStderr(() =>
+                runCli([
+                    "resolve-conflict",
+                    refusing.address,
+                    "/file.txt",
+                    "version-missing",
+                    "--peer",
+                    refusing.dial,
+                    "--directory",
+                    directory,
+                    "--write-ready-timeout-ms",
+                    "1500",
+                    "--assume-complete",
+                ])
+            );
+            // Past readiness, the command fails at its own check.
+            expect(resolved.error?.message).toBe(
+                "Version version-missing is not a current conflict head for /file.txt; rerun peerbit-fs conflicts before retrying"
+            );
+            // The library's first onProgress call is synchronous, so a wait
+            // that starts gated always shows the line.
+            expect(resolved.progress.length).toBeGreaterThan(0);
+            // waiting-silent once it asked, or no-peer before it saw the peer:
+            // either way no answer is coming.
+            expect(resolved.chunks.join("")).toMatch(
+                /Write readiness was not proven within 1500 ms: (waiting-silent: 1 of 1 required peer silent: .+ \(refused UNSUPPORTED\)|no-peer: .+)\. --assume-complete: assuming this replica's view is complete\./
+            );
+            expect(await stateOf(directory)).toMatchObject({
+                writeReady: true,
+                writeReadySource: "operator",
+            });
+
+            const mountDirectory = await freshDirectory("assume-mount");
+            const mounted = await captureStderr(() =>
+                runCli([
+                    "mount",
+                    refusing.address,
+                    path.join(mountDirectory, "not-mounted"),
+                    "--peer",
+                    refusing.dial,
+                    "--native-adapter",
+                    path.join(mountDirectory, "adapter-never-started"),
+                    "--directory",
+                    mountDirectory,
+                    "--write-ready-timeout-ms",
+                    "1500",
+                    "--assume-complete",
+                ])
+            );
+            // Writable, it prints the source and fails at the fake adapter.
+            expect(mounted.error).toBeInstanceOf(Error);
+            expect(mounted.progress.length).toBeGreaterThan(0);
+            expect(log).toHaveBeenCalledWith(
+                "write readiness: ready (operator)"
+            );
+            expect(await stateOf(mountDirectory)).toMatchObject({
+                writeReady: true,
+                writeReadySource: "operator",
+            });
+        } finally {
+            log.mockRestore();
+        }
+    });
+
+    it("says why a fresh open is pending in status", async () => {
+        const directory = await freshDirectory("status-gated");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const args = [
+            "status",
+            seed!.address,
+            "--peer",
+            seed!.dial,
+            "--directory",
+            directory,
+        ];
+        try {
+            await runCli([...args, "--json"]);
+            expect(log).toHaveBeenCalledTimes(1);
+            const { bootstrap } = JSON.parse(
+                String(log.mock.calls[0]?.[0])
+            ).filesystem;
+            expect(bootstrap).toMatchObject({
+                writeReady: false,
+                writeReadinessSource: null,
+                readiness: { state: expect.any(String), satisfied: false },
+            });
+            expect(bootstrap.readiness.state).not.toBe("ready");
+
+            log.mockClear();
+            await runCli(args);
+            expect(
+                log.mock.calls
+                    .map(([line]) => String(line))
+                    .filter((line) => line.startsWith("write readiness: "))
+            ).toEqual([
+                expect.stringMatching(
+                    /^write readiness: pending \((no-peer|no-qualified-donor|reconciling|waiting-[a-z]+): .+\)$/
+                ),
+            ]);
+        } finally {
+            log.mockRestore();
         }
     });
 });

@@ -654,6 +654,16 @@ const writeReadyTimeoutAdvice = (readiness?: ReadinessStatus) => {
     }
 };
 
+/** The readiness reason in awaitWriteReady's ETIMEDOUT message, or "". */
+const writeReadyTimeoutReason = (error: { message?: unknown }) => {
+    const message = typeof error.message === "string" ? error.message : "";
+    return message.startsWith(`${WRITE_READY_TIMEOUT_TEXT}: `)
+        ? message.slice(WRITE_READY_TIMEOUT_TEXT.length + 2)
+        : message === WRITE_READY_TIMEOUT_TEXT
+          ? ""
+          : message;
+};
+
 /**
  * A command's message for awaitWriteReady's ETIMEDOUT: the library's
  * readiness reason (its describeReadiness line, from the error's message)
@@ -663,52 +673,380 @@ export const writeReadyTimeoutMessage = (
     subject: string,
     error: { message?: unknown; readiness?: ReadinessStatus }
 ) => {
-    const message = typeof error.message === "string" ? error.message : "";
-    const reason = message.startsWith(`${WRITE_READY_TIMEOUT_TEXT}: `)
-        ? message.slice(WRITE_READY_TIMEOUT_TEXT.length + 2)
-        : message === WRITE_READY_TIMEOUT_TEXT
-          ? ""
-          : message;
+    const reason = writeReadyTimeoutReason(error);
     const advice = writeReadyTimeoutAdvice(error.readiness);
     return reason
         ? `${subject}: ${reason}. ${advice[0].toUpperCase()}${advice.slice(1)}.`
         : `${subject}; ${advice}.`;
 };
 
+type BootstrapPhase = BootstrapStatus["phase"];
+
 /**
- * awaitWriteReady for a command. An ETIMEDOUT becomes
- * writeReadyTimeoutMessage plus `note`; the library error is its cause.
+ * The peers of a readiness snapshot that can still answer: being asked or
+ * reconciled, answered BUSY and waiting to be asked again, or required and
+ * not listed as silent, refused or parked. The library lists every required
+ * peer in exactly one of silent, inFlight and busy, so each part alone finds
+ * the same peers; together they stay right if that changes.
  */
-const awaitCliWriteReady = async (
-    fsHandle: Pick<Awaited<ReturnType<typeof openCliFs>>, "awaitWriteReady">,
-    timeout: number,
-    subject: string,
-    note = ""
+const answeringPeers = (readiness: ReadinessStatus) => {
+    const silent = new Set(readiness.silent.map(({ peer }) => peer));
+    return new Set([
+        ...readiness.inFlight.map(({ peer }) => peer),
+        ...readiness.busy,
+        ...readiness.required.filter((peer) => !silent.has(peer)),
+    ]);
+};
+
+/** Where --assume-complete applies, as the not-applied lines name it. */
+const ASSUME_COMPLETE_APPLIES =
+    "no-peer, no-qualified-donor, or waiting-silent with every required peer silent";
+
+/**
+ * The readiness snapshots in which no required peer can still answer: no
+ * peer, only peers that are not write-ready, or every required peer silent,
+ * refused or parked. The library reports waiting-silent as soon as one
+ * required peer is, while others can still be asked, reconciled or busy, so
+ * the state alone is not enough; no-peer and no-qualified-donor have no
+ * required peer at all. Only these take --assume-complete, and only these
+ * name it.
+ */
+const noAnswerComing = (readiness?: ReadinessStatus) =>
+    (readiness?.state === "no-peer" ||
+        readiness?.state === "no-qualified-donor" ||
+        readiness?.state === "waiting-silent") &&
+    answeringPeers(readiness).size === 0;
+
+/**
+ * The phases in which --assume-complete does not make the replica writable
+ * yet: assumeComplete() refuses (EAGAIN) overlay-active and unverified, and
+ * waits out a fetch, which ends in overlay-active when it succeeds. It acts
+ * in `off` and `converged`.
+ */
+const bootstrapUnsettled = (phase: BootstrapPhase) =>
+    phase !== "off" && phase !== "converged";
+
+/**
+ * How an unsettled snapshot bootstrap phase settles, and a wait that
+ * covers it. The phase changes only inside one open, and a new run starts
+ * again from the phase the last one persisted, so neither a retry nor a
+ * short run such as peerbit-fs status sees it settle. The library
+ * converges an unverified phase after two checks 5 minutes apart that each
+ * saw no new row for a minute, and retires an overlay within its 15-minute
+ * retirementTimeoutMs, unverified (then that wait too) unless its rows
+ * arrived first. A fetch that succeeds installs an overlay.
+ */
+const bootstrapSettling = (phase: BootstrapPhase) => {
+    if (phase === "unverified") {
+        return {
+            settles:
+                "an unverified snapshot bootstrap converges only after about 10 minutes without new rows within one run",
+            timeoutMs: 660_000,
+        };
+    }
+    const retires =
+        "retires within 15 minutes, and one that retires unverified then needs about 10 more minutes without new rows, all within one run";
+    return {
+        settles:
+            phase === "fetching"
+                ? `a snapshot fetch that succeeds installs an overlay, which ${retires}`
+                : `a snapshot overlay ${retires}`,
+        timeoutMs: 1_560_000,
+    };
+};
+
+/**
+ * Appended to a timeout of a command that takes --assume-complete, run
+ * without it, when no required peer can still answer. While the snapshot
+ * bootstrap has not settled, the hint also asks for a wait long enough for
+ * it to settle.
+ */
+export const assumeCompleteHint = (
+    readiness: ReadinessStatus | undefined,
+    phase: BootstrapPhase
+) => {
+    if (!noAnswerComing(readiness)) return "";
+    if (!bootstrapUnsettled(phase)) {
+        return " If no write-ready replica will answer and you vouch that this replica's view is complete, rerun with --assume-complete.";
+    }
+    const { settles, timeoutMs } = bootstrapSettling(phase);
+    return ` If no write-ready replica will answer and you vouch that this replica's view is complete, rerun with --assume-complete and --write-ready-timeout-ms ${timeoutMs} or more: it is refused until the snapshot bootstrap settles (phase: ${phase}), and ${settles}.`;
+};
+
+/** How the phase settles, as a sentence that asks for that long a wait. */
+const keepOpenAdvice = (phase: BootstrapPhase) => {
+    const { settles, timeoutMs } = bootstrapSettling(phase);
+    return `${settles[0].toUpperCase()}${settles.slice(1)}, so rerun with --write-ready-timeout-ms ${timeoutMs} or more to keep the command open that long.`;
+};
+
+/** assumeComplete() refused a snapshot bootstrap that has not settled. */
+const bootstrapUnsettledNotApplied = (phase: BootstrapPhase) =>
+    ` --assume-complete was not applied: the snapshot bootstrap has not settled (phase: ${phase}), and assumeComplete() is refused until it does. ${keepOpenAdvice(phase)}`;
+
+/**
+ * Why --assume-complete was not applied to a timeout in which a required
+ * peer can still answer, every one is accounted for, or that is not about
+ * peers at all.
+ */
+const assumeCompleteNotApplied = (
+    readiness: ReadinessStatus | undefined,
+    phase: BootstrapPhase
+) => {
+    if (readiness?.state === "waiting-phase" && bootstrapUnsettled(phase)) {
+        return ` --assume-complete was not applied: every required peer is accounted for, and this replica turns writable by itself once the snapshot bootstrap settles (phase: ${phase}). ${keepOpenAdvice(phase)}`;
+    }
+    const stillAnswering = (detail: string, outcome: string) =>
+        ` --assume-complete was not applied: a required peer is still answering (${detail}), so this replica ${outcome}; it applies only once none can (${ASSUME_COMPLETE_APPLIES}).`;
+    // A silent peer named the state while another can still answer: its
+    // rows would be missing from an assumed view.
+    if (readiness?.state === "waiting-silent") {
+        const required = readiness.required.length;
+        return stillAnswering(
+            `waiting-silent, with ${answeringPeers(readiness).size} of ${required} required ${required === 1 ? "peer" : "peers"} in flight or busy`,
+            "may yet reconcile with it"
+        );
+    }
+    if (
+        readiness !== undefined &&
+        readiness.fault === undefined &&
+        !readiness.satisfied &&
+        (readiness.state === "reconciling" ||
+            readiness.state === "waiting-left" ||
+            readiness.state === "waiting-fetch" ||
+            readiness.state === "waiting-trust")
+    ) {
+        return stillAnswering(readiness.state, "may yet prove its view");
+    }
+    return ` --assume-complete was not applied: it applies only when the wait ends with no required peer that can still answer (${ASSUME_COMPLETE_APPLIES}).`;
+};
+
+/** Where the readiness progress line goes (process.stderr). */
+export type ProgressStream = {
+    write(chunk: string): unknown;
+    isTTY?: boolean;
+    columns?: number;
+};
+
+/**
+ * The progress line: the library's describeReadiness text, plus how many
+ * peers are contained when that text does not already say so.
+ */
+export const readinessProgressLine = (
+    status: ReadinessStatus,
+    describe: (status: ReadinessStatus) => string
+) => {
+    const contained = status.contained.length;
+    const suffix =
+        contained > 0 &&
+        status.state !== "no-qualified-donor" &&
+        status.state !== "ready"
+            ? ` (${contained} contained)`
+            : "";
+    return `write readiness: ${describe(status)}${suffix}`;
+};
+
+const CLEAR_LINE = "\r\x1b[2K";
+
+/**
+ * One progress line while a command waits for write readiness, driven only
+ * by awaitWriteReady's onProgress (no timer). A terminal rewrites the line
+ * in place and end() clears it; other streams get one line per readiness
+ * state and nothing at end().
+ */
+export const createReadinessProgress = (
+    stream: ProgressStream,
+    describe: (status: ReadinessStatus) => string
+) => {
+    let ended = false;
+    let written: string | undefined;
+    let state: ReadinessStatus["state"] | undefined;
+    return {
+        update(status: ReadinessStatus) {
+            if (ended) return;
+            const text = readinessProgressLine(status, describe);
+            if (stream.isTTY !== true) {
+                if (status.state === state) return;
+                state = status.state;
+                stream.write(`${text}\n`);
+                return;
+            }
+            const columns = stream.columns;
+            const fits =
+                columns === undefined ||
+                !Number.isFinite(columns) ||
+                columns < 2 ||
+                text.length <= columns - 1;
+            const line = fits ? text : `${text.slice(0, columns - 2)}…`;
+            if (line === written) return;
+            written = line;
+            stream.write(`${CLEAR_LINE}${line}`);
+        },
+        end() {
+            if (ended) return;
+            ended = true;
+            if (written !== undefined) stream.write(CLEAR_LINE);
+        },
+    };
+};
+
+type CliFs = Awaited<ReturnType<typeof openCliFs>>;
+
+type CliWriteReadyWait = {
+    timeoutMs: number;
+    /** e.g. "mount did not establish a safe initial write view" */
+    subject: string;
+    /** Appended to a timeout message (mount's --allow-partial-writes note). */
+    note?: string;
+    /** The command takes --assume-complete (mount, resolve-*). */
+    offersAssumeComplete: boolean;
+    /** --assume-complete was given. */
+    assumeComplete: boolean;
+};
+
+/**
+ * --assume-complete after a wait that timed out with no answer coming:
+ * assumeComplete(), then the warning of what the operator asserted. Its
+ * refusals become CLI errors (cause kept): an unsettled snapshot bootstrap
+ * gets `timedOut` (the timeout message) and how to let it settle. A proof
+ * that landed since the timeout makes it a no-op.
+ */
+const assumeCompleteAfterTimeout = async (
+    fsHandle: Pick<CliFs, "assumeComplete" | "bootstrapStatus">,
+    wait: CliWriteReadyWait,
+    timeout: { message?: unknown },
+    timedOut: string,
+    stream: ProgressStream
 ) => {
     try {
-        await fsHandle.awaitWriteReady({ timeout });
+        await fsHandle.assumeComplete();
     } catch (error: any) {
-        if (error?.code === "ETIMEDOUT") {
+        if (error?.code === "EINVAL") {
+            throw new Error(`--assume-complete was refused: ${error.message}`, {
+                cause: error,
+            });
+        }
+        if (error?.code === "EAGAIN") {
             throw new Error(
-                `${writeReadyTimeoutMessage(`${subject} within ${timeout} ms`, error)}${note}`,
+                `${timedOut}${bootstrapUnsettledNotApplied(fsHandle.bootstrapStatus().phase)}${wait.note ?? ""}`,
                 { cause: error }
             );
         }
         throw error;
     }
+    const reason = writeReadyTimeoutReason(timeout);
+    stream.write(
+        `${chalk.yellow(
+            `Write readiness was not proven within ${wait.timeoutMs} ms${reason ? `: ${reason}` : ""}. --assume-complete: assuming this replica's view is complete. Rows held only by peers it did not reconcile with are not in it, and writes made now can conflict with them.`
+        )}\n`
+    );
+};
+
+/**
+ * awaitWriteReady for a command, with the progress line on `stream` while
+ * an open that was not writable waits. An ETIMEDOUT becomes
+ * writeReadyTimeoutMessage, the --assume-complete hint and `note` (the
+ * library error is its cause), or, with --assume-complete and no answer
+ * coming, assumeComplete(); with the flag while a required peer can still
+ * answer, the message says why it was not applied. Resolves with
+ * bootstrapStatus() once writable.
+ */
+const awaitCliWriteReady = async (
+    fsHandle: Pick<
+        CliFs,
+        "awaitWriteReady" | "assumeComplete" | "bootstrapStatus"
+    >,
+    wait: CliWriteReadyWait,
+    stream: ProgressStream = process.stderr
+): Promise<BootstrapStatus> => {
+    const progress = fsHandle.bootstrapStatus().writeReady
+        ? undefined
+        : createReadinessProgress(
+              stream,
+              (await loadSharedFsRuntime()).describeReadiness
+          );
+    try {
+        await fsHandle.awaitWriteReady(
+            progress
+                ? { timeout: wait.timeoutMs, onProgress: progress.update }
+                : { timeout: wait.timeoutMs }
+        );
+    } catch (error: any) {
+        progress?.end();
+        if (error?.code !== "ETIMEDOUT") throw error;
+        const timedOut = writeReadyTimeoutMessage(
+            `${wait.subject} within ${wait.timeoutMs} ms`,
+            error
+        );
+        if (!wait.assumeComplete) {
+            const hint = wait.offersAssumeComplete
+                ? assumeCompleteHint(
+                      error.readiness,
+                      fsHandle.bootstrapStatus().phase
+                  )
+                : "";
+            throw new Error(`${timedOut}${hint}${wait.note ?? ""}`, {
+                cause: error,
+            });
+        }
+        // A peer that can still answer may yet prove this view: the flag
+        // never makes the replica writable before that is ruled out.
+        if (!noAnswerComing(error.readiness)) {
+            throw new Error(
+                `${timedOut}${assumeCompleteNotApplied(error.readiness, fsHandle.bootstrapStatus().phase)}${wait.note ?? ""}`,
+                { cause: error }
+            );
+        }
+        await assumeCompleteAfterTimeout(
+            fsHandle,
+            wait,
+            error,
+            timedOut,
+            stream
+        );
+        return fsHandle.bootstrapStatus();
+    }
+    progress?.end();
+    return fsHandle.bootstrapStatus();
+};
+
+/** "write readiness: ready (<source>)", printed once a mount is writable. */
+const writeReadinessLine = (status: BootstrapStatus) =>
+    status.partialWriteOverride
+        ? "write readiness: partial writes allowed for this session (--allow-partial-writes)"
+        : `write readiness: ready${status.writeReadinessSource ? ` (${status.writeReadinessSource})` : ""}`;
+
+const ASSUME_COMPLETE_OPTION = {
+    type: "boolean",
+    default: false,
+    description:
+        "If this replica's view is not proven within --write-ready-timeout-ms and no required peer can still answer (no peer, none write-ready, or every required peer stays silent), assume it is complete and make it writable instead of failing. Use it only when no write-ready replica will answer and you vouch for this replica's view: rows held only by peers it did not reconcile with are missing from its view, and later writes can conflict with them. Unlike --allow-partial-writes, it persists: the replica stays writable on later runs (source operator). Not applied until a snapshot bootstrap settles.",
+} as const;
+
+/** Node's setTimeout limit: a longer delay runs after 1 ms instead. */
+const MAX_WRITE_READY_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Checked before anything opens. Above Node's timer limit the wait would
+ * time out at once, and --assume-complete would act on that timeout.
+ */
+const assertWriteReadyTimeout = (timeoutMs: number) => {
+    if (
+        !Number.isInteger(timeoutMs) ||
+        timeoutMs < 1 ||
+        timeoutMs > MAX_WRITE_READY_TIMEOUT_MS
+    ) {
+        throw new Error(
+            `--write-ready-timeout-ms must be an integer from 1 to ${MAX_WRITE_READY_TIMEOUT_MS} (milliseconds); got ${timeoutMs}`
+        );
+    }
 };
 
 const awaitConflictResolutionReady = async (
-    fsHandle: Awaited<ReturnType<typeof openCliFs>>,
+    fsHandle: CliFs,
     peerbit: Peerbit,
-    timeout: number,
-    command: string
+    wait: CliWriteReadyWait
 ) => {
-    await awaitCliWriteReady(
-        fsHandle,
-        timeout,
-        `${command} did not establish a safe write view`
-    );
+    await awaitCliWriteReady(fsHandle, wait);
     await fsHandle.awaitBootstrapConverged();
     if (
         fsHandle.accessControlled &&
@@ -987,6 +1325,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "Fail the mount if a safe initial write view is not established within this time.",
                     })
+                    .option("assume-complete", ASSUME_COMPLETE_OPTION)
                     .option("allow-partial-writes", {
                         type: "boolean",
                         default: false,
@@ -1004,6 +1343,14 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         "mount requires a full replica; --no-replicate is not allowed for a writable mount"
                     );
                 }
+                // Checked here: yargs' conflicts() misfires on boolean
+                // defaults.
+                if (argv.assumeComplete && argv.allowPartialWrites) {
+                    throw new Error(
+                        "--assume-complete cannot be combined with --allow-partial-writes: the override never records a readiness proof, and assumeComplete() is refused under it."
+                    );
+                }
+                assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
@@ -1050,13 +1397,17 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     // before its namespace is safe to mutate. Do not expose a
                     // writable OS mount until the full-replica readiness fence
                     // has settled (warm reopens resolve immediately). A
-                    // timeout names the readiness reason and fitting advice.
-                    await awaitCliWriteReady(
-                        fsHandle,
-                        argv.writeReadyTimeoutMs,
-                        "mount did not establish a safe initial write view",
-                        " --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass."
-                    );
+                    // timeout names the readiness reason and fitting advice,
+                    // or, with --assume-complete, makes this view writable.
+                    const ready = await awaitCliWriteReady(fsHandle, {
+                        timeoutMs: argv.writeReadyTimeoutMs,
+                        subject:
+                            "mount did not establish a safe initial write view",
+                        note: " --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.",
+                        offersAssumeComplete: true,
+                        assumeComplete: argv.assumeComplete,
+                    });
+                    console.log(writeReadinessLine(ready));
                     let nativeProfileFile: string | undefined;
                     if (mountProfileDirectory) {
                         const profileFiles = await openMountProfileFiles(
@@ -1213,6 +1564,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                     writeReadinessSource:
                                         bootstrapAfter.writeReadinessSource ??
                                         null,
+                                    // Which peers a join waits for and why
+                                    // (plain data), or null without a join.
+                                    readiness: bootstrapAfter.readiness ?? null,
                                 },
                                 localPublicKey: fsHandle.localPublicKey,
                                 accessControlled: fsHandle.accessControlled,
@@ -1254,9 +1608,22 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             `bootstrap: ${bootstrapAfter.phase} (${bootstrapAfter.pendingDocs} documents pending)`
                         );
                     }
-                    console.log(
-                        `write readiness: ${bootstrapAfter.writeReady ? "ready" : "pending"}${bootstrapAfter.writeReadinessSource ? ` (${bootstrapAfter.writeReadinessSource})` : ""}`
-                    );
+                    if (
+                        !bootstrapAfter.writeReady &&
+                        bootstrapAfter.readiness
+                    ) {
+                        // status does not wait: this is the join's reason
+                        // right after open.
+                        const { describeReadiness } =
+                            await loadSharedFsRuntime();
+                        console.log(
+                            `write readiness: pending (${describeReadiness(bootstrapAfter.readiness)})`
+                        );
+                    } else {
+                        console.log(
+                            `write readiness: ${bootstrapAfter.writeReady ? "ready" : "pending"}${bootstrapAfter.writeReadinessSource ? ` (${bootstrapAfter.writeReadinessSource})` : ""}`
+                        );
+                    }
                     console.log(`local public key: ${fsHandle.localPublicKey}`);
                     console.log(
                         `access controlled: ${
@@ -1492,6 +1859,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "Fail if a safe write view is not established within this time.",
                     })
+                    .option("assume-complete", ASSUME_COMPLETE_OPTION)
                     .option("json", {
                         type: "boolean",
                         default: false,
@@ -1499,6 +1867,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     }),
             async (argv) => {
                 assertResolutionReplica("resolve-conflict", argv.replicate);
+                assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
@@ -1508,12 +1877,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: true,
                     });
-                    await awaitConflictResolutionReady(
-                        fsHandle,
-                        peerbit,
-                        argv.writeReadyTimeoutMs,
-                        "resolve-conflict"
-                    );
+                    await awaitConflictResolutionReady(fsHandle, peerbit, {
+                        timeoutMs: argv.writeReadyTimeoutMs,
+                        subject:
+                            "resolve-conflict did not establish a safe write view",
+                        offersAssumeComplete: true,
+                        assumeComplete: argv.assumeComplete,
+                    });
                     const normalizedPath = await normalizeCliFsPath(argv.path);
                     const visible = await fsHandle.conflicts(normalizedPath);
                     // conflicts() lists one version per content; every head
@@ -1613,6 +1983,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "Fail if a safe write view is not established within this time.",
                     })
+                    .option("assume-complete", ASSUME_COMPLETE_OPTION)
                     .option("json", {
                         type: "boolean",
                         default: false,
@@ -1624,6 +1995,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     "resolve-naming-conflict",
                     argv.replicate
                 );
+                assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
@@ -1633,12 +2005,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: true,
                     });
-                    await awaitConflictResolutionReady(
-                        fsHandle,
-                        peerbit,
-                        argv.writeReadyTimeoutMs,
-                        "resolve-naming-conflict"
-                    );
+                    await awaitConflictResolutionReady(fsHandle, peerbit, {
+                        timeoutMs: argv.writeReadyTimeoutMs,
+                        subject:
+                            "resolve-naming-conflict did not establish a safe write view",
+                        offersAssumeComplete: true,
+                        assumeComplete: argv.assumeComplete,
+                    });
                     const observedConflicts = conflictsInvolvingNode(
                         await fsHandle.namingConflicts(),
                         argv.nodeId
@@ -2071,11 +2444,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "string",
                         demandOption: true,
                     })
-                    .option("settle-seconds", {
+                    .option("write-ready-timeout-ms", {
                         type: "number",
-                        default: 5,
+                        default: 120_000,
                         description:
-                            "Quiet period with no document arrivals required before materializing.",
+                            "Fail if this replica has not proven its view within this time.",
                     })
                     .option("json", {
                         type: "boolean",
@@ -2092,6 +2465,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     process.exitCode = 1;
                     return;
                 }
+                assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
@@ -2103,31 +2477,22 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: true,
                     });
-                    // A one-shot CLI peer starts empty: wait for its own
-                    // bootstrap/sync to settle before materializing, or the
-                    // snapshot would describe a lagging view as current.
-                    // Settle = no document ARRIVALS for the settle window,
-                    // observed twice — root-listing size is not a
-                    // convergence signal.
+                    // Write readiness is the proof that this replica holds
+                    // every row of every peer it can see (a fresh open) or
+                    // was writable here before (a warm reopen);
+                    // snapshotWrite() refuses without it. Then wait for the
+                    // snapshot bootstrap to settle: snapshotWrite() also
+                    // refuses an unverified phase. No --assume-complete: a
+                    // snapshot from an assumed view would outrank complete
+                    // ones.
+                    await awaitCliWriteReady(fsHandle, {
+                        timeoutMs: argv.writeReadyTimeoutMs,
+                        subject:
+                            "snapshot did not establish a proven write view",
+                        offersAssumeComplete: false,
+                        assumeComplete: false,
+                    });
                     await fsHandle.awaitBootstrapConverged();
-                    const settleMs = Math.max(
-                        1000,
-                        (argv.settleSeconds ?? 5) * 1000
-                    );
-                    let quietChecks = 0;
-                    while (quietChecks < 2) {
-                        const status = fsHandle.bootstrapStatus();
-                        // Infinity (nothing ever arrived) counts as quiet;
-                        // the empty-tree refusal below catches dead links.
-                        if (status.msSinceLastArrival > settleMs) {
-                            quietChecks++;
-                        } else {
-                            quietChecks = 0;
-                        }
-                        await new Promise((resolve) =>
-                            setTimeout(resolve, Math.min(settleMs, 2000))
-                        );
-                    }
                     if ((await fsHandle.list("/")).length === 0) {
                         console.error(
                             chalk.red(
