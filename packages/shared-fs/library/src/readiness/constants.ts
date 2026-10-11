@@ -51,6 +51,13 @@ export const NOTICE_TARGETS = 256;
 export const SESSION_IDLE_MS = 30_000;
 /** OPEN attempts: the first waits this long, then x2 and x4. */
 export const REQUEST_TIMEOUT_MS = 5_000;
+/**
+ * Largest `writeReadiness.requestTimeoutMs`. A sync-wait window lasts one
+ * first attempt with nothing sent to R, so it must end inside R's session
+ * idle (one default attempt of margin for the round trip), or every session
+ * of a stalled sync expires and the chain parks.
+ */
+export const REQUEST_TIMEOUT_MAX_MS = SESSION_IDLE_MS - REQUEST_TIMEOUT_MS;
 /** `SharedLog.join` timeout of one pull batch. */
 export const PULL_TIMEOUT_MS = 10_000;
 /** Hashes per pull batch. */

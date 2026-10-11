@@ -135,10 +135,7 @@ export type ProcessSoakNetworkStatus = {
     remotePeers: string[];
 };
 
-export type ProcessSoakBootstrapStatus = Omit<
-    BootstrapStatus,
-    "manifest" | "msSinceLastArrival"
-> & {
+export type ProcessSoakBootstrapStatus = Omit<BootstrapStatus, "manifest"> & {
     manifest?: {
         authorKey: string;
         snapshotSeq: string;
@@ -146,8 +143,6 @@ export type ProcessSoakBootstrapStatus = Omit<
         ageMs: number;
         docs: string;
     };
-    /** `null` serializes BootstrapStatus's initial positive infinity. */
-    msSinceLastArrival: number | null;
 };
 
 export type ProcessSoakGcOptions = {

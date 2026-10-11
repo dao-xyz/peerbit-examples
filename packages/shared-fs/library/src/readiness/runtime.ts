@@ -8,6 +8,7 @@ import {
     Coordinator,
     type CoordinatorDebug,
     type CoordinatorTransport,
+    type PeerChange,
     type ReadinessStatus,
     type StatusContext,
 } from "./coordinator.js";
@@ -174,6 +175,16 @@ export interface JoinOptions {
      * without it faults (gated): `no trust view`.
      */
     trust?: { isTrusted(key: PublicSignKey): Promise<boolean> };
+    /**
+     * `writeReadiness.requestTimeoutMs`: the first attempt of every request
+     * of the coordinator's sessions (`REQUEST_TIMEOUT_MS` by default).
+     */
+    requestTimeoutMs?: number;
+    /**
+     * The coordinator's progress report (PR-4): the peers whose state or
+     * reason changed since the last one; never awaited, a throw is dropped.
+     */
+    onProgress?(changed: readonly PeerChange[]): void;
 }
 
 /** `ReadinessRuntime.debug()`: what is armed and in flight. */
@@ -843,6 +854,20 @@ export class ReadinessRuntime {
                     }
                 }
             },
+            ...(options.onProgress
+                ? {
+                      onProgress: (changed: readonly PeerChange[]) => {
+                          try {
+                              options.onProgress?.(changed);
+                          } catch {
+                              // Diagnostics never reach the join.
+                          }
+                      },
+                  }
+                : {}),
+            ...(options.requestTimeoutMs !== undefined
+                ? { requestTimeoutMs: options.requestTimeoutMs }
+                : {}),
         });
         this.coordinatorValue = coordinator;
         try {

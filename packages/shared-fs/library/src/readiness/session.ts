@@ -87,10 +87,11 @@ import {
  *   J's maintained state (`LocalScope`), the scope's pull queue and
  *   explainer, J's trust view in access-controlled stores, and bounded
  *   timers. No Peerbit import (key types aside).
- * - **Timers** bound requests in flight only: the 5, 10 and 20 s attempts of
- *   an OPEN, a cells request or a list page, and the sync-wait window
- *   (design 4.9). None is armed while the session waits for rows, pulls
- *   (the join has its own timeout) or a sign of life from R.
+ * - **Timers** bound requests in flight only: the attempts of an OPEN, a
+ *   cells request or a list page (`requestTimeoutMs`, x2, x4; 5, 10 and
+ *   20 s by default), and the sync-wait window (design 4.9). None is armed
+ *   while the session waits for rows, pulls (the join has its own timeout)
+ *   or a sign of life from R.
  * - **Exclusion needs a proof** (design 4.5 step 11, 4.7): an answer over
  *   256 KiB, a list that contradicts R's own header, or a hash R named whose
  *   entry is not a row of the scope. Silence, `BUSY`, refusals, fetch
@@ -106,16 +107,25 @@ import {
  *   is still open.
  */
 
-/** Delays of the three attempts of any request (5, 10, 20 s; design 4.9). */
-export const ATTEMPT_DELAYS_MS: readonly number[] = [
-    REQUEST_TIMEOUT_MS,
-    2 * REQUEST_TIMEOUT_MS,
-    4 * REQUEST_TIMEOUT_MS,
+/**
+ * Delays of the three attempts of any request: the first attempt's timeout,
+ * then twice and four times as long (design 4.9).
+ */
+export const attemptDelaysFor = (
+    requestTimeoutMs: number
+): readonly number[] => [
+    requestTimeoutMs,
+    2 * requestTimeoutMs,
+    4 * requestTimeoutMs,
 ];
+/** The default attempt delays (5, 10, 20 s). */
+export const ATTEMPT_DELAYS_MS: readonly number[] =
+    attemptDelaysFor(REQUEST_TIMEOUT_MS);
 /**
  * Sync wait without a single arrival for this long ends the wait: J peels
  * when the gap is at most `FETCH_MAX`, else pages the list (design 4.5
- * step 5). It never makes J ready.
+ * step 5). It never makes J ready. A session's window is its first attempt
+ * delay (`SessionPorts.requestTimeoutMs`), this by default.
  */
 export const SYNC_WINDOW_MS = REQUEST_TIMEOUT_MS;
 /** Smallest cell prefix a peel uses (design 4.5 step 6). */
@@ -423,6 +433,12 @@ export interface SessionPorts {
      * pulls it again (commit 2).
      */
     trust?: SessionTrustPort;
+    /**
+     * The first attempt's timeout (`writeReadiness.requestTimeoutMs`,
+     * default `REQUEST_TIMEOUT_MS`): attempts wait it, x2 and x4, and the
+     * sync-wait window is it.
+     */
+    requestTimeoutMs?: number;
 }
 
 /** Per-scope state for tests and status. */
@@ -922,6 +938,9 @@ export class JoinerSession {
     private readonly owner: string;
     private readonly timers: Timers;
     private readonly clock: () => number;
+    /** `attemptDelaysFor(requestTimeoutMs)`. */
+    private readonly attemptDelays: readonly number[];
+    private readonly syncWindowMs: number;
     private readonly runs: ScopeRun[] = [];
     private readonly missing: ScopeId[] = [];
     private readonly armed = new Set<unknown>();
@@ -952,6 +971,9 @@ export class JoinerSession {
         this.owner = hexOf(init.sessionId);
         this.timers = ports.timers ?? systemTimers;
         this.clock = ports.now ?? (() => performance.now());
+        const requestTimeoutMs = ports.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+        this.attemptDelays = attemptDelaysFor(requestTimeoutMs);
+        this.syncWindowMs = requestTimeoutMs;
         for (const id of scopeOrder(init.scopes)) {
             const scope = ports.scope(id);
             if (scope) this.runs.push(new ScopeRun(id, scope));
@@ -1390,7 +1412,7 @@ export class JoinerSession {
         );
         this.openTimer = this.arm(
             () => this.onOpenTimer(),
-            ATTEMPT_DELAYS_MS[this.openTries - 1]
+            this.attemptDelays[this.openTries - 1]
         );
     }
 
@@ -1398,7 +1420,7 @@ export class JoinerSession {
     private onOpenTimer() {
         this.openTimer = undefined;
         if (!this.runs.some((run) => !run.header)) return;
-        const last = this.openTries >= ATTEMPT_DELAYS_MS.length;
+        const last = this.openTries >= this.attemptDelays.length;
         try {
             this.ports.events.onAttempt?.(this, {
                 attempt: this.openTries,
@@ -1629,7 +1651,7 @@ export class JoinerSession {
 
     private armWindow(run: ScopeRun) {
         this.disarm(run.windowTimer);
-        run.windowTimer = this.arm(() => this.onWindow(run), SYNC_WINDOW_MS);
+        run.windowTimer = this.arm(() => this.onWindow(run), this.syncWindowMs);
     }
 
     /** W3: a whole window without an arrival ends the wait. */
@@ -1672,7 +1694,7 @@ export class JoinerSession {
         this.disarm(request.timer);
         request.timer = this.arm(
             () => this.onRequestTimer(run, request),
-            ATTEMPT_DELAYS_MS[request.tries - 1]
+            this.attemptDelays[request.tries - 1]
         );
         const { id, ports } = run;
         this.send(
@@ -1697,7 +1719,7 @@ export class JoinerSession {
     private onRequestTimer(run: ScopeRun, request: InFlight) {
         request.timer = undefined;
         if (run.request !== request) return;
-        if (request.tries < ATTEMPT_DELAYS_MS.length) {
+        if (request.tries < this.attemptDelays.length) {
             return this.sendRequest(run);
         }
         if (run.state === "peeling" || run.state === "recovering") {

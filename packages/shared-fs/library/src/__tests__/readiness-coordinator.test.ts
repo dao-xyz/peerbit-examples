@@ -1,10 +1,19 @@
 import { fileURLToPath } from "node:url";
 import { Ed25519Keypair, type PublicSignKey } from "@peerbit/crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SharedFileSystem } from "../index.js";
+import {
+    SharedFileSystem,
+    SharedFsWriteReadyTimeoutError,
+    type BootstrapTelemetryEvent,
+} from "../index.js";
 import { AnchorHost } from "../readiness/anchor-host.js";
 import { cellKey } from "../readiness/cells.js";
-import { PULL_TIMEOUT_MS } from "../readiness/constants.js";
+import {
+    PULL_TIMEOUT_MS,
+    REQUEST_TIMEOUT_MAX_MS,
+    REQUEST_TIMEOUT_MS,
+    SESSION_IDLE_MS,
+} from "../readiness/constants.js";
 import {
     BLOCKING_STATES,
     Coordinator,
@@ -13,7 +22,10 @@ import {
     type CoordinatorPorts,
     type CoordinatorTransport,
     type Evaluation,
+    type PeerChange,
+    type PeerReason,
     type PeerRecord,
+    type PeerState,
     type ReadinessStatus,
     type StatusContext,
     type TransportEvent,
@@ -4507,8 +4519,15 @@ describe("host decision (index.ts)", () => {
             });
             expect(program.setGuardArmed).toHaveBeenCalledWith(true);
             expect(program.emitWriteReadyOnce).toHaveBeenCalledWith(
-                "reconciled"
+                "reconciled",
+                expect.any(Function)
             );
+            // PR-4: the telemetry counts the persisted proof's records.
+            expect(program.emitWriteReadyOnce.mock.calls[0][1]()).toEqual({
+                contained: 1,
+                excluded: 0,
+                gaps: 0,
+            });
             expect(program.readinessRuntime.markReady).toHaveBeenCalledTimes(1);
             expect(coordinator.phase).toBe("finished");
             expect(events).toHaveLength(1);
@@ -4934,5 +4953,1058 @@ describe("host decision (index.ts)", () => {
         expect(program.writeBootstrapState).not.toHaveBeenCalled();
         expect(program.writesReady).toBe(false);
         expect(program.readinessRuntime.markReady).not.toHaveBeenCalled();
+    });
+
+    describe("the readiness surface (PR-4)", () => {
+        /** A waiting status, as the runtime would report it. */
+        const WAITING_SILENT: ReadinessStatus = {
+            state: "waiting-silent",
+            satisfied: false,
+            required: ["donor"],
+            contained: [],
+            excluded: [],
+            silent: [{ peer: "donor", reachable: true }],
+            inFlight: [],
+            busy: [],
+            fetchPending: [],
+            gaps: [],
+            unconfirmed: [],
+        };
+
+        /** `host()` with telemetry on, a status, and its prototype methods. */
+        const surface = () => {
+            const made = host();
+            const { program } = made;
+            const telemetry: BootstrapTelemetryEvent[] = [];
+            program.bootstrapTelemetry = (event: BootstrapTelemetryEvent) =>
+                telemetry.push(event);
+            program.bootstrapTelemetryNow = () => 0;
+            // The real telemetry emitter, not host()'s stub.
+            program.emitWriteReadyOnce = (
+                SharedFileSystem.prototype as any
+            ).emitWriteReadyOnce;
+            let status: ReadinessStatus | undefined = WAITING_SILENT;
+            program.readinessRuntime.status = vi.fn(() => status);
+            return {
+                ...made,
+                telemetry,
+                setStatus: (next: ReadinessStatus | undefined) => {
+                    status = next;
+                },
+            };
+        };
+
+        it("the join gets requestTimeoutMs and an onProgress of this generation: readiness-peer telemetry, then readiness:progress only while someone listens, nothing once writable", () => {
+            const { program, join, telemetry } = surface();
+            program.readinessRequestTimeoutMs = 750;
+            program.startReadinessJoin(GENERATION, 0n);
+            const options = join.options!;
+            expect(options.requestTimeoutMs).toBe(750);
+            const silent: PeerChange = {
+                peer: "donor",
+                state: "silent",
+                reason: "reachable-silent",
+            };
+
+            // Nobody listens: telemetry only, and no status is built.
+            options.onProgress!([silent]);
+            expect(telemetry).toEqual([
+                { type: "readiness-peer", atMs: 0, ...silent },
+            ]);
+            expect(program.readinessRuntime.status).not.toHaveBeenCalled();
+
+            const progress: unknown[] = [];
+            const listener = (event: any) => progress.push(event.detail);
+            program.events.addEventListener("readiness:progress", listener);
+            // Only `satisfied` or the fault changed: no telemetry, one event.
+            options.onProgress!([]);
+            expect(progress).toEqual([WAITING_SILENT]);
+            expect(telemetry).toHaveLength(1);
+            const excluded: PeerChange = {
+                peer: "liar",
+                state: "excluded-inconsistent",
+                reason: "excluded",
+                detail: "a list shorter than its header's count",
+            };
+            options.onProgress!([excluded]);
+            expect(telemetry.at(-1)).toEqual({
+                type: "readiness-peer",
+                atMs: 0,
+                ...excluded,
+            });
+            expect(progress).toHaveLength(2);
+
+            // An older generation's join, a writable open and a blocked
+            // lifecycle report nothing.
+            program.openGeneration = GENERATION + 1;
+            options.onProgress!([silent]);
+            program.openGeneration = GENERATION;
+            program.writesReady = true;
+            options.onProgress!([silent]);
+            program.writesReady = false;
+            program.writeReadinessLifecycleBlocked = true;
+            options.onProgress!([silent]);
+            program.writeReadinessLifecycleBlocked = false;
+            expect(progress).toHaveLength(2);
+            expect(telemetry).toHaveLength(2);
+
+            program.events.removeEventListener("readiness:progress", listener);
+            options.onProgress!([]);
+            expect(progress).toHaveLength(2);
+        });
+
+        it("write:ready once per open generation; never under allowPartialWrites or without a source (an observer)", () => {
+            const { program, events } = surface();
+            Object.assign(program, {
+                writeReadyDispatched: false,
+                writesReady: true,
+                partialWriteOverride: false,
+                writeReadinessSource: "creator",
+            });
+            program.dispatchWriteReadyOnce();
+            program.dispatchWriteReadyOnce();
+            expect(events).toEqual([{ writeReady: true }]);
+
+            // The next generation (open() resets the flag).
+            program.writeReadyDispatched = false;
+            program.partialWriteOverride = true;
+            program.dispatchWriteReadyOnce();
+            program.partialWriteOverride = false;
+            program.writeReadinessSource = undefined;
+            program.dispatchWriteReadyOnce();
+            program.writeReadinessSource = "reconciled";
+            program.writesReady = false;
+            program.dispatchWriteReadyOnce();
+            expect(events).toHaveLength(1);
+            program.writesReady = true;
+            program.dispatchWriteReadyOnce();
+            expect(events).toHaveLength(2);
+        });
+
+        it("write-ready telemetry: warm and the decision's counts; zeros for a creator, a warm reopen, or counts that throw", () => {
+            const { program, telemetry } = surface();
+            const emit = (...args: unknown[]) => {
+                program.bootstrapTelemetryWriteReadyEmitted = false;
+                program.emitWriteReadyOnce(...args);
+                return telemetry.at(-1);
+            };
+            const base = { type: "write-ready", atMs: 0, durationMs: 0 };
+            const zeros = { contained: 0, excluded: 0, gaps: 0 };
+            program.readinessWarmOpen = false;
+            expect(emit("creator")).toEqual({
+                ...base,
+                source: "creator",
+                warm: false,
+                ...zeros,
+            });
+            program.readinessWarmOpen = true;
+            expect(emit("reconciled")).toEqual({
+                ...base,
+                source: "reconciled",
+                warm: true,
+                ...zeros,
+            });
+            program.readinessWarmOpen = false;
+            expect(
+                emit("reconciled", () => ({
+                    contained: 2,
+                    excluded: 1,
+                    gaps: 3,
+                }))
+            ).toEqual({
+                ...base,
+                source: "reconciled",
+                warm: false,
+                contained: 2,
+                excluded: 1,
+                gaps: 3,
+            });
+            expect(
+                emit("operator", () => {
+                    throw new Error("no status");
+                })
+            ).toEqual({ ...base, source: "operator", warm: false, ...zeros });
+            // Once per open.
+            program.emitWriteReadyOnce("operator");
+            expect(telemetry).toHaveLength(4);
+        });
+
+        it("an operator flip counts the status at the flip; a reconciled one the proof's distinct peers", async () => {
+            const { program, telemetry, setStatus } = surface();
+            setStatus({
+                ...WAITING_SILENT,
+                contained: [
+                    {
+                        peer: "gated",
+                        qualified: false,
+                        source: "none",
+                        scopes: ["namespace-v1"],
+                        departed: false,
+                    },
+                ],
+                excluded: [
+                    { peer: "liar", reason: "inconsistent", detail: "x" },
+                ],
+                gaps: [{ peer: "gone", missing: "unknown" }],
+            });
+            await program.commitWriteReady(GENERATION, "operator");
+            expect(telemetry.at(-1)).toMatchObject({
+                type: "write-ready",
+                source: "operator",
+                warm: false,
+                contained: 1,
+                excluded: 1,
+                gaps: 1,
+            });
+
+            const next = surface();
+            const proof: Proof = {
+                ...PROOF,
+                scopes: ["namespace-v1", "trust-v1"],
+                contained: [
+                    PROOF.contained[0],
+                    { ...PROOF.contained[0], scope: "trust-v1" },
+                ],
+                gaps: [{ peer: "gone", missing: 2 }],
+            };
+            await next.program.commitWriteReady(
+                GENERATION,
+                "reconciled",
+                proof
+            );
+            expect(next.telemetry.at(-1)).toMatchObject({
+                type: "write-ready",
+                source: "reconciled",
+                contained: 1,
+                excluded: 0,
+                gaps: 1,
+            });
+        });
+
+        it("awaitWriteReady({ onProgress }): the snapshot at once, then each readiness:progress until the wait settles; a throw is ignored; write-ready-timeout on the timeout", async () => {
+            const { program, telemetry } = surface();
+            const listeners = () =>
+                program.events.listenerCount("readiness:progress");
+            const calls: ReadinessStatus[] = [];
+            const waiting = program.awaitWriteReady({
+                onProgress: (readiness: ReadinessStatus) =>
+                    calls.push(readiness),
+            });
+            // Synchronous: before awaitWriteReady returned.
+            expect(calls).toEqual([WAITING_SILENT]);
+            expect(listeners()).toBe(1);
+            const next = { ...WAITING_SILENT, state: "reconciling" as const };
+            program.events.dispatchEvent(
+                new CustomEvent("readiness:progress", { detail: next })
+            );
+            expect(calls).toEqual([WAITING_SILENT, next]);
+            // The flip resolves every waiter; no call after it.
+            for (const waiter of program.writeReadinessWaiters.slice(1)) {
+                waiter.resolve();
+            }
+            await waiting;
+            expect(listeners()).toBe(0);
+            program.events.dispatchEvent(
+                new CustomEvent("readiness:progress", { detail: next })
+            );
+            expect(calls).toHaveLength(2);
+
+            // A throwing onProgress never ends the wait early; the timeout
+            // rejects after the last call and is reported.
+            const order: string[] = [];
+            const timedOut = program
+                .awaitWriteReady({
+                    timeout: 50,
+                    onProgress: () => {
+                        order.push("progress");
+                        throw new Error("the caller's bug");
+                    },
+                })
+                .then(
+                    () => order.push("resolved"),
+                    (error: unknown) => {
+                        order.push("rejected");
+                        return error;
+                    }
+                );
+            program.events.dispatchEvent(
+                new CustomEvent("readiness:progress", { detail: next })
+            );
+            const error = await timedOut;
+            expect(error).toBeInstanceOf(SharedFsWriteReadyTimeoutError);
+            expect(order).toEqual(["progress", "progress", "rejected"]);
+            expect(listeners()).toBe(0);
+            expect(telemetry).toEqual([
+                {
+                    type: "write-ready-timeout",
+                    atMs: 0,
+                    timeoutMs: 50,
+                    state: "waiting-silent",
+                    required: 1,
+                    silent: 1,
+                    reachable: 1,
+                    busy: 0,
+                },
+            ]);
+
+            // No join (no snapshot): no first call, no telemetry; and
+            // without a telemetry callback a timeout still just rejects.
+            const { program: plain, setStatus } = surface();
+            setStatus(undefined);
+            plain.bootstrapTelemetry = undefined;
+            const none: ReadinessStatus[] = [];
+            await expect(
+                plain.awaitWriteReady({
+                    timeout: 20,
+                    onProgress: (readiness: ReadinessStatus) =>
+                        none.push(readiness),
+                })
+            ).rejects.toBeInstanceOf(SharedFsWriteReadyTimeoutError);
+            expect(none).toEqual([]);
+
+            // Already writable: resolved, never called.
+            plain.writesReady = true;
+            await plain.awaitWriteReady({
+                onProgress: (readiness: ReadinessStatus) =>
+                    none.push(readiness),
+            });
+            expect(none).toEqual([]);
+            expect(plain.events.listenerCount("readiness:progress")).toBe(0);
+        });
+
+        it("write-ready-timeout counts reachable silent peers only, neither refused nor parked", () => {
+            const { program, telemetry } = surface();
+            program.emitWriteReadyTimeout(1000, {
+                ...WAITING_SILENT,
+                required: ["a", "b", "c", "d", "e"],
+                silent: [
+                    { peer: "a", reachable: true },
+                    { peer: "b", reachable: false },
+                    { peer: "c", reachable: true, refused: "SCOPE" },
+                    { peer: "d", reachable: true, parked: true },
+                ],
+                busy: ["e"],
+            });
+            expect(telemetry).toEqual([
+                {
+                    type: "write-ready-timeout",
+                    atMs: 0,
+                    timeoutMs: 1000,
+                    state: "waiting-silent",
+                    required: 5,
+                    silent: 4,
+                    reachable: 1,
+                    busy: 1,
+                },
+            ]);
+            program.emitWriteReadyTimeout(1000, undefined);
+            program.bootstrapTelemetry = undefined;
+            program.emitWriteReadyTimeout(1000, WAITING_SILENT);
+            expect(telemetry).toHaveLength(1);
+        });
+    });
+});
+
+/**
+ * A scripted session whose namespace run can hold hashes parked for J's
+ * trust graph (`trustPending` in its debug), as a real run does while it
+ * waits only for trust.
+ */
+class StalledSession extends ScriptedSession {
+    trustPending = 0;
+
+    debug() {
+        const debug = super.debug();
+        debug.scopes[NS].trustPending = this.trustPending;
+        return debug;
+    }
+}
+
+describe("readiness coordinator: progress (PR-4)", () => {
+    /** `onProgress` calls with the evaluation each came in, and each peer's last report. */
+    const progressOf = (w: World) => {
+        const calls: Array<{ changed: PeerChange[]; evaluation: number }> = [];
+        const last = new Map<string, PeerChange>();
+        return {
+            calls,
+            last,
+            onProgress: (changed: readonly PeerChange[]) => {
+                calls.push({
+                    changed: [...changed],
+                    evaluation: w.evaluations.length,
+                });
+                for (const change of changed) last.set(change.peer, change);
+            },
+        };
+    };
+
+    /** Worlds of scripted sessions (no oracle record). */
+    const scriptedWorlds = new Set<World>();
+
+    /** A world of scripted sessions whose coordinator reports progress. */
+    const scriptedProgress = async (
+        peers: Array<[string, PeerOptions?]>,
+        stalled = false
+    ) => {
+        const { w, peers: out } = await worldWith(peers, 0);
+        scriptedWorlds.add(w);
+        const made: ScriptedSession[] = [];
+        const progress = progressOf(w);
+        const coordinator = w.run({
+            onProgress: progress.onProgress,
+            createSession: (init, ports) => {
+                const session = stalled
+                    ? new StalledSession(init, ports)
+                    : new ScriptedSession(init, ports);
+                made.push(session);
+                return session as unknown as JoinerSession;
+            },
+        });
+        await settle();
+        const latest = (peer: FakePeer) => {
+            const session = made
+                .filter((candidate) => candidate.peer === peer.hash)
+                .at(-1);
+            if (!session) throw new Error(`no session of ${peer.name}`);
+            return session;
+        };
+        return { w, peers: out, coordinator, progress, latest };
+    };
+
+    afterEach(() => {
+        // Scripted containment has no oracle record; real sessions keep it.
+        for (const w of scriptedWorlds) {
+            for (const record of w.coordinator?.records() ?? []) {
+                w.checked.add(record.hash);
+            }
+        }
+        scriptedWorlds.clear();
+    });
+
+    /** `peer` reads unreachable now, and J hears of it. */
+    const depart = (w: World, peer: FakePeer) => {
+        w.transport.reachable.set(peer.hash, false);
+        w.transport.emit({
+            kind: "reachability",
+            source: "unreachable",
+            peer: peer.hash,
+        });
+    };
+
+    it("reports once per evaluation that changed something, naming only the peers whose state or reason changed", async () => {
+        const { w, peers } = await worldWith([["D"], ["E"]]);
+        const [d, e] = peers;
+        await w.start();
+        const progress = progressOf(w);
+        const coordinator = w.run({ onProgress: progress.onProgress });
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        await settle();
+
+        // At most one call per evaluation.
+        expect(progress.calls.length).toBeGreaterThan(0);
+        const evaluations = progress.calls.map(({ evaluation }) => evaluation);
+        expect(new Set(evaluations).size).toBe(evaluations.length);
+        // Each change differs from that peer's last report.
+        const reported = new Map<string, string>();
+        for (const { changed } of progress.calls) {
+            const names = changed.map(({ peer }) => peer);
+            expect(new Set(names).size).toBe(names.length);
+            for (const { peer, state, reason } of changed) {
+                expect(reported.get(peer)).not.toBe(`${state}/${reason}`);
+                reported.set(peer, `${state}/${reason}`);
+            }
+        }
+        for (const peer of [d, e]) {
+            const changes = progress.calls
+                .flatMap(({ changed }) => changed)
+                .filter((change) => change.peer === peer.hash);
+            expect(changes[0]).toEqual({
+                peer: peer.hash,
+                state: "asking",
+                reason: "asked",
+            });
+            expect(changes.at(-1)).toEqual({
+                peer: peer.hash,
+                state: "contained",
+                reason: "qualified",
+            });
+        }
+
+        // Evaluations that find nothing new report nothing.
+        const calls = progress.calls.length;
+        const before = w.evaluations.length;
+        coordinator.evaluate();
+        await settle();
+        coordinator.evaluate();
+        await settle();
+        expect(w.evaluations).toHaveLength(before + 2);
+        expect(progress.calls).toHaveLength(calls);
+    });
+
+    describe("reasons", () => {
+        type Case = {
+            reason: PeerReason;
+            state: PeerState;
+            options?: PeerOptions;
+            stalled?: boolean;
+            drive?: (context: {
+                w: World;
+                peer: Peer;
+                session: () => ScriptedSession;
+            }) => unknown;
+            detail?: string;
+        };
+        const LONG = "a header that contradicts the list ".repeat(10);
+        const cases: Case[] = [
+            { reason: "asked", state: "asking" },
+            {
+                reason: "confirm-only",
+                state: "asking",
+                options: { subscriber: false, replicator: true },
+            },
+            {
+                reason: "no-sign-of-life",
+                state: "unconfirmed",
+                options: { subscriber: false, replicator: true },
+                drive: ({ session }) => session().attempt(),
+            },
+            {
+                reason: "busy",
+                state: "busy",
+                drive: ({ session }) => session().finish({ kind: "busy" }),
+            },
+            {
+                reason: "in-flight",
+                state: "reconciling",
+                drive: ({ session }) => session().set("certifying"),
+            },
+            {
+                reason: "parked",
+                state: "reconciling",
+                drive: ({ session }) => session().finish({ kind: "closed" }),
+            },
+            {
+                reason: "waiting-fetch",
+                state: "reconciling",
+                drive: ({ session }) => {
+                    const s = session();
+                    s.set("draining");
+                    s.failed = 2;
+                    s.pending = 2;
+                    s.set("failed-fetch-wait");
+                },
+            },
+            {
+                reason: "waiting-trust",
+                state: "reconciling",
+                stalled: true,
+                drive: ({ session }) => {
+                    const s = session() as StalledSession;
+                    s.pending = 3;
+                    s.trustPending = 3;
+                    s.set("draining");
+                },
+            },
+            {
+                reason: "reachable-silent",
+                state: "silent",
+                drive: ({ session }) => session().set("silent"),
+            },
+            {
+                // Visible only by its replication announcement, while J's
+                // route table has no route to it.
+                reason: "unreachable-silent",
+                state: "silent",
+                options: { subscriber: false, reachable: false },
+                drive: async ({ w, peer, session }) => {
+                    w.transport.emit({
+                        kind: "replicator",
+                        type: "join",
+                        peer: peer.hash,
+                        key: peer.key,
+                    });
+                    await settle();
+                    session().set("silent");
+                },
+            },
+            {
+                reason: "refused-unsupported",
+                state: "refused",
+                drive: ({ session }) =>
+                    session().finish({ kind: "refused", code: "UNSUPPORTED" }),
+            },
+            {
+                reason: "refused-scope",
+                state: "refused",
+                drive: ({ session }) =>
+                    session().finish({ kind: "refused", code: "SCOPE" }),
+            },
+            {
+                reason: "qualified",
+                state: "contained",
+                drive: ({ session }) =>
+                    session().finish({
+                        kind: "contained",
+                        results: [session().result(true)],
+                    }),
+            },
+            {
+                reason: "not-write-ready",
+                state: "contained",
+                drive: ({ session }) =>
+                    session().finish({
+                        kind: "contained",
+                        results: [session().result(false)],
+                    }),
+            },
+            {
+                reason: "gap",
+                state: "left",
+                drive: async ({ w, peer, session }) => {
+                    session().set("peeling");
+                    depart(w, peer);
+                    await settle();
+                },
+            },
+            {
+                // Left while its decoded set held nothing J lacks: a gap of 0.
+                reason: "departed",
+                state: "left",
+                drive: async ({ w, peer, session }) => {
+                    const s = session();
+                    s.set("certifying");
+                    s.pending = 0;
+                    s.set("draining");
+                    depart(w, peer);
+                    await settle();
+                },
+            },
+            {
+                reason: "left-unanswered",
+                state: "left-unanswered",
+                drive: async ({ w, peer }) => {
+                    depart(w, peer);
+                    await settle();
+                },
+            },
+            {
+                // D6: unsubscribed and no replicator; its attempt ends.
+                reason: "store-closed",
+                state: "left",
+                drive: async ({ w, peer, session }) => {
+                    w.transport.subscribed.delete(peer.hash);
+                    w.transport.emit({
+                        kind: "unsubscribe",
+                        peer: peer.hash,
+                        reason: "remote-unsubscribe",
+                    });
+                    await settle();
+                    session().attempt();
+                },
+            },
+            {
+                reason: "excluded",
+                state: "excluded-inconsistent",
+                drive: ({ session }) =>
+                    session().finish({
+                        kind: "excluded",
+                        reason: "inconsistent",
+                        scope: NS,
+                        detail: LONG,
+                    }),
+                detail: LONG.slice(0, 200),
+            },
+        ];
+
+        it.each(cases)(
+            "$reason ($state)",
+            async ({ reason, state, options, stalled, drive, detail }) => {
+                const { w, peers, coordinator, progress, latest } =
+                    await scriptedProgress([["R", options]], stalled);
+                const [r] = peers;
+                await drive?.({ w, peer: r, session: () => latest(r) });
+                await settle();
+                expect(w.stateOf(r)).toBe(state);
+                expect(progress.last.get(r.hash)).toEqual({
+                    peer: r.hash,
+                    state,
+                    reason,
+                    ...(detail !== undefined ? { detail } : {}),
+                });
+                // A report is a read: nothing armed, nothing decided.
+                expect(coordinator.debug().armedTimers).toBe(0);
+            }
+        );
+
+        it("left: store-closed comes before gap; every recorded gap is in status gaps whatever the reason, a departed one with missing 0", async () => {
+            const { w, peers, progress, latest } = await scriptedProgress([
+                ["S"],
+                ["U"],
+                ["Z"],
+            ]);
+            const [s, u, z] = peers;
+            // S closes the filesystem (D6) before answering; its attempt
+            // ends. J may lack S's rows.
+            w.transport.subscribed.delete(s.hash);
+            w.transport.emit({
+                kind: "unsubscribe",
+                peer: s.hash,
+                reason: "remote-unsubscribe",
+            });
+            await settle();
+            latest(s).attempt();
+            // U turns unreachable while peeling: J may lack its rows too.
+            latest(u).set("peeling");
+            depart(w, u);
+            // Z leaves while its decoded set holds nothing J lacks.
+            const left = latest(z);
+            left.set("certifying");
+            left.pending = 0;
+            left.set("draining");
+            depart(w, z);
+            await settle();
+            const reasons = [s, u, z].map((peer) =>
+                progress.last.get(peer.hash)
+            );
+            expect(reasons).toEqual([
+                { peer: s.hash, state: "left", reason: "store-closed" },
+                { peer: u.hash, state: "left", reason: "gap" },
+                { peer: z.hash, state: "left", reason: "departed" },
+            ]);
+            const gaps = new Map(
+                w.status().gaps.map(({ peer, missing }) => [peer, missing])
+            );
+            expect(gaps).toEqual(
+                new Map<string, number | "unknown">([
+                    [s.hash, "unknown"],
+                    [u.hash, "unknown"],
+                    [z.hash, 0],
+                ])
+            );
+        });
+
+        it("access-controlled stores: checking-identity while J's trust check runs, then qualified, or untrusted-identity for an identity J does not trust", async () => {
+            const w = await World.create({ trust: true });
+            const r = await w.peer("R");
+            const u = await w.peer("U");
+            w.rows([w.j, r, u], 4, "c");
+            w.rows([w.j, r, u], 4, "tc", 1000, TRUST);
+            w.trust!.trusted.add(r.hash);
+            await w.start();
+            const release = w.trust!.hold();
+            const progress = progressOf(w);
+            const coordinator = w.run({ onProgress: progress.onProgress });
+            await w.until(
+                () =>
+                    w.stateOf(r) === "contained" &&
+                    w.stateOf(u) === "contained",
+                "contained"
+            );
+            await settle();
+            for (const peer of [r, u]) {
+                expect(progress.last.get(peer.hash)).toEqual({
+                    peer: peer.hash,
+                    state: "contained",
+                    reason: "checking-identity",
+                });
+            }
+            release();
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            await settle();
+            expect(progress.last.get(r.hash)?.reason).toBe("qualified");
+            expect(progress.last.get(u.hash)?.reason).toBe(
+                "untrusted-identity"
+            );
+        });
+
+        it("every reason is covered", () => {
+            const every: Record<PeerReason, true> = {
+                asked: true,
+                "confirm-only": true,
+                busy: true,
+                "in-flight": true,
+                parked: true,
+                "waiting-fetch": true,
+                "waiting-trust": true,
+                "reachable-silent": true,
+                "unreachable-silent": true,
+                "refused-unsupported": true,
+                "refused-scope": true,
+                qualified: true,
+                "not-write-ready": true,
+                "untrusted-identity": true,
+                "checking-identity": true,
+                departed: true,
+                "store-closed": true,
+                gap: true,
+                "left-unanswered": true,
+                "no-sign-of-life": true,
+                excluded: true,
+            };
+            const covered = new Set<string>([
+                ...cases.map(({ reason }) => reason),
+                "checking-identity",
+                "untrusted-identity",
+            ]);
+            expect([...covered].sort()).toEqual(Object.keys(every).sort());
+        });
+    });
+
+    it("a satisfied flip alone reports changed: [], after the decision was asked; so does a fault", async () => {
+        const { w, peers } = await worldWith([["D"]]);
+        const [d] = peers;
+        await w.start();
+        const order: string[] = [];
+        let phase = false;
+        const progress = progressOf(w);
+        const coordinator = w.run({
+            phaseSettled: () => phase,
+            decide: async () => {
+                order.push("decide");
+            },
+            onProgress: (changed) => {
+                order.push("progress");
+                progress.onProgress(changed);
+            },
+        });
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await settle();
+        expect(progress.last.get(d.hash)?.reason).toBe("qualified");
+        expect(coordinator.satisfied()).toBe(false);
+        expect(order).not.toContain("decide");
+        const calls = progress.calls.length;
+
+        // The phase settles: the predicate holds with no record change.
+        order.length = 0;
+        phase = true;
+        coordinator.evaluate();
+        await settle();
+        expect(progress.calls).toHaveLength(calls + 1);
+        expect(progress.calls.at(-1)!.changed).toEqual([]);
+        expect(order).toEqual(["decide", "progress"]);
+
+        // A fault with no record change reports too.
+        const {
+            w: faulted,
+            peers: scripted,
+            progress: faultProgress,
+            latest,
+        } = await scriptedProgress([["R"]]);
+        const [r] = scripted;
+        const before = faultProgress.calls.length;
+        expect(faultProgress.last.get(r.hash)?.reason).toBe("asked");
+        latest(r).finish({
+            kind: "local-unavailable",
+            scope: NS,
+            detail: "tap faulted",
+        });
+        await settle();
+        // The record kept its state and reason; only the fault changed.
+        expect(faulted.stateOf(r)).toBe("asking");
+        expect(faulted.status().fault).toBe("tap faulted");
+        expect(faultProgress.calls).toHaveLength(before + 1);
+        expect(faultProgress.calls.at(-1)!.changed).toEqual([]);
+    });
+
+    it("a throwing onProgress changes neither the decision nor later evaluations", async () => {
+        const { w, peers } = await worldWith([
+            ["D"],
+            ["E", { subscriber: false }],
+        ]);
+        const [d, e] = peers;
+        await w.start();
+        let thrown = 0;
+        let decided = 0;
+        const coordinator = w.run({
+            decide: async () => {
+                decided++;
+            },
+            onProgress: () => {
+                thrown++;
+                throw new Error("an observer's bug");
+            },
+        });
+        await w.until(() => decided === 1, "decided");
+        expect(coordinator.satisfied()).toBe(true);
+        expect(coordinator.debug().decisions).toMatchObject({
+            started: 1,
+            failed: 0,
+        });
+        const calls = thrown;
+        expect(calls).toBeGreaterThan(0);
+        // A later change is still evaluated, reported and decided on.
+        w.transport.subscribed.set(e.hash, e.key);
+        w.transport.emit({ kind: "subscribe", peer: e.hash, key: e.key });
+        await w.until(() => w.stateOf(e) === "contained", "E contained");
+        await settle();
+        expect(thrown).toBeGreaterThan(calls);
+        expect(decided).toBeGreaterThan(1);
+        expect(w.stateOf(d)).toBe("contained");
+    });
+
+    it("reports nothing after finish or dispose, not even an evaluation pending then", async () => {
+        for (const end of ["finish", "dispose"] as const) {
+            const { w, peers } = await worldWith([
+                ["D"],
+                ["E", { subscriber: false }],
+            ]);
+            const [d, e] = peers;
+            await w.start();
+            const progress = progressOf(w);
+            const coordinator = w.run({ onProgress: progress.onProgress });
+            await w.until(() => w.stateOf(d) === "contained", "D contained");
+            await settle();
+            const calls = progress.calls.length;
+            coordinator.evaluate();
+            coordinator[end]();
+            w.transport.emit({ kind: "subscribe", peer: e.hash, key: e.key });
+            await settle();
+            expect(progress.calls, end).toHaveLength(calls);
+        }
+    });
+
+    it("33 (progress): no peer for hours reports nothing and arms nothing; a subscribe reports at once", async () => {
+        const { w, peers } = await worldWith([["D", { subscriber: false }]]);
+        const [d] = peers;
+        await w.start();
+        const progress = progressOf(w);
+        const coordinator = w.run({ onProgress: progress.onProgress });
+        await settle();
+        expect(w.status().state).toBe("no-peer");
+        // No record, not satisfied, no fault: nothing to report.
+        expect(progress.calls).toEqual([]);
+        await w.clock.advanceSettled(6 * HOUR);
+        expect(progress.calls).toEqual([]);
+        expect(coordinator.debug().armedTimers).toBe(0);
+        expect(w.clock.armed()).toBe(0);
+
+        const at = w.clock.now;
+        w.transport.subscribed.set(d.hash, d.key);
+        w.transport.emit({ kind: "subscribe", peer: d.hash, key: d.key });
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        await settle();
+        expect(w.clock.now).toBe(at);
+        expect(progress.calls[0].changed).toEqual([
+            { peer: d.hash, state: "asking", reason: "asked" },
+        ]);
+        expect(progress.last.get(d.hash)?.reason).toBe("qualified");
+    });
+
+    it("computes no reason without the port", async () => {
+        const reasonOf = vi.spyOn(Coordinator.prototype as any, "reasonOf");
+        try {
+            const { w } = await worldWith([["D"]]);
+            await w.start();
+            const coordinator = w.run();
+            await w.until(() => coordinator.satisfied(), "satisfied");
+            await settle();
+            expect(reasonOf).not.toHaveBeenCalled();
+
+            const { w: reporting } = await worldWith([["D"]]);
+            await reporting.start();
+            const reported = reporting.run({ onProgress: () => {} });
+            await reporting.until(() => reported.satisfied(), "satisfied");
+            expect(reasonOf).toHaveBeenCalled();
+        } finally {
+            reasonOf.mockRestore();
+        }
+    });
+
+    it("requestTimeoutMs reaches every session: OPENs at 0, t and 3t, silent at 7t", async () => {
+        const { w, peers } = await worldWith([["S"]]);
+        const [s] = peers;
+        await w.start();
+        s.hooks.toPeer = () => null;
+        const progress = progressOf(w);
+        w.run({ requestTimeoutMs: 200, onProgress: progress.onProgress });
+        await w.until(() => opensTo(w, s) === 1, "first OPEN");
+        expect(w.clock.now).toBe(0);
+        await w.clock.advanceSettled(199);
+        expect(opensTo(w, s)).toBe(1);
+        await w.clock.advanceSettled(1);
+        expect(opensTo(w, s)).toBe(2);
+        await w.clock.advanceSettled(400);
+        expect(opensTo(w, s)).toBe(3);
+        await w.clock.advanceSettled(799);
+        expect(w.stateOf(s)).toBe("asking");
+        await w.clock.advanceSettled(1);
+        expect(w.stateOf(s)).toBe("silent");
+        expect(progress.last.get(s.hash)?.reason).toBe("reachable-silent");
+        expect(w.clock.armed()).toBe(0);
+    });
+
+    it("a confirm-only row is asked for at least the default attempt: a shorter requestTimeoutMs does not stop it blocking sooner, a longer one waits longer", async () => {
+        for (const [requestTimeoutMs, unconfirmedAt] of [
+            [200, REQUEST_TIMEOUT_MS],
+            [20_000, 20_000],
+        ] as const) {
+            // Test 21's world: X a replicator row with no sign of life that
+            // never answers, D a donor.
+            const { w, peers } = await worldWith([
+                ["X", { subscriber: false, replicator: true }],
+                ["D"],
+            ]);
+            const [x, d] = peers;
+            await w.start();
+            x.hooks.toPeer = () => null;
+            const coordinator = w.run({ requestTimeoutMs });
+            await w.until(() => w.stateOf(d) === "contained", "D contained");
+            expect(w.record(x)).toMatchObject({
+                state: "asking",
+                confirmOnly: true,
+                live: false,
+            });
+            await w.clock.advanceSettled(unconfirmedAt - 1 - w.clock.now);
+            expect(w.stateOf(x)).toBe("asking");
+            expect(coordinator.satisfied()).toBe(false);
+            await w.clock.advanceSettled(1);
+            expect(w.stateOf(x)).toBe("unconfirmed");
+            expect(opensTo(w, x)).toBe(1);
+            await w.until(() => coordinator.satisfied(), "satisfied with D");
+            expect(w.clock.armed()).toBe(0);
+        }
+    });
+
+    it("requestTimeoutMs at its cap: a stalled sync's window ends inside the responder's session idle, so the peel is answered; at the idle itself the session expires first", async () => {
+        expect(REQUEST_TIMEOUT_MAX_MS).toBeLessThan(SESSION_IDLE_MS);
+        // Sync delivered rows once (syncDelivering) and then stalled: J
+        // waits one window with no arrival, then peels D's 1000-row gap.
+        const stalled = async (requestTimeoutMs: number) => {
+            const { w, peers } = await worldWith([["D"]]);
+            const [d] = peers;
+            w.rows([d], 1000, "extra", 5000);
+            await w.start();
+            w.syncDelivering.add(NS);
+            const coordinator = w.run({ requestTimeoutMs });
+            await w.until(() => w.sessionsOf(d).length === 1, "D asked");
+            await w.clock.advanceSettled(requestTimeoutMs - 1);
+            expect(w.stateOf(d)).toBe("reconciling");
+            expect(coordinator.satisfied()).toBe(false);
+            await w.clock.advanceSettled(1);
+            return { w, d, coordinator };
+        };
+
+        const capped = await stalled(REQUEST_TIMEOUT_MAX_MS);
+        await capped.w.until(
+            () => capped.coordinator.satisfied(),
+            "contained once the window ended"
+        );
+        expect(capped.w.clock.now).toBe(REQUEST_TIMEOUT_MAX_MS);
+        expect(capped.w.sessionsOf(capped.d)).toHaveLength(1);
+        expect(capped.w.sessionsOf(capped.d)[0].outcome?.kind).toBe(
+            "contained"
+        );
+
+        // What the cap prevents: R expired the session before the peel.
+        const idle = await stalled(SESSION_IDLE_MS);
+        await idle.w.until(
+            () => idle.w.sessionsOf(idle.d).length === 2,
+            "renewed"
+        );
+        expect(idle.w.sessionsOf(idle.d)[0].outcome).toMatchObject({
+            kind: "renew",
+            reason: "expired",
+        });
+        expect(idle.coordinator.satisfied()).toBe(false);
     });
 });

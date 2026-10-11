@@ -174,7 +174,7 @@ const expectedContentHash = (expected: ProcessSoakContentExpectation) =>
 const serializeBootstrapStatus = (
     status: ReturnType<SharedFsHandle["bootstrapStatus"]>
 ): ProcessSoakBootstrapStatus => {
-    const { manifest, msSinceLastArrival, ...serializable } = status;
+    const { manifest, ...serializable } = status;
     return {
         ...serializable,
         manifest: manifest
@@ -185,9 +185,6 @@ const serializeBootstrapStatus = (
                   docs: manifest.docs.toString(),
               }
             : undefined,
-        msSinceLastArrival: Number.isFinite(msSinceLastArrival)
-            ? msSinceLastArrival
-            : null,
     };
 };
 

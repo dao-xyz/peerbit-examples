@@ -1,4 +1,5 @@
 import type { PublicSignKey } from "@peerbit/crypto";
+import { REQUEST_TIMEOUT_MS } from "./constants.js";
 import {
     buildProof,
     type ContainedInput,
@@ -112,13 +113,16 @@ import {
  *   its earlier, gated snapshot) is remembered, and the containment then
  *   opens that fresh session.
  * - **Timers.** The coordinator arms none of its own: every timer is a
- *   session's bounded attempt (5, 10 or 20 s) or sync-wait window, and
- *   `debug().armedTimers` sums them, so a test can assert that nothing is
- *   armed while J is gated with nothing in flight (M1 plan section 10.5).
+ *   session's bounded attempt (`requestTimeoutMs`, x2, x4; 5, 10 or 20 s by
+ *   default) or sync-wait window, and `debug().armedTimers` sums them, so a
+ *   test can assert that nothing is armed while J is gated with nothing in
+ *   flight (M1 plan section 10.5).
  * - **`evaluate()`** runs once per microtask however many events asked for
  *   it, computes `satisfied()`, reports it (`onEvaluate`) and, when it
  *   holds, asks the host to decide (`decide`). No polling and no quiet
- *   window.
+ *   window. Then, with an `onProgress` port (PR-4), it reports the peers
+ *   whose state or reason changed since the last report (`reportProgress`):
+ *   a read, after the decision was asked.
  * - **Lifecycle.** Every listener is detached on `finish`/`dispose`, and
  *   every handler first checks that this coordinator is still running (as
  *   the entries change listener checks its identity: a removed listener can
@@ -148,6 +152,45 @@ export type PeerState =
     | "unconfirmed"
     | "excluded-inconsistent"
     | "excluded-unsubstantiated";
+
+/**
+ * Why a peer is in its state (`readiness-peer` telemetry, PR-4). A pure read
+ * of the record (`reasonOf`); nothing decides on it.
+ */
+export type PeerReason =
+    | "asked" // asking, with full attempts
+    | "confirm-only" // asking: a replicator row with no sign of life, asked once
+    | "busy" // busy: R answered BUSY; waits for a re-ask trigger
+    | "in-flight" // reconciling: R's session is working
+    | "parked" // reconciling: renewals ran out, or its session closed under it
+    | "waiting-fetch" // reconciling: every unfinished scope waits for a fetch
+    | "waiting-trust" // reconciling: waits only for J's trust graph
+    | "reachable-silent" // silent, reachable at the last read
+    | "unreachable-silent" // silent, unreachable at the last read
+    | "refused-unsupported"
+    | "refused-scope"
+    | "qualified" // contained and counted by the predicate
+    | "not-write-ready" // contained; its answer's provenance does not qualify
+    | "untrusted-identity" // contained; ACL: J does not trust its identity
+    | "checking-identity" // contained; ACL: identity not checked at this epoch
+    | "departed" // left, with nothing J lacks recorded (no gap, or a gap of 0)
+    | "store-closed" // left: unsubscribed, not a replicator (D6); gap or not
+    | "gap" // left with rows J may lack (D4; a count above 0, or unknown)
+    | "left-unanswered" // left before answering; its attempt is in flight
+    | "no-sign-of-life" // unconfirmed
+    | "excluded"; // excluded-*: `detail` says why
+
+/** A peer whose state or reason changed since the last progress report. */
+export interface PeerChange {
+    peer: string;
+    state: PeerState;
+    reason: PeerReason;
+    /** `excluded` only: what R's answer contradicted (at most 200 chars). */
+    detail?: string;
+}
+
+/** `PeerChange.detail` is cut to this many characters. */
+const CHANGE_DETAIL_MAX = 200;
 
 /** States that keep a peer Required (design 2.1 "Required", 4.7). */
 export const BLOCKING_STATES: ReadonlySet<PeerState> = new Set<PeerState>([
@@ -354,6 +397,21 @@ export interface CoordinatorPorts {
     decide?(): Promise<void>;
     /** After each evaluation; tests observe the decision points. */
     onEvaluate?(evaluation: Evaluation): void;
+    /**
+     * After an evaluation that found a change since the last call: a peer's
+     * state or reason, `satisfied`, or the fault (PR-4, `readiness:progress`
+     * and `readiness-peer`). `changed` lists the peers whose state or
+     * reason changed, in record order (empty when only `satisfied` or the
+     * fault did). Called after the decision was asked; never awaited; a
+     * throw is the observer's. Without it no reason is computed.
+     */
+    onProgress?(changed: readonly PeerChange[]): void;
+    /**
+     * The first request attempt of every session
+     * (`writeReadiness.requestTimeoutMs`; `REQUEST_TIMEOUT_MS` by default,
+     * and never less for a confirm-only peer's single attempt).
+     */
+    readonly requestTimeoutMs?: number;
     /**
      * A session contained `results` for `peer` (telemetry, and in test mode
      * the per-session K2 shadow check, G18). Called after the record
@@ -721,6 +779,13 @@ export class Coordinator {
     private decideAgain = false;
     private readonly decisions = { started: 0, failed: 0 };
     private lastDecisionError?: string;
+    /** Each record's last reported state and reason (`reportProgress`). */
+    private readonly reported = new Map<
+        string,
+        { state: PeerState; reason: PeerReason }
+    >();
+    private reportedSatisfied = false;
+    private reportedFault?: string;
 
     constructor(readonly ports: CoordinatorPorts) {
         this.timers = ports.timers ?? systemTimers;
@@ -923,7 +988,107 @@ export class Coordinator {
                 // An observer's error is the observer's.
             }
             if (satisfied && this.running) this.requestDecision();
+            this.reportProgress(satisfied);
         });
+    }
+
+    /**
+     * After an evaluation (PR-4): the records whose state or reason changed
+     * since the last report, and whether `satisfied` or the fault did; the
+     * port is called only when something did. A read: it changes no record
+     * and asks for nothing. Records are never deleted, so the map only
+     * grows with them. Nothing without the port, or once finished.
+     */
+    private reportProgress(satisfied: boolean) {
+        const onProgress = this.ports.onProgress;
+        if (!onProgress || !this.running) return;
+        const changed: PeerChange[] = [];
+        for (const entry of this.entries.values()) {
+            const { hash: peer, state } = entry;
+            const reason = this.reasonOf(entry);
+            const last = this.reported.get(peer);
+            if (last && last.state === state && last.reason === reason) {
+                continue;
+            }
+            this.reported.set(peer, { state, reason });
+            changed.push({
+                peer,
+                state,
+                reason,
+                ...(reason === "excluded" && entry.excluded
+                    ? {
+                          detail: entry.excluded.detail.slice(
+                              0,
+                              CHANGE_DETAIL_MAX
+                          ),
+                      }
+                    : {}),
+            });
+        }
+        if (
+            changed.length === 0 &&
+            satisfied === this.reportedSatisfied &&
+            this.fault === this.reportedFault
+        ) {
+            return;
+        }
+        this.reportedSatisfied = satisfied;
+        this.reportedFault = this.fault;
+        try {
+            onProgress.call(this.ports, changed);
+        } catch {
+            // An observer's error is the observer's.
+        }
+    }
+
+    /**
+     * Why `entry` is in its state (`PeerReason`), first match: for
+     * `reconciling`, parked, then waiting for a fetch, then only for J's
+     * trust graph; for `contained` in access-controlled stores, the
+     * identity check at this epoch, then the identity, then the header.
+     */
+    private reasonOf(entry: Entry): PeerReason {
+        switch (entry.state) {
+            case "asking":
+                return entry.confirmOnly && !entry.live
+                    ? "confirm-only"
+                    : "asked";
+            case "busy":
+                return "busy";
+            case "reconciling":
+                if (entry.parked) return "parked";
+                if (entry.fetchWaiting) return "waiting-fetch";
+                if (this.trustStalled(entry)) return "waiting-trust";
+                return "in-flight";
+            case "silent":
+                return entry.reachable
+                    ? "reachable-silent"
+                    : "unreachable-silent";
+            case "refused":
+                return entry.refused === "SCOPE"
+                    ? "refused-scope"
+                    : "refused-unsupported";
+            case "contained":
+                if (this.ports.trust) {
+                    if (!this.trustChecked(entry)) return "checking-identity";
+                    if (entry.identity !== "trusted") {
+                        return "untrusted-identity";
+                    }
+                }
+                return entry.qualified ? "qualified" : "not-write-ready";
+            case "left":
+                if (entry.storeClosed) return "store-closed";
+                return entry.gap !== undefined && entry.gap.missing !== 0
+                    ? "gap"
+                    : "departed";
+            case "left-unanswered":
+                return "left-unanswered";
+            case "unconfirmed":
+                return "no-sign-of-life";
+            case "excluded-inconsistent":
+            case "excluded-unsubstantiated":
+                return "excluded";
+        }
     }
 
     /**
@@ -2423,6 +2588,15 @@ export class Coordinator {
         entry.sessionsOpened++;
         if (!entry.qualifying) entry.state = "asking";
         const peer = init.peer;
+        // A2: a confirm-only peer's single attempt never ends sooner than
+        // the default one, so a shorter option cannot unblock it sooner.
+        let requestTimeoutMs = this.ports.requestTimeoutMs;
+        if (entry.confirmOnly && !entry.live) {
+            requestTimeoutMs = Math.max(
+                requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
+                REQUEST_TIMEOUT_MS
+            );
+        }
         const events: SessionEvents = {
             onOutcome: (session, outcome) => this.onOutcome(session, outcome),
             onState: (session, scope, state) =>
@@ -2445,6 +2619,7 @@ export class Coordinator {
             scope: (id) => this.ports.scope(id),
             events,
             ...(this.sessionTrust ? { trust: this.sessionTrust } : {}),
+            ...(requestTimeoutMs !== undefined ? { requestTimeoutMs } : {}),
         };
         let session: JoinerSession;
         try {
