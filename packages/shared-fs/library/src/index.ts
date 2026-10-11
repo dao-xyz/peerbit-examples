@@ -12260,11 +12260,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const resumed = marker !== undefined && !empty;
         this.setBootstrapPhase("fetching");
         this.setGuardArmed(false);
-        await this.writeBootstrapState(
-            { bootstrap: "active" },
-            generation,
-            true
-        );
+        if (!this.viewProven) {
+            // Only an unproven view persists the crash marker (every other
+            // open wrote or read it already). A warm reopen keeps its
+            // proof: the overlay is in memory and the proof covers the
+            // store, as when one with content stops mid-sync.
+            await this.writeBootstrapState(
+                { bootstrap: "active" },
+                generation,
+                true
+            );
+        }
         if (!active()) {
             this.emitBootstrapAbortedOnce(generation, signal);
             return;

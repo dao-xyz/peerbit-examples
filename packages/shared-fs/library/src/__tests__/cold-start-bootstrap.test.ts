@@ -393,6 +393,78 @@ describe("shared fs cold-start bootstrap", () => {
         }
     });
 
+    it("keeps a warm reopen's proof when its snapshot bootstrap is stopped before it decides", async () => {
+        // F-C1: `peerbit-fs create`, then `status` twice. Each status is a
+        // warm reopen of an empty store, so it starts a snapshot bootstrap,
+        // and it stops before discovery decides.
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-warm-stop-"));
+        const directory = join(root, "peer");
+        let peer: Peerbit | undefined;
+        try {
+            peer = await Peerbit.create({ directory });
+            const creator = await openSharedFs({
+                peerbit: peer,
+                machineLabel: "warm-stop-creator",
+            });
+            const address = creator.address!;
+            const sidecar = async () =>
+                JSON.parse(
+                    await readFile(
+                        join(
+                            directory,
+                            "shared-fs-bootstrap",
+                            `${address}.json`
+                        ),
+                        "utf8"
+                    )
+                );
+            await peer.stop();
+            peer = undefined;
+            expect(await sidecar()).toEqual({
+                writeReady: true,
+                writeReadySource: "creator",
+            });
+
+            for (const label of ["warm-stop-1", "warm-stop-2"]) {
+                peer = await Peerbit.create({ directory });
+                const warm = await openSharedFs({
+                    peerbit: peer,
+                    address,
+                    machineLabel: label,
+                    // Discovery cannot decide before the stop below.
+                    bootstrap: { discoveryTimeoutMs: 60_000 },
+                });
+                expect(warm.bootstrapStatus()).toMatchObject({
+                    phase: "fetching",
+                    writeReady: true,
+                    writeReadinessSource: "creator",
+                });
+                await peer.stop();
+                peer = undefined;
+                // The warm proof stands: no interrupted-bootstrap marker.
+                expect(await sidecar()).toEqual({
+                    writeReady: true,
+                    writeReadySource: "creator",
+                });
+            }
+
+            peer = await Peerbit.create({ directory });
+            const reopened = await openSharedFs({
+                peerbit: peer,
+                address,
+                machineLabel: "warm-stop-final",
+            });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "creator",
+            });
+            await reopened.writeFile("/after.txt", "at once");
+        } finally {
+            await peer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it("retires promptly when the final pending overlay document arrives", async () => {
         const peer = await createPeer();
         const fs = await openSharedFs({
