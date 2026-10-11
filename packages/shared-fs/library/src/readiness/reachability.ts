@@ -48,8 +48,14 @@ import type { CoordinatorTransport, TransportEvent } from "./coordinator.js";
  * names the relay, not R. So a disconnect re-reads every blocking record
  * (an event without a peer), and pubsub's `unsubscribe` of the readiness
  * topic, which peers other than R's fanout parent receive, re-reads R.
- * If neither arrives, R stays Required until the caller's timeout (liveness,
- * never a wrong ready); the relayed variant of design test 53 checks it.
+ * If neither arrives, the coordinator still re-reads R where R becomes or
+ * stays Required (a sign of life, discovery, a `replicator:leave`, R's
+ * session turning silent, the end of an OPEN attempt, an evaluation that
+ * stops at R with nothing armed), so R leaves once J's route table no
+ * longer reaches it, unless R is answering J (then only an event departs
+ * it); while J reaches R, R stays Required until the caller's timeout
+ * (liveness, never a wrong ready). The relayed variant of design test 53
+ * checks it.
  *
  * Every listener checks that it is still the attached one before it
  * delivers (main-event 1.0.3-1.0.4 can leave a removed listener firing).

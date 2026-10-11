@@ -92,13 +92,37 @@ import {
  *   gap; after a header it is `left` at once, with the rows J still lacks as
  *   the gap (D4), and its session keeps pulling. Reachable again resumes the
  *   session or starts a new one. A read that cannot be made counts as
- *   reachable: it gates, never a wrong `left`. A peer that unsubscribes the
+ *   reachable: it gates, never a wrong `left`. A quiet network sends no such
+ *   event, so the same read also runs wherever a record becomes or stays
+ *   Required: a new record, a sign of life, discovery, a `replicator:leave`,
+ *   a session turning `silent`, and the end of every OPEN attempt (every
+ *   Required record then; design 4.9). J hears a dead peer relayed (a pubsub
+ *   subscriber, M0 P1, and the replicator shared-log announces once that
+ *   subscription arrives); without these reads it would be asked with full
+ *   attempts and block J for good. An evaluation that stops at a blocking
+ *   record with nothing armed (a `silent`, `busy`, refused or parked peer)
+ *   reads that record too: a silent peer's route can go with no event while
+ *   no attempt ends. These reads skip a peer that is answering (its session
+ *   holds R's header and is not `silent`): a relayed answer can arrive
+ *   before J's route table learns R, so only a reachability event departs
+ *   it (design case 31). One such a read departed while its OPEN was
+ *   unanswered is answering again once its header arrives, so the order of
+ *   its sign of life and its answer does not decide. A sign of life still
+ *   counts as one (design 2.1, 4.7 "live replicators count"), also one that
+ *   came before J had the peer's record: the read departs only a peer J's
+ *   route table does not reach, with its gap, and a replicator row with no
+ *   sign of life keeps its one attempt (A2); once such a row, asked and
+ *   gone, shows a sign of life, it is a live peer that left before
+ *   answering: `left` with its gap, whether that sign arrived before its
+ *   record, during its attempt or after. A peer that unsubscribes the
  *   readiness topic explicitly (`remote-unsubscribe`) and is no replicator
- *   closed the store (G2-6): it leaves however reachable it is. Required is the
- *   set at the moment of evaluation (design 2.1), so `satisfied()` re-reads the
- *   peers it counts as gone (and subscribers that were unreachable when J saw
- *   them) and answers false for one that reads reachable; a route that came
- *   back without an event cannot let J decide around it.
+ *   closed the store (G2-6): it leaves however reachable it is. Required is
+ *   the set at the moment of evaluation (design 2.1), so whenever nothing
+ *   blocks, `satisfied()` re-reads the peers it counts as gone (and
+ *   subscribers that were unreachable when J saw them) and answers false
+ *   for one that reads reachable; a route that came back without an event
+ *   cannot let J decide around it, nor leave J waiting when that peer is the
+ *   only one that could qualify.
  * - **Silence, `BUSY`, refusals and fetch failures never unblock.** A
  *   `silent` peer's late answer counts whenever it arrives; a `busy` peer is
  *   re-asked on its notice, on any message or sign of life from it, and once
@@ -165,8 +189,7 @@ export type PeerReason =
     | "parked" // reconciling: renewals ran out, or its session closed under it
     | "waiting-fetch" // reconciling: every unfinished scope waits for a fetch
     | "waiting-trust" // reconciling: waits only for J's trust graph
-    | "reachable-silent" // silent, reachable at the last read
-    | "unreachable-silent" // silent, unreachable at the last read
+    | "reachable-silent" // silent: a silent peer J cannot reach leaves (D3 = A')
     | "refused-unsupported"
     | "refused-scope"
     | "qualified" // contained and counted by the predicate
@@ -706,6 +729,13 @@ interface Entry extends PeerRecord {
     /** The D6 `replicators()` re-read is running. */
     visibilityRead: boolean;
     /**
+     * `departed` came from a read with no reachability event (`required`),
+     * and no event has read R gone since: R's header ending its attempt in
+     * flight makes it answering again instead of `left` (case 31, whatever
+     * the order of the sign of life and the answer).
+     */
+    departedByRead: boolean;
+    /**
      * The session ordinal (`sessionsOpened`) of each held result: one
      * session freezes trust after namespace, a later session later (G3-12).
      */
@@ -747,12 +777,18 @@ export class Coordinator {
         string,
         { via: Via; key?: PublicSignKey }
     >();
-    /** Peers with a sign of life before `start` (`signsOfLife`). */
+    /**
+     * Peers with a sign of life before their record: before `start`
+     * (`signsOfLife`), or since it from a peer J could not reach then
+     * (`entryOf`). Discovery counts their replicator rows live.
+     */
     private readonly earlyLife = new Set<string>();
     /** The signs of life before `start` could not be read (fail closed). */
     private everyRowLive = false;
     /** A decision-time re-read found a peer to ask again (`satisfied`). */
     private refreshPending = false;
+    /** `satisfied()` stopped at an idle blocking record (`recheck`). */
+    private recheckPending = false;
     private evaluationPending = false;
     private lastSatisfied = false;
     /** `satisfied()` when the coordinator finished (status after it). */
@@ -900,7 +936,11 @@ export class Coordinator {
                 sameBytes(message.sessionId, session.sessionId)
             ) {
                 // The session's own input: it advances (or drops) it, and is
-                // never a re-ask trigger (a `BUSY` answer would loop).
+                // never a re-ask trigger (a `BUSY` answer would loop). Nor a
+                // re-read (`required`): R answering is no peer J heard of
+                // only relayed, and a relayed answer can arrive before J's
+                // route table learns R (readiness messages carry no
+                // acknowledgement to learn a route from).
                 session.onMessage(message, from, bytes);
                 return;
             }
@@ -1061,9 +1101,9 @@ export class Coordinator {
                 if (this.trustStalled(entry)) return "waiting-trust";
                 return "in-flight";
             case "silent":
-                return entry.reachable
-                    ? "reachable-silent"
-                    : "unreachable-silent";
+                // A record turning silent is read again (`required`): one
+                // J cannot reach leaves (D3 = A'), so a silent one is reachable.
+                return "reachable-silent";
             case "refused":
                 return entry.refused === "SCOPE"
                     ? "refused-scope"
@@ -1150,8 +1190,12 @@ export class Coordinator {
      * Required is read at the moment of evaluation (design 2.1): a `left`
      * peer, or a subscriber that was unreachable when J saw it, that reads
      * reachable now makes the answer false, and a microtask asks it (D4).
-     * The reads are the same route-table reads as a departure's, failing
-     * closed to reachable, so this can only gate.
+     * They run once nothing blocks, whether or not a record qualified yet:
+     * the peer back may be the only one that can. The reads are the same
+     * route-table reads as a departure's, failing closed to reachable, so
+     * these can only gate. The first blocking record, when nothing armed
+     * advances it, is read on a microtask too (`recheck`): one J cannot
+     * reach leaves with its gap (D3 = A', D4).
      */
     satisfied(): boolean {
         if (!this.running || !this.discovered || this.fault !== undefined) {
@@ -1161,7 +1205,12 @@ export class Coordinator {
         let qualified = false;
         let unchecked = false;
         for (const entry of this.entries.values()) {
-            if (BLOCKING_STATES.has(entry.state)) return false;
+            if (BLOCKING_STATES.has(entry.state)) {
+                // Nothing armed advances it (silent, busy, refused,
+                // parked, queued): a microtask reads it again (D3 = A').
+                if (!this.inFlight(entry)) this.recheck(entry);
+                return false;
+            }
             if (entry.state !== "contained") continue;
             if (acl) {
                 if (!this.trustFirst(entry)) return false;
@@ -1176,11 +1225,13 @@ export class Coordinator {
             this.recheckTrust();
             return false;
         }
-        if (!qualified) return false;
+        // Before the donor clause: the peer back may be the only one that
+        // can qualify, and nothing else would ask it.
         if (this.reachableAgain()) {
             this.refresh();
             return false;
         }
+        if (!qualified) return false;
         return this.phaseSettled();
     }
 
@@ -1240,6 +1291,29 @@ export class Coordinator {
         return false;
     }
 
+    /**
+     * `satisfied()` stopped at `entry`, blocking with nothing armed that
+     * would read it again: a silent peer is read only when it turns silent,
+     * and its route can go with no event while nothing else re-reads it (no
+     * attempt ends). One record per microtask, `required` (it skips an
+     * answering peer and a row with no sign of life); a change settles, so
+     * the next blocking record is read in turn, and no change ends it (no
+     * loop, no polling: each evaluation has its own trigger, design 4.9).
+     */
+    private recheck(entry: Entry) {
+        if (this.recheckPending) return;
+        this.recheckPending = true;
+        void resolved.then(() => {
+            this.recheckPending = false;
+            if (!this.running || this.entries.get(entry.hash) !== entry) return;
+            const { state, departed } = entry;
+            this.required(entry);
+            if (entry.state !== state || entry.departed !== departed) {
+                this.settle();
+            }
+        });
+    }
+
     /** Re-reads `left` and unreachable visible peers once, on a microtask. */
     private refresh() {
         if (this.refreshPending) return;
@@ -1253,8 +1327,23 @@ export class Coordinator {
     }
 
     /** D1, D2 (G2-7): every record, then the unreachable visible peers. */
-    private rereadAll() {
-        for (const entry of [...this.entries.values()]) this.reread(entry);
+    private rereadAll(byEvent = false) {
+        for (const entry of [...this.entries.values()]) {
+            this.reread(entry, byEvent);
+        }
+        for (const [hash, seen] of [...this.unreachableVisible]) {
+            if (this.readReachable(hash)) this.connected(hash, seen);
+        }
+    }
+
+    /**
+     * The same reads with no reachability event (an OPEN attempt's end):
+     * every record `required` re-reads, then the unreachable visible peers.
+     * A queued replicator row with no sign of life keeps its one attempt
+     * (A2), and a peer that is answering waits for an event (case 31).
+     */
+    private rereadRequired() {
+        for (const entry of [...this.entries.values()]) this.required(entry);
         for (const [hash, seen] of [...this.unreachableVisible]) {
             if (this.readReachable(hash)) this.connected(hash, seen);
         }
@@ -1595,7 +1684,7 @@ export class Coordinator {
                     }
                     // A session reset or pubsub's own unreachability: A'
                     // decides (D1).
-                    return this.reread(entry);
+                    return this.reread(entry, true);
                 }
                 case "replicator": {
                     if (event.peer === this.self) return;
@@ -1603,10 +1692,15 @@ export class Coordinator {
                         const entry = this.entries.get(event.peer);
                         if (!entry) return;
                         entry.via.delete("replicator");
-                        return this.checkVisibility(entry);
+                        this.checkVisibility(entry);
+                        // shared-log's own liveness eviction dispatches it
+                        // too, with no reachability event: A' decides (D1),
+                        // and a departure stands as an event's does (A1).
+                        return this.reread(entry, true);
                     }
                     // V3: a replication announcement is a sign of life, so the
-                    // peer gets full attempts whatever its reachability.
+                    // peer gets full attempts whatever it was before; one J's
+                    // route table does not reach leaves (`required`).
                     this.unreachableVisible.delete(event.peer);
                     const entry =
                         this.entries.get(event.peer) ??
@@ -1620,7 +1714,7 @@ export class Coordinator {
                 case "reachability":
                     // D1 and D2 (G2-7): every record, so a relayed peer whose
                     // relay went away is re-read too.
-                    return this.rereadAll();
+                    return this.rereadAll(true);
             }
         } finally {
             this.settle();
@@ -1708,7 +1802,14 @@ export class Coordinator {
         }
     }
 
-    /** A session scope's state change (S- transitions). */
+    /**
+     * A session scope's state change (S- transitions). A record that turns
+     * `silent` is re-read (`required`): it stopped answering, so the reads
+     * without a reachability event no longer skip it, and a request's last
+     * attempt arms no timer that would (design 4.9, D3 = A'). R's header
+     * ending a `left-unanswered` block is A1 after a reachability event,
+     * and makes R answering again after a read with none (`departedByRead`).
+     */
     protected onSessionState(
         session: JoinerSession,
         _scope: ScopeId,
@@ -1722,13 +1823,24 @@ export class Coordinator {
         try {
             if (entry.qualifying) return;
             if (entry.departed) {
-                if (entry.state === "left-unanswered" && entry.headerHeld) {
-                    // R's answer ended the attempt in flight (A1).
-                    this.attemptEnded(entry);
+                if (entry.state !== "left-unanswered" || !entry.headerHeld) {
+                    return;
                 }
-                return;
+                if (!entry.departedByRead || entry.storeClosed) {
+                    // R's answer ended the attempt in flight (A1).
+                    return this.attemptEnded(entry);
+                }
+                // Departed by a read with no reachability event before R's
+                // answer came (a sign of life first): R answers now, so it
+                // is answering, as when the answer comes first (case 31).
+                entry.departed = false;
+                entry.departedByRead = false;
             }
+            const before = entry.state;
             this.fromSession(entry, session);
+            if (entry.state === "silent" && before !== "silent") {
+                this.required(entry);
+            }
         } finally {
             this.settle();
         }
@@ -1769,21 +1881,33 @@ export class Coordinator {
     /**
      * An OPEN attempt of `session` ended with a scope still without a
      * header (`SessionEvents.onAttempt`, added in commit 2): ends a
-     * `left-unanswered` block or a confirm-only peer's single attempt,
-     * whichever attempt it was (`_last` is for diagnostics).
+     * confirm-only peer's single attempt, re-reads every Required record
+     * (D3 = A'), then ends a `left-unanswered` block, whichever attempt it
+     * was (`_last` is for diagnostics).
+     *
+     * The re-read (`rereadRequired`) runs on a design 4.9 trigger that
+     * bounded work already arms: a quiet network sends no event, so a
+     * Required peer J's route table stopped reaching (a dead peer J heard
+     * relayed, or one whose route went with no event) would otherwise be
+     * asked for good. R's own attempt has just ended, so R, unreachable now,
+     * is `left` at once, with a gap (A1). A qualification session's attempt
+     * re-reads too, and changes nothing else (G2-20).
      */
     protected onAttempt(session: JoinerSession, _last: boolean): void {
         if (!this.running) return;
         const entry = this.owners.get(session);
-        if (!entry || entry.session !== session || entry.qualifying) return;
+        if (!entry || entry.session !== session) return;
         try {
-            if (entry.confirmOnly && !entry.live) {
+            const owned = !entry.qualifying;
+            if (owned && entry.confirmOnly && !entry.live) {
                 // A2: a replicator row with no sign of life is asked once.
                 this.closeSession(entry);
                 entry.state = "unconfirmed";
-                return;
             }
-            if (entry.state === "left-unanswered") this.attemptEnded(entry);
+            this.rereadRequired();
+            if (owned && entry.state === "left-unanswered") {
+                this.attemptEnded(entry);
+            }
         } finally {
             this.settle();
         }
@@ -1915,13 +2039,17 @@ export class Coordinator {
      * A sign of life (V2, V3, V6 not consumed by R's session): `silent`
      * resumes, `busy` is re-asked, `unconfirmed` gets full attempts, a
      * fetch-waiting session retries R's failed pulls, a qualification
-     * session resumes, a departed peer is re-read. `refused`, parked and
-     * excluded peers wait for R's notice.
+     * session resumes, a departed peer is re-read (an `unconfirmed` one
+     * still gone leaves, `goneLive`). `refused`, parked and excluded peers
+     * wait for R's notice. Then R, Required now or still, is re-read
+     * (`required`): J hears a dead peer's subscription and announcement
+     * relayed (design case 14), and no reachability event may follow.
      */
     private lifeSigned(entry: Entry) {
         if (entry.departed) {
             const before = entry.state;
             this.reread(entry);
+            if (this.goneLive(entry)) return;
             // Still gone, or back and `arrive` asked it again.
             if (
                 entry.departed ||
@@ -1934,20 +2062,24 @@ export class Coordinator {
         }
         switch (entry.state) {
             case "silent":
-                return entry.session?.resume();
+                entry.session?.resume();
+                break;
             case "busy":
-                return this.reask(entry);
+                this.reask(entry);
+                break;
             case "unconfirmed":
-                return this.renewChain(entry);
+                this.renewChain(entry);
+                break;
             case "reconciling":
                 if (entry.fetchWaiting) entry.session?.resume();
-                return;
+                break;
             case "contained":
                 // Its attempts or a request may have gone unanswered
                 // (silent, no timer armed); a queued one has no session yet.
                 if (entry.qualifying) entry.session?.resume();
-                return;
+                break;
         }
+        this.required(entry);
     }
 
     /** N1-N3: a notice is a trigger, never evidence (design 4.3). */
@@ -1975,6 +2107,7 @@ export class Coordinator {
             // still gone is not asked.
             const before = entry.state;
             this.reread(entry);
+            if (this.goneLive(entry)) return;
             if (
                 entry.departed ||
                 before === "left" ||
@@ -1985,20 +2118,26 @@ export class Coordinator {
         }
         switch (entry.state) {
             case "busy":
-                return this.reask(entry);
+                this.reask(entry);
+                break;
             case "silent":
             case "asking":
-                return entry.session?.resume();
+                entry.session?.resume();
+                break;
             case "reconciling":
-                if (entry.parked) return this.renewChain(entry);
-                return entry.session?.resume();
+                if (entry.parked) this.renewChain(entry);
+                else entry.session?.resume();
+                break;
             case "refused":
             case "unconfirmed":
-                return this.renewChain(entry);
+                this.renewChain(entry);
+                break;
             case "left":
             case "left-unanswered":
                 return this.reread(entry);
         }
+        // A sign of life: R, Required now or still, is re-read (D3 = A').
+        this.required(entry);
     }
 
     /** N2: a qualification session for a contained, unqualified R (Q3). */
@@ -2044,11 +2183,17 @@ export class Coordinator {
         this.enqueue(entry, this.freshInit(entry.hash));
     }
 
-    /** D1: re-read one peer's reachability and apply D3 or D4. */
-    private reread(entry: Entry) {
+    /**
+     * D1: re-read one peer's reachability and apply D3 or D4. `byEvent`: a
+     * transport event made the read, so a departure stands (A1) even once
+     * R's answer arrives (`departedByRead`).
+     */
+    private reread(entry: Entry, byEvent = false) {
         entry.reachable = this.readReachable(entry.hash);
-        if (!entry.reachable || entry.storeClosed) this.depart(entry);
-        else if (entry.departed) this.arrive(entry);
+        if (!entry.reachable || entry.storeClosed) {
+            this.depart(entry);
+            if (byEvent) entry.departedByRead = false;
+        } else if (entry.departed) this.arrive(entry);
     }
 
     /** D3 (and D6): the peer is gone. */
@@ -2085,6 +2230,7 @@ export class Coordinator {
     private arrive(entry: Entry) {
         if (!entry.departed) return;
         entry.departed = false;
+        entry.departedByRead = false;
         if (entry.state === "contained") {
             // A qualification session that went silent while R was away.
             if (entry.qualifying) entry.session?.resume();
@@ -2195,6 +2341,10 @@ export class Coordinator {
         if (entry) return entry;
         if (!this.readReachable(peer)) {
             this.unreachableVisible.set(peer, { via, key });
+            // Still a sign of life since J opened (design 2.1): a
+            // replicator row discovery lists for it later is live, so it
+            // leaves with its gap, as when the sign follows the record.
+            this.earlyLife.add(peer);
             return undefined;
         }
         this.unreachableVisible.delete(peer);
@@ -2228,6 +2378,7 @@ export class Coordinator {
             storeClosed: false,
             ticket: 0,
             visibilityRead: false,
+            departedByRead: false,
             ordinals: new Map(),
             trustToken: 0,
             trustChecking: false,
@@ -2235,6 +2386,10 @@ export class Coordinator {
         };
         this.entries.set(hash, entry);
         this.enqueue(entry, this.freshInit(hash));
+        // A live peer J cannot reach (a replication announcement or an
+        // early sign of life, relayed) leaves before it is asked, with its
+        // gap; a row with no sign of life keeps its one attempt.
+        this.required(entry);
         return entry;
     }
 
@@ -2246,6 +2401,65 @@ export class Coordinator {
         entry.confirmOnly = false;
         entry.unsubscribed = false;
         entry.storeClosed = false;
+    }
+
+    /**
+     * D3 = A' where a record becomes or stays Required with no reachability
+     * event (a new record, a sign of life, discovery, `silent`, an OPEN
+     * attempt's end): the same read as an event's (`reread`), so a peer J's
+     * route table does not reach departs by the same rule,
+     * `left-unanswered` until its attempt in flight ends and then `left`
+     * with a gap (D4), instead of being asked for good. A sign of life is
+     * still one (design 2.1, 4.7); this read only decides whether its peer
+     * is still there. A replicator row with no sign of life is left to its
+     * one attempt (A2): unanswered, it is `unconfirmed`, with no gap, until
+     * it shows one (`goneLive`). A peer that is answering is skipped
+     * (`answering`).
+     */
+    private required(entry: Entry) {
+        if (!BLOCKING_STATES.has(entry.state)) return;
+        if (entry.confirmOnly && !entry.live) return;
+        if (this.answering(entry)) return;
+        const departed = entry.departed;
+        this.reread(entry);
+        if (!departed && entry.departed) entry.departedByRead = true;
+    }
+
+    /**
+     * R's live session holds R's header and is not `silent`: R answers J,
+     * maybe relayed before J's route table learns R (readiness messages
+     * carry no acknowledgement to learn a route from). Only a reachability
+     * event departs it, as before these reads (design case 31: a busy
+     * creator known only through replication traffic, still answering,
+     * stays Required). Once it turns `silent` it is read again. A peer
+     * such a read departed while its OPEN was unanswered is answering once
+     * its header arrives (`departedByRead`, `onSessionState`), so the
+     * order of a sign of life and the answer does not decide.
+     */
+    private answering(entry: Entry): boolean {
+        return (
+            entry.session !== undefined &&
+            entry.headerHeld &&
+            entry.state !== "silent"
+        );
+    }
+
+    /**
+     * After a sign of life's re-read (`lifeSigned`, `notice`): a row asked
+     * once and gone (`unconfirmed`, departed, no gap) that is live now and
+     * still reads gone is a live peer that left before answering, so `left`
+     * with an unknown gap (D4), the same outcome as when that sign of life
+     * arrives during its attempt (design 2.2(2), 2.3). Like any `left` peer,
+     * `arrive` asks it again once it reads reachable, and `satisfied()`
+     * re-reads it.
+     */
+    private goneLive(entry: Entry): boolean {
+        if (!entry.departed || entry.state !== "unconfirmed" || !entry.live) {
+            return false;
+        }
+        entry.state = "left";
+        entry.gap = { missing: "unknown" };
+        return true;
     }
 
     private freshInit(peer: string): SessionInit {
@@ -2288,6 +2502,7 @@ export class Coordinator {
                     if (entry) {
                         entry.via.add("subscriber");
                         entry.key ??= key;
+                        this.required(entry);
                     } else if (this.readReachable(hash)) {
                         this.createEntry(hash, "subscriber", {
                             key,
@@ -2306,10 +2521,13 @@ export class Coordinator {
                 for (const hash of replicators) {
                     if (hash === this.self) continue;
                     const entry = this.entries.get(hash);
-                    if (entry) entry.via.add("replicator");
-                    else {
+                    if (entry) {
+                        entry.via.add("replicator");
+                        this.required(entry);
+                    } else {
                         // A row with a sign of life since J opened gets full
-                        // attempts; one with none is asked once (A2).
+                        // attempts, unless J cannot reach it (`required`);
+                        // one with none is asked once (A2).
                         this.createEntry(hash, "replicator", {
                             live: this.everyRowLive || this.earlyLife.has(hash),
                             confirmOnly: true,
