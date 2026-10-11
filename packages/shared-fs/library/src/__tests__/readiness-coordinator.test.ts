@@ -63,6 +63,7 @@ import {
     type SessionState,
 } from "../readiness/session.js";
 import {
+    CellsReqV1,
     CloseV1,
     ERROR_CODE,
     ErrorV1,
@@ -1819,7 +1820,7 @@ describe("readiness coordinator: departure (D3 = A')", () => {
         expect(w.status().required).toEqual([t.hash]);
     });
 
-    it("a notice from a departed, unconfirmed row re-reads it first: still gone, it is not asked", async () => {
+    it("a notice from a departed, unconfirmed row re-reads it first: still gone, it is not asked and leaves with a gap", async () => {
         const { w, peers } = await worldWith([
             ["D", { provenance: CREATOR }],
             ["X", { provenance: CREATOR, subscriber: false, replicator: true }],
@@ -1842,18 +1843,24 @@ describe("readiness coordinator: departure (D3 = A')", () => {
         await settle();
         expect(record).toMatchObject({ state: "unconfirmed", departed: true });
         // X's notice reaches J relayed, with no route to X; X is then gone
-        // for good.
+        // for good. The notice is a sign of life: X is a live peer that
+        // left before answering (D4).
         const opens = opensTo(w, x);
         w.fromPeer(x, w.notice(x));
         x.up = false;
         await settle();
         expect(record).toMatchObject({
-            state: "unconfirmed",
+            state: "left",
+            live: true,
             departed: true,
             reachable: false,
+            gap: { missing: "unknown" },
         });
         expect(opensTo(w, x)).toBe(opens);
         await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(coordinator.proof().gaps).toEqual([
+            { peer: x.hash, missing: "unknown" },
+        ]);
         await w.clock.advanceSettled(6 * HOUR);
         expect(coordinator.satisfied()).toBe(true);
         expect(coordinator.debug().armedTimers).toBe(0);
@@ -2068,6 +2075,1190 @@ describe("readiness coordinator: departure (D3 = A')", () => {
         expect(opensTo(w, s)).toBe(4);
         await w.until(() => coordinator.satisfied(), "satisfied");
     });
+});
+
+/**
+ * D3 = A' with no reachability event (design test 9's macOS stall): J hears
+ * a dead peer relayed (pubsub relays a dead subscriber, M0 P1; shared-log
+ * announces a replicator its index still lists once that subscription
+ * arrives, `pruneOfflineReplicators`), and a quiet network sends no
+ * reachability event. Each sign of life still counts (design 2.1, 4.7), so
+ * the peer is live; J re-reads it where it becomes or stays Required, and a
+ * peer J's route table does not reach leaves with its gap instead of being
+ * asked for good.
+ */
+describe("readiness coordinator: re-reads without a reachability event (D3 = A')", () => {
+    /**
+     * `peer` is back, reachable with no event yet, and answers from its
+     * second OPEN on: asked in full, its first attempt ends with it still
+     * asking (a confirm-only one would be unconfirmed then).
+     */
+    const back = (w: World, peer: Peer) => {
+        peer.up = true;
+        let opens = 0;
+        peer.hooks.toPeer = (message) =>
+            message instanceof OpenV1 && opens++ === 0 ? null : undefined;
+        w.transport.reachable.delete(peer.hash);
+    };
+
+    /** Asked in full: still asking after its first attempt, then contained. */
+    const askedInFull = async (w: World, peer: Peer, opens: number) => {
+        const record = w.record(peer);
+        expect(record).toMatchObject({
+            state: "asking",
+            departed: false,
+            confirmOnly: false,
+        });
+        expect(record.gap).toBeUndefined();
+        expect(opensTo(w, peer)).toBe(opens + 1);
+        await w.clock.advanceSettled(5000);
+        expect(opensTo(w, peer)).toBe(opens + 2);
+        await w.until(() => w.stateOf(peer) === "contained", "contained");
+    };
+
+    /** `peer` relayed to J: a readiness subscriber and a replicator. */
+    const relayed = (w: World, peer: Peer) => {
+        w.transport.emit({ kind: "subscribe", peer: peer.hash, key: peer.key });
+        for (const type of ["join", "change"] as const) {
+            w.transport.emit({
+                kind: "replicator",
+                type,
+                peer: peer.hash,
+                key: peer.key,
+            });
+        }
+    };
+
+    it("a replicator row J cannot reach, relayed while its one attempt runs, is live and left-unanswered; the attempt's end makes it left with a gap, nothing armed; back, it is asked in full", async () => {
+        const { w, peers } = await worldWith([
+            ["X", { subscriber: false, replicator: true, reachable: false }],
+            ["L"],
+        ]);
+        const [x, l] = peers;
+        await w.start();
+        x.up = false;
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(l) === "contained", "L contained");
+        const record = w.record(x);
+        expect(record).toMatchObject({
+            state: "asking",
+            live: false,
+            confirmOnly: true,
+        });
+
+        relayed(w, x);
+        await settle();
+        // A sign of life (live), from a peer J's route table does not reach.
+        expect(record).toMatchObject({
+            state: "left-unanswered",
+            live: true,
+            confirmOnly: false,
+            departed: true,
+            reachable: false,
+        });
+        expect(coordinator.satisfied()).toBe(false);
+        expect(w.status().state).toBe("waiting-left");
+
+        await w.clock.advanceSettled(5000);
+        expect(record.state).toBe("left");
+        expect(record.gap).toEqual({ missing: "unknown" });
+        expect(record.session).toBeUndefined();
+        expect(opensTo(w, x)).toBe(1);
+        expect(coordinator.debug().armedTimers).toBe(0);
+        await w.until(() => coordinator.satisfied(), "satisfied with L");
+        expect(w.status().gaps).toEqual([{ peer: x.hash, missing: "unknown" }]);
+        expect(coordinator.proof().gaps).toEqual([
+            { peer: x.hash, missing: "unknown" },
+        ]);
+
+        // Relayed again, and hours pass: still gone, not asked.
+        relayed(w, x);
+        await settle();
+        await w.clock.advanceSettled(6 * HOUR);
+        expect(record.state).toBe("left");
+        expect(opensTo(w, x)).toBe(1);
+        expect(coordinator.satisfied()).toBe(true);
+        expect(coordinator.debug().armedTimers).toBe(0);
+
+        // X comes back: Required with full attempts.
+        back(w, x);
+        w.transport.emit({
+            kind: "reachability",
+            source: "connect",
+            peer: x.hash,
+        });
+        await settle();
+        await askedInFull(w, x, 1);
+        await w.until(() => coordinator.satisfied(), "satisfied with X");
+    });
+
+    it("a replicator row relayed after its one attempt ended is a live peer that left before answering: left with a gap, not asked while J cannot reach it; once it reads reachable, by an event or the decision's own read, it is asked in full", async () => {
+        for (const byEvent of [true, false]) {
+            const { w, peers } = await worldWith([
+                [
+                    "X",
+                    { subscriber: false, replicator: true, reachable: false },
+                ],
+                ["L"],
+            ]);
+            const [x, l] = peers;
+            await w.start();
+            x.up = false;
+            const coordinator = w.run();
+            await w.until(() => w.stateOf(l) === "contained", "L contained");
+            await w.clock.advanceSettled(5000);
+            const record = w.record(x);
+            // Asked once, unanswered: not Required, so no read departs it
+            // (A2), and no gap: it never showed a sign of life.
+            expect(record).toMatchObject({
+                state: "unconfirmed",
+                live: false,
+                reachable: false,
+                departed: false,
+            });
+            await w.until(() => coordinator.satisfied(), "satisfied with L");
+
+            relayed(w, x);
+            await settle();
+            // Live, and still gone: it left before answering (D4), as when
+            // relayed during its attempt; not asked.
+            expect(record).toMatchObject({
+                state: "left",
+                live: true,
+                departed: true,
+                gap: { missing: "unknown" },
+            });
+            expect(opensTo(w, x)).toBe(1);
+            expect(coordinator.satisfied()).toBe(true);
+            expect(w.status().gaps).toEqual([
+                { peer: x.hash, missing: "unknown" },
+            ]);
+            expect(coordinator.proof().gaps).toEqual([
+                { peer: x.hash, missing: "unknown" },
+            ]);
+            expect(coordinator.debug().armedTimers).toBe(0);
+
+            back(w, x);
+            if (byEvent) {
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "connect",
+                    peer: x.hash,
+                });
+            } else {
+                expect(coordinator.satisfied()).toBe(false);
+            }
+            await settle();
+            await askedInFull(w, x, 1);
+            await w.until(() => coordinator.satisfied(), "satisfied with X");
+        }
+    });
+
+    it("a peer with no row relayed as a subscriber and a replicator J cannot reach is a live record that leaves before it is asked, with a gap; once it reads reachable it is asked in full", async () => {
+        const { w, peers } = await worldWith([
+            ["Y", { subscriber: false, reachable: false }],
+            ["L"],
+        ]);
+        const [y] = peers;
+        await w.start();
+        y.up = false;
+        const coordinator = w.run();
+        await w.until(() => coordinator.satisfied(), "satisfied with L");
+
+        relayed(w, y);
+        await settle();
+        const record = w.record(y);
+        expect(record).toMatchObject({
+            state: "left",
+            live: true,
+            departed: true,
+            reachable: false,
+        });
+        expect(record.gap).toEqual({ missing: "unknown" });
+        expect(opensTo(w, y)).toBe(0);
+        expect(coordinator.satisfied()).toBe(true);
+        expect(w.status().gaps).toEqual([{ peer: y.hash, missing: "unknown" }]);
+        expect(coordinator.debug().armedTimers).toBe(0);
+
+        // Its route appears with no event: the decision's own read asks it.
+        back(w, y);
+        expect(coordinator.satisfied()).toBe(false);
+        await settle();
+        await askedInFull(w, y, 0);
+        await w.until(() => coordinator.satisfied(), "satisfied with Y");
+        expect(w.status().gaps).toEqual([]);
+    });
+
+    it("a replicator row J cannot reach with a sign of life before start (recorded, or unreadable so every row is live) leaves at discovery with a gap; back, it is asked in full", async () => {
+        for (const signs of [(x: Peer) => [x.hash], () => undefined]) {
+            const { w, peers } = await worldWith([
+                [
+                    "X",
+                    { subscriber: false, replicator: true, reachable: false },
+                ],
+                ["L"],
+            ]);
+            const [x, l] = peers;
+            await w.start();
+            x.up = false;
+            const coordinator = w.run({ signsOfLife: () => signs(x) });
+            await w.until(() => w.stateOf(l) === "contained", "L contained");
+            const record = w.record(x);
+            expect(record).toMatchObject({
+                state: "left",
+                live: true,
+                confirmOnly: false,
+                departed: true,
+            });
+            expect(record.gap).toEqual({ missing: "unknown" });
+            expect(opensTo(w, x)).toBe(0);
+            await w.until(() => coordinator.satisfied(), "satisfied with L");
+            expect(w.status().gaps).toEqual([
+                { peer: x.hash, missing: "unknown" },
+            ]);
+            expect(coordinator.debug().armedTimers).toBe(0);
+
+            back(w, x);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: x.hash,
+            });
+            await settle();
+            await askedInFull(w, x, 0);
+            await w.until(() => coordinator.satisfied(), "satisfied with X");
+        }
+    });
+
+    it("31: a busy creator J knows only through replication traffic, reachable, stays Required through every re-read and gates J until its late header; J then holds its rows", async () => {
+        const { w, peers } = await worldWith([
+            ["C", { provenance: CREATOR, subscriber: false, replicator: true }],
+            ["W", { provenance: WARM }],
+        ]);
+        const [c, warm] = peers;
+        const newest = w.rows([c], 5, "new", 5000);
+        await w.start();
+        // Busy: its header comes after its first attempt ended.
+        c.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 6000 : 0);
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(warm) === "contained", "W contained");
+        const record = w.record(c);
+        expect(record).toMatchObject({ confirmOnly: true, live: false });
+
+        // Its replication traffic: live, re-read, still Required.
+        w.transport.emit({
+            kind: "replicator",
+            type: "change",
+            peer: c.hash,
+            key: c.key,
+        });
+        await settle();
+        expect(record).toMatchObject({
+            state: "asking",
+            live: true,
+            confirmOnly: false,
+            departed: false,
+            reachable: true,
+        });
+        expect(coordinator.satisfied()).toBe(false);
+
+        // Its first attempt ends (every record re-read): a second goes out.
+        await w.clock.advanceSettled(5000);
+        expect(record).toMatchObject({ state: "asking", departed: false });
+        expect(opensTo(w, c)).toBe(2);
+        expect(coordinator.satisfied()).toBe(false);
+        w.transport.emit({
+            kind: "replicator",
+            type: "change",
+            peer: c.hash,
+            key: c.key,
+        });
+        await settle();
+        expect(record).toMatchObject({ state: "asking", departed: false });
+        expect(w.status().required).toEqual([c.hash]);
+
+        await w.clock.advanceSettled(1000);
+        await w.until(() => w.stateOf(c) === "contained", "C contained");
+        for (const entry of newest) {
+            expect(w.jIndex().get(entry.id!)).toBe(entry.head);
+        }
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(w.status().gaps).toEqual([]);
+        expect(record.departed).toBe(false);
+    });
+
+    it("31 (no route): a busy creator J knows only through replication traffic that J's route table does not reach is live, and leaves when its attempt ends: J decides without its rows only with it named as a gap", async () => {
+        const { w, peers } = await worldWith([
+            [
+                "C",
+                {
+                    provenance: CREATOR,
+                    subscriber: false,
+                    replicator: true,
+                    reachable: false,
+                },
+            ],
+            ["W", { provenance: WARM }],
+        ]);
+        const [c, warm] = peers;
+        const newest = w.rows([c], 5, "new", 5000);
+        await w.start();
+        c.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 6000 : 0);
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(warm) === "contained", "W contained");
+        const record = w.record(c);
+
+        w.transport.emit({
+            kind: "replicator",
+            type: "change",
+            peer: c.hash,
+            key: c.key,
+        });
+        await settle();
+        // Its replication traffic is a sign of life (live); gone by A', it
+        // blocks until its attempt in flight ends.
+        expect(record).toMatchObject({
+            state: "left-unanswered",
+            live: true,
+            confirmOnly: false,
+            departed: true,
+        });
+        expect(coordinator.satisfied()).toBe(false);
+
+        await w.clock.advanceSettled(5000);
+        expect(record.state).toBe("left");
+        expect(record.gap).toEqual({ missing: "unknown" });
+        await w.until(() => coordinator.satisfied(), "satisfied with W");
+        expect(w.status().gaps).toEqual([{ peer: c.hash, missing: "unknown" }]);
+        expect(coordinator.proof().gaps).toEqual([
+            { peer: c.hash, missing: "unknown" },
+        ]);
+
+        // Its route appears, and it is idle now: asked again, contained,
+        // its rows held.
+        c.hooks.delayToJ = undefined;
+        w.transport.reachable.delete(c.hash);
+        expect(coordinator.satisfied()).toBe(false);
+        await w.until(() => w.stateOf(c) === "contained", "C contained");
+        for (const entry of newest) {
+            expect(w.jIndex().get(entry.id!)).toBe(entry.head);
+        }
+        await w.until(() => coordinator.satisfied(), "satisfied with C");
+        expect(w.status().gaps).toEqual([]);
+    });
+
+    for (const sign of ["replication", "subscribe", "notice"] as const) {
+        it(`31 (no route, ${sign} after its attempt): a creator row J cannot reach whose one attempt ended unanswered while another peer still gates J, then shows a sign of life, leaves with a gap; J's first decision names it`, async () => {
+            const { w, peers } = await worldWith([
+                [
+                    "C",
+                    {
+                        provenance: CREATOR,
+                        subscriber: false,
+                        replicator: true,
+                        reachable: false,
+                    },
+                ],
+                ["W", { provenance: WARM }],
+            ]);
+            const [c, warm] = peers;
+            const newest = w.rows([c], 5, "new", 5000);
+            await w.start();
+            c.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 6000 : 0);
+            // W gates J past C's attempt: its header comes at 8 s.
+            warm.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 8000 : 0);
+            let first:
+                | {
+                      lacks: number;
+                      gaps: Array<{
+                          peer: string;
+                          missing: number | "unknown";
+                      }>;
+                      state: string | undefined;
+                      at: number;
+                  }
+                | undefined;
+            const coordinator: Coordinator = w.run({
+                onEvaluate: (evaluation) => {
+                    w.evaluations.push(evaluation);
+                    if (!evaluation.satisfied || first) return;
+                    first = {
+                        lacks: newest.filter(
+                            (entry) => w.jIndex().get(entry.id!) !== entry.head
+                        ).length,
+                        gaps: w.coordinator!.proof().gaps,
+                        state: w.stateOf(c),
+                        at: w.clock.now,
+                    };
+                },
+            });
+            await settle();
+            await w.clock.advanceSettled(5000);
+            const record = w.record(c);
+            // Asked once, unanswered: not Required, so no read departs it,
+            // and no sign of life yet, so no gap (A2).
+            expect(record).toMatchObject({
+                state: "unconfirmed",
+                live: false,
+                reachable: false,
+                departed: false,
+            });
+            expect(record.gap).toBeUndefined();
+            expect(first, "W still gates J").toBeUndefined();
+
+            await w.clock.advanceSettled(500);
+            const opens = opensTo(w, c);
+            if (sign === "replication") {
+                w.transport.emit({
+                    kind: "replicator",
+                    type: "change",
+                    peer: c.hash,
+                    key: c.key,
+                });
+            } else if (sign === "subscribe") {
+                w.transport.emit({
+                    kind: "subscribe",
+                    peer: c.hash,
+                    key: c.key,
+                });
+            } else {
+                w.fromPeer(c, w.notice(c));
+            }
+            await settle();
+            // Live and still gone: it left before answering, with its gap
+            // (D4), the outcome a sign of life during its attempt gives.
+            expect(record).toMatchObject({
+                state: "left",
+                live: true,
+                departed: true,
+                reachable: false,
+                gap: { missing: "unknown" },
+            });
+            expect(opensTo(w, c)).toBe(opens);
+            // Nothing of C's is armed (W's session still is).
+            expect(record.session).toBeUndefined();
+            expect(coordinator.satisfied()).toBe(false);
+
+            for (let i = 0; i < 40 && !first; i++) {
+                await w.clock.advanceSettled(1000);
+            }
+            expect(first, "J decided").toBeDefined();
+            // J decides without C's rows only with C named as a gap.
+            expect(first!.state).toBe("left");
+            expect(first!.lacks).toBe(newest.length);
+            expect(first!.gaps).toEqual([{ peer: c.hash, missing: "unknown" }]);
+            expect(w.status().gaps).toEqual([
+                { peer: c.hash, missing: "unknown" },
+            ]);
+            expect(opensTo(w, c)).toBe(opens);
+
+            // Its route appears, and it is idle now: asked again in full,
+            // contained, its rows held.
+            c.hooks.delayToJ = undefined;
+            w.transport.reachable.delete(c.hash);
+            expect(coordinator.satisfied()).toBe(false);
+            await w.until(() => w.stateOf(c) === "contained", "C contained");
+            for (const entry of newest) {
+                expect(w.jIndex().get(entry.id!)).toBe(entry.head);
+            }
+            await w.until(() => coordinator.satisfied(), "satisfied with C");
+            expect(w.status().gaps).toEqual([]);
+        });
+    }
+
+    it("a store-closed, live row asked once that J reads reachable again neither loops nor gates: J decides once the other Required peer answers", async () => {
+        const { w, peers } = await worldWith([
+            ["X", { subscriber: false, replicator: true, reachable: false }],
+            ["W", { provenance: WARM }],
+        ]);
+        const [x, warm] = peers;
+        await w.start();
+        x.up = false;
+        warm.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 20_000 : 0);
+        // A loop re-evaluates on microtasks with no time passing: bounded
+        // here, so a regression fails instead of freezing the run.
+        const LIMIT = 20_000;
+        let evaluations = 0;
+        let spun = false;
+        let decided = 0;
+        const coordinator: Coordinator = w.run({
+            onEvaluate: (evaluation) => {
+                w.evaluations.push(evaluation);
+                if (++evaluations > LIMIT && !spun) {
+                    spun = true;
+                    w.coordinator!.dispose();
+                }
+            },
+            decide: async () => {
+                decided++;
+                w.coordinator!.finish();
+            },
+        });
+        await settle();
+        await w.clock.advanceSettled(5000);
+        const record = w.record(x);
+        expect(record).toMatchObject({
+            state: "unconfirmed",
+            live: false,
+            reachable: false,
+        });
+
+        // Relayed: a sign of life from a peer J cannot reach.
+        w.transport.emit({ kind: "subscribe", peer: x.hash, key: x.key });
+        await settle();
+        expect(record).toMatchObject({ live: true, departed: true });
+        // X closes its store (D6), then its node reads reachable again.
+        w.transport.replicating.delete(x.hash);
+        w.transport.emit({ kind: "replicator", type: "leave", peer: x.hash });
+        w.transport.emit({
+            kind: "unsubscribe",
+            peer: x.hash,
+            reason: "remote-unsubscribe",
+        });
+        await w.until(() => record.storeClosed, "X's store closed");
+        w.transport.reachable.delete(x.hash);
+        w.transport.emit({
+            kind: "reachability",
+            source: "connect",
+            peer: x.hash,
+        });
+        await settle();
+        const before = evaluations;
+        expect(decided).toBe(0);
+        const opens = opensTo(w, x);
+
+        await w.clock.advanceSettled(16_000);
+        expect(
+            spun,
+            `X ${JSON.stringify({ state: record.state, live: record.live, departed: record.departed, storeClosed: record.storeClosed })}, W ${w.stateOf(warm)}, evaluations ${evaluations - before}`
+        ).toBe(false);
+        expect(evaluations - before).toBeLessThan(100);
+        expect(w.stateOf(warm)).toBe("contained");
+        expect(decided).toBe(1);
+        expect(coordinator.phase).toBe("finished");
+        // X closed its store: not asked again; the gap it left with when it
+        // went unanswered stays.
+        expect(opensTo(w, x)).toBe(opens);
+        expect(record).toMatchObject({
+            state: "left",
+            storeClosed: true,
+            gap: { missing: "unknown" },
+        });
+    });
+
+    it("a peer that closed its store and opens it again while J cannot reach it stays left; its route back, with no event, asks it again and J holds its rows", async () => {
+        const { w, peers } = await worldWith([["S"], ["D"]]);
+        const [s, d] = peers;
+        const own = w.rows([s], 3, "s", 5000);
+        await w.start();
+        s.hooks.toPeer = () => null;
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+
+        // S closes the store (D6): gone however reachable it is.
+        w.transport.subscribed.delete(s.hash);
+        w.transport.emit({
+            kind: "unsubscribe",
+            peer: s.hash,
+            reason: "remote-unsubscribe",
+        });
+        const record = w.record(s);
+        await w.until(() => record.storeClosed, "S's store closed");
+        expect(record.state).toBe("left-unanswered");
+        await w.clock.advanceSettled(5000);
+        expect(record).toMatchObject({ state: "left", storeClosed: true });
+        await w.until(() => coordinator.satisfied(), "satisfied with D");
+
+        // S opens it again; its subscribe reaches J relayed, with no route.
+        w.transport.reachable.set(s.hash, false);
+        w.transport.subscribed.set(s.hash, s.key);
+        w.transport.emit({ kind: "subscribe", peer: s.hash, key: s.key });
+        await settle();
+        // A sign of life clears D6; J still cannot reach S.
+        expect(record).toMatchObject({
+            state: "left",
+            storeClosed: false,
+            unsubscribed: false,
+            departed: true,
+        });
+        expect(coordinator.satisfied()).toBe(true);
+
+        // The route comes back with no event: the decision asks S again.
+        s.hooks.toPeer = undefined;
+        w.transport.reachable.delete(s.hash);
+        expect(coordinator.satisfied()).toBe(false);
+        await w.until(() => record.state === "contained", "S contained");
+        for (const entry of own) {
+            expect(w.jIndex().get(entry.id!)).toBe(entry.head);
+        }
+        await w.until(() => coordinator.satisfied(), "satisfied with S");
+    });
+
+    it("a Required peer whose route goes with no event leaves at the end of its attempt, with a gap and nothing armed", async () => {
+        const { w, peers } = await worldWith([["S"], ["D"]]);
+        const [s, d] = peers;
+        await w.start();
+        s.hooks.toPeer = () => null;
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        const record = w.record(s);
+        const session = record.session!;
+
+        w.transport.reachable.set(s.hash, false);
+        await settle();
+        expect(record).toMatchObject({ state: "asking", departed: false });
+        expect(coordinator.satisfied()).toBe(false);
+
+        await w.clock.advanceSettled(5000);
+        expect(record).toMatchObject({
+            state: "left",
+            departed: true,
+            reachable: false,
+        });
+        expect(record.gap).toEqual({ missing: "unknown" });
+        expect(record.session).toBeUndefined();
+        expect(session.outcome?.kind).toBe("closed");
+        expect(opensTo(w, s)).toBe(1);
+        expect(coordinator.debug().armedTimers).toBe(0);
+        await w.until(() => coordinator.satisfied(), "satisfied with D");
+        expect(coordinator.proof().gaps).toEqual([
+            { peer: s.hash, missing: "unknown" },
+        ]);
+    });
+
+    it("a silent peer whose route goes with no event leaves at the next evaluation, with a gap", async () => {
+        const { w, peers } = await worldWith([
+            ["S"],
+            ["D"],
+            ["T", { subscriber: false }],
+        ]);
+        const [s, d, t] = peers;
+        await w.start();
+        s.hooks.toPeer = () => null;
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        await w.clock.advanceSettled(35_000);
+        const record = w.record(s);
+        expect(record.state).toBe("silent");
+        expect(coordinator.debug().armedTimers).toBe(0);
+
+        // S's route goes with no event; T subscribes and answers late.
+        w.transport.reachable.set(s.hash, false);
+        t.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 6000 : 0);
+        w.transport.subscribed.set(t.hash, t.key);
+        w.transport.emit({ kind: "subscribe", peer: t.hash, key: t.key });
+        await settle();
+        // The event's evaluation stops at S, silent with nothing armed, and
+        // reads it again (`recheck`): it leaves, with its gap.
+        expect(record).toMatchObject({
+            state: "left",
+            departed: true,
+            reachable: false,
+        });
+        expect(record.gap).toEqual({ missing: "unknown" });
+        expect(w.stateOf(t)).toBe("asking");
+        expect(coordinator.satisfied()).toBe(false);
+        await w.clock.advanceSettled(6000);
+        await w.until(() => w.stateOf(t) === "contained", "T contained");
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        expect(w.status().gaps).toEqual([{ peer: s.hash, missing: "unknown" }]);
+    });
+
+    it("a replicator:leave re-reads its peer: still reachable, it stays Required; evicted once J's route table lost it, it is left-unanswered, then left with a gap", async () => {
+        const { w, peers } = await worldWith([
+            ["R", { subscriber: false }],
+            ["D"],
+        ]);
+        const [r, d] = peers;
+        await w.start();
+        r.hooks.toPeer = () => null;
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(d) === "contained", "D contained");
+        w.transport.replicating.add(r.hash);
+        w.transport.emit({
+            kind: "replicator",
+            type: "join",
+            peer: r.hash,
+            key: r.key,
+        });
+        await settle();
+        const record = w.record(r);
+        expect(record).toMatchObject({ state: "asking", live: true });
+
+        // A leave while J still reaches R: Required (A').
+        w.transport.emit({ kind: "replicator", type: "leave", peer: r.hash });
+        await settle();
+        expect(record).toMatchObject({ state: "asking", departed: false });
+
+        // shared-log evicts R after J's route table lost it, with no event.
+        w.transport.reachable.set(r.hash, false);
+        w.transport.replicating.delete(r.hash);
+        w.transport.emit({ kind: "replicator", type: "leave", peer: r.hash });
+        await settle();
+        expect(record).toMatchObject({
+            state: "left-unanswered",
+            departed: true,
+        });
+        expect(coordinator.satisfied()).toBe(false);
+        await w.clock.advanceSettled(5000);
+        expect(record.state).toBe("left");
+        expect(record.gap).toEqual({ missing: "unknown" });
+        await w.until(() => coordinator.satisfied(), "satisfied with D");
+    });
+
+    for (const sign of ["notice", "request", "subscribe"] as const) {
+        it(`a ${sign} from a creator J cannot reach that comes before J has its record makes the replicator row discovery lists live: it leaves at creation with a gap, and J's first decision names it`, async () => {
+            const { w, peers } = await worldWith([
+                [
+                    "C",
+                    {
+                        provenance: CREATOR,
+                        subscriber: false,
+                        replicator: true,
+                        reachable: false,
+                    },
+                ],
+                ["W", { provenance: WARM }],
+            ]);
+            const [c, warm] = peers;
+            const newest = w.rows([c], 5, "new", 5000);
+            await w.start();
+            c.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 60_000 : 0);
+            // W gates J past where C's one attempt would end.
+            warm.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 8000 : 0);
+            let first:
+                | {
+                      lacks: number;
+                      gaps: Array<{
+                          peer: string;
+                          missing: number | "unknown";
+                      }>;
+                  }
+                | undefined;
+            const coordinator: Coordinator = w.run({
+                onEvaluate: (evaluation) => {
+                    w.evaluations.push(evaluation);
+                    if (!evaluation.satisfied || first) return;
+                    first = {
+                        lacks: newest.filter(
+                            (entry) => w.jIndex().get(entry.id!) !== entry.head
+                        ).length,
+                        gaps: w.coordinator!.proof().gaps,
+                    };
+                },
+            });
+            // Before discovery resolves: J has no record of C yet.
+            if (sign === "subscribe") {
+                w.transport.emit({
+                    kind: "subscribe",
+                    peer: c.hash,
+                    key: c.key,
+                });
+            } else {
+                const bytes = encodeReadinessMessage(
+                    sign === "notice" ? w.notice(c) : w.request(c)
+                );
+                coordinator.onMessage(
+                    decodeReadinessMessage(bytes),
+                    c.hash,
+                    bytes.length,
+                    c.key
+                );
+            }
+            expect(coordinator.record(c.hash)).toBeUndefined();
+            await settle();
+            const record = w.record(c);
+            expect(record).toMatchObject({
+                state: "left",
+                live: true,
+                confirmOnly: false,
+                departed: true,
+                gap: { missing: "unknown" },
+            });
+            expect(opensTo(w, c)).toBe(0);
+
+            for (let i = 0; i < 40 && !first; i++) {
+                await w.clock.advanceSettled(1000);
+            }
+            expect(first, "J decided").toBeDefined();
+            expect(first!.lacks).toBe(newest.length);
+            expect(first!.gaps).toEqual([{ peer: c.hash, missing: "unknown" }]);
+            expect(opensTo(w, c)).toBe(0);
+        });
+    }
+
+    it("31 (answering, no route): a creator J's route table does not reach that answers J relayed stays Required through another peer's attempt end and its own signs of life; J holds its rows before it decides", async () => {
+        const { w, peers } = await worldWith([
+            [
+                "C",
+                {
+                    provenance: CREATOR,
+                    subscriber: false,
+                    replicator: true,
+                    reachable: false,
+                },
+            ],
+            ["W", { provenance: WARM }],
+        ]);
+        const [c, warm] = peers;
+        const newest = w.rows([c], 5, "new", 5000);
+        await w.start();
+        // C's header comes at once (relayed: J still has no route to C);
+        // the pulls of its rows wait.
+        let release!: () => void;
+        w.joinGate = new Promise<void>((resolve) => (release = resolve));
+        // W's first OPEN is lost: its attempt ends at 5 s.
+        let opens = 0;
+        warm.hooks.toPeer = (m) =>
+            m instanceof OpenV1 && opens++ === 0 ? null : undefined;
+        let first: { lacks: number; gaps: unknown[] } | undefined;
+        const coordinator: Coordinator = w.run({
+            onEvaluate: (evaluation) => {
+                w.evaluations.push(evaluation);
+                if (!evaluation.satisfied || first) return;
+                first = {
+                    lacks: newest.filter(
+                        (entry) => w.jIndex().get(entry.id!) !== entry.head
+                    ).length,
+                    gaps: w.coordinator!.proof().gaps,
+                };
+            },
+        });
+        await w.until(() => w.record(c).headerHeld, "C's header");
+        const record = w.record(c);
+        expect(record).toMatchObject({
+            state: "reconciling",
+            live: true,
+            reachable: false,
+        });
+
+        await w.clock.advanceSettled(5000);
+        // W's attempt ended (every Required record re-read): C answers, so
+        // only a reachability event could depart it.
+        expect(record).toMatchObject({
+            state: "reconciling",
+            departed: false,
+        });
+        w.transport.emit({
+            kind: "replicator",
+            type: "change",
+            peer: c.hash,
+            key: c.key,
+        });
+        await settle();
+        expect(record).toMatchObject({
+            state: "reconciling",
+            departed: false,
+        });
+        await w.until(() => w.stateOf(warm) === "contained", "W contained");
+        expect(coordinator.satisfied()).toBe(false);
+        expect(first).toBeUndefined();
+
+        w.joinGate = undefined;
+        release();
+        await w.until(() => w.stateOf(c) === "contained", "C contained");
+        await w.until(() => first !== undefined, "decided");
+        expect(first).toEqual({ lacks: 0, gaps: [] });
+    });
+
+    it("a creator that left before it was asked, the only peer that can qualify, whose route comes back with no event: the next evaluation asks it, and J holds its rows", async () => {
+        const { w, peers } = await worldWith([
+            ["C", { subscriber: false, reachable: false }],
+            ["G", { provenance: GATED }],
+        ]);
+        const [c, gated] = peers;
+        const own = w.rows([c], 5, "new", 5000);
+        await w.start();
+        const blocked = () => w.transport.reachable.get(c.hash) === false;
+        c.hooks.toPeer = () => (blocked() ? null : undefined);
+        c.hooks.toJ = () => (blocked() ? null : undefined);
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(gated) === "contained", "G contained");
+        expect(coordinator.satisfied()).toBe(false);
+
+        // C is relayed to J (V3) while J has no route: live, and gone.
+        w.transport.replicating.add(c.hash);
+        w.transport.emit({
+            kind: "replicator",
+            type: "join",
+            peer: c.hash,
+            key: c.key,
+        });
+        await settle();
+        const record = w.record(c);
+        expect(record).toMatchObject({
+            state: "left",
+            departed: true,
+            gap: { missing: "unknown" },
+        });
+        expect(opensTo(w, c)).toBe(0);
+
+        // Its route comes back with no event; a host trigger evaluates
+        // (design 4.9). G does not qualify, so only C can.
+        await w.clock.advanceSettled(2000);
+        w.transport.reachable.delete(c.hash);
+        coordinator.evaluate();
+        await w.until(() => w.stateOf(c) === "contained", "C contained");
+        for (const entry of own) {
+            expect(w.jIndex().get(entry.id!)).toBe(entry.head);
+        }
+        await w.until(() => coordinator.satisfied(), "satisfied with C");
+        expect(w.status().gaps).toEqual([]);
+    });
+
+    it("a queued replicator row with no sign of life that J cannot reach is not read at another session's attempt end: it is asked once and ends unconfirmed, with no gap (A2)", async () => {
+        const names: Array<[string, PeerOptions?]> = [];
+        for (let i = 0; i < SESSIONS_IN_FLIGHT; i++) names.push([`P${i}`]);
+        names.push([
+            "X",
+            { subscriber: false, replicator: true, reachable: false },
+        ]);
+        const { w, peers } = await worldWith(names);
+        const x = peers[peers.length - 1];
+        await w.start();
+        x.up = false;
+        // Every slot is held past the first attempts' end.
+        for (const p of peers.slice(0, -1)) {
+            p.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 6000 : 0);
+        }
+        let first: { gaps: unknown[]; x: string | undefined } | undefined;
+        const coordinator: Coordinator = w.run({
+            onEvaluate: (evaluation) => {
+                w.evaluations.push(evaluation);
+                if (!evaluation.satisfied || first) return;
+                first = {
+                    gaps: w.coordinator!.proof().gaps,
+                    x: w.stateOf(x),
+                };
+            },
+        });
+        await settle();
+        expect(w.record(x)).toMatchObject({ state: "asking", queued: true });
+        await w.clock.advanceSettled(5000);
+        expect(w.record(x)).toMatchObject({
+            state: "asking",
+            departed: false,
+        });
+        expect(w.record(x).gap).toBeUndefined();
+        for (let i = 0; i < 40 && !first; i++) {
+            await w.clock.advanceSettled(1000);
+        }
+        expect(first).toEqual({ gaps: [], x: "unconfirmed" });
+        expect(opensTo(w, x)).toBe(1);
+        expect(coordinator.debug().armedTimers).toBe(0);
+    });
+
+    it("a row whose header reached J relayed and whose next request then went unanswered is read again when it turns silent: J cannot reach it, so it leaves with its gap and nothing armed", async () => {
+        const { w, peers } = await worldWith([
+            [
+                "C",
+                {
+                    provenance: CREATOR,
+                    subscriber: false,
+                    replicator: true,
+                    reachable: false,
+                },
+            ],
+            ["W", { provenance: WARM }],
+        ]);
+        const [c, warm] = peers;
+        // Too many rows for the header alone: J asks for cells.
+        w.rows([c], 400, "new", 5000);
+        await w.start();
+        // Only C's header reaches J.
+        c.hooks.toJ = (m) => (m instanceof HeaderV1 ? undefined : null);
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(warm) === "contained", "W contained");
+        const record = w.record(c);
+        expect(record).toMatchObject({
+            state: "reconciling",
+            live: true,
+            reachable: false,
+            departed: false,
+        });
+        expect(coordinator.satisfied()).toBe(false);
+
+        await w.until(
+            () => w.sentTo(c, CellsReqV1).length > 0,
+            "C asked for cells"
+        );
+        for (let i = 0; i < 60 && record.state !== "left"; i++) {
+            await w.clock.advanceSettled(1000);
+        }
+        expect(record).toMatchObject({
+            state: "left",
+            departed: true,
+            reachable: false,
+        });
+        expect(record.gap).toBeDefined();
+        await w.until(() => coordinator.satisfied(), "satisfied with W");
+        expect(w.status().gaps.map(({ peer }) => peer)).toEqual([c.hash]);
+        expect(coordinator.debug().armedTimers).toBe(0);
+    });
+
+    for (const event of [false, true]) {
+        it(`31 (answering, no route, sign of life first${event ? ", then a reachability event" : ""}): a creator J's route table does not reach whose sign of life comes before its relayed header is left-unanswered by the read; ${event ? "an event read it gone too, so its header makes it left with its gap (A1)" : "its header makes it answering again, so J holds its rows before it decides"}`, async () => {
+            const { w, peers } = await worldWith([
+                [
+                    "C",
+                    {
+                        provenance: CREATOR,
+                        subscriber: false,
+                        replicator: true,
+                        reachable: false,
+                    },
+                ],
+                ["W", { provenance: WARM }],
+            ]);
+            const [c, warm] = peers;
+            const newest = w.rows([c], 5, "new", 5000);
+            await w.start();
+            // C's header reaches J relayed at 2 s; the pulls of its rows wait.
+            let release!: () => void;
+            w.joinGate = new Promise<void>((resolve) => (release = resolve));
+            c.hooks.delayToJ = (m) => (m instanceof HeaderV1 ? 2000 : 0);
+            let first: { lacks: number; gaps: unknown[] } | undefined;
+            const coordinator: Coordinator = w.run({
+                onEvaluate: (evaluation) => {
+                    w.evaluations.push(evaluation);
+                    if (!evaluation.satisfied || first) return;
+                    first = {
+                        lacks: newest.filter(
+                            (entry) => w.jIndex().get(entry.id!) !== entry.head
+                        ).length,
+                        gaps: w.coordinator!.proof().gaps,
+                    };
+                },
+            });
+            await w.until(() => w.stateOf(warm) === "contained", "W contained");
+            const record = w.record(c);
+
+            // A sign of life at 1 s, before the header: the read departs C.
+            await w.clock.advanceSettled(1000);
+            w.transport.emit({
+                kind: "replicator",
+                type: "change",
+                peer: c.hash,
+                key: c.key,
+            });
+            await settle();
+            expect(record).toMatchObject({
+                state: "left-unanswered",
+                departed: true,
+                headerHeld: false,
+                live: true,
+            });
+            if (event) {
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "disconnect",
+                });
+                await settle();
+                expect(record.state).toBe("left-unanswered");
+            }
+
+            // The header at 2 s.
+            await w.clock.advanceSettled(1000);
+            expect(record.headerHeld).toBe(true);
+            expect(record.session).toBeDefined();
+            if (event) {
+                expect(record).toMatchObject({ state: "left", departed: true });
+                expect(record.gap).toBeDefined();
+                await w.until(() => first !== undefined, "decided");
+                expect(first!.lacks).toBe(newest.length);
+                expect(first!.gaps).toEqual([
+                    { peer: c.hash, missing: record.gap!.missing },
+                ]);
+                w.joinGate = undefined;
+                release();
+                return;
+            }
+            expect(record).toMatchObject({
+                state: "reconciling",
+                departed: false,
+                reachable: false,
+            });
+            expect(record.gap).toBeUndefined();
+            expect(coordinator.satisfied()).toBe(false);
+            await w.clock.advanceSettled(1000);
+            expect(first).toBeUndefined();
+
+            w.joinGate = undefined;
+            release();
+            await w.until(() => w.stateOf(c) === "contained", "C contained");
+            await w.until(() => first !== undefined, "decided");
+            expect(first).toEqual({ lacks: 0, gaps: [] });
+        });
+    }
+
+    for (const variant of ["never a record", "left by an event"] as const) {
+        it(`a peer (${variant}) asked when its route came back with no event while nothing qualified, silent while reachable, whose route then goes with no event, leaves at the next evaluation: J decides once a peer qualifies, naming it`, async () => {
+            const { w, peers } = await worldWith([
+                ["G", { provenance: GATED }],
+                ["C", variant === "never a record" ? { reachable: false } : {}],
+            ]);
+            const [g, c] = peers;
+            await w.start();
+            // C answers nothing.
+            c.hooks.toPeer = () => null;
+            let first: { gaps: unknown[] } | undefined;
+            const coordinator: Coordinator = w.run({
+                onEvaluate: (evaluation) => {
+                    w.evaluations.push(evaluation);
+                    if (!evaluation.satisfied || first) return;
+                    first = { gaps: w.coordinator!.proof().gaps };
+                },
+            });
+            await w.until(() => w.stateOf(g) === "contained", "G contained");
+            if (variant === "left by an event") {
+                w.transport.reachable.set(c.hash, false);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "disconnect",
+                    peer: c.hash,
+                });
+                await settle();
+                await w.clock.advanceSettled(5000);
+                expect(w.record(c)).toMatchObject({
+                    state: "left",
+                    gap: { missing: "unknown" },
+                });
+            } else {
+                expect(coordinator.record(c.hash)).toBeUndefined();
+            }
+            expect(coordinator.satisfied()).toBe(false);
+
+            // C's route comes back with no event; a host trigger evaluates:
+            // nothing qualified, so C is asked (it may be the only one).
+            w.transport.reachable.delete(c.hash);
+            coordinator.evaluate();
+            await settle();
+            const record = w.record(c);
+            expect(record).toMatchObject({ state: "asking", departed: false });
+            for (let i = 0; i < 120 && record.state !== "silent"; i++) {
+                await w.clock.advanceSettled(1000);
+            }
+            expect(record).toMatchObject({ state: "silent", reachable: true });
+            expect(coordinator.debug().armedTimers).toBe(0);
+
+            // Its route goes with no event; G's notice qualifies it, and its
+            // qualification session ends with no attempt end.
+            w.transport.reachable.set(c.hash, false);
+            g.provenance = RECONCILED;
+            w.fromPeer(g, w.notice(g));
+            await w.until(() => w.record(g).qualified, "G qualified");
+            await w.until(() => first !== undefined, "decided");
+            expect(record).toMatchObject({
+                state: "left",
+                departed: true,
+                gap: { missing: "unknown" },
+            });
+            expect(first).toEqual({
+                gaps: [{ peer: c.hash, missing: "unknown" }],
+            });
+            expect(coordinator.debug().armedTimers).toBe(0);
+        });
+    }
 });
 
 describe("readiness coordinator: sessions, queue and timers", () => {
@@ -5511,19 +6702,47 @@ describe("readiness coordinator: progress (PR-4)", () => {
                 drive: ({ session }) => session().set("silent"),
             },
             {
-                // Visible only by its replication announcement, while J's
-                // route table has no route to it.
-                reason: "unreachable-silent",
-                state: "silent",
-                options: { subscriber: false, reachable: false },
+                // A replicator row J's route table had no route to at
+                // discovery, asked once; its header reaches J relayed (the
+                // session's own input: live, not re-read), then a request
+                // goes unanswered. Silent, it is read again and leaves with
+                // its gap (D3 = A'), never reported silent and unreachable.
+                // (A replication announcement of a peer J cannot
+                // reach is a departure too: "departure (D3 = A')".)
+                reason: "gap",
+                state: "left",
+                options: {
+                    subscriber: false,
+                    replicator: true,
+                    reachable: false,
+                },
                 drive: async ({ w, peer, session }) => {
-                    w.transport.emit({
-                        kind: "replicator",
-                        type: "join",
-                        peer: peer.hash,
-                        key: peer.key,
-                    });
+                    w.coordinator!.onMessage(
+                        new HeaderV1({
+                            sessionId: session().sessionId,
+                            scope: NS,
+                            logId: peer.scope(NS).logId,
+                            provenance: new ProvenanceV1({
+                                ...peer.provenance,
+                                openNonce: peer.openNonce,
+                            }),
+                            freezeId: new Uint8Array(8),
+                            count: 0,
+                            anchor: new Uint8Array(32),
+                            hlc: 0n,
+                            above: 0,
+                        }),
+                        peer.hash,
+                        1,
+                        peer.key
+                    );
                     await settle();
+                    expect(w.record(peer)).toMatchObject({
+                        live: true,
+                        reachable: false,
+                        departed: false,
+                    });
+                    session().set("certifying");
                     session().set("silent");
                 },
             },
@@ -5727,7 +6946,6 @@ describe("readiness coordinator: progress (PR-4)", () => {
                 "waiting-fetch": true,
                 "waiting-trust": true,
                 "reachable-silent": true,
-                "unreachable-silent": true,
                 "refused-unsupported": true,
                 "refused-scope": true,
                 qualified: true,

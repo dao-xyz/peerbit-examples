@@ -26,6 +26,7 @@ import {
 } from "../readiness/explain.js";
 import type { IdKey } from "../readiness/id-map.js";
 import { validateProof } from "../readiness/proof.js";
+import { isReachable } from "../readiness/reachability.js";
 import { logIdOf, type ReadinessRuntime } from "../readiness/runtime.js";
 import { NAMESPACE_V1, SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import { documentsIndexPort, type IndexedHead } from "../readiness/tap.js";
@@ -826,6 +827,52 @@ const sameBytes = (a: Uint8Array | undefined, b: Uint8Array) =>
     a.length === b.length &&
     a.every((byte, i) => byte === b[i]);
 
+/**
+ * `fs.awaitWriteReady`. A timeout first logs the error's readiness snapshot
+ * and the coordinator's records (via, live, reachable, departed, the
+ * session's scopes), with the test's names for the peers, then rethrows:
+ * the error's message names a hash only, not which peer it is or why it
+ * waits.
+ */
+const awaitWriteReady = async (
+    fs: SharedFsHandle,
+    names: ReadonlyMap<string, string>
+) => {
+    try {
+        await fs.awaitWriteReady({ timeout: 30_000 });
+    } catch (error: any) {
+        const records = runtimeOf(fs)
+            .coordinator?.records()
+            .map((record) => ({
+                peer: record.hash,
+                state: record.state,
+                via: [...record.via],
+                live: record.live,
+                confirmOnly: record.confirmOnly,
+                reachable: record.reachable,
+                departed: record.departed,
+                gap: record.gap,
+                session: record.session?.debug(),
+            }));
+        const named = (_key: string, value: unknown) =>
+            typeof value === "bigint"
+                ? `${value}`
+                : typeof value === "string"
+                  ? (names.get(value) ?? value)
+                  : value;
+        const legend = [...names]
+            .map(([hash, name]) => `${name}=${hash}`)
+            .join(" ");
+        console.error(
+            `${error?.message}\npeers: ${legend}\n${JSON.stringify(
+                { readiness: error?.readiness, records },
+                named
+            )}`
+        );
+        throw error;
+    }
+};
+
 describe("design test 9: a crash between containment and the sidecar write; a lagging donor lists a head J retired", () => {
     const peers: Peerbit[] = [];
     const roots: string[] = [];
@@ -892,10 +939,21 @@ describe("design test 9: a crash between containment and the sidecar write; a la
         restores.push(() => (owner.onMessage = onMessage));
     };
 
-    it("9: gated on reopen with no proof on disk; the lagging donor's retired head is superseded (not pulled, not indexed, the donor not excluded); then ready", async () => {
+    /**
+     * `relayDonor`: after the reopen, J hears the stopped donor D relayed
+     * (design case 14; M0 P1 saw a dead peer relayed to a fresh J as a
+     * pubsub subscriber): a readiness-topic subscribe naming D, and the
+     * `replicator:join` and `replication:change` shared-log dispatches once
+     * a relayed subscription of a peer J's replication index still lists
+     * arrives (`pruneOfflineReplicators`). Each is a sign of life, and J's
+     * route table does not reach D: D leaves, and J turns ready as in 9.
+     */
+    const designTest9 = async (relayDonor: boolean) => {
+        const names = new Map<string, string>();
         // D, the creator: /x.txt edited once, so its first version is a
         // superseded row, plus files that never change.
         const donorPeer = await createPeer();
+        names.set(hashOf(donorPeer), "D");
         const donor = await openSharedFs({
             peerbit: donorPeer,
             machineLabel: "explain-donor",
@@ -927,6 +985,7 @@ describe("design test 9: a crash between containment and the sidecar write; a la
                 denyOutboundUpgradedConnection: deny,
             },
         });
+        names.set(hashOf(laggingPeer), "L");
         await laggingPeer.dial(donorPeer);
         const lagging = await openSharedFs({
             peerbit: laggingPeer,
@@ -935,7 +994,7 @@ describe("design test 9: a crash between containment and the sidecar write; a la
             bootstrap: false,
             gc: false,
         });
-        await lagging.awaitWriteReady({ timeout: 30_000 });
+        await awaitWriteReady(lagging, names);
         const donorRows = await namespaceRows(donor);
         await waitUntil(async () =>
             expect(await namespaceRows(lagging)).toEqual(donorRows)
@@ -968,6 +1027,7 @@ describe("design test 9: a crash between containment and the sidecar write; a la
         roots.push(root);
         const directory = joinPath(root, "joiner");
         const firstPeer = await createPeer({ directory });
+        names.set(hashOf(firstPeer), "J");
         const hold = holdFlips(firstPeer);
         restores.push(hold.restore);
         await firstPeer.dial(donorPeer);
@@ -1014,6 +1074,10 @@ describe("design test 9: a crash between containment and the sidecar write; a la
         // J reopens in the same directory and sees L only.
         const reopenedPeer = await createPeer({ directory });
         expect(hashOf(reopenedPeer)).toBe(hashOf(firstPeer));
+        // Relayed: J's decision is held until D was relayed, so J cannot
+        // turn ready on L alone first.
+        const held = relayDonor ? holdFlips(reopenedPeer) : undefined;
+        if (held) restores.push(held.restore);
         await reopenedPeer.dial(laggingPeer);
         const joiner = await openSharedFs({
             peerbit: reopenedPeer,
@@ -1025,9 +1089,52 @@ describe("design test 9: a crash between containment and the sidecar write; a la
         // No proof on disk: a fresh join, gated at open.
         expect(joiner.bootstrapStatus().writeReady).toBe(false);
         expect(joiner.bootstrapStatus().readiness).toBeDefined();
-        await joiner.awaitWriteReady({ timeout: 30_000 });
-
         const laggingHash = hashOf(laggingPeer);
+        if (held) {
+            await waitUntil(() =>
+                expect(
+                    runtimeOf(joiner).coordinator?.record(laggingHash)?.state
+                ).toBe("contained")
+            );
+            expect(
+                isReachable(reopenedPeer, hashOf(reopenedPeer), donorHash)
+            ).toBe(false);
+            const from = donorPeer.identity.publicKey;
+            const topic: string = (joiner.program as any).readiness.topic;
+            (reopenedPeer.services.pubsub as any).dispatchEvent(
+                new CustomEvent("subscribe", {
+                    detail: { from, topics: [topic] },
+                })
+            );
+            for (const type of ["replicator:join", "replication:change"]) {
+                entriesOf(joiner).log.events.dispatchEvent(
+                    new CustomEvent(type, { detail: { publicKey: from } })
+                );
+            }
+            held.restore();
+        }
+        await awaitWriteReady(joiner, names);
+
+        // Relayed: D is live and gone (A'), a live peer that left before
+        // answering: left with an unknown gap (D4), whether it was relayed
+        // while its row's one attempt ran, after that attempt ended, or with
+        // no row.
+        let gaps: Array<{ peer: string; missing: number | "unknown" }> = [];
+        if (relayDonor) {
+            const donorRecord =
+                runtimeOf(joiner).coordinator!.record(donorHash);
+            expect(donorRecord).toMatchObject({
+                state: "left",
+                live: true,
+                departed: true,
+                reachable: false,
+                gap: { missing: "unknown" },
+            });
+            gaps = [{ peer: donorHash, missing: "unknown" }];
+            console.info(
+                `design test 9 (relayed donor): D ${donorRecord!.state} via ${[...donorRecord!.via].join("+")}, ${donorRecord!.sessionsOpened} session(s)`
+            );
+        }
         const record = runtimeOf(joiner).coordinator!.record(laggingHash)!;
         expect(record).toMatchObject({ state: "contained", qualified: true });
         const result = record.results.get(SCOPE_NAMESPACE_V1)!;
@@ -1042,7 +1149,7 @@ describe("design test 9: a crash between containment and the sidecar write; a la
         expect(joiner.bootstrapStatus().readiness).toMatchObject({
             state: "ready",
             excluded: [],
-            gaps: [],
+            gaps,
             contained: [
                 {
                     peer: laggingHash,
@@ -1071,6 +1178,19 @@ describe("design test 9: a crash between containment and the sidecar write; a la
                     count: donorRows.size,
                 }),
             ]);
+            expect(proof.proof.gaps).toEqual(gaps);
         }
-    }, 180_000);
+    };
+
+    it(
+        "9: gated on reopen with no proof on disk; the lagging donor's retired head is superseded (not pulled, not indexed, the donor not excluded); then ready",
+        () => designTest9(false),
+        180_000
+    );
+
+    it(
+        "9 (relayed donor): the stopped donor, relayed to J as a subscriber and a replicator J's route table does not reach, is live and leaves with its gap; J turns ready as in 9",
+        () => designTest9(true),
+        180_000
+    );
 });

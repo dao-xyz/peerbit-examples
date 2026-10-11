@@ -566,7 +566,7 @@ write readiness. It names the `peer`, its `state` (`ReadinessPeerState`) and the
   life, which is asked once.
 - `busy`: `busy`.
 - `reconciling`: `in-flight`, `parked`, `waiting-fetch` or `waiting-trust`.
-- `silent`: `reachable-silent` or `unreachable-silent`.
+- `silent`: `reachable-silent`. A silent peer the joiner cannot reach leaves.
 - `refused`: `refused-unsupported` or `refused-scope`.
 - `contained`: `qualified`, `not-write-ready`, and with access control
   `checking-identity` or `untrusted-identity`.
