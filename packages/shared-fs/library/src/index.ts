@@ -954,8 +954,8 @@ export type BootstrapStatus = {
     /**
      * True only after the accepted snapshot's document ids were covered before
      * overlay retirement. This is not a global network-frontier proof. It stays
-     * false for bootstrap-disabled/off views and for a quiescence-based
-     * recovery from an unverified retirement.
+     * false for bootstrap-disabled/off views, for an unverified posture that a
+     * readiness proof ended, and for a quiescence-based recovery from one.
      */
     snapshotCoverageVerified: boolean;
     /**
@@ -3118,8 +3118,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private foregroundMutationTasks = new Set<Promise<unknown>>();
     /**
      * Guard D arming: false from the moment a bootstrap is decided until
-     * verified retirement (or post-timeout quiescence), so a partial
-     * replica can never resurrect history network-wide.
+     * verified retirement, a readiness proof, or post-timeout quiescence,
+     * so a partial replica can never resurrect history network-wide.
      */
     private guardArmed = true;
     /** Invalidates async Guard D decisions across every disarm/re-arm. */
@@ -4169,8 +4169,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // startBootstrap, an "active" marker over a store that held no
             // content before this open left no partial doc set (typically a
             // session stopped before its bootstrap decided): a plain join.
-            // Anything else holds the unverified posture until the store
-            // settles.
+            // Anything else holds the unverified posture until this open's
+            // readiness proof or, failing one, until the store settles.
             const partial =
                 bootstrapMarker === "unverified" ||
                 (await this.contentStoredBeforeOpen(openGeneration));
@@ -11426,7 +11426,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * telemetry, the readiness runtime (its coordinator finishes and READY
      * notices go out, carrying the new provenance), the `write:ready` event
      * and the waiters. markWriteReady() and assumeComplete() share it;
-     * neither runs under allowPartialWrites, so the view is proven.
+     * neither runs under allowPartialWrites, so the view is proven. An
+     * unverified posture ends here too (endUnverifiedPosture): the same
+     * sidecar write clears its marker. One the quiescence checker already
+     * ended (`converged`, unverified) moves to `off` as well.
      */
     private async commitWriteReady(
         generation: number,
@@ -11460,6 +11463,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.viewProven = true;
         this.setGuardArmed(true);
         this.writeReadinessSource = source;
+        if (this.bootstrapPhase === "unverified") {
+            // Before the READY notices, so they carry phase `off`.
+            this.endUnverifiedPosture();
+        } else if (
+            this.bootstrapPhase === "converged" &&
+            !this.bootstrapVerified
+        ) {
+            // The quiescence checker ended the posture before this commit
+            // (until PR-6 deletes it) and ran its end actions; the proven
+            // open lands in `off` all the same.
+            this.setBootstrapPhase("off");
+        }
         this.emitWriteReadyOnce(source, () => {
             if (proof) {
                 return {
@@ -11483,6 +11498,34 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             waiter.resolve();
         }
         this.reportWritersUnheard();
+    }
+
+    /**
+     * Ends the unverified posture on this open's write readiness (a join's
+     * proof or assumeComplete()), from commitWriteReady after its sidecar
+     * write, in the same serialized slot. The proof covers the store and
+     * never an overlay, and the posture holds none, so the open lands in
+     * `off`, as a plain join that reconciled: it may publish snapshots and
+     * certify disposal like one. A crash before that write leaves the
+     * marker, and the next open is gated again. Then the quiescence path's
+     * end actions; `bootstrap:converged` goes out after the phase change,
+     * because the ignore policy reads the phase in its listener.
+     */
+    private endUnverifiedPosture() {
+        if (this.quiescenceTimer) {
+            clearInterval(this.quiescenceTimer);
+            this.quiescenceTimer = undefined;
+        }
+        this.setBootstrapPhase("off");
+        this.events.dispatchEvent(
+            new CustomEvent("bootstrap:converged", {
+                detail: { verified: false },
+            })
+        );
+        this.resolveBootstrapWaiters({ verified: false });
+        this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
+        this.emitNamespaceReset();
+        this.changesetHub?.overlayRetired();
     }
 
     /**
@@ -11547,21 +11590,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * The predicate's phase clause (design 4.8 line 2): this open's
-     * bootstrap decision settled and the phase `off` or `converged`.
+     * bootstrap decision settled and the phase `off`, `converged` or
+     * `unverified`. The proof covers the store, never an overlay, and the
+     * unverified posture holds none (the overlay is dropped before the
+     * phase changes), so the proof decides there and its commit ends the
+     * posture. `fetching` and `overlay-active` still gate.
      */
     private readinessPhaseSettled() {
         return (
             this.writeReadinessDecisionSettled &&
             (this.bootstrapPhase === "off" ||
-                this.bootstrapPhase === "converged")
+                this.bootstrapPhase === "converged" ||
+                this.bootstrapPhase === "unverified")
         );
     }
 
     /**
      * Every bootstrap phase change after open()'s reset: a design 4.9
      * trigger (M8), so a joiner whose peers are accounted for turns ready
-     * when its overlay retires or its unverified posture quiesces, with no
-     * other event. evaluate() is a coalesced microtask and never throws.
+     * when its overlay retires or its bootstrap falls back, with no other
+     * event. evaluate() is a coalesced microtask and never throws.
      */
     private setBootstrapPhase(phase: BootstrapPhase) {
         this.bootstrapPhase = phase;
@@ -12233,7 +12281,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         if (marker === "unverified") {
             // A previous bootstrap retired on timeout: no overlay, but
-            // Guard D stays disarmed and GC gated until quiescence.
+            // Guard D stays disarmed and GC gated until this open's
+            // readiness proof or, failing one, quiescence.
             this.setBootstrapPhase("unverified");
             this.setGuardArmed(false);
             this.emitBootstrapFallbackOnce(
@@ -12368,8 +12417,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * The safety posture for any partial store that cannot verify: guard
-     * disarmed, GC gated, marker persisted, arming deferred to the
-     * quiescence checker.
+     * disarmed, GC gated, marker persisted. A join's proof ends it
+     * (endUnverifiedPosture); failing one, the quiescence checker arms.
      */
     private enterUnverified(
         generation: number = this.openGeneration,
@@ -13575,7 +13624,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         } else {
             // Timeout: the local store is a valid lagging-replica view —
             // no worse than a plain join mid-sync — but Guard D stays
-            // disarmed and GC gated until the store is quiescent.
+            // disarmed and GC gated until this open's readiness proof
+            // (endUnverifiedPosture) or, failing one, quiescence.
             this.setBootstrapPhase("unverified");
             this.emitOverlayRetiredOnce(false);
             void this.writeBootstrapState(
@@ -13590,7 +13640,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             this.resolveBootstrapWaiters({ verified: false });
             // Honest view shrink: unproven overlay docs left the served
-            // tree. Latched — the quiescence path dispatches this too.
+            // tree. Latched — the posture's end dispatches this too.
             this.watchHub?.resyncAll("overlay-timeout", "bootstrap:end");
             this.emitNamespaceReset();
             this.changesetHub?.overlayRetired();
@@ -13598,10 +13648,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Post-timeout arming: Guard D and GC come back only when the store
-     * has been quiet (no document arrivals for a full window) on two
-     * consecutive checks — an honest heuristic, still strictly stronger
-     * than today's config-only arming.
+     * Post-timeout arming for an open that has not proven its view: Guard
+     * D and GC come back only when the store has been quiet (no document
+     * arrivals for a full window) on two consecutive checks — an honest
+     * heuristic, still strictly stronger than today's config-only arming.
+     * A readiness proof ends the posture first (endUnverifiedPosture
+     * clears this timer).
      */
     private startQuiescenceChecker(
         generation: number = this.openGeneration,
@@ -13860,9 +13912,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * Refused with EINVAL on an observer or partial replica, and under
      * allowPartialWrites (that open opted into partial semantics; reopen
      * without it). Waits for the bootstrap decision, then refuses with
-     * EAGAIN while a snapshot overlay is fetching, active or unverified.
-     * ECLOSED once a close or reopen began. A no-op when already writable
-     * (the source is kept).
+     * EAGAIN while a snapshot overlay is fetching or active. ECLOSED once
+     * a close or reopen began. A no-op when already writable (the source
+     * is kept), also in the unverified posture, which a warm reopen keeps
+     * until the quiet period. On a handle not yet writable it acts there
+     * and ends the posture, as a proof does (the overlay is gone; the
+     * caller vouches for the store).
      */
     async assumeComplete(): Promise<void> {
         const closed = () =>
@@ -13895,8 +13950,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await Promise.resolve(this.bootstrapDecision).catch(() => {});
         if (!current()) throw closed();
         if (
-            this.bootstrapPhase !== "off" &&
-            this.bootstrapPhase !== "converged"
+            this.bootstrapPhase === "fetching" ||
+            this.bootstrapPhase === "overlay-active"
         ) {
             throw new SharedFsWritePendingError(
                 "assumeComplete",
@@ -15070,8 +15125,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         const tick = async () => {
             this.throwIfMaintenanceInactive(context);
-            // Publish only from a whole view: a plain replica ("off") or
-            // a VERIFIED converged bootstrap — never from "unverified" or
+            // Publish only from a whole view: a plain replica ("off", which
+            // includes an unverified posture a readiness proof ended) or a
+            // VERIFIED converged bootstrap — never from "unverified" or
             // quiescence-armed states, whose fresh timestamps would
             // outrank complete snapshots for every future joiner.
             if (

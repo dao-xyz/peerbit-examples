@@ -265,13 +265,13 @@ const ASSUME_COMPLETE_HINT =
 /**
  * How an unsettled snapshot bootstrap phase settles, as the CLI words it:
  * only inside one long run, so a retry or a short status run does not help.
+ * An unverified posture is settled: the join's proof or assumeComplete()
+ * ends it.
  */
-const UNVERIFIED_SETTLES =
-    "an unverified snapshot bootstrap converges only after about 10 minutes without new rows within one run";
 const OVERLAY_SETTLES =
-    "a snapshot overlay retires within 15 minutes, and one that retires unverified then needs about 10 more minutes without new rows, all within one run";
+    "a snapshot overlay retires within 15 minutes within one run";
 const FETCHING_SETTLES =
-    "a snapshot fetch that succeeds installs an overlay, which retires within 15 minutes, and one that retires unverified then needs about 10 more minutes without new rows, all within one run";
+    "a snapshot fetch that succeeds installs an overlay, which retires within 15 minutes within one run";
 
 /** The hint while the phase has not settled: assumeComplete() refuses. */
 const unsettledHint = (phase: string, settles: string, timeoutMs: number) =>
@@ -633,8 +633,9 @@ describe("write readiness progress line", () => {
     });
 
     it("names --assume-complete only where no answer is coming", () => {
-        // assumeComplete() acts in these phases.
-        for (const phase of ["off", "converged"] as const) {
+        // assumeComplete() acts in these phases; in `unverified` it ends
+        // the posture, as the join's proof does.
+        for (const phase of ["off", "converged", "unverified"] as const) {
             for (const readiness of [
                 readinessSnapshot({ state: "no-peer" }),
                 readinessSnapshot({ state: "no-qualified-donor" }),
@@ -706,16 +707,13 @@ describe("write readiness progress line", () => {
             readinessSnapshot({ state: "waiting-silent" }),
             everyRequiredPeerSilent(),
         ]) {
-            expect(assumeCompleteHint(readiness, "unverified")).toBe(
-                unsettledHint("unverified", UNVERIFIED_SETTLES, 660_000)
-            );
             expect(assumeCompleteHint(readiness, "overlay-active")).toBe(
-                unsettledHint("overlay-active", OVERLAY_SETTLES, 1_560_000)
+                unsettledHint("overlay-active", OVERLAY_SETTLES, 960_000)
             );
             // assumeComplete() waits out a fetch, and one that succeeds
             // leaves an overlay it refuses: the long wait up front.
             expect(assumeCompleteHint(readiness, "fetching")).toBe(
-                unsettledHint("fetching", FETCHING_SETTLES, 1_560_000)
+                unsettledHint("fetching", FETCHING_SETTLES, 960_000)
             );
         }
         // Nothing points at peerbit-fs status: a short run starts from the
@@ -723,7 +721,7 @@ describe("write readiness progress line", () => {
         expect(
             assumeCompleteHint(
                 readinessSnapshot({ state: "no-peer" }),
-                "unverified"
+                "overlay-active"
             )
         ).not.toContain("status");
     });
@@ -1520,7 +1518,7 @@ describe("peerbit-fs cli", () => {
             // The phase settles only inside one long run, so the advice is a
             // longer wait, never a status check.
             expect(unsettled.error?.message).toBe(
-                `resolve-conflict did not establish a safe write view within 750 ms: ${reason}. ${SILENT_PEER_ADVICE}${unsettledNotApplied("fetching", FETCHING_SETTLES, 1_560_000)}`
+                `resolve-conflict did not establish a safe write view within 750 ms: ${reason}. ${SILENT_PEER_ADVICE}${unsettledNotApplied("fetching", FETCHING_SETTLES, 960_000)}`
             );
             expect(unsettled.error?.cause).toBe(pending);
             expect(unsettled.chunks.join("")).not.toContain(ASSUMED_WARNING);
@@ -1812,8 +1810,8 @@ describe("peerbit-fs cli", () => {
             // Every peer accounted for, the phase not settled: the join
             // turns writable by itself once it settles, within one run.
             for (const [phase, settles, timeoutMs] of [
-                ["unverified", UNVERIFIED_SETTLES, 660_000],
-                ["fetching", FETCHING_SETTLES, 1_560_000],
+                ["overlay-active", OVERLAY_SETTLES, 960_000],
+                ["fetching", FETCHING_SETTLES, 960_000],
             ] as const) {
                 const settling = await timedOut(
                     readinessSnapshot({ state: "waiting-phase" }),
@@ -1829,12 +1827,12 @@ describe("peerbit-fs cli", () => {
             // unsettled phase: no warning, and advice that ends the loop.
             const pending = new SharedFsWritePendingError(
                 "assumeComplete",
-                "unverified"
+                "overlay-active"
             );
             const refused = await timedOut(
                 readinessSnapshot({ state: "no-peer" }),
                 {
-                    phase: "unverified",
+                    phase: "overlay-active",
                     assume: async () => {
                         throw pending;
                     },
@@ -1842,7 +1840,7 @@ describe("peerbit-fs cli", () => {
             );
             expect(refused.assumed).toBe(1);
             expect(refused.error?.message).toBe(
-                `${refused.base}${unsettledNotApplied("unverified", UNVERIFIED_SETTLES, 660_000)}`
+                `${refused.base}${unsettledNotApplied("overlay-active", OVERLAY_SETTLES, 960_000)}`
             );
             expect(refused.error?.cause).toBe(pending);
             expect(refused.stderr).not.toContain(ASSUMED_WARNING);
@@ -1850,9 +1848,8 @@ describe("peerbit-fs cli", () => {
             // Without the flag the hint says the same, and asks for the
             // long wait while a fetch may still leave an overlay.
             for (const [phase, settles, timeoutMs] of [
-                ["unverified", UNVERIFIED_SETTLES, 660_000],
-                ["overlay-active", OVERLAY_SETTLES, 1_560_000],
-                ["fetching", FETCHING_SETTLES, 1_560_000],
+                ["overlay-active", OVERLAY_SETTLES, 960_000],
+                ["fetching", FETCHING_SETTLES, 960_000],
             ] as const) {
                 const hinted = await timedOut(
                     readinessSnapshot({ state: "no-peer" }),
@@ -1874,6 +1871,8 @@ describe("peerbit-fs cli", () => {
                 ],
                 [readinessSnapshot({ state: "waiting-silent" }), "off"],
                 [everyRequiredPeerSilent(), "off"],
+                // The unverified posture is settled: assumeComplete() ends it.
+                [readinessSnapshot({ state: "no-peer" }), "unverified"],
             ] as const) {
                 const assumed = await timedOut(readiness, { phase });
                 expect(assumed.assumed, describeReadiness(readiness)).toBe(1);

@@ -1438,30 +1438,150 @@ describe("shared fs cold-start bootstrap", () => {
             expect(reopened.bootstrapStatus().phase).toBe("unverified");
 
             // Readiness counts what peers answer, never a manifest found:
-            // the creator is contained and qualified, and the posture's
-            // phase is what still gates it (design 4.8).
+            // containing the creator proves the store, and that proof ends
+            // the posture (design 4.8; design test 59).
             await joinerPeer.dial(creatorPeer);
-            await waitUntil(() =>
-                expect(reopened.bootstrapStatus().readiness).toMatchObject({
-                    state: "waiting-phase",
-                    satisfied: false,
-                    contained: [
-                        expect.objectContaining({
-                            peer: creatorPeer.identity.publicKey.hashcode(),
-                            qualified: true,
-                            source: "creator",
-                        }),
-                    ],
-                })
-            );
-            await expect(
-                reopened.awaitWriteReady({ timeout: 500 })
-            ).rejects.toMatchObject({
-                code: "ETIMEDOUT",
-                readiness: { state: "waiting-phase" },
+            await reopened.awaitWriteReady({ timeout: 20_000 });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+                snapshotCoverageVerified: false,
+            });
+            expect(reopened.bootstrapStatus().readiness).toMatchObject({
+                state: "ready",
+                contained: [
+                    expect.objectContaining({
+                        peer: creatorPeer.identity.publicKey.hashcode(),
+                        qualified: true,
+                        source: "creator",
+                    }),
+                ],
             });
             expect(reopened.bootstrapStatus().manifest).toBeUndefined();
         } finally {
+            await joinerPeer?.stop().catch(() => {});
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("keeps the unverified marker until the proof's sidecar write: a crash before it reopens gated, one after it reopens warm (design test 61)", async () => {
+        const root = await mkdtemp(join(tmpdir(), "shared-fs-posture-crash-"));
+        const directory = join(root, "joiner");
+        let joinerPeer: Peerbit | undefined;
+        const prototype = SharedFileSystem.prototype as any;
+        const replace = prototype.replaceBootstrapState;
+        try {
+            const creatorPeer = await createPeer();
+            const creator = await openSharedFs({
+                peerbit: creatorPeer,
+                machineLabel: "posture-creator",
+            });
+            await creator.writeFile("/data.txt", "from the creator");
+            const statePath = join(
+                directory,
+                "shared-fs-bootstrap",
+                `${creator.address}.json`
+            );
+            const state = async () =>
+                JSON.parse(await readFile(statePath, "utf8"));
+            // A previous bootstrap here retired unverified.
+            await mkdir(join(directory, "shared-fs-bootstrap"), {
+                recursive: true,
+            });
+            await writeFile(
+                statePath,
+                JSON.stringify({ writeReady: false, bootstrap: "unverified" })
+            );
+            const open = (label: string) =>
+                openSharedFs({
+                    peerbit: joinerPeer!,
+                    address: creator.address,
+                    machineLabel: label,
+                    bootstrap: false,
+                });
+
+            // The predicate holds in the posture, and the process stops
+            // before the decision writes its proof (the in-process stand-in
+            // for a crash before that write).
+            joinerPeer = await Peerbit.create({ directory });
+            await joinerPeer.dial(creatorPeer);
+            const hold = holdFlipsOf(joinerPeer);
+            const first = await open("posture-before");
+            await waitUntil(() => {
+                expect(hold.parked()).toBe(1);
+                expect(first.bootstrapStatus()).toMatchObject({
+                    phase: "unverified",
+                    writeReady: false,
+                });
+            });
+            await joinerPeer.stop();
+            hold.restore();
+            expect(await state()).toMatchObject({
+                writeReady: false,
+                bootstrap: "unverified",
+            });
+
+            // The marker holds the next open in the posture, gated.
+            joinerPeer = await Peerbit.create({ directory });
+            const gated = await open("posture-gated");
+            expect(gated.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                writeReady: false,
+                guardArmed: false,
+            });
+
+            // Now the proof lands. The file as that write left it is the
+            // image a crash right after it leaves: written while the phase
+            // was still `unverified`, holding the proof and no marker.
+            let image: { phase: string; contents: string } | undefined;
+            prototype.replaceBootstrapState = async function (
+                this: any,
+                path: string,
+                contents: string
+            ) {
+                await replace.call(this, path, contents);
+                if (this.node === joinerPeer && JSON.parse(contents).proof) {
+                    image = {
+                        phase: this.bootstrapPhase,
+                        contents: await readFile(path, "utf8"),
+                    };
+                }
+            };
+            await joinerPeer.dial(creatorPeer);
+            await gated.awaitWriteReady({ timeout: 20_000 });
+            prototype.replaceBootstrapState = replace;
+            expect(gated.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+            });
+            expect(image?.phase).toBe("unverified");
+            const proven = JSON.parse(image!.contents);
+            expect(proven).toMatchObject({
+                writeReady: true,
+                writeReadySource: "reconciled",
+            });
+            expect(proven).not.toHaveProperty("bootstrap");
+            await joinerPeer.stop();
+            // Nothing after that write changed the file.
+            expect(await readFile(statePath, "utf8")).toBe(image!.contents);
+
+            // So the next open is a warm reopen, offline.
+            joinerPeer = await Peerbit.create({ directory });
+            const warm = await open("posture-warm");
+            expect(warm.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+            });
+            expect(decode(await warm.readFile("/data.txt"))).toBe(
+                "from the creator"
+            );
+        } finally {
+            prototype.replaceBootstrapState = replace;
             await joinerPeer?.stop().catch(() => {});
             await rm(root, { recursive: true, force: true });
         }
@@ -1983,6 +2103,13 @@ describe("shared fs cold-start bootstrap", () => {
             writeReady: false,
             guardArmed: false,
         });
+        // Its join still runs, and the proof ends the posture.
+        await joiner.awaitWriteReady({ timeout: 20_000 });
+        expect(joiner.bootstrapStatus()).toMatchObject({
+            phase: "off",
+            writeReady: true,
+            guardArmed: true,
+        });
     });
 
     it("makes a joiner whose whole store arrived during its open ready after one answer", async () => {
@@ -2120,6 +2247,19 @@ describe("shared fs cold-start bootstrap", () => {
                     });
                     await joinerPeer!.stop();
                 };
+                // A join still runs in the posture: its proof ends it
+                // (design test 59), in phase `off` with Guard D armed, and
+                // the same sidecar write clears the marker.
+                const provenFromPosture = async (fs: SharedFsHandle) => {
+                    await fs.awaitWriteReady({ timeout: 20_000 });
+                    expect(fs.bootstrapStatus()).toMatchObject({
+                        phase: "off",
+                        writeReady: true,
+                        writeReadinessSource: "reconciled",
+                        guardArmed: true,
+                    });
+                    expect(await state()).not.toHaveProperty("bootstrap");
+                };
 
                 // A join stopped before its bootstrap decided left an
                 // "active" marker over a store with no content (as a mount
@@ -2145,7 +2285,7 @@ describe("shared fs cold-start bootstrap", () => {
                 // The same marker over content an earlier session stored may
                 // be a partial bootstrap, whatever this open receives: it
                 // holds the unverified posture, with the bootstrap on and
-                // with it off.
+                // with it off, until the join proves the store.
                 await writeState();
                 const resumed = await reopen("resumed", {
                     discoveryTimeoutMs: 500,
@@ -2155,6 +2295,7 @@ describe("shared fs cold-start bootstrap", () => {
                     writeReady: false,
                     guardArmed: false,
                 });
+                await provenFromPosture(resumed);
                 await joinerPeer!.stop();
                 await writeState();
                 const resumedOff = await reopen("resumed-off", false);
@@ -2163,6 +2304,7 @@ describe("shared fs cold-start bootstrap", () => {
                     writeReady: false,
                     guardArmed: false,
                 });
+                await provenFromPosture(resumedOff);
                 await joinerPeer!.stop();
 
                 // A join that abandoned to a plain join cleared its marker;
@@ -2178,6 +2320,7 @@ describe("shared fs cold-start bootstrap", () => {
                     writeReady: false,
                     guardArmed: false,
                 });
+                await provenFromPosture(remarked);
             } finally {
                 await joinerPeer?.stop().catch(() => {});
                 await rm(root, { recursive: true, force: true });
@@ -3119,12 +3262,14 @@ describe("shared fs cold-start bootstrap", () => {
     );
 
     it(
-        "retires unverified into the safety posture when convergence times out",
+        "retires unverified into the safety posture when convergence times out; the join's proof ends it",
         { retry: 1, timeout: 240_000 },
         async () => {
             const donor = await populatedDonor(20);
             const joinerPeer = await createPeer();
             await joinerPeer.dial(donor.peer);
+            // The decision waits for the test, so the posture can be read.
+            const hold = holdFlipsOf(joinerPeer);
             let settle!: (event: BootstrapTelemetryEvent) => void;
             const outcome = new Promise<BootstrapTelemetryEvent>(
                 (resolve) => (settle = resolve)
@@ -3171,6 +3316,23 @@ describe("shared fs cold-start bootstrap", () => {
                 { code: "EAGAIN" }
             );
             await expect(joiner.namingConflicts()).resolves.toBeDefined();
+
+            // The proof covers the store, never the retired overlay: it
+            // ends the posture as a plain join that reconciled (phase
+            // `off`, Guard D armed), which may publish a snapshot.
+            hold.release();
+            await joiner.awaitWriteReady({ timeout: 30_000 });
+            expect(joiner.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+                snapshotCoverageVerified: false,
+            });
+            expect((joiner.program as any).quiescenceTimer).toBeUndefined();
+            await expect(joiner.snapshotWrite()).resolves.toMatchObject({
+                segments: expect.any(Number),
+            });
         }
     );
 

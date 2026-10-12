@@ -719,39 +719,32 @@ const noAnswerComing = (readiness?: ReadinessStatus) =>
 
 /**
  * The phases in which --assume-complete does not make the replica writable
- * yet: assumeComplete() refuses (EAGAIN) overlay-active and unverified, and
- * waits out a fetch, which ends in overlay-active when it succeeds. It acts
- * in `off` and `converged`.
+ * yet: assumeComplete() refuses (EAGAIN) overlay-active, and waits out a
+ * fetch, which ends in overlay-active when it succeeds. It acts in `off`,
+ * `converged` and `unverified`; in `unverified` it ends that posture, as the
+ * join's proof does.
  */
 const bootstrapUnsettled = (phase: BootstrapPhase) =>
-    phase !== "off" && phase !== "converged";
+    phase === "fetching" || phase === "overlay-active";
 
 /**
  * How an unsettled snapshot bootstrap phase settles, and a wait that
  * covers it. The phase changes only inside one open, and a new run starts
  * again from the phase the last one persisted, so neither a retry nor a
- * short run such as peerbit-fs status sees it settle. The library
- * converges an unverified phase after two checks 5 minutes apart that each
- * saw no new row for a minute, and retires an overlay within its 15-minute
- * retirementTimeoutMs, unverified (then that wait too) unless its rows
- * arrived first. A fetch that succeeds installs an overlay.
+ * short run such as peerbit-fs status sees it settle. The library retires
+ * an overlay within its 15-minute retirementTimeoutMs, verified once its
+ * rows arrived, otherwise unverified; either settles the phase, and a join
+ * in the unverified posture leaves it on its proof. A fetch that succeeds
+ * installs an overlay.
  */
 const bootstrapSettling = (phase: BootstrapPhase) => {
-    if (phase === "unverified") {
-        return {
-            settles:
-                "an unverified snapshot bootstrap converges only after about 10 minutes without new rows within one run",
-            timeoutMs: 660_000,
-        };
-    }
-    const retires =
-        "retires within 15 minutes, and one that retires unverified then needs about 10 more minutes without new rows, all within one run";
+    const retires = "retires within 15 minutes within one run";
     return {
         settles:
             phase === "fetching"
                 ? `a snapshot fetch that succeeds installs an overlay, which ${retires}`
                 : `a snapshot overlay ${retires}`,
-        timeoutMs: 1_560_000,
+        timeoutMs: 960_000,
     };
 };
 
@@ -2480,7 +2473,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     // Write readiness is the proof that this replica holds
                     // every row of every peer it can see (a fresh open) or
                     // was writable here before (a warm reopen);
-                    // snapshotWrite() refuses without it. Then wait for the
+                    // snapshotWrite() refuses without it. A join's proof
+                    // also ends an unverified posture. Then wait for the
                     // snapshot bootstrap to settle: snapshotWrite() also
                     // refuses an unverified phase. No --assume-complete: a
                     // snapshot from an assumed view would outrank complete

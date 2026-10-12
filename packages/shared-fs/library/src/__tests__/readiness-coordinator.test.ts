@@ -5826,6 +5826,9 @@ describe("host decision (index.ts)", () => {
         expect(coordinator.satisfied()).toBe(false);
         expect(coordinator.debug().decisions.started).toBe(0);
 
+        // A verified retirement (an unverified `converged` is what the
+        // quiescence checker leaves, and the proof moves it to `off`).
+        program.bootstrapVerified = true;
         program.setBootstrapPhase("converged");
         expect(program.bootstrapPhase).toBe("converged");
         await w.until(() => program.writesReady, "J ready");
@@ -5846,14 +5849,15 @@ describe("host decision (index.ts)", () => {
         // An open-mode store: no trust view.
         expect(options).not.toHaveProperty("trust");
 
-        // The phase clause (design 4.8): decision settled, phase off or
-        // converged.
+        // The phase clause (design 4.8): decision settled, phase off,
+        // converged or unverified (the posture holds no overlay, so the
+        // proof decides there and ends it).
         for (const [phase, settled] of [
             ["off", true],
             ["converged", true],
+            ["unverified", true],
             ["fetching", false],
             ["overlay-active", false],
-            ["unverified", false],
         ] as const) {
             program.bootstrapPhase = phase;
             expect(options.phaseSettled(), phase).toBe(settled);

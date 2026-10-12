@@ -411,7 +411,7 @@ describe("write readiness escape and status", () => {
             );
         });
 
-        it("refuses with EAGAIN while the bootstrap phase is unsettled and ECLOSED after close", async () => {
+        it("refuses with EAGAIN while a snapshot overlay is fetching or active and ECLOSED after close", async () => {
             const { directory, address } = await orphanedDirectory();
             const peer = await createPeer(directory);
             const fs = await openSharedFs({
@@ -422,9 +422,10 @@ describe("write readiness escape and status", () => {
                 gc: false,
             });
             const program = programOf(fs);
-            // A snapshot overlay settles by itself; an unverified posture is
-            // M2's. Either way the operator waits.
-            for (const phase of ["fetching", "overlay-active", "unverified"]) {
+            // A snapshot overlay settles by itself, so the operator waits.
+            // The unverified posture holds no overlay: assumeComplete()
+            // ends it (the next test).
+            for (const phase of ["fetching", "overlay-active"]) {
                 program.bootstrapPhase = phase;
                 const refused = fs.assumeComplete();
                 await expect(refused).rejects.toBeInstanceOf(
@@ -444,6 +445,86 @@ describe("write readiness escape and status", () => {
             expect(fs.bootstrapStatus().readiness).toBeUndefined();
             await expect(fs.assumeComplete()).rejects.toMatchObject({
                 code: "ECLOSED",
+            });
+        });
+
+        it("ends the unverified posture as operator (design test 62): phase off, Guard D armed, the marker cleared in the same write; a reopen is warm", async () => {
+            const { directory, address, statePath } = await orphanedDirectory();
+            // A previous bootstrap retired unverified, then the process
+            // stopped: the marker holds the posture for the next open.
+            await writeFile(
+                statePath,
+                JSON.stringify({ writeReady: false, bootstrap: "unverified" })
+            );
+            const peer = await createPeer(directory);
+            const fs = await openSharedFs({
+                peerbit: peer,
+                address,
+                machineLabel: "orphan-unverified",
+                bootstrap: false,
+                gc: false,
+            });
+            const program = programOf(fs);
+            expect(fs.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                writeReady: false,
+                guardArmed: false,
+            });
+            expect(program.quiescenceTimer).toBeDefined();
+            // No peer: only the operator can end it.
+            await waitUntil(() =>
+                expect(fs.bootstrapStatus().readiness).toMatchObject({
+                    state: "no-peer",
+                    satisfied: false,
+                })
+            );
+
+            // What each event saw: the posture ends before write:ready, and
+            // the ignore policy's bootstrap:converged reads phase `off`.
+            const seen: Array<{ event: string; phase: string }> = [];
+            for (const event of ["bootstrap:converged", "write:ready"]) {
+                program.events.addEventListener(event, () =>
+                    seen.push({ event, phase: fs.bootstrapStatus().phase })
+                );
+            }
+            await fs.assumeComplete();
+            expect(fs.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "operator",
+                guardArmed: true,
+                snapshotCoverageVerified: false,
+            });
+            expect(seen).toEqual([
+                { event: "bootstrap:converged", phase: "off" },
+                { event: "write:ready", phase: "off" },
+            ]);
+            expect(program.quiescenceTimer).toBeUndefined();
+            await expect(fs.awaitBootstrapConverged()).resolves.toEqual({
+                verified: false,
+            });
+            const persisted = JSON.parse(await readFile(statePath, "utf8"));
+            expect(persisted).toMatchObject({
+                writeReady: true,
+                writeReadySource: "operator",
+            });
+            expect(persisted).not.toHaveProperty("bootstrap");
+            await fs.writeFile("/after.txt", "operator");
+
+            await stopPeer(peer);
+            const reopenedPeer = await createPeer(directory);
+            const reopened = await openSharedFs({
+                peerbit: reopenedPeer,
+                address,
+                machineLabel: "orphan-unverified-warm",
+                bootstrap: false,
+                gc: false,
+            });
+            expect(reopened.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "operator",
+                guardArmed: true,
             });
         });
 
