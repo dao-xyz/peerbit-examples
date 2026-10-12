@@ -387,6 +387,16 @@ line. A mount that is writable at once prints nothing here. Once writable,
 (`--assume-complete`). `resolve-conflict` and `resolve-naming-conflict` wait
 the same way and show the same line.
 
+A remount from a writable state directory also prints `freshness: <state>`:
+whether it has yet compared its view with the peers it can see (see the library
+README's "Warm freshness"); it is writable either way. `mount --require-fresh`
+waits for that comparison instead, within `--write-ready-timeout-ms`; offline
+it times out, and a mount without the flag writes on the replica's own earlier
+proof. It cannot be combined with `--assume-complete` or
+`--allow-partial-writes`. `status` prints the same line (`freshness` in
+`--json`); like every command but `mount`, it compares only if a peer asks it,
+so it usually reports `unchecked`.
+
 When no write-ready replica will answer, for example because the creator is
 gone for good, or a peer stays silent and cannot be restarted, a join cannot
 prove its view. If you know this replica's view is complete, add

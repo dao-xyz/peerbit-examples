@@ -22,7 +22,8 @@ const packages = [
         // The readiness modules ship as both src and lib. Windows checkouts
         // measure about 1.3% larger (CRLF line endings); the published
         // tarball is packed on Linux.
-        maxUnpackedBytes: 4_100_000,
+        // M2 warm freshness: 4.10 MB on macOS, about 4.16 MB on Windows.
+        maxUnpackedBytes: 4_200_000,
         requiredPaths: [
             "LICENSE",
             "README.md",

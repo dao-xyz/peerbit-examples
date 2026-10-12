@@ -148,6 +148,17 @@ import {
  *   polling and no quiet window. Then, with an `onProgress` port (PR-4),
  *   it reports the peers whose state or reason changed since the last
  *   report (`reportProgress`): a read, after the decision was asked.
+ * - **Purpose (M2 PR-4).** `ports.purpose` "freshness" runs the same
+ *   machinery for a warm full-replica open W (discovery, sessions with W's
+ *   `hlcProved`, the pull queue, the explainer, trust first, departure):
+ *   the predicate drops the donor clause and the phase clause and needs at
+ *   least one contained record instead (`satisfied`; O2: a donor clause
+ *   would deadlock two warm peers, and W's own persisted proof is the
+ *   non-vacuity). The decision (`ports.decide`) is then the host's
+ *   freshness label, never a flip; it is monotone for the open, and once
+ *   the host finishes the coordinator nothing is asked again (no re-check
+ *   at rest). A freshness coordinator opens no qualification session:
+ *   qualification is the donor clause's.
  * - **Lifecycle.** Every listener is detached on `finish`/`dispose`, and
  *   every handler first checks that this coordinator is still running (as
  *   the entries change listener checks its identity: a removed listener can
@@ -371,8 +382,66 @@ export interface Evaluation {
     complete: boolean;
 }
 
+/**
+ * What the predicate decides (M2 PR-4): "join", design 4.8 for a fresh
+ * full address-open; "freshness", the check of a warm full-replica open
+ * (no donor clause, no phase clause, at least one contained record).
+ */
+export type CoordinatorPurpose = "join" | "freshness";
+
+/**
+ * `bootstrapStatus().freshness.state` (M2 PR-4). The coordinator reports
+ * `unchecked`, `checking` and `fault`; the runtime adds `fresh` (held once,
+ * monotone for the open) and the host `off`.
+ */
+export type FreshnessState =
+    /**
+     * A warm reopen under `allowPartialWrites`, which runs no check (the
+     * host reports no freshness at all for other opens).
+     */
+    | "off"
+    /**
+     * No peer to compare with (none visible, or only unconfirmed or
+     * departed ones), or on-demand and nobody asked yet.
+     */
+    | "unchecked"
+    /** Sessions running, a Required peer blocking, or a check in flight. */
+    | "checking"
+    /** The check held once; monotone for the open. */
+    | "fresh"
+    /** No readiness state, scope or transport (as a join's fault). */
+    | "fault";
+
+/** A warm open's freshness check (plain data, as `ReadinessStatus`). */
+export interface FreshnessStatus {
+    state: FreshnessState;
+    /** Required peers now (blocking states). */
+    required: number;
+    /** Contained peers (hashcodes). */
+    contained: string[];
+    excluded: string[];
+    /** Required peers with nothing in flight: silent, refused or parked. */
+    silent: string[];
+    /** Peers that left with rows W may lack (D4; O16). */
+    gaps: string[];
+    /** Why the first Required record blocks. */
+    reason?: PeerReason;
+    fault?: string;
+    /** Milliseconds from the check's start (the end of the open) to fresh. */
+    ms?: number;
+    /** `OpenV1`, `CellsReqV1` and `ListPageV1` sent for the check. */
+    requests: number;
+}
+
 export interface CoordinatorPorts {
     transport: CoordinatorTransport;
+    /**
+     * "freshness" (M2 PR-4): the predicate drops the donor clause and the
+     * phase clause and needs at least one contained record. Everything
+     * else (Required, departure, trust first, blocking states) is M1's.
+     * Default "join".
+     */
+    readonly purpose?: CoordinatorPurpose;
     /**
      * The peers (hashcodes) that showed J a sign of life between J's open
      * and `start` (production: the runtime's `LifeRecorder`, attached
@@ -383,8 +452,12 @@ export interface CoordinatorPorts {
      * (fail closed). Without the port: none (unit tests).
      */
     signsOfLife?(): Iterable<string> | undefined;
-    /** Directed one-way send to `to` (a hashcode); never throws. */
-    send(message: ReadinessMessage, to: string): void;
+    /**
+     * Directed one-way send to `to` (a hashcode); never throws.
+     * `qualification`: the message is a qualification session's (the
+     * runtime's request counters).
+     */
+    send(message: ReadinessMessage, to: string, qualification?: boolean): void;
     /**
      * Scopes every session opens, namespace first: both in an
      * access-controlled store, which `trust` marks (the runtime reads it
@@ -544,6 +617,7 @@ export interface ReadinessStatus {
 }
 
 export interface CoordinatorDebug {
+    purpose: CoordinatorPurpose;
     /** Timers armed by this coordinator's sessions (it arms none itself). */
     armedTimers: number;
     sessions: number;
@@ -761,6 +835,7 @@ interface Entry extends PeerRecord {
 }
 
 export class Coordinator {
+    readonly purpose: CoordinatorPurpose;
     private phaseValue: CoordinatorPhase = "idle";
     private readonly entries = new Map<string, Entry>();
     /** Live sessions to their record (detached before the coordinator closes one). */
@@ -843,6 +918,7 @@ export class Coordinator {
     private reportedFault?: string;
 
     constructor(readonly ports: CoordinatorPorts) {
+        this.purpose = ports.purpose ?? "join";
         this.timers = ports.timers ?? systemTimers;
         this.clock = ports.now ?? (() => performance.now());
         const trust = ports.trust;
@@ -861,6 +937,11 @@ export class Coordinator {
 
     private get running() {
         return this.phaseValue === "running";
+    }
+
+    /** A warm open's freshness check (M2 PR-4). */
+    private get freshness() {
+        return this.purpose === "freshness";
     }
 
     private get self() {
@@ -1216,6 +1297,10 @@ export class Coordinator {
      * missing one); and a record counts as qualified only with an identity
      * J trusts at that epoch (design 2.1).
      *
+     * The freshness purpose (M2 PR-4, O2) keeps every clause above but the
+     * donor clause and the phase clause, and needs at least one contained
+     * record instead: complete is satisfied, and `onComplete` never fires.
+     *
      * Required is read at the moment of evaluation (design 2.1): a `left`
      * peer, or a subscriber that was unreachable when J saw it, that reads
      * reachable now makes the answer false, and a microtask asks it (D4).
@@ -1233,6 +1318,7 @@ export class Coordinator {
         }
         const acl = this.ports.trust !== undefined;
         let qualified = false;
+        let contained = false;
         let unchecked = false;
         for (const entry of this.entries.values()) {
             if (BLOCKING_STATES.has(entry.state)) {
@@ -1249,6 +1335,7 @@ export class Coordinator {
                     continue;
                 }
             }
+            contained = true;
             if (this.qualifiedNow(entry)) qualified = true;
         }
         if (unchecked) {
@@ -1260,6 +1347,13 @@ export class Coordinator {
         if (this.reachableAgain()) {
             this.refresh();
             return false;
+        }
+        if (this.freshness) {
+            // No donor clause and no phase clause (O2, O9); W's own
+            // persisted proof is the non-vacuity, and one contained record
+            // the evidence that W was compared at all.
+            this.lastComplete = contained;
+            return contained;
         }
         if (!qualified) return false;
         // Complete: one body, so the reads above still run once per
@@ -1506,6 +1600,51 @@ export class Coordinator {
         return status;
     }
 
+    /**
+     * The freshness check's view of the records (M2 PR-4): `checking` while
+     * a record blocks or one is contained (its trust check or the host's
+     * label may still run), `unchecked` with neither, `fault` when J's
+     * own state failed. The runtime adds `fresh`, `ms` and `requests`.
+     */
+    freshnessView(): FreshnessStatus {
+        const blocking: Entry[] = [];
+        const status: FreshnessStatus = {
+            state: "unchecked",
+            required: 0,
+            contained: [],
+            excluded: [],
+            silent: [],
+            gaps: [],
+            requests: 0,
+        };
+        for (const entry of this.entries.values()) {
+            const { hash, state } = entry;
+            if (BLOCKING_STATES.has(state)) blocking.push(entry);
+            if (state === "contained") status.contained.push(hash);
+            else if (entry.excluded && state.startsWith("excluded-")) {
+                status.excluded.push(hash);
+            }
+            if (
+                state === "silent" ||
+                state === "refused" ||
+                (state === "reconciling" && entry.parked)
+            ) {
+                status.silent.push(hash);
+            }
+            if (entry.gap) status.gaps.push(hash);
+        }
+        status.required = blocking.length;
+        if (blocking.length > 0) status.reason = this.reasonOf(blocking[0]);
+        if (blocking.length > 0 || status.contained.length > 0) {
+            status.state = "checking";
+        }
+        if (this.fault !== undefined) {
+            status.state = "fault";
+            status.fault = this.fault;
+        }
+        return status;
+    }
+
     /** Design 7's state, first match (SPEC2 2.5). */
     private stateOf(
         context: StatusContext,
@@ -1660,6 +1799,7 @@ export class Coordinator {
         let queued = 0;
         for (const entry of this.entries.values()) if (entry.queued) queued++;
         return {
+            purpose: this.purpose,
             armedTimers,
             sessions: this.owners.size,
             inFlight: this.inFlightCount(),
@@ -2122,13 +2262,20 @@ export class Coordinator {
             return;
         }
         if (entry.state === "contained") {
-            if (entry.qualified || !qualifies(notice.provenance)) return;
+            // A freshness check counts containment only (no donor clause).
+            if (
+                this.freshness ||
+                entry.qualified ||
+                !qualifies(notice.provenance)
+            ) {
+                return;
+            }
             // Only the header of a fresh session can qualify R.
             if (entry.qualifying) return entry.session?.resume();
             return this.qualify(entry);
         }
         if (entry.state.startsWith("excluded-")) return;
-        if (qualifies(notice.provenance)) {
+        if (!this.freshness && qualifies(notice.provenance)) {
             // R turned ready, but the session in flight answers from the
             // snapshot R froze before (gated): the containment it ends in
             // opens a fresh session (`onContainedOutcome`).
@@ -2839,6 +2986,7 @@ export class Coordinator {
         entry.sessionsOpened++;
         if (!entry.qualifying) entry.state = "asking";
         const peer = init.peer;
+        const qualification = entry.qualifying;
         // A2: a confirm-only peer's single attempt never ends sooner than
         // the default one, so a shorter option cannot unblock it sooner.
         let requestTimeoutMs = this.ports.requestTimeoutMs;
@@ -2859,7 +3007,7 @@ export class Coordinator {
         const ports: SessionPorts = {
             send: (message) => {
                 try {
-                    this.ports.send(message, peer);
+                    this.ports.send(message, peer, qualification);
                 } catch {
                     // The port never throws; a failed send is a lost message.
                 }

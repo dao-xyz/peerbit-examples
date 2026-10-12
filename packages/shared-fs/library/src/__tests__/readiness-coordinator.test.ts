@@ -9,6 +9,7 @@ import {
 import { AnchorHost } from "../readiness/anchor-host.js";
 import { cellKey } from "../readiness/cells.js";
 import {
+    FRESHNESS_START,
     PULL_TIMEOUT_MS,
     REQUEST_TIMEOUT_MAX_MS,
     REQUEST_TIMEOUT_MS,
@@ -22,6 +23,7 @@ import {
     type CoordinatorPorts,
     type CoordinatorTransport,
     type Evaluation,
+    type FreshnessStatus,
     type PeerChange,
     type PeerReason,
     type PeerRecord,
@@ -52,6 +54,7 @@ import {
     SCOPE_TRUST_V1,
     type ScopeId,
 } from "../readiness/scopes.js";
+import { optOutOfReadinessShadow } from "../readiness/shadow.js";
 import {
     JoinerSession,
     MAX_RENEWALS,
@@ -63,6 +66,7 @@ import {
     type SessionState,
 } from "../readiness/session.js";
 import {
+    CAP_FRESHNESS,
     CellsReqV1,
     CloseV1,
     ERROR_CODE,
@@ -71,6 +75,7 @@ import {
     NOTICE_REASON,
     OpenScopeV1,
     OpenV1,
+    PROVENANCE_SOURCES,
     ProvenanceV1,
     StateNoticeV1,
     decodeReadinessMessage,
@@ -266,6 +271,11 @@ class World {
     coordinator?: Coordinator;
     /** `ports.started()`. */
     started: Promise<void> = Promise.resolve();
+    /**
+     * Where the peers' messages to J go instead of `coordinator` (a real
+     * runtime as J, M2 PR-4).
+     */
+    toJ?: (message: ReadinessMessage, peer: Peer, bytes: number) => void;
     private labels = 0;
 
     static async create(options: { trust?: boolean } = {}): Promise<World> {
@@ -475,12 +485,14 @@ class World {
         const bytes = encodeReadinessMessage(out);
         const copy = decodeReadinessMessage(bytes);
         const deliver = () =>
-            this.coordinator?.onMessage(
-                copy,
-                peer.hash,
-                bytes.length,
-                peer.key
-            );
+            this.toJ
+                ? this.toJ(copy, peer, bytes.length)
+                : this.coordinator?.onMessage(
+                      copy,
+                      peer.hash,
+                      bytes.length,
+                      peer.key
+                  );
         const delay = peer.hooks.delayToJ?.(copy) ?? 0;
         if (delay > 0) this.clock.set(deliver, delay);
         else queueMicrotask(deliver);
@@ -595,6 +607,11 @@ class World {
 
     status(context: StatusContext = WAITING): ReadinessStatus {
         return this.coordinator!.status(context);
+    }
+
+    /** The freshness check's view (M2 PR-4). */
+    freshness(): FreshnessStatus {
+        return this.coordinator!.freshnessView();
     }
 
     sessionsOf(peer: FakePeer) {
@@ -7318,5 +7335,584 @@ describe("readiness coordinator: progress (PR-4)", () => {
             reason: "expired",
         });
         expect(idle.coordinator.satisfied()).toBe(false);
+    });
+});
+
+/**
+ * M2 PR-4 commits 1 and 2 (M2 plan section 8): the coordinator's freshness
+ * purpose (tests 75 and 77, coordinator halves), the on-demand start on a
+ * real runtime (test 81), and the labels a fresh W's responder gives
+ * askers with and without `CAP_FRESHNESS` and its notices (tests 84's
+ * caps-0 row and 96, coordinator halves). W is the world's J.
+ */
+describe("readiness coordinator: freshness (M2 PR-4)", () => {
+    const WARM_FRESH: ProvenanceState = { ...WARM, source: "warm-fresh" };
+    const sourceOf = (provenance: ProvenanceV1) =>
+        PROVENANCE_SOURCES[provenance.source];
+
+    it("the freshness predicate drops the donor and phase clauses and needs one contained record", async () => {
+        // Nobody visible, then a replicator row with no sign of life that
+        // never answers: discovered, nothing contained, not fresh.
+        const empty = await World.create();
+        const silentRow = await empty.peer("U", {
+            subscriber: false,
+            replicator: true,
+        });
+        silentRow.hooks.toPeer = () => null;
+        await empty.start();
+        const decided = vi.fn(async () => {});
+        const lone = empty.run({ purpose: "freshness", decide: decided });
+        expect(lone.purpose).toBe("freshness");
+        await empty.until(
+            () => empty.stateOf(silentRow) === "asking",
+            "U asked"
+        );
+        expect(lone.freshnessView()).toMatchObject({
+            state: "checking",
+            required: 1,
+            reason: "confirm-only",
+        });
+        await empty.clock.advanceSettled(REQUEST_TIMEOUT_MS);
+        await empty.until(
+            () => empty.stateOf(silentRow) === "unconfirmed",
+            "U unconfirmed"
+        );
+        await settle();
+        expect(lone.satisfied()).toBe(false);
+        expect(lone.freshnessView()).toEqual({
+            state: "unchecked",
+            required: 0,
+            contained: [],
+            excluded: [],
+            silent: [],
+            gaps: [],
+            requests: 0,
+        });
+        expect(decided).not.toHaveBeenCalled();
+
+        // Two gated peers and a phase that never settles: a join would wait
+        // for a donor and the phase; the check holds once both are contained.
+        const { w, peers } = await worldWith([
+            ["A", { provenance: GATED }],
+            ["B", { provenance: GATED }],
+        ]);
+        const [a, b] = peers;
+        await w.start();
+        const onComplete = vi.fn();
+        const decide = vi.fn(async () => {});
+        const coordinator = w.run({
+            purpose: "freshness",
+            phaseSettled: () => false,
+            onComplete,
+            decide,
+        });
+        await w.until(() => decide.mock.calls.length > 0, "decided");
+        expect(w.stateOf(a)).toBe("contained");
+        expect(w.stateOf(b)).toBe("contained");
+        expect(w.record(a).qualified).toBe(false);
+        expect(coordinator.satisfied()).toBe(true);
+        expect(w.evaluations.at(-1)).toMatchObject({
+            satisfied: true,
+            complete: true,
+        });
+        expect(onComplete).not.toHaveBeenCalled();
+        expect(coordinator.freshnessView()).toMatchObject({
+            state: "checking",
+            required: 0,
+            contained: [a.hash, b.hash],
+        });
+        expect(coordinator.debug().purpose).toBe("freshness");
+
+        // A notice that would qualify A opens no qualification session: the
+        // check has no donor clause.
+        a.provenance = RECONCILED;
+        a.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
+        await settle();
+        expect(w.record(a).sessionsOpened).toBe(1);
+        expect(w.record(a).qualifying).toBe(false);
+        expect(w.sessionsOf(a)).toHaveLength(1);
+    });
+
+    it("75: a silent visible peer keeps W checking with its reason named, and nothing is armed after its attempts", async () => {
+        const { w, peers } = await worldWith([
+            ["A", { provenance: CREATOR }],
+            ["S", { provenance: CREATOR }],
+        ]);
+        const [a, s] = peers;
+        s.hooks.toPeer = () => null;
+        await w.start();
+        const decide = vi.fn(async () => {});
+        const coordinator = w.run({ purpose: "freshness", decide });
+        await w.until(() => w.stateOf(a) === "contained", "A contained");
+        expect(w.freshness()).toMatchObject({
+            state: "checking",
+            required: 1,
+            reason: "asked",
+        });
+
+        // S's three attempts (5, 10 and 20 s) go unanswered.
+        await w.clock.advanceSettled(
+            REQUEST_TIMEOUT_MS + 2 * REQUEST_TIMEOUT_MS + 4 * REQUEST_TIMEOUT_MS
+        );
+        await w.until(() => w.stateOf(s) === "silent", "S silent");
+        await settle();
+        expect(opensTo(w, s)).toBe(3);
+        const view: FreshnessStatus = w.freshness();
+        expect(view).toEqual({
+            state: "checking",
+            required: 1,
+            contained: [a.hash],
+            excluded: [],
+            silent: [s.hash],
+            gaps: [],
+            reason: "reachable-silent",
+            requests: 0,
+        });
+        expect(coordinator.satisfied()).toBe(false);
+        expect(decide).not.toHaveBeenCalled();
+        expect(coordinator.debug().armedTimers).toBe(0);
+
+        // Hours later: still checking, nothing asked, nothing armed.
+        const sent = w.sent.length;
+        const evaluations = w.evaluations.length;
+        await w.clock.advanceSettled(6 * HOUR);
+        expect(w.sent.length).toBe(sent);
+        expect(w.evaluations.length).toBe(evaluations);
+        expect(w.freshness()).toMatchObject({
+            state: "checking",
+            reason: "reachable-silent",
+        });
+        expect(coordinator.debug().armedTimers).toBe(0);
+        expect(decide).not.toHaveBeenCalled();
+    });
+
+    it("77: at rest after fresh nothing is asked in hours of fake clock, whatever arrives", async () => {
+        // Neither peer qualifies, so only the freshness predicate (no
+        // donor clause) can finish this coordinator.
+        const { w, peers } = await worldWith([
+            ["A", { provenance: GATED }],
+            ["B", { provenance: GATED }],
+        ]);
+        const [a, b] = peers;
+        await w.start();
+        // The host's label finishes the check (`ReadinessRuntime.markFresh`).
+        let coordinator!: Coordinator;
+        const decide = vi.fn(async () => coordinator.finish());
+        coordinator = w.run({ purpose: "freshness", decide });
+        expect(coordinator.debug().purpose).toBe("freshness");
+        await w.until(() => coordinator.phase === "finished", "fresh");
+        expect(decide).toHaveBeenCalledTimes(1);
+        expect(w.record(a).qualified).toBe(false);
+        await settle();
+        expect(coordinator.debug().armedTimers).toBe(0);
+        expect(coordinator.debug().sessions).toBe(0);
+        const sent = w.sent.length;
+        const evaluations = w.evaluations.length;
+
+        await w.clock.advanceSettled(6 * HOUR);
+        // Events, a new subscriber, notices and requests change nothing.
+        w.transport.emit({ kind: "reachability", source: "connect" });
+        const c = await w.peer("C", { provenance: CREATOR });
+        w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+        a.responder.sendNotice([w.j.key], NOTICE_REASON.WARM_FRESH);
+        b.provenance = RECONCILED;
+        b.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
+        w.fromPeer(c, w.request(c));
+        await settle();
+        await w.clock.advanceSettled(6 * HOUR);
+        expect(w.sent.length).toBe(sent);
+        expect(w.evaluations.length).toBe(evaluations);
+        expect(decide).toHaveBeenCalledTimes(1);
+        expect(coordinator.record(c.hash)).toBeUndefined();
+        expect(coordinator.debug().armedTimers).toBe(0);
+    });
+
+    it("84 (caps-0 row) and 96: a fresh W says warm-fresh to an M2 asker and warm to a caps-0 one, in headers and notices alike", async () => {
+        // A 0.17.0 joiner (caps 0) against a fresh warm donor: `warm`, which
+        // it qualifies (PR-4); a WARM_FRESH notice, labelled for its caps,
+        // changes no record.
+        const old = await worldWith([["W", { provenance: WARM_FRESH }]]);
+        const [oldW] = old.peers;
+        oldW.hooks.toPeer = (message) =>
+            message instanceof OpenV1
+                ? Object.assign(copyMessage(message), { caps: 0 })
+                : undefined;
+        await old.w.start();
+        const oldJ = old.w.run();
+        await old.w.until(() => oldJ.satisfied(), "the caps-0 joiner ready");
+        const oldRecord = old.w.record(oldW);
+        expect(oldRecord.qualified).toBe(true);
+        expect(oldRecord.results.get(NS)?.source).toBe("warm");
+        const received: StateNoticeV1[] = [];
+        oldW.hooks.toJ = (message) => {
+            if (message instanceof StateNoticeV1) received.push(message);
+            return undefined;
+        };
+        oldW.responder.sendNotice([old.w.j.key], NOTICE_REASON.WARM_FRESH);
+        await settle();
+        expect(received).toHaveLength(1);
+        expect(sourceOf(received[0].provenance)).toBe("warm");
+        expect(received[0].reason).toBe(NOTICE_REASON.WARM_FRESH);
+        expect(oldRecord.sessionsOpened).toBe(1);
+        expect(oldRecord.results.get(NS)?.source).toBe("warm");
+
+        // An M2 joiner (`CAP_FRESHNESS`) holding W contained and unqualified
+        // (W gated when it answered): W turns fresh, its WARM_FRESH notice
+        // opens one qualification session, whose header says `warm-fresh`.
+        const { w, peers } = await worldWith([["W", { provenance: GATED }]]);
+        const [warm] = peers;
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(warm) === "contained", "W contained");
+        expect(w.sentTo(warm, OpenV1)[0].caps).toBe(CAP_FRESHNESS);
+        const record = w.record(warm);
+        expect(record.qualified).toBe(false);
+        warm.provenance = WARM_FRESH;
+        const notices: StateNoticeV1[] = [];
+        warm.hooks.toJ = (message) => {
+            if (message instanceof StateNoticeV1) notices.push(message);
+            return undefined;
+        };
+        warm.responder.sendNotice([w.j.key], NOTICE_REASON.WARM_FRESH);
+        await w.until(() => record.qualified, "W qualified");
+        expect(sourceOf(notices[0].provenance)).toBe("warm-fresh");
+        expect(record.sessionsOpened).toBe(2);
+        expect(record.results.get(NS)?.source).toBe("warm-fresh");
+        await w.until(() => coordinator.satisfied(), "satisfied");
+        // One qualification session, then nothing more for W.
+        await settle();
+        expect(w.sessionsOf(warm)).toHaveLength(2);
+    });
+
+    it("96 (caps-0 joiner): a 0.17.0 joiner holding a gated W contained and unqualified gets the flip's READY notice as warm, which 0.17.0 qualifies", async () => {
+        // W gated (requireFreshOnReopen) when the caps-0 joiner asked; W's
+        // check holds and its flip sends READY. Labelled `warm-fresh`, a
+        // 0.17.0 joiner (which never qualifies it) would drop the notice
+        // and never open the qualification session it waits for.
+        const { w, peers } = await worldWith([["W", { provenance: GATED }]]);
+        const [warm] = peers;
+        warm.hooks.toPeer = (message) =>
+            message instanceof OpenV1
+                ? Object.assign(copyMessage(message), { caps: 0 })
+                : undefined;
+        await w.start();
+        const coordinator = w.run();
+        await w.until(() => w.stateOf(warm) === "contained", "W contained");
+        const record = w.record(warm);
+        expect(record.qualified).toBe(false);
+        warm.provenance = WARM_FRESH;
+        const notices: StateNoticeV1[] = [];
+        warm.hooks.toJ = (message) => {
+            if (message instanceof StateNoticeV1) notices.push(message);
+            return undefined;
+        };
+        warm.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
+        await w.until(() => record.qualified, "W qualified");
+        expect(notices).toHaveLength(1);
+        expect(notices[0].provenance.writeReady).toBe(true);
+        // 0.17.0 qualifies `creator`, `reconciled`, `warm` and `operator`.
+        expect(sourceOf(notices[0].provenance)).toBe("warm");
+        expect(record.sessionsOpened).toBe(2);
+        expect(record.results.get(NS)?.source).toBe("warm");
+        await w.until(() => coordinator.satisfied(), "satisfied");
+    });
+
+    /**
+     * A real ReadinessRuntime as W: its namespace on an empty fake store,
+     * its sends through `w`'s network (J's role), and the peers' messages to
+     * it through `w.toJ`. Peers hold no rows, so W contains each without a
+     * pull.
+     */
+    const runtimeIn = async (w: World) => {
+        const logId = w.j.scope(NS).logId;
+        let provenance: ProvenanceState = WARM;
+        const program = {};
+        optOutOfReadinessShadow(program);
+        const runtime = await ReadinessRuntime.create({
+            address: "readiness-freshness-test",
+            stores: { namespace: logId },
+            anchorHost: w.host,
+            program,
+            ports: {
+                send: async (message, to) =>
+                    w.toPeer(
+                        typeof to === "string" ? to : to.hashcode(),
+                        message
+                    ),
+                provenance: () => ({ ...provenance }),
+                timers: w.clock,
+            },
+        });
+        const documents: any = {
+            index: {
+                closed: false,
+                valueEncoding: { decoder: () => undefined },
+                index: {
+                    get: async () => undefined,
+                    count: async () => 0,
+                    iterate: () => ({
+                        done: () => true,
+                        next: async () => [],
+                        close: async () => {},
+                    }),
+                },
+            },
+            events: new EventTarget(),
+            log: {
+                events: new EventTarget(),
+                join: async () => {},
+                log: {
+                    id: logId,
+                    has: async () => false,
+                    get: async () => undefined,
+                },
+            },
+        };
+        runtime.attachNamespace(documents, { join: true });
+        await runtime.whenTaken();
+        runtime.startNamespace();
+        await runtime.whenStarted();
+        w.toJ = (message, peer, bytes) =>
+            runtime.onMessage(message, peer.key, bytes);
+        return {
+            runtime,
+            setProvenance: (next: ProvenanceState) => (provenance = next),
+        };
+    };
+
+    it("81: on-demand starts nothing until the first OpenV1; then W turns fresh, notices once, and rests", async () => {
+        expect(FRESHNESS_START).toBe("eager");
+        const { w, peers } = await worldWith(
+            [
+                ["A", { provenance: GATED }],
+                ["B", { provenance: CREATOR }],
+            ],
+            0
+        );
+        const [a, b] = peers;
+        await w.start();
+        const { runtime, setProvenance } = await runtimeIn(w);
+        const transport = vi.fn(() => w.transport);
+        const onFresh = vi.fn(async () => {
+            // The host: the label first, then the runtime's notices.
+            setProvenance(WARM_FRESH);
+            runtime.markFresh();
+        });
+        runtime.startFreshness({
+            transport,
+            hlcProved: 0n,
+            timers: w.clock,
+            now: () => w.clock.now,
+            onFresh,
+            start: "on-demand",
+        });
+        await w.clock.advanceSettled(HOUR);
+        expect(transport).not.toHaveBeenCalled();
+        expect(w.transport.listeners.size).toBe(0);
+        expect(runtime.debug().coordinator).toBeUndefined();
+        expect(runtime.freshnessStatus()).toEqual({
+            state: "unchecked",
+            required: 0,
+            contained: [],
+            excluded: [],
+            silent: [],
+            gaps: [],
+            requests: 0,
+        });
+        expect(w.sent).toEqual([]);
+        // A join cannot take the slot.
+        const joinTransport = vi.fn(() => w.transport);
+        runtime.startJoin({
+            transport: joinTransport,
+            hlcProved: 0n,
+            phaseSettled: () => true,
+            onSatisfied: async () => {},
+        });
+        expect(joinTransport).not.toHaveBeenCalled();
+
+        // A's OPEN starts the check; A, a sign of life, is asked too.
+        runtime.onMessage(w.request(a), a.key);
+        expect(transport).toHaveBeenCalledTimes(1);
+        expect(runtime.debug().coordinator?.purpose).toBe("freshness");
+        await w.until(
+            () => runtime.freshnessStatus()?.state === "fresh",
+            "W fresh"
+        );
+        expect(onFresh).toHaveBeenCalledTimes(1);
+        const status = runtime.freshnessStatus()!;
+        expect(new Set(status.contained)).toEqual(new Set([a.hash, b.hash]));
+        expect(status.ms).toBe(HOUR);
+        expect(runtime.stats.sent.freshness.open).toBe(2);
+        expect(runtime.stats.sent.join).toEqual({
+            open: 0,
+            cellsReq: 0,
+            listPage: 0,
+        });
+        expect(runtime.stats.sent.qualification.open).toBe(0);
+        expect(status.requests).toBe(
+            runtime.stats.sent.freshness.open +
+                runtime.stats.sent.freshness.cellsReq +
+                runtime.stats.sent.freshness.listPage
+        );
+        // K16: the join-only readers answer as when no join ran.
+        expect(runtime.satisfied()).toBe(false);
+        expect(runtime.proofIfSatisfied()).toBeUndefined();
+        expect(runtime.coordinator).toBeUndefined();
+        expect(
+            runtime.status({ writeReady: true, phaseSettled: true })
+        ).toBeUndefined();
+
+        // One WARM_FRESH notice to each peer W had a session with, labelled
+        // `warm-fresh` (A, which asked W, got W's header labelled for its
+        // caps before; its notice says `warm-fresh` whatever they are).
+        await settle();
+        const notices = w.sent.filter(
+            ({ message }) => message instanceof StateNoticeV1
+        );
+        expect(new Set(notices.map(({ to }) => to))).toEqual(
+            new Set([a.hash, b.hash])
+        );
+        expect(notices).toHaveLength(2);
+        for (const { message } of notices) {
+            const notice = message as StateNoticeV1;
+            expect(notice.reason).toBe(NOTICE_REASON.WARM_FRESH);
+            expect(sourceOf(notice.provenance)).toBe("warm-fresh");
+        }
+
+        // At rest: nothing sent, nothing armed once the responder's
+        // sessions idled out; a later OPEN changes nothing.
+        const sent = w.sent.length;
+        await w.clock.advanceSettled(6 * HOUR);
+        expect(runtime.debug().armedTimers).toBe(0);
+        runtime.onMessage(w.request(b), b.key);
+        await settle();
+        const after = w.sent.slice(sent);
+        expect(after.every(({ message }) => message instanceof HeaderV1)).toBe(
+            true
+        );
+        expect(runtime.stats.sent.freshness.open).toBe(2);
+        expect(onFresh).toHaveBeenCalledTimes(1);
+        runtime.markFresh();
+        expect(
+            w.sent.filter(({ message }) => message instanceof StateNoticeV1)
+        ).toHaveLength(2);
+        runtime.disposeWithoutPersist();
+    });
+
+    it("READY notices skip WARM_FRESH only when they carried warm-fresh: a requireFreshOnReopen flip after the label, not an operator release before it", async () => {
+        const noticesOf = (w: World) =>
+            w.sent.flatMap(({ message, to }) =>
+                message instanceof StateNoticeV1
+                    ? [
+                          {
+                              to,
+                              reason: message.reason,
+                              source: sourceOf(message.provenance),
+                          },
+                      ]
+                    : []
+            );
+        for (const flip of ["after-label", "operator-before"] as const) {
+            const { w, peers } = await worldWith(
+                [["A", { provenance: CREATOR }]],
+                0
+            );
+            const [a] = peers;
+            await w.start();
+            const { runtime, setProvenance } = await runtimeIn(w);
+            runtime.startFreshness({
+                transport: () => w.transport,
+                hlcProved: 0n,
+                timers: w.clock,
+                now: () => w.clock.now,
+                onFresh: async () => {
+                    // The host's order: the label, the flip, the notices.
+                    setProvenance(WARM_FRESH);
+                    if (flip === "after-label") runtime.markReady();
+                    runtime.markFresh();
+                },
+                start: "eager",
+            });
+            // assumeComplete() before the check held: READY says `warm`.
+            if (flip === "operator-before") runtime.markReady();
+            await w.until(
+                () => runtime.freshnessStatus()?.state === "fresh",
+                "W fresh"
+            );
+            await settle();
+            expect(noticesOf(w), flip).toEqual(
+                flip === "after-label"
+                    ? [
+                          {
+                              to: a.hash,
+                              reason: NOTICE_REASON.READY,
+                              source: "warm-fresh",
+                          },
+                      ]
+                    : [
+                          {
+                              to: a.hash,
+                              reason: NOTICE_REASON.WARM_FRESH,
+                              source: "warm-fresh",
+                          },
+                      ]
+            );
+            runtime.disposeWithoutPersist();
+        }
+    });
+
+    it("81: eager (and requireFreshOnReopen's start) begins at once; a runtime without a namespace scope reports the fault", async () => {
+        const { w } = await worldWith([["A", { provenance: CREATOR }]], 0);
+        await w.start();
+        const { runtime } = await runtimeIn(w);
+        const onFresh = vi.fn(async () => runtime.markFresh());
+        runtime.startFreshness({
+            transport: () => w.transport,
+            hlcProved: 0n,
+            timers: w.clock,
+            now: () => w.clock.now,
+            onFresh,
+            start: "eager",
+        });
+        expect(runtime.debug().coordinator?.purpose).toBe("freshness");
+        expect(w.transport.listeners.size).toBe(1);
+        await w.until(
+            () => runtime.freshnessStatus()?.state === "fresh",
+            "W fresh"
+        );
+        expect(runtime.freshnessStatus()?.ms).toBe(0);
+        // A second start is a no-op: one check per generation.
+        runtime.startFreshness({
+            transport: () => {
+                throw new Error("a second check");
+            },
+            hlcProved: 0n,
+            onFresh,
+        });
+        expect(runtime.freshnessStatus()?.state).toBe("fresh");
+        runtime.disposeWithoutPersist();
+
+        const bare = await ReadinessRuntime.create({
+            address: "readiness-freshness-fault",
+            stores: { namespace: w.j.scope(NS).logId },
+            anchorHost: w.host,
+            ports: {
+                send: async () => {},
+                provenance: () => WARM,
+                timers: w.clock,
+            },
+        });
+        bare.startFreshness({
+            transport: () => w.transport,
+            hlcProved: 0n,
+            onFresh,
+        });
+        expect(bare.freshnessStatus()).toMatchObject({
+            state: "fault",
+            fault: "no namespace scope",
+            requests: 0,
+        });
+        expect(bare.debug().coordinator).toBeUndefined();
+        bare.disposeWithoutPersist();
     });
 });

@@ -1953,6 +1953,109 @@ describe("peerbit-fs cli", () => {
         }
     });
 
+    it("opens one-shot commands with the on-demand freshness start and mount with the eager one, prints freshness, and keeps a lone warm mount --require-fresh gated (M2 O11, O15)", async () => {
+        const seed = await seedCreatorDirectory("freshness");
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const createSpy = mockCliBootstrap();
+        // What each warm open asked of its freshness check.
+        const prototype = SharedFileSystem.prototype as any;
+        const startFreshness = prototype.startReadinessFreshness;
+        const starts: Array<{ start?: string; requireFresh: boolean }> = [];
+        prototype.startReadinessFreshness = function (
+            this: any,
+            generation: number,
+            warm: { start?: string }
+        ) {
+            starts.push({
+                start: warm.start,
+                requireFresh: this.requireFreshOnReopen === true,
+            });
+            return startFreshness.call(this, generation, warm);
+        };
+        const mount = (...flags: string[]) =>
+            captureStderr(() =>
+                runCli([
+                    "mount",
+                    seed.address,
+                    path.join(seed.directory, "not-mounted"),
+                    "--native-adapter",
+                    path.join(seed.directory, "adapter-never-started"),
+                    "--directory",
+                    seed.directory,
+                    ...flags,
+                ])
+            );
+        try {
+            await runCli([
+                "status",
+                seed.address,
+                "--json",
+                "--directory",
+                seed.directory,
+            ]);
+            expect(
+                JSON.parse(String(log.mock.calls[0]?.[0])).filesystem.bootstrap
+            ).toMatchObject({
+                writeReady: true,
+                writeReadinessSource: "creator",
+                freshness: { state: "unchecked", requests: 0 },
+            });
+            log.mockClear();
+            await runCli([
+                "status",
+                seed.address,
+                "--directory",
+                seed.directory,
+            ]);
+            expect(log).toHaveBeenCalledWith("freshness: unchecked");
+            expect(starts).toEqual([
+                { start: "on-demand", requireFresh: false },
+                { start: "on-demand", requireFresh: false },
+            ]);
+
+            // A mount checks at once, and prints the line before it fails
+            // at the fake adapter.
+            log.mockClear();
+            const mounted = await mount();
+            expect(mounted.error).toBeInstanceOf(Error);
+            expect(log).toHaveBeenCalledWith(
+                "write readiness: ready (creator)"
+            );
+            expect(log).toHaveBeenCalledWith("freshness: unchecked");
+            expect(starts[2]).toEqual({ start: "eager", requireFresh: false });
+
+            // --require-fresh with nobody to compare with: gated until the
+            // timeout, whose message names the flag and the way out.
+            const gated = await mount(
+                "--require-fresh",
+                "--write-ready-timeout-ms",
+                "500"
+            );
+            expect(gated.error?.message).toContain(
+                "mount did not establish a safe initial write view within 500 ms"
+            );
+            expect(gated.error?.message).toContain(
+                "--require-fresh: this warm replica waits until it has compared its view with a peer of this filesystem; mount without it to write on its own earlier proof."
+            );
+            expect(starts[3]).toEqual({ start: "eager", requireFresh: true });
+            for (const flag of [
+                "--assume-complete",
+                "--allow-partial-writes",
+            ]) {
+                const refused = await mount("--require-fresh", flag);
+                expect(refused.error?.message).toContain(
+                    `--require-fresh cannot be combined with ${flag}`
+                );
+            }
+            expect(starts).toHaveLength(4);
+        } finally {
+            prototype.startReadinessFreshness = startFreshness;
+            createSpy.mockRestore();
+            log.mockRestore();
+            await fs.rm(seed.directory, { recursive: true, force: true });
+        }
+    });
+
     it("requires an output directory for --mount-profile before mounting", async () => {
         await expect(
             runCli([

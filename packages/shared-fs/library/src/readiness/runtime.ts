@@ -3,11 +3,18 @@ import type { PublicSignKey } from "@peerbit/crypto";
 import type { DocumentsLike } from "@peerbit/document";
 import { AnchorHost, type LaneSet } from "./anchor-host.js";
 import { cellKey } from "./cells.js";
-import { M, NOTICE_TARGETS } from "./constants.js";
+import {
+    FRESHNESS_START,
+    M,
+    NOTICE_TARGETS,
+    type FreshnessStart,
+} from "./constants.js";
 import {
     Coordinator,
     type CoordinatorDebug,
+    type CoordinatorPurpose,
     type CoordinatorTransport,
+    type FreshnessStatus,
     type PeerChange,
     type ReadinessStatus,
     type StatusContext,
@@ -27,7 +34,7 @@ import {
     type PullStore,
     type SessionScopeBundle,
 } from "./ports.js";
-import type { Proof, ProofScope } from "./proof.js";
+import { hlcProvedOf, type Proof, type ProofScope } from "./proof.js";
 import { LifeRecorder } from "./reachability.js";
 import {
     Responder,
@@ -193,6 +200,72 @@ export interface JoinOptions {
     onProgress?(changed: readonly PeerChange[]): void;
 }
 
+/** The ports a join and a freshness check share (`runCoordinator`). */
+type CoordinatorOptions = Pick<
+    JoinOptions,
+    | "transport"
+    | "hlcProved"
+    | "trust"
+    | "timers"
+    | "now"
+    | "requestTimeoutMs"
+    | "onProgress"
+    | "onSession"
+>;
+
+/**
+ * What `startFreshness` needs from the host (M2 PR-4): a warm full-replica
+ * open's check. The same ports as a join's, but no phase clause and no
+ * flip: `onFresh` records the label.
+ */
+export interface FreshnessOptions extends CoordinatorOptions {
+    /**
+     * The host's decision after a satisfied evaluation: record `fresh`
+     * first (the provenance then says `warm-fresh`, and `noteFresh()` the
+     * status), flip under
+     * `requireFreshOnReopen`, then `markFresh()`. A rejection (only that
+     * flip can reject) leaves the check running and the next trigger
+     * retries.
+     */
+    onFresh(): Promise<void>;
+    /**
+     * `eager` starts the coordinator now; `on-demand` on the first
+     * `OpenV1` this generation receives. `FRESHNESS_START` by default;
+     * `requireFreshOnReopen` passes `eager` (O4, O15).
+     */
+    start?: FreshnessStart;
+}
+
+/** Requests a coordinator's sessions send (the runtime's counters). */
+export type RequestVariant = "open" | "cellsReq" | "listPage";
+/**
+ * Whose requests: a join, a join's qualification sessions, or a warm
+ * open's freshness check (M2 PR-4).
+ */
+export type RequestPurpose = "join" | "qualification" | "freshness";
+
+/** `ReadinessRuntime.stats` (M2 PR-4): counted, never read to decide. */
+export interface RuntimeStats {
+    sent: Record<RequestPurpose, Record<RequestVariant, number>>;
+}
+
+const requestVariant = (
+    message: ReadinessMessage
+): RequestVariant | undefined =>
+    message instanceof OpenV1
+        ? "open"
+        : message instanceof CellsReqV1
+          ? "cellsReq"
+          : message instanceof ListPageV1
+            ? "listPage"
+            : undefined;
+
+const noRequests = (): Record<RequestVariant, number> => ({
+    open: 0,
+    cellsReq: 0,
+    listPage: 0,
+});
+
 /** `ReadinessRuntime.debug()`: what is armed and in flight. */
 export interface RuntimeDebug {
     /** The responder's idle timers plus the coordinator's sessions' timers. */
@@ -231,7 +304,12 @@ export const logIdOf = (documents: DocumentsLike<any, any>): Uint8Array => {
  * also runs the joiner's coordinator (`startJoin`): its predicate (design
  * 4.8) decides when the filesystem turns ready, through the host's decision
  * (`markWriteReady`), which reads the predicate and its proof at one
- * synchronous point (`proofIfSatisfied`) and persists the proof first.
+ * synchronous point (`proofIfSatisfied`) and persists the proof first. On
+ * a warm full-replica open it runs the same coordinator in its freshness
+ * purpose instead (`startFreshness`, M2 PR-4): the result is a label
+ * (`warm-fresh`) and notices, never a flip of its own, and the join-only
+ * readers (`status`, `satisfied`, `proofIfSatisfied`, `coordinator`)
+ * answer as when no join ran.
  */
 export class ReadinessRuntime {
     readonly openNonce: Uint8Array = randomBytes(OPEN_NONCE_BYTES);
@@ -255,9 +333,36 @@ export class ReadinessRuntime {
     private sealedStart?: ScopeStart;
     /** Messages received while this generation was live (diagnostics). */
     messagesReceived = 0;
-    /** The joiner's coordinator of this generation (`startJoin`). */
+    /**
+     * The coordinator of this generation: the join's (`startJoin`) or the
+     * freshness check's (`startFreshness`); at most one of them runs.
+     */
     private coordinatorValue?: Coordinator;
     private joinStarted = false;
+    /**
+     * The freshness check of a warm full-replica open (`startFreshness`):
+     * its options, its start (`begun`: the coordinator ran or faulted),
+     * once the host recorded it, `fresh` and the time it took, and
+     * `noticed` once `markFresh` finished it.
+     */
+    private freshnessRun?: {
+        readonly options: FreshnessOptions;
+        readonly now: () => number;
+        readonly startedAt: number;
+        begun: boolean;
+        fault?: string;
+        fresh: boolean;
+        ms?: number;
+        noticed: boolean;
+    };
+    /** Requests sent by this generation's coordinator (M2 PR-4). */
+    readonly stats: RuntimeStats = {
+        sent: {
+            join: noRequests(),
+            qualification: noRequests(),
+            freshness: noRequests(),
+        },
+    };
     /**
      * Set when `startJoin` ran but no coordinator could: J cannot contain
      * anyone this open, so `satisfied()` stays false (G2-11).
@@ -265,6 +370,13 @@ export class ReadinessRuntime {
     private joinFault?: string;
     /** READY notices went out (`markReady`); once per generation. */
     private readyNoticed = false;
+    /**
+     * Those READY notices carried `warm-fresh` (a requireFreshOnReopen
+     * flip, after the host recorded the label), so `markFresh` sends no
+     * WARM_FRESH ones; an operator release before the check held sent
+     * `warm`, and the WARM_FRESH notices still go out.
+     */
+    private readyNoticedFresh = false;
     /** A failed decision was logged (`decideFor`); once per generation. */
     private decisionWarned = false;
     /**
@@ -556,10 +668,11 @@ export class ReadinessRuntime {
 
     /**
      * Attach before `entries.open()`, so events during open are buffered.
-     * `join`: this open may run the joiner's coordinator (a fresh full
-     * address-open); the replication announcements and readiness messages
-     * that arrive from now on are recorded for it as signs of life, since
-     * the coordinator only starts after the store opened.
+     * `join`: this open may run a coordinator (a fresh full address-open's
+     * join, or a warm full-replica open's freshness check); the replication
+     * announcements and readiness messages that arrive from now on are
+     * recorded for it as signs of life, since the coordinator only starts
+     * after the store opened (an on-demand check: at its first asker).
      */
     attachNamespace(
         entries: DocumentsLike<any, any>,
@@ -704,6 +817,11 @@ export class ReadinessRuntime {
         // Until the coordinator's start takes the record: a sign of life
         // its discovery counts.
         this.lifeRecorder?.noteMessage(from);
+        // An on-demand freshness check starts at its first asker, which the
+        // record above already holds (M2 PR-4).
+        if (message instanceof OpenV1 && this.freshnessRun?.begun === false) {
+            this.beginFreshness();
+        }
         const coordinator = this.coordinatorValue;
         if (!coordinator) return;
         try {
@@ -787,12 +905,99 @@ export class ReadinessRuntime {
      * access-controlled store without a trust scope or J's trust view,
      * nothing can be contained this open: `satisfied()` stays false and the
      * status names the fault (G2-11, G3-9); `assumeComplete` is the escape.
+     * A no-op once a freshness check holds the coordinator slot.
      */
     startJoin(options: JoinOptions): void {
-        if (this.joinStarted || this.blockedValue || this.disposedValue) {
+        if (
+            this.joinStarted ||
+            this.freshnessRun !== undefined ||
+            this.blockedValue ||
+            this.disposedValue
+        ) {
             return;
         }
         this.joinStarted = true;
+        const fault = this.runCoordinator("join", options, {
+            phaseSettled: () => options.phaseSettled(),
+            ...(options.onComplete
+                ? { onComplete: () => options.onComplete?.() }
+                : {}),
+            decide: () =>
+                this.decideFor(
+                    () => options.onSatisfied(),
+                    "shared-fs: write readiness could not persist its proof; the next readiness event retries:"
+                ),
+        });
+        if (fault !== undefined) this.joinFault = fault;
+    }
+
+    /**
+     * Starts a warm full-replica open's freshness check, once per
+     * generation (M2 PR-4; the host never calls it for a fresh join, an
+     * observer or `allowPartialWrites`): M1's coordinator in its freshness
+     * purpose, with the sidecar's `hlcProved`, in the coordinator slot a
+     * join would use, so messages, trust changes and `evaluate()` reach it
+     * as they reach a join. It does not set `joinStarted`: `status`,
+     * `satisfied`, `proofIfSatisfied` and `coordinator` answer as when no
+     * join ran. `start` `on-demand` defers the coordinator to the first
+     * `OpenV1` this generation receives; the signs of life recorded since
+     * the namespace attach wait for it. The faults are a join's, reported
+     * by `freshnessStatus()` (`fault`); W stays as writable as it was.
+     */
+    startFreshness(options: FreshnessOptions): void {
+        if (
+            this.joinStarted ||
+            this.freshnessRun !== undefined ||
+            this.blockedValue ||
+            this.disposedValue
+        ) {
+            return;
+        }
+        const now = options.now ?? (() => performance.now());
+        this.freshnessRun = {
+            options,
+            now,
+            startedAt: now(),
+            begun: false,
+            fresh: false,
+            noticed: false,
+        };
+        if ((options.start ?? FRESHNESS_START) === "eager") {
+            this.beginFreshness();
+        }
+    }
+
+    /** The freshness check's coordinator starts (eager, or at its asker). */
+    private beginFreshness() {
+        const run = this.freshnessRun;
+        if (!run || run.begun || this.blockedValue || this.disposedValue) {
+            return;
+        }
+        run.begun = true;
+        const fault = this.runCoordinator("freshness", run.options, {
+            decide: () =>
+                this.decideFor(
+                    () => run.options.onFresh(),
+                    "shared-fs: the freshness check could not record its result; the next readiness event retries:"
+                ),
+        });
+        if (fault !== undefined) run.fault = fault;
+    }
+
+    /**
+     * The coordinator of `purpose` over this generation's scopes, started;
+     * or the fault that keeps it from running (no readiness state, no
+     * transport, no scope, no trust view), with the signs of life dropped.
+     */
+    private runCoordinator(
+        purpose: CoordinatorPurpose,
+        options: CoordinatorOptions,
+        decision: {
+            phaseSettled?: () => boolean;
+            onComplete?: () => void;
+            decide: () => Promise<void>;
+        }
+    ): string | undefined {
         const namespace = this.scopes.get(SCOPE_NAMESPACE_V1);
         const trust = this.accessControlled
             ? this.scopes.get(SCOPE_TRUST_V1)
@@ -809,22 +1014,21 @@ export class ReadinessRuntime {
                     ? "no trust view"
                     : undefined;
         if (fault !== undefined) {
-            this.joinFault = fault;
             this.disposeLifeRecorder();
-            return;
+            return fault;
         }
         let transport: CoordinatorTransport;
         try {
             transport = options.transport();
         } catch (error: any) {
             // Gated, never a failed open: the join cannot see its peers.
-            this.joinFault = `readiness transport: ${error?.message ?? error}`;
             this.disposeLifeRecorder();
-            return;
+            return `readiness transport: ${error?.message ?? error}`;
         }
         const registry = shadowRegistry();
         const scopes = trust ? [namespace!, trust] : [namespace!];
         const coordinator = new Coordinator({
+            purpose,
             transport,
             // Taken once, by `start` (after its listeners attached). No
             // recorder (the host did not mark this open as a join): unknown,
@@ -834,7 +1038,12 @@ export class ReadinessRuntime {
                 this.lifeRecorder = undefined;
                 return recorder?.take();
             },
-            send: (message, to) => this.sendTo(message, to),
+            send: (message, to, qualification) =>
+                this.sendTo(
+                    message,
+                    to,
+                    qualification ? "qualification" : purpose
+                ),
             scopes: scopes.map(({ descriptor }) => descriptor.id),
             scope: (id) => this.sessionScope(id)?.ports,
             // Both scopes' starts; a failed one still settles, and the first
@@ -848,11 +1057,11 @@ export class ReadinessRuntime {
             syncDelivering: (scope) => this.syncDelivering(scope),
             timers: options.timers,
             now: options.now,
-            phaseSettled: () => options.phaseSettled(),
-            ...(options.onComplete
-                ? { onComplete: () => options.onComplete?.() }
+            ...(decision.phaseSettled
+                ? { phaseSettled: decision.phaseSettled }
                 : {}),
-            decide: () => this.decideFor(options),
+            ...(decision.onComplete ? { onComplete: decision.onComplete } : {}),
+            decide: decision.decide,
             onContained: (_peer, results) => {
                 if (registry) this.checkContained(results);
                 for (const result of results) {
@@ -883,35 +1092,46 @@ export class ReadinessRuntime {
             coordinator.start();
         } catch (error: any) {
             // A bug, never a reason to release: the join stays unsatisfied.
-            this.joinFault = `coordinator: ${error?.message ?? error}`;
             this.disposeJoin();
+            return `coordinator: ${error?.message ?? error}`;
         }
+        return undefined;
     }
 
     /**
-     * The host's decision; a rejection (the proof could not be persisted)
-     * is logged once per generation and goes back to the coordinator, which
-     * counts it (`debug().coordinator.decisions`) and asks again on the next
-     * trigger.
+     * The host's decision (a join's `onSatisfied`, a freshness check's
+     * `onFresh`); a rejection (the proof or the flip could not be
+     * persisted) is logged once per generation and goes back to the
+     * coordinator, which counts it (`debug().coordinator.decisions`) and
+     * asks again on the next trigger.
      */
-    private async decideFor(options: JoinOptions): Promise<void> {
+    private async decideFor(
+        decide: () => Promise<void>,
+        warning: string
+    ): Promise<void> {
         try {
-            await options.onSatisfied();
+            await decide();
         } catch (error: any) {
             if (!this.decisionWarned) {
                 this.decisionWarned = true;
-                console.warn(
-                    "shared-fs: write readiness could not persist its proof; the next readiness event retries:",
-                    error?.message ?? error
-                );
+                console.warn(warning, error?.message ?? error);
             }
             throw error;
         }
     }
 
-    /** A directed one-way send of the coordinator's sessions. */
-    private sendTo(message: ReadinessMessage, to: string) {
+    /**
+     * A directed one-way send of the coordinator's sessions; requests are
+     * counted by `purpose` (`stats`).
+     */
+    private sendTo(
+        message: ReadinessMessage,
+        to: string,
+        purpose: RequestPurpose
+    ) {
         if (this.blockedValue || this.disposedValue || !this.ports) return;
+        const variant = requestVariant(message);
+        if (variant) this.stats.sent[purpose][variant]++;
         try {
             void this.ports.send(message, to).catch(() => {
                 this.sendFailures++;
@@ -931,12 +1151,22 @@ export class ReadinessRuntime {
     }
 
     /**
+     * The join's coordinator: undefined on an open that runs a freshness
+     * check instead (the join-only readers answer as when no join ran).
+     */
+    private get joinCoordinator(): Coordinator | undefined {
+        return this.freshnessRun === undefined
+            ? this.coordinatorValue
+            : undefined;
+    }
+
+    /**
      * The predicate (design 4.8, `Coordinator.satisfied`): false when no
      * join ran or it faulted, so a caller that requires it fails closed.
      */
     satisfied(): boolean {
         if (this.joinFault !== undefined || this.disposedValue) return false;
-        return this.coordinatorValue?.satisfied() === true;
+        return this.joinCoordinator?.satisfied() === true;
     }
 
     /**
@@ -953,7 +1183,7 @@ export class ReadinessRuntime {
         ) {
             return undefined;
         }
-        const coordinator = this.coordinatorValue;
+        const coordinator = this.joinCoordinator;
         if (!coordinator || !coordinator.satisfied()) return undefined;
         return coordinator.proof();
     }
@@ -994,17 +1224,144 @@ export class ReadinessRuntime {
     markReady(): void {
         if (this.disposedValue || this.readyNoticed) return;
         this.readyNoticed = true;
+        try {
+            this.readyNoticedFresh =
+                this.ports?.provenance().source === "warm-fresh";
+        } catch {
+            // Unknown: the WARM_FRESH notices go out (a trigger, never
+            // evidence).
+        }
+        // A freshness check goes on (a gated warm open the operator
+        // released): only its own result (`markFresh`) finishes it.
+        this.notify(NOTICE_REASON.READY, this.freshnessRun === undefined);
+    }
+
+    /**
+     * W's freshness check held (`onFresh`, M2 PR-4, as the host records
+     * its label and before a `requireFreshOnReopen` flip):
+     * `freshnessStatus()` says `fresh`, with the time it took, from here
+     * on, so a `write:ready` listener reads the state the provenance
+     * already says. Monotone; `markFresh` sends the notices.
+     */
+    noteFresh(): void {
+        const run = this.freshnessRun;
+        if (!run || run.fresh || this.disposedValue) return;
+        run.fresh = true;
+        run.ms = Math.max(0, run.now() - run.startedAt);
+    }
+
+    /**
+     * W's freshness check held and the host recorded it (`onFresh`, M2
+     * PR-4), so the provenance its notices carry says `warm-fresh` (`warm`
+     * to a caps-0 target, `Responder.sendNotice`): the state is `fresh`
+     * (`noteFresh`, if the host did not call it), the
+     * coordinator finishes (sessions closed, records kept for
+     * `freshnessStatus`; nothing is asked again in this open), and every
+     * peer that had a session or a `BUSY` with W gets a WARM_FRESH notice,
+     * unless READY notices with that label went out in this generation
+     * (the `requireFreshOnReopen` flip's). Once per generation.
+     */
+    markFresh(): void {
+        const run = this.freshnessRun;
+        if (!run || run.noticed || this.disposedValue) return;
+        this.noteFresh();
+        run.noticed = true;
+        if (this.readyNoticedFresh) {
+            this.finishCoordinator();
+            return;
+        }
+        this.notify(NOTICE_REASON.WARM_FRESH, true);
+    }
+
+    /**
+     * A warm open's freshness check (M2 PR-4), or undefined when none was
+     * started (a fresh join, a creator, an observer, `allowPartialWrites`).
+     * Plain data; `requests` counts the check's `OpenV1`, `CellsReqV1` and
+     * `ListPageV1`.
+     */
+    freshnessStatus(): FreshnessStatus | undefined {
+        const run = this.freshnessRun;
+        if (!run) return undefined;
+        const sent = this.stats.sent.freshness;
+        const requests = sent.open + sent.cellsReq + sent.listPage;
+        if (run.fault !== undefined) {
+            return {
+                state: "fault",
+                required: 0,
+                contained: [],
+                excluded: [],
+                silent: [],
+                gaps: [],
+                fault: run.fault,
+                requests,
+            };
+        }
+        const view: FreshnessStatus = (run.begun
+            ? this.coordinatorValue?.freshnessView()
+            : undefined) ?? {
+            state: "unchecked",
+            required: 0,
+            contained: [],
+            excluded: [],
+            silent: [],
+            gaps: [],
+            requests,
+        };
+        return {
+            ...view,
+            ...(run.fresh ? { state: "fresh" as const, ms: run.ms } : {}),
+            requests,
+        };
+    }
+
+    /**
+     * The newest namespace HLC the freshness check's contained records
+     * report (`hlcProvedOf` of its records, as a join's proof): the host's
+     * hint for the next check's gap estimate. Undefined when no check ran.
+     */
+    freshnessHlcProved(): bigint | undefined {
+        const run = this.freshnessRun;
+        const coordinator = this.coordinatorValue;
+        if (!run?.begun || run.fault !== undefined || !coordinator) {
+            return undefined;
+        }
+        try {
+            return hlcProvedOf(coordinator.proof());
+        } catch {
+            return undefined;
+        }
+    }
+
+    /** Finishes this generation's coordinator; never throws. */
+    private finishCoordinator(): string[] {
         const coordinator = this.coordinatorValue;
         let joined: string[] = [];
-        if (coordinator) {
+        if (!coordinator) return joined;
+        try {
+            joined = coordinator.noticeTargets();
+            coordinator.finish();
+        } catch (error: any) {
+            console.warn(
+                "shared-fs: readiness coordinator finish failed:",
+                error?.message ?? error
+            );
+        }
+        return joined;
+    }
+
+    /**
+     * A notice with this open's provenance now to every peer that had a
+     * session or a `BUSY` with it, either way (at most `NOTICE_TARGETS`);
+     * `finish`: the coordinator finishes first. A trigger, never evidence.
+     */
+    private notify(reason: number, finish: boolean) {
+        let joined: string[] = [];
+        if (finish) joined = this.finishCoordinator();
+        else {
             try {
-                joined = coordinator.noticeTargets();
-                coordinator.finish();
-            } catch (error: any) {
-                console.warn(
-                    "shared-fs: readiness coordinator finish failed:",
-                    error?.message ?? error
-                );
+                joined = this.coordinatorValue?.noticeTargets() ?? [];
+            } catch {
+                // A read of the records; never throws.
             }
         }
         const responder = this.responder;
@@ -1020,7 +1377,7 @@ export class ReadinessRuntime {
         try {
             responder.sendNotice(
                 [...targets.values()].slice(0, NOTICE_TARGETS),
-                NOTICE_REASON.READY
+                reason
             );
         } catch {
             // Sends never throw; a notice is a trigger, never needed.
@@ -1055,9 +1412,12 @@ export class ReadinessRuntime {
         };
     }
 
-    /** The joiner's coordinator of this generation, if one runs (tests). */
+    /**
+     * The joiner's coordinator of this generation, if one runs (tests);
+     * never the freshness check's (`debug().coordinator` shows it).
+     */
     get coordinator(): Coordinator | undefined {
-        return this.coordinatorValue;
+        return this.joinCoordinator;
     }
 
     /**

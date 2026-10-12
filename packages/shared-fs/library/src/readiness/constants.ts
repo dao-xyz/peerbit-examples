@@ -71,3 +71,15 @@ export const PULL_BATCH = 256;
  * reads stayed at milliseconds, at 4 they reached 2 s, at 16 or more 6-9 s.
  */
 export const PULL_LANES = 2;
+
+/**
+ * When a warm full-replica open starts its freshness check (M2 PR-4, owner
+ * decision O4): `eager` at the end of the open (the design's background
+ * check), or `on-demand` on the first `OpenV1` the responder receives. The
+ * kill switch of the freshness load (M2 plan 7.4, 10.2) is this one
+ * constant; `FreshnessOptions.start` overrides it per open
+ * (`requireFreshOnReopen` starts at once, the CLI's one-shot commands wait
+ * for an asker, O15).
+ */
+export type FreshnessStart = "eager" | "on-demand";
+export const FRESHNESS_START: FreshnessStart = "eager";

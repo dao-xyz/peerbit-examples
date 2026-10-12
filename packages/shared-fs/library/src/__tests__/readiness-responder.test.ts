@@ -22,11 +22,14 @@ import {
     CELL_BYTES,
     DIGEST_BYTES,
     M,
+    SESSIONS_PER_PEER,
+    SESSIONS_TOTAL,
     SESSION_IDLE_MS,
 } from "../readiness/constants.js";
 import { digestToHead, headDigest } from "../readiness/digest.js";
 import {
     Responder,
+    provenanceFor,
     type ProvenanceState,
     type Timers,
 } from "../readiness/responder.js";
@@ -39,6 +42,7 @@ import {
 } from "../readiness/scopes.js";
 import { ScopeTap, documentsIndexPort } from "../readiness/tap.js";
 import {
+    CAP_FRESHNESS,
     CellsV1,
     ERROR_CODE,
     ErrorV1,
@@ -368,7 +372,8 @@ describe("readiness responder", () => {
             expect(
                 sameBytes(header.provenance.openNonce, runtime.openNonce)
             ).toBe(true);
-            expect(header.provenance.caps).toBe(0);
+            // This build's caps (M2 PR-4: `CAP_FRESHNESS`).
+            expect(header.provenance.caps).toBe(CAP_FRESHNESS);
             const trustHeader = await client.next(
                 HeaderV1,
                 (message) =>
@@ -1280,6 +1285,130 @@ describe("readiness responder", () => {
             expect(PROVENANCE_SOURCES[third.provenance.source]).toBe(
                 "reconciled"
             );
+            r.close();
+        });
+
+        it("labels a fresh W per asker: warm-fresh with CAP_FRESHNESS, warm without, in headers and notices; warm-fresh to a target that never asked; nothing sent at rest (tests 77, 84 caps-0 row, 96; M2 PR-4)", async () => {
+            let provenance: ProvenanceState = {
+                writeReady: true,
+                source: "warm",
+                fullReplica: true,
+                phase: "off",
+            };
+            const r = await fakeResponder(100, "inline", () => provenance);
+            const [m2, old, unknown, busyOld] = await keys(4);
+            const m2Client = r.network.client(m2);
+            const oldClient = r.network.client(old);
+            const unknownClient = r.network.client(unknown);
+            const busyOldClient = r.network.client(busyOld);
+            const header = async (
+                client: ReadinessClient,
+                caps: number,
+                sessionId?: Uint8Array
+            ) => {
+                const after = client.inbox.length;
+                const opened = client.open({
+                    sessionId,
+                    attempt: sessionId ? 2 : 1,
+                    caps,
+                    scopes: r.scopes,
+                });
+                return client.next(
+                    HeaderV1,
+                    (message) => sameBytes(message.sessionId, opened.sessionId),
+                    { after }
+                );
+            };
+            const sourceOf = (message: HeaderV1 | StateNoticeV1) =>
+                PROVENANCE_SOURCES[message.provenance.source];
+
+            // Not fresh yet: `warm` to everyone.
+            expect(sourceOf(await header(m2Client, CAP_FRESHNESS))).toBe(
+                "warm"
+            );
+            expect(sourceOf(await header(oldClient, 0))).toBe("warm");
+
+            // Fresh: `warm-fresh` only to an asker with the bit; the caps the
+            // responder advertises are its own either way.
+            provenance = { ...provenance, source: "warm-fresh" };
+            const fresh = await header(m2Client, CAP_FRESHNESS);
+            expect(sourceOf(fresh)).toBe("warm-fresh");
+            expect(fresh.provenance.caps).toBe(CAP_FRESHNESS);
+            const caps0 = await header(oldClient, 0);
+            expect(sourceOf(caps0)).toBe("warm");
+            expect(caps0.provenance.caps).toBe(CAP_FRESHNESS);
+            expect(caps0.provenance.writeReady).toBe(true);
+            // A retry of that session keeps its asker's label.
+            expect(sourceOf(await header(oldClient, 0, caps0.sessionId))).toBe(
+                "warm"
+            );
+            // Other bits do not stand in for CAP_FRESHNESS.
+            expect(sourceOf(await header(oldClient, 0b10))).toBe("warm");
+            // Every other source is reported as it is.
+            for (const source of [
+                "creator",
+                "reconciled",
+                "operator",
+            ] as const) {
+                const state = { ...provenance, source };
+                expect(provenanceFor(state, 0)).toBe(state);
+            }
+
+            // A caps-0 asker the total cap refused (BUSY, no session) is
+            // labelled by that OPEN too.
+            for (const key of await keys(3)) {
+                const client = r.network.client(key);
+                for (
+                    let i = 0;
+                    i < SESSIONS_PER_PEER &&
+                    r.responder.debug().sessions < SESSIONS_TOTAL;
+                    i++
+                ) {
+                    await header(client, CAP_FRESHNESS);
+                }
+            }
+            expect(r.responder.debug().sessions).toBe(SESSIONS_TOTAL);
+            busyOldClient.open({ caps: 0, scopes: r.scopes });
+            expect((await busyOldClient.next(ErrorV1)).code).toBe(
+                ERROR_CODE.BUSY
+            );
+
+            // Notices are labelled by the caps of the target's last OPEN; a
+            // target that never sent one gets `warm-fresh` (an M2 joiner's
+            // notice path qualifies only that).
+            r.responder.sendNotice(
+                [m2, old, unknown.hashcode(), busyOld],
+                NOTICE_REASON.WARM_FRESH
+            );
+            for (const [client, label] of [
+                [m2Client, "warm-fresh"],
+                [oldClient, "warm"],
+                [unknownClient, "warm-fresh"],
+                [busyOldClient, "warm"],
+            ] as const) {
+                const notice = await client.next(StateNoticeV1);
+                expect(notice.reason).toBe(NOTICE_REASON.WARM_FRESH);
+                expect(sourceOf(notice)).toBe(label);
+                expect(notice.provenance.caps).toBe(CAP_FRESHNESS);
+            }
+
+            // At rest: the idle timers end the sessions, which sends the
+            // refused caps-0 asker its CAPACITY notice (labelled `warm`), and
+            // the responder sends nothing else of its own for hours.
+            const sent = r.network.sent.length;
+            for (let hour = 0; hour < 6; hour++) {
+                r.timers.advance(3_600_000);
+                await settle();
+            }
+            const capacity = r.network.sent.slice(sent);
+            expect(capacity).toHaveLength(1);
+            expect(capacity[0].to).toBe(busyOld.hashcode());
+            const notice = capacity[0].message as StateNoticeV1;
+            expect(notice).toBeInstanceOf(StateNoticeV1);
+            expect(notice.reason).toBe(NOTICE_REASON.CAPACITY);
+            expect(sourceOf(notice)).toBe("warm");
+            expect(r.timers.armed()).toBe(0);
+            expect(r.responder.debug().sessions).toBe(0);
             r.close();
         });
 

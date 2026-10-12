@@ -237,15 +237,17 @@ describe("readiness joiner session", () => {
                     openNonce: new Uint8Array(16),
                     ...overrides,
                 });
+            // M2 PR-4 adds `warm-fresh`; PR-5 drops `warm`.
             for (const source of [
                 "creator",
                 "reconciled",
                 "warm",
+                "warm-fresh",
                 "operator",
             ]) {
                 expect(qualifies(provenance({ source }))).toBe(true);
             }
-            for (const source of ["none", "warm-fresh", "partial-override"]) {
+            for (const source of ["none", "partial-override"]) {
                 expect(qualifies(provenance({ source }))).toBe(false);
             }
             expect(qualifies(provenance({ writeReady: false }))).toBe(false);
