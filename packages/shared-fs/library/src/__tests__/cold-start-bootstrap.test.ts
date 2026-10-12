@@ -3280,7 +3280,7 @@ describe("shared fs cold-start bootstrap", () => {
                 const lines = readFileSync(
                     fileURLToPath(new URL("../index.ts", import.meta.url)),
                     "utf8"
-                ).split("\n");
+                ).split(/\r?\n/); // CRLF on a Windows checkout
                 const first = lines.findIndex((line) =>
                     line.startsWith("    private async fetchAndInstallOverlay(")
                 );
@@ -3288,6 +3288,7 @@ describe("shared fs cold-start bootstrap", () => {
                     (line, i) => i > first && line === "    }"
                 );
                 expect(first).toBeGreaterThan(0);
+                expect(last).toBeGreaterThan(first);
                 const inOverlay = timers.own.filter(({ frame }) => {
                     const line = Number(
                         frame.match(/[\\/]src[\\/]index\.ts:(\d+):/)?.[1]
