@@ -403,19 +403,18 @@ missing from its view, and writes made after it can conflict with them. While a
 required peer is still being asked, also beside one that stays silent, it may
 yet answer and the view gain its rows, so the command fails with the timeout
 and says that the flag was not applied. It cannot be combined with
-`--allow-partial-writes`, and it is not applied while a snapshot bootstrap has
-not settled. That phase settles only within one long run: an unverified
-bootstrap converges after about 10 minutes without new rows, and a snapshot
-overlay retires within 15 minutes (one that retires unverified then needs the
-10 quiet minutes too). Every run, including a short `peerbit-fs status`, starts
-again from the phase the last one left, so retrying does not help: keep the
-command open with a `--write-ready-timeout-ms` that covers it, such as 660000
-for an unverified bootstrap or 1560000 for an overlay; the error names the
-phase and the value. Without the flag, a timeout of one of these commands whose
-join has no peer, only peers that are not write-ready, or only required peers
-that refused or stay silent ends with a hint naming `--assume-complete` and,
-while the phase has not settled (including a snapshot fetch, which installs an
-overlay when it succeeds), the wait it needs.
+`--allow-partial-writes`, and it is not applied while a snapshot overlay is
+fetching or active. An overlay retires within 15 minutes, but only within one
+long run. Every run, including a short `peerbit-fs status`, starts again from
+the phase the last one left, so retrying does not help: keep the command open
+with a `--write-ready-timeout-ms` that covers it, such as 960000; the error
+names the phase and the value. An unverified bootstrap (an overlay that retired
+before its rows were covered, or one resumed over a partial store) does not
+hold the flag back, and a join's proof ends it without the flag. Without the
+flag, a timeout of one of these commands whose join has no peer, only peers
+that are not write-ready, or only required peers that refused or stay silent
+ends with a hint naming `--assume-complete` and, while an overlay is fetching
+(a fetch that succeeds installs one) or active, the wait it needs.
 
 Readiness proves a mount's view against the peers it can see, not against
 writers that are offline or rows a peer received after it answered. A replica

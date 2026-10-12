@@ -266,7 +266,14 @@ these hold:
   partial replicas stays gated, so two fresh joiners never certify each other.
 - In an access-controlled filesystem, the trust rules below hold.
 - Any snapshot bootstrap has settled: its decision is made and its phase is
-  `off` or `converged`.
+  `off`, `converged` or `unverified`. A snapshot overlay that is still
+  fetching or active gates the join. In the unverified posture (an overlay
+  that retired before its rows were covered, or a bootstrap resumed over a
+  partial store) no overlay is served, so the proof, which covers the store,
+  decides there. Its state-file write also clears the posture's marker, and
+  the replica continues in phase `off` as a plain join that reconciled: the
+  resurrection guard arms, and it may publish snapshots and pass the disposal
+  checks.
 
 There is no quiet window and no polling. The condition is checked again on every
 readiness event (an answer, a peer arriving, leaving or becoming reachable, a
@@ -412,15 +419,16 @@ pending `awaitWriteReady()` calls, and tells the peers it exchanged readiness
 requests with that it is ready. It is refused with `EINVAL` on observers, on
 partial replicas and under `allowPartialWrites`; it waits for the bootstrap
 decision, then fails with retryable `EAGAIN` while a snapshot overlay is
-fetching, active or unverified; it fails with `ECLOSED` once a close or reopen
-began. On a handle that is already writable it does nothing. The phase settles
-only inside one open (a reopen resumes the persisted phase): an unverified one
-after two checks 5 minutes apart that saw no new row for a minute, an overlay
-once covered or, unverified, at `retirementTimeoutMs`. The CLI's
-`--assume-complete` calls it only after its `--write-ready-timeout-ms` wait
-timed out with no required peer that can still answer (`no-peer`,
-`no-qualified-donor`, or `waiting-silent` with every required peer silent), so
-a proof that lands in time still makes the replica `reconciled`.
+fetching or active; it fails with `ECLOSED` once a close or reopen began. On a
+handle that is already writable it does nothing, also in the unverified posture
+(a warm reopen keeps that until the quiet period); on one that is not, it acts
+there and ends the posture as a proof does. An overlay settles only inside
+one open (a reopen resumes the persisted phase): once covered or, unverified,
+at `retirementTimeoutMs`. The CLI's `--assume-complete` calls it only after
+its `--write-ready-timeout-ms` wait timed out with no required peer that can
+still answer (`no-peer`, `no-qualified-donor`, or `waiting-silent` with every
+required peer silent), so a proof that lands in time still makes the replica
+`reconciled`.
 
 ### Diagnosing a gated join
 

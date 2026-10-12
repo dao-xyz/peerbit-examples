@@ -1,5 +1,12 @@
 import type { PublicSignKey } from "@peerbit/crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+    mkdir,
+    mkdtemp,
+    readFile,
+    readdir,
+    rm,
+    writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { Peerbit } from "peerbit";
@@ -30,9 +37,10 @@ import { stopTestPeers } from "./stop-test-peers.js";
  *
  * - M8: the bootstrap decision settling and a phase change are triggers, so
  *   a joiner whose peers are accounted for turns ready by that event alone.
- *   Held by test hooks: the joiner's `startBootstrap`, and the quiescence
- *   checker's callback, captured as `guard-override.test.ts` captures it
- *   (production checks every five minutes).
+ *   Held by a test hook: the joiner's `startBootstrap`.
+ * - M2 PR-1 (design tests 58 and 60): the phase clause accepts the
+ *   unverified posture, and the proof's commit ends it in phase `off`;
+ *   `fetching` and `overlay-active` still gate.
  * - M9: a failed sidecar write leaves J gated with nothing armed, and the
  *   next trigger retries (`replaceBootstrapState` fails for J's node).
  * - The proof the decision persists, its `hlcProved`, the
@@ -367,38 +375,127 @@ describe("readiness decision (PR-3 commit 4, in-process)", () => {
             expect(readinessOf(joiner.fs)!.state).toBe("ready");
         });
 
-        it("a joiner in the unverified posture turns ready by the quiescence transition to converged alone", async () => {
+        it("design test 58: a reopen holding the unverified marker turns ready on its proof; that sidecar write clears the marker and the posture lands in `off` without a quiescence check", async () => {
+            const donor = await createDonor();
+            const busy = holdOpens(donor.fs);
+            const directory = await newDirectory();
+            // A previous bootstrap of this replica retired unverified, then
+            // the process stopped (E3: the reopen resumes the posture).
+            const state = joinPath(directory, "shared-fs-bootstrap");
+            await mkdir(state, { recursive: true });
+            await writeFile(
+                joinPath(state, `${donor.fs.address}.json`),
+                JSON.stringify({ writeReady: false, bootstrap: "unverified" })
+            );
+            const peer = await createPeer(directory);
+            // Each sidecar write of J, with J's phase as it began.
+            const prototype = SharedFileSystem.prototype as any;
+            const replace = prototype.replaceBootstrapState;
+            const writes: Array<{ contents: any; phase: string }> = [];
+            prototype.replaceBootstrapState = function (
+                this: any,
+                path: string,
+                contents: string
+            ) {
+                if (this.node === peer) {
+                    writes.push({
+                        contents: JSON.parse(contents),
+                        phase: this.bootstrapPhase,
+                    });
+                }
+                return replace.call(this, path, contents);
+            };
+            restores.push(() => (prototype.replaceBootstrapState = replace));
+            const flip = atReadyOn(peer, (fs) => ({
+                phase: fs.bootstrapStatus().phase,
+                guardArmed: fs.bootstrapStatus().guardArmed,
+                quiescenceTimer: programOf(fs).quiescenceTimer,
+            }));
+            const joiner = await joinOf(donor, peer, { bootstrap: "auto" });
+            const program = programOf(joiner.fs);
+            await program.bootstrapDecision;
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                writeReady: false,
+                guardArmed: false,
+            });
+            // Until PR-6 the posture still arms its checker; the proof
+            // clears it before it ever runs (five minutes in production).
+            expect(program.quiescenceTimer).toBeDefined();
+            await waitUntil(() =>
+                expect(readinessOf(joiner.fs)).toMatchObject({
+                    state: "reconciling",
+                    satisfied: false,
+                })
+            );
+
+            const phases = watchTrigger(joiner.fs, "setBootstrapPhase");
+            busy.release();
+            await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+            // The posture ended before write:ready, with the checker's
+            // interval cleared and Guard D armed, and never through
+            // `converged`.
+            expect(await flip).toEqual({
+                phase: "off",
+                guardArmed: true,
+                quiescenceTimer: undefined,
+            });
+            expect(phases.map(({ args }) => args)).toEqual([["off"]]);
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+                snapshotCoverageVerified: false,
+            });
+            expect(readinessOf(joiner.fs)!.state).toBe("ready");
+
+            // One write carries the proof and clears the marker, made while
+            // the phase was still `unverified`; nothing was written after
+            // it, and every write before it kept the marker.
+            const proven = writes.findIndex(
+                ({ contents }) => contents.writeReady === true
+            );
+            expect(proven).toBe(writes.length - 1);
+            expect(writes[proven].phase).toBe("unverified");
+            expect(writes[proven].contents).toMatchObject({
+                writeReady: true,
+                writeReadySource: "reconciled",
+            });
+            expect(writes[proven].contents).not.toHaveProperty("bootstrap");
+            for (const { contents } of writes.slice(0, proven)) {
+                expect(contents.bootstrap).toBe("unverified");
+            }
+            const sidecar = await readSidecar(directory);
+            expect(sidecar).not.toHaveProperty("bootstrap");
+            expect(proofIn(sidecar).contained).toContainEqual(
+                expect.objectContaining({ peer: hashOf(donor.peer) })
+            );
+        });
+
+        it("design test 60: the phase clause still gates `fetching` and `overlay-active`; the overlay's unverified retirement lets the proof decide", async () => {
             const donor = await createDonor();
             const busy = holdOpens(donor.fs);
             const peer = await createPeer();
             const joiner = await joinOf(donor, peer);
             const program = programOf(joiner.fs);
-            // Enter the unverified posture (a resumed bootstrap that could
-            // not verify) and capture the quiescence checker's callback.
-            const realSetInterval = globalThis.setInterval;
-            let check: (() => void) | undefined;
-            let handle: ReturnType<typeof setInterval> | undefined;
-            const spy = vi
-                .spyOn(globalThis, "setInterval")
-                .mockImplementation(((callback: () => void) => {
-                    check = callback;
-                    handle = realSetInterval(() => {}, 2 ** 30);
-                    return handle;
-                }) as typeof setInterval);
-            try {
-                program.enterUnverified(
-                    program.openGeneration,
-                    "test: unverified posture"
-                );
-            } finally {
-                spy.mockRestore();
-            }
-            restores.push(() => clearInterval(handle));
-            expect(check).toBeDefined();
-            expect(joiner.fs.bootstrapStatus().phase).toBe("unverified");
-
-            busy.release();
+            const coordinator = coordinatorOf(joiner.fs);
             const donorHash = hashOf(donor.peer);
+            // What each bootstrap:converged saw.
+            const converged: Array<{ verified: boolean; phase: string }> = [];
+            program.events.addEventListener(
+                "bootstrap:converged",
+                (event: any) =>
+                    converged.push({
+                        verified: event.detail.verified,
+                        phase: joiner.fs.bootstrapStatus().phase,
+                    })
+            );
+
+            // A snapshot bootstrap fetching, then its overlay active (the
+            // phases only: what an overlay holds never reaches the proof).
+            program.setBootstrapPhase("fetching");
+            busy.release();
             await waitUntil(() =>
                 expect(readinessOf(joiner.fs)).toMatchObject({
                     state: "waiting-phase",
@@ -407,38 +504,134 @@ describe("readiness decision (PR-3 commit 4, in-process)", () => {
                     contained: [{ peer: donorHash, qualified: true }],
                 })
             );
-            const error = await timeoutOf(joiner.fs, 1_500);
-            expect(error.readiness).toMatchObject({ state: "waiting-phase" });
+            await timeoutOf(joiner.fs, 500);
+            program.setBootstrapPhase("overlay-active");
+            await waitUntil(() =>
+                expect(coordinator.debug().evaluationPending).toBe(false)
+            );
+            const error = await timeoutOf(joiner.fs, 500);
+            expect(error.readiness).toMatchObject({
+                state: "waiting-phase",
+                satisfied: false,
+            });
             expect(decisionsOf(joiner.fs)).toMatchObject({
                 started: 0,
                 inFlight: false,
             });
-            expect(runtimeOf(joiner.fs).debug().armedTimers).toBe(0);
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "overlay-active",
+                writeReady: false,
+            });
 
-            // The two quiescence checks, five minutes apart in production.
-            const phases = watchTrigger(joiner.fs, "setBootstrapPhase");
-            program.lastArrivalMs = 0;
-            check!();
-            expect(joiner.fs.bootstrapStatus().phase).toBe("unverified");
-            expect(phases).toEqual([]);
-            check!();
-            expect(phases).toEqual([
-                {
-                    args: ["converged"],
-                    before: expect.any(Boolean),
-                    after: true,
-                },
-            ]);
+            // The retirement timed out: the posture begins, and that phase
+            // change alone makes J ready on its proof, which ends it.
+            program.retireOverlay(false);
             await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "off",
+                writeReady: true,
+                writeReadinessSource: "reconciled",
+                guardArmed: true,
+            });
+            expect(program.quiescenceTimer).toBeUndefined();
             expect(decisionsOf(joiner.fs)).toMatchObject({
                 started: 1,
                 failed: 0,
             });
+            // The retirement's event, then the posture's end, which the
+            // ignore policy reads as settled.
+            expect(converged).toEqual([
+                { verified: false, phase: "unverified" },
+                { verified: false, phase: "off" },
+            ]);
+        });
+
+        it("a proof that lands after the quiescence checker ended the posture still moves the open to `off`, which passes the disposal phase check", async () => {
+            const donor = await createDonor();
+            const directory = await newDirectory();
+            const state = joinPath(directory, "shared-fs-bootstrap");
+            await mkdir(state, { recursive: true });
+            await writeFile(
+                joinPath(state, `${donor.fs.address}.json`),
+                JSON.stringify({ writeReady: false, bootstrap: "unverified" })
+            );
+            const peer = await createPeer(directory);
+            const flips = holdFlips(peer);
+            restores.push(flips.restore);
+            const joiner = await joinOf(donor, peer, { bootstrap: "auto" });
+            const program = programOf(joiner.fs);
+            await program.bootstrapDecision;
+            await waitUntil(() => expect(flips.parked()).toBe(1));
             expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "unverified",
+                writeReady: false,
+            });
+            const converged: Array<{ verified: boolean; phase: string }> = [];
+            program.events.addEventListener(
+                "bootstrap:converged",
+                (event: any) =>
+                    converged.push({
+                        verified: event.detail.verified,
+                        phase: joiner.fs.bootstrapStatus().phase,
+                    })
+            );
+
+            // The checker's two quiet checks (five minutes apart in
+            // production) run while the decision is parked.
+            const realSetInterval = globalThis.setInterval;
+            let check: (() => void) | undefined;
+            const spy = vi
+                .spyOn(globalThis, "setInterval")
+                .mockImplementationOnce(((callback: () => void) => {
+                    check = callback;
+                    const timer = realSetInterval(() => {}, 2 ** 30);
+                    restores.push(() => clearInterval(timer));
+                    return timer;
+                }) as typeof setInterval);
+            try {
+                program.startQuiescenceChecker();
+            } finally {
+                spy.mockRestore();
+            }
+            program.lastArrivalMs = 0;
+            check!();
+            check!();
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "converged",
+                snapshotCoverageVerified: false,
+                writeReady: false,
+            });
+
+            flips.release();
+            await joiner.fs.awaitWriteReady({ timeout: 30_000 });
+            expect(joiner.fs.bootstrapStatus()).toMatchObject({
+                phase: "off",
                 writeReady: true,
                 writeReadinessSource: "reconciled",
-                phase: "converged",
+                guardArmed: true,
+                snapshotCoverageVerified: false,
             });
+            // The checker already ran the posture's end actions; the proof
+            // only moves the phase.
+            expect(converged).toEqual([
+                { verified: false, phase: "converged" },
+            ]);
+            expect(await readSidecar(directory)).not.toHaveProperty(
+                "bootstrap"
+            );
+            // Disposal passes its phase check and goes on to capture the
+            // closure (stubbed: whether J holds every chunk yet is not this
+            // test's concern).
+            let captured = false;
+            program.captureDisposalClosure = async () => {
+                captured = true;
+                throw new Error("closure capture reached");
+            };
+            restores.push(() => delete program.captureDisposalClosure);
+            await expect(
+                joiner.fs.prepareForDisposal({ minAcks: 1, timeout: 30_000 })
+            ).rejects.toThrow();
+            expect(captured).toBe(true);
         });
     });
 
