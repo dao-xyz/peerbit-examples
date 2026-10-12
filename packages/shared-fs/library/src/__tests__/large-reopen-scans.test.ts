@@ -141,6 +141,9 @@ describe("shared fs large reopen scans", () => {
         );
     });
 
+    // Windows runners spend most of this test in the 300-file writeBatch:
+    // 46-89 s against about 2 s on Linux. 0.16.6 measured the same (38-114 s
+    // for the whole test, 2026-10-12), so the default 120 s left no room.
     it("reads every index row once across a cold reopen, a snapshot and a GC plan", async () => {
         const root = await mkdtemp(join(tmpdir(), "shared-fs-reopen-scans-"));
         roots.push(root);
@@ -329,7 +332,7 @@ describe("shared fs large reopen scans", () => {
         } finally {
             reads.restore();
         }
-    });
+    }, 300_000);
 
     it("the reopen content probe fails closed while the index is closing", async () => {
         const peer = await Peerbit.create();
