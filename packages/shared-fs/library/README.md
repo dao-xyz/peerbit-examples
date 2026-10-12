@@ -273,7 +273,19 @@ these hold:
   decides there. Its state-file write also clears the posture's marker, and
   the replica continues in phase `off` as a plain join that reconciled: the
   resurrection guard arms, and it may publish snapshots and pass the disposal
-  checks.
+  checks. A bootstrap (mode `auto`) still looking for or fetching a snapshot
+  when everything else holds stops there, because a snapshot can add nothing
+  the contained peers do not already hold: the join falls back to a plain
+  join (`lastFailure` reads "readiness proved the view before a snapshot was
+  needed") and decides at once, instead of waiting for discovery to time out
+  on a connected peer that does not run this filesystem. An overlay already
+  in use is not stopped, and `mode: "require"` still waits for its snapshot.
+  Readiness does not wait for snapshot manifests, which carry a fleet's
+  advisory ignore patterns: a joiner stopped this way takes them from the
+  manifest a full bootstrap would have chosen (never its own), when it holds
+  one or when one arrives (or its signer becomes trusted) later, until its
+  ignore policy has read the rules file or settled without it. Meanwhile its
+  own snapshots advertise no patterns.
 
 There is no quiet window and no polling. The condition is checked again on every
 readiness event (an answer, a peer arriving, leaving or becoming reachable, a
@@ -539,10 +551,14 @@ started (`open:start` is zero). Stage events additionally report their own
 `durationMs` and relevant counts. The stream covers document-store open,
 manifest discovery, segment fetch, overlay installation and readiness,
 pending-document drain, verified or unverified overlay retirement,
-readiness sessions, write readiness, fallback, and abort. A callback exception
-or rejected return is ignored so observability cannot change filesystem
-behavior. Callbacks run inline and returned promises are not awaited, so keep
-the handler lightweight and hand events to an external queue for slower work.
+readiness sessions, write readiness, fallback, and abort. When readiness
+stops a bootstrap (see [What a join proves](#what-a-join-proves)),
+`manifest-discovery:end` carries `aborted: "readiness"`, with zero counts if
+discovery itself was stopped, and the `fallback` reason says so. A callback
+exception or rejected return is ignored so observability cannot change
+filesystem behavior. Callbacks run inline and returned promises are not
+awaited, so keep the handler lightweight and hand events to an external queue
+for slower work.
 When no callback is supplied, Shared FS does not read telemetry clocks or
 allocate telemetry events.
 

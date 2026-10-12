@@ -29,6 +29,7 @@ export const READINESS_HOST = [
     "startReadinessJoin",
     "readinessPhaseSettled",
     "setBootstrapPhase",
+    "onReadinessComplete",
     "trackBootstrapDecision",
     "settleWriteReadinessDecision",
     "serializeWriteReadinessTransition",

@@ -780,6 +780,7 @@ describe("readiness coordinator: Required peers (design 4.7)", () => {
         expect(w.evaluations.at(-1)).toEqual({
             satisfied: true,
             changed: true,
+            complete: true,
         });
         expect(w.evaluations.filter((e) => e.satisfied)).toHaveLength(1);
     });
@@ -1133,6 +1134,7 @@ describe("readiness coordinator: Required peers (design 4.7)", () => {
         expect(w.evaluations.at(-1)).toEqual({
             satisfied: true,
             changed: true,
+            complete: true,
         });
     });
 });
@@ -3717,7 +3719,7 @@ describe("readiness coordinator: the phase clause and the decision (PR-3 commit 
         coordinator.evaluate();
         await settle();
         expect(w.evaluations.slice(evaluations)).toEqual([
-            { satisfied: true, changed: true },
+            { satisfied: true, changed: true, complete: true },
         ]);
         expect(decide).toHaveBeenCalledTimes(1);
         expect(coordinator.debug().decisions).toEqual({
@@ -3725,6 +3727,92 @@ describe("readiness coordinator: the phase clause and the decision (PR-3 commit 
             failed: 0,
             inFlight: false,
         });
+    });
+
+    it("68 (M2 PR-2): `complete` is the predicate without its phase clause; onComplete on every such evaluation, the reads once each, no timer", async () => {
+        const { w, peers } = await worldWith([["G", { provenance: GATED }]]);
+        const [g] = peers;
+        await w.start();
+        let phaseSettled = false;
+        const onComplete = vi.fn();
+        const decide = vi.fn(async () => {});
+        const coordinator = w.run({
+            phaseSettled: () => phaseSettled,
+            onComplete,
+            decide,
+        });
+        await w.until(() => w.stateOf(g) === "contained", "G contained");
+        await settle();
+        // No qualified donor: never complete, so the host is never told.
+        expect(w.evaluations.length).toBeGreaterThan(0);
+        expect(w.evaluations.every((e) => !e.complete && !e.satisfied)).toBe(
+            true
+        );
+        expect(onComplete).not.toHaveBeenCalled();
+
+        // G turns ready: its qualification session completes the predicate
+        // but for the phase clause.
+        g.provenance = RECONCILED;
+        g.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
+        await w.until(() => w.record(g).qualified, "G qualified");
+        await settle();
+        const complete = w.evaluations.filter((e) => e.complete);
+        expect(complete.length).toBeGreaterThan(0);
+        expect(complete.every((e) => !e.satisfied)).toBe(true);
+        // Level-triggered: once per complete evaluation, never awaited.
+        expect(onComplete).toHaveBeenCalledTimes(complete.length);
+        expect(decide).not.toHaveBeenCalled();
+        expect(w.status({ writeReady: false, phaseSettled: false }).state).toBe(
+            "waiting-phase"
+        );
+        // Nothing armed while only the phase waits, and no evaluation in
+        // hours of fake time.
+        expect(coordinator.debug().armedTimers).toBe(0);
+        const before = w.evaluations.length;
+        await w.clock.advanceSettled(HOUR);
+        expect(w.evaluations).toHaveLength(before);
+        expect(onComplete).toHaveBeenCalledTimes(complete.length);
+
+        // One trigger: one evaluation, one body (satisfied() once, its
+        // decision-time reads once), one call.
+        const satisfied = vi.spyOn(coordinator, "satisfied");
+        const reachableAgain = vi.spyOn(coordinator as any, "reachableAgain");
+        const refresh = vi.spyOn(coordinator as any, "refresh");
+        const recheck = vi.spyOn(coordinator as any, "recheck");
+        const recheckTrust = vi.spyOn(coordinator as any, "recheckTrust");
+        const calls = onComplete.mock.calls.length;
+        w.transport.emit({ kind: "reachability", source: "connect" });
+        await settle();
+        expect(w.evaluations.slice(before)).toEqual([
+            { satisfied: false, changed: false, complete: true },
+        ]);
+        expect(onComplete).toHaveBeenCalledTimes(calls + 1);
+        expect(satisfied).toHaveBeenCalledTimes(1);
+        expect(reachableAgain).toHaveBeenCalledTimes(1);
+        expect(refresh).not.toHaveBeenCalled();
+        expect(recheck).not.toHaveBeenCalled();
+        expect(recheckTrust).not.toHaveBeenCalled();
+        expect(coordinator.debug().armedTimers).toBe(0);
+
+        // A host that throws does not stop the join; the phase settling
+        // is the evaluation that decides, with no onComplete call.
+        onComplete.mockImplementation(() => {
+            throw new Error("host bug");
+        });
+        coordinator.evaluate();
+        await settle();
+        expect(onComplete).toHaveBeenCalledTimes(calls + 2);
+        satisfied.mockRestore();
+        phaseSettled = true;
+        coordinator.evaluate();
+        await settle();
+        expect(w.evaluations.at(-1)).toEqual({
+            satisfied: true,
+            changed: true,
+            complete: true,
+        });
+        expect(onComplete).toHaveBeenCalledTimes(calls + 2);
+        expect(decide).toHaveBeenCalledTimes(1);
     });
 
     it("M8: a phase clause that throws reads as unsettled: gated, no decision", async () => {
@@ -3761,6 +3849,7 @@ describe("readiness coordinator: the phase clause and the decision (PR-3 commit 
         expect(w.evaluations.at(-1)).toEqual({
             satisfied: true,
             changed: false,
+            complete: true,
         });
         expect(decide).toHaveBeenCalledTimes(2);
         expect(coordinator.debug().decisions).toEqual({
@@ -3796,7 +3885,7 @@ describe("readiness coordinator: the phase clause and the decision (PR-3 commit 
         await settle();
         // One rerun of the evaluation, one more decision.
         expect(w.evaluations.slice(evaluations)).toEqual([
-            { satisfied: true, changed: false },
+            { satisfied: true, changed: false, complete: true },
         ]);
         expect(decide).toHaveBeenCalledTimes(2);
         // Nothing landed during the second: no third.
@@ -3853,6 +3942,7 @@ describe("readiness coordinator: the phase clause and the decision (PR-3 commit 
         expect(w.evaluations.at(-1)).toEqual({
             satisfied: true,
             changed: false,
+            complete: true,
         });
         expect(coordinator.debug().decisions).toEqual({
             started: 2,
@@ -5731,7 +5821,7 @@ describe("host decision (index.ts)", () => {
             expect(program.clock).not.toHaveBeenCalled();
             expect(timers.armed).toEqual([]);
             expect(w.evaluations.filter((e) => e.satisfied)).toEqual([
-                { satisfied: true, changed: true },
+                { satisfied: true, changed: true, complete: true },
             ]);
             expect(coordinator.debug()).toMatchObject({
                 armedTimers: 0,
@@ -6000,8 +6090,8 @@ describe("host decision (index.ts)", () => {
             w.transport.emit({ kind: "subscribe", peer: d.hash, key: d.key });
             await w.until(() => program.writesReady, "J ready");
             expect(w.evaluations.filter((e) => e.satisfied)).toEqual([
-                { satisfied: true, changed: true },
-                { satisfied: true, changed: false },
+                { satisfied: true, changed: true, complete: true },
+                { satisfied: true, changed: false, complete: true },
             ]);
             expect(program.writeBootstrapState).toHaveBeenCalledTimes(2);
             expect(program.writeBootstrapState.mock.calls[1][0]).toEqual(
