@@ -1,5 +1,23 @@
 # @peerbit/shared-fs-cli
 
+## 0.18.0
+
+### Minor Changes
+
+- 0c066da: `mount --require-fresh` keeps a warm remount from becoming writable until the
+  replica has compared its view with the peers of the filesystem it can see,
+  within `--write-ready-timeout-ms` (the library's
+  `writeReadiness.requireFreshOnReopen`). It cannot be combined with
+  `--assume-complete` or `--allow-partial-writes`. `mount` and `status` print
+  `freshness: <state>` for a warm replica, and `status --json` includes
+  `freshness`. Every command but `mount` checks freshness only if a peer asks it,
+  so a script that runs `status` repeatedly adds no freshness requests.
+
+### Patch Changes
+
+- Updated dependencies [0c066da]
+    - @peerbit/shared-fs@0.18.0
+
 ## 0.17.2
 
 ### Patch Changes
