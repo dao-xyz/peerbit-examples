@@ -1833,10 +1833,16 @@ describe("shared fs cold-start bootstrap", () => {
                 heldOpen.mockRestore();
             }
             await waiting.awaitWriteReady({ timeout: 20_000 });
-            // The restarted creator is a warm reopen of its directory.
+            // The restarted creator is a warm reopen of its directory:
+            // `warm`, or `warm-fresh` when its own freshness check (M2)
+            // contained the joiner before the joiner's session froze.
             expect(
                 containedNamespace(waiting, creatorPeer).result
-            ).toMatchObject({ source: "warm", qualified: true, count: 0 });
+            ).toMatchObject({
+                source: expect.stringMatching(/^warm(-fresh)?$/),
+                qualified: true,
+                count: 0,
+            });
             expect(logOf(reopened).length).toBe(5);
             await waiting.writeFile("/first.txt", "after retry");
             await waitUntil(async () => {

@@ -11,6 +11,7 @@ import {
     READINESS_FORMAT_TAG,
 } from "../readiness/constants.js";
 import {
+    CAP_FRESHNESS,
     CellsReqV1,
     CellsV1,
     CloseV1,
@@ -207,7 +208,10 @@ describe("readiness wire v1", () => {
         });
         expect(fresh.formatTag).toBe(READINESS_FORMAT_TAG);
         expect(fresh.caps).toBe(READINESS_CAPS);
-        expect(READINESS_CAPS).toBe(0);
+        // M2 PR-4: bit 0 says "qualifies and reports `warm-fresh`"; the
+        // layout and the golden bytes above (explicit caps) are unchanged.
+        expect(CAP_FRESHNESS).toBe(1);
+        expect(READINESS_CAPS).toBe(CAP_FRESHNESS);
         // caps is the last provenance field: a little-endian u32.
         const encoded = serialize(provenance());
         expect(hex(encoded.subarray(encoded.length - 4))).toBe("04030201");

@@ -16,6 +16,7 @@ import {
 import type { ScopeDescriptor, ScopeId } from "./scopes.js";
 import type { ScopeTap } from "./tap.js";
 import {
+    CAP_FRESHNESS,
     CellsReqV1,
     CellsV1,
     CloseV1,
@@ -82,6 +83,16 @@ import {
  *   out while its freeze waited (the joiner's attempts may have ended
  *   unanswered meanwhile). Every `EXPIRED` ends its session, since the
  *   joiner opens a new one.
+ * - **Labels (M2 PR-4).** A warm open that passed its freshness check
+ *   reports `warm-fresh` (`ports.provenance`). A session's header says so
+ *   only to an asker whose `OpenV1.caps` sets `CAP_FRESHNESS`; one without
+ *   the bit (0.17.0) gets `warm`, which it qualifies (`provenanceFor`).
+ *   Notices are labelled the same way, by the caps of the target's last
+ *   OPEN, and carry `warm-fresh` to a target that never sent one: an M2
+ *   joiner opens a qualification session only on a notice whose
+ *   provenance qualifies (M2 plan section 3), and so does a 0.17.0 joiner
+ *   that holds a gated W contained and unqualified, which never qualifies
+ *   `warm-fresh`.
  * - **Re-entrancy (S15).** The RPC awaits decryption before each handler and
  *   directed messages take different routes, so no handler assumes order: a
  *   request awaits its session's freeze, and every await re-checks that the
@@ -102,6 +113,10 @@ export interface ResponderScope {
 
 export interface ProvenanceState {
     writeReady: boolean;
+    /**
+     * `warm-fresh` for a warm open that passed its freshness check; the
+     * responder labels it per asker (`provenanceFor`).
+     */
     source: ProvenanceSource;
     fullReplica: boolean;
     phase: ProvenancePhase;
@@ -122,9 +137,29 @@ export const systemTimers: Timers = {
     clear: (handle) => clearTimeout(handle as any),
 };
 
+/**
+ * The provenance an asker with `askerCaps` is told (M2 PR-4): `warm-fresh`
+ * only to an asker that sets `CAP_FRESHNESS`, `warm` to one that does not
+ * (a 0.17.0 joiner qualifies `warm`, never `warm-fresh`). Every other
+ * source as it is.
+ */
+export const provenanceFor = (
+    state: ProvenanceState,
+    askerCaps: number
+): ProvenanceState =>
+    state.source === "warm-fresh" && (askerCaps & CAP_FRESHNESS) === 0
+        ? { ...state, source: "warm" }
+        : state;
+
 export interface ResponderPorts {
     /** Directed send; `to` is a key or its hashcode (`rpc.send`'s `to`). */
     send(message: ReadinessMessage, to: PublicSignKey | string): Promise<void>;
+    /**
+     * This open's provenance now, as for an asker with `CAP_FRESHNESS`
+     * (`warm-fresh` once fresh): sessions and notices send it through
+     * `provenanceFor` with their asker's caps (a notice target that never
+     * sent an OPEN gets it as it is).
+     */
     provenance(): ProvenanceState;
     timers?: Timers;
 }
@@ -151,7 +186,10 @@ interface Snapshot {
 interface FrozenScope {
     readonly scope: ResponderScope;
     readonly snapshot: Snapshot;
-    /** Read with the session's first snapshot; every header sends it. */
+    /**
+     * Read with the session's first snapshot and labelled for its asker
+     * (`provenanceFor`); every header sends it.
+     */
     readonly provenance: ProvenanceState;
     readonly anchor: Uint8Array;
     /** The snapshot's cells in the wire layout (m x 44 B). */
@@ -170,6 +208,8 @@ interface Session {
     /** Every header of this session carries it (`HeaderV1.freezeId`). */
     readonly freezeId: Uint8Array;
     readonly hlcProved: bigint;
+    /** The asker's `OpenV1.caps` from the OPEN that created the session. */
+    readonly caps: number;
     list: boolean;
     /** Resolves to the frozen scopes, or to an error code to answer. */
     frozen: Promise<FrozenScope[] | ErrorCode>;
@@ -281,6 +321,8 @@ export class Responder {
     >();
     /** Peers that had a session or a `BUSY` in this open (READY notices, PR-3). */
     readonly noticeTargets = new Map<string, PublicSignKey>();
+    /** The `OpenV1.caps` of each notice target's last OPEN (`sendNotice`). */
+    private readonly targetCaps = new Map<string, number>();
     private readonly snapshots = new Map<ScopeId, Snapshot>();
     /** The newest list copy per scope (`listOf`). */
     private readonly lists = new Map<
@@ -406,17 +448,18 @@ export class Responder {
         this.send(new ErrorV1({ sessionId, code }), to);
     }
 
-    private remember(hash: string, peer: PublicSignKey) {
+    private remember(hash: string, peer: PublicSignKey, caps?: number) {
         if (
             this.noticeTargets.size < NOTICE_TARGETS ||
             this.noticeTargets.has(hash)
         ) {
             this.noticeTargets.set(hash, peer);
+            if (caps !== undefined) this.targetCaps.set(hash, caps);
         }
     }
 
-    /** `state`, or the provenance now (notices: a trigger, never evidence). */
-    private provenance(state: ProvenanceState = this.ports.provenance()) {
+    /** `state` as this responder sends it (its nonce and caps). */
+    private provenance(state: ProvenanceState) {
         return new ProvenanceV1({
             ...state,
             openNonce: this.host.openNonce,
@@ -461,6 +504,7 @@ export class Responder {
                 limit.peer ||
                 limit.list
             ) {
+                this.remember(peerHash, from, open.caps);
                 return this.error(from, open.sessionId, ERROR_CODE.BUSY, limit);
             }
             const created: Session = {
@@ -472,6 +516,7 @@ export class Responder {
                 // another freeze, and its headers say so.
                 freezeId: randomBytes(FREEZE_ID_BYTES),
                 hlcProved: open.hlcProved,
+                caps: open.caps,
                 list,
                 frozen: undefined as any,
                 cellsServed: new Map(),
@@ -479,7 +524,7 @@ export class Responder {
             this.sessions.set(key, created);
             this.perPeer.set(peerHash, (this.perPeer.get(peerHash) ?? 0) + 1);
             if (list) this.listSession = key;
-            this.remember(peerHash, from);
+            this.remember(peerHash, from, open.caps);
             created.frozen = this.freeze(created, scopes);
             session = created;
         }
@@ -619,8 +664,12 @@ export class Responder {
                 }
                 const snapshot = this.snapshotOf(scope);
                 // In the same synchronous step as the first snapshot: a
-                // peer that turns ready later must not vouch for it.
-                provenance ??= this.ports.provenance();
+                // peer that turns ready (or fresh) later must not vouch for
+                // it.
+                provenance ??= provenanceFor(
+                    this.ports.provenance(),
+                    session.caps
+                );
                 out.push({
                     scope,
                     snapshot,
@@ -888,15 +937,29 @@ export class Responder {
 
     /**
      * Directed `StateNoticeV1` to each peer, a key or its hashcode (a
-     * trigger, never evidence).
+     * trigger, never evidence), with the provenance now labelled for the
+     * caps of the peer's last OPEN (`provenanceFor`; M2 PR-4): `warm` to a
+     * 0.17.0 joiner, which qualifies it, `warm-fresh` to an M2 one and to
+     * a peer that never sent an OPEN.
      */
     sendNotice(peers: Iterable<PublicSignKey | string>, reason: number) {
         if (!this.answering()) return;
-        const notice = new StateNoticeV1({
-            provenance: this.provenance(),
-            reason,
-        });
+        const state = this.ports.provenance();
+        const notices = new Map<ProvenanceSource, StateNoticeV1>();
         for (const peer of peers) {
+            const caps = this.targetCaps.get(
+                typeof peer === "string" ? peer : peer.hashcode()
+            );
+            const label =
+                caps === undefined ? state : provenanceFor(state, caps);
+            let notice = notices.get(label.source);
+            if (!notice) {
+                notice = new StateNoticeV1({
+                    provenance: this.provenance(label),
+                    reason,
+                });
+                notices.set(label.source, notice);
+            }
             this.stats.notices++;
             this.send(notice, peer);
         }
@@ -912,6 +975,7 @@ export class Responder {
         this.sessions.clear();
         this.perPeer.clear();
         this.busyWaiters.clear();
+        this.targetCaps.clear();
         this.snapshots.clear();
         this.lists.clear();
         this.listSession = undefined;

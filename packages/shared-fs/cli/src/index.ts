@@ -570,6 +570,15 @@ const openCliFs = async (
         allowPartialWrites?: boolean;
         gc?: false;
         rootKey?: Peerbit["identity"]["publicKey"];
+        /**
+         * The mount's long-lived open checks a warm replica's freshness at
+         * once (`eager`); every other command is one short run, which
+         * checks only if a peer asks it (`on-demand`, the default here), so
+         * a script that runs `status` in a loop adds no freshness load.
+         */
+        freshnessStart?: "eager" | "on-demand";
+        /** mount --require-fresh. */
+        requireFreshOnReopen?: boolean;
     }
 ) => {
     const { openSharedFs } = await loadSharedFsRuntime();
@@ -577,6 +586,10 @@ const openCliFs = async (
         options.replicate === false
             ? { replicate: false }
             : CLI_REPLICATION_ARGS;
+    // The library's internal open argument; no public option.
+    const internalArgs = {
+        freshnessStart: options.freshnessStart ?? "on-demand",
+    };
     const open = () =>
         openSharedFs({
             peerbit,
@@ -585,7 +598,11 @@ const openCliFs = async (
             rootKey: options.rootKey,
             allowPartialWrites: options.allowPartialWrites,
             gc: options.gc,
+            ...(options.requireFreshOnReopen
+                ? { writeReadiness: { requireFreshOnReopen: true } }
+                : {}),
             ...programArgs,
+            ...internalArgs,
         });
     if (!options.address) {
         return open();
@@ -1002,6 +1019,19 @@ const awaitCliWriteReady = async (
     return fsHandle.bootstrapStatus();
 };
 
+/**
+ * "freshness: <state>" of a warm replica's check, or undefined for an open
+ * that runs none (a creator, a fresh join, an observer).
+ */
+const freshnessLine = (status: BootstrapStatus) => {
+    const freshness = status.freshness;
+    if (!freshness) return undefined;
+    const contained = freshness.contained.length;
+    return `freshness: ${freshness.state}${
+        contained > 0 ? ` (${contained} contained)` : ""
+    }`;
+};
+
 /** "write readiness: ready (<source>)", printed once a mount is writable. */
 const writeReadinessLine = (status: BootstrapStatus) =>
     status.partialWriteOverride
@@ -1319,6 +1349,12 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             "Fail the mount if a safe initial write view is not established within this time.",
                     })
                     .option("assume-complete", ASSUME_COMPLETE_OPTION)
+                    .option("require-fresh", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "On a warm reopen (a directory where this replica was already writable), keep the mount from becoming writable until this replica has compared its view with the peers of this filesystem it can see, within --write-ready-timeout-ms. Without it a warm reopen is writable at once from its own earlier proof, also offline, and checks in the background.",
+                    })
                     .option("allow-partial-writes", {
                         type: "boolean",
                         default: false,
@@ -1341,6 +1377,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 if (argv.assumeComplete && argv.allowPartialWrites) {
                     throw new Error(
                         "--assume-complete cannot be combined with --allow-partial-writes: the override never records a readiness proof, and assumeComplete() is refused under it."
+                    );
+                }
+                if (argv.requireFresh && argv.allowPartialWrites) {
+                    throw new Error(
+                        "--require-fresh cannot be combined with --allow-partial-writes: the override is writable at once and never checks freshness."
+                    );
+                }
+                if (argv.requireFresh && argv.assumeComplete) {
+                    throw new Error(
+                        "--require-fresh cannot be combined with --assume-complete: to write on a warm replica's own proof without comparing it with peers, mount without --require-fresh."
                     );
                 }
                 assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
@@ -1385,6 +1431,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         machineLabel: argv.machine,
                         replicate: true,
                         allowPartialWrites: argv.allowPartialWrites,
+                        // A mount runs on: its warm reopen checks at once.
+                        freshnessStart: "eager",
+                        requireFreshOnReopen: argv.requireFresh,
                     });
                     // A fresh address-open can serve bootstrap-overlay reads
                     // before its namespace is safe to mutate. Do not expose a
@@ -1396,11 +1445,15 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         timeoutMs: argv.writeReadyTimeoutMs,
                         subject:
                             "mount did not establish a safe initial write view",
-                        note: " --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.",
-                        offersAssumeComplete: true,
+                        note: argv.requireFresh
+                            ? " --require-fresh: this warm replica waits until it has compared its view with a peer of this filesystem; mount without it to write on its own earlier proof."
+                            : " --allow-partial-writes is only a session-scoped, data-conflict-risk recovery bypass.",
+                        offersAssumeComplete: !argv.requireFresh,
                         assumeComplete: argv.assumeComplete,
                     });
                     console.log(writeReadinessLine(ready));
+                    const freshness = freshnessLine(ready);
+                    if (freshness) console.log(freshness);
                     let nativeProfileFile: string | undefined;
                     if (mountProfileDirectory) {
                         const profileFiles = await openMountProfileFiles(
@@ -1560,6 +1613,10 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                     // Which peers a join waits for and why
                                     // (plain data), or null without a join.
                                     readiness: bootstrapAfter.readiness ?? null,
+                                    // A warm replica's freshness check, or
+                                    // null without one. This short run
+                                    // checks only if a peer asks it.
+                                    freshness: bootstrapAfter.freshness ?? null,
                                 },
                                 localPublicKey: fsHandle.localPublicKey,
                                 accessControlled: fsHandle.accessControlled,
@@ -1617,6 +1674,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             `write readiness: ${bootstrapAfter.writeReady ? "ready" : "pending"}${bootstrapAfter.writeReadinessSource ? ` (${bootstrapAfter.writeReadinessSource})` : ""}`
                         );
                     }
+                    const freshness = freshnessLine(bootstrapAfter);
+                    if (freshness) console.log(freshness);
                     console.log(`local public key: ${fsHandle.localPublicKey}`);
                     console.log(
                         `access controlled: ${

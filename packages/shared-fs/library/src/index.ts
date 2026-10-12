@@ -99,9 +99,12 @@ import {
     READINESS_TOPIC_SALT,
     REQUEST_TIMEOUT_MAX_MS,
     REQUEST_TIMEOUT_MS,
+    type FreshnessStart,
 } from "./readiness/constants.js";
 import {
     describeReadiness,
+    type FreshnessState,
+    type FreshnessStatus,
     type PeerChange,
     type PeerReason,
     type PeerState,
@@ -131,6 +134,8 @@ import { ReadinessMessage } from "./readiness/wire.js";
 export * from "./model.js";
 export {
     describeReadiness,
+    type FreshnessState,
+    type FreshnessStatus,
     type ReadinessState,
     type ReadinessStatus,
     type PeerState as ReadinessPeerState,
@@ -673,7 +678,9 @@ export type BootstrapTelemetryEvent =
            * Peers counted at the decision: for `reconciled`, the persisted
            * proof (distinct contained peers, excluded and gap records; at
            * most 32 per array, as the proof keeps); for `operator`, the
-           * readiness status at the flip; 0 for a creator and a warm reopen.
+           * readiness status at the flip; 0 for a creator and a warm reopen,
+           * except a warm reopen requireFreshOnReopen gated, which counts
+           * its freshness check at the flip.
            */
           contained: number;
           excluded: number;
@@ -734,6 +741,22 @@ export type BootstrapTelemetryEvent =
      * sessions included), never deduplicated.
      */
     | ({ type: "readiness-session"; atMs: number } & ReadinessSessionRecord)
+    /**
+     * A warm full-replica open's freshness check changed state (M2): one
+     * event per change of `bootstrapStatus().freshness.state`, with the
+     * peers counted at that moment. `ms` once fresh (from the end of the
+     * open); `requests` the check's OPEN, cells and list requests so far.
+     */
+    | {
+          type: "freshness";
+          atMs: number;
+          state: FreshnessState;
+          contained: number;
+          excluded: number;
+          gaps: number;
+          ms?: number;
+          requests: number;
+      }
     | {
           type: "fallback";
           atMs: number;
@@ -864,8 +887,19 @@ export type SharedFsOpenArgs = {
      * blocks after its last attempt, and a replicator with no sign of life
      * is asked for at least 5000 ms. The exception is a peer that left
      * before answering: it stops blocking when its attempt in flight ends.
+     *
+     * `requireFreshOnReopen` (default false): a warm reopen of a full
+     * replica stays write-gated, with the resurrection guard armed on its
+     * proven view, until its freshness check (README "Warm freshness")
+     * contained the peers it sees, then turns writable with the source it
+     * persisted. Offline it stays gated; assumeComplete() releases it as
+     * `operator`. It changes nothing for other opens, and is refused with
+     * allowPartialWrites.
      */
-    writeReadiness?: { requestTimeoutMs?: number };
+    writeReadiness?: {
+        requestTimeoutMs?: number;
+        requireFreshOnReopen?: boolean;
+    };
     /**
      * Caller assertion for the physical block store. Snapshot segment deletion
      * additionally requires the blocks service to report
@@ -886,6 +920,13 @@ type SharedFsInternalOpenArgs = SharedFsOpenArgs & {
     bootstrapTelemetry?: (event: BootstrapTelemetryEvent) => void;
     /** openSharedFs-only callback; never serialized into the program. */
     openProfileTelemetry?: (event: SharedFsOpenProfileEvent) => void;
+    /**
+     * When a warm full-replica open starts its freshness check
+     * (`FRESHNESS_START` by default). The CLI's one-shot commands pass
+     * `on-demand` (M2 O15): a short run then checks only if a peer asks it.
+     * No public option; `requireFreshOnReopen` always starts at once.
+     */
+    freshnessStart?: FreshnessStart;
 };
 
 export type BootstrapOptions = {
@@ -990,6 +1031,13 @@ export type BootstrapStatus = {
      * replica, allowPartialWrites, and after close.
      */
     readiness?: ReadinessStatus;
+    /**
+     * A warm full-replica open's freshness check (README "Warm
+     * freshness"): whether this reopen has contained the peers it sees
+     * since its proof. `off` on a warm reopen under allowPartialWrites (no
+     * check runs); undefined on every other open and after close.
+     */
+    freshness?: FreshnessStatus;
     manifest?: {
         authorKey: string;
         snapshotSeq: bigint;
@@ -1547,6 +1595,25 @@ const validateWriteReadiness = (args: SharedFsOpenArgs | undefined) => {
         throw new SharedFsError(
             "EINVAL",
             `writeReadiness.requestTimeoutMs must be a number of milliseconds from ${WRITE_READINESS_REQUEST_TIMEOUT_MIN_MS} to ${REQUEST_TIMEOUT_MAX_MS}`
+        );
+    }
+    const requireFreshOnReopen: unknown =
+        args?.writeReadiness?.requireFreshOnReopen;
+    if (
+        requireFreshOnReopen !== undefined &&
+        typeof requireFreshOnReopen !== "boolean"
+    ) {
+        throw new SharedFsError(
+            "EINVAL",
+            "writeReadiness.requireFreshOnReopen must be a boolean"
+        );
+    }
+    // The override is writable at once and never runs the check, so the
+    // two would contradict each other silently.
+    if (requireFreshOnReopen === true && args?.allowPartialWrites === true) {
+        throw new SharedFsError(
+            "EINVAL",
+            "writeReadiness.requireFreshOnReopen cannot be combined with allowPartialWrites"
         );
     }
 };
@@ -2968,8 +3035,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /** Readiness state of the current open generation (not serialized). */
     private readinessRuntime: ReadinessRuntime | undefined;
-    /** This generation became ready from a trusted warm sidecar (set in open). */
+    /**
+     * This generation reopened from a trusted warm sidecar (set in open):
+     * ready at once, or gated until fresh under requireFreshOnReopen.
+     */
     private readinessWarmOpen: boolean | undefined;
+    /**
+     * This warm open's freshness check held (M2; set in open, monotone for
+     * the open): its provenance says `warm-fresh`.
+     */
+    private readinessFresh: boolean | undefined;
+    /** `writeReadiness.requireFreshOnReopen` of this open (set in open). */
+    private requireFreshOnReopen: boolean | undefined;
+    /** The freshness state `freshness:change` last reported (set in open). */
+    private readinessFreshnessReported: FreshnessState | undefined;
     /** `writeReadiness.requestTimeoutMs` of this open (set in open). */
     private readinessRequestTimeoutMs: number | undefined;
     /** `write:ready` went out in this open generation (set in open). */
@@ -3622,6 +3701,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writesReady = !addressOpen || partialWriteOverride;
         this.partialWriteOverride = partialWriteOverride;
         this.readinessWarmOpen = false;
+        this.readinessFresh = false;
+        this.readinessFreshnessReported = undefined;
         this.writeReadinessRequired = addressOpen && !partialWriteOverride;
         this.viewProven = !addressOpen;
         this.writeReadinessDecisionSettled =
@@ -3629,6 +3710,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessSource = undefined;
         this.readinessRequestTimeoutMs =
             args?.writeReadiness?.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+        this.requireFreshOnReopen =
+            args?.writeReadiness?.requireFreshOnReopen === true;
         this.machineLabel = args?.machineLabel || "unknown-machine";
         // Default to a full replica: every mount serves the whole namespace
         // from its local index, and a writer must never see its own files
@@ -3880,11 +3963,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // full-replica open's readiness decision (with its proof) or
             // assumeComplete(). Missing/unreadable state and any
             // interrupted-bootstrap marker remain fail-closed.
-            this.writesReady = true;
-            this.writeReadinessRequired = false;
             this.viewProven = true;
             this.writeReadinessDecisionSettled = true;
             this.readinessWarmOpen = true;
+            if (this.requireFreshOnReopen && !partialWriteOverride) {
+                // Gated until the freshness check holds (M2): the view is
+                // proven, so the resurrection guard stays armed, and the
+                // sidecar keeps its proof and source for the flip
+                // (onReadinessFresh). No join runs (startReadinessJoin).
+                this.writesReady = false;
+                this.writeReadinessRequired = true;
+                this.writeReadinessSource = undefined;
+            } else {
+                this.writesReady = true;
+                this.writeReadinessRequired = false;
+            }
         }
         if (addressOpen && !trustedWarmWriteReady) {
             // Clear any proof from an earlier full-replica generation before
@@ -3960,9 +4053,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // ingest instead; it is chunked with yields and still lands in
         // low single-digit seconds.
         // A fresh full address-open runs the readiness join once it opened
-        // (startReadinessJoin).
+        // (startReadinessJoin), a warm full-replica open its freshness
+        // check (startReadinessFreshness), gated or not.
         const freshFullJoin =
-            addressOpen && this.writeReadinessRequired && this.isFullReplica();
+            addressOpen &&
+            this.writeReadinessRequired &&
+            this.isFullReplica() &&
+            !this.readinessWarmOpen;
+        const warmFullCheck =
+            this.readinessWarmOpen === true && !partialWriteOverride;
         const openProfileTelemetry = internalArgs?.openProfileTelemetry;
         const entrySyncProfile = openProfileTelemetry
             ? (event: SharedFsSyncProfileEvent) => {
@@ -3986,10 +4085,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         await readinessRuntime.whenTaken();
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         // A fresh full address-open runs the joiner's coordinator later
-        // (startReadinessJoin); what peers announce from here on is a sign
-        // of life it counts.
+        // (startReadinessJoin), a warm full-replica open the same coordinator
+        // for its freshness check; what peers announce from here on is a
+        // sign of life it counts.
         readinessRuntime.attachNamespace(this.entries, {
-            join: freshFullJoin,
+            join: freshFullJoin || warmFullCheck,
         });
         const readinessOpen = this.readiness.open({
             topic: toBase64(
@@ -4292,8 +4392,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.assertLifecycleRequestActive(lifecycleRequestGeneration);
         this.writeReadinessLifecycleBlocked = false;
-        if (this.writeReadinessRequired && this.isFullReplica()) {
+        if (
+            this.writeReadinessRequired &&
+            this.isFullReplica() &&
+            !this.readinessWarmOpen
+        ) {
             this.startReadinessJoin(openGeneration, persisted.hlcProved);
+        } else if (warmFullCheck) {
+            this.startReadinessFreshness(openGeneration, {
+                hlcProved: persisted.hlcProved,
+                // A warm open was proven with this source; the gated flip
+                // keeps it (trustedWarmWriteReady).
+                source: persisted.writeReadySource!,
+                start: internalArgs?.freshnessStart,
+            });
         }
         // Only a creating open, or the author of a zero-document manifest,
         // publishes one (see publishEmptyManifest).
@@ -4733,10 +4845,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     /**
      * What the readiness responder reports about this open (honest
      * provenance, WRITE_READINESS_V2.md 4.4). A warm reopen of an accepted
-     * sidecar reports `warm`, not the source it persisted. In this open, a
-     * creating open reports `creator`, the readiness decision (design 4.8)
-     * `reconciled`, so a chain of joiners can qualify each other, and
-     * assumeComplete() `operator`.
+     * sidecar reports `warm`, not the source it persisted, and `warm-fresh`
+     * once its freshness check held (M2), also after a requireFreshOnReopen
+     * open was released by assumeComplete(). The responder tells an asker
+     * without `CAP_FRESHNESS` `warm` all the same (`provenanceFor`). In this
+     * open, a creating open reports `creator`, the readiness decision
+     * (design 4.8) `reconciled`, so a chain of joiners can qualify each
+     * other, and assumeComplete() `operator`.
      */
     private readinessProvenance(): ProvenanceState {
         const writeReady = this.writesReady === true;
@@ -4748,7 +4863,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 : !writeReady || source === undefined
                   ? "none"
                   : this.readinessWarmOpen
-                    ? "warm"
+                    ? this.readinessFresh
+                        ? "warm-fresh"
+                        : "warm"
                     : source,
             fullReplica: this.isFullReplica(),
             phase: this.bootstrapPhase,
@@ -11451,11 +11568,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * unverified posture ends here too (endUnverifiedPosture): the same
      * sidecar write clears its marker. One the quiescence checker already
      * ended (`converged`, unverified) moves to `off` as well.
+     *
+     * `keepProof` (M2, the requireFreshOnReopen flip of a warm open, with
+     * the source it persisted, `creator` included): `proof` and
+     * `hlcProved` stay out of the patch, so the sidecar keeps the proof
+     * that made the open warm instead of losing it to `proof: null`.
      */
     private async commitWriteReady(
         generation: number,
-        source: "reconciled" | "operator",
-        proof?: Proof
+        source: WriteReadinessSource,
+        proof?: Proof,
+        options: { keepProof?: boolean } = {}
     ) {
         const drops = this.dropRequests;
         await this.writeBootstrapState(
@@ -11463,8 +11586,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 writeReady: true,
                 writeReadySource: source,
                 bootstrap: null,
-                proof: proof ?? null,
-                ...(proof ? { hlcProved: hlcProvedOf(proof) } : {}),
+                ...(options.keepProof
+                    ? {}
+                    : {
+                          proof: proof ?? null,
+                          ...(proof ? { hlcProved: hlcProvedOf(proof) } : {}),
+                      }),
             },
             generation,
             true
@@ -11505,7 +11632,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     gaps: proof.gaps.length,
                 };
             }
-            const readiness = this.readinessStatus();
+            // A warm open's flip counts its freshness check.
+            const readiness =
+                this.readinessStatus() ??
+                this.readinessRuntime?.freshnessStatus();
             return {
                 contained: readiness?.contained.length ?? 0,
                 excluded: readiness?.excluded.length ?? 0,
@@ -11555,24 +11685,54 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * through markWriteReady() when design 4.8's predicate holds. No timer,
      * no poll: every trigger is an event (design 4.9), a phase change and
      * the bootstrap decision included (setBootstrapPhase,
-     * settleWriteReadinessDecision).
+     * settleWriteReadinessDecision). Never on a warm open, which a
+     * requireFreshOnReopen open leaves gated: its freshness check holds the
+     * coordinator slot and has no donor clause, so two such peers never
+     * wait for each other (startReadinessFreshness).
      */
     private startReadinessJoin(generation: number, hlcProved: bigint) {
         if (
             generation !== this.openGeneration ||
-            !this.writeReadinessRequired
+            !this.writeReadinessRequired ||
+            this.readinessWarmOpen
         ) {
             return;
         }
         this.readinessRuntime?.startJoin({
+            ...this.readinessCoordinatorPorts(generation),
+            hlcProved,
+            phaseSettled: () => this.readinessPhaseSettled(),
+            onComplete: () => this.onReadinessComplete(generation),
+            // Looked up at call time, so a test can hold the decision
+            // (readiness-flip-hold.ts) without touching this closure.
+            onSatisfied: () => this.markWriteReady(generation),
+            onSession: (record) => {
+                if (generation === this.openGeneration) {
+                    this.emitReadinessSession(record);
+                }
+            },
+            requestTimeoutMs: this.readinessRequestTimeoutMs,
+            onProgress: (changed) => {
+                if (generation === this.openGeneration) {
+                    this.onReadinessProgress(changed);
+                }
+            },
+        });
+    }
+
+    /**
+     * The transport of this open's readiness coordinator (a join or a
+     * freshness check) and, in an access-controlled store, its trust port:
+     * it reads this open's trust graph, and once the open is gone it
+     * rejects, which gates (a join) or keeps the check from holding.
+     */
+    private readinessCoordinatorPorts(generation: number) {
+        return {
             transport: () =>
                 new PeerbitTransport(this.node, {
                     topic: this.readiness.topic,
                     log: this.entries.log,
                 }),
-            hlcProved,
-            // An access-controlled store's join reads this open's trust
-            // graph; once the open is gone it rejects, which gates.
             ...(this.trustGraph
                 ? {
                       trust: {
@@ -11591,23 +11751,152 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                       },
                   }
                 : {}),
-            phaseSettled: () => this.readinessPhaseSettled(),
-            onComplete: () => this.onReadinessComplete(generation),
-            // Looked up at call time, so a test can hold the decision
-            // (readiness-flip-hold.ts) without touching this closure.
-            onSatisfied: () => this.markWriteReady(generation),
-            onSession: (record) => {
-                if (generation === this.openGeneration) {
-                    this.emitReadinessSession(record);
-                }
-            },
+        };
+    }
+
+    /**
+     * Starts this warm full-replica open's freshness check (M2, README
+     * "Warm freshness"): the join's coordinator in its freshness purpose,
+     * with the sidecar's `hlcProved`, so the same sessions, pull queue,
+     * explainer, trust-first rule and departure decide whether this reopen
+     * contains every peer it sees. No donor clause, no phase clause, no
+     * timer, and nothing asked again once it held. `start`: the CLI's
+     * one-shot commands wait for a peer to ask (O15); requireFreshOnReopen
+     * starts at once whatever the default.
+     */
+    private startReadinessFreshness(
+        generation: number,
+        warm: {
+            hlcProved: bigint;
+            source: WriteReadinessSource;
+            start?: FreshnessStart;
+        }
+    ) {
+        if (
+            generation !== this.openGeneration ||
+            !this.readinessWarmOpen ||
+            this.partialWriteOverride
+        ) {
+            return;
+        }
+        const start: FreshnessStart | undefined = this.requireFreshOnReopen
+            ? "eager"
+            : warm.start === "eager" || warm.start === "on-demand"
+              ? warm.start
+              : undefined;
+        this.readinessRuntime?.startFreshness({
+            ...this.readinessCoordinatorPorts(generation),
+            hlcProved: warm.hlcProved,
             requestTimeoutMs: this.readinessRequestTimeoutMs,
-            onProgress: (changed) => {
+            ...(start ? { start } : {}),
+            onFresh: () => this.onReadinessFresh(generation, warm),
+            onProgress: () => {
                 if (generation === this.openGeneration) {
-                    this.onReadinessProgress(changed);
+                    this.noteFreshnessChange();
                 }
             },
         });
+        // A fault (no readiness state, scope or transport) shows at once.
+        this.noteFreshnessChange();
+    }
+
+    /**
+     * The freshness check held (the runtime asks after a satisfied
+     * evaluation), in the serialized readiness transition. `readinessFresh`
+     * and the runtime's `fresh` state first, so every notice from here on
+     * carries `warm-fresh` (the flip's READY notices included) and
+     * `write:ready` reads `fresh`; under requireFreshOnReopen then the flip,
+     * with the persisted source and proof kept, the only step that can
+     * reject (the next readiness event retries); then the runtime's
+     * WARM_FRESH notices, `freshness:change` and telemetry; last a
+     * best-effort `hlcProved` patch, the next check's gap estimate, only
+     * forward (a check that contained only older peers keeps the newer
+     * hint), never retried and never waited for. `proof`, `writeReady` and
+     * the source stay as they are.
+     */
+    private onReadinessFresh(
+        generation: number,
+        warm: { hlcProved: bigint; source: WriteReadinessSource }
+    ): Promise<void> {
+        return this.serializeWriteReadinessTransition(async () => {
+            if (
+                this.writeReadinessLifecycleBlocked ||
+                generation !== this.openGeneration
+            ) {
+                return;
+            }
+            this.readinessFresh = true;
+            this.readinessRuntime?.noteFresh();
+            if (!this.writesReady && this.writeReadinessRequired) {
+                await this.commitWriteReady(
+                    generation,
+                    warm.source,
+                    undefined,
+                    {
+                        keepProof: true,
+                    }
+                );
+            }
+            const runtime = this.readinessRuntime;
+            const hlcProved = runtime?.freshnessHlcProved();
+            runtime?.markFresh();
+            this.noteFreshnessChange(true);
+            if (hlcProved !== undefined && hlcProved > warm.hlcProved) {
+                void this.writeBootstrapState({ hlcProved }, generation).catch(
+                    () => {}
+                );
+            }
+        });
+    }
+
+    /**
+     * `freshness:change` (detail: state, contained peers, `ms` once fresh)
+     * and the `freshness` telemetry event, when the check's state differs
+     * from the last one reported (`unchecked` before the first). Called at
+     * the start, after each evaluation that changed a record, and at the
+     * label (`atLabel`), which alone reports `fresh`: the state says so
+     * before the flip, the event follows it. A read; never throws.
+     */
+    private noteFreshnessChange(atLabel = false) {
+        let freshness: FreshnessStatus | undefined;
+        try {
+            freshness = this.readinessRuntime?.freshnessStatus();
+        } catch {
+            return;
+        }
+        if (
+            !freshness ||
+            freshness.state ===
+                (this.readinessFreshnessReported ?? "unchecked") ||
+            (freshness.state === "fresh" && !atLabel)
+        ) {
+            return;
+        }
+        this.readinessFreshnessReported = freshness.state;
+        const { state, contained, excluded, gaps, ms, requests } = freshness;
+        if (this.bootstrapTelemetry) {
+            this.emitBootstrapTelemetry({
+                type: "freshness",
+                atMs: this.bootstrapTelemetryElapsed(
+                    this.bootstrapTelemetryNow!()
+                ),
+                state,
+                contained: contained.length,
+                excluded: excluded.length,
+                gaps: gaps.length,
+                ...(ms !== undefined ? { ms } : {}),
+                requests,
+            });
+        }
+        this.events.dispatchEvent(
+            new CustomEvent("freshness:change", {
+                detail: {
+                    state,
+                    contained: contained.length,
+                    ...(ms !== undefined ? { ms } : {}),
+                },
+            })
+        );
     }
 
     /**
@@ -14281,7 +14570,30 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             guardArmed: this.guardArmed,
             lastFailure: this.bootstrapFailure,
             readiness: this.readinessStatus(),
+            freshness: this.freshnessStatus(),
         };
+    }
+
+    /**
+     * The freshness check of a warm full-replica open (`off` for a warm
+     * reopen under allowPartialWrites, which runs none); undefined for
+     * every other open and after close.
+     */
+    private freshnessStatus(): FreshnessStatus | undefined {
+        const runtime = this.readinessRuntime;
+        if (!runtime || !this.readinessWarmOpen) return undefined;
+        if (this.partialWriteOverride) {
+            return {
+                state: "off",
+                required: 0,
+                contained: [],
+                excluded: [],
+                silent: [],
+                gaps: [],
+                requests: 0,
+            };
+        }
+        return runtime.freshnessStatus();
     }
 
     /** The readiness join's snapshot, when this open runs one. */
@@ -14298,7 +14610,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * Resolve when this handle may accept mutations. Fresh full replicas
      * resolve after the readiness proof (design 2.2) is persisted, or
      * after assumeComplete(); new creators, proven warm reopens, and
-     * explicit allowPartialWrites overrides resolve immediately.
+     * explicit allowPartialWrites overrides resolve immediately. A warm
+     * reopen under `writeReadiness.requireFreshOnReopen` resolves when its
+     * freshness check held, or after assumeComplete().
      * Closing/reopening rejects outstanding waiters. While a fresh join
      * waits, `onProgress` gets its readiness snapshot at once and on every
      * `readiness:progress` event, until the wait settles.
@@ -14439,7 +14753,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * is kept), also in the unverified posture, which a warm reopen keeps
      * until the quiet period. On a handle not yet writable it acts there
      * and ends the posture, as a proof does (the overlay is gone; the
-     * caller vouches for the store).
+     * caller vouches for the store). A warm reopen that
+     * `writeReadiness.requireFreshOnReopen` holds gated until its freshness
+     * check is released the same way (M2): `operator` replaces the source
+     * it persisted, and the check goes on for its label.
      */
     async assumeComplete(): Promise<void> {
         const closed = () =>
@@ -18871,6 +19188,10 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
         options.telemetry?.openProfile;
     // Test-only jitter rng rides along undocumented.
     (args as any).gcRng = (options as any).gcRng;
+    // The CLI's one-shot commands (O15); undocumented, no public option.
+    (args as SharedFsInternalOpenArgs).freshnessStart = (
+        options as { freshnessStart?: FreshnessStart }
+    ).freshnessStart;
     const program = options.address
         ? await SharedFileSystem.open(
               options.address as string,

@@ -513,13 +513,15 @@ const QUALIFYING_SOURCES: ReadonlySet<ProvenanceSource> = new Set([
     "creator",
     "reconciled",
     "warm",
+    "warm-fresh",
     "operator",
 ]);
 
 /**
  * A qualified donor by its header (design 2.1): ready, a source in
- * {creator, reconciled, warm, operator}, a full replica, this format. M2
- * replaces `warm` with `warm-fresh`.
+ * {creator, reconciled, warm, warm-fresh, operator}, a full replica, this
+ * format. M2 PR-4 adds `warm-fresh` (a warm open that passed its freshness
+ * check); PR-5 drops `warm` (D6).
  */
 export const qualifies = (provenance: ProvenanceV1): boolean =>
     provenance.writeReady === true &&

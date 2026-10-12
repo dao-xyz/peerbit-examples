@@ -46,7 +46,8 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * G4-12), design 4.12 #17 end to end, the S8 attach rule, the M1 ACL gap
  * and the M2 trust reclassify of the commit 3 handoff, R's identity turning
  * trusted by a trust change (I1), the scopes an ACL join opens (R1) and its
- * fault without J's trust view (R2).
+ * fault without J's trust view (R2); and M2's design test 80: a warm
+ * reopen's freshness check holds only once the trust scope is contained too.
  *
  * Since PR-3 commit 4 the coordinator's predicate decides when a fresh full
  * address-open turns ready, so ready implies containment: the tests read
@@ -1899,6 +1900,62 @@ describe("readiness trust scope (in-process)", () => {
         // Qualified by the event; nothing asked again.
         expect(coordinator.record(replicaHash)!.sessionsOpened).toBe(sessions);
         expect(await joiner.fs.isTrustedWriter(replicaKey)).toBe(true);
+    }, 180_000);
+
+    it("80: a warm W whose trust scope is not contained yet is not fresh; it turns fresh once both scopes are (M2 PR-4)", async () => {
+        const owner = await createOwner();
+        const replica = await readyReplica(
+            owner,
+            "trust-80",
+            await createPeer({ disk: true })
+        );
+        await expectFiles(replica.fs, [OWNER_FILE]);
+        const directory = (replica.peer as any).directory as string;
+        const address = replica.fs.address;
+        await stopPeer(replica.peer);
+        // O's sessions freeze the namespace first, then wait here for the
+        // trust scope's start: W's session with O cannot contain it yet.
+        const held = holdTrustStart(owner.fs);
+
+        const peer = await Peerbit.create({ directory } as any);
+        peers.push(peer);
+        await peer.dial(owner.peer);
+        const warm = await openSharedFs({
+            peerbit: peer,
+            address,
+            machineLabel: "trust-80-warm",
+            bootstrap: false,
+            gc: false,
+        });
+        // Writable from its own proof all the while (no requireFreshOnReopen).
+        expect(warm.bootstrapStatus().writeReady).toBe(true);
+        await held.read;
+        const ownerHash = hashOf(owner.peer);
+        await waitUntil(() =>
+            expect(warm.bootstrapStatus().freshness).toMatchObject({
+                state: "checking",
+                required: 1,
+                contained: [],
+            })
+        );
+        expect(programOf(warm).readinessProvenance().source).toBe("warm");
+
+        held.release();
+        await waitUntil(() =>
+            expect(warm.bootstrapStatus().freshness).toMatchObject({
+                state: "fresh",
+                contained: [ownerHash],
+            })
+        );
+        const check = (runtimeOf(warm) as any).coordinatorValue as Coordinator;
+        expect(check.purpose).toBe("freshness");
+        expect([...check.record(ownerHash)!.results.keys()]).toEqual([
+            SCOPE_NAMESPACE_V1,
+            SCOPE_TRUST_V1,
+        ]);
+        expect(programOf(warm).readinessProvenance().source).toBe("warm-fresh");
+        // A freshness check is not a join.
+        expect(warm.bootstrapStatus().readiness).toBeUndefined();
     }, 180_000);
 
     describe("R: the scopes of a join", () => {

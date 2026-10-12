@@ -117,6 +117,8 @@ export class ReadinessClient {
         sessionId?: Uint8Array;
         attempt?: number;
         flags?: number;
+        /** The asker's caps (this build's `READINESS_CAPS` by default). */
+        caps?: number;
         hlcProved?: bigint;
         version?: number;
         scopes: Array<{
@@ -132,6 +134,7 @@ export class ReadinessClient {
             sessionId,
             attempt: properties.attempt ?? 1,
             flags: properties.flags,
+            caps: properties.caps,
             hlcProved: properties.hlcProved ?? 0n,
             scopes: properties.scopes.map(
                 (scope) =>

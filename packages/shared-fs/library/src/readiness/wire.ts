@@ -50,10 +50,20 @@ export const LOG_ID_BYTES = 32;
 export const FREEZE_ID_BYTES = 8;
 
 /**
- * Bits of `OpenV1.caps` and `ProvenanceV1.caps`: optional variants, codes
- * and reasons a build understands. None yet.
+ * Caps bit 0 (M2 PR-4): this build qualifies `warm-fresh` and, as a
+ * responder, reports `warm-fresh` to an asker whose `OpenV1.caps` sets the
+ * bit (`warm` to one that does not, in notices too; a notice target that
+ * never sent an OPEN gets `warm-fresh`). A semantic bit, not a variant:
+ * 0.17.0 sends caps 0 and its decode guard reads `OpenV1.flags`, never
+ * caps, so no layout and no golden byte changes.
  */
-export const READINESS_CAPS = 0;
+export const CAP_FRESHNESS = 1 << 0;
+
+/**
+ * Bits of `OpenV1.caps` and `ProvenanceV1.caps`: optional variants, codes,
+ * reasons and labels a build understands.
+ */
+export const READINESS_CAPS = CAP_FRESHNESS;
 
 /** `OpenV1.flags` bit 0: freeze the snapshot's hash list (list mode). */
 export const OPEN_FLAG_LIST = 1;
@@ -70,7 +80,11 @@ export type ErrorCode = (typeof ERROR_CODE)[keyof typeof ERROR_CODE];
 export const NOTICE_REASON = {
     READY: 0,
     CAPACITY: 1,
-    /** Reserved for M2. */
+    /**
+     * A warm full-replica open passed its freshness check (M2 PR-4): its
+     * provenance now says `warm-fresh`. A trigger only, as every notice;
+     * 0.17.0 decodes it.
+     */
     WARM_FRESH: 2,
 } as const;
 

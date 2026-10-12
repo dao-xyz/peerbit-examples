@@ -215,6 +215,10 @@ await fs.writeFile("/docs/hello.txt", "hello from workstation-b");
 Newly created filesystems are ready immediately. So is a warm reopen: a full
 replica reopening a state directory in which it was already writable (as the
 creator, through a join's proof, or through `assumeComplete()`), also offline.
+A warm reopen then checks in the background whether it is still fresh (see
+[Warm freshness](#warm-freshness)); with
+`writeReadiness: { requireFreshOnReopen: true }` it waits for that check
+instead.
 A reopen whose state records an interrupted bootstrap joins again instead,
 and so does one after `program.drop()`, which gates the state first.
 `replicate: false` handles and partial replicas cannot establish a complete
@@ -259,8 +263,9 @@ these hold:
   lack is listed in `readiness.gaps`. Silence, `BUSY` answers, refusals and
   fetches that no peer serves never release a join.
 - At least one contained peer answered, in the exchange that contained it, as
-  a write-ready full replica: a creator, a reconciled join, a warm reopen or an
-  operator's `assumeComplete()`. A peer that was still gated when it answered
+  a write-ready full replica: a creator, a reconciled join, a warm reopen
+  (`warm`, or `warm-fresh` once its freshness check held) or an operator's
+  `assumeComplete()`. A peer that was still gated when it answered
   is asked again once it announces that it turned ready, and qualifies only
   through that new answer. A join that sees only gated joiners, observers or
   partial replicas stays gated, so two fresh joiners never certify each other.
@@ -344,7 +349,9 @@ a write-ready peer then proves it.
   on by default) and otherwise behave as described for partial replication
   above.
 - That a warm reopen is fresh. It is writable offline from its own state file
-  and learns of writes made elsewhere only as they arrive.
+  and learns of writes made elsewhere only as they arrive. Its freshness check
+  (below) labels it once it contained the peers it sees, but by default does
+  not gate it.
 - That garbage collection is safe. GC keeps its own retention rules (see
   [Unattended lifecycle](#unattended-lifecycle)) and also requires readiness.
 - That a revocation is enforced; see the access-controlled rules below.
@@ -460,6 +467,53 @@ still answer (`no-peer`, `no-qualified-donor`, or `waiting-silent` with every
 required peer silent), so a proof that lands in time still makes the replica
 `reconciled`.
 
+### Warm freshness
+
+At the end of a warm reopen, a full replica runs the join's exchange with every
+peer of this filesystem it can see, with the same rules for which peers count,
+pulls and explanations, trust and departures, but no write-readiness decision:
+it is fresh once every visible peer is contained, gone or excluded, at least
+one is contained, and, with access control, the trust rules hold. No qualified
+donor is needed, so two warm replicas reopened together check each other; a
+gated joiner counts as a contained peer. A peer that left before answering
+counts as settled, as for a join, and is listed in `freshness.gaps`: a warm
+reopen whose only peer holding rows left unanswered still turns fresh, with
+that gap recorded. As for a join, a peer known only by its replicator row,
+with no sign of life, is asked once and stops counting if it does not answer:
+replicas reopened at the same moment can turn fresh before comparing with
+peers that were still opening, and `freshness` does not list those. The check
+runs once per open and asks nothing again once it held; it arms no timer, and a silent peer keeps it at `checking` with no
+further requests. A peer that answered `BUSY` is asked again on its next
+message or capacity notice; one that refused on a fault of its own readiness
+state may send neither, and keeps the check at `checking` too. Nothing is
+persisted: every warm reopen checks again.
+
+Once fresh, the replica tells peers of this release `warm-fresh` instead of
+`warm` (both qualify it as a donor) and sends each peer it exchanged requests
+with a notice. Peers of 0.17.x keep seeing `warm`, as before, in answers and
+notices alike, so a 0.17.x joiner that met a gated replica qualifies it on the
+notice of its flip.
+
+`bootstrapStatus().freshness` (`FreshnessStatus`) reports the check on a warm
+full-replica open: `state` is `unchecked` (no peer compared yet), `checking`,
+`fresh` (for the rest of the open) or `fault` (this replica's own readiness
+state failed; reopen); `off` on a warm reopen under `allowPartialWrites`, which
+runs none. It also lists `contained`, `excluded`, `silent` and `gaps`, the
+`required` count, the first blocking peer's `reason`, `ms` from the end of the
+open to fresh, and `requests` sent for it. It is undefined on every other open.
+Each state change dispatches `freshness:change` on `fs.program.events`
+(`event.detail`: `state`, the `contained` count, and `ms` once fresh).
+
+With `writeReadiness: { requireFreshOnReopen: true }` a warm reopen stays
+write-gated (`EAGAIN`), with the resurrection guard armed on its proven view,
+until the check holds, then turns writable with the source and proof its state
+file already holds and dispatches `write:ready`. Offline, or while a silent or
+`BUSY` peer keeps the check at `checking`, it stays gated, with no timer;
+`assumeComplete()` releases it and records `operator`. It cannot be
+combined with `allowPartialWrites` (`EINVAL`) and changes no other open. The
+CLI's `mount --require-fresh` sets it; the CLI's short commands check only if
+a peer asks them, so a script that runs `status` adds no load.
+
 ### Diagnosing a gated join
 
 `awaitWriteReady({ timeout })` rejects with `SharedFsWriteReadyTimeoutError`
@@ -472,8 +526,8 @@ rejects pending waiters with `ECLOSED`. A timeout not above 0 or above
 
 `bootstrapStatus().readiness` returns the same snapshot (`ReadinessStatus`)
 at any time for an open that runs a join. It is undefined for a creator, a
-warm reopen, an observer or partial replica, under `allowPartialWrites`, and
-after close. Its `state` (`ReadinessState`) is one of:
+warm reopen (see `freshness` above), an observer or partial replica, under
+`allowPartialWrites`, and after close. Its `state` (`ReadinessState`) is one of:
 
 - `ready`: writable.
 - `no-peer`: no visible peer to reconcile with. Peers that left and replicator
@@ -511,7 +565,8 @@ public key's `hashcode()`.
 `bootstrapStatus().writeReadinessSource` records what made a full replica
 writable: `creator`, `reconciled` (a join's proof, stored with it in the state
 file) or `operator` (`assumeComplete()`). A warm reopen reports the source it
-reopened with; its peers see it as `warm`, which also qualifies it as a donor.
+reopened with; its peers see it as `warm`, or `warm-fresh` once its freshness
+check held, and either qualifies it as a donor.
 
 To follow a join while it waits, pass `onProgress` to
 `awaitWriteReady({ timeout, onProgress })`. It is called with the snapshot
@@ -526,7 +581,8 @@ the one-line reason the timeout message uses.
 `write:ready` (`event.detail` is `bootstrapStatus()`) is dispatched on
 `fs.program.events` once per open, for every source: when a join's proof
 (`reconciled`) or `assumeComplete()` (`operator`) makes the replica writable,
-and as the last step of a creating open or a warm reopen. A listener sees the
+as the last step of a creating open or a warm reopen, and when a warm reopen
+gated by `requireFreshOnReopen` turns fresh. A listener sees the
 latter only if it was attached to the program before it opened; an
 `openSharedFs()` caller cannot. It is never dispatched under
 `allowPartialWrites` or on an observer. Listeners of either event must not
@@ -597,7 +653,12 @@ process's monotonic clock, not the injected `clock`.
 decision counted: `contained` (distinct peers), `excluded` and `gaps`, from the
 persisted proof for `reconciled` (at most 32 records each, as the proof keeps
 them), from the readiness status at the flip for `operator`, and 0 for a
-creator or a warm reopen.
+creator or a warm reopen (at a `requireFreshOnReopen` flip, the freshness
+check's peers).
+
+A warm full-replica open emits `freshness` at each change of its freshness
+state, with the `state`, the `contained`, `excluded` and `gaps` counts, `ms`
+once fresh and the `requests` sent for the check.
 
 A fresh full join also emits `readiness-peer` when a peer's state or the reason
 for it changes, at most once per peer per readiness evaluation and never after
