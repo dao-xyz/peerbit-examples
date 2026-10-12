@@ -144,6 +144,8 @@ export class IgnorePolicyEngine {
             (this.policy.patterns?.length ?? 0) > 0 ? "open-args" : "none"
         );
         if (this.policy.defaultsFile === false) {
+            // No defaults file, so no advisory patterns to take.
+            this.program.attachIgnorePolicy(false);
             return;
         }
         // Bootstrap window: manifest-carried advisory patterns fill in
@@ -181,6 +183,12 @@ export class IgnorePolicyEngine {
             "ignore:advisory-available",
             this.bootstrapListener
         );
+        // A cut bootstrap's watch found its first usable manifest, with or
+        // without patterns: the absent conclusion it held back can run.
+        (this.program.events as any).addEventListener(
+            "ignore:advisory-resolved",
+            this.bootstrapListener
+        );
         // The settled-state conclusion (absent vs present, author gating)
         // re-runs once the bootstrap converges.
         this.convergedListener = () => {
@@ -188,6 +196,12 @@ export class IgnorePolicyEngine {
         };
         (this.program.events as any).addEventListener(
             "bootstrap:converged",
+            this.convergedListener
+        );
+        // So does the open's bootstrap decision settling: until then a
+        // phase "off" may still turn "fetching" (bootstrapDecisionPending).
+        (this.program.events as any).addEventListener(
+            "bootstrap:decided",
             this.convergedListener
         );
         // Slot watcher: any naming change directly under the root re-runs
@@ -222,6 +236,10 @@ export class IgnorePolicyEngine {
             }
         };
         this.program.entries.events.addEventListener("change", this.listener);
+        // With every listener in place: a cut bootstrap's advisory watch
+        // runs while this engine is undecided ("replace" never takes
+        // advisory patterns).
+        this.program.attachIgnorePolicy(this.policy.defaultsMode !== "replace");
         await this.refresh();
     }
 
@@ -238,11 +256,19 @@ export class IgnorePolicyEngine {
                 "ignore:advisory-available",
                 this.bootstrapListener
             );
+            (this.program.events as any).removeEventListener(
+                "ignore:advisory-resolved",
+                this.bootstrapListener
+            );
             this.bootstrapListener = undefined;
         }
         if (this.convergedListener) {
             (this.program.events as any).removeEventListener(
                 "bootstrap:converged",
+                this.convergedListener
+            );
+            (this.program.events as any).removeEventListener(
+                "bootstrap:decided",
                 this.convergedListener
             );
             this.convergedListener = undefined;
@@ -251,6 +277,36 @@ export class IgnorePolicyEngine {
             clearTimeout(this.debounceTimer);
             this.debounceTimer = undefined;
         }
+        if (enginesByProgram.get(this.program) === this) {
+            // No engine decides for the program any more: a cut
+            // bootstrap's advisory watch detaches.
+            this.program.detachIgnorePolicy();
+        }
+    }
+
+    /**
+     * From here on advisory patterns are ignored (the rules file was taken
+     * or concluded absent): tell the program, whose cut-bootstrap advisory
+     * watch then detaches.
+     */
+    private settle() {
+        if (this.fileRead) {
+            return;
+        }
+        this.fileRead = true;
+        this.announceSettled();
+    }
+
+    private announceSettled() {
+        if (enginesByProgram.get(this.program) !== this) {
+            return; // a replaced engine decides nothing for the program
+        }
+        this.program.ignorePolicySettled = true;
+        (this.program.events as any).dispatchEvent(
+            new CustomEvent("ignore:settled", {
+                detail: { provenance: this.provenance },
+            })
+        );
     }
 
     private get rootLevelDefaults(): boolean {
@@ -307,8 +363,12 @@ export class IgnorePolicyEngine {
             // naming-present-but-content-pending. Only a settled store
             // may conclude ABSENT; everything else keeps the door open
             // for the manifest advisory and later arrivals.
+            // "off" before the open's bootstrap decided may still turn
+            // "fetching" (its content probe runs first): not settled.
             const phase = this.program.bootstrapStatus().phase;
-            const settled = phase === "off" || phase === "converged";
+            const settled =
+                (phase === "off" && !this.program.bootstrapDecisionPending) ||
+                phase === "converged";
             const pendingNode = settled
                 ? await (this.program as any)
                       .resolvePath(path)
@@ -325,11 +385,23 @@ export class IgnorePolicyEngine {
             if (!settled) {
                 return; // decide nothing while the store is partial
             }
-            this.fileRead = true;
+            if (
+                this.provenance !== "manifest-advisory" &&
+                this.program.advisoryIgnorePending
+            ) {
+                // A bootstrap cut by readiness accepted no manifest, and
+                // the one carrying the fleet's advisory patterns may still
+                // replicate or have its signer trusted: wait for it
+                // (ignore:advisory-resolved) or for the rules file (the
+                // slot watcher). Meanwhile the rules are what absent
+                // would install.
+                return;
+            }
             if (this.provenance === "manifest-advisory") {
                 // Sticky last-good: advisory rules hold until a REAL
                 // rules file replaces them (a fleet may run on advisory
                 // alone) — never silently collapse to open-args.
+                this.settle();
                 return;
             }
             try {
@@ -342,6 +414,7 @@ export class IgnorePolicyEngine {
             } catch {
                 /* keep last good */
             }
+            this.settle();
             return;
         }
         this.rulesFileNodeId = info.nodeId;
@@ -406,17 +479,23 @@ export class IgnorePolicyEngine {
             }
         }
         const content = read?.bytes;
+        let settling = false;
         try {
             const lines = new TextDecoder()
                 .decode(content)
                 .split("\n")
                 .map((line) => line.trim())
                 .filter((line) => line.length > 0 && !line.startsWith("#"));
+            // Read: advisory patterns no longer apply, valid or not.
+            settling = !this.fileRead;
             this.fileRead = true;
             this.degraded = undefined;
             this.install(this.compileBase(lines), "rules-file");
         } catch (error: any) {
             this.degrade(`rules file invalid: ${error?.message ?? error}`);
+        }
+        if (settling) {
+            this.announceSettled();
         }
     }
 

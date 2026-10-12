@@ -142,11 +142,12 @@ import {
  *   test can assert that nothing is armed while J is gated with nothing in
  *   flight (M1 plan section 10.5).
  * - **`evaluate()`** runs once per microtask however many events asked for
- *   it, computes `satisfied()`, reports it (`onEvaluate`) and, when it
- *   holds, asks the host to decide (`decide`). No polling and no quiet
- *   window. Then, with an `onProgress` port (PR-4), it reports the peers
- *   whose state or reason changed since the last report (`reportProgress`):
- *   a read, after the decision was asked.
+ *   it, computes `satisfied()`, reports it (`onEvaluate`), tells the host
+ *   when only the phase clause failed (`onComplete`: the bootstrap cut, M2
+ *   PR-2) and, when it holds, asks the host to decide (`decide`). No
+ *   polling and no quiet window. Then, with an `onProgress` port (PR-4),
+ *   it reports the peers whose state or reason changed since the last
+ *   report (`reportProgress`): a read, after the decision was asked.
  * - **Lifecycle.** Every listener is detached on `finish`/`dispose`, and
  *   every handler first checks that this coordinator is still running (as
  *   the entries change listener checks its identity: a removed listener can
@@ -363,6 +364,11 @@ export interface Evaluation {
     satisfied: boolean;
     /** `satisfied` differs from the previous evaluation's. */
     changed: boolean;
+    /**
+     * The predicate without its phase clause (design 4.8 line 2): every
+     * other clause held and only `ports.phaseSettled` was read (M2 PR-2).
+     */
+    complete: boolean;
 }
 
 export interface CoordinatorPorts {
@@ -420,6 +426,13 @@ export interface CoordinatorPorts {
     decide?(): Promise<void>;
     /** After each evaluation; tests observe the decision points. */
     onEvaluate?(evaluation: Evaluation): void;
+    /**
+     * After an evaluation that found `complete && !satisfied`: only the
+     * phase clause failed (production: the host's bootstrap cut, M2 PR-2).
+     * Level-triggered: called on every such evaluation, never awaited; the
+     * host's handler is idempotent, and a throw is the host's.
+     */
+    onComplete?(): void;
     /**
      * After an evaluation that found a change since the last call: a peer's
      * state or reason, `satisfied`, or the fault (PR-4, `readiness:progress`
@@ -791,6 +804,12 @@ export class Coordinator {
     private recheckPending = false;
     private evaluationPending = false;
     private lastSatisfied = false;
+    /**
+     * The last `satisfied()` reached its phase clause: everything else held
+     * (`Evaluation.complete`). Written by every call, read by `evaluate()`
+     * right after its own.
+     */
+    private lastComplete = false;
     /** `satisfied()` when the coordinator finished (status after it). */
     private finalSatisfied = false;
     private evaluations = 0;
@@ -1008,9 +1027,10 @@ export class Coordinator {
     }
 
     /**
-     * Coalesced: one evaluation per microtask, then `ports.onEvaluate`, then,
-     * when it holds, the host's decision (`requestDecision`), whether or not
-     * the answer changed (M9).
+     * Coalesced: one evaluation per microtask, then `ports.onEvaluate`, then
+     * `ports.onComplete` when only the phase clause failed, then, when it
+     * holds, the host's decision (`requestDecision`), whether or not the
+     * answer changed (M9).
      */
     evaluate(): void {
         if (!this.running || this.evaluationPending) return;
@@ -1019,13 +1039,21 @@ export class Coordinator {
             this.evaluationPending = false;
             if (!this.running) return;
             const satisfied = this.satisfied();
+            const complete = this.lastComplete;
             const changed = satisfied !== this.lastSatisfied;
             this.lastSatisfied = satisfied;
             this.evaluations++;
             try {
-                this.ports.onEvaluate?.({ satisfied, changed });
+                this.ports.onEvaluate?.({ satisfied, changed, complete });
             } catch {
                 // An observer's error is the observer's.
+            }
+            if (complete && !satisfied && this.running) {
+                try {
+                    this.ports.onComplete?.();
+                } catch {
+                    // The host's error is the host's; the join goes on.
+                }
             }
             if (satisfied && this.running) this.requestDecision();
             this.reportProgress(satisfied);
@@ -1178,7 +1206,8 @@ export class Coordinator {
      * succeeded, no local fault, every record in a non-blocking state, some
      * contained record qualified, and, last, the host's phase clause
      * (`ports.phaseSettled`), so the decision-time reads below still run
-     * while only the phase is pending.
+     * while only the phase is pending. Reaching the phase clause is
+     * `Evaluation.complete` (M2 PR-2).
      *
      * In an access-controlled store (design 4.8, 2.2(3), 2.2(4)) every
      * contained record also holds both scopes, its trust result from a
@@ -1198,6 +1227,7 @@ export class Coordinator {
      * reach leaves with its gap (D3 = A', D4).
      */
     satisfied(): boolean {
+        this.lastComplete = false;
         if (!this.running || !this.discovered || this.fault !== undefined) {
             return false;
         }
@@ -1232,6 +1262,9 @@ export class Coordinator {
             return false;
         }
         if (!qualified) return false;
+        // Complete: one body, so the reads above still run once per
+        // evaluation (M2 PR-2).
+        this.lastComplete = true;
         return this.phaseSettled();
     }
 

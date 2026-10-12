@@ -606,6 +606,13 @@ export type BootstrapTelemetryEvent =
            * not counted in `candidates`.
            */
           zeroDocument: number;
+          /**
+           * `readiness`: the bootstrap cut ended discovery or the trust wait
+           * because readiness proved the view first (the bootstrap then
+           * falls back to a plain join). Counts are of what was examined:
+           * all zero when discovery itself was cut.
+           */
+          aborted?: "readiness";
       }
     | {
           type: "segments-fetch:start";
@@ -891,7 +898,10 @@ export type BootstrapOptions = {
      * has arrived and every peer visible as running the filesystem has
      * answered. Otherwise it waits this long, for example when nobody runs
      * the filesystem yet, or when a connected peer that does not run it
-     * (such as a bootstrap relay) never answers.
+     * (such as a bootstrap relay) never answers. In mode "auto" a fresh
+     * full join also stops looking once write readiness has contained every
+     * peer it must (a snapshot can then add nothing) and falls back to a
+     * plain join, unless an overlay is already installed.
      */
     discoveryTimeoutMs?: number;
     segmentFetchConcurrency?: number;
@@ -2593,6 +2603,31 @@ const BOOTSTRAP_DEFAULTS = {
     segmentFetchConcurrency: 16,
     retirementTimeoutMs: 15 * 60 * 1000,
 };
+/**
+ * The fallback reason of a bootstrap that readiness cut (M2 PR-2): every
+ * Required peer was contained with a qualified donor while snapshot
+ * discovery still ran, so no snapshot from those peers could add a row.
+ */
+const BOOTSTRAP_CUT_REASON =
+    "readiness proved the view before a snapshot was needed";
+/**
+ * One open's watch for the advisory ignore patterns its cut bootstrap did
+ * not accept (watchAdvisoryIgnorePatterns).
+ */
+type AdvisoryIgnoreWatch = {
+    generation: number;
+    /** A usable trusted manifest was found, with patterns or without. */
+    answered: boolean;
+    /** authorKey and snapshotSeq of the manifest taken last. */
+    adopted?: string;
+    detached: boolean;
+    /** The evaluation in flight; `dirty` asks it for one more round. */
+    running?: Promise<void>;
+    /** Resolves when the watch's first round finished (the cut awaits it). */
+    firstRound?: Promise<void>;
+    dirty: boolean;
+    onSettled: () => void;
+};
 const SNAPSHOT_DEFAULTS = {
     publishIntervalMs: 30 * 60 * 1000,
     minChangesBetween: 50,
@@ -3193,6 +3228,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private quiescentChecks = 0;
     private bootstrapTimers: ReturnType<typeof setTimeout>[] = [];
     private snapshotTimer: ReturnType<typeof setInterval> | undefined;
+    /**
+     * A snapshot publisher check held back while the advisory watch waits
+     * (advisoryIgnorePending); it runs once the watch answers or detaches.
+     */
+    private deferredSnapshotTick: (() => void) | undefined;
     private supersessionTimer: ReturnType<typeof setInterval> | undefined;
     private verifiedRetirementTimer: ReturnType<typeof setTimeout> | undefined;
     private quiescenceTimer: ReturnType<typeof setInterval> | undefined;
@@ -3202,6 +3242,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private bootstrapDecision: Promise<void> = Promise.resolve();
     /** Cancels and joins the per-open bootstrap task during close/reopen. */
     private bootstrapAbortController?: AbortController;
+    /**
+     * Ends this open's snapshot discovery, without an error, when readiness
+     * proved the view first (the bootstrap cut, onReadinessComplete). Not
+     * the close signal: that one still rejects. Created by startBootstrap,
+     * reset in open().
+     */
+    private discoveryAbortController: AbortController | undefined;
+    /** This open's bootstrap was cut (onReadinessComplete); reset in open(). */
+    private bootstrapCut: boolean | undefined;
     /** True only after a VERIFIED retirement (never for quiescence arming). */
     private bootstrapVerified = false;
     /** Human-readable summary of the last bootstrap fallback, for status. */
@@ -3259,6 +3308,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * bootstrap window until /.artifactignore is readable.
      */
     bootstrapAdvisoryIgnorePatterns: string[] | undefined;
+    /**
+     * Written by the policy layer only (attachIgnorePolicy,
+     * detachIgnorePolicy, its settle): undefined with no engine attached,
+     * false while an engine that takes advisory patterns is undecided, and
+     * true once it took the rules file or concluded it absent, or for an
+     * engine that never takes them. Only false runs a cut bootstrap's
+     * advisory watch.
+     */
+    ignorePolicySettled: boolean | undefined;
+    /** The advisory watch of a cut bootstrap (watchAdvisoryIgnorePatterns). */
+    private advisoryIgnoreWatch: AdvisoryIgnoreWatch | undefined;
     /**
      * Set only by the constructor, which borsh bypasses: a program loaded
      * from an address never has it, whichever API opens it, so every such
@@ -3372,6 +3432,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             resolve();
         }
         this.clearBootstrapTimers();
+        this.stopAdvisoryIgnoreWatch();
 
         if (this.changeListener) {
             this.entries.events.removeEventListener(
@@ -3718,6 +3779,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writeReadinessWaiters = [];
         this.bootstrapVerified = false;
         this.bootstrapFailure = undefined;
+        this.discoveryAbortController = undefined;
+        this.bootstrapCut = false;
+        this.stopAdvisoryIgnoreWatch();
         this.stateWriteChain ??= Promise.resolve();
         this.writeReadinessTransitionChain ??= Promise.resolve();
         this.snapshotRunning = false;
@@ -3790,6 +3854,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 // The readiness join's trust epoch moves: parked hashes and
                 // contained peers' trust are checked again (G2-10).
                 this.readinessRuntime?.onTrustChange();
+                // A held manifest's signer may be trusted now.
+                void this.evaluateAdvisoryIgnoreWatch();
             };
             this.trustChangeListener = trustChangeListener;
             this.trustGraph.trustGraph.events.addEventListener(
@@ -4043,6 +4109,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 )
             ) {
                 this.disposalContentGeneration++;
+            }
+            if (
+                this.advisoryIgnoreWatch &&
+                added.some(
+                    (value: unknown) => value instanceof BootstrapManifest
+                )
+            ) {
+                void this.evaluateAdvisoryIgnoreWatch();
             }
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
@@ -4347,7 +4421,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         trusted: number,
         invalid: number,
         stale: number,
-        seen: { targets: number; zeroDocument: number }
+        seen: {
+            targets: number;
+            zeroDocument: number;
+            aborted?: "readiness";
+        }
     ) {
         if (
             !this.bootstrapTelemetry ||
@@ -4370,6 +4448,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             stale,
             targets: seen.targets,
             zeroDocument: seen.zeroDocument,
+            ...(seen.aborted ? { aborted: seen.aborted } : {}),
         });
     }
 
@@ -11571,6 +11650,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                   }
                 : {}),
             phaseSettled: () => this.readinessPhaseSettled(),
+            onComplete: () => this.onReadinessComplete(generation),
             // Looked up at call time, so a test can hold the decision
             // (readiness-flip-hold.ts) without touching this closure.
             onSatisfied: () => this.markWriteReady(generation),
@@ -11617,6 +11697,33 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
+     * The bootstrap cut (M2 PR-2): the coordinator found every clause of the
+     * predicate but the phase clause true, so every Required peer is
+     * contained (or left, or excluded) with a qualified donor, and no
+     * snapshot from those peers can add a row this replica lacks. While the
+     * bootstrap is still `fetching` (no overlay was made visible: overlay
+     * reads gate on `overlay-active`), end its discovery; startBootstrap
+     * then falls back to a plain join, a phase change that lets the next
+     * evaluation decide. Never after `overlay-active` (retirement keeps its
+     * own tracking, O9) and never in mode "require", whose open awaits a
+     * snapshot (O8; its join starts after the bootstrap in any case).
+     * Called on every complete evaluation; idempotent.
+     */
+    private onReadinessComplete(generation: number) {
+        if (
+            generation !== this.openGeneration ||
+            this.bootstrapCut ||
+            this.bootstrapPhase !== "fetching" ||
+            this.bootstrapConfig.mode === "require" ||
+            !this.discoveryAbortController
+        ) {
+            return;
+        }
+        this.bootstrapCut = true;
+        this.discoveryAbortController.abort();
+    }
+
+    /**
      * Publishes a background bootstrap decision and settles write readiness
      * when it finishes, either way.
      */
@@ -11650,6 +11757,20 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         this.writeReadinessDecisionSettled = true;
         this.readinessRuntime?.evaluate();
+        // The policy layer concludes nothing while the decision is
+        // outstanding (bootstrapDecisionPending): its cue to look again.
+        this.events.dispatchEvent(new CustomEvent("bootstrap:decided"));
+    }
+
+    /**
+     * Whether this open's bootstrap decision is still outstanding. The phase
+     * reads "off" from the open until the bootstrap starts fetching (after
+     * its content probe), and again from a fallback until the decision
+     * settles, so "off" alone does not mean the store is settled. The
+     * policy layer reads it; settling dispatches bootstrap:decided.
+     */
+    get bootstrapDecisionPending(): boolean {
+        return this.writeReadinessDecisionSettled === false;
     }
 
     private clearBootstrapTimers() {
@@ -11675,6 +11796,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             clearInterval(this.snapshotTimer);
             this.snapshotTimer = undefined;
         }
+        this.deferredSnapshotTick = undefined;
         if (this.gcTimer) {
             clearTimeout(this.gcTimer);
             this.gcTimer = undefined;
@@ -12307,6 +12429,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // open) holds a PARTIAL doc set: its failure path must never arm
         // the guard.
         const resumed = marker !== undefined && !empty;
+        // Before the phase change, which is itself an evaluation: a donor
+        // contained while the phase was still "off" cuts on it.
+        const discovery = new AbortController();
+        this.discoveryAbortController = discovery;
         this.setBootstrapPhase("fetching");
         this.setGuardArmed(false);
         if (!this.viewProven) {
@@ -12327,12 +12453,37 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         let installed = false;
         let failure: unknown;
         try {
-            installed = await this.fetchAndInstallOverlay(signal);
+            installed = await this.fetchAndInstallOverlay(
+                signal,
+                discovery.signal
+            );
         } catch (error) {
             failure = error;
         }
         if (!active()) {
             this.emitBootstrapAbortedOnce(generation, signal);
+            return;
+        }
+        if (this.bootstrapCut) {
+            // Read whether or not the overlay was installed: a cut can land
+            // between the install's last check and this line, and the
+            // overlay is still invisible ("fetching"). A resumed store keeps
+            // its marker until the proof's sidecar write clears it
+            // (commitWriteReady): a crash in between reopens gated. The
+            // advisory watch takes a manifest held now before the phase
+            // change, and later ones without holding it up.
+            await this.watchAdvisoryIgnorePatterns(generation).catch(() => {});
+            if (!active()) {
+                if (this.advisoryIgnoreWatch?.generation === generation) {
+                    this.stopAdvisoryIgnoreWatch();
+                }
+                this.emitBootstrapAbortedOnce(generation, signal);
+                return;
+            }
+            this.bootstrapFailure = BOOTSTRAP_CUT_REASON;
+            this.abandonBootstrap(generation, BOOTSTRAP_CUT_REASON, {
+                keepMarker: resumed,
+            });
             return;
         }
         if (!installed) {
@@ -12389,13 +12540,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * Fall back to a plain join over a FRESH store; clears any partial
-     * overlay state and re-arms the guard on a proven view. Never valid
-     * for a resumed partial store — that path takes enterUnverified().
+     * overlay state and re-arms the guard on a proven view. A failure over
+     * a resumed partial store takes enterUnverified() instead; only the
+     * bootstrap cut falls back over one, with `keepMarker` (the marker
+     * stays until the readiness proof's sidecar write, and the guard stays
+     * down on its unproven view).
      */
     private abandonBootstrap(
         generation: number = this.openGeneration,
         reason: string = this.bootstrapFailure ??
-            "no usable snapshot manifest was found"
+            "no usable snapshot manifest was found",
+        options: { keepMarker?: boolean } = {}
     ) {
         if (generation !== this.openGeneration) {
             return;
@@ -12409,9 +12564,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.setBootstrapPhase("off");
         this.setGuardArmed(this.viewProven);
         this.emitBootstrapFallbackOnce("plain-join", reason);
-        void this.writeBootstrapState({ bootstrap: null }, generation).catch(
-            () => {}
-        );
+        if (!options.keepMarker) {
+            void this.writeBootstrapState(
+                { bootstrap: null },
+                generation
+            ).catch(() => {});
+        }
         this.resolveBootstrapWaiters({ verified: false });
     }
 
@@ -12493,11 +12651,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      *   queries still waiting on other neighbours are then cancelled: the
      *   joiner has a snapshot to install, and a silent neighbour could at
      *   most hold a newer one.
-     * Otherwise discovery waits for the deadline. Nothing tells a peer that
-     * does not run this filesystem (a relay peer.bootstrap() dials, which
-     * never answers) from a donor whose answer is still on its way, so an
-     * empty or zero-document answer from one peer never cancels the query
-     * to another.
+     * Otherwise discovery waits for the deadline, unless `cut` aborts (the
+     * bootstrap cut, onReadinessComplete): it then ends at once with what
+     * arrived so far and no error, and the caller does not use that
+     * partial result. Nothing tells a peer that does not run this
+     * filesystem (a relay peer.bootstrap() dials, which never answers) from
+     * a donor whose answer is still on its way, so an empty or
+     * zero-document answer from one peer never cancels the query to
+     * another.
      *
      * Membership events (replicator join, replication change, topic
      * subscribe, peer reachable, new neighbour stream) re-evaluate the
@@ -12518,7 +12679,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private async discoverManifests(
         signal: AbortSignal,
         timeoutMs: number,
-        usable: (found: unknown[]) => Promise<boolean> = async () => false
+        usable: (found: unknown[]) => Promise<boolean> = async () => false,
+        cut?: AbortSignal
     ): Promise<{ results: unknown[]; targets: number }> {
         const query = {
             query: [
@@ -12565,6 +12727,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     signal.reason ??
                         new SharedFsError("ECLOSED", "bootstrap was aborted")
                 );
+            const onCut = () => finish();
             const finish = (error?: unknown) => {
                 if (settled) {
                     return;
@@ -12573,6 +12736,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 clearTimeout(timer);
                 clearTimeout(retry);
                 signal.removeEventListener("abort", onAbort);
+                cut?.removeEventListener("abort", onCut);
                 discovery.abort();
                 // main-event 1.0.3-1.0.4 (still allowed by @libp2p/interface's
                 // ^1.0.1) leave the registered wrapper attached on
@@ -12705,6 +12869,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }, timeoutMs / 2);
             signal.addEventListener("abort", onAbort, { once: true });
+            cut?.addEventListener("abort", onCut, { once: true });
             const options = { signal: discovery.signal };
             logEvents.addEventListener("replicator:join", onEvent, options);
             logEvents.addEventListener("replication:change", onEvent, options);
@@ -12715,6 +12880,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             pubsub.addEventListener("stream:outbound", onEvent, options);
             if (signal.aborted) {
                 onAbort();
+                return;
+            }
+            if (cut?.aborted) {
+                onCut();
                 return;
             }
             void evaluate();
@@ -12784,11 +12953,317 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
+     * The snapshot a bootstrap installs among `candidates`: ranked by wall
+     * clock across authors (snapshotSeq is per-author). Future-dated
+     * timestamps are clamped to now so an author with a fast clock cannot
+     * permanently dominate ranking.
+     */
+    private newestManifestCandidate<
+        T extends { payload: SnapshotManifestPayload },
+    >(candidates: T[]): T | undefined {
+        const now = BigInt(Math.floor(this.clock()));
+        const rankOf = (candidate: T) =>
+            candidate.payload.createdAtWallMs > now
+                ? now
+                : candidate.payload.createdAtWallMs;
+        return [...candidates].sort((a, b) =>
+            compareBigint(rankOf(b), rankOf(a))
+        )[0];
+    }
+
+    /**
+     * Installs an accepted manifest's advisory ignore patterns for the
+     * policy layer (ignore:advisory-available). Advisory only (write/view
+     * behavior of THIS peer); invalid pattern lists are dropped, never
+     * partially applied.
+     */
+    private acceptAdvisoryIgnorePatterns(payload: SnapshotManifestPayload) {
+        if (!payload.advisoryIgnorePatterns) {
+            return;
+        }
+        try {
+            compileIgnoreRules(payload.advisoryIgnorePatterns);
+            this.bootstrapAdvisoryIgnorePatterns = [
+                ...payload.advisoryIgnorePatterns,
+            ];
+            this.events.dispatchEvent(
+                new CustomEvent("ignore:advisory-available", {
+                    detail: {
+                        patterns: this.bootstrapAdvisoryIgnorePatterns,
+                    },
+                })
+            );
+        } catch (error: any) {
+            console.warn(
+                "shared-fs: dropping invalid advisory ignore patterns from snapshot manifest:",
+                error?.message ?? error
+            );
+        }
+    }
+
+    /**
+     * The bootstrap cut skips the manifest accept, which is how a fleet
+     * with no rules file gives a joiner its advisory ignore patterns, and
+     * the readiness proof does not cover bootstrap manifests (they are in
+     * neither scope): the one a full bootstrap would have chosen may not
+     * have replicated by the cut, or its signer may not be trusted here
+     * yet. So until the policy layer settles (ignore:settled: it took the
+     * rules file or concluded it absent, and ignores advisory patterns from
+     * then on), every BootstrapManifest arriving in the entries log and
+     * every trust-graph change takes the patterns of the manifest a full
+     * bootstrap would choose among those held (newestHeldManifestCandidate),
+     * through the same accept and ignore:advisory-available. The first such
+     * manifest, with patterns or without, also dispatches
+     * ignore:advisory-resolved; until then the policy layer does not
+     * conclude the rules file absent (advisoryIgnorePending). No timer:
+     * without a manifest or a rules file the policy stays undecided, which
+     * applies the same rules as absent (open-args only) but still takes a
+     * late manifest. While it waits, this replica's own manifests carry no
+     * advisory patterns of their own (snapshotWriteInner) and the automatic
+     * publisher holds back (startSnapshotPublisher), so it neither settles
+     * on itself nor advertises an empty set to later joiners.
+     *
+     * A late adoption is a late ignore:advisory-available, as when a full
+     * bootstrap accepts its manifest after the handle opened: the policy
+     * installs the patterns at once (ignore:rules-changed). Files already
+     * visible or written stay in the shared store, untouched; under an
+     * ignored path list() hides them (or annotates them, showLeaked), stat()
+     * marks them ignoredLeak, ignore-aware watchers report them deleted
+     * with cause "policy", and new writes, renames or rm there are
+     * rejected (EIGNORED).
+     *
+     * Runs only while a policy engine that takes advisory patterns is
+     * attached and undecided (ignorePolicySettled false); one attaching
+     * after the cut starts it (attachIgnorePolicy). Nothing when a manifest
+     * was accepted before the cut (its patterns stay installed). The
+     * listeners are the open's own entries and trust taps
+     * (generation-guarded); the watch detaches on ignore:settled, on the
+     * engine's detach, close and reopen. Awaits only the first round, one
+     * scan of local state, so a manifest already held is taken before the
+     * fallback's phase change; rounds that events add run on their own,
+     * and write readiness never waits for the policy to settle.
+     */
+    private async watchAdvisoryIgnorePatterns(generation: number) {
+        this.stopAdvisoryIgnoreWatch();
+        if (
+            generation !== this.openGeneration ||
+            this.bootstrapAdvisoryIgnorePatterns !== undefined ||
+            this.ignorePolicySettled !== false
+        ) {
+            return;
+        }
+        const watch: AdvisoryIgnoreWatch = {
+            generation,
+            answered: false,
+            detached: false,
+            dirty: false,
+            onSettled: () => this.stopAdvisoryIgnoreWatch(watch),
+        };
+        this.advisoryIgnoreWatch = watch;
+        (this.events as any).addEventListener(
+            "ignore:settled",
+            watch.onSettled
+        );
+        void this.evaluateAdvisoryIgnoreWatch(watch);
+        await watch.firstRound;
+    }
+
+    /**
+     * Written by the policy layer only: an engine attached to this program.
+     * `takesAdvisory` (it reads the defaults file and merges into it) makes
+     * it undecided until it settles; any other engine never takes advisory
+     * patterns, so it counts as settled at once. An engine attaching after
+     * a cut bootstrap that accepted no manifest starts the advisory watch
+     * the cut could not.
+     */
+    attachIgnorePolicy(takesAdvisory: boolean) {
+        this.stopAdvisoryIgnoreWatch();
+        this.ignorePolicySettled = !takesAdvisory;
+        if (takesAdvisory && this.bootstrapCut) {
+            void this.watchAdvisoryIgnorePatterns(this.openGeneration).catch(
+                () => {}
+            );
+        }
+    }
+
+    /**
+     * Written by the policy layer only: the program's engine stopped, so
+     * nothing takes advisory patterns any more.
+     */
+    detachIgnorePolicy() {
+        this.ignorePolicySettled = undefined;
+        this.stopAdvisoryIgnoreWatch();
+    }
+
+    /**
+     * Whether a cut bootstrap still waits for its first usable trusted
+     * manifest (watchAdvisoryIgnorePatterns). The policy layer reads it:
+     * while true it does not conclude the rules file absent.
+     */
+    get advisoryIgnorePending(): boolean {
+        const watch = this.advisoryIgnoreWatch;
+        return watch !== undefined && !watch.detached && !watch.answered;
+    }
+
+    /**
+     * One evaluation of the advisory watch: coalesced (an event during a
+     * round asks for one more) and dropped once the watch detached or its
+     * open ended. A newer chosen manifest replaces the patterns taken; when
+     * none is usable any more (a revoked signer) the last taken stay, as
+     * the policy layer keeps its last good rules.
+     */
+    private evaluateAdvisoryIgnoreWatch(
+        watch: AdvisoryIgnoreWatch | undefined = this.advisoryIgnoreWatch
+    ): Promise<void> {
+        if (!watch || watch.detached) {
+            return Promise.resolve();
+        }
+        if (watch.running) {
+            watch.dirty = true;
+            return watch.running;
+        }
+        const current = () =>
+            !watch.detached &&
+            this.advisoryIgnoreWatch === watch &&
+            watch.generation === this.openGeneration;
+        const round = async () => {
+            const chosen = await this.newestHeldManifestCandidate().catch(
+                () => undefined
+            );
+            if (!current() || !chosen) {
+                return;
+            }
+            const key = `${chosen.authorKey}:${chosen.payload.snapshotSeq}`;
+            if (watch.adopted === key) {
+                return;
+            }
+            watch.adopted = key;
+            this.acceptAdvisoryIgnorePatterns(chosen.payload);
+            if (!watch.answered) {
+                watch.answered = true;
+                this.events.dispatchEvent(
+                    new CustomEvent("ignore:advisory-resolved", {
+                        detail: {
+                            patterns: this.bootstrapAdvisoryIgnorePatterns,
+                        },
+                    })
+                );
+                this.runDeferredSnapshotTick();
+            }
+        };
+        let firstRoundDone: (() => void) | undefined;
+        watch.firstRound ??= new Promise<void>(
+            (resolve) => (firstRoundDone = resolve)
+        );
+        const run = (async () => {
+            try {
+                do {
+                    watch.dirty = false;
+                    await round();
+                    firstRoundDone?.();
+                } while (watch.dirty && current());
+            } finally {
+                firstRoundDone?.();
+            }
+        })().finally(() => {
+            watch.running = undefined;
+        });
+        watch.running = run;
+        return run;
+    }
+
+    private stopAdvisoryIgnoreWatch(
+        watch: AdvisoryIgnoreWatch | undefined = this.advisoryIgnoreWatch
+    ) {
+        if (!watch) {
+            return;
+        }
+        if (this.advisoryIgnoreWatch === watch) {
+            this.advisoryIgnoreWatch = undefined;
+        }
+        if (watch.detached) {
+            return;
+        }
+        watch.detached = true;
+        (this.events as any).removeEventListener(
+            "ignore:settled",
+            watch.onSettled
+        );
+        // Close and reopen cleared the held check first (clearBootstrapTimers).
+        this.runDeferredSnapshotTick();
+    }
+
+    /** The snapshot publisher check held back while the watch waited. */
+    private runDeferredSnapshotTick() {
+        const tick = this.deferredSnapshotTick;
+        this.deferredSnapshotTick = undefined;
+        tick?.();
+    }
+
+    /**
+     * The manifest a full bootstrap would choose among those this replica
+     * holds: checkBootstrapManifest kind "candidate", from a trusted
+     * signer, ranked by newestManifestCandidate. Never this replica's own:
+     * a fresh bootstrap holds none, and one published while the watch waits
+     * carries no advisory patterns (snapshotWriteInner).
+     */
+    private async newestHeldManifestCandidate() {
+        const held: unknown[] = await this.entries.index
+            .iterate(
+                {
+                    query: [
+                        new StringMatch({
+                            key: "kind",
+                            value: "bootstrap-manifest",
+                        }),
+                    ],
+                },
+                { local: true, remote: false, resolve: true }
+            )
+            .all();
+        const own = this.authorKey();
+        const trusted: Array<{
+            payload: SnapshotManifestPayload;
+            authorKey: string;
+        }> = [];
+        for (const raw of held) {
+            if (!(raw instanceof BootstrapManifest)) {
+                continue;
+            }
+            const checked = await this.checkBootstrapManifest(
+                raw,
+                this.bootstrapConfig
+            );
+            if (
+                checked.kind === "candidate" &&
+                checked.candidate.authorKey !== own &&
+                (!this.trustGraph ||
+                    (await this.trustGraph.isTrusted(
+                        checked.candidate.signerKey
+                    )))
+            ) {
+                trusted.push(checked.candidate);
+            }
+        }
+        return this.newestManifestCandidate(trusted);
+    }
+
+    /**
      * Discover, verify, fetch and install the newest trusted snapshot.
      * Returns false when no usable manifest exists (caller falls back).
+     *
+     * `cut` is the bootstrap cut (onReadinessComplete): it also returns
+     * false, right after discovery (a partial result is never ranked), in
+     * the trust-race wait, during segment fetches and at the install loop's
+     * yields. Rows installed before a cut stay invisible (overlay reads gate
+     * on "overlay-active"), and the caller re-reads the cut even after
+     * true. Advisory ignore patterns accepted before a cut stay installed,
+     * as after a segment fetch failure; a cut before the accept leaves
+     * them to the caller (watchAdvisoryIgnorePatterns).
      */
     private async fetchAndInstallOverlay(
-        signal: AbortSignal
+        signal: AbortSignal,
+        cut?: AbortSignal
     ): Promise<boolean> {
         const throwIfAborted = () => {
             if (signal.aborted) {
@@ -12798,7 +13273,11 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
         };
+        const isCut = () => cut?.aborted === true;
         throwIfAborted();
+        if (isCut()) {
+            return false;
+        }
         const config = this.bootstrapConfig;
         if (this.bootstrapTelemetry) {
             const clockMs = this.bootstrapTelemetryNow!();
@@ -12862,9 +13341,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const discovered = await this.discoverManifests(
             signal,
             config.discoveryTimeoutMs,
-            usable
+            usable,
+            cut
         );
         throwIfAborted();
+        if (isCut()) {
+            // Nothing found was examined: the counts are zero.
+            this.emitManifestDiscoveryEnd(0, 0, 0, 0, 0, {
+                targets: discovered.targets,
+                zeroDocument: 0,
+                aborted: "readiness",
+            });
+            return false;
+        }
         const deadline = this.clock() + config.discoveryTimeoutMs;
         // Per-stage rejection tally: surfaced in bootstrapStatus and the
         // "require" error so clock-skew or trust failures are diagnosable
@@ -12930,8 +13419,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Trust-race tolerance: the trust graph may still be replicating,
         // so an untrusted verdict is final only at the deadline.
         const trusted: Candidate[] = [];
+        const trustWaitCut = () => {
+            this.emitManifestDiscoveryEnd(
+                candidates.length + invalid + stale,
+                candidates.length,
+                0,
+                invalid,
+                stale,
+                {
+                    targets: discovered.targets,
+                    zeroDocument: empty,
+                    aborted: "readiness",
+                }
+            );
+            return false;
+        };
         while (trusted.length === 0) {
             throwIfAborted();
+            if (isCut()) {
+                return trustWaitCut();
+            }
             for (const candidate of candidates) {
                 if (
                     !this.trustGraph ||
@@ -12946,10 +13453,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             await new Promise<void>((resolve, reject) => {
                 const timer = setTimeout(() => {
                     signal.removeEventListener("abort", onAbort);
+                    cut?.removeEventListener("abort", onCut);
                     resolve();
                 }, 250);
                 const onAbort = () => {
                     clearTimeout(timer);
+                    cut?.removeEventListener("abort", onCut);
                     reject(
                         signal.reason ??
                             new SharedFsError(
@@ -12958,11 +13467,23 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                             )
                     );
                 };
+                // The cut ends the wait at once; the loop returns on it.
+                const onCut = () => {
+                    clearTimeout(timer);
+                    signal.removeEventListener("abort", onAbort);
+                    resolve();
+                };
                 signal.addEventListener("abort", onAbort, { once: true });
+                cut?.addEventListener("abort", onCut, { once: true });
                 if (signal.aborted) {
                     onAbort();
+                } else if (isCut()) {
+                    onCut();
                 }
             });
+        }
+        if (isCut()) {
+            return trustWaitCut();
         }
         if (trusted.length === 0) {
             this.emitManifestDiscoveryEnd(
@@ -12976,16 +13497,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             this.bootstrapFailure = `${candidates.length} snapshot candidate(s) found, none from a trusted signer by the discovery deadline`;
             return false;
         }
-        // Rank by wall clock across authors (snapshotSeq is per-author).
-        // Future-dated timestamps are clamped to now so an author with a
-        // fast clock cannot permanently dominate ranking.
-        const now = BigInt(Math.floor(this.clock()));
-        const rankOf = (candidate: Candidate) =>
-            candidate.payload.createdAtWallMs > now
-                ? now
-                : candidate.payload.createdAtWallMs;
-        trusted.sort((a, b) => compareBigint(rankOf(b), rankOf(a)));
-        const chosen = trusted[0];
+        const chosen = this.newestManifestCandidate(trusted)!;
         this.emitManifestDiscoveryEnd(
             candidates.length + invalid + stale,
             candidates.length,
@@ -12998,28 +13510,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // Manifest-carried ADVISORY ignore patterns: installed into the
         // local slot at accept time — before any segment or chunk fetch —
         // so the bootstrap window is covered until /.artifactignore is
-        // readable. Advisory only (write/view behavior of THIS peer);
-        // invalid pattern lists are dropped, never partially applied.
-        if (chosen.payload.advisoryIgnorePatterns) {
-            try {
-                compileIgnoreRules(chosen.payload.advisoryIgnorePatterns);
-                this.bootstrapAdvisoryIgnorePatterns = [
-                    ...chosen.payload.advisoryIgnorePatterns,
-                ];
-                this.events.dispatchEvent(
-                    new CustomEvent("ignore:advisory-available", {
-                        detail: {
-                            patterns: this.bootstrapAdvisoryIgnorePatterns,
-                        },
-                    })
-                );
-            } catch (error: any) {
-                console.warn(
-                    "shared-fs: dropping invalid advisory ignore patterns from snapshot manifest:",
-                    error?.message ?? error
-                );
-            }
-        }
+        // readable.
+        this.acceptAdvisoryIgnorePatterns(chosen.payload);
         // Restrict block fetches to CURRENTLY CONNECTED peers: the
         // replicator-derived provider set can contain dead ex-members
         // (machines join and leave constantly in this workload). Upstream
@@ -13047,16 +13539,22 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 ),
             });
         }
+        // The cut also stops the fetches in flight; a fetch it failed is
+        // the cut, not a bootstrap failure.
+        const fetchSignal = cut ? AbortSignal.any([signal, cut]) : signal;
         const segments = await mapWithConcurrency(
             chosen.payload.segments,
             config.segmentFetchConcurrency,
             async (ref) => {
+                if (isCut()) {
+                    throw new Error(BOOTSTRAP_CUT_REASON);
+                }
                 const bytes = (await (this.node.services.blocks as any).get(
                     ref.cid,
                     {
                         remote: {
                             timeout: config.discoveryTimeoutMs * 4,
-                            signal,
+                            signal: fetchSignal,
                             ...(connectedPeers.length > 0
                                 ? { from: connectedPeers }
                                 : {}),
@@ -13088,7 +13586,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
                 return segment;
             }
-        );
+        ).catch((error) => {
+            if (isCut()) {
+                return undefined;
+            }
+            throw error;
+        });
+        throwIfAborted();
+        if (!segments || isCut()) {
+            return false;
+        }
         if (this.bootstrapTelemetry) {
             const clockMs = this.bootstrapTelemetryNow!();
             this.emitBootstrapTelemetry({
@@ -13154,9 +13661,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 sinceYield = 0;
                 await new Promise((resolve) => setImmediate(resolve));
                 throwIfAborted();
+                if (isCut()) {
+                    return false;
+                }
             }
         }
         throwIfAborted();
+        if (isCut()) {
+            return false;
+        }
         this.bootstrapManifestMeta = {
             authorKey: chosen.authorKey,
             snapshotSeq: chosen.payload.snapshotSeq,
@@ -14878,9 +15391,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             context
         );
         this.throwIfMaintenanceInactive(context);
+        // While a cut bootstrap waits for the fleet's advisory patterns
+        // (advisoryIgnorePending), the policy's effective set is only its
+        // open-args: advertise none rather than that.
         const advisoryIgnorePatterns =
             options.advisoryIgnorePatterns ??
-            this.advisoryIgnorePublish ??
+            (this.advisoryIgnorePending
+                ? undefined
+                : this.advisoryIgnorePublish) ??
             (await this.readAdvisoryFromRulesFile());
         this.throwIfMaintenanceInactive(context);
         const payload = new SnapshotManifestPayload({
@@ -15177,6 +15695,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             const populated = await this.hasLocalNamingRow();
             this.throwIfMaintenanceInactive(context);
             if (!populated) {
+                return;
+            }
+            if (this.advisoryIgnorePending) {
+                // A cut bootstrap still waits for the fleet's advisory
+                // ignore patterns: a manifest now would advertise none, and
+                // as the newest it would outrank the one carrying them for
+                // later joiners. The check runs again once the watch
+                // answers or detaches.
+                this.deferredSnapshotTick = runTick;
                 return;
             }
             try {

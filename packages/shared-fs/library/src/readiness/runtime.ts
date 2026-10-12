@@ -157,6 +157,12 @@ export interface JoinOptions {
      */
     phaseSettled(): boolean;
     /**
+     * After an evaluation where every clause but the phase clause held
+     * (production: the host's bootstrap cut, M2 PR-2). Called on every such
+     * evaluation, never awaited; a throw is dropped.
+     */
+    onComplete?(): void;
+    /**
      * The host's decision after a satisfied evaluation (production:
      * `markWriteReady`): read the predicate and its proof
      * (`proofIfSatisfied`), persist, flip. A rejection leaves J gated and
@@ -843,6 +849,9 @@ export class ReadinessRuntime {
             timers: options.timers,
             now: options.now,
             phaseSettled: () => options.phaseSettled(),
+            ...(options.onComplete
+                ? { onComplete: () => options.onComplete?.() }
+                : {}),
             decide: () => this.decideFor(options),
             onContained: (_peer, results) => {
                 if (registry) this.checkContained(results);

@@ -32,6 +32,7 @@ import {
 import type { ReadinessRuntime } from "../readiness/runtime.js";
 import { SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import { OpenV1 } from "../readiness/wire.js";
+import { holdCuts } from "./readiness-cut-hold.js";
 import { holdFlips } from "./readiness-flip-hold.js";
 
 const decode = (value: Uint8Array | undefined) =>
@@ -80,6 +81,7 @@ const waitUntil = async (
 describe("shared fs cold-start bootstrap", () => {
     const peers: Peerbit[] = [];
     const holds: Array<ReturnType<typeof holdFlips>> = [];
+    const cutHolds: Array<ReturnType<typeof holdCuts>> = [];
 
     afterEach(async () => {
         await Promise.allSettled(
@@ -94,6 +96,7 @@ describe("shared fs cold-start bootstrap", () => {
         // After the peers stopped: a decision still parked then finds its
         // open ended and flips nothing.
         for (const hold of holds.splice(0)) hold.restore();
+        for (const hold of cutHolds.splice(0)) hold.restore();
     });
 
     /**
@@ -104,6 +107,19 @@ describe("shared fs cold-start bootstrap", () => {
     const holdFlipsOf = (peer: Peerbit) => {
         const hold = holdFlips(peer);
         holds.push(hold);
+        return hold;
+    };
+
+    /**
+     * Drops the bootstrap cut of `peer`'s filesystems (readiness-cut-hold.ts,
+     * M2 PR-2): a test that pins the posture a failed bootstrap takes holds
+     * it, so a readiness proof that comes first cannot end the bootstrap
+     * as a plain join instead. The cut has its own tests
+     * (readiness-bootstrap-cut.test.ts).
+     */
+    const holdCutsOf = (peer: Peerbit) => {
+        const hold = holdCuts(peer);
+        cutHolds.push(hold);
         return hold;
     };
 
@@ -1426,8 +1442,10 @@ describe("shared fs cold-start bootstrap", () => {
 
             // Reopened, it never installs the local genesis, and the content
             // its earlier session stored makes it a resumed bootstrap: the
-            // unverified posture.
+            // unverified posture. (The store reconnects to the creator on
+            // its own, so the bootstrap cut is held: this pins the posture.)
             joinerPeer = await Peerbit.create({ directory });
+            holdCutsOf(joinerPeer);
             const reopened = await openSharedFs({
                 peerbit: joinerPeer,
                 address: creator.address,
@@ -2206,6 +2224,9 @@ describe("shared fs cold-start bootstrap", () => {
                 ) => {
                     await donor.writeFile(`/${label}.txt`, label);
                     joinerPeer = await Peerbit.create({ directory: at });
+                    // The postures below are a failed bootstrap's: the cut,
+                    // which ends one on a readiness proof, stays held.
+                    holdCutsOf(joinerPeer);
                     await joinerPeer.dial(donorPeer);
                     const held = holdOpenUntilHistory(
                         joinerPeer,

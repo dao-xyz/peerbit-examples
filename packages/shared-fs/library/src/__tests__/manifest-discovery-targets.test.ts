@@ -7,6 +7,7 @@ import {
     type BootstrapTelemetryEvent,
 } from "../index.js";
 import { BootstrapManifest } from "../model.js";
+import { holdCuts } from "./readiness-cut-hold.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
@@ -21,6 +22,12 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * took 15 s. Now a usable snapshot ends discovery in tens of milliseconds,
  * and without one the silent neighbour costs one timeout. The bounds below
  * separate those outcomes from 15 s without being timing-flaky.
+ *
+ * These tests pin discovery itself, so every joiner holds the bootstrap cut
+ * (readiness-cut-hold.ts, M2 PR-2): a readiness proof that comes first
+ * would otherwise end discovery before what they measure. The cut has its
+ * own tests (readiness-bootstrap-cut.test.ts); mode "require" never cuts
+ * (test 67, below).
  */
 
 type DiscoveryEnd = Extract<
@@ -33,10 +40,19 @@ const DISCOVERY_BOUND_MS = DISCOVERY_TIMEOUT_MS;
 
 describe("shared fs manifest discovery targets", () => {
     const peers: Peerbit[] = [];
+    const cutHolds: Array<ReturnType<typeof holdCuts>> = [];
 
     afterEach(async () => {
         await stopTestPeers(peers);
+        for (const hold of cutHolds.splice(0)) hold.restore();
     });
+
+    /** A joiner's peer whose bootstrap cut is held (see the file comment). */
+    const createJoinerPeer = async () => {
+        const peer = await createPeer();
+        cutHolds.push(holdCuts(peer));
+        return peer;
+    };
 
     const createPeer = async () => {
         const peer = await Peerbit.create();
@@ -55,7 +71,7 @@ describe("shared fs manifest discovery targets", () => {
         address: string;
     }) => {
         const bystander = await createPeer();
-        const joinerPeer = await createPeer();
+        const joinerPeer = await createJoinerPeer();
         await joinerPeer.dial(bystander);
         await joinerPeer.dial(donor.peer);
         // The bystander must be a target, or the bound proves nothing.
@@ -223,7 +239,7 @@ describe("shared fs manifest discovery targets", () => {
                 bootstrap: { mode: "off" },
             });
 
-            const joinerPeer = await createPeer();
+            const joinerPeer = await createJoinerPeer();
             await joinerPeer.dial(observerPeer);
             await joinerPeer.dial(donorPeer);
             // Only the observer is visible: the donor's Subscribe has not
@@ -336,6 +352,60 @@ describe("shared fs manifest discovery targets", () => {
     );
 
     it(
+        "67 (M2 PR-2): mode require never cuts: it waits out discovery and fails when no snapshot is usable",
+        { timeout: 120_000 },
+        async () => {
+            // A genesis-only donor beside a silent bystander: in mode "auto"
+            // the readiness proof ends this discovery (the cut); "require"
+            // awaits a snapshot before its join starts, so nothing cuts it
+            // (O8).
+            const donorPeer = await createPeer();
+            const donor = await openSharedFs({
+                peerbit: donorPeer,
+                machineLabel: "discovery-donor",
+                replicate: { factor: 1 },
+            });
+            const bystander = await createPeer();
+            // Recorded, not held: a call would show a cut was asked for.
+            const joinerPeer = await createPeer();
+            const cuts = holdCuts(joinerPeer);
+            cutHolds.push(cuts);
+            cuts.release();
+            await joinerPeer.dial(bystander);
+            await joinerPeer.dial(donorPeer);
+            const events: BootstrapTelemetryEvent[] = [];
+            const timeoutMs = 1_500;
+            const started = Date.now();
+            await expect(
+                openSharedFs({
+                    peerbit: joinerPeer,
+                    address: donor.address,
+                    machineLabel: "discovery-require",
+                    replicate: { factor: 1 },
+                    bootstrap: {
+                        mode: "require",
+                        discoveryTimeoutMs: timeoutMs,
+                    },
+                    telemetry: { bootstrap: (event) => events.push(event) },
+                })
+            ).rejects.toMatchObject({ code: "EIO" });
+            expect(Date.now() - started).toBeGreaterThanOrEqual(timeoutMs);
+            const end = discoveryEnd(events);
+            expect(end).toBeDefined();
+            expect(end!.aborted).toBeUndefined();
+            expect(end!.durationMs).toBeGreaterThanOrEqual(timeoutMs - 100);
+            expect(end!.zeroDocument).toBeGreaterThanOrEqual(1);
+            expect(
+                events.find((event) => event.type === "fallback")
+            ).toMatchObject({
+                posture: "plain-join",
+                reason: expect.stringContaining("zero-document"),
+            });
+            expect(cuts.calls()).toEqual([]);
+        }
+    );
+
+    it(
         "does not let a corrupted copy hide the genuine manifest",
         { timeout: 120_000 },
         async () => {
@@ -376,7 +446,7 @@ describe("shared fs manifest discovery targets", () => {
                     });
                 return { ...found, results: [...corrupted, ...found.results] };
             };
-            const joinerPeer = await createPeer();
+            const joinerPeer = await createJoinerPeer();
             await joinerPeer.dial(donorPeer);
             const events: BootstrapTelemetryEvent[] = [];
             let joiner: Awaited<ReturnType<typeof openSharedFs>>;
