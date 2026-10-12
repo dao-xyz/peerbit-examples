@@ -1,5 +1,8 @@
 import { deserialize } from "@dao-xyz/borsh";
+import { Ed25519Keypair, type PublicSignKey } from "@peerbit/crypto";
+import { TrustedNetwork } from "@peerbit/trusted-network";
 import { Peerbit } from "peerbit";
+import { readFileSync } from "node:fs";
 import {
     mkdir,
     mkdtemp,
@@ -10,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Documents } from "@peerbit/document";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -34,6 +38,7 @@ import { SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import { OpenV1 } from "../readiness/wire.js";
 import { holdCuts } from "./readiness-cut-hold.js";
 import { holdFlips } from "./readiness-flip-hold.js";
+import { watchTimers } from "./readiness-timer-watch.js";
 
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
@@ -2785,56 +2790,6 @@ describe("shared fs cold-start bootstrap", () => {
         expect(joiner.bootstrapStatus().writeReady).toBe(false);
     });
 
-    it("accepts a current routed donor without requiring a direct stream", async () => {
-        const peer = await createPeer();
-        const fs = await openSharedFs({
-            peerbit: peer,
-            machineLabel: "routed-discovery-probe",
-        });
-        const program: any = fs.program;
-        const pubsub: any = peer.services.pubsub;
-        const self = peer.identity.publicKey.hashcode();
-        const donorHash = "routed-donor";
-        const relayHash = "live-relay";
-        const getReplicators = program.entries.log.getReplicators.bind(
-            program.entries.log
-        );
-        const isReachable = pubsub.routes.isReachable.bind(pubsub.routes);
-        const getBestRouteHint = pubsub.routes.getBestRouteHint.bind(
-            pubsub.routes
-        );
-        pubsub.peers.set(relayHash, {});
-        program.entries.log.getReplicators = async () =>
-            new Set([self, donorHash]);
-        pubsub.routes.isReachable = (from: string, target: string) =>
-            from === self && target === donorHash;
-        pubsub.routes.getBestRouteHint = (from: string, target: string) =>
-            from === self && target === donorHash
-                ? { nextHop: relayHash, distance: 2, updatedAt: Date.now() }
-                : undefined;
-        try {
-            // Bootstrap discovery's liveness rule (write readiness no longer
-            // reads it, PR-3 commit 4).
-            expect(pubsub.peers.has(donorHash)).toBe(false);
-            await expect(program.liveRemoteReplicators()).resolves.toEqual([
-                donorHash,
-            ]);
-
-            pubsub.routes.getBestRouteHint = () => ({
-                nextHop: relayHash,
-                distance: 2,
-                updatedAt: Date.now() - 20_000,
-                expiresAt: Date.now() + 1_000,
-            });
-            await expect(program.liveRemoteReplicators()).resolves.toEqual([]);
-        } finally {
-            program.entries.log.getReplicators = getReplicators;
-            pubsub.routes.isReachable = isReachable;
-            pubsub.routes.getBestRouteHint = getBestRouteHint;
-            pubsub.peers.delete(relayHash);
-        }
-    });
-
     it(
         "serves a readable, winner-correct tree from the snapshot before the log replicates",
         { retry: 1, timeout: 240_000 },
@@ -3153,6 +3108,292 @@ describe("shared fs cold-start bootstrap", () => {
                 expect((await joiner.list("/tree")).length).toBe(10);
             });
             expect(joiner.bootstrapStatus().phase).toBe("off");
+        }
+    );
+
+    /**
+     * An access-controlled store whose only snapshot is published by R, a
+     * writer O authorized; R stays online to serve its segments (design
+     * test 71's trust race).
+     */
+    const trustRaceStore = async () => {
+        // O owns the store; R, a trusted writer, publishes the only
+        // snapshot and stays online to serve its segments.
+        const ownerPeer = await createPeer();
+        const owner = await openSharedFs({
+            peerbit: ownerPeer,
+            machineLabel: "trust-owner",
+            rootKey: ownerPeer.identity.publicKey,
+            gc: false,
+        });
+        await owner.writeBatch(
+            Array.from({ length: 20 }, (_, i) => ({
+                path: `/acl/f-${i}.txt`,
+                content: `guarded ${i}`,
+            }))
+        );
+        const publisherPeer = await createPeer();
+        await publisherPeer.dial(ownerPeer);
+        const publisher = await openSharedFs({
+            peerbit: publisherPeer,
+            address: owner.address,
+            machineLabel: "trust-publisher",
+            bootstrap: false,
+            gc: false,
+        });
+        const publisherKey = publisherPeer.identity.publicKey;
+        await owner.authorizeWriter(publisherKey);
+        await publisher.awaitWriteReady({ timeout: 60_000 });
+        await waitUntil(async () =>
+            expect(await publisher.isTrustedWriter(publisherKey)).toBe(true)
+        );
+        expect((await publisher.snapshotWrite()).segments).toBeGreaterThan(0);
+        const manifestId = `bootstrap:${encodePublicSignKey(publisherKey)}`;
+        await waitUntil(async () =>
+            expect(
+                await (owner.program as any).getDocument(manifestId)
+            ).toBeDefined()
+        );
+        return { ownerPeer, owner, publisherPeer, publisherKey };
+    };
+
+    /**
+     * Wraps discoverManifests for `peer`'s filesystems: `onEnd` runs when a
+     * discovery returned. Restored by the returned function.
+     */
+    const onDiscoveryEnd = (peer: Peerbit, onEnd: () => void) => {
+        const prototype = SharedFileSystem.prototype as any;
+        const discoverManifests = prototype.discoverManifests;
+        prototype.discoverManifests = async function (
+            this: any,
+            ...args: any[]
+        ) {
+            const found = await discoverManifests.apply(this, args);
+            if (this.node === peer) onEnd();
+            return found;
+        };
+        return () => (prototype.discoverManifests = discoverManifests);
+    };
+
+    it(
+        "71 (M2 PR-3): the trust-race wait ends on the trust graph's change event; no timer loop, the deadline only gives up",
+        { timeout: 240_000 },
+        async () => {
+            const deadlineMs = 60_000;
+            const { ownerPeer, owner, publisherPeer, publisherKey } =
+                await trustRaceStore();
+
+            // J's trust graph has not learned R yet (the trust race) until
+            // the test says so: R's key reads untrusted on J only.
+            const joinerPeer = await createPeer();
+            holdCutsOf(joinerPeer);
+            let untrusted = true;
+            let discovered = false;
+            let checksAfterDiscovery = 0;
+            const isTrusted = TrustedNetwork.prototype.isTrusted;
+            const restoreIsTrusted = () =>
+                (TrustedNetwork.prototype.isTrusted = isTrusted);
+            TrustedNetwork.prototype.isTrusted = function (
+                this: any,
+                trustee: PublicSignKey,
+                ...rest: any[]
+            ) {
+                if (this.node === joinerPeer && trustee.equals(publisherKey)) {
+                    // The trust-race loop's checks (not the write path's).
+                    if (
+                        discovered &&
+                        new Error().stack?.includes("fetchAndInstallOverlay")
+                    ) {
+                        checksAfterDiscovery++;
+                    }
+                    if (untrusted) return Promise.resolve(false);
+                }
+                return (isTrusted as any).call(this, trustee, ...rest);
+            };
+            const restoreDiscovery = onDiscoveryEnd(
+                joinerPeer,
+                () => (discovered = true)
+            );
+            const timers = watchTimers();
+            try {
+                await joinerPeer.dial(ownerPeer);
+                await joinerPeer.dial(publisherPeer);
+                const events: BootstrapTelemetryEvent[] = [];
+                const joiner = await openSharedFs({
+                    peerbit: joinerPeer,
+                    address: owner.address,
+                    machineLabel: "trust-joiner",
+                    gc: false,
+                    bootstrap: { discoveryTimeoutMs: deadlineMs },
+                    telemetry: { bootstrap: (event) => events.push(event) },
+                } as any);
+                const program = joiner.program as any;
+                let trustChanges = 0;
+                program.trustGraph.trustGraph.events.addEventListener(
+                    "change",
+                    () => trustChanges++
+                );
+                const discoveryEnd = () =>
+                    events.find(
+                        (event) => event.type === "manifest-discovery:end"
+                    );
+                // In the wait: discovery ended, the candidate was checked
+                // and found untrusted, and nothing was decided.
+                await waitUntil(() => {
+                    expect(discovered).toBe(true);
+                    expect(checksAfterDiscovery).toBeGreaterThanOrEqual(1);
+                });
+                const changesAtWait = trustChanges;
+                await new Promise((resolve) => setTimeout(resolve, 1_500));
+                expect(discoveryEnd()).toBeUndefined();
+                expect(program.bootstrapPhase).toBe("fetching");
+                // A 250 ms poll would have checked about six more times.
+                // Only a trust-graph change checks again (one candidate per
+                // check, at most one check per change).
+                expect(checksAfterDiscovery).toBeLessThanOrEqual(
+                    1 + trustChanges
+                );
+
+                // R becomes trusted on J; the next trust-graph change (a
+                // real one: O authorizes another key) ends the wait.
+                untrusted = false;
+                const changedAt = Date.now();
+                await owner.authorizeWriter(
+                    (await Ed25519Keypair.create()).publicKey
+                );
+                expect((await joiner.awaitBootstrapConverged()).verified).toBe(
+                    true
+                );
+                expect(Date.now() - changedAt).toBeLessThan(deadlineMs / 4);
+                expect(trustChanges).toBeGreaterThan(changesAtWait);
+                expect(discoveryEnd()).toMatchObject({
+                    candidates: 1,
+                    trusted: 1,
+                });
+                expect(discoveryEnd()).not.toHaveProperty("aborted");
+                expect(decode(await joiner.readFile("/acl/f-7.txt"))).toBe(
+                    "guarded 7"
+                );
+
+                // fetchAndInstallOverlay armed one timer of its own: the
+                // give-up at the deadline, never a re-check interval.
+                const lines = readFileSync(
+                    fileURLToPath(new URL("../index.ts", import.meta.url)),
+                    "utf8"
+                ).split("\n");
+                const first = lines.findIndex((line) =>
+                    line.startsWith("    private async fetchAndInstallOverlay(")
+                );
+                const last = lines.findIndex(
+                    (line, i) => i > first && line === "    }"
+                );
+                expect(first).toBeGreaterThan(0);
+                const inOverlay = timers.own.filter(({ frame }) => {
+                    const line = Number(
+                        frame.match(/[\\/]src[\\/]index\.ts:(\d+):/)?.[1]
+                    );
+                    return line > first && line <= last + 1;
+                });
+                expect(inOverlay).toHaveLength(1);
+                expect(inOverlay[0].ms).toBeGreaterThan(deadlineMs / 2);
+
+                // The flip's writers-unheard report reads the trust graph
+                // remotely; let it finish while O and R still run, or J's
+                // close waits for it after they stopped.
+                await joiner.awaitWriteReady({ timeout: 60_000 });
+                await waitUntil(() =>
+                    expect(
+                        events.some((event) => event.type === "writers-unheard")
+                    ).toBe(true)
+                );
+            } finally {
+                timers.stop();
+                restoreIsTrusted();
+                restoreDiscovery();
+            }
+        }
+    );
+
+    it(
+        "71 (M2 PR-3): a trust-graph change that lands while the candidates are checked is not lost",
+        { timeout: 240_000 },
+        async () => {
+            const deadlineMs = 60_000;
+            const { ownerPeer, owner, publisherPeer, publisherKey } =
+                await trustRaceStore();
+            const joinerPeer = await createPeer();
+            holdCutsOf(joinerPeer);
+            // The trust-race loop's first check after discovery reads R
+            // untrusted, and R turns trusted (with its change event) while
+            // that check runs, before the loop could start waiting.
+            let discovered = false;
+            let changedDuringCheck = false;
+            const isTrusted = TrustedNetwork.prototype.isTrusted;
+            TrustedNetwork.prototype.isTrusted = function (
+                this: any,
+                trustee: PublicSignKey,
+                ...rest: any[]
+            ) {
+                if (
+                    this.node === joinerPeer &&
+                    trustee.equals(publisherKey) &&
+                    !changedDuringCheck
+                ) {
+                    if (
+                        discovered &&
+                        new Error().stack?.includes("fetchAndInstallOverlay")
+                    ) {
+                        changedDuringCheck = true;
+                        this.trustGraph.events.dispatchEvent(
+                            new CustomEvent("change", {
+                                detail: { added: [], removed: [] },
+                            })
+                        );
+                    }
+                    return Promise.resolve(false);
+                }
+                return (isTrusted as any).call(this, trustee, ...rest);
+            };
+            const restoreDiscovery = onDiscoveryEnd(
+                joinerPeer,
+                () => (discovered = true)
+            );
+            try {
+                await joinerPeer.dial(ownerPeer);
+                await joinerPeer.dial(publisherPeer);
+                const events: BootstrapTelemetryEvent[] = [];
+                const started = Date.now();
+                const joiner = await openSharedFs({
+                    peerbit: joinerPeer,
+                    address: owner.address,
+                    machineLabel: "trust-joiner",
+                    gc: false,
+                    bootstrap: { discoveryTimeoutMs: deadlineMs },
+                    telemetry: { bootstrap: (event) => events.push(event) },
+                } as any);
+                // Re-checked at once, not at the deadline.
+                expect((await joiner.awaitBootstrapConverged()).verified).toBe(
+                    true
+                );
+                expect(changedDuringCheck).toBe(true);
+                expect(Date.now() - started).toBeLessThan(deadlineMs / 4);
+                expect(
+                    events.find(
+                        (event) => event.type === "manifest-discovery:end"
+                    )
+                ).toMatchObject({ candidates: 1, trusted: 1 });
+                // See the case above: the flip's writers-unheard report
+                // finishes while O and R run.
+                await joiner.awaitWriteReady({ timeout: 60_000 });
+                await waitUntil(() =>
+                    expect(
+                        events.some((event) => event.type === "writers-unheard")
+                    ).toBe(true)
+                );
+            } finally {
+                TrustedNetwork.prototype.isTrusted = isTrusted;
+                restoreDiscovery();
+            }
         }
     );
 

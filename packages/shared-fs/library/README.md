@@ -278,8 +278,8 @@ these hold:
   the contained peers do not already hold: the join falls back to a plain
   join (`lastFailure` reads "readiness proved the view before a snapshot was
   needed") and decides at once, instead of waiting for discovery to time out
-  on a connected peer that does not run this filesystem. An overlay already
-  in use is not stopped, and `mode: "require"` still waits for its snapshot.
+  on a peer that does not answer it. An overlay already in use is not
+  stopped, and `mode: "require"` still waits for its snapshot.
   Readiness does not wait for snapshot manifests, which carry a fleet's
   advisory ignore patterns: a joiner stopped this way takes them from the
   manifest a full bootstrap would have chosen (never its own), when it holds
@@ -295,6 +295,24 @@ trips beyond receiving the rows it lacked. A peer that keeps writing does not
 hold it back: each peer is compared at the summary it took when asked. Once
 contained, a peer that leaves still counts, because the joiner holds or has
 explained everything that peer listed.
+
+A snapshot bootstrap asks for manifests only the peers that run this
+filesystem: those subscribed to its readiness topic, and the replicators of its
+namespace log, each while reachable. A connected peer that does not run it,
+such as a relay `peer.bootstrap()` dials, is never asked. Peers are added as
+they subscribe, announce themselves as replicators or become reachable, and
+one still silent halfway through `discoveryTimeoutMs` (default 5 s) is asked
+once more. Discovery ends when every peer asked has answered, or once a
+manifest the joiner would install has arrived and every readiness subscriber
+has answered. A replicator that never subscribed is asked, but its row can
+outlive the peer, so it is not waited for then, nor once every readiness
+subscriber asked has returned a manifest (a zero-document one counts). In
+`mode: "require"`, answers with nothing do not end discovery while no manifest
+has been found, so a donor that becomes visible later is still asked.
+Otherwise it ends at `discoveryTimeoutMs`, or when readiness stops the
+bootstrap as above. A manifest whose signer is not trusted yet is checked
+again on every trust-graph change until a second `discoveryTimeoutMs` has
+passed.
 
 Before it accepts its first write, a node with a directory writes the proof,
 with an fsync, to its state file

@@ -50,3 +50,52 @@ describe("readiness timers", () => {
         ).toEqual([]);
     });
 });
+
+/**
+ * Design test 72 (M2 PR-3, plan 4.4): bootstrap discovery reads peers
+ * through the readiness transport (src/readiness/reachability.ts, whose A'
+ * reads stay there until U-37), so src/index.ts reads no route table, no
+ * pubsub neighbour map and no `stream:outbound` event of its own, except
+ * the snapshot segment providers (P5, kept by O13) and, until PR-6, the GC
+ * peer gate (P6).
+ */
+describe("private pubsub reads in src/index.ts", () => {
+    it("72: none besides the segment providers and the GC peer gate", async () => {
+        const lines = (
+            await readFile(
+                fileURLToPath(new URL("../index.ts", import.meta.url)),
+                "utf8"
+            )
+        ).split("\n");
+        const reads = lines.flatMap((line, i) =>
+            /\.peers\b|\broutes\b|getBestRouteHint|stream:outbound/.test(line)
+                ? [i]
+                : []
+        );
+        /** The method whose body holds line `i` (0-based). */
+        const methodOf = (i: number) => {
+            for (let at = i; at >= 0; at--) {
+                const name = lines[at].match(
+                    /^ {4}(?:private |protected |public )?(?:async )?(\w+)[<(]/
+                )?.[1];
+                if (name) return name;
+            }
+            return undefined;
+        };
+        expect(
+            reads.map((i) => ({
+                method: methodOf(i),
+                read: lines[i].trim(),
+            }))
+        ).toEqual([
+            {
+                method: "fetchAndInstallOverlay",
+                read: "...(((this.node.services.pubsub as any)?.peers?.keys?.() ??",
+            },
+            {
+                method: "gcSchedulerTickInner",
+                read: "...(((this.node.services.pubsub as any)?.peers?.keys?.() ??",
+            },
+        ]);
+    });
+});

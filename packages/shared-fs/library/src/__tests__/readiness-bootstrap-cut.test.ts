@@ -1,5 +1,6 @@
 import { deserialize } from "@dao-xyz/borsh";
 import type { PublicSignKey } from "@peerbit/crypto";
+import { Documents } from "@peerbit/document";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -31,10 +32,13 @@ import { stopTestPeers } from "./stop-test-peers.js";
  *
  * In-process Peerbit peers. `bystander` runs Peerbit but not this
  * filesystem, as the public relays `peer.bootstrap()` dials do: a pubsub
- * neighbour that never answers a manifest query, so without the cut a
- * joiner's discovery runs to its deadline (`boot2` in the M2 plan's
- * measurements; 60 s here, so a test that does not cut cannot pass by
- * waiting).
+ * neighbour that never answers a manifest query. Since M2 PR-3 discovery
+ * never asks it (manifest-discovery-targets.test.ts, test 69), so beside
+ * it the donors' answers to the joiner's manifest queries are held until
+ * the test ends (`holdManifestAnswers`): a filesystem peer whose answer is
+ * still on its way, which discovery waits for. Without the cut a joiner's
+ * discovery then runs to its deadline (60 s here, so a test that does not
+ * cut cannot pass by waiting).
  *
  * Probes: readiness-cut-hold.ts drops (and records) the cut of a peer's
  * filesystems while held, and calls the real handler on demand; the
@@ -109,7 +113,11 @@ describe("readiness bootstrap cut (M2 PR-2)", () => {
     const peers: Peerbit[] = [];
     const restores: Array<() => void> = [];
 
+    /** Run before the peers stop. */
+    const beforeStop: Array<() => void> = [];
+
     afterEach(async () => {
+        for (const release of beforeStop.splice(0)) release();
         await stopTestPeers(peers);
         // After the peers stopped: a parked decision then finds its open
         // ended and flips nothing.
@@ -231,7 +239,39 @@ describe("readiness bootstrap cut (M2 PR-2)", () => {
         return { peer, fs, segments, fileCount };
     };
 
-    /** A joiner's peer dialed to a bystander and to every one of `to`. */
+    /**
+     * The filesystems of `donors` answer `joiner`'s snapshot-manifest
+     * queries only once the test ends (before the peers stop): a donor
+     * whose answer is still on its way. Other queries pass. The wrapper
+     * sits on the document index class, for those peers only.
+     */
+    const holdManifestAnswers = (donors: Peerbit[], joiner: Peerbit) => {
+        const prototype = Object.getPrototypeOf(new Documents().index);
+        const processQuery = prototype.processQuery;
+        const joinerHash = joiner.identity.publicKey.hashcode();
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => (release = resolve));
+        prototype.processQuery = async function (this: any, ...args: any[]) {
+            if (
+                donors.includes(this?.node) &&
+                args[1]?.hashcode?.() === joinerHash &&
+                (args[0]?.query ?? []).some(
+                    (match: any) => match?.value === "bootstrap-manifest"
+                )
+            ) {
+                await released;
+            }
+            return processQuery.apply(this, args);
+        };
+        beforeStop.push(release);
+        restores.push(() => (prototype.processQuery = processQuery));
+    };
+
+    /**
+     * A joiner's peer dialed to every one of `to` and, unless `bystander`
+     * is false, to a bystander, with `to`'s manifest answers held (see the
+     * file comment).
+     */
     const joinerPeerBeside = async (
         to: Peerbit[],
         options: { directory?: string; bystander?: boolean } = {}
@@ -245,6 +285,7 @@ describe("readiness bootstrap cut (M2 PR-2)", () => {
                     bystander.identity.publicKey.hashcode()
                 )
             ).toBe(true);
+            holdManifestAnswers(to, peer);
         }
         for (const other of to) await peer.dial(other);
         return peer;
@@ -267,7 +308,7 @@ describe("readiness bootstrap cut (M2 PR-2)", () => {
         } as any);
 
     it(
-        "63: both bootstrap(): a genesis donor beside a peer that does not run the filesystem; ready on the proof, not the deadline",
+        "63: both bootstrap(): a genesis donor whose manifest answer is on its way, beside a peer that does not run the filesystem; ready on the proof, not the deadline",
         { timeout: 120_000 },
         async () => {
             const donor = await genesisDonor();
@@ -663,7 +704,13 @@ describe("readiness bootstrap cut (M2 PR-2)", () => {
                 ...rest: any[]
             ) {
                 if (this.node === joinerPeer && trustee.equals(publisherKey)) {
-                    if (discovered) afterDiscovery++;
+                    // The trust-race loop's checks (not the write path's).
+                    if (
+                        discovered &&
+                        new Error().stack?.includes("fetchAndInstallOverlay")
+                    ) {
+                        afterDiscovery++;
+                    }
                     return Promise.resolve(false);
                 }
                 return (isTrusted as any).call(this, trustee, ...rest);
@@ -691,11 +738,13 @@ describe("readiness bootstrap cut (M2 PR-2)", () => {
                 { gc: false }
             );
             const program = programOf(joiner);
-            // In the wait: discovery ended, and the candidate was checked
-            // again after at least one of the wait's rounds. Readiness holds
-            // but for the phase (the held cut was asked for).
+            // In the wait: discovery ended, and the trust-race loop found
+            // the candidate untrusted (since M2 PR-3 it then waits for a
+            // trust-graph change, the deadline or the cut; no 250 ms
+            // rounds). Readiness holds but for the phase (the held cut was
+            // asked for).
             await waitUntil(() => {
-                expect(afterDiscovery).toBeGreaterThanOrEqual(2);
+                expect(afterDiscovery).toBeGreaterThanOrEqual(1);
                 expect(
                     cuts.calls().some(({ phase }) => phase === "fetching")
                 ).toBe(true);
