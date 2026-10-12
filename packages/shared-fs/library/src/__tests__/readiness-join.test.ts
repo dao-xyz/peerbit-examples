@@ -16,6 +16,7 @@ import { FileVersion, NamingEvent, SharedFsEntry } from "../model.js";
 import { BLOCKING_STATES, Coordinator } from "../readiness/coordinator.js";
 import { headDigest } from "../readiness/digest.js";
 import { hlcProvedOf, validateProof } from "../readiness/proof.js";
+import { PeerbitTransport } from "../readiness/reachability.js";
 import type { ReadinessRuntime } from "../readiness/runtime.js";
 import { NAMESPACE_V1, SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import type { SessionResult } from "../readiness/session.js";
@@ -65,6 +66,22 @@ const programOf = (fs: SharedFsHandle): any => fs.program;
 const entriesOf = (fs: SharedFsHandle): any => programOf(fs).entries;
 const hashOf = (peer: Peerbit) => peer.identity.publicKey.hashcode();
 const readinessOf = (fs: SharedFsHandle) => fs.bootstrapStatus().readiness;
+/**
+ * The filesystem peers `fs` sees now, by the public reads and A' that
+ * bootstrap discovery uses (`PeerbitTransport.filesystemPeers`).
+ */
+const filesystemPeersOf = async (fs: SharedFsHandle) => {
+    const transport = new PeerbitTransport(programOf(fs).node, {
+        topic: programOf(fs).readiness.topic,
+        log: entriesOf(fs).log,
+    });
+    try {
+        return await transport.filesystemPeers();
+    } finally {
+        transport.dispose();
+    }
+};
+const NO_FILESYSTEM_PEER = { subscribers: [], replicatorOnly: [] };
 
 const coordinatorOf = (fs: SharedFsHandle): Coordinator => {
     const coordinator = runtimeOf(fs)?.coordinator;
@@ -748,11 +765,12 @@ describe("readiness join (in-process)", () => {
                 ],
             });
             expect(joiner.fs.bootstrapStatus().writeReady).toBe(false);
-            // No live replicator is left: what held J before commit 4.
+            // J sees no filesystem peer any more (what held J before
+            // commit 4): no readiness subscriber, no reachable replicator.
             await waitUntil(async () =>
-                expect(
-                    await programOf(joiner.fs).liveRemoteReplicators()
-                ).toEqual([])
+                expect(await filesystemPeersOf(joiner.fs)).toEqual(
+                    NO_FILESYSTEM_PEER
+                )
             );
 
             // Design 4.12 #12: still ready.
@@ -847,10 +865,12 @@ describe("readiness join (in-process)", () => {
             expect(coordinatorOf(joiner.fs).phase).toBe("finished");
 
             await stopPeer(donor.peer);
+            // J's coordinator finished at the flip: the public reads show
+            // the departure.
             await waitUntil(async () =>
-                expect(
-                    await programOf(joiner.fs).liveRemoteReplicators()
-                ).toEqual([])
+                expect(await filesystemPeersOf(joiner.fs)).toEqual(
+                    NO_FILESYSTEM_PEER
+                )
             );
             expect(joiner.fs.bootstrapStatus()).toMatchObject({
                 writeReady: true,
@@ -1172,12 +1192,12 @@ describe("readiness join (in-process)", () => {
         const error = await timeoutOf(second.fs, 1_500);
         expect(error.readiness).toMatchObject({ state: "no-qualified-donor" });
         // A live replicator never released anything since commit 4, and
-        // J1 is one: J2's predicate alone holds J2 (S23).
-        await waitUntil(async () =>
-            expect(await programOf(second.fs).liveRemoteReplicators()).toEqual([
-                firstHash,
-            ])
-        );
+        // J1 is one (not departed in J2's records): J2's predicate alone
+        // holds J2 (S23).
+        expect(coordinator.record(firstHash)).toMatchObject({
+            state: "contained",
+            departed: false,
+        });
         expect(runtimeOf(second.fs)!.satisfied()).toBe(false);
         expect(second.fs.bootstrapStatus().writeReady).toBe(false);
 
@@ -1412,12 +1432,14 @@ describe("readiness join (in-process)", () => {
             expect(error.readiness!.inFlight.map(({ peer }) => peer)).toEqual([
                 donorHash,
             ]);
-            // The phase clause holds and the donor is a live replicator:
-            // the donor's containment alone holds J.
+            // The phase clause holds and the donor has not departed (J's
+            // records): the donor's containment alone holds J.
             const program = programOf(joiner.fs);
             expect(program.writeReadinessDecisionSettled).toBe(true);
             expect(program.readinessPhaseSettled()).toBe(true);
-            expect(await program.liveRemoteReplicators()).toEqual([donorHash]);
+            expect(coordinatorOf(joiner.fs).record(donorHash)).toMatchObject({
+                departed: false,
+            });
             expect(runtimeOf(joiner.fs)!.satisfied()).toBe(false);
 
             const flip = atReady(joiner.fs, () =>

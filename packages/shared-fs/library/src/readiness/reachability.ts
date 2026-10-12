@@ -17,6 +17,11 @@ import type { CoordinatorTransport, TransportEvent } from "./coordinator.js";
  * | `services.fanout` `peer:reachable`/`peer:unreachable` | `peerbit libp2p.js:97`; dispatched at `@peerbit/stream index.js:1653-1685` |
  * | `services.blocks` `peer:reachable`/`peer:unreachable` | `peerbit libp2p.js:98` (`DirectBlock extends DirectStream`, `@peerbit/blocks libp2p.js:17`); the same dispatch |
  *
+ * Bootstrap discovery reads peers through the same functions
+ * (`PeerbitTransport.filesystemPeers`, M2 PR-3), so `src/index.ts` keeps
+ * no route or neighbour read of its own besides the snapshot segment
+ * providers and the GC peer gate.
+ *
  * A read that cannot be made (a missing service, a renamed field, a throw)
  * answers "reachable": the peer keeps blocking until the caller's timeout or
  * `assumeComplete()`. It never makes a peer leave, so a Peerbit bump that
@@ -246,6 +251,17 @@ export interface ReplicatorSource {
     readonly events: EventSourceLike;
 }
 
+/**
+ * The peers bootstrap discovery asks (`PeerbitTransport.filesystemPeers`),
+ * both lists J excluded and filtered by A'.
+ */
+export interface FilesystemPeers {
+    /** The readiness topic's subscribers. */
+    subscribers: string[];
+    /** The namespace log's replicators that are not among `subscribers`. */
+    replicatorOnly: string[];
+}
+
 export interface PeerbitTransportOptions {
     /** The readiness RPC's topic (`RPC.topic`). */
     topic: string;
@@ -338,6 +354,38 @@ export class PeerbitTransport implements CoordinatorTransport {
             if (typeof hash === "string" && hash !== this.self) out.push(hash);
         }
         return out;
+    }
+
+    /**
+     * The peers bootstrap discovery asks for snapshot manifests (M2 PR-3):
+     * the readiness topic's subscribers, and the namespace log's
+     * replicators that did not subscribe it (a lost Subscribe, U-1), each
+     * kept only while A' reads it reachable. The two stay apart because a
+     * subscriber runs the filesystem now, while a replicator row can
+     * outlive its peer (A' keeps a peer whose route is still in the
+     * table). Public reads besides A'; a view that cannot be read (no
+     * identity, a cold replication index) lists nobody. Never throws.
+     */
+    async filesystemPeers(): Promise<FilesystemPeers> {
+        let subscribed: string[] = [];
+        try {
+            subscribed = (await this.subscribers()).map(({ hash }) => hash);
+        } catch {
+            // A cold subscription view proves nothing; replicators remain.
+        }
+        let replicators: string[] = [];
+        try {
+            replicators = await this.replicators();
+        } catch {
+            // A cold replication index counts none of its rows.
+        }
+        const subscribers = new Set(subscribed);
+        return {
+            subscribers: subscribed.filter((hash) => this.isReachable(hash)),
+            replicatorOnly: [...new Set(replicators)].filter(
+                (hash) => !subscribers.has(hash) && this.isReachable(hash)
+            ),
+        };
     }
 
     listen(listener: (event: TransportEvent) => void): () => void {

@@ -49,7 +49,8 @@ const THIS_FILE = /readiness-timer-watch\.ts:/;
 
 /** 1-based [first, last] lines of each host method's body. */
 const hostRanges = (() => {
-    const lines = readFileSync(INDEX_PATH, "utf8").split("\n");
+    // A Windows checkout has CRLF line endings.
+    const lines = readFileSync(INDEX_PATH, "utf8").split(/\r?\n/);
     const ranges: Array<{ name: string; first: number; last: number }> = [];
     for (const name of READINESS_HOST) {
         const start = lines.findIndex((line) =>
@@ -59,6 +60,9 @@ const hostRanges = (() => {
             throw new Error(`readiness-timer-watch: no ${name} in index.ts`);
         }
         const end = lines.findIndex((line, i) => i > start && line === "    }");
+        if (end < 0) {
+            throw new Error(`readiness-timer-watch: no end of ${name}`);
+        }
         ranges.push({ name, first: start + 1, last: end + 1 });
     }
     return ranges;

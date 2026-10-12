@@ -107,6 +107,7 @@ import {
     type PeerState,
     type ReadinessState,
     type ReadinessStatus,
+    type TransportEvent,
 } from "./readiness/coordinator.js";
 import type { RejectionReason } from "./readiness/explain.js";
 import { installTrustRejectionNotes } from "./readiness/ports.js";
@@ -2577,10 +2578,6 @@ const SNAPSHOT_MAX_SEGMENT_COUNT = 256;
 const SNAPSHOT_TARGET_SEGMENT_BYTES = 384_000;
 const SNAPSHOT_EST_DOC_BYTES = 384;
 const MANIFEST_PAYLOAD_CAP_BYTES = 100_000;
-/** Direct neighbours one manifest discovery asks at most besides the peers
- *  visible as running the filesystem, which are always asked
- *  (@peerbit/document asked up to 8 targets in all). */
-const MANIFEST_DISCOVERY_MAX_NEIGHBOURS = 16;
 /** @peerbit/log EntryType.CUT (not re-exported by @peerbit/document). */
 const ENTRY_TYPE_CUT = 1;
 /** Members per changeset manifest, versions+naming combined. 12k x 36B is
@@ -11404,61 +11401,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         return (id) => cached.get(id) ?? overlay?.get(id);
     }
 
-    /**
-     * Remote replicators of this log with current donor liveness: reachable,
-     * with a non-expiring best route whose next hop is a live direct stream.
-     * Empty when the transport cannot prove liveness or the replication
-     * index is still cold. Bootstrap discovery reads it
-     * (visibleFilesystemPeers); write readiness does not.
-     */
-    private async liveRemoteReplicators(): Promise<string[]> {
-        const pubsub = (this.node?.services?.pubsub as any) ?? undefined;
-        const peers = pubsub?.peers as Map<string, unknown> | undefined;
-        const routes = pubsub?.routes as
-            | {
-                  isReachable: (from: string, target: string) => boolean;
-                  getBestRouteHint: (
-                      from: string,
-                      target: string
-                  ) => { nextHop: string; expiresAt?: number } | undefined;
-              }
-            | undefined;
-        // Donor liveness needs the DirectStream route/session API and its
-        // live peer-stream map. A transport without them cannot prove a live
-        // donor, so discovery counts none.
-        if (
-            typeof peers?.has !== "function" ||
-            typeof routes?.isReachable !== "function" ||
-            typeof routes.getBestRouteHint !== "function"
-        ) {
-            return [];
-        }
-        try {
-            const self = this.node.identity.publicKey.hashcode();
-            const replicators = await this.entries.log.getReplicators();
-            return [...replicators].filter((hash) => {
-                if (hash === self || !routes.isReachable(self, hash)) {
-                    return false;
-                }
-                // DirectStream retains invalidated routes briefly for
-                // failover, marking them with expiresAt. They are useful for
-                // delivery retries but are not current donor-liveness
-                // evidence. The selected next hop, for direct and relayed
-                // donors alike, must also still be a live direct stream.
-                const hint = routes.getBestRouteHint(self, hash);
-                return (
-                    hint != null &&
-                    hint.expiresAt == null &&
-                    peers.has(hint.nextHop)
-                );
-            });
-        } catch {
-            // A cold replication index is not proof: discovery then counts
-            // none of its replicators.
-            return [];
-        }
-    }
-
     private serializeWriteReadinessTransition<T>(
         transition: () => Promise<T>
     ): Promise<T> {
@@ -12604,77 +12546,65 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Peers visible as running this filesystem now: live remote replicators
-     * of its log, plus reachable remote subscribers of its topic.
-     */
-    private async visibleFilesystemPeers(): Promise<Set<string>> {
-        const visible = new Set(await this.liveRemoteReplicators());
-        const pubsub = this.node.services.pubsub as any;
-        const self = this.node.identity.publicKey.hashcode();
-        try {
-            const subscribers: PublicSignKey[] =
-                (await pubsub.getSubscribers(this.entries.log.topic)) ?? [];
-            for (const key of subscribers) {
-                const hash = key.hashcode();
-                if (
-                    hash !== self &&
-                    (pubsub.peers?.has?.(hash) ||
-                        pubsub.routes?.isReachable?.(self, hash))
-                ) {
-                    visible.add(hash);
-                }
-            }
-        } catch {
-            // A cold subscription view proves nothing; replicators suffice.
-        }
-        return visible;
-    }
-
-    /**
      * Collect bootstrap manifests from the local index and from remote
      * peers, with one query per peer and one deadline (timeoutMs) for the
      * whole discovery. A peer that never answers costs that deadline once;
      * iterate() waited it out three times (15 s by default).
      *
-     * Asked: every peer visible as running this filesystem
-     * (visibleFilesystemPeers), and up to MANIFEST_DISCOVERY_MAX_NEIGHBOURS
-     * other direct pubsub neighbours. Neighbours are asked even when they
-     * are not visible as filesystem peers, as @peerbit/document did when it
-     * picked the targets: the subscriber view can lag behind the connection
-     * (a lost Subscribe announcement), and a connected donor must not be
-     * skipped for that. The cap never applies to a visible peer.
+     * Asked: the peers this run's own readiness transport lists
+     * (PeerbitTransport.filesystemPeers, M2 PR-3): the readiness topic's
+     * subscribers, and the namespace log's replicators that are not among
+     * them, both filtered by A'. A peer that does not run this filesystem
+     * (a relay peer.bootstrap() dials) is in neither list and is never
+     * asked. The transport is discovery's own, not the readiness join's:
+     * mode "require" bootstraps before a join exists, and a warm empty
+     * store bootstraps with no join (#415). Every exit disposes it.
      *
      * Discovery ends before the deadline in two cases only:
-     * - every peer asked has answered (an answer with nothing counts);
-     * - a remote peer returned a manifest `usable` accepts, and every peer
-     *   known to run this filesystem (visible as above) has answered. The
-     *   queries still waiting on other neighbours are then cancelled: the
-     *   joiner has a snapshot to install, and a silent neighbour could at
-     *   most hold a newer one.
+     * - every peer asked has answered (an answer with nothing counts). A
+     *   replicator-only row holds this exit only until every readiness
+     *   subscriber asked has returned a manifest (a zero-document one
+     *   counts): a row can outlive its peer (A' reads a dead ex-member
+     *   reachable while its route stays in the table), while a subscriber
+     *   that answers with nothing (an observer, another fresh joiner) may
+     *   leave a donor visible only by its row (U-1) as the one to wait
+     *   for. In mode "require", which fails the open without a snapshot,
+     *   this exit also needs a manifest found, locally or remotely: answers
+     *   with nothing then leave the donor's subscribe or replicator event
+     *   time to add it, until the deadline;
+     * - a remote peer returned a manifest `usable` accepts, and every
+     *   readiness subscriber asked has answered. A replicator-only row is
+     *   asked but never holds this exit, for the same reason. The queries
+     *   still waiting are cancelled: the joiner has a snapshot to install,
+     *   and a silent peer could at most hold a newer one.
      * Otherwise discovery waits for the deadline, unless `cut` aborts (the
      * bootstrap cut, onReadinessComplete): it then ends at once with what
      * arrived so far and no error, and the caller does not use that
-     * partial result. Nothing tells a peer that does not run this
-     * filesystem (a relay peer.bootstrap() dials, which never answers) from
-     * a donor whose answer is still on its way, so an empty or
-     * zero-document answer from one peer never cancels the query to
-     * another.
+     * partial result. Nothing tells a donor whose answer is still on its
+     * way from a peer that will not answer, so an empty or zero-document
+     * answer from one peer never cancels the query to a readiness
+     * subscriber, and an empty one never the query to a replicator-only
+     * row.
      *
-     * Membership events (replicator join, replication change, topic
-     * subscribe, peer reachable, new neighbour stream) re-evaluate the
-     * targets until discovery ends. A new neighbour is asked, and a
-     * neighbour that becomes visible is asked again: it may have dropped
-     * the first query because it had not opened this filesystem yet. Such
-     * a neighbour can also stay invisible (the same lagging view), so every
-     * peer still silent at half the deadline is asked once more, as
-     * iterate()'s retry did.
+     * The transport's events (a readiness subscribe, a replicator join or
+     * change, a peer turning reachable) re-evaluate the targets until
+     * discovery ends. A peer's readiness RPC subscribes beside its store,
+     * so a peer asked while its store still opens may drop the query; its
+     * replicator announcement comes after its index opened (Documents
+     * opens the index before the log), so a peer still pending then is
+     * asked again, once. Every peer still silent at half the deadline is
+     * asked once more, as iterate()'s retry did. The deadline and that
+     * retry are a give-up bound and a retry, never evidence.
      *
-     * Still missed, as before: a donor that is neither visible nor a direct
-     * neighbour, one beyond the neighbour cap, and one that answers after
-     * the deadline. A fresh joiner then takes the plain-join fallback (it
-     * replicates the log in full; only the snapshot speed-up is lost), a
-     * resumed partial store takes the unverified posture, and mode
-     * "require" fails the open.
+     * Still missed: a donor that is neither a readiness subscriber nor a
+     * replicator J reaches, one that answers after the deadline, one
+     * visible only by its row once every subscriber returned a manifest it
+     * would not install (a genesis creator's zero-document one, say), and,
+     * outside mode "require", one that becomes visible only after every
+     * peer asked has answered with nothing. A fresh joiner then takes the
+     * plain-join fallback (it replicates the log in full; only the
+     * snapshot speed-up is lost), a resumed partial store takes the
+     * unverified posture, and mode "require" fails the open.
      */
     private async discoverManifests(
         signal: AbortSignal,
@@ -12699,29 +12629,32 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 new SharedFsError("ECLOSED", "bootstrap was aborted")
             );
         }
+        // Mode "require" fails the open without a snapshot, so answers with
+        // nothing never end its discovery while nothing was found.
+        const untilFound = this.bootstrapConfig.mode === "require";
         return new Promise((resolve, reject) => {
-            // Aborting this cancels the queries still pending and drops the
-            // membership listeners.
+            // Aborting this cancels the queries still pending.
             const discovery = new AbortController();
+            const transport = new PeerbitTransport(this.node, {
+                topic: this.readiness.topic,
+                log: this.entries.log,
+            });
             // settled: timed out, failed or answered with nothing.
-            // asVisible: asked while visible as a filesystem peer.
+            // subscriber: listed as a readiness subscriber (holds the
+            // usable exit). replicator: asked after its log opened.
             const queries = new Map<
                 string,
                 {
                     state: "pending" | "settled" | "answered";
-                    asVisible: boolean;
+                    subscriber: boolean;
+                    replicator: boolean;
                     token: object;
                 }
             >();
-            const filesystemPeers = new Set<string>();
-            let neighbours = 0;
             let usableFound = false;
             let settled = false;
             let evaluating = false;
             let dirty = false;
-            const pubsub = this.node.services.pubsub as any;
-            const logEvents = this.entries.log.events as any;
-            const onEvent = () => void evaluate();
             const onAbort = () =>
                 finish(
                     signal.reason ??
@@ -12738,14 +12671,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 signal.removeEventListener("abort", onAbort);
                 cut?.removeEventListener("abort", onCut);
                 discovery.abort();
-                // main-event 1.0.3-1.0.4 (still allowed by @libp2p/interface's
-                // ^1.0.1) leave the registered wrapper attached on
-                // removeEventListener; there the abort above detaches it.
-                logEvents.removeEventListener("replicator:join", onEvent);
-                logEvents.removeEventListener("replication:change", onEvent);
-                pubsub.removeEventListener("subscribe", onEvent);
-                pubsub.removeEventListener("peer:reachable", onEvent);
-                pubsub.removeEventListener("stream:outbound", onEvent);
+                transport.dispose();
                 if (error !== undefined) {
                     reject(error);
                 } else {
@@ -12753,40 +12679,61 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             };
             const check = () => {
-                let pending = false;
-                let knownPending = false;
-                for (const [hash, { state }] of queries) {
+                let subscriberPending = false;
+                let rowPending = false;
+                let subscribers = 0;
+                let subscribersFound = 0;
+                for (const { state, subscriber } of queries.values()) {
+                    if (subscriber) {
+                        subscribers++;
+                        if (state === "answered") {
+                            subscribersFound++;
+                        }
+                    }
                     if (state === "pending") {
-                        pending = true;
-                        knownPending ||= filesystemPeers.has(hash);
+                        if (subscriber) {
+                            subscriberPending = true;
+                        } else {
+                            rowPending = true;
+                        }
                     }
                 }
+                // Every readiness subscriber asked returned a manifest: the
+                // fleet's snapshot state came from peers that run the
+                // filesystem now, so a replicator-only row no longer holds.
+                const rowsReleased =
+                    subscribers > 0 && subscribersFound === subscribers;
                 if (
-                    (queries.size > 0 && !pending) ||
-                    (usableFound && !knownPending)
+                    (queries.size > 0 &&
+                        !subscriberPending &&
+                        (!rowPending || rowsReleased) &&
+                        (!untilFound || results.length > 0)) ||
+                    (usableFound && !subscriberPending)
                 ) {
                     finish();
                 }
             };
-            const ask = (hash: string, visible: boolean, again = false) => {
+            const ask = (
+                hash: string,
+                subscriber: boolean,
+                replicator: boolean,
+                again = false
+            ) => {
                 const existing = queries.get(hash);
                 if (existing) {
+                    existing.subscriber ||= subscriber;
                     if (
                         existing.state !== "pending" ||
-                        (!again && (!visible || existing.asVisible))
+                        (!again && (!replicator || existing.replicator))
                     ) {
                         return;
                     }
-                } else if (!visible) {
-                    if (neighbours >= MANIFEST_DISCOVERY_MAX_NEIGHBOURS) {
-                        return;
-                    }
-                    neighbours++;
                 }
                 const token = {};
                 queries.set(hash, {
                     state: "pending",
-                    asVisible: visible || !!existing?.asVisible,
+                    subscriber: subscriber || !!existing?.subscriber,
+                    replicator: replicator || !!existing?.replicator,
                     token,
                 });
                 const settle = async (found: unknown[]) => {
@@ -12823,7 +12770,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         remote: {
                             timeout: timeoutMs,
                             from: [hash],
-                            // Asked again explicitly below, at most once.
+                            // Asked again explicitly below, at most twice.
                             retryMissingResponses: false,
                         } as any,
                         resolve: true,
@@ -12841,43 +12788,55 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 try {
                     do {
                         dirty = false;
-                        const visible = await this.visibleFilesystemPeers();
+                        const peers = await transport.filesystemPeers();
                         if (settled) {
                             return;
                         }
-                        for (const hash of visible) {
-                            filesystemPeers.add(hash);
-                            ask(hash, true);
+                        for (const hash of peers.subscribers) {
+                            ask(hash, true, false);
                         }
-                        for (const hash of pubsub.peers?.keys?.() ?? []) {
-                            ask(hash, false);
+                        for (const hash of peers.replicatorOnly) {
+                            ask(hash, false, true);
                         }
                         check();
                     } while (dirty && !settled);
                 } catch {
-                    // The next membership event re-evaluates.
+                    // The next transport event re-evaluates.
                 } finally {
                     evaluating = false;
                 }
             };
+            const onEvent = (event: TransportEvent) => {
+                if (event.kind === "replicator") {
+                    if (event.type === "leave") {
+                        return;
+                    }
+                    // Its log opened after its index: a query it dropped
+                    // while opening is answered now.
+                    if (queries.get(event.peer)?.state === "pending") {
+                        ask(event.peer, false, true);
+                    }
+                } else if (
+                    event.kind === "unsubscribe" ||
+                    (event.kind === "reachability" &&
+                        event.source !== "connect")
+                ) {
+                    // A departure adds nobody to ask.
+                    return;
+                }
+                void evaluate();
+            };
             const timer = setTimeout(() => finish(), timeoutMs);
             const retry = setTimeout(() => {
-                for (const [hash, { state, asVisible }] of [...queries]) {
-                    if (state === "pending") {
-                        ask(hash, asVisible, true);
+                for (const [hash, query] of [...queries]) {
+                    if (query.state === "pending") {
+                        ask(hash, query.subscriber, query.replicator, true);
                     }
                 }
             }, timeoutMs / 2);
             signal.addEventListener("abort", onAbort, { once: true });
             cut?.addEventListener("abort", onCut, { once: true });
-            const options = { signal: discovery.signal };
-            logEvents.addEventListener("replicator:join", onEvent, options);
-            logEvents.addEventListener("replication:change", onEvent, options);
-            pubsub.addEventListener("subscribe", onEvent, options);
-            pubsub.addEventListener("peer:reachable", onEvent, options);
-            // "peer:reachable" is skipped for a neighbour whose route another
-            // service added first; "stream:outbound" is not.
-            pubsub.addEventListener("stream:outbound", onEvent, options);
+            transport.listen(onEvent);
             if (signal.aborted) {
                 onAbort();
                 return;
@@ -13315,7 +13274,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             return checked;
         };
-        // Lets discovery stop waiting on silent neighbours once a remote
+        // Lets discovery stop waiting on silent peers once a remote
         // peer has served a snapshot this joiner would install.
         const usable = async (found: unknown[]) => {
             for (const raw of found) {
@@ -13417,7 +13376,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return false;
         }
         // Trust-race tolerance: the trust graph may still be replicating,
-        // so an untrusted verdict is final only at the deadline.
+        // so an untrusted verdict is final only at the deadline. The
+        // candidates are checked again on every trust-graph change (its
+        // "change" event, as the host's trust listener sees it), never on a
+        // poll; the deadline only gives up, and the abort and the cut end
+        // the wait at once. The listener attaches before the first check,
+        // so a change that lands between a check and the wait re-checks
+        // instead of being lost.
         const trusted: Candidate[] = [];
         const trustWaitCut = () => {
             this.emitManifestDiscoveryEnd(
@@ -13434,53 +13399,97 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
             return false;
         };
-        while (trusted.length === 0) {
-            throwIfAborted();
-            if (isCut()) {
-                return trustWaitCut();
+        const trustEvents = this.trustGraph?.trustGraph?.events as
+            | {
+                  addEventListener(type: string, listener: () => void): void;
+                  removeEventListener(type: string, listener: () => void): void;
+              }
+            | undefined;
+        let trustWaiting = true;
+        let trustChanged = false;
+        let gaveUp = false;
+        let wake: (() => void) | undefined;
+        const onTrustChange = () => {
+            // main-event 1.0.3-1.0.4 can leave a removed listener firing.
+            if (!trustWaiting) {
+                return;
             }
-            for (const candidate of candidates) {
-                if (
-                    !this.trustGraph ||
-                    (await this.trustGraph.isTrusted(candidate.signerKey))
-                ) {
-                    trusted.push(candidate);
+            trustChanged = true;
+            wake?.();
+        };
+        trustEvents?.addEventListener("change", onTrustChange);
+        // The give-up bound, armed once, when the first wait begins.
+        let giveUp: ReturnType<typeof setTimeout> | undefined;
+        try {
+            while (trusted.length === 0) {
+                throwIfAborted();
+                if (isCut()) {
+                    return trustWaitCut();
                 }
-            }
-            if (trusted.length > 0 || this.clock() >= deadline) {
-                break;
-            }
-            await new Promise<void>((resolve, reject) => {
-                const timer = setTimeout(() => {
-                    signal.removeEventListener("abort", onAbort);
-                    cut?.removeEventListener("abort", onCut);
-                    resolve();
-                }, 250);
-                const onAbort = () => {
-                    clearTimeout(timer);
-                    cut?.removeEventListener("abort", onCut);
-                    reject(
-                        signal.reason ??
-                            new SharedFsError(
-                                "ECLOSED",
-                                "bootstrap was aborted"
-                            )
-                    );
-                };
-                // The cut ends the wait at once; the loop returns on it.
-                const onCut = () => {
-                    clearTimeout(timer);
-                    signal.removeEventListener("abort", onAbort);
-                    resolve();
-                };
-                signal.addEventListener("abort", onAbort, { once: true });
-                cut?.addEventListener("abort", onCut, { once: true });
-                if (signal.aborted) {
-                    onAbort();
-                } else if (isCut()) {
-                    onCut();
+                trustChanged = false;
+                for (const candidate of candidates) {
+                    if (
+                        !this.trustGraph ||
+                        (await this.trustGraph.isTrusted(candidate.signerKey))
+                    ) {
+                        trusted.push(candidate);
+                    }
                 }
-            });
+                if (trusted.length > 0 || gaveUp || this.clock() >= deadline) {
+                    break;
+                }
+                if (trustChanged) {
+                    // Changed while the candidates were checked.
+                    continue;
+                }
+                giveUp ??= setTimeout(
+                    () => {
+                        gaveUp = true;
+                        wake?.();
+                    },
+                    Math.max(0, deadline - this.clock())
+                );
+                await new Promise<void>((resolve, reject) => {
+                    const done = () => {
+                        wake = undefined;
+                        signal.removeEventListener("abort", onAbort);
+                        cut?.removeEventListener("abort", onCut);
+                    };
+                    const onAbort = () => {
+                        done();
+                        reject(
+                            signal.reason ??
+                                new SharedFsError(
+                                    "ECLOSED",
+                                    "bootstrap was aborted"
+                                )
+                        );
+                    };
+                    // The cut ends the wait at once; the loop returns on it.
+                    const onCut = () => {
+                        done();
+                        resolve();
+                    };
+                    wake = () => {
+                        done();
+                        resolve();
+                    };
+                    signal.addEventListener("abort", onAbort, { once: true });
+                    cut?.addEventListener("abort", onCut, { once: true });
+                    if (signal.aborted) {
+                        onAbort();
+                    } else if (isCut()) {
+                        onCut();
+                    }
+                });
+            }
+        } finally {
+            trustWaiting = false;
+            wake = undefined;
+            if (giveUp !== undefined) {
+                clearTimeout(giveUp);
+            }
+            trustEvents?.removeEventListener("change", onTrustChange);
         }
         if (isCut()) {
             return trustWaitCut();

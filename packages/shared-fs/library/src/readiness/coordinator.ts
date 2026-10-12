@@ -69,7 +69,7 @@ import {
  *   is current. A contained peer whose provisional `rejected-untrusted`
  *   rows a trust change may reverse is asked again (G3-6).
  * - **Visible peers** come from the readiness topic's subscribers (filtered
- *   by reachability, as `visibleFilesystemPeers` does), from the namespace
+ *   by reachability, as bootstrap discovery's are), from the namespace
  *   log's replicators, and from any readiness message a peer sends J. A
  *   subscribe, a replicator announcement or a readiness message since this
  *   open is a sign of life (`live`); a replicator row with none is asked
