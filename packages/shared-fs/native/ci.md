@@ -3,7 +3,10 @@
 The `Shared FS Native Smoke` workflow mounts the filesystem for real on
 GitHub-hosted runners, on every shared-fs pull request and push to master:
 
-- Linux: fuse3 on `ubuntu-latest`.
+- Linux: fuse3 on `ubuntu-24.04` (libfuse 3.14, `libfuse3.so.3`) and
+  `ubuntu-26.04` (libfuse 3.18, `libfuse3.so.4`). The labels are pinned so
+  each soname the adapter loads stays covered, and a step fails unless the
+  image provides only its expected soname.
 - Windows: WinFsp on `windows-2025` and `windows-2022`, installed with
   Chocolatey. The smoke builds the adapter without cgo, as releases do.
 
@@ -17,14 +20,15 @@ on a physical Scaleway Apple Silicon host with kernel extensions enabled and
 macFUSE installed.
 
 The `Shared FS Native Cross-OS Interop` workflow (manual) also runs on
-GitHub-hosted runners. A Linux fuse3 seed mounts a new filesystem and publishes
-its address once mounted; WinFsp joiners on `windows-2025` and `windows-2022`
-(or one of them) mount it. Each peer writes, renames and acknowledges files
-through its own mount, then waits for every other peer's. Hosted runners accept
-no inbound connections, so the peers reach each other only through the public
-Peerbit bootstrap relay in `bootstrap-5.env`, and the workflow fails while that
-relay is down. A macOS join would need macFUSE; the library-level
-`Shared FS Cross-OS Interop` covers macOS.
+GitHub-hosted runners. A Linux fuse3 seed on `ubuntu-24.04` mounts a new
+filesystem and publishes its address once mounted; WinFsp joiners on
+`windows-2025` and `windows-2022` (or one of them) mount it. Each peer writes,
+renames and acknowledges files through its own mount, then waits for every
+other peer's. Hosted runners accept no inbound connections, so the peers reach
+each other only through the public Peerbit bootstrap relay in
+`bootstrap-5.env`, and the workflow fails while that relay is down. A macOS
+join would need macFUSE; the library-level `Shared FS Cross-OS Interop` covers
+macOS.
 
 The Scaleway macOS host is reused while warm because those machines have a
 minimum allocation period. Each workflow run still creates a fresh ephemeral

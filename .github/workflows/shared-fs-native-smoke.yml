@@ -59,11 +59,21 @@ env:
 
 jobs:
     linux-fuse:
-        name: Linux FUSE native smoke
-        runs-on: ubuntu-latest
+        name: Linux FUSE native smoke (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
         # Four extra mounted benchmark passes need more time than the smoke,
         # and the developer workload adds a git clone/status set to each pass.
         timeout-minutes: ${{ inputs.mount_profile && (inputs.dev_workload && 180 || 120) || (inputs.dev_workload && 60 || 30) }}
+        strategy:
+            fail-fast: false
+            matrix:
+                # Pinned images, not ubuntu-latest: the adapter must load both
+                # libfuse3 sonames, and each image ships exactly one of them.
+                include:
+                    - os: ubuntu-24.04
+                      libfuse3: libfuse3.so.3 # libfuse 3.14
+                    - os: ubuntu-26.04
+                      libfuse3: libfuse3.so.4 # libfuse 3.18
 
         steps:
             - name: Checkout
@@ -95,6 +105,20 @@ jobs:
                   sudo modprobe fuse || true
                   if test -e /dev/fuse; then
                     sudo chmod 666 /dev/fuse
+                  fi
+
+            - name: Check libfuse3 soname
+              env:
+                  EXPECTED_SONAME: ${{ matrix.libfuse3 }}
+                  RUNNER_LABEL: ${{ matrix.os }}
+              run: |
+                  # cgofuse tries libfuse3.so.3 before libfuse3.so.4, so a leg
+                  # tests its soname only while that is the only one installed.
+                  sonames="$(ldconfig -p | awk '$1 ~ /^libfuse3\.so\.[0-9]+$/ { print $1 }' | sort -u | paste -sd ' ' -)"
+                  echo "libfuse3 sonames: ${sonames:-none}"
+                  if [ "$sonames" != "$EXPECTED_SONAME" ]; then
+                    echo "::error::$RUNNER_LABEL should provide only $EXPECTED_SONAME, found: ${sonames:-none}"
+                    exit 1
                   fi
 
             - name: Install dependencies
@@ -146,7 +170,7 @@ jobs:
               if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: shared-fs-linux-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+                  name: shared-fs-linux-benchmarks-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
                   path: |
                       ${{ runner.temp }}/shared-fs-linux-fuse-benchmark.json
                       ${{ runner.temp }}/shared-fs-linux-control-benchmark.json
@@ -239,7 +263,7 @@ jobs:
               if: ${{ always() && inputs.mount_profile }}
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: shared-fs-linux-mount-profile-${{ github.run_id }}-${{ github.run_attempt }}
+                  name: shared-fs-linux-mount-profile-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
                   path: ${{ runner.temp }}/shared-fs-mount-profile
                   if-no-files-found: error
                   retention-days: 14

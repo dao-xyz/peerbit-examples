@@ -5,7 +5,8 @@ Experimental native mount adapter for `@peerbit/shared-fs`.
 This adapter speaks the negotiated shared-fs IPC protocol and mounts the
 filesystem through [cgofuse](https://github.com/winfsp/cgofuse), which supports:
 
-- Linux: FUSE/libfuse
+- Linux: FUSE/libfuse (`fuse3` builds load `libfuse3.so.3`, or
+  `libfuse3.so.4` from libfuse 3.17 on)
 - macOS: macFUSE
 - Windows: WinFsp
 
@@ -94,11 +95,12 @@ consumes them. It reconstructs and validates each complete stat before passing
 it to cgofuse; missing or malformed metadata lets WinFsp use its ordinary
 `getattr` fallback. Linux and macOS request compact entries and pass the host
 only each entry's type, for `d_type`: macOS (FUSE 2) has no readdir-plus, and
-the high-level API of libfuse3.so.3 (3.16 and older), which cgofuse loads,
-replays a listing with node ID 0, so the Linux kernel would discard the stats.
-libfuse3.so.4 (3.17.1+) looks the entries up; revisit this if cgofuse loads
-it. The `includeStats` option is optional per request: without it, and for a
-backend that does not supply stats, the server returns compact entries.
+the high-level API of libfuse3.so.3 (3.16 and older), which cgofuse loads
+first, replays a listing with node ID 0, so the Linux kernel would discard the
+stats. libfuse3.so.4 (3.17.1+), which cgofuse loads where libfuse3.so.3 is
+absent, looks the entries up; whether stats pay off there is not measured. The
+`includeStats` option is optional per request: without it, and for a backend
+that does not supply stats, the server returns compact entries.
 
 The portable IPC microbenchmark exercises the real Go client without requiring
 FUSE or Peerbit networking:
@@ -448,6 +450,8 @@ every stat, and names other peers create appear at once.
   round trip per path component plus one. `go.mod` therefore replaces cgofuse
   with a fork that drops that line, until
   [winfsp/cgofuse#110](https://github.com/winfsp/cgofuse/pull/110) is released.
+  The fork also loads `libfuse3.so.4` where `libfuse3.so.3` is absent, until
+  [winfsp/cgofuse#112](https://github.com/winfsp/cgofuse/pull/112) is released.
   The fork and the `-o` belong together: the fork alone would give libfuse's
   defaults of 1 s for names and attributes.
 

@@ -63,7 +63,10 @@ jobs:
     seed-linux-native:
         name: Linux FUSE native seed
         needs: plan
-        runs-on: ubuntu-latest
+        # Pinned like the Windows joiners, to the image the Linux adapter
+        # releases build on, so its timings stay comparable between runs.
+        # Shared FS Native Smoke covers libfuse3.so.4 on ubuntu-26.04.
+        runs-on: ubuntu-24.04
         timeout-minutes: 60
         steps:
             - name: Checkout
