@@ -1,11 +1,62 @@
 # Write readiness v2: prove catch-up instead of waiting out a timer
 
+> **Status (2026-11-15).** Everything after this block is the design as
+> written on 2026-10-05, before it was built (code refs at `2fd4f64b`). The
+> code under `library/src/` and `cli/src/` is authoritative where the two
+> disagree. D3 is A' (section 12); text marked "pending D3" describes what
+> shipped. Code comments also cite the M1 and M2 plans (`M1-PLAN.md`,
+> `M2-PLAN.md` in `evidence/`, below): design tests 58-96 are the M2 plan's,
+> and some D1-D9 in `coordinator.ts` and `session.ts` are PR-3 spec rule ids
+> ("D6: R closed the store"), not section 12's decisions.
+>
+> **Released** (library and CLI versions):
+>
+> - 0.16.6: #407 (D8: scheduled GC and Guard D need a proven view), #410 (D9).
+> - 0.17.0, M1: #409 (maintained state, responder, salt `/shared-fs/v9.2`),
+>   #414 (the proof replaces the quiet window), #415 (a warm reopen keeps its
+>   proof), #416 (progress, telemetry, `--assume-complete`), #417 (A' departs
+>   unreachable peers without a transport event).
+> - 0.17.1, M2: #418 (the `unverified` posture ends on the proof), #420
+>   (snapshot discovery stops once readiness proves the view).
+> - 0.17.2, M2: #421 (snapshot discovery asks only filesystem peers).
+> - On master, not yet released, M2: #424 (warm freshness: `warm-fresh`,
+>   `requireFreshOnReopen`, `mount --require-fresh`).
+>
+> **Pending:** a trust-removal soundness fix (access-controlled stores: a
+> trust check made before J's trust graph lost an edge still counts after
+> it); M2 PR-5a (freshness re-asks a confirm-only peer that shows life after
+> `fresh`), PR-5 (only `warm-fresh` qualifies, D6; `warm` still does) and
+> PR-6 (no quiescence checker or private GC peer gate reads); M3-M5.
+>
+> **Where the code differs from the text** (each checked in the code):
+>
+> - 4.5 steps 3-4: rows above R's `hlc` come from the in-memory id map, not
+>   an index range query, and leave the peel; gapEst has no `+ k` term.
+> - 2.1, 4.4: D_R = sha256(the scope's domain tag ‖ lanes).
+> - 4.3, 4.4: `OpenV1` adds `flags` (list mode) and `caps`, with count and
+>   above per scope; `HeaderV1` adds `freezeId`; `ProvenanceV1` adds `caps`;
+>   `fullReplica` is the open's `replicate.factor === 1`. R freezes only at a
+>   verified count with no replace verify pending.
+> - 4.5, 4.7: cells and list requests get the 5/10/20 s attempts too; after
+>   16 renewals a peer is parked until its notice; a new state, `refused`
+>   (`UNSUPPORTED` or `SCOPE`), blocks like `silent`.
+> - 4.7, 4.9: reachability is also re-read at the end of each OPEN attempt
+>   and on signs of life (#417), and on pubsub and blocks reachability events.
+> - 4.8: the phase clause also accepts `unverified` (#418).
+> - 4.10: only the namespace structures are persisted, in a file named by
+>   the store's log id; proof records carry a `scope`.
+> - 7, D11: CLI `--assume-complete` acts only after `--write-ready-timeout-ms`
+>   ran out with no required peer able to answer.
+> - 9, M2: freshness reuses the join's sessions and pull queue with no donor
+>   or phase clause; the bootstrap decision is a cut to a plain join (#420).
+
 Status: design for owner review, revised after a 25-finding review (see "Review
 notes" at the end), then revised again on 2026-10-05 after a benchmark of six
 proof mechanisms (section 11.1). That revision replaced the proof mechanism:
 salted `u64` lists and per-session RIBLT became a maintained coded prefix plus
 a set hash. The M0 probes ran on 2026-10-05; section "M0 results" lists what
-they changed, and **D3 is back with the owner** (K0 fired). Nothing is
+they changed, and **D3 is back with the owner** (K0 fired; corrected
+2026-11-15: the owner chose A' the same day, section 12). Nothing is
 implemented. Code refs: `origin/master`
 `2fd4f64b` (0.16.5, Peerbit 5.4.10, `@peerbit/shared-log` 16.0.40,
 `@peerbit/document` 15.1.11). `src/index.ts:N` is
