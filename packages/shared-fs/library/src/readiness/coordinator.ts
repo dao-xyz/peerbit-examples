@@ -645,6 +645,17 @@ export interface CoordinatorDebug {
      */
     trustTriggers: { change: number; scopesContained: number; grew: number };
     /**
+     * J's trust set's epoch at its last removal (0 before any): a trust
+     * result certified below it does not count (`trustCurrent`).
+     */
+    trustRemovedAt: number;
+    /**
+     * Records reopened, and sessions renewed or started over, because their
+     * trust result was certified before a removal from J's trust set
+     * (`reopenStaleTrust`).
+     */
+    staleTrust: number;
+    /**
      * The host's decisions (`ports.decide`): asked, rejected, one in flight
      * now, and the last rejection's message.
      */
@@ -899,6 +910,16 @@ export class Coordinator {
     };
     /** `trustScopesContained()` at the last `settle()` (its flip classifies). */
     private trustScopesWere = true;
+    /**
+     * J's trust set's epoch at its last removal (a delete, a replace, a
+     * reseed), from the sink `watchTrustRemovals` adds; 0 before any.
+     */
+    private trustRemovedAt = 0;
+    /** Detaches that sink. */
+    private removeTrustSink?: () => void;
+    /** `staleTrustSoon` scheduled its microtask, which has not run yet. */
+    private staleTrustPending = false;
+    private staleTrust = 0;
     /** `satisfied()` found a record unchecked at this epoch (3.2). */
     private trustRecheckPending = false;
     /** The sessions' trust view (access-controlled stores). */
@@ -927,6 +948,7 @@ export class Coordinator {
                 epoch: () => this.trustEpoch,
                 isTrusted: (key) => askTrust(trust, key),
                 scopesContained: () => this.trustScopesContained(),
+                removedAt: () => this.trustRemovedAt,
             };
         }
     }
@@ -998,6 +1020,7 @@ export class Coordinator {
         const go = () => {
             if (!this.running) return;
             this.startedSettled = true;
+            this.watchTrustRemovals();
             this.settle();
         };
         started.then(go, go);
@@ -1081,15 +1104,19 @@ export class Coordinator {
      * J's trust graph changed (any `change` event, added-only and empty ones
      * included; design 4.9): the trust epoch moves, so a check in flight is
      * stale; every live session classifies its parked hashes again (2.5);
-     * every contained record's trust is checked again (4.2). The event's
-     * content is never read: a revocation may never arrive as a delete (M0
-     * P3). After `finish` it is ignored: readiness is never withdrawn.
+     * every contained record's trust is checked again (4.2). First, a peer
+     * whose trust result a removal from J's trust set made stale is asked
+     * again (`reopenStaleTrust`; the removal's own microtask may not have
+     * run yet). The event's content is never read: a revocation may never
+     * arrive as a delete (M0 P3). After `finish` it is ignored: readiness
+     * is never withdrawn.
      */
     trustChanged(): void {
         if (!this.running) return;
         this.trustEpoch++;
         this.trustTriggers.change++;
         try {
+            this.reopenStaleTrust();
             this.reclassifySessions();
             if (this.ports.trust) {
                 for (const entry of [...this.entries.values()]) {
@@ -1376,17 +1403,58 @@ export class Coordinator {
      * from a session no earlier than the namespace one. It holds by
      * construction (one freeze puts trust after namespace, and a namespace
      * renewal reopens trust); this fails closed if a path ever breaks it.
+     * The trust result must also be current (`trustCurrent`); a stale one
+     * is asked again (`reopenStaleTrust`).
      */
     private trustFirst(entry: Entry): boolean {
         const namespace = entry.ordinals.get(SCOPE_NAMESPACE_V1);
         const trust = entry.ordinals.get(SCOPE_TRUST_V1);
+        const held = entry.results.get(SCOPE_TRUST_V1);
         return (
             entry.results.has(SCOPE_NAMESPACE_V1) &&
-            entry.results.has(SCOPE_TRUST_V1) &&
+            held !== undefined &&
+            this.trustCurrent(held) &&
             namespace !== undefined &&
             trust !== undefined &&
             trust >= namespace
         );
+    }
+
+    /**
+     * A trust result still shows that J's trust set holds R's trust view:
+     * C3 proved it at `seq`, and no row left J's set since
+     * (`trustRemovedAt`), so the set only grew. A CUT that reaches J
+     * mid-join, or a delete Documents applies by id over a re-grant of the
+     * same edge, shrinks J's set under a contained trust scope; the
+     * predicate and the promotion clause then no longer count the result.
+     */
+    private trustCurrent(result: SessionResult): boolean {
+        return result.seq >= this.trustRemovedAt;
+    }
+
+    /** The trust run's result of a live `session`, once contained. */
+    private liveTrust(session: JoinerSession): SessionResult | undefined {
+        return session.state(SCOPE_TRUST_V1) === "contained"
+            ? session.resultOf(SCOPE_TRUST_V1)
+            : undefined;
+    }
+
+    /**
+     * The trust result that counts for `entry` (`trustScopesContained`):
+     * its live session's trust run's when that session reopened trust
+     * (none until the run is contained), else the record's.
+     */
+    private countedTrust(entry: Entry): SessionResult | undefined {
+        const session = entry.session;
+        if (
+            session &&
+            !session.outcome &&
+            !entry.qualifying &&
+            session.init.scopes.includes(SCOPE_TRUST_V1)
+        ) {
+            return this.liveTrust(session);
+        }
+        return entry.results.get(SCOPE_TRUST_V1);
     }
 
     /** The record trust check of `entry` completed at the current epoch. */
@@ -1814,6 +1882,8 @@ export class Coordinator {
             trustEpoch: this.trustEpoch,
             trustChecks: this.trustChecks,
             trustTriggers: { ...this.trustTriggers },
+            trustRemovedAt: this.trustRemovedAt,
+            staleTrust: this.staleTrust,
             decisions: {
                 ...this.decisions,
                 inFlight: this.deciding,
@@ -1958,6 +2028,13 @@ export class Coordinator {
                     for (const result of outcome.results) {
                         this.setResult(entry, result);
                     }
+                    const held = entry.results.get(SCOPE_TRUST_V1);
+                    if (held && !this.trustCurrent(held)) {
+                        // A trust result certified before a removal from
+                        // J's trust set: a fresh chain on both scopes.
+                        this.staleTrust++;
+                        return this.reopenForTrust(entry);
+                    }
                     const next = nextSessionInit(session.init, outcome);
                     if (next) return this.openSession(entry, next);
                     entry.state = "reconciling";
@@ -1982,10 +2059,13 @@ export class Coordinator {
      * attempt arms no timer that would (design 4.9, D3 = A'). R's header
      * ending a `left-unanswered` block is A1 after a reachability event,
      * and makes R answering again after a read with none (`departedByRead`).
+     * A trust run contained at a `seq` a removal from J's trust set
+     * followed is asked again on a microtask (`staleTrustSoon`), never from
+     * inside the session's own call.
      */
     protected onSessionState(
         session: JoinerSession,
-        _scope: ScopeId,
+        scope: ScopeId,
         state: SessionState
     ): void {
         if (!this.running) return;
@@ -1994,6 +2074,10 @@ export class Coordinator {
         if (!entry || entry.session !== session || session.outcome) return;
         if (HEADER_SCOPE.has(state)) entry.headerHeld = true;
         try {
+            if (scope === SCOPE_TRUST_V1 && state === "contained") {
+                const own = this.liveTrust(session);
+                if (own && !this.trustCurrent(own)) this.staleTrustSoon();
+            }
             if (entry.qualifying) return;
             if (entry.departed) {
                 if (entry.state !== "left-unanswered" || !entry.headerHeld) {
@@ -2116,6 +2200,9 @@ export class Coordinator {
                 this.qualify(entry);
             }
         }
+        // A trust result certified before a removal from J's trust set
+        // arrives stale: asked again before it counts.
+        this.reopenStaleTrust();
         this.reaskBusy();
         // C grew (design 4.9): parked trust-pending and logged hashes again.
         this.reclassify();
@@ -2837,9 +2924,10 @@ export class Coordinator {
     /**
      * Every peer that is Required or contained has its trust scope
      * contained: a trust result the record holds, or the trust run of its
-     * live session contained when that session reopened trust. `left`,
-     * excluded and unconfirmed peers do not count. True in open mode. The
-     * namespace runs' promotion clause (design 4.5 step 8, G3-1).
+     * live session contained when that session reopened trust, either one
+     * current (`trustCurrent`). `left`, excluded and unconfirmed peers do
+     * not count. True in open mode. The namespace runs' promotion clause
+     * (design 4.5 step 8, G3-1).
      */
     private trustScopesContained(): boolean {
         if (!this.ports.trust) return true;
@@ -2850,19 +2938,113 @@ export class Coordinator {
             ) {
                 continue;
             }
-            const session = entry.session;
-            if (
-                session &&
-                !session.outcome &&
-                !entry.qualifying &&
-                session.init.scopes.includes(SCOPE_TRUST_V1)
-            ) {
-                if (session.state(SCOPE_TRUST_V1) !== "contained") return false;
-            } else if (!entry.results.has(SCOPE_TRUST_V1)) {
-                return false;
-            }
+            const counted = this.countedTrust(entry);
+            if (!counted || !this.trustCurrent(counted)) return false;
         }
         return true;
+    }
+
+    /**
+     * Access-controlled stores: a sink on J's trust set records the epoch of
+     * each removal (`trustRemovedAt`), which the predicate and the promotion
+     * clause read at once, whether or not a trust change event follows (a
+     * replace verify's repair dispatches none). The peers it made stale are
+     * asked again on a microtask (`staleTrustSoon`), outside the tap's
+     * dispatch. Attached once the scopes started; detached by
+     * `finish`/`dispose`.
+     */
+    private watchTrustRemovals() {
+        if (!this.ports.trust || this.removeTrustSink) return;
+        let local: SessionScopePorts["local"] | undefined;
+        try {
+            local = this.ports.scope(SCOPE_TRUST_V1)?.local;
+        } catch {
+            // No trust scope: its sessions fault (`local-unavailable`).
+        }
+        if (!local) return;
+        const set = local;
+        this.removeTrustSink = set.addSink({
+            apply: (_digest, sign) => {
+                if (sign !== -1) return;
+                this.trustRemovedAt = set.epoch;
+                this.staleTrustSoon();
+            },
+            // A reseed seeds the set again from that epoch. No trust
+            // result can predate it (C1 needs a verified count, and a
+            // verified tap never reseeds), so its epoch is enough, and a
+            // set rebuilt with no row still certifies at it.
+            reset: () => {
+                this.trustRemovedAt = set.epoch;
+                this.staleTrustSoon();
+            },
+        });
+    }
+
+    /**
+     * `reopenStaleTrust`, then `settle`, on a microtask, coalesced: never
+     * from inside the tap's dispatch (a sink that closed a session there
+     * would detach that session's sink mid-dispatch) or a session's call.
+     */
+    private staleTrustSoon() {
+        if (!this.running || this.staleTrustPending) return;
+        this.staleTrustPending = true;
+        void resolved.then(() => {
+            this.staleTrustPending = false;
+            if (!this.running) return;
+            try {
+                this.reopenStaleTrust();
+            } finally {
+                this.settle();
+            }
+        });
+    }
+
+    /**
+     * Asks again every peer whose counted trust result is stale
+     * (`trustCurrent`): R's trust view may hold a row J's trust set no
+     * longer does, so R's containment, and every `rejected-untrusted` row
+     * the promotion clause let a session explain against it, no longer
+     * shows that J trusts what R trusts. A contained record is reopened
+     * (`reopenForTrust`; departed, it leaves with an unknown gap), a
+     * qualification session whose trust run is stale starts over, and a
+     * Required peer's chain is renewed: its new trust run certifies against
+     * J's set now. A `left` peer whose session kept pulling (D4) is reopened
+     * as a departed contained one, its gap unknown: `arrive` would resume
+     * that session on the stale result, and nothing would ask R again, so
+     * the session goes and R, back, is asked with a fresh chain. Bounded: a
+     * result turns stale once, at the first removal after its `seq`.
+     */
+    private reopenStaleTrust() {
+        if (!this.ports.trust || !this.running) return;
+        for (const entry of [...this.entries.values()]) {
+            if (entry.state === "contained") {
+                const held = entry.results.get(SCOPE_TRUST_V1);
+                if (held && !this.trustCurrent(held)) {
+                    this.staleTrust++;
+                    this.reopenForTrust(entry, "unknown");
+                    continue;
+                }
+                const session = entry.session;
+                const own =
+                    entry.qualifying && session && !session.outcome
+                        ? this.liveTrust(session)
+                        : undefined;
+                if (own && !this.trustCurrent(own)) {
+                    this.staleTrust++;
+                    this.closeSession(entry);
+                    this.qualify(entry);
+                }
+                continue;
+            }
+            const left = entry.state === "left";
+            if (!left && !BLOCKING_STATES.has(entry.state)) continue;
+            const counted = this.countedTrust(entry);
+            if (counted && !this.trustCurrent(counted)) {
+                this.staleTrust++;
+                if (left) this.reopenForTrust(entry, "unknown");
+                else this.renewChain(entry);
+            }
+        }
     }
 
     /**
@@ -2959,9 +3141,10 @@ export class Coordinator {
      * signer trusted now may reverse (2.6, G3-6): its results go, its
      * qualification with them. Reachable: asked again on both scopes with a
      * fresh chain. Departed: `left`, with the heads it explained by trust as
-     * its gap (D4): J keeps whatever sync delivers, and the gap is named.
+     * its gap (D4), or `missing` when that count says nothing (a stale trust
+     * result): J keeps whatever sync delivers, and the gap is named.
      */
-    private reopenForTrust(entry: Entry) {
+    private reopenForTrust(entry: Entry, missing?: "unknown") {
         let heads = 0;
         for (const result of entry.results.values()) {
             heads += result.untrusted?.heads ?? 0;
@@ -2972,7 +3155,7 @@ export class Coordinator {
         if (entry.departed) {
             this.closeSession(entry);
             entry.state = "left";
-            entry.gap = { missing: heads };
+            entry.gap = { missing: missing ?? heads };
             return;
         }
         this.renewChain(entry);
@@ -3074,6 +3257,8 @@ export class Coordinator {
             // Detaching never throws; nothing to undo if it did.
         }
         this.detach = undefined;
+        this.removeTrustSink?.();
+        this.removeTrustSink = undefined;
         try {
             this.ports.transport.dispose();
         } catch {

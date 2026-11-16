@@ -93,12 +93,15 @@ export const settle = async (rounds = 50) => {
  * J's trust view as a session reads it (the coordinator's
  * `SessionTrustPort`, faked; PR-3 commit 3): a settable trust epoch,
  * verdicts per key hashcode (untrusted unless listed), reads that throw, a
- * hold on the reads, and the promotion clause as a function.
+ * hold on the reads, the promotion clause as a function, and the epoch of
+ * the last removal from J's trust set.
  */
 export class FakeTrust implements SessionTrustPort {
     epochValue = 0;
     /** `scopesContained()`; true unless a case sets it. */
     contained: () => boolean = () => true;
+    /** `removedAt()`; 0 (no removal) unless a case sets it. */
+    removedValue = 0;
     readonly trusted = new Set<string>();
     readonly throwing = new Set<string>();
     /** Hashcodes asked, in order. */
@@ -119,6 +122,10 @@ export class FakeTrust implements SessionTrustPort {
 
     scopesContained() {
         return this.contained();
+    }
+
+    removedAt() {
+        return this.removedValue;
     }
 
     /** Holds every read that starts from now on; returns the release. */
