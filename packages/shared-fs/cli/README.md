@@ -21,7 +21,7 @@ peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs mount <address> <mountpoint> --assume-complete
 peerbit-fs status [address]
-peerbit-fs conflicts <address> [--fail-if-any]
+peerbit-fs conflicts <address> [--fail-if-any [--allow-unverified]]
 peerbit-fs naming-conflicts <address>
 peerbit-fs resolve-conflict <address> <path> <version-id>
 peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move|merge-directory>
@@ -101,23 +101,33 @@ history.
 
 ### Fail CI on conflicts
 
-`conflicts --fail-if-any` exits with status 3 when the local view holds any
-conflict, content or naming, and 0 when it holds none; errors exit with 1. It
-prints the content listing as before, then each naming conflict's type and
-path (`--json` adds a `namingConflicts` array). `--path` limits both kinds to
-a file or path prefix:
+`conflicts --fail-if-any` prints the content listing as before, then each
+naming conflict's type and path (`--json` adds a `namingConflicts` array), and
+exits with:
+
+| Status | Meaning                                             |
+| ------ | --------------------------------------------------- |
+| 0      | No conflict, in a view verified complete.           |
+| 3      | A conflict, content or naming.                      |
+| 4      | No conflict, but the view is not verified complete. |
+| 1      | An error.                                           |
+
+A view is verified complete when `view.snapshotCoverageVerified` (above) is
+true: a full replica (the default; not `--no-replicate`) that joined through a
+snapshot bootstrap from a reachable peer, such as a CI job's fresh
+`--directory`. In any other view no conflict proves nothing, so the gate fails
+with 4; `--allow-unverified` accepts the local view and exits 0 instead.
+`--path` limits both kinds to a file or path prefix:
 
 ```bash
 peerbit-fs conflicts "$ADDRESS" --fail-if-any || {
   code=$?
   [ "$code" -eq 3 ] && echo "unresolved shared-fs conflicts" >&2
+  [ "$code" -eq 4 ] && echo "no peer verified the shared-fs view" >&2
   exit "$code"
 }
 ```
 
-Run it on a full replica (the default; not `--no-replicate`), so that no
-conflict means none in the converged view; it warns otherwise (with `--json`,
-`view.snapshotCoverageVerified` is false).
 `naming-conflicts` has no such flag: one gate covers every kind. A native mount
 shows the same conflicts as read-only copies under `/.peerbit-conflicts` (see
 the library README's "Conflicts" section).

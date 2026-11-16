@@ -3128,7 +3128,7 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("gates CI with conflicts --fail-if-any: 3 for any content or naming conflict, 0 for none", async () => {
+    it("gates CI with conflicts --fail-if-any: 3 for any conflict, 0 for none in a verified view, 4 in any other", async () => {
         const fixture = await seedConflicts();
         const log = vi.spyOn(console, "log").mockImplementation(() => {});
         const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -3140,7 +3140,6 @@ describe("peerbit-fs cli", () => {
                 "conflicts",
                 fixture.address,
                 ...args,
-                "--no-replicate",
                 "--directory",
                 fixture.directory,
             ]);
@@ -3149,21 +3148,47 @@ describe("peerbit-fs cli", () => {
                 output: log.mock.calls.map(([line]) => String(line)).join("\n"),
             };
         };
+        /** A full replica whose snapshot bootstrap covered the store. */
+        const verified = async (...args: string[]) => {
+            const create = mockCliBootstrap();
+            const converged = vi
+                .spyOn(SharedFsHandle.prototype, "awaitBootstrapConverged")
+                .mockResolvedValue({ verified: true });
+            const realStatus = SharedFsHandle.prototype.bootstrapStatus;
+            const status = vi
+                .spyOn(SharedFsHandle.prototype, "bootstrapStatus")
+                .mockImplementation(function (this: SharedFsHandle) {
+                    return {
+                        ...realStatus.call(this),
+                        phase: "converged",
+                        snapshotCoverageVerified: true,
+                    };
+                });
+            try {
+                return await run(...args);
+            } finally {
+                create.mockRestore();
+                converged.mockRestore();
+                status.mockRestore();
+            }
+        };
         try {
             // Every kind fails the gate; the content listing stays as it was.
-            const all = await run("--fail-if-any");
+            const all = await run("--fail-if-any", "--no-replicate");
             expect(all.exitCode).toBe(3);
             expect(all.output).toContain("/content.txt");
             expect(all.output).toContain(fixture.otherVersionId);
             expect(all.output).toContain("duplicate-name /duplicate.txt");
             expect(all.output).toContain("delete-vs-edit /delete-race.txt");
+            expect((await verified("--fail-if-any")).exitCode).toBe(3);
 
             // A naming conflict alone fails it too.
             const naming = await run(
                 "--path",
                 "/duplicate.txt",
                 "--fail-if-any",
-                "--json"
+                "--json",
+                "--no-replicate"
             );
             expect(naming.exitCode).toBe(3);
             const result = JSON.parse(naming.output);
@@ -3176,13 +3201,32 @@ describe("peerbit-fs cli", () => {
                 })
             );
 
-            // No conflict in scope: status 0.
-            const none = await run("--path", "/missing", "--fail-if-any");
+            // No conflict in scope: 0 only where the view is verified.
+            const none = await verified("--path", "/missing", "--fail-if-any");
             expect(none.exitCode ?? 0).toBe(0);
             expect(none.output).toBe("No conflicts");
+            for (const json of [[], ["--json"]]) {
+                const unverified = await run(
+                    "--path",
+                    "/missing",
+                    "--fail-if-any",
+                    ...json,
+                    "--no-replicate"
+                );
+                expect(unverified.exitCode).toBe(4);
+            }
+            const accepted = await run(
+                "--path",
+                "/missing",
+                "--fail-if-any",
+                "--allow-unverified",
+                "--no-replicate"
+            );
+            expect(accepted.exitCode ?? 0).toBe(0);
+            expect(accepted.output).toBe("No conflicts");
 
             // Without the flag the status never reports conflicts.
-            const listing = await run();
+            const listing = await run("--no-replicate");
             expect(listing.exitCode ?? 0).toBe(0);
             expect(listing.output).toContain("/content.txt");
             expect(listing.output).not.toContain("duplicate-name");
