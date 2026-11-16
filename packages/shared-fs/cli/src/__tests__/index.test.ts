@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -21,7 +22,9 @@ import {
     assumeCompleteHint,
     conflictScanIsPartial,
     connectMountToNetwork,
+    connectToNetwork,
     createReadinessProgress,
+    mountOpenError,
     normalizeNativeMountpoint,
     openMountProfileFiles,
     readinessProgressLine,
@@ -29,6 +32,7 @@ import {
     runCli,
     stopMountSession,
     writeReadyTimeoutMessage,
+    type CliNetworkArgs,
 } from "../index.js";
 
 const stopPeer = async (peer: Peerbit) => {
@@ -472,47 +476,423 @@ const parseFailure = async (args: string[]) => {
     }
 };
 
-describe("mount network connection", () => {
-    const fakePeer = (bootstrap: () => Promise<unknown>) => ({
-        bootstrap: vi.fn(bootstrap),
-        dial: vi.fn(async () => true),
-        enableBootstrapRecovery: vi.fn(),
-    });
+/** Multiaddrs that parse; nothing listens at them. */
+const HUB =
+    "/ip4/127.0.0.1/tcp/8002/p2p/12D3KooWKj1J1hHxrYyB37qDDGCi9aU2vcHzDZhtMk7te7dEmqqT";
+const OTHER_HUB =
+    "/ip4/127.0.0.1/tcp/8003/p2p/12D3KooWCjPUP1kG1nS21ipT5oW6A7t6kN8AiZKY9Kr3cpcPdyzJ";
+const RELAY =
+    "/ip4/127.0.0.1/tcp/8004/p2p/12D3KooWL59gCJDvPdTXyS8RrhYxDu1ZjJ1rbhta67xkBwCFjpst";
 
-    it("mounts from local state when bootstrap nodes are unreachable", async () => {
-        const peer = fakePeer(async () => {
-            throw new Error("Failed to succefully dial any bootstrap node");
-        });
+/**
+ * A peer for the network seams: bootstrap and dial resolve unless given a
+ * rejection; `unreachable` addresses reject dial with ECONNREFUSED.
+ */
+const fakeNetworkPeer = (
+    options: {
+        bootstrap?: (addresses?: string[]) => Promise<unknown>;
+        unreachable?: string[];
+    } = {}
+) => ({
+    bootstrap: vi.fn(
+        options.bootstrap ??
+            (async (_addresses?: string[]) => ({
+                connectedPeerIds: [],
+                failures: [],
+            }))
+    ),
+    dial: vi.fn(async (address: string) => {
+        if (options.unreachable?.includes(address)) {
+            throw new Error(`connect ECONNREFUSED ${address}`);
+        }
+        return true;
+    }),
+    enableBootstrapRecovery: vi.fn(),
+    services: { fanout: { addBootstraps: vi.fn() } },
+});
+
+const BOOTSTRAP_DOWN = async () => {
+    throw new Error("Failed to succefully dial any bootstrap node");
+};
+
+const REDIALS = "; Peerbit keeps redialling while the mount runs.";
+
+/** Whether every call of `first` came before every call of `then`. */
+const calledBefore = (
+    first: { mock: { invocationCallOrder: number[] } },
+    then: { mock: { invocationCallOrder: number[] } }
+) =>
+    Math.max(...first.mock.invocationCallOrder) <
+    Math.min(...then.mock.invocationCallOrder);
+
+describe("mount network connection", () => {
+    it("mounts without the network when the public bootstrap nodes are unreachable", async () => {
+        const peer = fakeNetworkPeer({ bootstrap: BOOTSTRAP_DOWN });
         const warn = vi.fn();
-        await connectMountToNetwork(peer as never, undefined, warn);
-        expect(warn).toHaveBeenCalledTimes(1);
-        expect(warn.mock.calls[0][0]).toContain(
-            "Failed to succefully dial any bootstrap node"
+        const unreachable = await connectMountToNetwork(
+            peer as never,
+            {},
+            warn
         );
+        expect(unreachable).toEqual([
+            "the Peerbit bootstrap network (Failed to succefully dial any bootstrap node)",
+        ]);
+        // Nothing claims local state: a first mount has none.
+        expect(warn.mock.calls).toEqual([
+            [`Could not reach ${unreachable[0]}${REDIALS}`],
+        ]);
+        expect(peer.bootstrap).toHaveBeenCalledWith();
         expect(peer.enableBootstrapRecovery).toHaveBeenCalledTimes(1);
+        expect(peer.enableBootstrapRecovery).toHaveBeenCalledWith();
+        expect(peer.services.fanout.addBootstraps).not.toHaveBeenCalled();
     });
 
     it("keeps reconnecting after a successful bootstrap", async () => {
-        const peer = fakePeer(async () => ({
-            connectedPeerIds: [],
-            failures: [],
-        }));
+        const peer = fakeNetworkPeer();
         const warn = vi.fn();
-        await connectMountToNetwork(peer as never, undefined, warn);
+        expect(await connectMountToNetwork(peer as never, {}, warn)).toEqual(
+            []
+        );
         expect(warn).not.toHaveBeenCalled();
         expect(peer.enableBootstrapRecovery).toHaveBeenCalledTimes(1);
+        expect(peer.enableBootstrapRecovery).toHaveBeenCalledWith();
     });
 
-    it("dials explicit peers without the public bootstrap network", async () => {
-        const peer = fakePeer(async () => {
-            throw new Error("unexpected bootstrap");
-        });
-        const address =
-            "/ip4/127.0.0.1/tcp/8002/p2p/12D3KooWKj1J1hHxrYyB37qDDGCi9aU2vcHzDZhtMk7te7dEmqqT";
-        await connectMountToNetwork(peer as never, [address], vi.fn());
-        expect(peer.dial).toHaveBeenCalledWith(address);
+    // Peerbit.bootstrap(), which every recovery attempt repeats, pins the
+    // pubsub topic-root candidates to the nodes it reached. A --peer mount
+    // that switched so after it was connected stalled other mounts' joins
+    // for a minute, so it keeps automatic candidates.
+    it("dials explicit peers, registered for pubsub's redial, without bootstrap() or its recovery", async () => {
+        const peer = fakeNetworkPeer({ bootstrap: BOOTSTRAP_DOWN });
+        const warn = vi.fn();
+        expect(
+            await connectMountToNetwork(peer as never, { peer: [HUB] }, warn)
+        ).toEqual([]);
+        expect(peer.dial.mock.calls).toEqual([[HUB]]);
+        expect(peer.services.fanout.addBootstraps.mock.calls).toEqual([
+            [[HUB]],
+        ]);
+        expect(warn).not.toHaveBeenCalled();
         expect(peer.bootstrap).not.toHaveBeenCalled();
         expect(peer.enableBootstrapRecovery).not.toHaveBeenCalled();
+    });
+
+    it("registers an explicit peer for the redial before dialling it, so one that cannot be dialled is redialled too, and names it", async () => {
+        const peer = fakeNetworkPeer({ unreachable: [HUB] });
+        const warn = vi.fn();
+        const unreachable = await connectMountToNetwork(
+            peer as never,
+            { peer: [HUB, OTHER_HUB] },
+            warn
+        );
+        // Peerbit.dial registers only a peer that answered.
+        expect(peer.services.fanout.addBootstraps.mock.calls).toEqual([
+            [[HUB, OTHER_HUB]],
+        ]);
+        expect(
+            calledBefore(peer.services.fanout.addBootstraps, peer.dial)
+        ).toBe(true);
+        // The other peer is still dialled, in order.
+        expect(peer.dial.mock.calls).toEqual([[HUB], [OTHER_HUB]]);
+        expect(unreachable).toEqual([
+            `--peer ${HUB} (connect ECONNREFUSED ${HUB})`,
+        ]);
+        expect(warn.mock.calls).toEqual([
+            [`Could not reach ${unreachable[0]}${REDIALS}`],
+        ]);
+        expect(peer.bootstrap).not.toHaveBeenCalled();
+        expect(peer.enableBootstrapRecovery).not.toHaveBeenCalled();
+    });
+
+    it("uses a --bootstrap list instead of the public one, also for recovery", async () => {
+        const peer = fakeNetworkPeer();
+        const warn = vi.fn();
+        await connectMountToNetwork(
+            peer as never,
+            { bootstrap: [RELAY, OTHER_HUB] },
+            warn
+        );
+        expect(peer.bootstrap.mock.calls).toEqual([[[RELAY, OTHER_HUB]]]);
+        expect(peer.dial).not.toHaveBeenCalled();
+        expect(warn).not.toHaveBeenCalled();
+        expect(peer.enableBootstrapRecovery).toHaveBeenCalledWith({
+            addresses: [RELAY, OTHER_HUB],
+        });
+        // bootstrap() registers its list for pubsub's redial itself.
+        expect(peer.services.fanout.addBootstraps).not.toHaveBeenCalled();
+    });
+
+    it("mounts without the network when no --bootstrap node answers, naming them, and redials that list", async () => {
+        const peer = fakeNetworkPeer({ bootstrap: BOOTSTRAP_DOWN });
+        const warn = vi.fn();
+        const unreachable = await connectMountToNetwork(
+            peer as never,
+            { bootstrap: [RELAY, OTHER_HUB] },
+            warn
+        );
+        expect(unreachable).toEqual([
+            `--bootstrap ${RELAY}, --bootstrap ${OTHER_HUB} (Failed to succefully dial any bootstrap node)`,
+        ]);
+        expect(warn.mock.calls).toEqual([
+            [`Could not reach ${unreachable[0]}${REDIALS}`],
+        ]);
+        expect(peer.enableBootstrapRecovery).toHaveBeenCalledWith({
+            addresses: [RELAY, OTHER_HUB],
+        });
+    });
+
+    // bootstrap() replaces pubsub's redial list with its own addresses and
+    // takes its topic-root candidates from them: a --peer joins neither.
+    it("with --bootstrap and --peer, bootstraps from the --bootstrap list only, then registers and dials each --peer, without recovery", async () => {
+        const peer = fakeNetworkPeer({ unreachable: [HUB] });
+        const warn = vi.fn();
+        const unreachable = await connectMountToNetwork(
+            peer as never,
+            { peer: [HUB, OTHER_HUB], bootstrap: [RELAY] },
+            warn
+        );
+        expect(peer.bootstrap.mock.calls).toEqual([[[RELAY]]]);
+        expect(peer.services.fanout.addBootstraps.mock.calls).toEqual([
+            [[HUB, OTHER_HUB]],
+        ]);
+        expect(
+            calledBefore(peer.bootstrap, peer.services.fanout.addBootstraps)
+        ).toBe(true);
+        expect(
+            calledBefore(peer.services.fanout.addBootstraps, peer.dial)
+        ).toBe(true);
+        expect(peer.dial.mock.calls).toEqual([[HUB], [OTHER_HUB]]);
+        expect(unreachable).toEqual([
+            `--peer ${HUB} (connect ECONNREFUSED ${HUB})`,
+        ]);
+        expect(warn.mock.calls).toEqual([
+            [`Could not reach ${unreachable[0]}${REDIALS}`],
+        ]);
+        expect(peer.enableBootstrapRecovery).not.toHaveBeenCalled();
+
+        // Nothing answers: each is named, and each is still registered.
+        const down = fakeNetworkPeer({
+            bootstrap: BOOTSTRAP_DOWN,
+            unreachable: [HUB],
+        });
+        expect(
+            await connectMountToNetwork(
+                down as never,
+                { peer: [HUB], bootstrap: [RELAY] },
+                vi.fn()
+            )
+        ).toEqual([
+            `--bootstrap ${RELAY} (Failed to succefully dial any bootstrap node)`,
+            `--peer ${HUB} (connect ECONNREFUSED ${HUB})`,
+        ]);
+        expect(down.services.fanout.addBootstraps.mock.calls).toEqual([
+            [[HUB]],
+        ]);
+        expect(down.enableBootstrapRecovery).not.toHaveBeenCalled();
+    });
+
+    it("refuses a --peer or --bootstrap that is not a multiaddr before dialling anything", async () => {
+        const cases: Array<[CliNetworkArgs, RegExp]> = [
+            [
+                { peer: ["not-a-multiaddr"] },
+                /^--peer not-a-multiaddr is not a multiaddr: /,
+            ],
+            [{ peer: [] }, /^--peer requires a multiaddr$/],
+            [{ bootstrap: [""] }, /^--bootstrap requires a multiaddr$/],
+        ];
+        for (const [network, message] of cases) {
+            const peer = fakeNetworkPeer();
+            await expect(
+                connectMountToNetwork(peer as never, network, vi.fn())
+            ).rejects.toThrow(message);
+            expect(peer.dial).not.toHaveBeenCalled();
+            expect(peer.bootstrap).not.toHaveBeenCalled();
+            expect(peer.enableBootstrapRecovery).not.toHaveBeenCalled();
+            expect(peer.services.fanout.addBootstraps).not.toHaveBeenCalled();
+        }
+    });
+
+    it("names what it could not reach when the open then fails, in words for a first mount that found no peer", () => {
+        const address = "zb2rhbnwihVzMMEGAPf9EwTZBsQz9fszCnM4Y8mJmBFgiyN7J";
+        const unreachable = [`--peer ${HUB} (connect ECONNREFUSED)`];
+        const failed = new Error("Failed to load program");
+        const error = mountOpenError(address, unreachable, failed) as Error;
+        expect(error.message).toBe(
+            `Could not open ${address}: this state directory does not hold it, and no peer that holds it answered. At mount start, could not reach --peer ${HUB} (connect ECONNREFUSED).`
+        );
+        expect(error.cause).toBe(failed);
+        const other = new Error("EACCES: permission denied");
+        const named = mountOpenError(address, unreachable, other) as Error;
+        expect(named.message).toBe(
+            `Could not open ${address}: EACCES: permission denied. At mount start, could not reach --peer ${HUB} (connect ECONNREFUSED).`
+        );
+        expect(named.cause).toBe(other);
+        // Everything was reached: the error is unchanged.
+        expect(mountOpenError(address, [], failed)).toBe(failed);
+    });
+
+    it("mount names an unreachable --peer when a first mount then finds no peer that holds the filesystem", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-first-mount-")
+        );
+        // A loopback port that nothing listens on: dials are refused.
+        const port = await new Promise<number>((resolve, reject) => {
+            const server = net.createServer();
+            server.once("error", reject);
+            server.listen(0, "127.0.0.1", () => {
+                const { port } = server.address() as net.AddressInfo;
+                server.close(() => resolve(port));
+            });
+        });
+        const closed = `/ip4/127.0.0.1/tcp/${port}/p2p/12D3KooWKj1J1hHxrYyB37qDDGCi9aU2vcHzDZhtMk7te7dEmqqT`;
+        const address = "zb2rhbnwihVzMMEGAPf9EwTZBsQz9fszCnM4Y8mJmBFgiyN7J";
+        // No block store holds the address: the load fails at once instead
+        // of after the remote lookup's 30 s.
+        const createPeerbit = Peerbit.create.bind(Peerbit);
+        const create = vi
+            .spyOn(Peerbit, "create")
+            .mockImplementation(async (options) => {
+                const peer = await createPeerbit(options);
+                vi.spyOn(peer.services.blocks, "get").mockResolvedValue(
+                    undefined
+                );
+                return peer;
+            });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+            const error = await runCli([
+                "mount",
+                address,
+                path.join(directory, "not-mounted"),
+                "--native-adapter",
+                path.join(directory, "adapter-never-started"),
+                "--directory",
+                directory,
+                "--peer",
+                closed,
+            ]).then(
+                () => undefined,
+                (error: Error) => error
+            );
+            const escaped = closed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            expect(error?.message).toMatch(
+                new RegExp(
+                    `^Could not open ${address}: this state directory does not hold it, and no peer that holds it answered\\. At mount start, could not reach --peer ${escaped} \\(.+\\)\\.$`
+                )
+            );
+            expect((error?.cause as Error)?.message).toBe(
+                "Failed to load program"
+            );
+            const warnings = warn.mock.calls.map(([line]) =>
+                String(line).replace(/\u001b\[[0-9;]*m/g, "")
+            );
+            expect(
+                warnings.filter((line) => line.startsWith("Could not reach"))
+            ).toEqual([
+                expect.stringMatching(
+                    new RegExp(
+                        `^Could not reach --peer ${escaped} \\(.+\\); Peerbit keeps redialling while the mount runs\\.$`
+                    )
+                ),
+            ]);
+            expect(warnings.join("\n")).not.toContain("local state");
+        } finally {
+            warn.mockRestore();
+            create.mockRestore();
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("one-shot command network connection", () => {
+    it("fails at once naming an explicit peer that cannot be dialled", async () => {
+        const peer = fakeNetworkPeer({ unreachable: [OTHER_HUB] });
+        const error = await connectToNetwork(peer as never, {
+            peer: [HUB, OTHER_HUB],
+        }).then(
+            () => undefined,
+            (error: Error) => error
+        );
+        expect(error?.message).toBe(
+            `Could not dial --peer ${OTHER_HUB}: connect ECONNREFUSED ${OTHER_HUB}`
+        );
+        expect((error?.cause as Error)?.message).toBe(
+            `connect ECONNREFUSED ${OTHER_HUB}`
+        );
+        expect(peer.bootstrap).not.toHaveBeenCalled();
+    });
+
+    it("uses a --bootstrap list instead of the public one, and fails naming it when no node answers", async () => {
+        const peer = fakeNetworkPeer();
+        await connectToNetwork(peer as never, { bootstrap: [RELAY] });
+        expect(peer.bootstrap.mock.calls).toEqual([[[RELAY]]]);
+
+        const down = fakeNetworkPeer({ bootstrap: BOOTSTRAP_DOWN });
+        await expect(
+            connectToNetwork(down as never, { bootstrap: [RELAY, OTHER_HUB] })
+        ).rejects.toThrow(
+            `Could not reach any --bootstrap address (${RELAY}, ${OTHER_HUB}): Failed to succefully dial any bootstrap node`
+        );
+    });
+
+    it("fails a command at once, naming an unreachable --peer or --bootstrap list", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-unreachable-")
+        );
+        // A loopback port that nothing listens on: dials are refused.
+        const port = await new Promise<number>((resolve, reject) => {
+            const server = net.createServer();
+            server.once("error", reject);
+            server.listen(0, "127.0.0.1", () => {
+                const { port } = server.address() as net.AddressInfo;
+                server.close(() => resolve(port));
+            });
+        });
+        const closed = `/ip4/127.0.0.1/tcp/${port}/p2p/12D3KooWKj1J1hHxrYyB37qDDGCi9aU2vcHzDZhtMk7te7dEmqqT`;
+        const status = (...flags: string[]) =>
+            runCli([
+                "status",
+                "never-opened",
+                "--json",
+                "--directory",
+                directory,
+                ...flags,
+            ]).then(
+                () => undefined,
+                (error: Error) => error
+            );
+        try {
+            const peerError = await status("--peer", closed);
+            expect(peerError?.message).toMatch(
+                new RegExp(
+                    `^Could not dial --peer ${closed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `
+                )
+            );
+            expect((await status("--bootstrap", closed))?.message).toBe(
+                `Could not reach any --bootstrap address (${closed}): Failed to succefully dial any bootstrap node`
+            );
+        } finally {
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("skips only the public network when a --no-replicate read asks it to", async () => {
+        const offline = fakeNetworkPeer();
+        await connectToNetwork(offline as never, {}, { publicNetwork: false });
+        expect(offline.bootstrap).not.toHaveBeenCalled();
+
+        const explicit = fakeNetworkPeer();
+        await connectToNetwork(
+            explicit as never,
+            { peer: [HUB], bootstrap: [RELAY] },
+            { publicNetwork: false }
+        );
+        expect(explicit.bootstrap.mock.calls).toEqual([[[RELAY]]]);
+        expect(explicit.dial.mock.calls).toEqual([[HUB]]);
+
+        const publicNetwork = fakeNetworkPeer();
+        await connectToNetwork(publicNetwork as never, {});
+        expect(publicNetwork.bootstrap.mock.calls).toEqual([[]]);
     });
 });
 

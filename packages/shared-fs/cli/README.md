@@ -462,6 +462,67 @@ Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can
 be opened.
 
+## Choose the network: `--peer` and `--bootstrap`
+
+By default, commands that open a filesystem by address join the public Peerbit
+bootstrap network, whose node list they fetch at startup. Two repeatable
+options change that, and both are used when given together:
+
+- `--peer <multiaddr>` dials that peer, such as a hub, and keeps the command
+  off the public network.
+- `--bootstrap <multiaddr>` uses that node instead of the public list, which
+  is then not fetched.
+
+Each takes every value that follows it, so put them after the positionals:
+
+```bash
+peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared" \
+  --peer /ip4/192.0.2.10/tcp/4002/p2p/<hub peer id>
+```
+
+`mount` starts while they are down: it warns, naming each `--peer` it could
+not dial, or the `--bootstrap` list when none of its nodes answers, and goes
+on. A remount from a writable state directory is writable at once (unless
+`--require-fresh`); a first mount still needs a peer that holds the filesystem
+to answer within about 30 s, or fails naming what it could not reach.
+
+Peerbit's pubsub keeps every `--peer` and `--bootstrap` address while the
+mount runs, whatever its first dial did, and dials a down one again. How soon
+depends on whether another of these addresses is connected:
+
+- None is, as with a single `--peer`: it redials about once a second, so a hub
+  restarted at the same address is usually back within about 2 s.
+- One is, as with `--bootstrap` and `--peer` together, or several of either:
+  the mount dials a down address when it writes, so a write made after the hub
+  is back reaches it within about a second. An idle mount dials it only about
+  once a minute, so it can take that long to sync with that hub again. A
+  faster idle redial needs a change in Peerbit.
+
+Without `--peer`, the mount also enables Peerbit's bootstrap recovery: while
+it has no connections at all, it bootstraps again from `--bootstrap` (else the
+public list), 1 s after a failed attempt, doubling to at most 60 s with 20%
+jitter. That fallback guarantees retries; it is not the dial rate. A `--peer`
+mount skips it: a new bootstrap pins the mount's pubsub topic roots to the
+nodes it reached, and a mount that switched so while connected stalled other
+machines' joins for about a minute. Give every machine of a filesystem the
+same `--bootstrap` list.
+
+A `--peer` with `/p2p/<id>` accepts only that identity, so the hub must keep
+its state directory to be redialled: one that returns with a new identity is
+refused on every redial, silently. Without `/p2p/`, any peer at that address
+is accepted, which authenticates the hub less. A connection that dies without
+closing, as across a laptop's sleep, counts as connected until Peerbit or
+libp2p drops it: with a hung hub, that took about 12 s while the mount wrote
+and about 2 minutes while it was idle.
+
+Other commands fail at once, naming the address, when a `--peer` cannot be
+dialled or no `--bootstrap` node answers. The options apply to `mount`,
+`status`, `conflicts`, `naming-conflicts`, `resolve-conflict`,
+`resolve-naming-conflict`, `trust`, `revoke`, `gc`, `snapshot`,
+`prepare-disposal` and `benchmark`; `status` and `benchmark` without an
+address connect to nothing. `--no-replicate` reads that skip the public network
+still dial `--peer` and `--bootstrap`.
+
 ## Safely dispose of a machine
 
 Stop mounted writes, wait for persisted delivery, and only then dispose of the
