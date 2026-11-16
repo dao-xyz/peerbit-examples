@@ -137,12 +137,21 @@ A package that is not on npm yet has no settings page, so its first version
 needs a token or a manual publish.
 
 The `NPM_TOKEN` repository secret is a fallback. While it is set, npm sends it
-with every registry request of the publish step. When the exchange fails, npm
+with every registry request of the publish step. Every command in that step can
+read it too, including the builds and tests. When the exchange fails, npm
 publishes with the token without a warning. A broken trusted publisher then
-goes unnoticed, and a new one that never publishes expires after 2 days. So
-delete the secret once a release has published through trusted publishing, as
-npm advises. `npm view <package>@<version> _npmUser` names `GitHub Actions` for
-such a version.
+goes unnoticed, and a new one that never publishes expires after 2 days.
+
+So once a release has published through trusted publishing, delete the secret
+and [revoke the token](https://docs.npmjs.com/revoking-access-tokens) on
+npmjs.com, as npm advises. Deleting the secret alone leaves the token valid
+until it expires. `npm view <package>@<version> _npmUser` names `GitHub Actions`
+for a version that published through trusted publishing.
+
+npm also advises selecting "Require two-factor authentication and disallow
+tokens" under "Publishing access" in each package's settings. The package can
+then be published only through trusted publishing or by hand with two-factor
+authentication.
 
 ## Cloudflare hosting
 
