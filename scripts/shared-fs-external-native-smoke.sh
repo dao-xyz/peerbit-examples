@@ -96,7 +96,7 @@ single_line_detail() {
 go_version="$(single_line_detail "$(go version 2>/dev/null || true)")"
 mount_runtime="unknown"
 if [ "$(uname -s)" = "Darwin" ]; then
-  # The adapter's cgofuse loads macFUSE when it is installed, else FUSE-T.
+  # The adapter mounts only through macFUSE; it refuses FUSE-T.
   if [ -e /usr/local/lib/libfuse.2.dylib ] || [ -e /usr/local/lib/libosxfuse.2.dylib ]; then
     macfuse_version="$(
       defaults read /Library/Filesystems/macfuse.fs/Contents/Info CFBundleShortVersionString 2>/dev/null ||
@@ -105,10 +105,6 @@ if [ "$(uname -s)" = "Darwin" ]; then
     )"
     macfuse_version="$(single_line_detail "$macfuse_version")"
     mount_runtime="macFUSE $macfuse_version"
-  elif [ -e /usr/local/lib/libfuse-t.dylib ]; then
-    fuse_t_version="$(readlink /usr/local/lib/libfuse-t.dylib 2>/dev/null | sed -n 's/^libfuse-t-\(.*\)\.dylib$/\1/p' || true)"
-    fuse_t_version="$(single_line_detail "$fuse_t_version")"
-    mount_runtime="FUSE-T $fuse_t_version"
   fi
 elif [ "$(uname -s)" = "Linux" ]; then
   fuse3_version="$(pkg-config --modversion fuse3 2>/dev/null || true)"
@@ -395,8 +391,6 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ]; then
   # Mirrors nativeMountOptions in packages/shared-fs/native/mount_options.go.
   if [ "$(uname -s)" = "Linux" ]; then
     benchmark_args+=(--mount-option "-o" --mount-option "entry_timeout=0.1,attr_timeout=0,negative_timeout=0")
-  elif [ "${mount_runtime%% *}" = "FUSE-T" ]; then
-    benchmark_args+=(--mount-option "-o" --mount-option "noattrcache")
   fi
   if [ "${PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG:-}" = "1" ]; then
     benchmark_args+=(--mount-option "-d")

@@ -1,6 +1,9 @@
 package main
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // linuxKernelCacheOptions bound what the Linux kernel caches for the mount:
 // a name's binding to a file for at most 0.1 s, attributes never, and
@@ -17,24 +20,30 @@ import "os"
 // defaults of 1 s for names and attributes. Keep both together.
 const linuxKernelCacheOptions = "entry_timeout=0.1,attr_timeout=0,negative_timeout=0"
 
-// fuseTCacheOptions turn off the macOS NFS client's attribute cache for a
-// FUSE-T mount. FUSE-T ignores libfuse's timeouts, and the NFS client's
-// default (5 to 60 s) hid other peers' changes for up to 18 s in a two-mount
-// probe and made concurrent appends overwrite each other; with this option
-// both were exact. macFUSE's caching is unchanged.
-const fuseTCacheOptions = "noattrcache"
+// The macOS libraries cgofuse tries, in its order (fuse/host_cgo.go). It loads
+// the first that exists, so a Mac with both macFUSE and FUSE-T mounts through
+// macFUSE.
+const (
+	macFUSELibrary = "/usr/local/lib/libfuse.2.dylib"    // macFUSE 4 and later
+	osxFUSELibrary = "/usr/local/lib/libosxfuse.2.dylib" // OSXFUSE, macFUSE 3
+	fuseTLibrary   = "/usr/local/lib/libfuse-t.dylib"
+)
 
-// darwinLoadsFuseT reports whether cgofuse will load FUSE-T. cgofuse loads the
-// first of macFUSE's libfuse.2.dylib, OSXFUSE's libosxfuse.2.dylib and
-// FUSE-T's libfuse-t.dylib that exists (fuse/host_cgo.go), so a host with both
-// runtimes mounts through macFUSE, which is not given FUSE-T's options.
-func darwinLoadsFuseT(exists func(path string) bool) bool {
-	for _, library := range []string{"/usr/local/lib/libfuse.2.dylib", "/usr/local/lib/libosxfuse.2.dylib"} {
-		if exists(library) {
-			return false
-		}
+// errFuseTUnsupported is the adapter's startup error on a Mac where cgofuse
+// would load FUSE-T. peerbit-fs mount refuses with the same text before it
+// opens the filesystem (library/src/native-mount-runtime.ts).
+var errFuseTUnsupported = errors.New("FUSE-T is not supported: install macFUSE (brew install --cask macfuse) to mount on macOS; FUSE-T can stay installed. Found FUSE-T's /usr/local/lib/libfuse-t.dylib but not macFUSE's /usr/local/lib/libfuse.2.dylib or /usr/local/lib/libosxfuse.2.dylib.")
+
+// nativeRuntimeError refuses, before anything is mounted, a Mac where cgofuse
+// would load FUSE-T: shared-fs CI does not test FUSE-T, and its license allows
+// non-commercial use only, so macOS mounts go through macFUSE alone. A Mac
+// with neither runtime is left to cgofuse, which reports that it cannot find
+// FUSE.
+func nativeRuntimeError(goos string, exists func(path string) bool) error {
+	if goos != "darwin" || exists(macFUSELibrary) || exists(osxFUSELibrary) || !exists(fuseTLibrary) {
+		return nil
 	}
-	return exists("/usr/local/lib/libfuse-t.dylib")
+	return errFuseTUnsupported
 }
 
 func pathExists(path string) bool {
@@ -44,10 +53,8 @@ func pathExists(path string) bool {
 
 // nativeMountOptions returns the cgofuse mount arguments before the
 // mountpoint. macFUSE (through FUSE 2.8) keeps libfuse's defaults: names and
-// attributes cached for 1 s, missing names never. FUSE-T serves the mount
-// through a local NFS server, whose client caches what it chooses; fuseT turns
-// its attribute cache off.
-func nativeMountOptions(goos string, fuseT bool, debug bool) []string {
+// attributes cached for 1 s, missing names never.
+func nativeMountOptions(goos string, debug bool) []string {
 	options := []string{"-s"}
 	switch goos {
 	case "windows":
@@ -58,10 +65,6 @@ func nativeMountOptions(goos string, fuseT bool, debug bool) []string {
 		options = append(options, "-o", "uid=-1,gid=-1")
 	case "linux":
 		options = append(options, "-o", linuxKernelCacheOptions)
-	case "darwin":
-		if fuseT {
-			options = append(options, "-o", fuseTCacheOptions)
-		}
 	}
 	if debug {
 		options = append(options, "-d")

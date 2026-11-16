@@ -1634,6 +1634,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
+                // The adapter refuses FUSE-T without macFUSE only when it
+                // starts, after the write-ready wait. Refuse first, so no one
+                // is sent to install an adapter this host cannot use.
+                const { getNativeMountRefusal } = await loadSharedFsRuntime();
+                const refusal = await getNativeMountRefusal();
+                if (refusal) {
+                    console.error(chalk.red(refusal));
+                    process.exitCode = 1;
+                    return;
+                }
                 // Refuse a missing or stale adapter before opening Peerbit.
                 const externalAdapter = await resolveMountNativeAdapter(
                     argv.nativeAdapter

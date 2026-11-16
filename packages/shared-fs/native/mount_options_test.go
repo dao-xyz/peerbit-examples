@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -10,7 +11,6 @@ func TestNativeMountOptionsPerPlatform(t *testing.T) {
 	tests := []struct {
 		name  string
 		goos  string
-		fuseT bool
 		debug bool
 		want  []string
 	}{
@@ -34,30 +34,21 @@ func TestNativeMountOptionsPerPlatform(t *testing.T) {
 			debug: true,
 			want:  []string{"-s", "-o", linuxCache, "-d"},
 		},
-		// macFUSE keeps libfuse's defaults; FUSE-T turns off the NFS client's
-		// attribute cache.
-		{name: "darwin macFUSE", goos: "darwin", want: []string{"-s"}},
-		{name: "darwin macFUSE debug", goos: "darwin", debug: true, want: []string{"-s", "-d"}},
-		{name: "darwin FUSE-T", goos: "darwin", fuseT: true, want: []string{"-s", "-o", "noattrcache"}},
-		{
-			name:  "darwin FUSE-T debug",
-			goos:  "darwin",
-			fuseT: true,
-			debug: true,
-			want:  []string{"-s", "-o", "noattrcache", "-d"},
-		},
+		// macFUSE keeps libfuse's defaults.
+		{name: "darwin", goos: "darwin", want: []string{"-s"}},
+		{name: "darwin debug", goos: "darwin", debug: true, want: []string{"-s", "-d"}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := nativeMountOptions(test.goos, test.fuseT, test.debug); !reflect.DeepEqual(got, test.want) {
+			if got := nativeMountOptions(test.goos, test.debug); !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("native mount options = %#v, want %#v", got, test.want)
 			}
 		})
 	}
 }
 
-func TestDarwinLoadsFuseTFollowsCgofuseOrder(t *testing.T) {
+func TestNativeRuntimeErrorRefusesOnlyFuseT(t *testing.T) {
 	installed := func(libraries ...string) func(string) bool {
 		return func(path string) bool {
 			for _, library := range libraries {
@@ -68,25 +59,48 @@ func TestDarwinLoadsFuseTFollowsCgofuseOrder(t *testing.T) {
 			return false
 		}
 	}
+	// The paths cgofuse dlopens on macOS, in its order.
 	const macFUSE = "/usr/local/lib/libfuse.2.dylib"
 	const osxFUSE = "/usr/local/lib/libosxfuse.2.dylib"
 	const fuseT = "/usr/local/lib/libfuse-t.dylib"
 	tests := []struct {
 		name      string
+		goos      string
 		libraries []string
-		want      bool
+		want      error
 	}{
-		{name: "FUSE-T only", libraries: []string{fuseT}, want: true},
-		{name: "macFUSE only", libraries: []string{macFUSE}},
-		{name: "OSXFUSE and FUSE-T", libraries: []string{osxFUSE, fuseT}},
-		{name: "macFUSE and FUSE-T", libraries: []string{macFUSE, fuseT}},
-		{name: "neither"},
+		{name: "macFUSE only", goos: "darwin", libraries: []string{macFUSE}},
+		{name: "OSXFUSE only", goos: "darwin", libraries: []string{osxFUSE}},
+		{name: "FUSE-T only", goos: "darwin", libraries: []string{fuseT}, want: errFuseTUnsupported},
+		// cgofuse loads macFUSE first, so FUSE-T stays unused.
+		{name: "macFUSE and FUSE-T", goos: "darwin", libraries: []string{macFUSE, fuseT}},
+		{name: "OSXFUSE and FUSE-T", goos: "darwin", libraries: []string{osxFUSE, fuseT}},
+		// cgofuse reports that it cannot find FUSE.
+		{name: "none", goos: "darwin"},
+		// Only macOS loads these libraries.
+		{name: "linux", goos: "linux", libraries: []string{fuseT}},
+		{name: "windows", goos: "windows", libraries: []string{fuseT}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := darwinLoadsFuseT(installed(test.libraries...)); got != test.want {
-				t.Fatalf("darwinLoadsFuseT = %v, want %v", got, test.want)
+			if got := nativeRuntimeError(test.goos, installed(test.libraries...)); got != test.want {
+				t.Fatalf("nativeRuntimeError = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestFuseTRefusalNamesTheFixAndTheCheckedLibraries(t *testing.T) {
+	message := errFuseTUnsupported.Error()
+	for _, want := range []string{
+		"FUSE-T is not supported",
+		"install macFUSE",
+		"/usr/local/lib/libfuse.2.dylib",
+		"/usr/local/lib/libosxfuse.2.dylib",
+		"/usr/local/lib/libfuse-t.dylib",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("FUSE-T refusal %q does not mention %q", message, want)
+		}
 	}
 }

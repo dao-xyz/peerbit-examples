@@ -13,10 +13,10 @@ import (
 // fresh statistics.
 const mntNoWait = 2
 
-// mountWatcher reports when the mountpoint is attached. FUSE-T calls Init from
-// its NFS server before macOS attaches the NFS mount, so a ready line written
-// from Init alone can precede the mount; macFUSE's Init follows the kernel
-// mount, so its wait returns at once. The watcher subscribes to the kernel's
+// mountWatcher reports when the mountpoint is attached, so the ready line
+// never precedes the mount. macFUSE's Init follows the kernel mount, so its
+// wait returns at once; the watcher guards a runtime that calls Init earlier,
+// as FUSE-T did before the adapter refused it. It subscribes to the kernel's
 // filesystem events (EVFILT_FS, which posts VQ_MOUNT for every new mount)
 // before it reads the mount table, so a mount between the two is never
 // missed, and it rereads the table only when an event arrives.

@@ -234,7 +234,9 @@ Native runtime prerequisites are platform-specific:
 - Linux: FUSE/libfuse. On Debian or Ubuntu, install `fuse3` and
   `libfuse3-dev`.
 - macOS: macFUSE. With Homebrew, run `brew install --cask macfuse`, then approve
-  macFUSE in System Settings and reboot if macOS requires it.
+  macFUSE in System Settings and reboot if macOS requires it. FUSE-T is not
+  supported: on a Mac with FUSE-T but not macFUSE, `mount` refuses at once and
+  `status` lists macFUSE as missing.
 - Windows: WinFsp runtime must be installed before mounting.
 
 Mounts keep each file's exec bit and mtime and support symlinks: `chmod`

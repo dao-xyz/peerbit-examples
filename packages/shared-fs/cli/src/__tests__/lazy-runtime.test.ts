@@ -25,7 +25,11 @@ type ProbeResult = {
     stderr: string;
 };
 
-const runProbe = (args: string[]) =>
+const runProbe = (
+    args: string[],
+    loader = loaderUrl,
+    env: NodeJS.ProcessEnv = {}
+) =>
     new Promise<ProbeResult>((resolve) => {
         execFile(
             process.execPath,
@@ -34,14 +38,14 @@ const runProbe = (args: string[]) =>
                 "--import",
                 "tsx",
                 "--experimental-loader",
-                loaderUrl,
+                loader,
                 cliEntry,
                 ...args,
             ],
             {
                 cwd: cliDirectory,
                 encoding: "utf8",
-                env: { ...process.env, FORCE_COLOR: "0" },
+                env: { ...process.env, FORCE_COLOR: "0", ...env },
                 timeout: 30_000,
             },
             (error, stdout, stderr) => {
@@ -127,5 +131,86 @@ describe("peerbit-fs lazy runtime loading", () => {
 
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toContain(BLOCKED_IMPORT);
+    });
+});
+
+describe("peerbit-fs mount on a host the native adapter refuses", () => {
+    it("prints only the refusal and exits 1, before the adapter check and Peerbit", async () => {
+        // A runtime whose host check refuses, as on a Mac with FUSE-T but no
+        // macFUSE, and that fails loudly if mount goes on to open Peerbit.
+        const refusal = "stub runtime refuses this host";
+        const runtime = `data:text/javascript,${encodeURIComponent(`
+export const getNativeMountRefusal = async () => ${JSON.stringify(refusal)};
+export const Peerbit = {
+    create: async () => {
+        throw new Error("stub runtime opened Peerbit");
+    },
+};
+`)}`;
+        const loader = `data:text/javascript,${encodeURIComponent(`
+export async function resolve(specifier, context, nextResolve) {
+    if (specifier === "@peerbit/shared-fs") {
+        return { url: ${JSON.stringify(runtime)}, shortCircuit: true };
+    }
+    return nextResolve(specifier, context);
+}
+`)}`;
+        const root = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-refusal-")
+        );
+        const state = path.join(root, "state");
+        try {
+            const { version } = JSON.parse(
+                await fs.readFile(
+                    path.join(cliDirectory, "package.json"),
+                    "utf8"
+                )
+            ) as { version: string };
+            // A managed adapter without an install record, which mount
+            // refuses naming install-adapter: the host's refusal comes first.
+            const slot = path.join(
+                root,
+                "adapters",
+                `shared-fs-native-v${version}`
+            );
+            await fs.mkdir(slot, { recursive: true });
+            await fs.writeFile(
+                path.join(
+                    slot,
+                    process.platform === "win32"
+                        ? "peerbit-shared-fs-native.exe"
+                        : "peerbit-shared-fs-native"
+                ),
+                ""
+            );
+            const result = await runProbe(
+                [
+                    "mount",
+                    "zb2rh-not-opened",
+                    path.join(root, "mountpoint"),
+                    "--directory",
+                    state,
+                ],
+                loader,
+                {
+                    PEERBIT_SHARED_FS_NATIVE_ADAPTER: undefined,
+                    PEERBIT_SHARED_FS_NATIVE_INSTALL_DIR: path.join(
+                        root,
+                        "adapters"
+                    ),
+                }
+            );
+
+            expect(result.exitCode).toBe(1);
+            expect(result.stdout).toBe("");
+            // One line: no usage text, no stack trace, no adapter advice.
+            expect(result.stderr).toBe(`${refusal}\n`);
+            // mount creates the state directory just before Peerbit opens it.
+            await expect(fs.stat(state)).rejects.toMatchObject({
+                code: "ENOENT",
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
     });
 });
