@@ -462,6 +462,44 @@ Run `peerbit-fs status "$ADDRESS"` when diagnosing a host. It checks the native
 adapter, platform prerequisites, local Peerbit state, and whether the address can
 be opened.
 
+## Choose the network: `--peer` and `--bootstrap`
+
+By default, commands that open a filesystem by address join the public Peerbit
+bootstrap network, whose node list they fetch at startup. Two repeatable
+options change that, and both are used when given together:
+
+- `--peer <multiaddr>` dials that peer, such as a hub, and keeps the command
+  off the public network.
+- `--bootstrap <multiaddr>` uses that node instead of the public list, which
+  is then not fetched.
+
+Each takes every value that follows it, so put them after the positionals:
+
+```bash
+peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared" \
+  --peer /ip4/192.0.2.10/tcp/4002/p2p/<hub peer id>
+```
+
+`mount` starts while they are down: it warns, naming the address, and mounts
+from local state. A remount from a writable state directory is writable at
+once (unless `--require-fresh`); a first mount still needs a peer that holds
+the filesystem to answer within about 30 s. Peerbit's bootstrap recovery
+redials the `--bootstrap` and `--peer` addresses (else the public list)
+whenever the mount has no connections at all, such as after a hub restarts at
+the same address: about 1 s after a failed attempt, doubling to at most 60 s
+with 20% jitter, for as long as the mount runs. It does not redial one address
+while the mount is connected to another, and a connection that dies without
+closing, as across a laptop's sleep, counts as connected until the operating
+system closes it.
+
+Other commands fail at once, naming the address, when a `--peer` cannot be
+dialled or no `--bootstrap` node answers. The options apply to `mount`,
+`status`, `conflicts`, `naming-conflicts`, `resolve-conflict`,
+`resolve-naming-conflict`, `trust`, `revoke`, `gc`, `snapshot`,
+`prepare-disposal` and `benchmark`; `status` and `benchmark` without an
+address connect to nothing. `--no-replicate` reads that skip the public network
+still dial `--peer` and `--bootstrap`.
+
 ## Safely dispose of a machine
 
 Stop mounted writes, wait for persisted delivery, and only then dispose of the

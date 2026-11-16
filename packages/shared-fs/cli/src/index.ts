@@ -138,62 +138,121 @@ export const normalizeNativeMountpoint = (
     return path.resolve(mountpoint);
 };
 
-const coerceAddresses = (addrs: string | string[]) => {
-    return (Array.isArray(addrs) ? addrs : [addrs]).map((address) => {
-        multiaddr(address); // validate early with a clear error
-        return address;
-    });
+/** The parsed --peer and --bootstrap options. */
+export type CliNetworkArgs = {
+    peer?: string | string[];
+    bootstrap?: string | string[];
 };
 
-const connectToNetwork = async (
-    peerbit: Peerbit,
-    peer?: string | string[],
-    options?: { bootstrap?: boolean }
-) => {
-    if (peer) {
-        // Dial plain strings so no foreign Multiaddr instances cross module
-        // graphs; the client parses them with its own multiaddr copy.
-        for (const address of coerceAddresses(peer)) {
-            await peerbit.dial(address);
+const errorText = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
+
+// Plain strings, so no foreign Multiaddr instances cross module graphs. A
+// flag without a value parses as [] or "", which multiaddr() reads as "/".
+const coerceAddresses = (flag: string, addrs: string | string[]) => {
+    const addresses = [addrs].flat();
+    if (addresses.length === 0 || addresses.some((a) => !a.trim())) {
+        throw new Error(`${flag} requires a multiaddr`);
+    }
+    for (const address of addresses) {
+        try {
+            multiaddr(address);
+        } catch (error) {
+            throw new Error(
+                `${flag} ${address} is not a multiaddr: ${errorText(error)}`
+            );
         }
-        return;
     }
-    if (options?.bootstrap === false) {
-        return;
+    return addresses;
+};
+
+// bootstrap undefined: the public list.
+const networkTargets = (network: CliNetworkArgs) => ({
+    peers: network.peer ? coerceAddresses("--peer", network.peer) : [],
+    bootstrap: network.bootstrap
+        ? coerceAddresses("--bootstrap", network.bootstrap)
+        : undefined,
+});
+
+/**
+ * One-shot commands need the network now: an unreachable --peer, or a
+ * --bootstrap list none of whose nodes answers, fails the command.
+ * `publicNetwork: false` (--no-replicate reads) skips only the public list.
+ */
+export const connectToNetwork = async (
+    peerbit: Pick<Peerbit, "bootstrap" | "dial">,
+    network: CliNetworkArgs,
+    options?: { publicNetwork?: boolean }
+) => {
+    const { peers, bootstrap } = networkTargets(network);
+    if (bootstrap) {
+        try {
+            await peerbit.bootstrap(bootstrap);
+        } catch (error) {
+            throw new Error(
+                `Could not reach any --bootstrap address (${bootstrap.join(", ")}): ${errorText(error)}`,
+                { cause: error }
+            );
+        }
+    } else if (peers.length === 0 && options?.publicNetwork !== false) {
+        await peerbit.bootstrap();
     }
-    await peerbit.bootstrap();
+    for (const address of peers) {
+        try {
+            await peerbit.dial(address);
+        } catch (error) {
+            throw new Error(
+                `Could not dial --peer ${address}: ${errorText(error)}`,
+                { cause: error }
+            );
+        }
+    }
 };
 
 /**
- * A mount is long-running and serves its local replica, so unreachable
- * bootstrap nodes must not stop it from starting. Peerbit's bootstrap
- * recovery then redials with backoff whenever the mount has no connections,
- * at startup and after later network loss. Joining a remote filesystem still
- * waits for the write-readiness fence, so an offline join fails safely.
- * Explicit --peer addresses keep the mount off the public network.
+ * A mount serves its local replica, so nothing unreachable stops it: it
+ * warns and mounts from local state. Peerbit's bootstrap recovery redials
+ * the --bootstrap and --peer addresses (else the public list) with backoff
+ * whenever the mount has no connections, such as after a hub restarts. A
+ * first join still needs a peer that holds the filesystem.
  */
 export const connectMountToNetwork = async (
     peerbit: Pick<Peerbit, "bootstrap" | "dial" | "enableBootstrapRecovery">,
-    peer?: string | string[],
+    network: CliNetworkArgs = {},
     warn: (message: string) => void = (message) =>
         console.warn(chalk.yellow(message))
 ) => {
-    if (peer) {
-        for (const address of coerceAddresses(peer)) {
-            await peerbit.dial(address);
+    const { peers, bootstrap } = networkTargets(network);
+    const redials = (them: string) =>
+        `Peerbit redials ${them} with backoff whenever this mount has no connections.`;
+    if (bootstrap || peers.length === 0) {
+        try {
+            await (bootstrap
+                ? peerbit.bootstrap(bootstrap)
+                : peerbit.bootstrap());
+        } catch (error) {
+            warn(
+                bootstrap
+                    ? `Could not reach --bootstrap ${bootstrap.join(", ")} (${errorText(error)}); mounting from local state. ${redials(bootstrap.length > 1 ? "them" : "it")}`
+                    : `Could not reach the Peerbit bootstrap network (${errorText(error)}); mounting from local state and reconnecting in the background.`
+            );
         }
-        return;
     }
-    try {
-        await peerbit.bootstrap();
-    } catch (error) {
-        warn(
-            `Could not reach the Peerbit bootstrap network (${
-                error instanceof Error ? error.message : String(error)
-            }); mounting from local state and reconnecting in the background.`
-        );
+    for (const address of peers) {
+        try {
+            await peerbit.dial(address);
+        } catch (error) {
+            warn(
+                `Could not dial --peer ${address} (${errorText(error)}); mounting from local state. ${redials("it")}`
+            );
+        }
     }
-    peerbit.enableBootstrapRecovery();
+    const addresses = [...(bootstrap ?? []), ...peers];
+    if (addresses.length > 0) {
+        peerbit.enableBootstrapRecovery({ addresses });
+    } else {
+        peerbit.enableBootstrapRecovery();
+    }
 };
 
 const stopPeerbitForCli = async (
@@ -1099,7 +1158,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
             type: "string",
             array: true,
             description:
-                "Multiaddr peer to dial before opening a shared filesystem.",
+                "Multiaddr of a peer to dial instead of joining the public bootstrap network. Repeatable. mount starts while it is down and redials it; other commands fail.",
+        })
+        .option("bootstrap", {
+            type: "string",
+            array: true,
+            description:
+                "Multiaddr of a bootstrap node to use instead of the public list, which is then not fetched. Repeatable. mount redials these.",
         })
         .option("replicate", {
             type: "boolean",
@@ -1196,8 +1261,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: argv.replicate !== false,
+                    await connectToNetwork(peerbit, argv, {
+                        publicNetwork: argv.replicate !== false,
                     });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
@@ -1233,8 +1298,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: argv.replicate !== false,
+                    await connectToNetwork(peerbit, argv, {
+                        publicNetwork: argv.replicate !== false,
                     });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
@@ -1425,7 +1490,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
                 try {
-                    await connectMountToNetwork(peerbit, argv.peer);
+                    await connectMountToNetwork(peerbit, argv);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -1555,8 +1620,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: argv.replicate !== false,
+                    await connectToNetwork(peerbit, argv, {
+                        publicNetwork: argv.replicate !== false,
                     });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
@@ -1738,8 +1803,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: argv.replicate !== false,
+                    await connectToNetwork(peerbit, argv, {
+                        publicNetwork: argv.replicate !== false,
                     });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
@@ -1821,8 +1886,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: argv.replicate !== false,
+                    await connectToNetwork(peerbit, argv, {
+                        publicNetwork: argv.replicate !== false,
                     });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
@@ -1923,7 +1988,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer);
+                    await connectToNetwork(peerbit, argv);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -2051,7 +2116,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer);
+                    await connectToNetwork(peerbit, argv);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -2191,8 +2256,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const peerbit = await createPeerbitForCli(directory);
                 try {
                     if (argv.address) {
-                        await connectToNetwork(peerbit, argv.peer, {
-                            bootstrap: argv.replicate !== false,
+                        await connectToNetwork(peerbit, argv, {
+                            publicNetwork: argv.replicate !== false,
                         });
                     }
                     const fsHandle = await openCliFs(peerbit, {
@@ -2258,9 +2323,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         | { ok: true; value: PrepareForDisposalResult }
                         | { ok: false; reason: unknown };
                     try {
-                        await connectToNetwork(peerbit, argv.peer, {
-                            bootstrap: true,
-                        });
+                        await connectToNetwork(peerbit, argv);
                         const fsHandle = await openCliFs(peerbit, {
                             address: argv.address,
                             machineLabel: argv.machine,
@@ -2391,9 +2454,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: true,
-                    });
+                    await connectToNetwork(peerbit, argv);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -2521,9 +2582,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await createPeerbitForCli(directory);
                 try {
-                    await connectToNetwork(peerbit, argv.peer, {
-                        bootstrap: true,
-                    });
+                    await connectToNetwork(peerbit, argv);
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
