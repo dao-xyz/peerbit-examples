@@ -7,14 +7,18 @@ a `--peer` that could not be dialled stopped `mount`, and only a `--peer` that
 answered at mount start was ever dialled again. Now `mount` warns, naming the
 address, and goes on, and every `--peer` is registered for Peerbit's pubsub
 redial whatever its first dial did. Pubsub redials a down address about once a
-second while the mount runs, also while the mount is connected to other
-peers, so a hub restarted at the same address is usually connected again
-within about 2 s. A remount from a writable state directory is writable
-meanwhile; a first mount still needs a peer that holds the filesystem, and
-when none answers its error now names the addresses it could not reach.
-Without `--bootstrap`, a `--peer` mount still never bootstraps, so its pubsub
-topic-root candidates stay automatic, and no `--peer` mount uses Peerbit's
-bootstrap recovery, whose bootstrap would pin them to the nodes it reached.
+second while no other `--peer` or `--bootstrap` address is connected, so a
+single `--peer` hub restarted at the same address is usually connected again
+within about 2 s. While another one is connected, the mount dials the down
+address when it writes and otherwise only about once a minute, so an idle
+mount can take that long to sync with a hub that came back; a faster idle
+redial needs a change in Peerbit. A remount from a writable state directory is
+writable meanwhile; a first mount still needs a peer that holds the
+filesystem, and when none answers its error now names the addresses it could
+not reach. Without `--bootstrap`, a `--peer` mount still never bootstraps, so
+its pubsub topic-root candidates stay automatic, and no `--peer` mount uses
+Peerbit's bootstrap recovery, whose bootstrap would pin them to the nodes it
+reached.
 
 The new repeatable `--bootstrap <multiaddr>` replaces the public bootstrap
 list, which is then not fetched, wherever `--peer` is accepted. A mount

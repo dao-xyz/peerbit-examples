@@ -225,12 +225,16 @@ export const connectMountToNetwork = async (
 ) => {
     // Every address stays registered with Peerbit's pubsub FanoutTree,
     // whatever its first dial did (Peerbit.dial registers only a peer that
-    // answered), and the tree redials it about once a second while it is
-    // down. Recovery re-runs Peerbit.bootstrap(), which resets that list and
-    // pins pubsub's topic-root candidates to the nodes it reached. A mount
-    // that switched so after it was connected stalled other mounts' joins
-    // for a minute, so a --peer mount never recovers: its candidates stay
-    // what its start made them (automatic without --bootstrap, as before).
+    // answered). The tree redials a down one about once a second while no
+    // other registered address is connected. While one is, only the mount's
+    // own traffic (a write's provider announce, a peer lookup) and the
+    // shared logs' 60 s provider announce dial it, so an idle mount can take
+    // a minute. Recovery re-runs Peerbit.bootstrap(), which resets that list
+    // and pins pubsub's topic-root candidates to the nodes it reached. A
+    // mount that switched so after it was connected stalled other mounts'
+    // joins for a minute, so a --peer mount never recovers: its candidates
+    // stay what its start made them (automatic without --bootstrap, as
+    // before).
     const { peers, bootstrap } = networkTargets(network);
     const unreachable: string[] = [];
     const unreached = (target: string, error: unknown) => {

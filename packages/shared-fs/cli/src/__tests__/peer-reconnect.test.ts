@@ -16,8 +16,11 @@ import { connectMountToNetwork } from "../index.js";
  * loopback looks to a hub elsewhere, so every reconnect is the client's own
  * dial. Every wait resolves on an event and only gives up at its deadline.
  *
- * Peerbit's pubsub redials a down --peer about once a second; no test here
- * depends on that rate beyond its bounds. A --peer client never uses
+ * Peerbit's pubsub redials a down --peer about once a second while no other
+ * registered address is connected, as in every test here but the
+ * --bootstrap one. While one is, it is dialled only by the client's own
+ * traffic, such as a write, and about once a minute; that test's client
+ * writes just before its --peer comes up. A --peer client never uses
  * bootstrap recovery, whose Peerbit.bootstrap() would replace the topic-root
  * candidates its start chose.
  */
@@ -416,7 +419,11 @@ describe("mount --peer reconnect over real TCP", () => {
 
     // Peerbit.dial registers a peer for pubsub's redial only when it
     // answers: before, a --peer that was down at mount start was never
-    // dialled again while the mount was connected to anything else.
+    // dialled again while the mount was connected to anything else. With
+    // the relay connected, pubsub still dials the hub only on the client's
+    // own traffic and about once a minute: this client opens and writes just
+    // before the hub starts, and the lookups those start dial it again
+    // within seconds. An idle client took about 60 s to connect.
     it("with --bootstrap, connects a --peer that was down at mount start when it comes up, while the bootstrap node stays connected", async () => {
         const relay = await createNode("relay");
         await relay.start();
@@ -450,6 +457,7 @@ describe("mount --peer reconnect over real TCP", () => {
         expect(connectedTo(client, relay.peerId)).toBe(true);
         clientFs = await open(client, "client", address);
         await clientFs.writeFile("/before-hub.txt", "before");
+        const writtenAt = performance.now();
 
         hubFs = await hub.start(address);
         const hubUpAt = performance.now();
@@ -467,6 +475,7 @@ describe("mount --peer reconnect over real TCP", () => {
             "the client's write reaches the --peer that came up"
         );
         report("a --peer down at mount start, with --bootstrap", {
+            hubUpAfterWriteMs: hubUpAt - writtenAt,
             connectedAfterHubUpMs: connectedAt - hubUpAt,
             writeReachedHubAfterUpMs: performance.now() - hubUpAt,
         });

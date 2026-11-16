@@ -485,17 +485,26 @@ on. A remount from a writable state directory is writable at once (unless
 `--require-fresh`); a first mount still needs a peer that holds the filesystem
 to answer within about 30 s, or fails naming what it could not reach.
 
-Peerbit's pubsub redials a down address about once a second while the mount
-runs, whatever its first dial did and also while other peers are connected, so
-a hub restarted at the same address is usually back within about 2 s. Without
-`--peer`, the mount also enables Peerbit's bootstrap recovery: while it has no
-connections at all, it bootstraps again from `--bootstrap` (else the public
-list), 1 s after a failed attempt, doubling to at most 60 s with 20% jitter.
-That fallback guarantees retries; it is not the dial rate. A `--peer` mount
-skips it: a new bootstrap pins the mount's pubsub topic roots to the nodes it
-reached, and a mount that switched so while connected stalled other machines'
-joins for about a minute. Give every machine of a filesystem the same
-`--bootstrap` list.
+Peerbit's pubsub keeps every `--peer` and `--bootstrap` address while the
+mount runs, whatever its first dial did, and dials a down one again. How soon
+depends on whether another of these addresses is connected:
+
+- None is, as with a single `--peer`: it redials about once a second, so a hub
+  restarted at the same address is usually back within about 2 s.
+- One is, as with `--bootstrap` and `--peer` together, or several of either:
+  the mount dials a down address when it writes, so a write made after the hub
+  is back reaches it within about a second. An idle mount dials it only about
+  once a minute, so it can take that long to sync with that hub again. A
+  faster idle redial needs a change in Peerbit.
+
+Without `--peer`, the mount also enables Peerbit's bootstrap recovery: while
+it has no connections at all, it bootstraps again from `--bootstrap` (else the
+public list), 1 s after a failed attempt, doubling to at most 60 s with 20%
+jitter. That fallback guarantees retries; it is not the dial rate. A `--peer`
+mount skips it: a new bootstrap pins the mount's pubsub topic roots to the
+nodes it reached, and a mount that switched so while connected stalled other
+machines' joins for about a minute. Give every machine of a filesystem the
+same `--bootstrap` list.
 
 A `--peer` with `/p2p/<id>` accepts only that identity, so the hub must keep
 its state directory to be redialled: one that returns with a new identity is
