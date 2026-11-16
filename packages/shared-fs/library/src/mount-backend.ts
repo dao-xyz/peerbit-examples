@@ -35,6 +35,13 @@ import {
 /** Why a mount commit fence ran; reported as `mount.localCommit` trigger. */
 type LocalCommitTrigger = "flush" | "fsync" | "release" | "truncate";
 
+type MountWriteResult = Pick<
+    SharedFsVersionInfo,
+    "id" | "nodeId" | "contentHash" | "mode" | "mtime"
+> & {
+    mountWriteOutcome?: SharedFsMountWriteOutcome;
+};
+
 /**
  * Per-fence counters, allocated only while profiling. `writeFileNs` is the
  * time of the target writes this fence started itself, so a consumer can
@@ -48,14 +55,14 @@ type LocalCommitProfileStats = {
 
 /**
  * The filesystem a native mount runs against. Mounts read file contents only
- * through `readVersionForMount`, commit through `writeFile` and
- * `setMetadata`, remove and rename only through `mutateNamespaceForMount`,
- * and look paths up through `stat`; they never call a target's ordinary
- * `readVersion`, `rm` or `rename`. A
+ * through `readVersionForMount`, commit through `writeFile`,
+ * `writeNodeForMount` and `setMetadata`, remove and rename only through
+ * `mutateNamespaceForMount`, and look paths up through `stat`; they never
+ * call a target's ordinary `readVersion`, `rm` or `rename`. A
  * SharedFsHandle or SharedFileSystem subclass (or any delegating wrapper)
- * that customizes read, remove or rename policy must therefore apply the same
- * policy in these mount-facing methods at the layer it overrides, as
- * IgnoreAwareFs does in `mutateNamespaceForMount`.
+ * that customizes read, write, remove or rename policy must therefore apply
+ * the same policy in these mount-facing methods at the layer it overrides,
+ * as IgnoreAwareFs does in `mutateNamespaceForMount` and `writeNodeForMount`.
  */
 export type SharedFsMountBackendTarget = {
     /**
@@ -95,14 +102,21 @@ export type SharedFsMountBackendTarget = {
         path: string,
         source: Uint8Array | string | AsyncIterable<Uint8Array>,
         options?: WriteFileOptions
-    ): Promise<
-        Pick<
-            SharedFsVersionInfo,
-            "id" | "nodeId" | "contentHash" | "mode" | "mtime"
-        > & {
-            mountWriteOutcome?: SharedFsMountWriteOutcome;
-        }
-    >;
+    ): Promise<MountWriteResult>;
+    /**
+     * writeFile onto the file node `nodeId` wherever it is named now, or
+     * under its delete as a restorable `delete-vs-edit`; `path` is where the
+     * mount last saw it. The mount commits through it the buffer of a
+     * descriptor whose file another peer renamed, replaced or deleted.
+     * Without it, such a flush, fsync or release fails with EIO and keeps
+     * the bytes.
+     */
+    writeNodeForMount?(
+        nodeId: string,
+        path: string,
+        source: Uint8Array,
+        options: WriteFileOptions
+    ): Promise<MountWriteResult>;
     /**
      * chmod/utimens of a regular file: publish one version that keeps the
      * visible bytes (see SharedFileSystem.setMetadata), honoring
@@ -344,8 +358,19 @@ type OpenFileState = {
     createCommitAttempted?: boolean;
     /** Confirmed CAS loss; this state can never publish again. */
     terminal?: SharedFsBackendError;
-    /** Namespace no longer names this node; buffered fd state is local-only. */
+    /**
+     * `path` no longer names this node (another peer renamed, replaced or
+     * deleted it): it leaves path overlays and commits by node id, unless
+     * `unlinked`.
+     */
     namespaceDetached?: boolean;
+    /**
+     * This mount's own unlink, or a rename over the file, removed the node
+     * (or pending create) this state showed at that path. As with an
+     * unlinked POSIX inode, its descriptors keep an anonymous file that
+     * never commits.
+     */
+    unlinked?: boolean;
     /**
      * Node whose exact snapshot seeded this state. `null` means the path was
      * absent. Only read-only conflict-version states leave this undefined.
@@ -1375,6 +1400,24 @@ export const createSharedFsMountBackend = (
         if (listed) bumpOverlayParent(state);
     };
 
+    /**
+     * This mount's own unlink or rename-over removed node `removed` (or a
+     * pending create) at a path where it showed `shown` (see `unlinked`).
+     * Another state of that node, which another peer's move had detached or
+     * left at an older path, showed bytes the remover never saw: it only
+     * detaches, so it still commits by node, as a restorable delete-vs-edit.
+     */
+    const unlinkStates = (shown: OpenFileState[], removed?: string) => {
+        for (const state of shown) {
+            state.unlinked = true;
+            detachNamespaceState(state);
+        }
+        if (removed === undefined) return;
+        for (const state of activeStates) {
+            if (state.nodeId === removed) detachNamespaceState(state);
+        }
+    };
+
     const namespaceStates = (path: string, descendants: boolean) => {
         if (!descendants) {
             const state = statesByPath.get(path);
@@ -1946,19 +1989,49 @@ export const createSharedFsMountBackend = (
         return snapshot.bytes;
     };
 
+    /** An unlinked file: its buffer has no node to publish to (see `unlinked`). */
+    const discards = (state: OpenFileState) =>
+        state.namespaceDetached === true &&
+        (state.unlinked === true || typeof state.nodeId !== "string");
+
+    /**
+     * Commit a detached state by node id: the bytes land wherever another
+     * peer moved its file, or under that peer's delete as a restorable
+     * delete-vs-edit.
+     */
+    const writeNode = (
+        state: OpenFileState,
+        bytes: Uint8Array,
+        { expectedNodeId: _, ...options }: WriteFileOptions
+    ) => {
+        if (!target.writeNodeForMount) {
+            throw new SharedFsBackendError(
+                "EIO",
+                `This mount target cannot save an open file another peer renamed, replaced or deleted: ${state.path}`
+            );
+        }
+        return target.writeNodeForMount(
+            state.nodeId as string,
+            state.path,
+            bytes,
+            options
+        );
+    };
+
     const commitNow = async (
         state: OpenFileState,
         profileStats?: LocalCommitProfileStats
     ) => {
-        if (state.namespaceDetached) {
+        if (discards(state)) {
             // POSIX-style unlinked/replaced descriptors retain their shared
-            // inode buffer, but it no longer has a pathname to publish through.
+            // inode buffer, but it no longer has a node to publish to.
             state.persistedGeneration = state.mutationGeneration;
             state.dirty = false;
             return;
         }
         for (const transitionPaths of namespaceTransitions.values()) {
             if (
+                !state.namespaceDetached &&
                 transitionPaths.some((path) => pathsOverlap(path, state.path))
             ) {
                 throw new SharedFsBackendError(
@@ -2080,11 +2153,13 @@ export const createSharedFsMountBackend = (
             // Once invoked, the target may publish the new node and still
             // reject: the create is no longer only local.
             if (creating) state.createCommitAttempted = true;
-            let result: Awaited<
-                ReturnType<SharedFsMountBackendTarget["writeFile"]>
-            >;
+            // A state can detach while its path write is in flight.
+            const byNode = state.namespaceDetached === true;
+            let result: MountWriteResult;
             try {
-                if (profile) {
+                if (byNode) {
+                    result = await writeNode(state, bytes, writeOptions);
+                } else if (profile) {
                     const writeId = ++profileWriteId;
                     const identity = {
                         source: "node-daemon",
@@ -2140,8 +2215,11 @@ export const createSharedFsMountBackend = (
                     );
                 }
             } catch (error) {
+                // A base-version mismatch is no namespace change (see below).
                 const expectedMismatch =
+                    !byNode &&
                     error instanceof SharedFsExpectedNodeMismatchError &&
+                    error.checkpoint !== "base-version" &&
                     error.path === state.path;
                 const provisionalMismatch =
                     expectedMismatch && error.expectedNodeId === null;
@@ -2174,15 +2252,11 @@ export const createSharedFsMountBackend = (
                     terminalizeStateLoss(state, terminal);
                     throw terminal;
                 }
-                if (existingMismatch) {
-                    const terminal = new SharedFsBackendError(
-                        "EAGAIN",
-                        `Path changed while its buffered state was being committed; descriptors are closed: ${state.path}`
-                    );
-                    terminalizeStateLoss(state, terminal);
-                    throw terminal;
-                }
-                throw error;
+                if (!existingMismatch) throw error;
+                // The path no longer names this node: another peer renamed,
+                // replaced or deleted it. Commit the snapshot by node id.
+                detachNamespaceState(state);
+                result = await writeNode(state, bytes, writeOptions);
             }
             const committed =
                 result &&
@@ -2273,6 +2347,19 @@ export const createSharedFsMountBackend = (
             if (!state.terminal) {
                 state.dirty = true;
             }
+            if (
+                error instanceof SharedFsExpectedNodeMismatchError &&
+                error.checkpoint === "base-version"
+            ) {
+                // The version this buffer builds on is unavailable here (not
+                // replicated, or retired): no save can name its base until it
+                // is back. The state keeps its bytes, and its path if still
+                // attached, for a later fence.
+                throw new SharedFsBackendError(
+                    "EIO",
+                    `${error.message}; the open file keeps its bytes`
+                );
+            }
             throw error;
         } finally {
             if (state.borrowedCommitSnapshot === snapshot && !inputExposed) {
@@ -2293,7 +2380,7 @@ export const createSharedFsMountBackend = (
         // A fence is bounded by the generation captured synchronously by its
         // caller. Sibling writes admitted later remain for the next fence.
         while (state.persistedGeneration < cutoff) {
-            if (state.namespaceDetached) {
+            if (discards(state)) {
                 state.persistedGeneration = state.mutationGeneration;
                 state.dirty = false;
                 return;
@@ -3473,12 +3560,20 @@ export const createSharedFsMountBackend = (
                             }
                             throw error;
                         }
+                        // The replaced file's descriptors, and a replaced
+                        // pending create's, keep an anonymous file that
+                        // never commits (see `unlinked`).
+                        unlinkStates(
+                            provisional
+                                ? [...destinationRootStates, provisional]
+                                : destinationRootStates,
+                            destination?.kind === "file"
+                                ? destination.nodeId
+                                : undefined
+                        );
                         for (const state of destinationStates) {
                             detachNamespaceState(state);
                         }
-                        // Its descriptors keep an anonymous file that never
-                        // commits (see commitNow).
-                        if (provisional) detachNamespaceState(provisional);
                         for (const state of sourceStates) {
                             if (state.namespaceDetached) continue;
                             if (state.path === fromPath) {
@@ -3526,7 +3621,7 @@ export const createSharedFsMountBackend = (
                             // descriptors keep an anonymous file that never
                             // commits. A node another peer created there
                             // meanwhile stays.
-                            detachNamespaceState(provisional);
+                            unlinkStates([provisional]);
                             return;
                         }
                         const affected = namespaceStates(normalized, false);
@@ -3580,9 +3675,8 @@ export const createSharedFsMountBackend = (
                             );
                             throw error;
                         }
-                        for (const state of affected) {
-                            detachNamespaceState(state);
-                        }
+                        // Bound to entry.nodeId (checked above).
+                        unlinkStates(affected, entry.nodeId);
                         await bumpOwnParent(normalized, entry.parentId);
                     },
                     normalized

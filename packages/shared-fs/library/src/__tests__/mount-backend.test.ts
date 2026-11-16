@@ -42,6 +42,20 @@ const chunkIdsOf = async (fs: SharedFsHandle, versionId: string) =>
         })) as unknown as { chunkIds: string[] }
     ).chunkIds;
 
+/**
+ * The bytes of a mount save over another writer's delete of `nodeId`: the
+ * one version its `delete-vs-edit` lists, read back once moved to `to`.
+ */
+const recoveredAt = async (fs: SharedFsHandle, nodeId: string, to: string) => {
+    const conflict = (await fs.namingConflicts()).find(
+        (candidate) =>
+            candidate.type === "delete-vs-edit" && candidate.nodeId === nodeId
+    );
+    expect(conflict?.recoverableVersionIds).toHaveLength(1);
+    await fs.resolveNamingConflict(nodeId, { type: "move", to });
+    return decode(await fs.readFile(to));
+};
+
 const mountTarget = (
     fs: SharedFsHandle,
     overrides: Partial<SharedFsMountBackendTarget> = {}
@@ -49,6 +63,8 @@ const mountTarget = (
     readVersionForMount: (path, versionId) =>
         fs.readVersionForMount(path, versionId),
     writeFile: (path, source, options) => fs.writeFile(path, source, options),
+    writeNodeForMount: (nodeId, path, source, options) =>
+        fs.writeNodeForMount(nodeId, path, source, options),
     setMetadata: (path, patch, options) => fs.setMetadata(path, patch, options),
     mkdir: (path) => fs.mkdir(path),
     mutateNamespaceForMount: (mutation) => fs.mutateNamespaceForMount(mutation),
@@ -1285,9 +1301,10 @@ describe("shared fs mount backend", () => {
         expect(writeFile).not.toHaveBeenCalled();
     });
 
-    it("rejects a commit if an existing path is replaced after writable open", async () => {
+    it("commits by node if an existing path is replaced after writable open", async () => {
         await fs.writeFile("/race.txt", "original");
         await fs.writeFile("/replacement.txt", "replacement");
+        const original = (await fs.stat("/race.txt"))!.nodeId;
         const writeFile = vi.fn(
             async (
                 path: string,
@@ -1310,15 +1327,17 @@ describe("shared fs mount backend", () => {
         });
         await backend.write(handle, encode("edited"), 0);
 
-        await expect(backend.release(handle)).rejects.toMatchObject({
-            code: "EAGAIN",
-        });
+        await backend.release(handle);
         expect(writeFile).toHaveBeenCalledOnce();
         expect(decode(await fs.readFile("/race.txt"))).toBe("replacement");
+        expect(await recoveredAt(fs, original, "/recovered.txt")).toBe(
+            "editedal"
+        );
     });
 
-    it("quarantines an existing-node mismatch across later path repair", async () => {
+    it("keeps an existing-node mismatch off the path across later path repair", async () => {
         await fs.writeFile("/quarantined.txt", "original");
+        const original = (await fs.stat("/quarantined.txt"))!.nodeId;
         const entered = deferred();
         const allowed = deferred();
         let actualNodeId: string | null = null;
@@ -1353,19 +1372,20 @@ describe("shared fs mount backend", () => {
         await fs.writeFile("/quarantined.txt", "replacement");
         actualNodeId = (await fs.stat("/quarantined.txt"))?.nodeId ?? null;
         allowed.resolve();
-        await expect(flushing).rejects.toMatchObject({ code: "EAGAIN" });
+        // The flush saves to the original node instead.
+        await flushing;
 
         await fs.rm("/quarantined.txt");
         await fs.writeFile("/quarantined.txt", "repaired");
-        await expect(backend.flush(handle)).rejects.toMatchObject({
-            code: "EBADF",
-        });
-        await expect(
-            backend.write(handle, encode("still stale"), 0)
-        ).rejects.toMatchObject({ code: "EBADF" });
+        await backend.flush(handle);
+        // Later saves of the descriptor stay on its node, off the path.
+        await backend.write(handle, encode("still stale"), 0);
         await backend.release(handle);
         expect(writeFile).toHaveBeenCalledOnce();
         expect(decode(await fs.readFile("/quarantined.txt"))).toBe("repaired");
+        expect(await recoveredAt(fs, original, "/recovered.txt")).toBe(
+            "still stale"
+        );
     });
 
     it("terminalizes an ordinary create that loses its absent-path race", async () => {
@@ -4432,8 +4452,9 @@ describe("shared fs mount backend", () => {
         ).toBe("original");
     });
 
-    it("rejects a capable commit after the opened path is replaced", async () => {
+    it("commits a capable save by node after the opened path is replaced", async () => {
         await fs.writeFile("/capable-replaced.txt", "original");
+        const original = (await fs.stat("/capable-replaced.txt"))!.nodeId;
         const backend = createSharedFsMountBackend(fs);
         const handle = await backend.open("/capable-replaced.txt", {
             read: true,
@@ -4443,11 +4464,12 @@ describe("shared fs mount backend", () => {
         await fs.rm("/capable-replaced.txt");
         await fs.writeFile("/capable-replaced.txt", "replacement");
 
-        await expect(backend.release(handle)).rejects.toMatchObject({
-            code: "EAGAIN",
-        });
+        await backend.release(handle);
         expect(decode(await fs.readFile("/capable-replaced.txt"))).toBe(
             "replacement"
+        );
+        expect(await recoveredAt(fs, original, "/recovered.txt")).toBe(
+            "edited!!"
         );
     });
 

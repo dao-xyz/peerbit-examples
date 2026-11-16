@@ -577,10 +577,12 @@ describe("mount directory change times", () => {
         const resurrected = await timeOf(backend, "/d");
         expect(resurrected).toBeGreaterThan(removed);
 
-        // The commit loses its node binding; the overlay leaves again.
-        await expect(backend.release(handle)).rejects.toMatchObject({
-            code: "EAGAIN",
-        });
+        // The commit finds the name gone and saves under the delete, as a
+        // delete-vs-edit; the overlay leaves again.
+        await backend.release(handle);
+        expect((await fs.namingConflicts()).map((c) => c.type)).toEqual([
+            "delete-vs-edit",
+        ]);
         expect(await backend.readdir("/d")).toEqual([]);
         expect(await timeOf(backend, "/d")).toBeGreaterThan(resurrected);
     });
@@ -1143,9 +1145,8 @@ describe("mount directory change times", () => {
         expect(await namesOf(backend, "/d")).toEqual(["x"]);
         const shown = await timeOf(backend, "/d");
         expect(shown).toBeGreaterThan(hidden);
-        await expect(backend.release(handle)).rejects.toMatchObject({
-            code: "EAGAIN",
-        });
+        // The save goes to x, which stays shadowed.
+        await backend.release(handle);
         expect(await backend.readdir("/d")).toEqual([]);
         expect(await timeOf(backend, "/d")).toBeGreaterThan(shown);
     });
@@ -1167,9 +1168,11 @@ describe("mount directory change times", () => {
         expect(await namesOf(backend, "/d")).toEqual(["x"]);
         const shown = await timeOf(backend, "/d");
         expect(shown).toBeGreaterThan(replaced);
-        await expect(backend.release(handle)).rejects.toMatchObject({
-            code: "EAGAIN",
-        });
+        // The save follows x to /e.
+        await backend.release(handle);
+        expect(new TextDecoder().decode(await fs.readFile("/e/x"))).toBe(
+            "local"
+        );
         expect(await backend.readdir("/d")).toEqual([]);
         expect(await timeOf(backend, "/d")).toBeGreaterThan(shown);
     });

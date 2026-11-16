@@ -7555,6 +7555,36 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
+     * A mount's save of an open file whose path another peer renamed,
+     * replaced or deleted: writeFile onto the file node `nodeId` wherever it
+     * is named now. Under a delete the delete stays visible and the save is a
+     * recoverable `delete-vs-edit`. `path` is where the mount last saw the
+     * node. `guard` vets the node's current path before anything is written
+     * (IgnoreAwareFs applies its write policy there); the result names it.
+     */
+    async writeNodeForMount(
+        nodeId: string,
+        path: string,
+        source: Uint8Array,
+        options: WriteFileOptions = {},
+        guard?: (path: string) => void
+    ): Promise<SharedFsWriteFileResult> {
+        this.assertWriteReady("writeFile");
+        const namespaceEpoch = this.captureOrdinaryNamespaceEpoch("writeFile");
+        return this.runForegroundMutation("writeFile", (context) =>
+            this.writeFileInner(
+                path,
+                source,
+                { ...options, expectedNodeId: nodeId },
+                namespaceEpoch,
+                context,
+                undefined,
+                { guard }
+            )
+        );
+    }
+
+    /**
      * The same write as {@link writeFile}, with its sequential sub-phases
      * reported to a mount profile (see SharedFsWriteFileProfilePhase). The
      * failing sub-phase is closed with the error's code.
@@ -7595,13 +7625,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         options: WriteFileOptions,
         namespaceEpoch: number,
         context: ForegroundMutationContext,
-        profiler?: SharedFsWriteFileProfiler
+        profiler?: SharedFsWriteFileProfiler,
+        /** writeNodeForMount: `expectedNodeId` names the node, not a path guard. */
+        byNode?: { guard?: (path: string) => void }
     ): Promise<SharedFsWriteFileResult> {
-        const normalized = normalizeFsPath(path);
+        let normalized = normalizeFsPath(path);
         if (normalized === "/") {
             throw new SharedFsError("EISDIR", "Cannot write to root");
         }
-        this.assertWritableName(basename(normalized), "file");
+        if (!byNode) this.assertWritableName(basename(normalized), "file");
         const expectedParentNodeId = options.expectedParentNodeId;
         if (
             expectedParentNodeId !== undefined &&
@@ -7662,13 +7694,40 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
         profiler?.set("bytes", bytes.byteLength);
         profiler?.enter("writeFile.resolvePath");
-        const resolved = await this.resolvePath(normalized);
         const expectedNodeId = options.expectedNodeId;
+        let resolved: ResolvedPath | undefined;
+        if (byNode) {
+            // Wherever the node is named now, or where its delete left it.
+            const state =
+                typeof expectedNodeId === "string" &&
+                nodeKindOf(expectedNodeId) === "file"
+                    ? await this.namingStateForNode(expectedNodeId)
+                    : undefined;
+            if (!state) {
+                throw new SharedFsError(
+                    "ENOENT",
+                    `File node no longer exists: ${expectedNodeId}`
+                );
+            }
+            normalized = await this.pathForNode(state.nodeId, new Map());
+            byNode.guard?.(normalized);
+            resolved = {
+                kind: "file",
+                nodeId: state.nodeId,
+                winner: state.winner,
+                state,
+                contested: false,
+                path: normalized,
+            };
+        } else {
+            resolved = await this.resolvePath(normalized);
+        }
         const resolvedNodeId = resolved?.nodeId ?? null;
         const assertExpectedNode = async (
             checkpoint: SharedFsExpectedNodeMismatchCheckpoint
         ) => {
-            if (expectedNodeId === undefined) {
+            // A version is bound to its node: only a path write is guarded.
+            if (expectedNodeId === undefined || byNode) {
                 return;
             }
             profiler?.enter("writeFile.guard", { checkpoint });
@@ -19027,6 +19086,23 @@ export class SharedFsHandle {
         options?: WriteFileOptions
     ) {
         return this.program.writeFile(path, source, options);
+    }
+
+    /** See SharedFileSystem.writeNodeForMount. */
+    writeNodeForMount(
+        nodeId: string,
+        path: string,
+        source: Uint8Array,
+        options?: WriteFileOptions,
+        guard?: (path: string) => void
+    ) {
+        return this.program.writeNodeForMount(
+            nodeId,
+            path,
+            source,
+            options,
+            guard
+        );
     }
 
     readVersion(path: string, versionId: string) {

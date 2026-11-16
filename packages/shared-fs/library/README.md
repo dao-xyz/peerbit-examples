@@ -1129,8 +1129,9 @@ starts, except a `flush` of a truncate-only change (see
 current file-node/path binding share one buffer, logical length, mutation
 generation, and commit ancestry; access mode, `O_APPEND`, and closing remain
 descriptor-local. A remote removal, replacement, or move detaches the old
-binding: its existing descriptors retain local-only bytes until close while a
-later open receives a fresh attached state. `release` closes writes through
+binding and a later open receives a fresh attached state, while the old
+descriptors' fences still persist their bytes by file node (see
+[Native Mounts](#native-mounts)). `release` closes writes through
 that descriptor before persisting its cutoff; while a truncate to empty is the
 only change, only the release of the descriptor that emptied the file
 persists. Later writes through sibling descriptors stay dirty for the next fence
@@ -1247,9 +1248,10 @@ than a temporarily available ancestor, retain
 that version as their sole causal base, and compare-and-set the path's node id
 at commit. A read-only first opener also loads that exact verified snapshot,
 which later writable siblings share without another load or hash. A typed
-remove/recreate mismatch quarantines every descriptor for the
-old local state, so repairing the path cannot make a retry publish stale bytes;
-other conflict heads remain preserved.
+remove/recreate mismatch detaches the old local state from its path: its
+descriptors keep working and save to their file node, so repairing the path
+cannot make a retry publish stale bytes there; other conflict heads remain
+preserved.
 Run `peerbit-fs status` to report the current host platform, selected adapter,
 and any missing native mount prerequisites.
 
@@ -1289,12 +1291,29 @@ creates a commit generation.
 
 One backend process keeps one attached, shareable state for each current
 file-node/path binding, even when several descriptors are open. A remote
-replacement or move can detach an older state: its still-open descriptors keep
-their local-only bytes until their last close, but the detached state is
-excluded from path overlays and commits while a fresh attached state loads for
-the observed binding. Attached state is removed after its last descriptor
-releases (or a typed node mismatch quarantines it), so a later open loads and
-verifies a fresh snapshot rather than retaining an unbounded inode cache.
+removal, replacement or move detaches an older state: it leaves path overlays
+while a fresh attached state loads for the observed binding, but its
+descriptors' fences still commit, to its file node instead of its old path.
+After a move the bytes land at the file's new path; after a removal or
+replacement the delete stays visible and the save is a recoverable
+`delete-vs-edit`, as for `writeFile`. A naming-conflict `move` to a path
+brings it back, and if the other side had also changed the file before
+deleting it, both versions are then listed in `conflicts()`. `restore` brings
+it back only at its old path: if the directory was removed too, the file is
+`unreachable` there and still needs a `move`, and of two such concurrent
+versions it shows the best-ranked one and keeps the other only in history. A
+fence succeeds only once that commit has, and otherwise fails with its error
+and keeps the bytes. This mount's own `unlink` or rename over the file is
+different: as in POSIX, the descriptors whose writes that path showed keep an
+anonymous file that never commits. Those of an older state of the same node,
+which another peer's move had detached, wrote bytes the remover never saw:
+they still commit by node, under the removal. Not covered yet: a file this
+backend is still creating. If another peer renames, removes or replaces a
+directory on its path before its first commit, that commit fails and its
+descriptors close (see the parent rule below), losing what was written.
+Attached state is removed after its last descriptor releases or when it
+detaches, so a later open loads and verifies a fresh snapshot rather than
+retaining an unbounded inode cache.
 
 `O_CREAT|O_EXCL` excludes settled paths and backend-local pending creators with
 `EEXIST`. Ordinary sibling opens attach to the same provisional file state,
@@ -1311,13 +1330,19 @@ the path after the winner is removed; unrelated `EIO` and readiness failures
 remain retryable. An exclusive commit-time loss is reported as `EEXIST`.
 
 Custom mount targets implement `SharedFsMountBackendTarget`. Mounts read file
-contents only through `readVersionForMount()`, commit through `writeFile()` and
-`setMetadata()`, remove and rename only through `mutateNamespaceForMount()`,
-and look paths up through `stat()`; they never call `readVersion()`, `rm()`,
-or `rename()`. A
+contents only through `readVersionForMount()`, commit through `writeFile()`,
+`writeNodeForMount()` and `setMetadata()`, remove and rename only through
+`mutateNamespaceForMount()`, and look paths up through `stat()`; they never
+call `readVersion()`, `rm()`, or `rename()`. A
 `SharedFsHandle` or `SharedFileSystem` subclass (or any delegating wrapper)
-that customizes read, remove, or rename policy must therefore apply it in those
-mount-facing methods at the layer it overrides, as `IgnoreAwareFs` does. For
+that customizes read, write, remove, or rename policy must therefore apply it
+in those mount-facing methods at the layer it overrides, as `IgnoreAwareFs`
+does. `writeNodeForMount()` lands at the file's current path, which its
+optional `guard` argument vets before anything is written: `IgnoreAwareFs`
+checks both that path and the one the mount last saw, so a save that would
+land at an ignored path is refused as a `writeFile()` there is. Without the
+optional `writeNodeForMount()`, the fence of a detached descriptor fails with
+`EIO` and keeps its bytes. For
 files, `stat()` must include `versionId`, `contentHash`, `size`, and
 `headVersionIds`, matching what `readVersionForMount()` returns.
 `writeFile()` must hash its input itself, honor `noOpIfHeadVersionIds`, and
@@ -1339,9 +1364,13 @@ its directory's time instead.
 
 Custom targets that implement `expectedNodeId` compare-and-set should
 throw the exported `SharedFsExpectedNodeMismatchError` for an atomic mismatch.
-The mount uses that discriminator to terminalize both an absent-path loser and
-an existing file state whose node was replaced, without a racy follow-up
-lookup; unrelated or untyped `EAGAIN` failures remain retryable.
+The mount uses that discriminator to terminalize an absent-path loser and to
+detach an existing file state whose path no longer names its node, which then
+commits by node, without a racy follow-up lookup; unrelated or untyped
+`EAGAIN` failures remain retryable. A `base-version` mismatch (the version an
+open file builds on is unavailable here, not yet replicated or retired) is no
+path change: the state stays attached and dirty, and the fence fails with
+`EIO` until that version is back.
 An initially absent nested create also captures the exact parent directory node
 while holding its reservation. If that built-in parent disappears, becomes a
 file, or is replaced by another directory node before the naming fence, the
@@ -1569,7 +1598,9 @@ the other side changed the file meanwhile and this replica had not received
 it, both versions are listed in `conflicts()`, and the other side's change
 stays visible when it was made on top of the version this replica saw.
 If the other side deleted the file, the delete stays visible and the save is a
-`delete-vs-edit` naming conflict that `restore` brings back. `writeFile` and
+`delete-vs-edit` naming conflict that `restore` brings back, or `move` when its
+directory is gone too or the other side had also changed it (see
+[Native Mounts](#native-mounts)). `writeFile` and
 `writeBatch` follow this rule, and so does a native-mount commit that keeps the
 mtime the file shows (a `utimens` before close set it back); a mount commit
 over heads that changed since the file was opened records the copy rather than
