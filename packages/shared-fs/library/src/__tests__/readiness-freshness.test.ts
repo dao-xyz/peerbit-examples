@@ -36,14 +36,16 @@ import { stopTestPeers } from "./stop-test-peers.js";
 
 /**
  * Warm freshness, host wiring (M2 PR-4 commits 3 and 4; M2 plan 4.1, 7.4,
- * design tests 73-79, 92 and 93), on in-process Peerbit peers and real
- * filesystems. A warm full-replica open runs the join's coordinator in its
- * freshness purpose at the end of the open: it contains every peer it sees
- * (no donor clause, no phase clause, at least one contained), then reports
- * `warm-fresh` to askers that set `CAP_FRESHNESS` and sends WARM_FRESH
- * notices. W stays writable throughout unless
- * `writeReadiness.requireFreshOnReopen`, which gates it until the check
- * holds and flips it with the source and proof it persisted.
+ * design tests 73-79, 92 and 93; 83b for PR-5a, plan 15.1), on in-process
+ * Peerbit peers and real filesystems. A warm full-replica open runs the
+ * join's coordinator in its freshness purpose at the end of the open: it
+ * contains every peer it sees (no donor clause, no phase clause, at least
+ * one contained), then reports `warm-fresh` to askers that set
+ * `CAP_FRESHNESS` and sends WARM_FRESH notices. W stays writable throughout
+ * unless `writeReadiness.requireFreshOnReopen`, which gates it until the
+ * check holds and flips it with the source and proof it persisted. Once it
+ * held, the check rests; a peer that never answered it wakes it with a
+ * sign of life, and only the label moves (PR-5a).
  *
  * Fault injection is patched by name and undone after each test: a
  * responder's OPENs held or dropped (`holdOpens`, `dropOpens`), and W's
@@ -442,11 +444,12 @@ describe("readiness freshness (M2 PR-4, in-process)", () => {
         expect(decode(await joiner.readFile("/creator.txt"))).toBe(
             "from the creator"
         );
-        // At rest: the check finished and arms nothing.
+        // At rest: the check rests (listening for a late peer, M2 PR-5a)
+        // and arms nothing.
         expect(runtimeOf(warm.fs).debug().coordinator?.purpose).toBe(
             "freshness"
         );
-        expect(checkOf(warm.fs).phase).toBe("finished");
+        expect(checkOf(warm.fs).phase).toBe("resting");
     }, 180_000);
 
     it("74: two warm peers reopened together both turn fresh (no donor clause, no deadlock), writable throughout", async () => {
@@ -884,6 +887,7 @@ describe("readiness freshness (M2 PR-4, in-process)", () => {
                 contained: 0,
                 excluded: 0,
                 gaps: 0,
+                unconfirmed: 0,
                 requests: expect.any(Number),
             },
             {
@@ -893,6 +897,7 @@ describe("readiness freshness (M2 PR-4, in-process)", () => {
                 contained: 1,
                 excluded: 0,
                 gaps: 0,
+                unconfirmed: 0,
                 ms: expect.any(Number),
                 requests: expect.any(Number),
             },
@@ -911,6 +916,254 @@ describe("readiness freshness (M2 PR-4, in-process)", () => {
             telemetry.filter((event) => event.type === "write-ready")
         ).toEqual([expect.objectContaining({ source: "creator", warm: true })]);
     }, 180_000);
+
+    it("83b: C reopened with W, its readiness opening late: W turns fresh with C unconfirmed, C's sign of life makes W checking (label `warm`, writes untouched), and W is fresh again once it contained C and pulled its row, with WARM_FRESH again", async () => {
+        const warmDirectory = await newDirectory();
+        const lateDirectory = await newDirectory();
+        const creator = await createCreator(warmDirectory);
+        const address = creator.fs.address;
+        const namespaceLog = logIdOf(programOf(creator.fs).entries);
+        const late = await readyJoiner(
+            creator.peer,
+            address,
+            lateDirectory,
+            "late"
+        );
+        const lateHash = hashOf(late.peer);
+        // W stops first, so its state keeps C's replicator row; C, alone
+        // then, writes a row W lacks.
+        await stopPeer(creator.peer);
+        await late.fs.writeFile("/late.txt", "from the late replica");
+        await stopPeer(late.peer);
+
+        // W reopens gated by requireFreshOnReopen, with sync withheld, so
+        // its check's pull is the only way C's row reaches it. No peer
+        // running now saw C's old session, so none relays a stale
+        // subscription of C.
+        const warmPeer = await createPeer(warmDirectory);
+        withholdSync(hashOf(warmPeer), namespaceLog);
+        const fs = await openSharedFs({
+            peerbit: warmPeer,
+            address,
+            machineLabel: "fresh-w",
+            bootstrap: false,
+            gc: false,
+            writeReadiness: {
+                requireFreshOnReopen: true,
+                requestTimeoutMs: 500,
+            },
+        });
+        const sends = recordSends(fs);
+        const events: Array<{
+            event: string;
+            source: string;
+            writeReady: boolean | undefined;
+        }> = [];
+        const target = programOf(fs).events as EventTarget;
+        const note = (event: string) =>
+            events.push({
+                event,
+                source: programOf(fs).readinessProvenance().source,
+                writeReady: fs.bootstrapStatus().writeReady,
+            });
+        target.addEventListener("write:ready", () => note("write:ready"));
+        target.addEventListener("freshness:change", (event) =>
+            note((event as CustomEvent).detail.state)
+        );
+        // B, a new joiner, comes while W checks: W contains it, and C's
+        // row, asked once with nobody answering, stops counting. W turns
+        // fresh and flips; B's join then qualifies W.
+        const bPeer = await createPeer();
+        await bPeer.dial(warmPeer);
+        const b = await openSharedFs({
+            peerbit: bPeer,
+            address,
+            machineLabel: "b",
+            bootstrap: false,
+            gc: false,
+        });
+        const bHash = hashOf(bPeer);
+        await fs.awaitWriteReady({ timeout: 60_000 });
+        await waitUntil(() =>
+            expect(freshnessOf(fs)).toMatchObject({
+                state: "fresh",
+                required: 0,
+                contained: [bHash],
+                unconfirmed: [lateHash],
+            })
+        );
+        await b.awaitWriteReady({ timeout: 60_000 });
+        expect(await fs.readFile("/late.txt").catch(() => undefined)).toBe(
+            undefined
+        );
+
+        // C's peer comes back, connected to W; its shared-fs (and so its
+        // readiness RPC) opens later. Reachable is no sign of life (K11):
+        // W still rests, asking nothing.
+        const latePeer = await createPeer(lateDirectory);
+        await latePeer.dial(warmPeer);
+        const transport = checkOf(fs).ports.transport;
+        await waitUntil(() =>
+            expect(transport.isReachable(lateHash)).toBe(true)
+        );
+        const requestsAtRest = freshnessOf(fs)!.requests;
+        expect(checkOf(fs).phase).toBe("resting");
+        expect(freshnessOf(fs)!.state).toBe("fresh");
+
+        // C's shared-fs opens: its sign of life wakes W's check.
+        const lateFs = await openSharedFs({
+            peerbit: latePeer,
+            address,
+            machineLabel: "late",
+            bootstrap: false,
+            gc: false,
+        });
+        await waitUntil(() => {
+            const status = freshnessOf(fs)!;
+            expect(status).toMatchObject({
+                state: "fresh",
+                required: 0,
+                unconfirmed: [],
+            });
+            expect([...status.contained].sort()).toEqual(
+                [bHash, lateHash].sort()
+            );
+        });
+        const record = checkOf(fs).record(lateHash)!;
+        expect(record.answered).toBe(true);
+        expect(
+            record.results.get(SCOPE_NAMESPACE_V1)!.pulled
+        ).toBeGreaterThanOrEqual(1);
+        expect(decode(await fs.readFile("/late.txt"))).toBe(
+            "from the late replica"
+        );
+        expect(checkOf(fs).debug()).toMatchObject({
+            phase: "resting",
+            wakes: 1,
+        });
+        expect(freshnessOf(fs)!.requests).toBeGreaterThan(requestsAtRest);
+        // From the flip on: the label went while C was asked (`warm`), W
+        // stayed writable, and the label came back; one write:ready.
+        const fromFlip = events.slice(
+            events.findIndex(({ event }) => event === "write:ready")
+        );
+        expect(fromFlip).toEqual([
+            { event: "write:ready", source: "warm-fresh", writeReady: true },
+            { event: "fresh", source: "warm-fresh", writeReady: true },
+            { event: "checking", source: "warm", writeReady: true },
+            { event: "fresh", source: "warm-fresh", writeReady: true },
+        ]);
+        // The flip's READY notices said warm-fresh (no WARM_FRESH then);
+        // the label's return sends WARM_FRESH to B and C.
+        const notices = sends.notices();
+        expect(notices.every(({ source }) => source === "warm-fresh")).toBe(
+            true
+        );
+        const ready = notices.filter(
+            ({ reason }) => reason === NOTICE_REASON.READY
+        );
+        const warmFresh = notices.filter(
+            ({ reason }) => reason === NOTICE_REASON.WARM_FRESH
+        );
+        expect(ready.map(({ to }) => to)).toContain(bHash);
+        expect(new Set(warmFresh.map(({ to }) => to))).toEqual(
+            new Set([bHash, lateHash])
+        );
+        expect(notices.indexOf(warmFresh[0])).toBeGreaterThan(
+            notices.indexOf(ready.at(-1)!)
+        );
+        await fs.writeFile("/after.txt", "written");
+        expect(lateFs.bootstrapStatus().writeReady).toBe(true);
+    }, 240_000);
+
+    it("83c: C stopped before W, so W dropped its row, and reopens after W's label: C's first readiness message wakes W, which asks it once, pulls its row and is fresh again", async () => {
+        const warmDirectory = await newDirectory();
+        const lateDirectory = await newDirectory();
+        const creator = await createCreator(warmDirectory);
+        const address = creator.fs.address;
+        const namespaceLog = logIdOf(programOf(creator.fs).entries);
+        const late = await readyJoiner(
+            creator.peer,
+            address,
+            lateDirectory,
+            "late"
+        );
+        const lateHash = hashOf(late.peer);
+        const replicatorsOf = async (fs: SharedFsHandle) =>
+            [...(await programOf(fs).entries.log.getReplicators())] as string[];
+        await waitUntil(async () =>
+            expect(await replicatorsOf(creator.fs)).toContain(lateHash)
+        );
+        // W's sync is withheld from here on: C's row reaches W only
+        // through a readiness pull. C stops first, so W drops its row.
+        withholdSync(hashOf(creator.peer), namespaceLog);
+        await late.fs.writeFile("/late.txt", "from the late replica");
+        await stopPeer(late.peer);
+        await waitUntil(async () =>
+            expect(await replicatorsOf(creator.fs)).not.toContain(lateHash)
+        );
+        await stopPeer(creator.peer);
+
+        // W reopens and turns fresh with B; it has no record of C.
+        const warmPeer = await createPeer(warmDirectory);
+        const fs = await openSharedFs({
+            peerbit: warmPeer,
+            address,
+            machineLabel: "fresh-w",
+            bootstrap: false,
+            gc: false,
+            writeReadiness: { requestTimeoutMs: 500 },
+        });
+        const bPeer = await createPeer();
+        await bPeer.dial(warmPeer);
+        const b = await openSharedFs({
+            peerbit: bPeer,
+            address,
+            machineLabel: "b",
+            bootstrap: false,
+            gc: false,
+        });
+        const bHash = hashOf(bPeer);
+        await waitUntil(() =>
+            expect(freshnessOf(fs)).toMatchObject({
+                state: "fresh",
+                required: 0,
+                contained: [bHash],
+                unconfirmed: [],
+            })
+        );
+        await b.awaitWriteReady({ timeout: 60_000 });
+        expect(checkOf(fs).phase).toBe("resting");
+        expect(checkOf(fs).record(lateHash)).toBeUndefined();
+        const requestsAtRest = freshnessOf(fs)!.requests;
+
+        // C comes back after the label; its own check asks W.
+        const latePeer = await createPeer(lateDirectory);
+        await latePeer.dial(warmPeer);
+        await openSharedFs({
+            peerbit: latePeer,
+            address,
+            machineLabel: "late",
+            bootstrap: false,
+            gc: false,
+        });
+        await waitUntil(() => {
+            const status = freshnessOf(fs)!;
+            expect(status).toMatchObject({ state: "fresh", required: 0 });
+            expect([...status.contained].sort()).toEqual(
+                [bHash, lateHash].sort()
+            );
+        });
+        expect(checkOf(fs).record(lateHash)!.answered).toBe(true);
+        expect(decode(await fs.readFile("/late.txt"))).toBe(
+            "from the late replica"
+        );
+        expect(checkOf(fs).debug()).toMatchObject({
+            phase: "resting",
+            wakes: 1,
+        });
+        expect(freshnessOf(fs)!.requests).toBeGreaterThan(requestsAtRest);
+    }, 240_000);
 
     it("92: requireFreshOnReopen starts no join; the flip keeps the persisted proof byte for byte, with writeReady and the source unchanged", async () => {
         const creator = await createCreator();

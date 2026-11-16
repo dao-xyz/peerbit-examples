@@ -220,12 +220,11 @@ type CoordinatorOptions = Pick<
  */
 export interface FreshnessOptions extends CoordinatorOptions {
     /**
-     * The host's decision after a satisfied evaluation: record `fresh`
-     * first (the provenance then says `warm-fresh`, and `noteFresh()` the
-     * status), flip under
+     * The host's decision after a satisfied evaluation: the label first
+     * (`noteFresh()`; the provenance then says `warm-fresh`), flip under
      * `requireFreshOnReopen`, then `markFresh()`. A rejection (only that
-     * flip can reject) leaves the check running and the next trigger
-     * retries.
+     * flip can reject; `withdrawFresh()` first) leaves the check running
+     * and the next trigger retries.
      */
     onFresh(): Promise<void>;
     /**
@@ -342,8 +341,8 @@ export class ReadinessRuntime {
     /**
      * The freshness check of a warm full-replica open (`startFreshness`):
      * its options, its start (`begun`: the coordinator ran or faulted),
-     * once the host recorded it, `fresh` and the time it took, and
-     * `noticed` once `markFresh` finished it.
+     * `fresh` while the label holds (a wake withdraws it, PR-5a) and the
+     * time to it, and `noticed` once `markFresh` sent its notices.
      */
     private freshnessRun?: {
         readonly options: FreshnessOptions;
@@ -373,8 +372,8 @@ export class ReadinessRuntime {
     /**
      * Those READY notices carried `warm-fresh` (a requireFreshOnReopen
      * flip, after the host recorded the label), so `markFresh` sends no
-     * WARM_FRESH ones; an operator release before the check held sent
-     * `warm`, and the WARM_FRESH notices still go out.
+     * WARM_FRESH ones for that label; an operator release before the check
+     * held sent `warm`, and the WARM_FRESH notices still go out.
      */
     private readyNoticedFresh = false;
     /** A failed decision was logged (`decideFor`); once per generation. */
@@ -980,6 +979,12 @@ export class ReadinessRuntime {
                     () => run.options.onFresh(),
                     "shared-fs: the freshness check could not record its result; the next readiness event retries:"
                 ),
+            // A late peer woke the check (PR-5a): the label goes at once.
+            onWake: () => {
+                run.fresh = false;
+                run.noticed = false;
+                this.readyNoticedFresh = false;
+            },
         });
         if (fault !== undefined) run.fault = fault;
     }
@@ -996,6 +1001,7 @@ export class ReadinessRuntime {
             phaseSettled?: () => boolean;
             onComplete?: () => void;
             decide: () => Promise<void>;
+            onWake?: () => void;
         }
     ): string | undefined {
         const namespace = this.scopes.get(SCOPE_NAMESPACE_V1);
@@ -1061,6 +1067,7 @@ export class ReadinessRuntime {
                 ? { phaseSettled: decision.phaseSettled }
                 : {}),
             ...(decision.onComplete ? { onComplete: decision.onComplete } : {}),
+            ...(decision.onWake ? { onWake: decision.onWake } : {}),
             decide: decision.decide,
             onContained: (_peer, results) => {
                 if (registry) this.checkContained(results);
@@ -1232,45 +1239,71 @@ export class ReadinessRuntime {
             // evidence).
         }
         // A freshness check goes on (a gated warm open the operator
-        // released): only its own result (`markFresh`) finishes it.
+        // released): only its own label rests it.
         this.notify(NOTICE_REASON.READY, this.freshnessRun === undefined);
     }
 
     /**
-     * W's freshness check held (`onFresh`, M2 PR-4, as the host records
-     * its label and before a `requireFreshOnReopen` flip):
-     * `freshnessStatus()` says `fresh`, with the time it took, from here
-     * on, so a `write:ready` listener reads the state the provenance
-     * already says. Monotone; `markFresh` sends the notices.
+     * The label of W's freshness check (`onFresh`, before a
+     * `requireFreshOnReopen` flip): the predicate read again now (a late
+     * peer may block since the evaluation), and when it holds the check
+     * rests (`Coordinator.rest`) and `freshnessStatus()` says `fresh`, so
+     * a `write:ready` listener reads what the provenance says. Returns
+     * whether the label holds; a wake withdraws it (PR-5a).
      */
-    noteFresh(): void {
+    noteFresh(): boolean {
         const run = this.freshnessRun;
-        if (!run || run.fresh || this.disposedValue) return;
+        if (!run || this.disposedValue) return false;
+        if (run.fresh) return true;
+        const coordinator = this.coordinatorValue;
+        if (!run.begun || run.fault !== undefined || !coordinator) {
+            return false;
+        }
+        try {
+            if (!coordinator.rest()) return false;
+        } catch {
+            return false;
+        }
         run.fresh = true;
         run.ms = Math.max(0, run.now() - run.startedAt);
+        return true;
     }
 
     /**
-     * W's freshness check held and the host recorded it (`onFresh`, M2
-     * PR-4), so the provenance its notices carry says `warm-fresh` (`warm`
-     * to a caps-0 target, `Responder.sendNotice`): the state is `fresh`
-     * (`noteFresh`, if the host did not call it), the
-     * coordinator finishes (sessions closed, records kept for
-     * `freshnessStatus`; nothing is asked again in this open), and every
-     * peer that had a session or a `BUSY` with W gets a WARM_FRESH notice,
-     * unless READY notices with that label went out in this generation
-     * (the `requireFreshOnReopen` flip's). Once per generation.
+     * After the label (`noteFresh`, called if the host did not) and its
+     * flip if any: every peer that had a session or a `BUSY` with W gets a
+     * WARM_FRESH notice (`warm` to a caps-0 target), unless the flip's
+     * READY notices carried `warm-fresh`. Once per label (PR-5a).
      */
     markFresh(): void {
         const run = this.freshnessRun;
-        if (!run || run.noticed || this.disposedValue) return;
-        this.noteFresh();
+        if (!run || this.disposedValue || !this.noteFresh()) return;
+        if (run.noticed) return;
         run.noticed = true;
-        if (this.readyNoticedFresh) {
-            this.finishCoordinator();
-            return;
+        if (!this.readyNoticedFresh) {
+            this.notify(NOTICE_REASON.WARM_FRESH, false);
         }
-        this.notify(NOTICE_REASON.WARM_FRESH, true);
+    }
+
+    /**
+     * The `requireFreshOnReopen` flip failed after the label: the label
+     * goes and the check runs again; the next event retries (M9).
+     */
+    withdrawFresh(): void {
+        const run = this.freshnessRun;
+        if (!run?.fresh || this.disposedValue) return;
+        run.fresh = false;
+        run.noticed = false;
+        try {
+            this.coordinatorValue?.resume();
+        } catch {
+            // Never throws.
+        }
+    }
+
+    /** The freshness label holds: the provenance says `warm-fresh`. */
+    freshnessHeld(): boolean {
+        return this.freshnessRun?.fresh === true && !this.disposedValue;
     }
 
     /**
@@ -1292,6 +1325,7 @@ export class ReadinessRuntime {
                 excluded: [],
                 silent: [],
                 gaps: [],
+                unconfirmed: [],
                 fault: run.fault,
                 requests,
             };
@@ -1305,6 +1339,7 @@ export class ReadinessRuntime {
             excluded: [],
             silent: [],
             gaps: [],
+            unconfirmed: [],
             requests,
         };
         return {

@@ -758,6 +758,7 @@ export type BootstrapTelemetryEvent =
           contained: number;
           excluded: number;
           gaps: number;
+          unconfirmed: number;
           ms?: number;
           requests: number;
       }
@@ -3044,11 +3045,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * ready at once, or gated until fresh under requireFreshOnReopen.
      */
     private readinessWarmOpen: boolean | undefined;
-    /**
-     * This warm open's freshness check held (M2; set in open, monotone for
-     * the open): its provenance says `warm-fresh`.
-     */
-    private readinessFresh: boolean | undefined;
     /** `writeReadiness.requireFreshOnReopen` of this open (set in open). */
     private requireFreshOnReopen: boolean | undefined;
     /** The freshness state `freshness:change` last reported (set in open). */
@@ -3705,7 +3701,6 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.writesReady = !addressOpen || partialWriteOverride;
         this.partialWriteOverride = partialWriteOverride;
         this.readinessWarmOpen = false;
-        this.readinessFresh = false;
         this.readinessFreshnessReported = undefined;
         this.writeReadinessRequired = addressOpen && !partialWriteOverride;
         this.viewProven = !addressOpen;
@@ -4875,12 +4870,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * What the readiness responder reports about this open (honest
      * provenance, WRITE_READINESS_V2.md 4.4). A warm reopen of an accepted
      * sidecar reports `warm`, not the source it persisted, and `warm-fresh`
-     * once its freshness check held (M2), also after a requireFreshOnReopen
-     * open was released by assumeComplete(). The responder tells an asker
-     * without `CAP_FRESHNESS` `warm` all the same (`provenanceFor`). In this
-     * open, a creating open reports `creator`, the readiness decision
-     * (design 4.8) `reconciled`, so a chain of joiners can qualify each
-     * other, and assumeComplete() `operator`.
+     * while its freshness check's label holds (M2, PR-5a), also after a
+     * requireFreshOnReopen open was released by assumeComplete(). The
+     * responder tells an asker without `CAP_FRESHNESS` `warm` all the same
+     * (`provenanceFor`). In this open, a creating open reports `creator`,
+     * the readiness decision (design 4.8) `reconciled`, so a chain of
+     * joiners can qualify each other, and assumeComplete() `operator`.
      */
     private readinessProvenance(): ProvenanceState {
         const writeReady = this.writesReady === true;
@@ -4892,7 +4887,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 : !writeReady || source === undefined
                   ? "none"
                   : this.readinessWarmOpen
-                    ? this.readinessFresh
+                    ? this.readinessRuntime?.freshnessHeld()
                         ? "warm-fresh"
                         : "warm"
                     : source,
@@ -11789,9 +11784,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * with the sidecar's `hlcProved`, so the same sessions, pull queue,
      * explainer, trust-first rule and departure decide whether this reopen
      * contains every peer it sees. No donor clause, no phase clause, no
-     * timer, and nothing asked again once it held. `start`: the CLI's
-     * one-shot commands wait for a peer to ask (O15); requireFreshOnReopen
-     * starts at once whatever the default.
+     * timer; once it held, only a late peer is asked (PR-5a). `start`:
+     * the CLI's one-shot commands wait for a peer to ask (O15);
+     * requireFreshOnReopen starts at once whatever the default.
      */
     private startReadinessFreshness(
         generation: number,
@@ -11831,44 +11826,49 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
 
     /**
      * The freshness check held (the runtime asks after a satisfied
-     * evaluation), in the serialized readiness transition. `readinessFresh`
-     * and the runtime's `fresh` state first, so every notice from here on
-     * carries `warm-fresh` (the flip's READY notices included) and
-     * `write:ready` reads `fresh`; under requireFreshOnReopen then the flip,
-     * with the persisted source and proof kept, the only step that can
-     * reject (the next readiness event retries); then the runtime's
-     * WARM_FRESH notices, `freshness:change` and telemetry; last a
-     * best-effort `hlcProved` patch, the next check's gap estimate, only
-     * forward (a check that contained only older peers keeps the newer
-     * hint), never retried and never waited for. `proof`, `writeReady` and
-     * the source stay as they are.
+     * evaluation), in the serialized readiness transition. The label
+     * first (`noteFresh`, which reads the predicate again), so every
+     * notice from here on carries `warm-fresh` (the flip's READY notices
+     * included) and `write:ready` reads `fresh`; under requireFreshOnReopen
+     * then the flip, with the persisted source and proof kept, the only
+     * step that can reject (the label goes and the next readiness event
+     * retries); then the runtime's WARM_FRESH notices, `freshness:change`
+     * and telemetry; last a best-effort `hlcProved` patch, the next check's
+     * gap estimate, only forward (a check that contained only older peers
+     * keeps the newer hint), never retried and never waited for. `proof`,
+     * `writeReady` and the source stay as they are. A label after a wake
+     * (PR-5a) never gates writes again: only the label moved.
      */
     private onReadinessFresh(
         generation: number,
         warm: { hlcProved: bigint; source: WriteReadinessSource }
     ): Promise<void> {
         return this.serializeWriteReadinessTransition(async () => {
+            const runtime = this.readinessRuntime;
             if (
                 this.writeReadinessLifecycleBlocked ||
-                generation !== this.openGeneration
+                generation !== this.openGeneration ||
+                !runtime?.noteFresh()
             ) {
                 return;
             }
-            this.readinessFresh = true;
-            this.readinessRuntime?.noteFresh();
             if (!this.writesReady && this.writeReadinessRequired) {
-                await this.commitWriteReady(
-                    generation,
-                    warm.source,
-                    undefined,
-                    {
-                        keepProof: true,
-                    }
-                );
+                try {
+                    await this.commitWriteReady(
+                        generation,
+                        warm.source,
+                        undefined,
+                        {
+                            keepProof: true,
+                        }
+                    );
+                } catch (error) {
+                    runtime.withdrawFresh();
+                    throw error;
+                }
             }
-            const runtime = this.readinessRuntime;
-            const hlcProved = runtime?.freshnessHlcProved();
-            runtime?.markFresh();
+            const hlcProved = runtime.freshnessHlcProved();
+            runtime.markFresh();
             this.noteFreshnessChange(true);
             if (hlcProved !== undefined && hlcProved > warm.hlcProved) {
                 void this.writeBootstrapState({ hlcProved }, generation).catch(
@@ -11902,7 +11902,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             return;
         }
         this.readinessFreshnessReported = freshness.state;
-        const { state, contained, excluded, gaps, ms, requests } = freshness;
+        const { state, contained, excluded, gaps, unconfirmed, ms, requests } =
+            freshness;
         if (this.bootstrapTelemetry) {
             this.emitBootstrapTelemetry({
                 type: "freshness",
@@ -11913,6 +11914,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 contained: contained.length,
                 excluded: excluded.length,
                 gaps: gaps.length,
+                unconfirmed: unconfirmed.length,
                 ...(ms !== undefined ? { ms } : {}),
                 requests,
             });
@@ -14619,6 +14621,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 excluded: [],
                 silent: [],
                 gaps: [],
+                unconfirmed: [],
                 requests: 0,
             };
         }
