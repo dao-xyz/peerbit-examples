@@ -505,6 +505,51 @@ describe("mount conflict tree", () => {
         });
     });
 
+    it("lists a hidden directory under the handle's ignore rules, as / would", async () => {
+        const other = await Peerbit.create();
+        try {
+            const ignoring = await openSharedFs({
+                peerbit: other,
+                machineLabel: "laptop",
+                ignore: { patterns: ["*.log", "build/"] },
+            });
+            await ignoring.mkdir("/parent");
+            await ignoring.mkdir("/parent/proj");
+            await ignoring.writeFile("/parent/proj/a.txt", "a");
+            // A peer without the rules wrote these.
+            await ignoring.program.writeFile("/parent/proj/debug.log", "log");
+            await ignoring.program.mkdir("/parent/proj/build");
+            const mount = createSharedFsMountBackend(ignoring);
+            expect(await namesOf(mount, "/parent/proj")).toEqual(["a.txt"]);
+
+            // Another writer deleted /parent, so /parent/proj is unreachable.
+            const parent = await winnerOf(ignoring, "/parent");
+            await ignoring.program.entries.put(
+                new NamingEvent({
+                    id: "naming:parent-removed",
+                    nodeId: parent.nodeId,
+                    parentId: "root",
+                    name: "parent",
+                    deleted: true,
+                    parentNamingIds: [parent.id],
+                    causalDepth: parent.causalDepth + 1n,
+                    createdAt: 5n,
+                    authorKey: "remote",
+                    machineLabel: "desktop",
+                }),
+                { unique: true }
+            );
+            const [entry] = await namesOf(mount, root);
+            expect(entry).toMatch(/^unreachable parent／proj laptop /);
+            const dir = `${root}/${entry}`;
+            // Ignored names stay out of the listing, and a name reaches one.
+            expect(await namesOf(mount, dir)).toEqual(["a.txt"]);
+            expect(await readThrough(mount, `${dir}/debug.log`)).toBe("log");
+        } finally {
+            await other.stop();
+        }
+    });
+
     it("shows a move cycle once, from its least id, and stops browsing where it repeats", async () => {
         await fs.mkdir("/x");
         await fs.mkdir("/y");

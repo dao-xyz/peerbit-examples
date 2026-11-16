@@ -65,12 +65,13 @@ type LocalCommitProfileStats = {
  * through `readVersionForMount` and `readNodeVersionForMount`, commit
  * through `writeFile`, `writeNodeForMount` and `setMetadata`, remove and
  * rename only through `mutateNamespaceForMount`, and look paths up through
- * `stat` (hidden nodes through `nodeForMount` and `listNodeForMount`); they
- * never call a target's ordinary `readVersion`, `rm` or `rename`. A
- * SharedFsHandle or SharedFileSystem subclass (or any delegating wrapper)
- * that customizes read, write, remove or rename policy must therefore apply
- * the same policy in these mount-facing methods at the layer it overrides,
- * as IgnoreAwareFs does in `mutateNamespaceForMount` and `writeNodeForMount`.
+ * `stat` (hidden nodes through `nodeForMount`, `listNodeForMount` and
+ * `childForMount`); they never call a target's ordinary `readVersion`, `rm`
+ * or `rename`. A SharedFsHandle or SharedFileSystem subclass (or any
+ * delegating wrapper) that customizes read, write, remove or rename policy
+ * must therefore apply the same policy in these mount-facing methods at the
+ * layer it overrides, as IgnoreAwareFs does in `mutateNamespaceForMount`,
+ * `writeNodeForMount` and the hidden-node lookups.
  */
 export type SharedFsMountBackendTarget = {
     /**

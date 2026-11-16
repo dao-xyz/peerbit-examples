@@ -31,6 +31,9 @@ which no Windows name can, and an encoded path could pass 255 bytes.
   `ENOENT` at once, and only a mount's first lookup or a well-formed name
   the last scan did not hold scans. Listing `/` or looking up the tree
   itself scans nothing.
+- Artifact-ignore rules apply in the tree as in `/`: `IgnoreAwareFs` leaves
+  out conflicts on ignored paths and lists a hidden directory's children as
+  `list()` does.
 - `SharedFileSystem` and `SharedFsHandle` gain `nodeForMount()`,
   `listNodeForMount()`, `childForMount()` and `readNodeVersionForMount()`,
   which reach a node wherever, or whether, it is named; `nodeForMount()`

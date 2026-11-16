@@ -1638,7 +1638,10 @@ entry (`stat`, `open`, `cd`) waits for no scan: a name not of the form above
 fails with `ENOENT` at once, and one the last scan held is checked on its own
 node. Only a mount's first lookup, or a well-formed name the last scan did not
 hold, scans. An entry leaves the tree once `resolveConflict()` or
-`resolveNamingConflict()` (or the CLI) settles its conflict.
+`resolveNamingConflict()` (or the CLI) settles its conflict. A target with
+artifact-ignore rules (`IgnoreAwareFs`) applies them in the tree as in `/`: a
+conflict on an ignored path is no entry unless the path is the rule's boundary,
+and a hidden directory lists its children as `list()` does.
 
 A file is in conflict only when its heads hold two or more different contents,
 and `conflicts()` lists one version per content. Heads that differ only in mode
