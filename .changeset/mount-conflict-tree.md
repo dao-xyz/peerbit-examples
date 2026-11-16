@@ -10,19 +10,22 @@ which no Windows name can, and an encoded path could pass 255 bytes.
 
 - The tree is flat, one entry per hidden version or node, named
   `<kind> <path> <writer> <time> <hash>[.<ext>]` (see the README's
-  "Conflicts"). `content` entries are the distinct heads of a file in
-  conflict and `delete-vs-edit` entries the versions a delete did not see;
-  `duplicate-name` entries are shadowed claimants, `multi-head` entries nodes
-  whose concurrent renames disagree, and `unreachable` entries the top-most
-  nodes whose parents no longer reach `/`, a directory browsable with its
-  files. Names are valid on Windows, macOS and Linux, at most 160 bytes,
-  distinct ignoring case and the same on every replica. A `content` or
-  `delete-vs-edit` entry is named for its file and bytes, so a `chmod`,
-  `touch` or recorded copy that keeps the bytes keeps its name.
+  "Conflicts"). `content` entries are the distinct contents among the heads
+  of a file in conflict and `delete-vs-edit` entries the contents a delete
+  did not see; `duplicate-name` entries are shadowed claimants, `multi-head`
+  entries nodes whose concurrent renames disagree, and `unreachable` entries
+  the top-most nodes whose parents no longer reach `/`, a directory browsable
+  with its files. Names are valid on Windows, macOS and Linux, at most 160
+  bytes and distinct ignoring case. A `content` or `delete-vs-edit` entry is
+  named for its file and bytes, so a `chmod`, `touch` or recorded copy that
+  keeps the bytes keeps its name; its writer and time can still move to an
+  older save of those bytes that arrives late, or to a newer one once GC
+  retires it.
 - Every write there fails with `EROFS`: create, `mkdir`, open for writing,
   truncate, `setattr`, `symlink`, `unlink`, `rmdir`, and rename into, out of or
   within the tree, also before the mount is write-ready, where some failed
-  with `EAGAIN`.
+  with `EAGAIN`. As everywhere in a mount, `chown`, an atime-only `touch -a`
+  and, on Windows, `chmod` succeed and change nothing.
 - `/` no longer lists `.peerbit-conflicts`; it is reachable by name, so git,
   backup tools and indexers do not walk hidden versions. Listing the tree
   scans every conflict, about 1 s per 10k files, the first time after a
@@ -43,8 +46,9 @@ which no Windows name can, and an encoded path could pass 255 bytes.
   `unreachable` naming conflict carries the node's `parentId`, and the
   namespace feed sets `versionForkOrMerge` when a version lands on a node
   whose name is deleted or not yet known (a delete-vs-edit).
-  `conflictEntryNames()` builds the entry names; `encodeConflictPathName()`
-  and `decodeConflictPathName()` are removed.
+  `conflictEntryNames()` builds the entry names and `conflictEntryNameHash()`
+  reads an entry name's hash back; `encodeConflictPathName()` and
+  `decodeConflictPathName()` are removed.
 
 The stored format and the wire are unchanged. The new layout replaces the old
 one without a compatibility window, a break allowed because shared-fs has no

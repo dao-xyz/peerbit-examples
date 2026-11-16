@@ -1596,9 +1596,9 @@ delete-vs-edit plan.md desktop 20261116T101733Z 0c1d2e3f4a5b.md
 unreachable docs／drafts desktop 20261116T102000Z 77aa88bb99cc/today.md
 ```
 
-- `content`: each distinct head of a file in conflict, the visible one too,
-  so two entries diff as the conflict.
-- `delete-vs-edit`: each version a delete did not see.
+- `content`: each distinct content among the heads of a file in conflict, the
+  visible one too, so two entries diff as the conflict.
+- `delete-vs-edit`: each content a delete did not see.
 - `duplicate-name`: each claimant a name's winner shadows.
 - `multi-head`: a node whose concurrent renames disagree, as it is now.
 - `unreachable`: a node whose parents no longer reach `/` (a parent was
@@ -1615,12 +1615,16 @@ is its file and bytes, and its writer and time are those of the save that
 brought those bytes in, so a `chmod`, `touch` or recorded copy that keeps the
 bytes keeps the name; a node entry's id is the node, and its writer and time
 are those of its name. Names are valid on Windows, macOS and Linux
-(lookalikes replace characters a name cannot hold; at most 160 bytes), unique
-even ignoring case and the same on every replica. One changes only when its
-path does or, for a node entry, when the node is renamed again. Creating,
-writing, truncating, `chmod`, `utimens`, renaming into, out of or within,
-unlinking and removing directories there fail with `EROFS`, also before the
-mount's first view settles.
+(lookalikes replace characters a name cannot hold; at most 160 bytes) and
+unique even ignoring case. One changes when its path does or, for a node
+entry, when the node is renamed again. A `content` or `delete-vs-edit` entry's
+writer and time also move to an older save of the same bytes that arrives
+late, or to a newer one once GC retires that save, so replicas that hold
+different history can name it differently; its hash stays. Creating, writing,
+truncating, `chmod`, `utimens`, renaming into, out of or within, unlinking and
+removing directories there fail with `EROFS`, also before the mount's first
+view settles. As everywhere in a mount, `chown`, an atime-only `touch -a` and,
+on Windows, `chmod` succeed and change nothing.
 
 `/.peerbit-conflicts` is never listed in `/`, so `ls -a`, Finder, Explorer, git
 (`status`, `add -A`, `clean`), backup tools and indexers do not walk or copy
