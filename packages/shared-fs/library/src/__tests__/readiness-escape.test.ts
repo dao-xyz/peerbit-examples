@@ -23,6 +23,7 @@ import {
 } from "../readiness/wire.js";
 import { holdFlips } from "./readiness-flip-hold.js";
 import { stopTestPeers } from "./stop-test-peers.js";
+import { within } from "./within.js";
 
 /**
  * The operator escape and the readiness status of PR-3 commit 2 (M1 plan
@@ -158,8 +159,16 @@ describe("write readiness escape and status", () => {
     const peers: Peerbit[] = [];
     const roots: string[] = [];
     const holds: Array<ReturnType<typeof holdFlips>> = [];
+    /**
+     * Undo a test's SharedFileSystem.prototype patch and release the writes
+     * it holds. Vitest does not stop a body that timed out, so its finally
+     * never runs: the patch would outlive the test in this reused worker
+     * (isolate: false), and a peer's close would wait on a held write.
+     */
+    const unpatches: Array<() => void> = [];
 
     afterEach(async () => {
+        for (const unpatch of unpatches.splice(0)) unpatch();
         await stopTestPeers(peers);
         // After the peers stopped: a decision still parked then finds its
         // open ended and flips nothing.
@@ -897,7 +906,11 @@ describe("write readiness escape and status", () => {
             const root = await mkdtemp(join(tmpdir(), "shared-fs-escape-"));
             roots.push(root);
             const directory = join(root, "joiner");
-            const peer = await createPeer(directory);
+            // J's on-disk steps fail by name if they stall (see within.ts).
+            const peer = await within(
+                "J's Peerbit.create",
+                createPeer(directory)
+            );
             await peer.dial(donor.peer);
             const sidecar = async () => {
                 const stateDirectory = join(directory, "shared-fs-bootstrap");
@@ -932,20 +945,50 @@ describe("write readiness escape and status", () => {
                 }
                 return replace.call(this, path, contents);
             };
+            const unpatch = () => {
+                prototype.replaceBootstrapState = replace;
+                release();
+            };
+            unpatches.push(unpatch);
             try {
-                const fs = await openSharedFs({
-                    peerbit: peer,
-                    address: donor.fs.address,
-                    machineLabel: "escape-joiner",
-                    bootstrap: false,
-                    gc: false,
-                });
+                const fs = await within(
+                    "J's openSharedFs",
+                    openSharedFs({
+                        peerbit: peer,
+                        address: donor.fs.address,
+                        machineLabel: "escape-joiner",
+                        bootstrap: false,
+                        gc: false,
+                    })
+                );
                 const program = programOf(fs);
                 const events: unknown[] = [];
                 program.events.addEventListener("write:ready", (event: any) =>
                     events.push(event.detail)
                 );
-                await held;
+                // In a passing run `held` wins: J's flip waits on the held
+                // write. A J that never gets there fails within 60 s with
+                // its readiness state, not with the test's timeout.
+                const flipped = fs.awaitWriteReady({ timeout: 60_000 }).then(
+                    () => {
+                        throw new Error(
+                            "J flipped without the held sidecar write"
+                        );
+                    },
+                    (error: unknown) => {
+                        const flags = written.map(
+                            (contents) => JSON.parse(contents).writeReady
+                        );
+                        throw new Error(
+                            `await held: J's write-ready sidecar write never reached the hold (sidecar writes so far: ${JSON.stringify(flags)}): ${(error as Error)?.message ?? error}`,
+                            { cause: error }
+                        );
+                    }
+                );
+                // The loser must not become an unhandled rejection: the
+                // drop below rejects the wait with ECLOSED.
+                flipped.catch(() => {});
+                await Promise.race([held, flipped]);
                 expect(program.writesReady).toBe(false);
                 expect(program.guardArmed).toBe(false);
                 expect(await sidecar()).toEqual({ writeReady: false });
@@ -981,14 +1024,17 @@ describe("write readiness escape and status", () => {
                 // before the held write lands.
                 const dropping = program.drop();
                 release();
-                expect(await dropping).toBe(true);
+                expect(await within("J's drop()", dropping)).toBe(true);
                 const writesAtDrop = written.length;
                 // Whatever the flip still had to do is done by now.
-                await program.writeReadinessTransitionChain;
+                await within(
+                    "J's readiness transition",
+                    program.writeReadinessTransitionChain
+                );
                 let pending: Promise<unknown>;
                 do {
                     pending = program.stateWriteChain;
-                    await pending;
+                    await within("J's sidecar writes", pending);
                 } while (pending !== program.stateWriteChain);
 
                 // The flip never happened: not in memory, not as an event,
@@ -1005,19 +1051,21 @@ describe("write readiness escape and status", () => {
                     written.map((contents) => JSON.parse(contents).writeReady)
                 ).toEqual([false, true, false]);
             } finally {
-                prototype.replaceBootstrapState = replace;
-                release();
+                unpatch();
             }
 
             // A reopen of the address in the same directory is no warm
             // donor over the dropped store: it joins afresh, to ready.
-            const reopened = await openSharedFs({
-                peerbit: peer,
-                address: donor.fs.address,
-                machineLabel: "escape-joiner-after-drop",
-                bootstrap: false,
-                gc: false,
-            });
+            const reopened = await within(
+                "the reopen's openSharedFs",
+                openSharedFs({
+                    peerbit: peer,
+                    address: donor.fs.address,
+                    machineLabel: "escape-joiner-after-drop",
+                    bootstrap: false,
+                    gc: false,
+                })
+            );
             expect(programOf(reopened).readinessWarmOpen).toBe(false);
             expect(reopened.bootstrapStatus().writeReady).toBe(false);
             expect(runtimeOf(reopened)!.coordinator).toBeDefined();
@@ -1026,9 +1074,11 @@ describe("write readiness escape and status", () => {
                 writeReady: true,
                 writeReadinessSource: "reconciled",
             });
-            expect(
-                new TextDecoder().decode(await reopened.readFile("/donor.txt"))
-            ).toBe("from the donor");
+            const read = await within(
+                "the reopen's readFile",
+                reopened.readFile("/donor.txt")
+            );
+            expect(new TextDecoder().decode(read)).toBe("from the donor");
         });
 
         /** The sidecar of the one filesystem `directory` holds. */
