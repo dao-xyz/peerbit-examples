@@ -25,6 +25,7 @@ const packages = [
         name: "@peerbit/shared-fs",
         // The readiness modules ship as both src and lib.
         // M2 warm freshness: 4.10 MB. N4 mount conflict tree: 4.24 MB.
+        // Persist-on-exit: 4.26 MB.
         maxUnpackedBytes: 4_300_000,
         requiredPaths: [
             "LICENSE",
@@ -40,7 +41,8 @@ const packages = [
         directory: "packages/shared-fs/cli",
         name: "@peerbit/shared-fs-cli",
         // #434's --peer redial with N4's conflicts gate: about 342 KB.
-        maxUnpackedBytes: 350_000,
+        // Persist-on-exit: about 356 KB.
+        maxUnpackedBytes: 360_000,
         requiredPaths: [
             "LICENSE",
             "README.md",
