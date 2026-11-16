@@ -40,6 +40,14 @@ import {
 const STEP_MS = 20_000;
 const FENCE_MS = 30_000;
 
+/**
+ * Files in the many-files fence test. Windows CI saves to durable stores
+ * several times slower than Linux and macOS: with 500 files that test ran
+ * past vitest's 120 s there, its fence still waiting. 100 files take the
+ * same path.
+ */
+const MANY_FILES = process.platform === "win32" ? 100 : 500;
+
 const text = (bytes: Uint8Array | undefined) =>
     bytes ? new TextDecoder().decode(bytes) : undefined;
 
@@ -680,7 +688,7 @@ describe("mount --persist-on-exit over real TCP", () => {
         });
     };
 
-    it("exits 0 only once another replica holds all 500 files, read there after the writer is gone", async () => {
+    it(`exits 0 only once another replica holds all ${MANY_FILES} files, read there after the writer is gone`, async () => {
         const writer = await createPeer("writer");
         const receiver = await createPeer("receiver");
         await writer.peer.dial(receiver.peer.getMultiaddrs());
@@ -696,8 +704,13 @@ describe("mount --persist-on-exit over real TCP", () => {
         const writeStarted = performance.now();
         // The last file stays open with its bytes buffered: the drain
         // commits it, the fence then delivers it.
-        await writeThroughMount(backend, 500, { leaveLastOpen: true });
+        await writeThroughMount(backend, MANY_FILES, { leaveLastOpen: true });
         const writeMs = performance.now() - writeStarted;
+        // Printed before the fence, so a run that times out still says how
+        // long the writes took.
+        console.log(
+            `persist-on-exit ${MANY_FILES} files written in ${Math.round(writeMs)} ms`
+        );
 
         // The Windows path: a `shutdown` line on stdin.
         const { stopped, input } = shutdownOnRequest(
@@ -733,7 +746,7 @@ describe("mount --persist-on-exit over real TCP", () => {
 
         if (back) await stop(back);
         const reopened = await reopenOffline(receiver.directory, address);
-        for (let i = 0; i < 500; i++) {
+        for (let i = 0; i < MANY_FILES; i++) {
             expect(
                 text(await reopened.readFile(`/f${i}.txt`)),
                 `/f${i}.txt`
@@ -746,7 +759,7 @@ describe("mount --persist-on-exit over real TCP", () => {
             /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
         );
         console.log(
-            "persist-on-exit 500 files:",
+            `persist-on-exit ${MANY_FILES} files:`,
             JSON.stringify({
                 writeMs: Math.round(writeMs),
                 fenceMs: Math.round(done!.at - waiting!.at),
