@@ -558,6 +558,24 @@ dialled or no `--bootstrap` node answers. The options apply to `mount`,
 address connect to nothing. `--no-replicate` reads that skip the public network
 still dial `--peer` and `--bootstrap`.
 
+## Stop a mount: persist-on-exit
+
+The first Ctrl-C, SIGTERM, Ctrl-Break (Windows) or `shutdown` line on a piped
+stdin stops `mount`: the adapter detaches, files still open are saved, and then,
+if another replica of the filesystem was seen in this session, `mount` waits up
+to `--persist-timeout-ms` (default 30000) until one holds every entry it wrote
+in this session (chunks, versions, names). With no replica seen it does not
+wait and says so. Writes of an earlier run that was killed are not covered.
+`--no-persist-on-exit` skips the wait. A second request aborts it; a third
+exits at once. Windows has no SIGTERM: `taskkill` and `child.kill()` end the
+process without any of this, so a supervisor sends `shutdown` instead.
+
+Exit codes: 0 stopped; 1 failed (also when an open file could not be saved); 75
+the wait gave up, with one `persist-on-exit: unacknowledged {"path":...,"ids":[...]}`
+line per file on stderr; 130 aborted. Unlike `prepare-disposal`, it fences only
+this session's own writes, while other writers keep writing; retire a machine
+with `prepare-disposal`.
+
 ## Safely dispose of a machine
 
 Stop mounted writes, wait for persisted delivery, and only then dispose of the

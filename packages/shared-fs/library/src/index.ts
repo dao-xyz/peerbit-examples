@@ -374,6 +374,14 @@ const EXPECTED_NAMING_CONFLICT_MAX_TOTAL_STRING_CODE_UNITS = 1_048_576;
  */
 const DISPOSAL_METADATA_BATCH_SIZE = 256;
 const DISPOSAL_CHUNK_BATCH_SIZE = 16;
+/** persistLocalWrites: bytes per batch (chunks carry the bytes). */
+const LOCAL_WRITE_BATCH_BYTES = 8 * 1024 * 1024;
+/** Membership changes that may give a waiting persistLocalWrites a leader. */
+const REPLICATION_EVENTS = [
+    "replicator:join",
+    "replicator:mature",
+    "replication:change",
+] as const;
 /** Node's setTimeout limit: a longer delay runs after 1 ms instead. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -1184,6 +1192,24 @@ export class PrepareForDisposalError extends Error {
             }`
         );
         this.name = "PrepareForDisposalError";
+    }
+}
+
+/** An entry written here with no remote receipt; its path when known. */
+export type UnacknowledgedWrite = { id: string; path?: string };
+
+/** persistLocalWrites gave up or failed; the writes stay committed here. */
+export class PersistLocalWritesError extends Error {
+    constructor(
+        readonly cause: unknown,
+        readonly unacknowledged: UnacknowledgedWrite[]
+    ) {
+        super(
+            `${unacknowledged.length} local writes have no remote receipt: ${
+                cause instanceof Error ? cause.message : String(cause)
+            }`
+        );
+        this.name = "PersistLocalWritesError";
     }
 }
 
@@ -3337,6 +3363,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private disposalContentGeneration = 0;
     private disposalPreparationRunning = false;
     private disposalPreparationRunningGeneration: number | undefined;
+    /** persistLocalWrites: this open's own writes by entry id. */
+    private localWrites?: Map<string, { nodeId?: string }>;
+    private remoteReplicaSeen?: boolean;
+    private replicationEvent?: Promise<void>;
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
     // --- Cold-start bootstrap state (all re-initialized in open()) ---
@@ -4280,6 +4310,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 atMs: this.bootstrapTelemetryElapsed(clockMs),
             });
         }
+        // persistLocalWrites state. Program events outlive open(), so
+        // replicas are tracked from before the store opens.
+        this.localWrites = new Map();
+        this.remoteReplicaSeen = false;
+        const selfKey = this.node.identity.publicKey;
+        let wake = () => {};
+        const onReplication = (event?: any) => {
+            const key = event?.detail?.publicKey;
+            if (
+                event?.type === "replicator:join" &&
+                key &&
+                !selfKey.equals(key)
+            )
+                this.remoteReplicaSeen = true;
+            wake();
+            this.replicationEvent = new Promise((resolve) => (wake = resolve));
+        };
+        onReplication();
+        const lifecycle = this.maintenanceAbortController!.signal;
+        for (const type of REPLICATION_EVENTS)
+            this.entries.log.events.addEventListener(type, onReplication, {
+                signal: lifecycle,
+            });
+        // Close settles a waiting fence: maintenance tasks are joined.
+        lifecycle.addEventListener("abort", () => wake());
         try {
             await this.entries.open({
                 type: SharedFsEntry,
@@ -4378,7 +4433,19 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
+            // Gone here (GC): nothing left for persistLocalWrites to deliver.
+            for (const value of removed) this.localWrites?.delete(value?.id);
             for (const value of added) {
+                // persistLocalWrites: this key's entries and the chunks its
+                // versions name (shared by content, maybe appended elsewhere).
+                if (
+                    value?.authorKey === localKey ||
+                    value?.id === `bootstrap:${localKey}`
+                ) {
+                    const write = { nodeId: value.nodeId };
+                    for (const id of [...(value.chunkIds ?? []), value.id])
+                        this.localWrites?.set(id, write);
+                }
                 if (
                     value instanceof NamingEvent ||
                     value instanceof FileVersion
@@ -15297,7 +15364,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private validatePrepareForDisposalOptions(
-        options: PrepareForDisposalOptions
+        options: PrepareForDisposalOptions,
+        name = "prepareForDisposal"
     ) {
         if (
             !options ||
@@ -15306,7 +15374,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             throw new SharedFsError(
                 "EINVAL",
-                "prepareForDisposal requires a positive integer minAcks"
+                `${name} requires a positive integer minAcks`
             );
         }
         if (
@@ -15317,7 +15385,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         ) {
             throw new SharedFsError(
                 "EINVAL",
-                `prepareForDisposal timeout must be a positive number no greater than ${MAX_TIMER_DELAY_MS}`
+                `${name} timeout must be a positive number no greater than ${MAX_TIMER_DELAY_MS}`
             );
         }
     }
@@ -15338,10 +15406,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.throwIfMaintenanceInactive(context);
     }
 
-    private disposalTimeoutError(options: PrepareForDisposalOptions) {
+    private disposalTimeoutError(
+        options: PrepareForDisposalOptions & { label?: string }
+    ) {
         return new SharedFsError(
             "ETIMEDOUT",
-            `Timed out preparing the filesystem for disposal with minAcks ${options.minAcks}`
+            `Timed out ${options.label ?? "preparing the filesystem for disposal"} with minAcks ${options.minAcks}`
         );
     }
 
@@ -15899,6 +15969,136 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             })();
         return this.trackMaintenanceTask(run);
+    }
+
+    /** Own writes not yet persisted, and whether another replica joined. */
+    pendingLocalWrites() {
+        return {
+            entries: this.localWrites?.size ?? 0,
+            remoteReplicaSeen: !!this.remoteReplicaSeen,
+        };
+    }
+
+    /**
+     * Await receipts from `minAcks` (default 1) remote replicas for each
+     * entry written here since open, on prepareForDisposal's receipt path;
+     * arrivals do not fail it. Resolves with the count acknowledged. With a
+     * timeout, no remote leader means waiting for one until the deadline.
+     */
+    async persistLocalWrites(
+        options: Partial<PrepareForDisposalOptions> = {}
+    ): Promise<number> {
+        const fence = {
+            ...options,
+            minAcks: options.minAcks ?? 1,
+            label: "persisting this replica's writes",
+        };
+        this.validatePrepareForDisposalOptions(fence, "persistLocalWrites");
+        const context = this.currentMaintenanceContext("persistLocalWrites");
+        const deadline = fence.timeout && Date.now() + fence.timeout;
+        const ledger = this.localWrites ?? new Map();
+        const captured = new Map(ledger);
+        const settle = (ids: string[]) => {
+            for (const id of ids)
+                if (ledger.get(id) === captured.get(id)) ledger.delete(id);
+        };
+        const progress = { confirmedEntries: 0, receiptBatches: 0 };
+        const run = async () => {
+            try {
+                const ids = [...captured.keys()];
+                const refs: Array<
+                    DisposalEntryRef & { order: number; size: number }
+                > = [];
+                for (let i = 0; i < ids.length; i += HEAD_QUERY_BATCH) {
+                    const byId = ids
+                        .slice(i, i + HEAD_QUERY_BATCH)
+                        .map((id) => new StringMatch({ key: "id", value: id }));
+                    const rows = await this.awaitDisposalStep(
+                        this.queryRows([
+                            byId.length > 1 ? new Or(byId) : byId[0],
+                        ]),
+                        fence,
+                        deadline,
+                        context
+                    );
+                    for (const raw of rows) {
+                        refs.push({
+                            ...this.disposalEntryRef(raw, raw.kind),
+                            order:
+                                raw.kind === "file-chunk"
+                                    ? 0
+                                    : raw.kind === "file-version"
+                                      ? 1
+                                      : 2,
+                            size: raw.__context?.size ?? 0,
+                        });
+                    }
+                }
+                // Deleted since: nothing left to deliver.
+                const found = new Set(refs.map(({ id }) => id));
+                settle(ids.filter((id) => !found.has(id)));
+                refs.sort((a, b) => a.order - b.order);
+                for (let start = 0, end = 0; start < refs.length; start = end) {
+                    for (
+                        let bytes = 0;
+                        end < refs.length;
+                        bytes += refs[end++].size
+                    ) {
+                        if (
+                            end - start === DISPOSAL_METADATA_BATCH_SIZE ||
+                            bytes >= LOCAL_WRITE_BATCH_BYTES ||
+                            refs[end].order !== refs[start].order
+                        )
+                            break;
+                    }
+                    const batch = refs.slice(start, end);
+                    for (;;) {
+                        // Taken before the attempt, so a join during it counts.
+                        const joined = this.replicationEvent!;
+                        try {
+                            await this.deliverDisposalBatch(
+                                batch,
+                                fence,
+                                deadline,
+                                progress,
+                                this.entries,
+                                context
+                            );
+                            break;
+                        } catch (error) {
+                            // No remote leader (yet): retry on the next
+                            // membership change, until the deadline.
+                            if (error instanceof SharedFsError || !deadline)
+                                throw error;
+                            await this.awaitDisposalStep(
+                                joined,
+                                fence,
+                                deadline,
+                                context
+                            );
+                        }
+                    }
+                    settle(batch.map(({ id }) => id));
+                }
+                return progress.confirmedEntries;
+            } catch (error) {
+                const states = new Map<string, NodeNamingState>();
+                const unacknowledged: UnacknowledgedWrite[] = [];
+                for (const [id, { nodeId }] of captured) {
+                    if (!ledger.has(id)) continue;
+                    const path =
+                        nodeId &&
+                        (await this.pathForNode(nodeId, states).catch(
+                            () => "/"
+                        ));
+                    unacknowledged.push(
+                        path && path !== "/" ? { id, path } : { id }
+                    );
+                }
+                throw new PersistLocalWritesError(error, unacknowledged);
+            }
+        };
+        return this.trackMaintenanceTask(run());
     }
 
     /**
@@ -19586,6 +19786,15 @@ export class SharedFsHandle {
     /** Fence the current recoverable filesystem closure before disposal. */
     prepareForDisposal(options: PrepareForDisposalOptions) {
         return this.program.prepareForDisposal(options);
+    }
+
+    /** Await remote receipts for this replica's own writes; see the program. */
+    persistLocalWrites(options?: Partial<PrepareForDisposalOptions>) {
+        return this.program.persistLocalWrites(options);
+    }
+
+    pendingLocalWrites() {
+        return this.program.pendingLocalWrites();
     }
 
     bootstrapStatus() {

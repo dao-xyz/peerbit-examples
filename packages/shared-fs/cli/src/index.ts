@@ -5,6 +5,8 @@ import type {
     ReadinessStatus,
     ResolveNamingAction,
     SharedFsConflict,
+    SharedFsHandle,
+    SharedFsMountBackend,
     SharedFsMountProfileWriter,
     SharedFsNamingConflict,
     SharedFsVersionInfo,
@@ -400,9 +402,11 @@ export const stopMountSession = async (
     session: {
         mounted?: { unmount(): Promise<void> };
         ipc?: { close(): Promise<void> };
-        /** Detached from the filesystem's namespace feed before Peerbit stops. */
-        backend?: { dispose(): void };
+        /** Drained (open files commit), then detached from the namespace feed. */
+        backend?: Pick<SharedFsMountBackend, "dispose" | "drain">;
         profileWriter?: SharedFsMountProfileWriter;
+        /** persist-on-exit: after the drain, before Peerbit stops. */
+        persist?(): Promise<void>;
         stopPeerbit(): Promise<void>;
     },
     options: { ignoreErrors?: boolean } = {}
@@ -417,36 +421,90 @@ export const stopMountSession = async (
         await step(() => session.mounted?.unmount());
         await step(() => session.ipc?.close());
     } finally {
+        const drained = await session.backend?.drain?.().catch(() => {});
+        for (const { path, error } of drained?.failed ?? []) {
+            console.error(`Could not save ${path}: ${error}`);
+            process.exitCode = 1;
+        }
         try {
-            session.backend?.dispose();
+            session.backend?.dispose?.();
         } catch {
             // Unsubscribing cannot leave anything to clean up.
         }
         await closeMountProfile(session.profileWriter).catch(() => {});
     }
+    await step(() => session.persist?.());
     await step(() => session.stopPeerbit());
 };
 
-const waitForTermination = async (stop: () => Promise<void>) => {
-    await new Promise<void>((resolve, reject) => {
-        let settled = false;
+// Shutdown requests: SIGINT, SIGTERM, SIGBREAK (Windows Ctrl+Break) and a
+// `shutdown` line on a stdin that is not a terminal. The first runs `stop`,
+// the second aborts its signal (persist-on-exit), the third exits (130).
+export const waitForTermination = (
+    stop: (signal: AbortSignal) => Promise<void>,
+    host: Pick<NodeJS.Process, "on" | "off" | "exit"> = process,
+    input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin
+) =>
+    new Promise<void>((resolve, reject) => {
+        const abort = new AbortController();
+        const signals = ["SIGINT", "SIGTERM", "SIGBREAK"] as const;
         const keepAlive = setInterval(() => {}, 1 << 30);
-        const finish = async () => {
-            if (settled) {
-                return;
-            }
-            settled = true;
-            clearInterval(keepAlive);
-            try {
-                await stop();
-                resolve();
-            } catch (error) {
-                reject(error);
-            }
+        let requests = 0;
+        const request = () => {
+            if (++requests > 2) host.exit(130);
+            if (requests > 1)
+                return abort.abort(new Error("shutdown requested again"));
+            stop(abort.signal)
+                .finally(() => {
+                    clearInterval(keepAlive);
+                    for (const name of signals) host.off(name, request);
+                    input.off("data", onData).pause();
+                })
+                .then(resolve, reject);
         };
-        process.once("SIGINT", finish);
-        process.once("SIGTERM", finish);
+        const onData = (data: unknown) =>
+            String(data)
+                .split(/\r?\n/)
+                .forEach((line) => line.trim() === "shutdown" && request());
+        for (const name of signals) host.on(name, request);
+        if (!input.isTTY) input.on("data", onData);
     });
+
+// --persist-on-exit. Sets the exit code: 75 when it gives up, 130 aborted.
+export const persistOnExit = async (
+    fsHandle: Pick<SharedFsHandle, "pendingLocalWrites" | "persistLocalWrites">,
+    options: { persistOnExit: boolean; persistTimeoutMs: number },
+    signal?: AbortSignal
+) => {
+    if (!options.persistOnExit) return;
+    const timeout = options.persistTimeoutMs;
+    const log = (line: string) => console.error(`persist-on-exit: ${line}`);
+    const { entries, remoteReplicaSeen } = fsHandle.pendingLocalWrites();
+    if (!remoteReplicaSeen) {
+        return log(
+            `no other replica seen; not waiting (${entries} entries only here)`
+        );
+    }
+    if (!entries) return;
+    log(`waiting up to ${timeout} ms for receipts for ${entries} entries`);
+    const started = Date.now();
+    try {
+        const acknowledged = await fsHandle.persistLocalWrites({
+            timeout,
+            signal,
+        });
+        log(
+            `${acknowledged} entries acknowledged in ${Date.now() - started} ms`
+        );
+    } catch (error: any) {
+        const byPath = new Map<string | null, string[]>();
+        for (const { id, path = null } of error?.unacknowledged ?? [])
+            byPath.set(path, [...(byPath.get(path) ?? []), id]);
+        for (const [path, ids] of byPath)
+            log(`unacknowledged ${JSON.stringify({ path, ids })}`);
+        log(`gave up: ${error?.message ?? error}`);
+        process.exitCode = signal?.aborted ? 130 : 75;
+    }
 };
 
 const readNativeStatus = async () => {
@@ -1154,14 +1212,17 @@ const MAX_WRITE_READY_TIMEOUT_MS = 2_147_483_647;
  * Checked before anything opens. Above Node's timer limit the wait would
  * time out at once, and --assume-complete would act on that timeout.
  */
-const assertWriteReadyTimeout = (timeoutMs: number) => {
+const assertWriteReadyTimeout = (
+    timeoutMs: number,
+    flag = "--write-ready-timeout-ms"
+) => {
     if (
         !Number.isInteger(timeoutMs) ||
         timeoutMs < 1 ||
         timeoutMs > MAX_WRITE_READY_TIMEOUT_MS
     ) {
         throw new Error(
-            `--write-ready-timeout-ms must be an integer from 1 to ${MAX_WRITE_READY_TIMEOUT_MS} (milliseconds); got ${timeoutMs}`
+            `${flag} must be an integer from 1 to ${MAX_WRITE_READY_TIMEOUT_MS} (milliseconds); got ${timeoutMs}`
         );
     }
 };
@@ -1473,6 +1534,18 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "string",
                         description:
                             "Diagnostic: write mounted-path timing records as NDJSON into this new or empty directory (node-daemon.ndjson, plus native-adapter.ndjson from a profiling-capable external adapter).",
+                    })
+                    .option("persist-on-exit", {
+                        type: "boolean",
+                        default: true,
+                        description:
+                            "At shutdown, wait for another replica to hold this mount's writes (see README).",
+                    })
+                    .option("persist-timeout-ms", {
+                        type: "number",
+                        default: 30_000,
+                        description:
+                            "Give up --persist-on-exit after this long (exit 75).",
                     }),
             async (argv) => {
                 if (argv.replicate === false) {
@@ -1498,6 +1571,10 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     );
                 }
                 assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
+                assertWriteReadyTimeout(
+                    argv.persistTimeoutMs,
+                    "--persist-timeout-ms"
+                );
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
@@ -1609,12 +1686,14 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
                             : "gc schedule: off"
                     );
-                    await waitForTermination(() =>
+                    await waitForTermination((signal) =>
                         stopMountSession({
                             mounted,
                             ipc,
                             backend,
                             profileWriter,
+                            persist: () =>
+                                persistOnExit(fsHandle, argv, signal),
                             stopPeerbit: () => stopPeerbitForCli(peerbit),
                         })
                     );
