@@ -3,7 +3,7 @@
 ---
 
 `mount` saves files still open at shutdown and, once another replica of the
-filesystem was seen in the session, waits until one acknowledges every entry
+filesystem was seen in the session, waits for a remote receipt for each entry
 the mount wrote in that session (`--persist-on-exit`, on by default;
 `--persist-timeout-ms`, default 30000; `--no-persist-on-exit` skips the
 wait; `--persist-on-exit=<value>` is refused). It exits 75 and lists the
