@@ -64,7 +64,9 @@ jobs:
             matrix:
                 include:
                     - target: linux-x64
-                      runs-on: ubuntu-latest
+                      # Pinned, as linux-arm64 is: the build image's glibc is
+                      # the oldest one the adapter runs on.
+                      runs-on: ubuntu-24.04
                       goos: linux
                       goarch: amd64
                       build-tags: native_mount fuse3
