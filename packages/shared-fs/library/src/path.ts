@@ -1,3 +1,5 @@
+import { sha256Sync } from "@peerbit/crypto";
+
 export const ROOT_NODE_ID = "root";
 export const CONFLICTS_DIR = ".peerbit-conflicts";
 
@@ -75,8 +77,114 @@ export const joinFsPath = (...parts: string[]) => {
     return normalizeFsPath(parts.join("/"));
 };
 
-export const encodeConflictPathName = (path: string) =>
-    encodeURIComponent(normalizeFsPath(path)).replaceAll("%", "~");
+/** What names an entry of a mount's conflict tree (see conflictEntryNames). */
+export type ConflictEntryNameParts = {
+    /** "content", or the naming conflict's type. */
+    kind: string;
+    /** The conflict's (best-effort) path. */
+    path: string;
+    /** The writer: its machine label, else its key. */
+    machineLabel: string;
+    authorKey: string;
+    /** When the writer made it: milliseconds on its clock. */
+    time: bigint;
+    /** The version, or for a node entry the node, the entry shows. */
+    id: string;
+    /** A directory entry takes no extension. */
+    directory?: boolean;
+};
 
-export const decodeConflictPathName = (name: string) =>
-    normalizeFsPath(decodeURIComponent(name.replaceAll("~", "%")));
+/** Room for a conflict-tree path under Windows' 260-character MAX_PATH. */
+const CONFLICT_NAME_MAX_BYTES = 160;
+const RESERVED_NAME_CHARS = '/\\:*?"<>|';
+const FULLWIDTH_NAME_CHARS =
+    "\uff0f\uff3c\uff1a\uff0a\uff1f\uff02\uff1c\uff1e\uff5c";
+
+/**
+ * `text` with what no name may hold on Windows, macOS or Linux replaced:
+ * "/" and the characters Windows reserves by their fullwidth forms, control
+ * characters by their U+2400 pictures, lone surrogates by U+FFFD.
+ */
+const nameText = (text: string) =>
+    // eslint-disable-next-line no-control-regex
+    text.replace(/[\u0000-\u001f\u007f/\\:*?"<>|]|\p{Cs}/gu, (char) => {
+        const code = char.charCodeAt(0);
+        const reserved = RESERVED_NAME_CHARS.indexOf(char);
+        return reserved >= 0
+            ? FULLWIDTH_NAME_CHARS[reserved]
+            : code < 0x20
+              ? String.fromCharCode(0x2400 + code)
+              : code === 0x7f
+                ? "\u2421"
+                : "\ufffd";
+    });
+
+const byteLength = (text: string) => utf8.encode(text).byteLength;
+
+/** At most `max` UTF-8 bytes of `text`: its end or start, "…" at the cut. */
+const fitText = (text: string, max: number, keepEnd: boolean) => {
+    if (byteLength(text) <= max) return text;
+    const chars = [...text];
+    let fitted = "";
+    let bytes = 3;
+    for (const char of keepEnd ? chars.reverse() : chars) {
+        bytes += byteLength(char);
+        if (bytes > max) break;
+        fitted = keepEnd ? char + fitted : fitted + char;
+    }
+    return keepEnd ? `…${fitted}` : `${fitted}…`;
+};
+
+const hashHex = (text: string) =>
+    Array.from(sha256Sync(utf8.encode(text)), (byte) =>
+        byte.toString(16).padStart(2, "0")
+    ).join("");
+
+/**
+ * Names for the entries of a mount's conflict tree, one per entry, each
+ * distinct (kind, id): `<kind> <path> <writer> <time> <hash>[.<ext>]`.
+ * Every name is valid on Windows, macOS and Linux and at most 160 bytes of
+ * UTF-8; it depends only on its own entry, so it is stable while that entry
+ * lasts. The path drops its leading "/", is cut at its start to fit, and
+ * shows characters no name may hold as lookalikes (see nameText); the writer
+ * is the machine label (spaces as "_", at most 32 bytes), else a hash of
+ * the key; the time is UTC (YYYYMMDDTHHMMSSZ); the hash is `digits` hex
+ * digits of SHA-256 of the kind and id, or all 64 when two names would
+ * otherwise be equal ignoring case; the extension is the original name's,
+ * when it is 1-16 ASCII letters, digits, "_" or "-".
+ */
+export const conflictEntryNames = (
+    entries: ConflictEntryNameParts[],
+    digits = 12
+): string[] => {
+    const nameOf = (entry: ConflictEntryNameParts, hashDigits: number) => {
+        const label = nameText(entry.machineLabel).replace(/\s/g, "_");
+        const writer = label
+            ? fitText(label, 32, false)
+            : entry.authorKey
+              ? `key-${hashHex(entry.authorKey).slice(0, 8)}`
+              : "unknown";
+        const date = new Date(Number(entry.time));
+        const time = Number.isNaN(date.getTime())
+            ? "unknown-time"
+            : date.toISOString().replace(/[-:]|\.\d+/g, "");
+        const extension = entry.directory
+            ? undefined
+            : /[^.]\.([A-Za-z0-9_-]{1,16})$/.exec(basename(entry.path))?.[1];
+        const hash = hashHex(`${entry.kind}\n${entry.id}`).slice(0, hashDigits);
+        const end = ` ${writer} ${time} ${hash}${extension ? `.${extension}` : ""}`;
+        const path = nameText(entry.path.replace(/^\/+/, "")) || "\uff0f";
+        const room =
+            CONFLICT_NAME_MAX_BYTES - byteLength(`${entry.kind} ${end}`);
+        return `${entry.kind} ${fitText(path, room, true)}${end}`;
+    };
+    const names = entries.map((entry) => nameOf(entry, digits));
+    const folded = new Map<string, number>();
+    for (const name of names) {
+        const key = name.toLowerCase();
+        folded.set(key, (folded.get(key) ?? 0) + 1);
+    }
+    return names.map((name, i) =>
+        folded.get(name.toLowerCase())! > 1 ? nameOf(entries[i], 64) : name
+    );
+};

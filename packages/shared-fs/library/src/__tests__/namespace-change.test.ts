@@ -298,6 +298,28 @@ describe("shared fs namespace-change feed", () => {
         ]);
     });
 
+    it("flags a save that lands on a file another writer deleted (delete-vs-edit)", async () => {
+        const base = await fs.writeFile("/gone.txt", "base");
+        const { nodeId } = (await fs.stat("/gone.txt"))!; // warm rows
+        await fs.rm("/gone.txt");
+        take();
+        // Another writer's save extends the only content head: no fork, no
+        // name change, yet the delete did not observe it.
+        await fs.program.entries.put(
+            fileVersion("version:feed-after-delete", nodeId, [base.id]),
+            { unique: true }
+        );
+        expect(take()).toEqual([
+            expect.objectContaining({ naming: [], versionForkOrMerge: true }),
+        ]);
+        expect(
+            (await fs.namingConflicts()).map((conflict) => [
+                conflict.type,
+                conflict.recoverableVersionIds,
+            ])
+        ).toEqual([["delete-vs-edit", ["version:feed-after-delete"]]]);
+    });
+
     it("marks a superseded ancestor that arrives after its descendant as no head", async () => {
         await fs.writeFile("/n.txt", "n");
         const [created] = naming();

@@ -534,6 +534,9 @@ const namingConflictForJson = (conflict: SharedFsNamingConflict) => ({
         : {}),
 });
 
+/** `conflicts --fail-if-any` found a conflict; errors exit with 1. */
+const CONFLICTS_FOUND_EXIT_CODE = 3;
+
 const printJson = (value: unknown) => {
     console.log(
         JSON.stringify(
@@ -1839,6 +1842,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         type: "boolean",
                         default: false,
                         description: "Print machine-readable JSON.",
+                    })
+                    .option("fail-if-any", {
+                        type: "boolean",
+                        default: false,
+                        description: `Exit with status ${CONFLICTS_FOUND_EXIT_CODE} when any content or naming conflict exists, 0 when none (a CI gate).`,
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
@@ -1862,6 +1870,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         bootstrap.phase === "converged" &&
                         bootstrap.snapshotCoverageVerified;
                     const conflicts = await fsHandle.conflicts(argv.path);
+                    // The gate counts every kind; the listing stays content.
+                    const namingConflicts = argv.failIfAny
+                        ? await fsHandle.namingConflicts(argv.path)
+                        : [];
+                    if (
+                        argv.failIfAny &&
+                        conflicts.length + namingConflicts.length > 0
+                    ) {
+                        process.exitCode = CONFLICTS_FOUND_EXIT_CODE;
+                    }
                     if (argv.json) {
                         printJson({
                             address: fsHandle.address,
@@ -1874,6 +1892,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                 snapshotCoverageVerified,
                             },
                             conflicts: conflicts.map(contentConflictForJson),
+                            ...(argv.failIfAny
+                                ? {
+                                      namingConflicts: namingConflicts.map(
+                                          namingConflictForJson
+                                      ),
+                                  }
+                                : {}),
                         });
                         return;
                     }
@@ -1884,7 +1909,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             )
                         );
                     }
-                    if (conflicts.length === 0) {
+                    if (conflicts.length + namingConflicts.length === 0) {
                         console.log("No conflicts");
                         return;
                     }
@@ -1898,6 +1923,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             console.log(
                                 `  ${version.id} ${version.size} bytes ${version.machineLabel} ${version.authorKey}${index === 0 ? " (visible)" : ""}`
                             );
+                        }
+                    }
+                    if (namingConflicts.length > 0) {
+                        console.log(
+                            chalk.bold(
+                                `naming conflicts (details: peerbit-fs naming-conflicts ${fsHandle.address}):`
+                            )
+                        );
+                        for (const conflict of namingConflicts) {
+                            console.log(`  ${conflict.type} ${conflict.path}`);
                         }
                     }
                 } finally {

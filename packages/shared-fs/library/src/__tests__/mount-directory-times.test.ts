@@ -4,8 +4,8 @@ import {
     CONFLICTS_DIR,
     FileVersion,
     NamingEvent,
+    conflictEntryNames,
     createSharedFsMountBackend,
-    encodeConflictPathName,
     openSharedFs,
     type SharedFsHandle,
     type SharedFsMountBackend,
@@ -35,11 +35,39 @@ const mountTarget = (
     list: (path) => fs.list(path),
     versions: (path) => fs.versions(path),
     conflicts: (path, options) => fs.conflicts(path, options),
+    namingConflicts: (path, options) => fs.namingConflicts(path, options),
+    nodeForMount: (nodeId, path) => fs.nodeForMount(nodeId, path),
+    listNodeForMount: (nodeId, path) => fs.listNodeForMount(nodeId, path),
+    childForMount: (parentNodeId, name, path) =>
+        fs.childForMount(parentNodeId, name, path),
+    readNodeVersionForMount: (nodeId, versionId) =>
+        fs.readNodeVersionForMount(nodeId, versionId),
     stat: (path) => fs.stat(path),
     bootstrapStatus: () => fs.bootstrapStatus(),
     onNamespaceChange: (listener) => fs.onNamespaceChange(listener),
     ...overrides,
 });
+
+/** The conflict-tree name of content version `id` of the file at `path`. */
+const contentEntryName = async (
+    fs: SharedFsHandle,
+    path: string,
+    id: string
+) => {
+    const version = (await fs.versions(path)).find(
+        (candidate) => candidate.id === id
+    )!;
+    return conflictEntryNames([
+        {
+            kind: "content",
+            path,
+            machineLabel: version.machineLabel,
+            authorKey: version.authorKey,
+            time: version.createdAt,
+            id,
+        },
+    ])[0];
+};
 
 /** A replicated-looking naming event, put straight into the store. */
 const namingEvent = (properties: {
@@ -611,12 +639,13 @@ describe("mount directory change times", () => {
         ]);
     });
 
-    it("moves the conflict directories when conflicts appear, move or resolve", async () => {
+    it("moves the conflict tree when conflicts appear, move or resolve", async () => {
         const backend = createSharedFsMountBackend(fs, { clock });
-        const conflictsTime = () => timeOf(backend, `/${CONFLICTS_DIR}`);
+        const root = `/${CONFLICTS_DIR}`;
+        const conflictsTime = () => timeOf(backend, root);
         await fs.mkdir("/d");
         await fs.writeFile("/d/plain.txt", "plain");
-        expect(await backend.readdir(`/${CONFLICTS_DIR}`)).toEqual([]);
+        expect(await backend.readdir(root)).toEqual([]);
 
         // A content edit changes no name, so it cannot reveal a conflict.
         let before = await conflictsTime();
@@ -626,23 +655,37 @@ describe("mount directory change times", () => {
         const base = await fs.writeFile("/d/c.txt", "base");
         await fs.stat("/d/c.txt");
         before = await conflictsTime();
-        await fs.writeFile("/d/c.txt", "left", { baseVersionIds: [base.id] });
-        await fs.writeFile("/d/c.txt", "right", { baseVersionIds: [base.id] });
+        const heads = [
+            await fs.writeFile("/d/c.txt", "left", {
+                baseVersionIds: [base.id],
+            }),
+            await fs.writeFile("/d/c.txt", "right", {
+                baseVersionIds: [base.id],
+            }),
+        ].map((head) => head.id);
         expect(await conflictsTime()).toBeGreaterThan(before);
-        expect(
-            (await backend.readdir(`/${CONFLICTS_DIR}`)).map((e) => e.name)
-        ).toEqual([encodeConflictPathName("/d/c.txt")]);
+        const entriesAt = async (path: string) =>
+            (
+                await Promise.all(
+                    heads.map((id) => contentEntryName(fs, path, id))
+                )
+            ).sort();
+        expect(await namesOf(backend, root)).toEqual(
+            await entriesAt("/d/c.txt")
+        );
 
-        // Renaming the conflicted file renames its conflict directory.
+        // Renaming the conflicted file renames its entries.
         before = await conflictsTime();
         await fs.rename("/d/c.txt", "/d/moved.txt");
         expect(await conflictsTime()).toBeGreaterThan(before);
+        expect(await namesOf(backend, root)).toEqual(
+            await entriesAt("/d/moved.txt")
+        );
 
-        // Resolving merges the heads and removes the conflict directory.
+        // Resolving merges the heads and removes the entries.
         before = await conflictsTime();
-        const [head] = (await fs.stat("/d/moved.txt"))!.headVersionIds!;
-        await fs.resolveConflict("/d/moved.txt", head);
-        expect(await backend.readdir(`/${CONFLICTS_DIR}`)).toEqual([]);
+        await fs.resolveConflict("/d/moved.txt", heads[0]);
+        expect(await backend.readdir(root)).toEqual([]);
         expect(await conflictsTime()).toBeGreaterThan(before);
     });
 
@@ -759,18 +802,18 @@ describe("mount directory change times", () => {
         expect(await timeOf(backend, root)).toBeGreaterThan(during!);
     });
 
-    it("redoes a conflict directory lookup that a fork raced", async () => {
+    it("scans the conflict tree again once a fork races a scan, and only then", async () => {
         const root = `/${CONFLICTS_DIR}`;
-        const dir = `${root}/${encodeConflictPathName("/d/c.txt")}`;
         await fs.mkdir("/d");
         const base = await fs.writeFile("/d/c.txt", "base");
         await fs.stat("/d/c.txt");
-        let race: ((pass: number) => Promise<void>) | undefined;
-        let passes = 0;
+        let race: (() => Promise<void>) | undefined;
         const conflicts = vi.fn(
             async (path?: string, options?: { allowPartial?: boolean }) => {
                 const result = await fs.conflicts(path, options);
-                if (race && path === "/d/c.txt") await race(++passes);
+                const racing = race;
+                race = undefined;
+                await racing?.();
                 return result;
             }
         );
@@ -779,35 +822,40 @@ describe("mount directory change times", () => {
             { clock }
         );
 
-        // Another writer forks the file while the first lookup is in flight.
-        race = async (pass) => {
-            if (pass > 1) return;
-            await fs.writeFile("/d/c.txt", "left", {
-                baseVersionIds: [base.id],
-            });
-            await fs.writeFile("/d/c.txt", "right", {
-                baseVersionIds: [base.id],
-            });
-        };
-        expect(await backend.getattr(dir)).toMatchObject({
-            kind: "directory",
-        });
-        expect(passes).toBe(2);
-
-        // Name changes land during every pass: the lookup gives up, and the
-        // conflict directories' time moves past one read meanwhile.
+        // Another writer forks the file while the first scan is in flight:
+        // the listing may predate the fork, so the tree's time moves past a
+        // read meanwhile, and the next lookup scans again.
         let during: number | undefined;
-        passes = 0;
-        race = async (pass) => {
-            await fs.writeFile(`/d/other-${pass}.txt`, "other");
-            if (pass === 3) during = await timeOf(backend, root);
+        race = async () => {
+            for (const side of ["left", "right"]) {
+                await fs.writeFile("/d/c.txt", side, {
+                    baseVersionIds: [base.id],
+                });
+            }
+            during = await timeOf(backend, root);
         };
-        await backend.getattr(dir);
-        expect(passes).toBe(3);
+        expect(await backend.readdir(root)).toEqual([]);
         expect(await timeOf(backend, root)).toBeGreaterThan(during!);
+        const names = await namesOf(backend, root);
+        expect(names).toHaveLength(2);
+        expect(conflicts).toHaveBeenCalledTimes(2);
+
+        // Nothing changed since: lookups, reads and listings reuse that scan.
+        for (const name of names) {
+            expect(await backend.getattr(`${root}/${name}`)).toMatchObject({
+                kind: "file",
+            });
+            const handle = await backend.open(`${root}/${name}`);
+            await backend.release(handle);
+        }
+        expect(await namesOf(backend, root)).toEqual(names);
+        await expect(backend.getattr(`${root}/missing`)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+        expect(conflicts).toHaveBeenCalledTimes(2);
     });
 
-    it("moves the conflict directories when a name reveals an existing fork", async () => {
+    it("moves the conflict tree when a name reveals an existing fork", async () => {
         const backend = createSharedFsMountBackend(fs, { clock });
         const root = `/${CONFLICTS_DIR}`;
         await fs.mkdir("/d");
@@ -838,9 +886,15 @@ describe("mount directory change times", () => {
             }),
             { unique: true }
         );
-        expect(await namesOf(backend, root)).toEqual([
-            encodeConflictPathName("/d/forked.txt"),
-        ]);
+        const forkedAt = async (path: string) =>
+            Promise.all(
+                ["version:left", "version:right"].map((id) =>
+                    contentEntryName(fs, path, id)
+                )
+            );
+        expect(await namesOf(backend, root)).toEqual(
+            (await forkedAt("/d/forked.txt")).sort()
+        );
         expect(await timeOf(backend, root)).toBeGreaterThan(before);
 
         // A deleted conflicted file leaves the listing; a concurrent rename
@@ -860,9 +914,17 @@ describe("mount directory change times", () => {
             }),
             { unique: true }
         );
-        expect(await namesOf(backend, root)).toEqual([
-            encodeConflictPathName("/d/revived.txt"),
-        ]);
+        const revived = await namesOf(backend, root);
+        expect(revived).toEqual(
+            expect.arrayContaining(await forkedAt("/d/revived.txt"))
+        );
+        // The rename and the delete it raced are a multi-head conflict too.
+        expect(
+            revived.filter((name) =>
+                name.startsWith("multi-head d\uff0frevived.txt ")
+            )
+        ).toHaveLength(1);
+        expect(revived).toHaveLength(3);
         expect(await timeOf(backend, root)).toBeGreaterThan(before);
 
         // Sibling versions of a warm file delivered in one sync change.
@@ -884,7 +946,7 @@ describe("mount directory change times", () => {
         }
         listener({ detail: { added: siblings, removed: [] } });
         expect(await namesOf(backend, root)).toContain(
-            encodeConflictPathName("/d/c.txt")
+            await contentEntryName(fs, "/d/c.txt", "version:sync-left")
         );
         expect(await timeOf(backend, root)).toBeGreaterThan(before);
     });

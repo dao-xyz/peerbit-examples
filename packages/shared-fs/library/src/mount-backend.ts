@@ -6,11 +6,13 @@ import {
     SharedFsExpectedNodeMismatchError,
     type SharedFsConflict,
     type SharedFsEntryInfo,
+    type SharedFsMountNode,
     type SharedFsMountReadSnapshot,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
     type SharedFsMountWriteOutcome,
     type SharedFsNamespaceChange,
+    type SharedFsNamingConflict,
     type SharedFsVersionInfo,
     type WriteFileOptions,
 } from "./index.js";
@@ -20,14 +22,14 @@ import {
     CONFLICTS_DIR,
     ROOT_NODE_ID,
     basename,
-    decodeConflictPathName,
+    conflictEntryNames,
     dirname,
-    encodeConflictPathName,
     fsNameError,
     fsNameErrorMessage,
     joinFsPath,
     normalizeFsPath,
     pathSegments,
+    type ConflictEntryNameParts,
 } from "./path.js";
 import {
     acceptsSharedFsWriteFileProfile,
@@ -59,10 +61,11 @@ type LocalCommitProfileStats = {
 
 /**
  * The filesystem a native mount runs against. Mounts read file contents only
- * through `readVersionForMount`, commit through `writeFile`,
- * `writeNodeForMount` and `setMetadata`, remove and rename only through
- * `mutateNamespaceForMount`, and look paths up through `stat`; they never
- * call a target's ordinary `readVersion`, `rm` or `rename`. A
+ * through `readVersionForMount` and `readNodeVersionForMount`, commit
+ * through `writeFile`, `writeNodeForMount` and `setMetadata`, remove and
+ * rename only through `mutateNamespaceForMount`, and look paths up through
+ * `stat` (hidden nodes through `nodeForMount` and `listNodeForMount`); they
+ * never call a target's ordinary `readVersion`, `rm` or `rename`. A
  * SharedFsHandle or SharedFileSystem subclass (or any delegating wrapper)
  * that customizes read, write, remove or rename policy must therefore apply
  * the same policy in these mount-facing methods at the layer it overrides,
@@ -143,6 +146,42 @@ export type SharedFsMountBackendTarget = {
         path?: string,
         options?: { allowPartial?: boolean }
     ): Promise<SharedFsConflict[]>;
+    /**
+     * Optional naming-conflict scan (see SharedFileSystem.namingConflicts).
+     * With it, `nodeForMount`, `listNodeForMount`, `childForMount` and
+     * `readNodeVersionForMount` (SharedFsHandle and SharedFileSystem provide
+     * them all), the mount's conflict tree also shows naming conflicts;
+     * without them it shows content conflicts only.
+     */
+    namingConflicts?(
+        path?: string,
+        options?: { allowPartial?: boolean }
+    ): Promise<SharedFsNamingConflict[]>;
+    /** See SharedFileSystem.nodeForMount. */
+    nodeForMount?(
+        nodeId: string,
+        path: string
+    ): Promise<SharedFsMountNode | undefined>;
+    /** See SharedFileSystem.listNodeForMount. */
+    listNodeForMount?(
+        nodeId: string,
+        path: string
+    ): Promise<SharedFsEntryInfo[]>;
+    /** See SharedFileSystem.childForMount. */
+    childForMount?(
+        parentNodeId: string,
+        name: string,
+        path: string
+    ): Promise<SharedFsEntryInfo | undefined>;
+    /**
+     * readVersionForMount of version `versionId` of node `nodeId`, wherever
+     * or whether the node is named; undefined when that version is not the
+     * node's. The conflict tree reads through it when present.
+     */
+    readNodeVersionForMount?(
+        nodeId: string,
+        versionId: string
+    ): Promise<SharedFsMountReadSnapshot | undefined>;
     /**
      * Optional artifact-ignore probe (provided by ignore-aware handles).
      * When present, write-intent opens on ignored paths fail EARLY at
@@ -638,23 +677,59 @@ const isConflictPath = (path: string) => {
     return pathSegments(path)[0] === CONFLICTS_DIR;
 };
 
-const parseConflictPath = (path: string) => {
-    const segments = pathSegments(path);
-    if (segments[0] !== CONFLICTS_DIR) {
-        return undefined;
-    }
-    if (segments.length === 1) {
-        return { kind: "root" as const };
-    }
-    const filePath = decodeConflictPathName(segments[1]);
-    if (segments.length === 2) {
-        return { kind: "path" as const, filePath };
-    }
-    if (segments.length === 3) {
-        return { kind: "version" as const, filePath, versionId: segments[2] };
-    }
-    return { kind: "invalid" as const };
+/**
+ * A node the conflict tree shows, `path` being its path there (an entry's:
+ * its conflict's): a file as one version's bytes, or a directory to browse.
+ * A `live` file is a node entry, which shows the node's visible version as
+ * it is when read.
+ */
+type ConflictTreeNode = { nodeId: string; path: string } & (
+    | { kind: "directory" }
+    | {
+          kind: "file";
+          versionId: string;
+          size: bigint;
+          mtimeMs: number;
+          live?: boolean;
+      }
+);
+
+/** The conflict tree's entries by name (see conflictEntryNames). */
+type ConflictTree = Map<string, ConflictTreeNode>;
+
+/** A listed or hidden node as the conflict tree shows it. */
+const conflictTreeNode = (
+    entry: SharedFsEntryInfo,
+    live?: boolean
+): ConflictTreeNode | undefined =>
+    entry.kind === "directory"
+        ? { kind: "directory", nodeId: entry.nodeId, path: entry.path }
+        : entry.versionId === undefined
+          ? undefined
+          : {
+                kind: "file",
+                nodeId: entry.nodeId,
+                path: entry.path,
+                versionId: entry.versionId,
+                size: entry.size,
+                mtimeMs: Number(entry.updatedAt),
+                live,
+            };
+
+/** Name each entry, sorted by name. */
+const entriesByName = (
+    records: (ConflictEntryNameParts & { node: ConflictTreeNode })[]
+): ConflictTree => {
+    const names = conflictEntryNames(records);
+    return new Map(
+        records
+            .map((record, i) => [names[i], record.node] as const)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    );
 };
+
+const readOnlyError = (path: string) =>
+    new SharedFsBackendError("EROFS", `Path is read-only: ${path}`);
 
 const notFound = (path: string) =>
     new SharedFsBackendError("ENOENT", `Path does not exist: ${path}`);
@@ -951,7 +1026,7 @@ export const createSharedFsMountBackend = (
     // Advanced for every namespace batch that may move a listed name; reads
     // whose result could predate such a batch are redone (settledRead).
     let nsSeq = 0;
-    // Advanced whenever the conflict directories' stamp moves.
+    // Advanced whenever the conflict tree may change (its stamp moves).
     let conflictsSeq = 0;
     const profile = options.profile;
     // Joins a `mount.target.writeFile` record to the target's own sub-phase
@@ -1029,9 +1104,157 @@ export const createSharedFsMountBackend = (
         }
     };
 
-    const conflictForPath = async (filePath: string) => {
-        const conflicts = await target.conflicts(filePath);
-        return conflicts.find((conflict) => conflict.path === filePath);
+    /** Whether the conflict tree shows naming conflicts (see the target). */
+    const namingTree =
+        typeof target.namingConflicts === "function" &&
+        typeof target.nodeForMount === "function" &&
+        typeof target.listNodeForMount === "function" &&
+        typeof target.childForMount === "function" &&
+        typeof target.readNodeVersionForMount === "function";
+
+    /**
+     * Scan every conflict into the entries of CONFLICTS_DIR: a file for each
+     * distinct head of a content conflict and each version a delete did not
+     * observe (delete-vs-edit), and the node of each multi-head, each
+     * shadowed duplicate-name claimant and each top-most unreachable node
+     * (one whose winning parent is not itself unreachable, or the least id
+     * on a move cycle), the others being found inside it.
+     */
+    const scanConflictTree = async (): Promise<ConflictTree> => {
+        const records: (ConflictEntryNameParts & {
+            node: ConflictTreeNode;
+        })[] = [];
+        const seen = new Set<string>();
+        const add = (
+            kind: string,
+            id: string,
+            writer: { authorKey: string; machineLabel: string },
+            time: bigint,
+            node: ConflictTreeNode
+        ) => {
+            if (seen.has(`${kind}\n${id}`)) return;
+            seen.add(`${kind}\n${id}`);
+            records.push({
+                kind,
+                path: node.path,
+                machineLabel: writer.machineLabel,
+                authorKey: writer.authorKey,
+                time,
+                id,
+                directory: node.kind === "directory",
+                node,
+            });
+        };
+        const versionNode = (
+            path: string,
+            version: SharedFsVersionInfo
+        ): ConflictTreeNode => ({
+            kind: "file",
+            nodeId: version.nodeId,
+            path,
+            versionId: version.id,
+            size: version.size,
+            mtimeMs: Number(version.mtime),
+        });
+        // A mount listing tolerates partial results while a cold-start
+        // bootstrap overlay is active.
+        for (const conflict of await target.conflicts(undefined, {
+            allowPartial: true,
+        })) {
+            for (const version of conflict.versions) {
+                add(
+                    "content",
+                    version.id,
+                    version,
+                    version.createdAt,
+                    versionNode(conflict.path, version)
+                );
+            }
+        }
+        if (!namingTree) return entriesByName(records);
+        const naming = await target.namingConflicts!(undefined, {
+            allowPartial: true,
+        });
+        const unreachableParents = new Map(
+            naming.flatMap((conflict) =>
+                conflict.type === "unreachable"
+                    ? [[conflict.nodeId, conflict.parentId] as const]
+                    : []
+            )
+        );
+        const topMost = (nodeId: string) => {
+            const chain = [nodeId];
+            let parent = unreachableParents.get(nodeId);
+            while (parent !== undefined && unreachableParents.has(parent)) {
+                if (parent === nodeId) {
+                    // On a move cycle: its least id stands for it.
+                    return chain.every((id) => id >= nodeId);
+                }
+                if (chain.includes(parent)) return false; // below a cycle
+                chain.push(parent);
+                parent = unreachableParents.get(parent);
+            }
+            return chain.length === 1;
+        };
+        for (const conflict of naming) {
+            if (conflict.type === "delete-vs-edit") {
+                const node = await target.nodeForMount!(
+                    conflict.nodeId,
+                    conflict.path
+                );
+                for (const versionId of conflict.recoverableVersionIds ?? []) {
+                    const version = node?.versions.find(
+                        (candidate) => candidate.id === versionId
+                    );
+                    if (version) {
+                        add(
+                            conflict.type,
+                            version.id,
+                            version,
+                            version.createdAt,
+                            versionNode(conflict.path, version)
+                        );
+                    }
+                }
+                continue;
+            }
+            const nodeIds =
+                conflict.type === "duplicate-name"
+                    ? (conflict.shadowedNodeIds ?? [])
+                    : conflict.type === "unreachable" &&
+                        !topMost(conflict.nodeId)
+                      ? []
+                      : [conflict.nodeId];
+            for (const nodeId of nodeIds) {
+                const node = await target.nodeForMount!(nodeId, conflict.path);
+                const shown = node && conflictTreeNode(node, true);
+                // Undefined for a file with no content yet.
+                if (shown) {
+                    add(conflict.type, nodeId, node, node.namedAt, shown);
+                }
+            }
+        }
+        return entriesByName(records);
+    };
+
+    /**
+     * The conflict tree, scanned again only once a feed batch may have
+     * changed it (conflictsSeq) or without a feed; concurrent readers share
+     * one scan.
+     */
+    let conflictTreeScan:
+        | { seq: number; tree: Promise<ConflictTree> }
+        | undefined;
+    const conflictTree = () => {
+        if (feed && conflictTreeScan?.seq === conflictsSeq) {
+            return conflictTreeScan.tree;
+        }
+        const scan = { seq: conflictsSeq, tree: scanConflictTree() };
+        conflictTreeScan = scan;
+        scan.tree.catch(() => {
+            if (conflictTreeScan === scan) conflictTreeScan = undefined;
+        });
+        return scan.tree;
     };
 
     const pendingDirtyState = (path: string) => {
@@ -1300,10 +1523,16 @@ export const createSharedFsMountBackend = (
             served.clear();
             for (const state of activeStates) markOpenState(state, true);
         }
-        // A forked file without a live winner, or on an ignored path, is not
-        // listed there, so any placement change may add or remove a conflict
-        // directory; an empty listing proves nothing about hidden forks.
-        if (change.reset || change.versionForkOrMerge || naming) {
+        // The conflict tree shows hidden nodes as they are: any placement
+        // change may add, remove or move one of its entries or their
+        // children, and so may a node's first or last content.
+        if (
+            change.reset ||
+            change.versionForkOrMerge ||
+            naming ||
+            change.firstContent.length > 0 ||
+            change.contentLost.length > 0
+        ) {
             conflictsSeq++;
             keys.add(CONFLICTS_STAMP_KEY);
         }
@@ -1962,60 +2191,190 @@ export const createSharedFsMountBackend = (
         }
     };
 
-    const getattrConflict = async (path: string): Promise<SharedFsStat> => {
-        const parsed = parseConflictPath(path);
-        if (!parsed || parsed.kind === "invalid") {
-            throw notFound(path);
+    /**
+     * The children of a directory the conflict tree shows, as that directory
+     * is now. `visited` holds it and the nodes above it on the path, which
+     * are left out, so a move cycle ends.
+     */
+    const listConflictDirectory = async (
+        directory: ConflictTreeNode,
+        visited: ReadonlySet<string>
+    ) => {
+        const children: { name: string; node: ConflictTreeNode }[] = [];
+        if (!namingTree) return children;
+        for (const entry of await target.listNodeForMount!(
+            directory.nodeId,
+            directory.path
+        )) {
+            const node = !visited.has(entry.nodeId) && conflictTreeNode(entry);
+            if (node) children.push({ name: entry.name, node });
         }
-        if (parsed.kind === "root") {
-            return directoryStat(
-                joinFsPath("/", CONFLICTS_DIR),
-                stamps.read(CONFLICTS_STAMP_KEY)
+        return children;
+    };
+
+    /** A node entry's file as it is now (see ConflictTreeNode). */
+    const liveNode = async (node: ConflictTreeNode) => {
+        if (node.kind !== "file" || !node.live) return node;
+        const now = await target.nodeForMount!(node.nodeId, node.path);
+        return (now && conflictTreeNode(now, true)) ?? node;
+    };
+
+    /**
+     * What a path under CONFLICTS_DIR names, looked up one name at a time
+     * (see listConflictDirectory).
+     */
+    const resolveConflictPath = async (
+        path: string
+    ): Promise<
+        | { kind: "root" }
+        | { kind: "node"; node: ConflictTreeNode; visited: Set<string> }
+        | { kind: "missing"; code: "ENOENT" | "ENOTDIR" }
+    > => {
+        const [, entryName, ...names] = pathSegments(path);
+        if (entryName === undefined) return { kind: "root" };
+        const entry = (await conflictTree()).get(entryName);
+        let node = entry && (await liveNode(entry));
+        const visited = new Set<string>();
+        for (const name of names) {
+            if (!node) break;
+            if (node.kind !== "directory") {
+                return { kind: "missing", code: "ENOTDIR" };
+            }
+            visited.add(node.nodeId);
+            const child = await target.childForMount!(
+                node.nodeId,
+                name,
+                joinFsPath(node.path, name)
             );
+            node =
+                child && !visited.has(child.nodeId)
+                    ? conflictTreeNode(child)
+                    : undefined;
+        }
+        if (!node) return { kind: "missing", code: "ENOENT" };
+        visited.add(node.nodeId);
+        return { kind: "node", node, visited };
+    };
+
+    const conflictPathError = (path: string, code: "ENOENT" | "ENOTDIR") =>
+        code === "ENOENT"
+            ? notFound(path)
+            : new SharedFsBackendError(
+                  "ENOTDIR",
+                  `Path is not a directory: ${path}`
+              );
+
+    const getattrConflict = async (path: string): Promise<SharedFsStat> => {
+        if (pathSegments(path).length === 1) {
+            // The tree itself is always there: no scan.
+            return directoryStat(path, stamps.read(CONFLICTS_STAMP_KEY));
         }
         return settledRead(
-            () => conflictForPath(parsed.filePath),
+            () => resolveConflictPath(path),
             () => conflictsSeq,
-            (conflict, settled) => {
-                let stat: SharedFsStat | undefined;
-                if (parsed.kind === "path") {
-                    stat =
-                        conflict &&
-                        directoryStat(path, stamps.read(CONFLICTS_STAMP_KEY));
-                } else {
-                    const version = conflict?.versions.find(
-                        (candidate) => candidate.id === parsed.versionId
-                    );
-                    stat =
-                        version &&
-                        fileStat(
-                            path,
-                            bigintToSize(version.size),
-                            Number(version.mtime)
-                        );
-                }
-                // A raced answer may predate a fork or merge: the conflict
-                // directories' time moves past whatever a consumer pairs
-                // with it.
+            (resolved, settled) => {
+                // A raced answer may predate a conflict change: the tree's
+                // time moves past whatever a consumer pairs with it.
                 if (!settled) stamps.bump(CONFLICTS_STAMP_KEY);
-                if (!stat) throw notFound(path);
-                return stat;
-            }
+                if (resolved.kind === "missing") {
+                    throw conflictPathError(path, resolved.code);
+                }
+                return resolved.kind === "root" ||
+                    resolved.node.kind === "directory"
+                    ? directoryStat(path, stamps.read(CONFLICTS_STAMP_KEY))
+                    : fileStat(
+                          path,
+                          bigintToSize(resolved.node.size),
+                          resolved.node.mtimeMs
+                      );
+            },
+            1
         );
     };
 
+    const readdirConflict = (path: string, includeStats: boolean) =>
+        settledRead(
+            async () => {
+                const resolved = await resolveConflictPath(path);
+                return {
+                    resolved,
+                    children:
+                        resolved.kind === "root"
+                            ? await Promise.all(
+                                  [...(await conflictTree())].map(
+                                      async ([name, node]) => ({
+                                          name,
+                                          node: includeStats
+                                              ? await liveNode(node)
+                                              : node,
+                                      })
+                                  )
+                              )
+                            : resolved.kind === "node" &&
+                                resolved.node.kind === "directory"
+                              ? await listConflictDirectory(
+                                    resolved.node,
+                                    resolved.visited
+                                )
+                              : undefined,
+                };
+            },
+            () => conflictsSeq,
+            ({ resolved, children }, settled): SharedFsDirent[] => {
+                if (!settled) stamps.bump(CONFLICTS_STAMP_KEY);
+                if (!children) {
+                    throw conflictPathError(
+                        path,
+                        resolved.kind === "missing" ? resolved.code : "ENOTDIR"
+                    );
+                }
+                return children.map(({ name, node }) =>
+                    node.kind === "directory"
+                        ? {
+                              name,
+                              kind: "directory",
+                              ...(includeStats
+                                  ? {
+                                        stat: directoryDirentStat(
+                                            stamps.read(CONFLICTS_STAMP_KEY)
+                                        ),
+                                    }
+                                  : {}),
+                          }
+                        : {
+                              name,
+                              kind: "file",
+                              ...(includeStats
+                                  ? {
+                                        stat: fileDirentStat(
+                                            bigintToSize(node.size),
+                                            node.mtimeMs
+                                        ),
+                                    }
+                                  : {}),
+                          }
+                );
+            },
+            // A scan reads every file version and naming event: it runs
+            // once, and a raced listing moves the time instead.
+            1
+        );
+
     const readConflictFile = async (path: string) => {
-        const parsed = parseConflictPath(path);
-        if (!parsed || parsed.kind !== "version") {
+        const resolved = await resolveConflictPath(path);
+        if (resolved.kind === "missing") {
+            throw conflictPathError(path, resolved.code);
+        }
+        if (resolved.kind === "root" || resolved.node.kind !== "file") {
             throw new SharedFsBackendError(
                 "EISDIR",
-                `Path is not a conflict file: ${path}`
+                `Path is a directory: ${path}`
             );
         }
-        const snapshot = await target.readVersionForMount(
-            parsed.filePath,
-            parsed.versionId
-        );
+        const { nodeId, versionId } = resolved.node;
+        const snapshot = target.readNodeVersionForMount
+            ? await target.readNodeVersionForMount(nodeId, versionId)
+            : await target.readVersionForMount(resolved.node.path, versionId);
         if (!snapshot) {
             throw notFound(path);
         }
@@ -2614,6 +2973,10 @@ export const createSharedFsMountBackend = (
         }
         const mutatingOpen =
             parsedFlags.write || parsedFlags.create || parsedFlags.truncate;
+        // Read-only for good, not until readiness: EROFS, never EAGAIN.
+        if (mutatingOpen && isConflictPath(normalized)) {
+            throw readOnlyError(normalized);
+        }
         if (mutatingOpen) {
             assertWriteReady("Mutating open for " + normalized);
         }
@@ -2627,12 +2990,6 @@ export const createSharedFsMountBackend = (
             throw new SharedFsBackendError("EISDIR", "Path is a directory: /");
         }
         if (isConflictPath(normalized)) {
-            if (mutatingOpen) {
-                throw new SharedFsBackendError(
-                    "EROFS",
-                    "Path is read-only: " + normalized
-                );
-            }
             const buffer = await readConflictFile(normalized);
             const state = newFileState(normalized, undefined, buffer);
             state.readOnly = true;
@@ -2935,84 +3292,7 @@ export const createSharedFsMountBackend = (
                 const normalized = kernelPath(path);
                 const includeStats = options?.includeStats === true;
                 if (isConflictPath(normalized)) {
-                    const parsed = parseConflictPath(normalized);
-                    if (
-                        !parsed ||
-                        parsed.kind === "invalid" ||
-                        parsed.kind === "version"
-                    ) {
-                        throw new SharedFsBackendError(
-                            "ENOTDIR",
-                            `Path is not a directory: ${normalized}`
-                        );
-                    }
-                    if (parsed.kind === "root") {
-                        // A mount listing tolerates partial results while
-                        // a cold-start bootstrap overlay is active. The scan
-                        // reads every file version, and any fork, merge or
-                        // removal may land during it: it runs once, and
-                        // a raced listing moves the time instead.
-                        return settledRead(
-                            () =>
-                                target.conflicts(undefined, {
-                                    allowPartial: true,
-                                }),
-                            () => conflictsSeq,
-                            (conflicts, settled) => {
-                                const entries = conflicts.map((conflict) => {
-                                    const name = encodeConflictPathName(
-                                        conflict.path
-                                    );
-                                    if (!includeStats) {
-                                        return {
-                                            name,
-                                            kind: "directory" as const,
-                                        };
-                                    }
-                                    return {
-                                        name,
-                                        kind: "directory" as const,
-                                        stat: directoryDirentStat(
-                                            stamps.read(CONFLICTS_STAMP_KEY)
-                                        ),
-                                    };
-                                });
-                                if (!settled) {
-                                    stamps.bump(CONFLICTS_STAMP_KEY);
-                                }
-                                return entries;
-                            },
-                            1
-                        );
-                    }
-                    return settledRead(
-                        () => conflictForPath(parsed.filePath),
-                        () => conflictsSeq,
-                        (conflict, settled) => {
-                            if (!settled) {
-                                stamps.bump(CONFLICTS_STAMP_KEY);
-                            }
-                            if (!conflict) {
-                                throw notFound(normalized);
-                            }
-                            return conflict.versions.map((version) => {
-                                if (!includeStats) {
-                                    return {
-                                        name: version.id,
-                                        kind: "file" as const,
-                                    };
-                                }
-                                return {
-                                    name: version.id,
-                                    kind: "file" as const,
-                                    stat: fileDirentStat(
-                                        bigintToSize(version.size),
-                                        Number(version.mtime)
-                                    ),
-                                };
-                            });
-                        }
-                    );
+                    return readdirConflict(normalized, includeStats);
                 }
                 return settledRead(
                     () => target.list(normalized),
@@ -3089,23 +3369,11 @@ export const createSharedFsMountBackend = (
                                 );
                             }
                         }
+                        // The conflict tree is looked up by name and never
+                        // listed: git, backup and indexing tools would walk
+                        // every hidden copy (no stored name can take it:
+                        // ".peerbit-" names are reserved).
                         const entries = [...byName.values()];
-                        if (normalized === "/") {
-                            entries.push(
-                                includeStats
-                                    ? {
-                                          name: CONFLICTS_DIR,
-                                          kind: "directory",
-                                          stat: directoryDirentStat(
-                                              stamps.read(CONFLICTS_STAMP_KEY)
-                                          ),
-                                      }
-                                    : {
-                                          name: CONFLICTS_DIR,
-                                          kind: "directory",
-                                      }
-                            );
-                        }
                         if (!settled) {
                             if (listedKey !== undefined) {
                                 stamps.bump(listedKey);
@@ -3220,13 +3488,8 @@ export const createSharedFsMountBackend = (
                     return;
                 }
                 const normalized = kernelPath(targetRef);
+                if (isConflictPath(normalized)) throw readOnlyError(normalized);
                 assertWriteReady(`Truncate ${normalized}`);
-                if (isConflictPath(normalized)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        `Path is read-only: ${normalized}`
-                    );
-                }
                 const handle = await openPathAdmitted(normalized, {
                     read: true,
                     write: true,
@@ -3340,13 +3603,8 @@ export const createSharedFsMountBackend = (
         async mkdir(path: string) {
             return wrap(async () => {
                 const normalized = kernelPath(path, true);
+                if (isConflictPath(normalized)) throw readOnlyError(normalized);
                 assertWriteReady(`mkdir ${normalized}`);
-                if (isConflictPath(normalized)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        `Path is read-only: ${normalized}`
-                    );
-                }
                 return withNamespaceTransition(
                     `mkdir ${normalized}`,
                     [normalized],
@@ -3388,13 +3646,8 @@ export const createSharedFsMountBackend = (
         async rmdir(path: string) {
             return wrap(async () => {
                 const normalized = kernelPath(path);
+                if (isConflictPath(normalized)) throw readOnlyError(normalized);
                 assertWriteReady(`rmdir ${normalized}`);
-                if (isConflictPath(normalized)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        `Path is read-only: ${normalized}`
-                    );
-                }
                 return withNamespaceTransition(
                     `rmdir ${normalized}`,
                     [normalized],
@@ -3450,13 +3703,10 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const fromPath = kernelPath(from, true);
                 const toPath = kernelPath(to, true);
-                assertWriteReady(`rename ${fromPath} to ${toPath}`);
-                if (isConflictPath(fromPath) || isConflictPath(toPath)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        "Conflict metadata is read-only"
-                    );
+                for (const path of [fromPath, toPath]) {
+                    if (isConflictPath(path)) throw readOnlyError(path);
                 }
+                assertWriteReady(`rename ${fromPath} to ${toPath}`);
                 if (fromPath === toPath) {
                     return;
                 }
@@ -3645,13 +3895,8 @@ export const createSharedFsMountBackend = (
         async unlink(path: string) {
             return wrap(async () => {
                 const normalized = kernelPath(path);
+                if (isConflictPath(normalized)) throw readOnlyError(normalized);
                 assertWriteReady(`unlink ${normalized}`);
-                if (isConflictPath(normalized)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        `Path is read-only: ${normalized}`
-                    );
-                }
                 return withNamespaceTransition(
                     `unlink ${normalized}`,
                     [normalized],
@@ -3739,12 +3984,7 @@ export const createSharedFsMountBackend = (
                 const { mtimeMs } = attrs;
                 const normalized = kernelPath(path);
                 if (normalized === "/") return;
-                if (isConflictPath(normalized)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        `Path is read-only: ${normalized}`
-                    );
-                }
+                if (isConflictPath(normalized)) throw readOnlyError(normalized);
                 assertWriteReady(`setattr ${normalized}`);
                 return withOpenPathLock(normalized, async () => {
                     for (;;) {
@@ -3861,12 +4101,7 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const normalized = kernelPath(path, true);
                 if (normalized === "/") throw alreadyExists(normalized);
-                if (isConflictPath(normalized)) {
-                    throw new SharedFsBackendError(
-                        "EROFS",
-                        `Path is read-only: ${normalized}`
-                    );
-                }
+                if (isConflictPath(normalized)) throw readOnlyError(normalized);
                 assertWriteReady(`symlink ${normalized}`);
                 return withNamespaceTransition(
                     `symlink ${normalized}`,

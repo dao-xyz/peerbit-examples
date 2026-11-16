@@ -218,6 +218,35 @@ mkdir "$mountpoint/docs"
 printf "hello external native" > "$mountpoint/docs/hello.txt"
 test "$(cat "$mountpoint/docs/hello.txt")" = "hello external native"
 
+# Conflict copies live in /.peerbit-conflicts: never listed in /, always there
+# by name, and every write inside fails with EROFS.
+conflicts_dir="$mountpoint/.peerbit-conflicts"
+if ls -A "$mountpoint" | grep -Fqx .peerbit-conflicts; then
+  echo "/.peerbit-conflicts must not be listed in /" >&2
+  exit 1
+fi
+test -d "$conflicts_dir"
+test -z "$(ls -A "$conflicts_dir")"
+expect_read_only() {
+  local output
+  if output="$("$@" 2>&1)"; then
+    echo "Expected EROFS from: $*" >&2
+    exit 1
+  fi
+  case "$output" in
+    *"Read-only file system"*) ;;
+    *)
+      echo "Expected EROFS from: $*, got: $output" >&2
+      exit 1
+      ;;
+  esac
+}
+expect_read_only touch "$conflicts_dir/new.txt"
+expect_read_only mkdir "$conflicts_dir/new"
+expect_read_only mv "$mountpoint/docs/hello.txt" "$conflicts_dir/hello.txt"
+expect_read_only rmdir "$conflicts_dir"
+test "$(cat "$mountpoint/docs/hello.txt")" = "hello external native"
+
 # Profiled Linux runs check the kernel cache policy: names cached for 0.1 s,
 # attributes never. The second of two stats 20 ms apart must then cost exactly
 # one getattr: 3 means the -o timeouts did not reach the kernel (a cgofuse that

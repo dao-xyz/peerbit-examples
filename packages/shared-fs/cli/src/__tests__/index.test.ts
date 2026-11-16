@@ -3128,6 +3128,72 @@ describe("peerbit-fs cli", () => {
         }
     });
 
+    it("gates CI with conflicts --fail-if-any: 3 for any content or naming conflict, 0 for none", async () => {
+        const fixture = await seedConflicts();
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const savedExitCode = process.exitCode;
+        const run = async (...args: string[]) => {
+            process.exitCode = undefined;
+            log.mockClear();
+            await runCli([
+                "conflicts",
+                fixture.address,
+                ...args,
+                "--no-replicate",
+                "--directory",
+                fixture.directory,
+            ]);
+            return {
+                exitCode: process.exitCode,
+                output: log.mock.calls.map(([line]) => String(line)).join("\n"),
+            };
+        };
+        try {
+            // Every kind fails the gate; the content listing stays as it was.
+            const all = await run("--fail-if-any");
+            expect(all.exitCode).toBe(3);
+            expect(all.output).toContain("/content.txt");
+            expect(all.output).toContain(fixture.otherVersionId);
+            expect(all.output).toContain("duplicate-name /duplicate.txt");
+            expect(all.output).toContain("delete-vs-edit /delete-race.txt");
+
+            // A naming conflict alone fails it too.
+            const naming = await run(
+                "--path",
+                "/duplicate.txt",
+                "--fail-if-any",
+                "--json"
+            );
+            expect(naming.exitCode).toBe(3);
+            const result = JSON.parse(naming.output);
+            expect(result.conflicts).toEqual([]);
+            expect(result.namingConflicts).toContainEqual(
+                expect.objectContaining({
+                    type: "duplicate-name",
+                    path: "/duplicate.txt",
+                    nodeId: fixture.duplicate.nodeId,
+                })
+            );
+
+            // No conflict in scope: status 0.
+            const none = await run("--path", "/missing", "--fail-if-any");
+            expect(none.exitCode ?? 0).toBe(0);
+            expect(none.output).toBe("No conflicts");
+
+            // Without the flag the status never reports conflicts.
+            const listing = await run();
+            expect(listing.exitCode ?? 0).toBe(0);
+            expect(listing.output).toContain("/content.txt");
+            expect(listing.output).not.toContain("duplicate-name");
+        } finally {
+            process.exitCode = savedExitCode;
+            log.mockRestore();
+            warn.mockRestore();
+            await fs.rm(fixture.directory, { recursive: true, force: true });
+        }
+    });
+
     it("publishes a selected content resolution and preserves history", async () => {
         const fixture = await seedConflicts();
         const log = vi.spyOn(console, "log").mockImplementation(() => {});

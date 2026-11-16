@@ -2,9 +2,9 @@ import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     CONFLICTS_DIR,
+    conflictEntryNames,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
-    encodeConflictPathName,
     openSharedFs,
     parseFlags,
     SharedFsError,
@@ -71,11 +71,39 @@ const mountTarget = (
     list: (path) => fs.list(path),
     versions: (path) => fs.versions(path),
     conflicts: (path, options) => fs.conflicts(path, options),
+    namingConflicts: (path, options) => fs.namingConflicts(path, options),
+    nodeForMount: (nodeId, path) => fs.nodeForMount(nodeId, path),
+    listNodeForMount: (nodeId, path) => fs.listNodeForMount(nodeId, path),
+    childForMount: (parentNodeId, name, path) =>
+        fs.childForMount(parentNodeId, name, path),
+    readNodeVersionForMount: (nodeId, versionId) =>
+        fs.readNodeVersionForMount(nodeId, versionId),
     stat: (path) => fs.stat(path),
     bootstrapStatus: () => fs.bootstrapStatus(),
     onNamespaceChange: (listener) => fs.onNamespaceChange(listener),
     ...overrides,
 });
+
+/** The conflict-tree name of content version `id` of the file at `path`. */
+const contentEntryName = async (
+    fs: SharedFsHandle,
+    path: string,
+    id: string
+) => {
+    const version = (await fs.versions(path)).find(
+        (candidate) => candidate.id === id
+    )!;
+    return conflictEntryNames([
+        {
+            kind: "content",
+            path,
+            machineLabel: version.machineLabel,
+            authorKey: version.authorKey,
+            time: version.createdAt,
+            id,
+        },
+    ])[0];
+};
 
 /** A verified reader that hands out `bytes` as the snapshot allocation. */
 const readVersionAs =
@@ -485,7 +513,6 @@ describe("shared fs mount backend", () => {
         expect(entries).toEqual([
             { name: "docs", kind: "directory" },
             { name: "note.txt", kind: "file" },
-            { name: CONFLICTS_DIR, kind: "directory" },
         ]);
         expect(entries.every((entry) => !("stat" in entry))).toBe(true);
         expect(list).toHaveBeenCalledOnce();
@@ -520,7 +547,7 @@ describe("shared fs mount backend", () => {
         const entries = await backend.readdir("/");
         const encodedBytes = Buffer.byteLength(JSON.stringify(entries));
 
-        expect(entries).toHaveLength(10_001);
+        expect(entries).toHaveLength(10_000);
         expect(entries.every((entry) => !("stat" in entry))).toBe(true);
         expect(encodedBytes).toBeLessThan(600_000);
         expect(list).toHaveBeenCalledOnce();
@@ -555,7 +582,7 @@ describe("shared fs mount backend", () => {
         const entries = await backend.readdir("/", { includeStats: true });
         const encodedBytes = Buffer.byteLength(JSON.stringify(entries));
 
-        expect(entries).toHaveLength(10_001);
+        expect(entries).toHaveLength(10_000);
         expect(
             entries.every(
                 (entry) =>
@@ -564,8 +591,7 @@ describe("shared fs mount backend", () => {
                     !("kind" in entry.stat)
             )
         ).toBe(true);
-        // Multiplying this representative 10k response slightly overestimates
-        // 100k because it repeats the fixed conflicts entry ten times.
+        // This representative 10k response, ten times over, stands for 100k.
         expect(encodedBytes * 10).toBeLessThan(64 * 1024 * 1024);
         expect(list).toHaveBeenCalledOnce();
         expect(stat).not.toHaveBeenCalled();
@@ -625,17 +651,17 @@ describe("shared fs mount backend", () => {
             kind: "symlink",
             stat: { size: "note.txt".length, mode: 0o120777, nlink: 1 },
         });
+        // The conflict tree is looked up by name, never listed.
+        expect(entries.map((entry) => entry.name)).not.toContain(CONFLICTS_DIR);
         const conflictsStat = await backend.getattr(`/${CONFLICTS_DIR}`);
-        expect(entries.find((entry) => entry.name === CONFLICTS_DIR)).toEqual({
-            name: CONFLICTS_DIR,
+        expect(conflictsStat).toEqual({
+            path: `/${CONFLICTS_DIR}`,
             kind: "directory",
-            stat: {
-                size: 0,
-                mode: 0o040755,
-                mtimeMs: conflictsStat.mtimeMs,
-                ctimeMs: conflictsStat.mtimeMs,
-                nlink: 2,
-            },
+            size: 0,
+            mode: 0o040755,
+            mtimeMs: conflictsStat.mtimeMs,
+            ctimeMs: conflictsStat.mtimeMs,
+            nlink: 2,
         });
     });
 
@@ -1861,7 +1887,6 @@ describe("shared fs mount backend", () => {
         });
         expect((await backend.readdir("/")).map(({ name }) => name)).toEqual([
             "destination.txt",
-            CONFLICTS_DIR,
         ]);
         const renamed = await backend.open("/destination.txt", { read: true });
         expect(decode(await backend.read(renamed, 64, 0))).toBe("source");
@@ -2041,7 +2066,6 @@ describe("shared fs mount backend", () => {
         ).toEqual([
             ["link", "symlink"],
             ["target.txt", "file"],
-            [CONFLICTS_DIR, "directory"],
         ]);
         // Only the link was written: no empty file ever published.
         expect(writeFile.mock.calls.map(([path]) => path)).toEqual([hidden]);
@@ -3474,7 +3498,7 @@ describe("shared fs mount backend", () => {
         expect(writeFile).toHaveBeenCalledTimes(2);
     });
 
-    it("exposes conflicts through the metadata namespace", async () => {
+    it("shows each content conflict head as a read-only file in the unlisted conflict tree", async () => {
         const backend = createSharedFsMountBackend(fs);
         await fs.writeFile("/note.txt", "base");
         const base = (await fs.versions("/note.txt"))
@@ -3489,63 +3513,66 @@ describe("shared fs mount backend", () => {
 
         expect(
             (await backend.readdir("/")).map((entry) => entry.name)
-        ).toContain(CONFLICTS_DIR);
-        const conflictName = encodeConflictPathName("/note.txt");
-        expect(await backend.readdir(`/${CONFLICTS_DIR}`)).toEqual([
-            { name: conflictName, kind: "directory" },
-        ]);
-        expect(
-            (await backend.readdir(`/${CONFLICTS_DIR}/${conflictName}`)).sort(
-                (a, b) => a.name.localeCompare(b.name)
-            )
-        ).toEqual(
-            [left.id, right.id]
-                .sort((a, b) => a.localeCompare(b))
-                .map((name) => ({ name, kind: "file" }))
+        ).not.toContain(CONFLICTS_DIR);
+        const names = [
+            await contentEntryName(fs, "/note.txt", left.id),
+            await contentEntryName(fs, "/note.txt", right.id),
+        ];
+        for (const name of names) {
+            // kind, path, writer, UTC time, hash, the original extension
+            expect(name).toMatch(
+                /^content note\.txt \S+ \d{8}T\d{6}Z [0-9a-f]{12}\.txt$/
+            );
+        }
+        expect(await backend.readdir(`/${CONFLICTS_DIR}`)).toEqual(
+            [...names].sort().map((name) => ({ name, kind: "file" }))
         );
-        const conflictEntries = await backend.readdir(`/${CONFLICTS_DIR}`, {
+        const entries = await backend.readdir(`/${CONFLICTS_DIR}`, {
             includeStats: true,
         });
-        expect(conflictEntries.map((entry) => entry.name)).toEqual([
-            conflictName,
-        ]);
-        expect(conflictEntries[0]).toMatchObject({
-            kind: "directory",
-            stat: {
-                size: 0,
-                mode: 0o040755,
-                nlink: 2,
-            },
-        });
-        const versionEntries = await backend.readdir(
-            `/${CONFLICTS_DIR}/${conflictName}`,
-            { includeStats: true }
-        );
-        expect(versionEntries.map((entry) => entry.name).sort()).toEqual(
-            [left.id, right.id].sort()
-        );
         const versionsById = new Map(
             (await fs.versions("/note.txt")).map((version) => [
                 version.id,
                 version,
             ])
         );
-        for (const entry of versionEntries) {
-            const version = versionsById.get(entry.name)!;
-            expect(entry.stat).toEqual({
+        for (const [i, id] of [left.id, right.id].entries()) {
+            const version = versionsById.get(id)!;
+            const stat = {
                 size: Number(version.size),
                 mode: 0o100644,
                 mtimeMs: Number(version.mtime),
                 ctimeMs: Number(version.mtime),
                 nlink: 1,
+            };
+            expect(entries.find((entry) => entry.name === names[i])).toEqual({
+                name: names[i],
+                kind: "file",
+                stat,
+            });
+            const path = `/${CONFLICTS_DIR}/${names[i]}`;
+            expect(await backend.getattr(path)).toEqual({
+                path,
+                kind: "file",
+                ...stat,
             });
         }
 
-        const handle = await backend.open(
-            `/${CONFLICTS_DIR}/${conflictName}/${right.id}`
-        );
+        const handle = await backend.open(`/${CONFLICTS_DIR}/${names[1]}`);
         expect(decode(await backend.read(handle, 1024, 0))).toBe("right");
         await backend.release(handle);
+        await expect(
+            backend.readdir(`/${CONFLICTS_DIR}/${names[1]}`)
+        ).rejects.toMatchObject({ code: "ENOTDIR" });
+        await expect(
+            backend.getattr(`/${CONFLICTS_DIR}/${names[1]}/x`)
+        ).rejects.toMatchObject({ code: "ENOTDIR" });
+        await expect(
+            backend.open(`/${CONFLICTS_DIR}/note.txt`)
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(backend.open(`/${CONFLICTS_DIR}`)).rejects.toMatchObject({
+            code: "EISDIR",
+        });
     });
 
     it("edits only the exact visible conflict version without resolving other heads", async () => {
@@ -4305,9 +4332,9 @@ describe("shared fs mount backend", () => {
             mode: 0o120000,
             baseVersionIds: [base.id],
         });
-        const dir = `/${CONFLICTS_DIR}/${encodeConflictPathName("/link")}`;
-        expect(await backend.getattr(`${dir}/${left.id}`)).toEqual({
-            path: `${dir}/${left.id}`,
+        const path = `/${CONFLICTS_DIR}/${await contentEntryName(fs, "/link", left.id)}`;
+        expect(await backend.getattr(path)).toEqual({
+            path,
             kind: "file",
             size: 4,
             mode: 0o100644,
@@ -4315,9 +4342,11 @@ describe("shared fs mount backend", () => {
             ctimeMs: Number(left.mtime),
             nlink: 1,
         });
-        for (const entry of await backend.readdir(dir, {
+        const entries = await backend.readdir(`/${CONFLICTS_DIR}`, {
             includeStats: true,
-        })) {
+        });
+        expect(entries).toHaveLength(2);
+        for (const entry of entries) {
             expect(entry).toMatchObject({
                 kind: "file",
                 stat: { mode: 0o100644 },
@@ -4325,7 +4354,7 @@ describe("shared fs mount backend", () => {
         }
     });
 
-    it("stats entries without a mode as 0644 and keeps root and conflict directory times stable while their names do not change", async () => {
+    it("stats entries without a mode as 0644 and keeps root and conflict tree times stable while their names do not change", async () => {
         await fs.writeFile("/plain.txt", "x");
         const backend = createSharedFsMountBackend(
             mountTarget(fs, {
@@ -4356,15 +4385,10 @@ describe("shared fs mount backend", () => {
         for (const side of ["left", "right"]) {
             await fs.writeFile("/c.txt", side, { baseVersionIds: [base.id] });
         }
-        const perPath = `/${CONFLICTS_DIR}/${encodeConflictPathName("/c.txt")}`;
         const times = async () => ({
             root: await backend.getattr("/"),
             conflicts: await backend.getattr(`/${CONFLICTS_DIR}`),
-            conflict: await backend.getattr(perPath),
             listedConflicts: (
-                await backend.readdir("/", { includeStats: true })
-            ).find((entry) => entry.name === CONFLICTS_DIR)?.stat,
-            listedConflict: (
                 await backend.readdir(`/${CONFLICTS_DIR}`, {
                     includeStats: true,
                 })
@@ -4372,27 +4396,20 @@ describe("shared fs mount backend", () => {
         });
         const before = await times();
         expect(await times()).toEqual(before);
-        // Every conflict directory shares one stamp; listings repeat it.
-        expect(before.conflict.mtimeMs).toBe(before.conflicts.mtimeMs);
         expect(before.conflicts.ctimeMs).toBe(before.conflicts.mtimeMs);
-        expect(before.listedConflicts?.mtimeMs).toBe(before.conflicts.mtimeMs);
-        expect(before.listedConflict).toEqual([
-            {
-                size: 0,
-                mode: 0o040755,
-                mtimeMs: before.conflicts.mtimeMs,
-                ctimeMs: before.conflicts.mtimeMs,
-                nlink: 2,
-            },
-        ]);
+        // Each head is a read-only regular copy at its own version's time.
+        expect(before.listedConflicts).toHaveLength(2);
+        for (const stat of before.listedConflicts) {
+            expect(stat).toMatchObject({ mode: 0o100644, nlink: 1 });
+        }
 
-        // A third conflicting head changes the conflict directories only.
+        // A third conflicting head changes the conflict tree only.
         await fs.writeFile("/c.txt", "third", { baseVersionIds: [base.id] });
         const forked = await times();
         expect(forked.conflicts.mtimeMs).toBeGreaterThan(
             before.conflicts.mtimeMs
         );
-        expect(forked.conflict.mtimeMs).toBe(forked.conflicts.mtimeMs);
+        expect(forked.listedConflicts).toHaveLength(3);
         expect(forked.root).toEqual(before.root);
 
         // A content write keeps `/`; a top-level create moves it.
