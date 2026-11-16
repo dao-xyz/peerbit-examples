@@ -146,6 +146,22 @@ test("ordinary failures keep their existing nonzero outcome", () => {
     assert.equal(result.find("shared-fs.strict-retry").length, 0);
 });
 
+test("a failure's stack keeps the frames past V8's default 10", () => {
+    const result = run("deep failure stack");
+    assert.equal(result.status, 1, result.stderr);
+    const [failure] = result.find("shared-fs.first-attempt-failure");
+    const { stack } = failure.errors[0];
+    assert.match(stack, /DEEP_FAILURE_STACK/);
+    const frames = stack.split(/\r?\n/).filter((line) => /^\s+at /.test(line));
+    // 31 frames of the recursion, then the test's own: a 10-frame stack
+    // ends inside the recursion.
+    assert.ok(
+        frames.filter((line) => /\bdescend\b/.test(line)).length >= 31,
+        stack
+    );
+    assert.ok(frames.length > 31, stack);
+});
+
 test("retry-then-skip cannot erase the strict retry outcome", () => {
     const result = run("retry then skips");
     assert.equal(result.status, 1, result.stderr);

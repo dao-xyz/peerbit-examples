@@ -687,10 +687,11 @@ on the caller's timeout: `timeoutMs`, the readiness `state`, and how many peers
 were `required`, `silent`, `reachable` (silent but reachable, neither refused
 nor parked) and `busy`. In an access-controlled filesystem, `writers-unheard`
 follows a `reconciled` or `operator` flip once: `count` is how many of the
-`trusted` writer keys (this peer's own excluded; at most 1024 checked,
-`truncated` when there were more) have no row attributed to them in this
-replica's index. Attribution is the rows' advisory `authorKey`, so this is a
-hint about writers whose rows may be missing, not a proof.
+`trusted` writer keys (read from this replica's own trust graph; this peer's
+own excluded; at most 1024 checked, `truncated` when there were more) have no
+row attributed to them in this replica's index. Attribution is the rows'
+advisory `authorKey`, so this is a hint about writers whose rows may be
+missing, not a proof. The report asks no other peer, and `close()` ends it.
 
 A consumer that switches exhaustively on `type` has to handle the
 `readiness-peer`, `writers-unheard` and `write-ready-timeout` cases.

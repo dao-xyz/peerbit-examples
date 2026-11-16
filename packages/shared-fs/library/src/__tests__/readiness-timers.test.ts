@@ -25,7 +25,8 @@ const linesWith = async (word: string, except = new Set<string>()) => {
     for (const name of files) {
         if (except.has(name)) continue;
         const source = await readFile(join(readinessDirectory, name), "utf8");
-        source.split("\n").forEach((line, i) => {
+        // A Windows checkout has CRLF line endings.
+        source.split(/\r?\n/).forEach((line, i) => {
             if (line.includes(word)) found.push(`${name}:${i + 1}`);
         });
     }
@@ -66,7 +67,7 @@ describe("private pubsub reads in src/index.ts", () => {
                 fileURLToPath(new URL("../index.ts", import.meta.url)),
                 "utf8"
             )
-        ).split("\n");
+        ).split(/\r?\n/); // CRLF on a Windows checkout
         const reads = lines.flatMap((line, i) =>
             /\.peers\b|\broutes\b|getBestRouteHint|stream:outbound/.test(line)
                 ? [i]

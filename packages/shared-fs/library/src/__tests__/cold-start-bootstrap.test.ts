@@ -3304,9 +3304,9 @@ describe("shared fs cold-start bootstrap", () => {
                 expect(inOverlay).toHaveLength(1);
                 expect(inOverlay[0].ms).toBeGreaterThan(deadlineMs / 2);
 
-                // The flip's writers-unheard report reads the trust graph
-                // remotely; let it finish while O and R still run, or J's
-                // close waits for it after they stopped.
+                // J turns write-ready and reports writers-unheard. The report
+                // reads only J's own trust graph and J's close ends it, so
+                // the close does not wait for it once O and R have stopped.
                 await joiner.awaitWriteReady({ timeout: 60_000 });
                 await waitUntil(() =>
                     expect(
@@ -3389,8 +3389,8 @@ describe("shared fs cold-start bootstrap", () => {
                         (event) => event.type === "manifest-discovery:end"
                     )
                 ).toMatchObject({ candidates: 1, trusted: 1 });
-                // See the case above: the flip's writers-unheard report
-                // finishes while O and R run.
+                // As in the case above, J turns write-ready and reports
+                // writers-unheard.
                 await joiner.awaitWriteReady({ timeout: 60_000 });
                 await waitUntil(() =>
                     expect(

@@ -13,6 +13,8 @@ import { join as joinPath } from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+    FileChunk,
+    FileVersion,
     SharedFileSystem,
     SharedFsHandle,
     SharedFsWriteReadyTimeoutError,
@@ -635,10 +637,14 @@ describe("readiness trust scope (in-process)", () => {
         return { peer, fs };
     };
 
-    /** W writes `files` once its own graph trusts it; `owner` indexes them. */
+    /**
+     * W writes `files` once its own graph trusts it; `owner` reads them
+     * (`step` names the test in a failure).
+     */
     const writeAsWriter = async (
         writer: Node,
         owner: Node,
+        step: string,
         files = WRITER_FILES
     ) => {
         await waitUntil(async () =>
@@ -649,18 +655,143 @@ describe("readiness trust scope (in-process)", () => {
         for (const { path, content } of files) {
             await writer.fs.writeFile(path, content);
         }
-        await expectFiles(owner.fs, files);
+        await expectFiles(
+            owner.fs,
+            files,
+            `${step}: the owner reads W's files`
+        );
     };
 
-    /** `fs` reads every file of `files` with its content. */
+    /** `error`, its message (and its stack's) prefixed with `label`. */
+    const labelled = (error: unknown, label: string) => {
+        if (error instanceof Error && !error.message.startsWith(label)) {
+            const message = error.message;
+            error.message = `${label}: ${message}`;
+            error.stack = error.stack?.replace(message, () => error.message);
+        }
+        return error;
+    };
+
+    /**
+     * `fs` reads every file of `files` with its content. A failure names
+     * `label`: the helper is called from many steps, and a stack cut at
+     * 10 frames (V8's default) stops above the caller.
+     */
     const expectFiles = async (
         fs: SharedFsHandle,
-        files: Array<{ path: string; content: string }>
-    ) =>
-        waitUntil(async () => {
-            for (const { path, content } of files) {
-                expect(decode(await fs.readFile(path))).toBe(content);
+        files: Array<{ path: string; content: string }>,
+        label?: string
+    ) => {
+        try {
+            await waitUntil(async () => {
+                for (const { path, content } of files) {
+                    expect(decode(await fs.readFile(path))).toBe(content);
+                }
+            });
+        } catch (error) {
+            throw label === undefined ? error : labelled(error, label);
+        }
+    };
+
+    /**
+     * What `fs`'s own index lacks of `files`: the visible version of each
+     * path, or a chunk that version names. Local reads only.
+     */
+    const missingLocally = async (
+        fs: SharedFsHandle,
+        files: ReadonlyArray<{ path: string }>
+    ) => {
+        const index = entriesOf(fs).index;
+        const local = (id: string) =>
+            index.get(id, { local: true, remote: false });
+        const missing: string[] = [];
+        for (const { path } of files) {
+            const versionId = (await fs.stat(path))?.versionId;
+            const version = versionId ? await local(versionId) : undefined;
+            if (!(version instanceof FileVersion)) {
+                missing.push(`${path} (version ${versionId ?? "none"})`);
+                continue;
             }
+            for (const id of new Set(version.chunkIds)) {
+                if (!((await local(id)) instanceof FileChunk)) {
+                    missing.push(`${path} (${id})`);
+                }
+            }
+        }
+        return missing;
+    };
+
+    /**
+     * Resolves once `fs`'s own index holds the visible version of each of
+     * `files` and every chunk it names: at once, or at a change of `fs`'s
+     * namespace store, never by polling. Rejects, naming `label` and what
+     * is missing, only once the CI budget is spent.
+     *
+     * The precondition for revoking or stopping W when W's files are read
+     * without W later. `expectFiles` can pass before it holds: fetchChunk
+     * falls back to a remote read that W answers while it runs, and W's
+     * chunk, version and naming entries are independent log roots, so they
+     * replicate in any order ("A version can replicate before its chunks",
+     * index.ts). Once W is revoked, `fs` refuses W's chunk, and once W
+     * stops, nothing serves it: 35 + M1 failed on macOS CI with "Missing
+     * chunk ... for /writer-a.txt" after the revoke.
+     */
+    const chunksHeld = (
+        fs: SharedFsHandle,
+        files: ReadonlyArray<{ path: string }>,
+        label: string,
+        timeoutMs = process.env.CI ? 60_000 : 30_000
+    ) =>
+        new Promise<void>((resolve, reject) => {
+            // Made at the call, so a give-up's stack names the step that
+            // waited, not the timer.
+            const origin = new Error(label);
+            const events: EventTarget = entriesOf(fs).events;
+            let missing = ["(not checked yet)"];
+            let checking = false;
+            let again = false;
+            let done = false;
+            const finish = (error?: unknown) => {
+                if (done) return;
+                done = true;
+                clearTimeout(giveUp);
+                events.removeEventListener("change", check);
+                if (error === undefined) resolve();
+                else reject(error);
+            };
+            // One check at a time; a change during a check runs it again,
+            // so no change is lost.
+            const check = () => {
+                if (done) return;
+                if (checking) {
+                    again = true;
+                    return;
+                }
+                checking = true;
+                again = false;
+                missingLocally(fs, files).then(
+                    (now) => {
+                        checking = false;
+                        missing = now;
+                        if (now.length === 0) finish();
+                        else if (again) check();
+                    },
+                    (error) => finish(labelled(error, label))
+                );
+            };
+            // The deadline only gives up: nothing is checked on a timer.
+            const giveUp = setTimeout(() => {
+                const error = new Error(
+                    `${label}: not in its own index after ${timeoutMs} ms: ${missing.join(", ")}. Reads of these pass only through fetchChunk's remote fallback to a peer that holds them, and once W is revoked or stopped none may.`
+                );
+                error.stack = [
+                    `Error: ${error.message}`,
+                    ...(origin.stack ?? "").split("\n").slice(1),
+                ].join("\n");
+                finish(error);
+            }, timeoutMs);
+            events.addEventListener("change", check);
+            check();
         });
 
     /**
@@ -868,8 +999,14 @@ describe("readiness trust scope (in-process)", () => {
     it("34 + M2: trust lag: W's rows wait as trust-pending (waiting-trust, no timer) until J's trust graph gains W's edge, then are pulled again and indexed, never rejected-untrusted", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
-        await writeAsWriter(writer, owner);
+        await writeAsWriter(writer, owner, "34");
         const writerKey = keyOf(writer.peer);
+        // J reads W's files from the owner alone at the end.
+        await chunksHeld(
+            owner.fs,
+            WRITER_FILES,
+            "34: the owner, W's chunks before W stops"
+        );
         await stopPeer(writer.peer);
         const ownerRows = await namespaceRows(owner.fs);
         const writerRows = await rowsSignedBy(owner.fs, ownerRows, writerKey);
@@ -971,19 +1108,34 @@ describe("readiness trust scope (in-process)", () => {
         expect(trust.pulled).toBeGreaterThanOrEqual(1);
         expect(pulls.held).toBeGreaterThanOrEqual(1);
         expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(true);
-        await expectFiles(joiner.fs, WRITER_FILES);
+        await expectFiles(
+            joiner.fs,
+            WRITER_FILES,
+            "34: J reads W's files from the owner"
+        );
     }, 180_000);
 
     it("35 + M1: a revoked writer's live rows at the donor are explained rejected-untrusted once every counted trust scope is contained, and the fresh full joiner turns ready on its own", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
-        await writeAsWriter(writer, owner);
+        await writeAsWriter(writer, owner, "35");
         const writerKey = keyOf(writer.peer);
+        // The owner reads W's files after W stops (macOS CI, 1 in 37:
+        // "Missing chunk" there when it had read them through W).
+        await chunksHeld(
+            owner.fs,
+            WRITER_FILES,
+            "35: the owner, W's chunks before W is revoked"
+        );
         await owner.fs.revokeWriter(writerKey);
         expect(await owner.fs.isTrustedWriter(writerKey)).toBe(false);
         await stopPeer(writer.peer);
         // Revocation is not retroactive: the owner still indexes W's rows.
-        await expectFiles(owner.fs, WRITER_FILES);
+        await expectFiles(
+            owner.fs,
+            WRITER_FILES,
+            "35: the owner reads W's files after the revoke"
+        );
         const ownerRows = await namespaceRows(owner.fs);
         const revoked = await rowsSignedBy(owner.fs, ownerRows, writerKey);
         expect(revoked.size).toBeGreaterThan(0);
@@ -1105,7 +1257,7 @@ describe("readiness trust scope (in-process)", () => {
     it("M1 with more donors than session slots: every donor holds the revoked writer's rows; sessions parked for trust free their slots, and J turns ready on its own", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
-        await writeAsWriter(writer, owner);
+        await writeAsWriter(writer, owner, "M1 with more donors");
         const replicas: Node[] = [];
         for (let i = 0; i < SESSIONS_IN_FLIGHT; i++) {
             const peer = await createPeer();
@@ -1115,7 +1267,11 @@ describe("readiness trust scope (in-process)", () => {
                 `trust-replica-${i}`,
                 peer
             );
-            await expectFiles(replica.fs, WRITER_FILES);
+            await expectFiles(
+                replica.fs,
+                WRITER_FILES,
+                `M1 with more donors: replica ${i} reads W's files`
+            );
             replicas.push(replica);
         }
         const writerKey = keyOf(writer.peer);
@@ -1216,7 +1372,11 @@ describe("readiness trust scope (in-process)", () => {
                 expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(true);
             });
             await writer.writeFile(BETWEEN.path, BETWEEN.content);
-            await expectFiles(owner.fs, [BETWEEN]);
+            await expectFiles(
+                owner.fs,
+                [BETWEEN],
+                "36a: the owner reads W's file"
+            );
             const after = await namespaceRows(owner.fs);
             const written = await rowsSignedBy(owner.fs, after, writerKey);
             expect(written.size).toBeGreaterThan(0);
@@ -1262,7 +1422,11 @@ describe("readiness trust scope (in-process)", () => {
                 expect(result.untrusted).toBeUndefined();
             }
             // W's rows reach J by sync after the decision.
-            await expectFiles(joiner.fs, [BETWEEN]);
+            await expectFiles(
+                joiner.fs,
+                [BETWEEN],
+                "36a: J reads W's file after the decision"
+            );
         }, 180_000);
 
         it("36b: a second peer holding the grant joins C after a rejection: the trust change reverses the first peer's rejected-untrusted rows, it is asked again, and J turns ready with the edge and the rows", async () => {
@@ -1271,14 +1435,33 @@ describe("readiness trust scope (in-process)", () => {
             const cut = await partitionablePeer();
             const holderPeer = await createPeer();
             await owner.fs.authorizeWriter(keyOf(holderPeer));
-            await writeAsWriter(writer, owner);
+            await writeAsWriter(writer, owner, "36b");
             const writerKey = keyOf(writer.peer);
             // R1: a full replica the owner never authorized. R2: an
             // authorized one.
             const first = await readyReplica(owner, "trust-r1", cut.peer);
             const second = await readyReplica(owner, "trust-r2", holderPeer);
-            await expectFiles(first.fs, WRITER_FILES);
-            await expectFiles(second.fs, WRITER_FILES);
+            await expectFiles(
+                first.fs,
+                WRITER_FILES,
+                "36b: R1 reads W's files"
+            );
+            await expectFiles(
+                second.fs,
+                WRITER_FILES,
+                "36b: R2 reads W's files"
+            );
+            // J reads W's files from R1 and R2 alone at the end.
+            await chunksHeld(
+                first.fs,
+                WRITER_FILES,
+                "36b: R1, W's chunks before W is revoked"
+            );
+            await chunksHeld(
+                second.fs,
+                WRITER_FILES,
+                "36b: R2, W's chunks before W is revoked"
+            );
             // W's grant (h1) is revoked; both replicas hold the CUT.
             await owner.fs.revokeWriter(writerKey);
             await waitUntil(async () => {
@@ -1397,7 +1580,11 @@ describe("readiness trust scope (in-process)", () => {
             // J holds h2 and W's rows.
             expect(await trustRows(joiner.fs)).toEqual(regranted);
             expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(true);
-            await expectFiles(joiner.fs, WRITER_FILES);
+            await expectFiles(
+                joiner.fs,
+                WRITER_FILES,
+                "36b: J reads W's files from R1 and R2"
+            );
         }, 240_000);
 
         /**
@@ -1436,12 +1623,21 @@ describe("readiness trust scope (in-process)", () => {
             const cut = await partitionablePeer();
             const holderPeer = await createPeer();
             await owner.fs.authorizeWriter(keyOf(holderPeer));
-            await writeAsWriter(writer, owner);
+            const step = hold === "contained" ? "36c" : "36d";
+            await writeAsWriter(writer, owner, step);
             const writerKey = keyOf(writer.peer);
             const first = await readyReplica(owner, "trust-r1", cut.peer);
             const second = await readyReplica(owner, "trust-r2", holderPeer);
-            await expectFiles(first.fs, WRITER_FILES);
-            await expectFiles(second.fs, WRITER_FILES);
+            await expectFiles(
+                first.fs,
+                WRITER_FILES,
+                `${step}: R1 reads W's files`
+            );
+            await expectFiles(
+                second.fs,
+                WRITER_FILES,
+                `${step}: R2 reads W's files`
+            );
             // D1 revokes h1 at both replicas; R1 is cut off; h2 reaches R2.
             await owner.fs.revokeWriter(writerKey);
             await within(
@@ -1809,11 +2005,15 @@ describe("readiness trust scope (in-process)", () => {
         const writer = await createWriter(owner);
         const replicaPeer = await createPeer();
         await owner.fs.authorizeWriter(keyOf(replicaPeer));
-        await writeAsWriter(writer, owner);
+        await writeAsWriter(writer, owner, "37");
         const writerKey = keyOf(writer.peer);
         // R2: authorized, up to date with the owner, revocation included.
         const replica = await readyReplica(owner, "trust-replica", replicaPeer);
-        await expectFiles(replica.fs, WRITER_FILES);
+        await expectFiles(
+            replica.fs,
+            WRITER_FILES,
+            "37: the replica reads W's files"
+        );
         await owner.fs.revokeWriter(writerKey);
         await waitUntil(async () =>
             expect(await replica.fs.isTrustedWriter(writerKey)).toBe(false)
@@ -1930,8 +2130,14 @@ describe("readiness trust scope (in-process)", () => {
     it("42: revoke then re-grant of a writer during a join: the re-grant is required and pulled; the writer's rows are held", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
-        await writeAsWriter(writer, owner);
+        await writeAsWriter(writer, owner, "42");
         const writerKey = keyOf(writer.peer);
+        // J reads W's files from the owner alone at the end.
+        await chunksHeld(
+            owner.fs,
+            WRITER_FILES,
+            "42: the owner, W's chunks before W stops"
+        );
         await stopPeer(writer.peer);
         const granted = await trustRows(owner.fs);
         expect(granted.size).toBe(1);
@@ -1973,7 +2179,11 @@ describe("readiness trust scope (in-process)", () => {
         expect(namespace.explainedBy["rejected-untrusted"]).toBeUndefined();
         expect(namespace.untrusted).toBeUndefined();
         expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(true);
-        await expectFiles(joiner.fs, WRITER_FILES);
+        await expectFiles(
+            joiner.fs,
+            WRITER_FILES,
+            "42: J reads W's files from the owner"
+        );
     }, 180_000);
 
     describe("55: a stale peer re-pushes a revoked grant (the stated non-guarantee)", () => {
@@ -1987,14 +2197,18 @@ describe("readiness trust scope (in-process)", () => {
             const writer = await createWriter(owner);
             const stale = await partitionablePeer();
             await owner.fs.authorizeWriter(keyOf(stale.peer));
-            await writeAsWriter(writer, owner);
+            await writeAsWriter(writer, owner, "55");
             const writerKey = keyOf(writer.peer);
             const replica = await readyReplica(
                 owner,
                 "trust-stale",
                 stale.peer
             );
-            await expectFiles(replica.fs, WRITER_FILES);
+            await expectFiles(
+                replica.fs,
+                WRITER_FILES,
+                "55: the stale replica reads W's files"
+            );
             await partition(stale, [owner.peer, writer.peer]);
             await owner.fs.revokeWriter(writerKey);
             expect(await owner.fs.isTrustedWriter(writerKey)).toBe(false);
@@ -2094,7 +2308,7 @@ describe("readiness trust scope (in-process)", () => {
     it("design 4.12 #17: a writer revoked between the namespace and trust freezes of J's session: its rows are explained rejected-untrusted once every counted trust scope is contained; J turns ready, never indexed them and does not trust the writer", async () => {
         const owner = await createOwner();
         const writer = await createWriter(owner);
-        await writeAsWriter(writer, owner);
+        await writeAsWriter(writer, owner, "#17");
         const writerKey = keyOf(writer.peer);
         await stopPeer(writer.peer);
         const ownerRows = await namespaceRows(owner.fs);
@@ -2326,7 +2540,11 @@ describe("readiness trust scope (in-process)", () => {
         const owner = await createOwner();
         const cut = await partitionablePeer();
         const replica = await readyReplica(owner, "trust-i1", cut.peer);
-        await expectFiles(replica.fs, [OWNER_FILE]);
+        await expectFiles(
+            replica.fs,
+            [OWNER_FILE],
+            "I1: R1 reads the owner's file"
+        );
         await partition(cut, [owner.peer]);
         // The owner grants R1 while cut off from it: the grant is the
         // owner's alone.
@@ -2393,7 +2611,11 @@ describe("readiness trust scope (in-process)", () => {
             "trust-80",
             await createPeer({ disk: true })
         );
-        await expectFiles(replica.fs, [OWNER_FILE]);
+        await expectFiles(
+            replica.fs,
+            [OWNER_FILE],
+            "80: W reads the owner's file"
+        );
         const directory = (replica.peer as any).directory as string;
         const address = replica.fs.address;
         await stopPeer(replica.peer);

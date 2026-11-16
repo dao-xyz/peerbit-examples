@@ -23,6 +23,9 @@ This gate keeps those attempts visible while refusing to call them a strict pass
   `shared-fs.strict-summary` line gives the strict-gate totals. These lines are
   available in the raw GitHub Actions job log; this does not depend on scraping
   Vitest's colored progress output.
+- The runner raises `Error.stackTraceLimit` from V8's default of 10 frames to
+  50 in every worker, before any test file loads, so a failure inside a
+  shared helper keeps the frames of the step that called it.
 
 The original failure is emitted once per test. Each diagnostic string is limited
 to 16,384 characters with an explicit truncation marker; at most four errors are

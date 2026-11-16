@@ -26,6 +26,14 @@ describe("strict CI fixture", () => {
         throw new Error("ORDINARY_FAILURE_STACK");
     });
 
+    test("deep failure stack", () => {
+        const descend = (depth) => {
+            if (depth === 0) throw new Error("DEEP_FAILURE_STACK");
+            descend(depth - 1);
+        };
+        descend(30);
+    });
+
     let attempts = 0;
     test("retry eventually passes", { retry: 1 }, () => {
         if (attempts++ === 0) throw new Error("ORIGINAL_FIRST_FAILURE_STACK");
