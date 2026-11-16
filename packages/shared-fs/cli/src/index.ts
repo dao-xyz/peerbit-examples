@@ -211,49 +211,81 @@ export const connectToNetwork = async (
 
 /**
  * A mount serves its local replica, so nothing unreachable stops it: it
- * warns and mounts from local state. Peerbit's bootstrap recovery redials
- * the --bootstrap and --peer addresses (else the public list) with backoff
- * whenever the mount has no connections, such as after a hub restarts. A
- * first join still needs a peer that holds the filesystem.
+ * warns, naming each address, and returns what it could not reach.
  */
 export const connectMountToNetwork = async (
-    peerbit: Pick<Peerbit, "bootstrap" | "dial" | "enableBootstrapRecovery">,
+    peerbit: Pick<Peerbit, "bootstrap" | "dial" | "enableBootstrapRecovery"> & {
+        services: {
+            fanout: Pick<Peerbit["services"]["fanout"], "addBootstraps">;
+        };
+    },
     network: CliNetworkArgs = {},
     warn: (message: string) => void = (message) =>
         console.warn(chalk.yellow(message))
 ) => {
+    // Every address stays registered with Peerbit's pubsub FanoutTree,
+    // whatever its first dial did (Peerbit.dial registers only a peer that
+    // answered), and the tree redials it about once a second while it is
+    // down. Recovery re-runs Peerbit.bootstrap(), which resets that list and
+    // pins pubsub's topic-root candidates to the nodes it reached. A mount
+    // that switched so after it was connected stalled other mounts' joins
+    // for a minute, so a --peer mount never recovers: its candidates stay
+    // what its start made them (automatic without --bootstrap, as before).
     const { peers, bootstrap } = networkTargets(network);
-    const redials = (them: string) =>
-        `Peerbit redials ${them} with backoff whenever this mount has no connections.`;
+    const unreachable: string[] = [];
+    const unreached = (target: string, error: unknown) => {
+        const text = `${target} (${errorText(error)})`;
+        unreachable.push(text);
+        warn(
+            `Could not reach ${text}; Peerbit keeps redialling while the mount runs.`
+        );
+    };
     if (bootstrap || peers.length === 0) {
-        try {
-            await (bootstrap
-                ? peerbit.bootstrap(bootstrap)
-                : peerbit.bootstrap());
-        } catch (error) {
-            warn(
+        await (
+            bootstrap ? peerbit.bootstrap(bootstrap) : peerbit.bootstrap()
+        ).catch((error) =>
+            unreached(
                 bootstrap
-                    ? `Could not reach --bootstrap ${bootstrap.join(", ")} (${errorText(error)}); mounting from local state. ${redials(bootstrap.length > 1 ? "them" : "it")}`
-                    : `Could not reach the Peerbit bootstrap network (${errorText(error)}); mounting from local state and reconnecting in the background.`
-            );
-        }
+                    ? bootstrap.map((a) => `--bootstrap ${a}`).join(", ")
+                    : "the Peerbit bootstrap network",
+                error
+            )
+        );
     }
+    if (peers.length === 0) {
+        if (bootstrap) {
+            peerbit.enableBootstrapRecovery({ addresses: bootstrap });
+        } else {
+            peerbit.enableBootstrapRecovery();
+        }
+        return unreachable;
+    }
+    // After bootstrap(), which replaces the list.
+    peerbit.services.fanout.addBootstraps(peers);
     for (const address of peers) {
-        try {
-            await peerbit.dial(address);
-        } catch (error) {
-            warn(
-                `Could not dial --peer ${address} (${errorText(error)}); mounting from local state. ${redials("it")}`
-            );
-        }
+        await peerbit
+            .dial(address)
+            .catch((error) => unreached(`--peer ${address}`, error));
     }
-    const addresses = [...(bootstrap ?? []), ...peers];
-    if (addresses.length > 0) {
-        peerbit.enableBootstrapRecovery({ addresses });
-    } else {
-        peerbit.enableBootstrapRecovery();
-    }
+    return unreachable;
 };
+
+/** A mount's failed open, naming what it could not reach at start. */
+export const mountOpenError = (
+    address: string,
+    unreachable: string[],
+    error: unknown
+) =>
+    unreachable.length === 0
+        ? error
+        : new Error(
+              `Could not open ${address}: ${
+                  errorText(error).includes("Failed to load program")
+                      ? "this state directory does not hold it, and no peer that holds it answered"
+                      : errorText(error)
+              }. At mount start, could not reach ${unreachable.join(", ")}.`,
+              { cause: error }
+          );
 
 const stopPeerbitForCli = async (
     peerbit: Peerbit,
@@ -1490,7 +1522,10 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
                 try {
-                    await connectMountToNetwork(peerbit, argv);
+                    const unreachable = await connectMountToNetwork(
+                        peerbit,
+                        argv
+                    );
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -1499,6 +1534,8 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         // A mount runs on: its warm reopen checks at once.
                         freshnessStart: "eager",
                         requireFreshOnReopen: argv.requireFresh,
+                    }).catch((error) => {
+                        throw mountOpenError(argv.address, unreachable, error);
                     });
                     // A fresh address-open can serve bootstrap-overlay reads
                     // before its namespace is safe to mutate. Do not expose a

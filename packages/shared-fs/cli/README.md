@@ -480,15 +480,27 @@ peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared" \
   --peer /ip4/192.0.2.10/tcp/4002/p2p/<hub peer id>
 ```
 
-`mount` starts while they are down: it warns, naming the address, and mounts
-from local state. A remount from a writable state directory is writable at
-once (unless `--require-fresh`); a first mount still needs a peer that holds
-the filesystem to answer within about 30 s. Peerbit's bootstrap recovery
-redials the `--bootstrap` and `--peer` addresses (else the public list)
-whenever the mount has no connections at all, such as after a hub restarts at
-the same address: about 1 s after a failed attempt, doubling to at most 60 s
-with 20% jitter, for as long as the mount runs. It does not redial one address
-while the mount is connected to another, and a connection that dies without
+`mount` starts while they are down: it warns, naming the address, and goes
+on. A remount from a writable state directory is writable at once (unless
+`--require-fresh`); a first mount still needs a peer that holds the filesystem
+to answer within about 30 s, or fails naming what it could not reach.
+
+Peerbit's pubsub redials a down address about once a second while the mount
+runs, whatever its first dial did and also while other peers are connected, so
+a hub restarted at the same address is usually back within about 2 s. Without
+`--peer`, the mount also enables Peerbit's bootstrap recovery: while it has no
+connections at all, it bootstraps again from `--bootstrap` (else the public
+list), 1 s after a failed attempt, doubling to at most 60 s with 20% jitter.
+That fallback guarantees retries; it is not the dial rate. A `--peer` mount
+skips it: a new bootstrap pins the mount's pubsub topic roots to the nodes it
+reached, and a mount that switched so while connected stalled other machines'
+joins for about a minute. Give every machine of a filesystem the same
+`--bootstrap` list.
+
+A `--peer` with `/p2p/<id>` accepts only that identity, so the hub must keep
+its state directory to be redialled: one that returns with a new identity is
+refused on every redial, silently. Without `/p2p/`, any peer at that address
+is accepted, which authenticates the hub less. A connection that dies without
 closing, as across a laptop's sleep, counts as connected until the operating
 system closes it.
 
