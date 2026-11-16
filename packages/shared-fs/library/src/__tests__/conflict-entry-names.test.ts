@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { conflictEntryNames, type ConflictEntryNameParts } from "../index.js";
+import {
+    conflictEntryNameHash,
+    conflictEntryNames,
+    type ConflictEntryNameParts,
+} from "../index.js";
 
 const utf8 = new TextEncoder();
 
@@ -54,6 +58,9 @@ const hostilePaths = [
     "/trailing space ",
     "/dots...",
     "/tab\there\nnew.txt",
+    // Valid names that a regular expression's "." does not match.
+    "/line\u2028sep.txt",
+    "/para\u2029dir/sub/notes.txt",
     "/\u0000nul\u007fdel",
     "/\ud800lone.txt",
     "/emoji-" + "\u{1f600}".repeat(200) + ".png",
@@ -126,7 +133,7 @@ describe("conflict tree entry names", () => {
         ).toContain(" my_laptop ");
     });
 
-    it("are valid on Windows, macOS and Linux for hostile paths, labels and times", () => {
+    it("are valid on Windows, macOS and Linux for hostile paths, labels and times, and give back their hash", () => {
         const entries: ConflictEntryNameParts[] = [];
         for (const path of hostilePaths) {
             for (const machineLabel of hostileLabels) {
@@ -161,6 +168,13 @@ describe("conflict tree entry names", () => {
             new Set(names.map((name) => name.normalize("NFD").toLowerCase()))
                 .size
         ).toBe(entries.length);
+        // A mount finds an entry by the hash its name holds.
+        const unparsed = names.filter((name, i) => {
+            const hash = sha256Hex(`${entries[i].kind}\n${entries[i].id}`);
+            const digits = name.includes(hash) ? hash : hash.slice(0, 12);
+            return conflictEntryNameHash(name) !== digits;
+        });
+        expect(unparsed).toEqual([]);
     });
 
     it("keep a cut path's end and only a plain original extension", () => {
@@ -203,6 +217,9 @@ describe("conflict tree entry names", () => {
                     new RegExp(` ${sha256Hex(`content\n${twin.id}`)}\\.txt$`)
                 )
             )
+        );
+        expect(names.map((name) => conflictEntryNameHash(name))).toEqual(
+            twins.map((twin) => sha256Hex(`content\n${twin.id}`))
         );
     });
 });

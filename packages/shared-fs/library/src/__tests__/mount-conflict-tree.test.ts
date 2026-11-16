@@ -455,6 +455,50 @@ describe("mount conflict tree", () => {
         expect(await readThrough(mount, "/c.txt")).toBe(visible);
     });
 
+    it("reaches entries whose path holds a line or paragraph separator", async () => {
+        // U+2028 and U+2029 are valid in names, and an entry's name keeps
+        // them, from the file's own name or a directory's above it.
+        await fs.mkdir("/para\u2029dir");
+        const paths = ["/line\u2028sep.txt", "/para\u2029dir/notes.txt"];
+        for (const path of paths) {
+            const base = await fs.writeFile(path, "base");
+            for (const side of ["left", "right"]) {
+                await fs.writeFile(path, `${side}${path}`, {
+                    baseVersionIds: [base.id],
+                });
+            }
+        }
+        const expected = paths
+            .flatMap((path) => [`left${path}`, `right${path}`])
+            .sort();
+        const mount = createSharedFsMountBackend(fs);
+        const names = await namesOf(mount, root);
+        expect(names).toHaveLength(4);
+        expect(names.filter((name) => /[\u2028\u2029]/.test(name))).toEqual(
+            names
+        );
+        const bytes: string[] = [];
+        for (const name of names) {
+            expect(await mount.getattr(`${root}/${name}`)).toMatchObject({
+                kind: "file",
+            });
+            bytes.push(await readThrough(mount, `${root}/${name}`));
+        }
+        expect(bytes.sort()).toEqual(expected);
+
+        // After a change elsewhere a lookup re-checks the entry's node, and
+        // a fresh mount's first lookup scans: both find it too.
+        await fs.writeFile("/elsewhere.txt", "x");
+        const fresh = createSharedFsMountBackend(fs);
+        for (const lookup of [mount, fresh]) {
+            const read: string[] = [];
+            for (const name of names) {
+                read.push(await readThrough(lookup, `${root}/${name}`));
+            }
+            expect(read.sort()).toEqual(expected);
+        }
+    });
+
     it("shows a hidden claimant once its first content lands, and not after its content leaves", async () => {
         await fs.writeFile("/dup.txt", "visible");
         await fs.writeFile("/donor.txt", "hidden claimant");

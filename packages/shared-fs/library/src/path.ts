@@ -192,9 +192,10 @@ export const conflictEntryNames = (
 /**
  * The hash in `name` when conflictEntryNames could have made it (a kind,
  * a space, ..., a space, 12 or 64 hex digits, an extension), else
- * undefined: a mount answers other names without looking.
+ * undefined: a mount answers other names without looking. The "..." may
+ * hold any character, U+2028 and U+2029 too (the s flag).
  */
 export const conflictEntryNameHash = (name: string) =>
-    /^(?:content|delete-vs-edit|duplicate-name|multi-head|unreachable) .+ ([0-9a-f]{12}|[0-9a-f]{64})(?:\.[\w-]{1,16})?$/.exec(
+    /^(?:content|delete-vs-edit|duplicate-name|multi-head|unreachable) .+ ([0-9a-f]{12}|[0-9a-f]{64})(?:\.[\w-]{1,16})?$/s.exec(
         name
     )?.[1];
