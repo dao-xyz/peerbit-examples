@@ -17,9 +17,9 @@ import { connectMountToNetwork } from "../index.js";
  * dial. Every wait resolves on an event and only gives up at its deadline.
  *
  * Peerbit's pubsub redials a down --peer about once a second; no test here
- * depends on that rate beyond its bounds. A --peer client never calls
- * Peerbit.bootstrap(), whose topic-root candidates would replace its
- * automatic ones.
+ * depends on that rate beyond its bounds. A --peer client never uses
+ * bootstrap recovery, whose Peerbit.bootstrap() would replace the topic-root
+ * candidates its start chose.
  */
 
 /** The roadmap's bound for a write made after the hub restarted. */
@@ -33,7 +33,8 @@ const CATCH_UP_AFTER_HUB_UP_MS = 30_000;
 /**
  * A third client's join, and sync between clients, after one client's
  * connections closed. A --peer client whose topic-root candidates switched
- * stalled a later join for 61-85 s; a healthy one takes under 3 s.
+ * stalled a later join for 61-85 s; a healthy join took 0.4-8.3 s on a
+ * heavily loaded machine.
  */
 const JOIN_AND_SYNC_MS = 30_000;
 /** Steps that are not under test: a join, a disconnect. */
