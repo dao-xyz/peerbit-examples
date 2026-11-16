@@ -438,45 +438,54 @@ export const stopMountSession = async (
     if (failures.length && !options.ignoreErrors) throw failures[0];
 };
 
-/** A shutdown under way; persistOnExit moves `phase` to 1 and 2. */
+/** A shutdown under way; persistOnExit sets `waiting` while it waits. */
 export type MountShutdown = {
     signal: AbortSignal;
-    /** 0 stopping, 1 persist-on-exit waits, 2 after that wait. */
-    phase: number;
+    /** persist-on-exit waits for receipts: a request aborts the wait. */
+    waiting: boolean;
     /** Exit now with the exit code set, else 130. */
     exit(): void;
 };
 
 const ignore = () => {};
 
+/**
+ * A request this soon after the last one acted on is a copy: npm, pnpm and
+ * npx pass on the Ctrl-C their child already got, within a millisecond.
+ */
+const COPY_MS = 100;
+
 // Shutdown requests: SIGINT, SIGTERM, SIGBREAK, SIGHUP and a `shutdown` line
-// on a stdin that is not a terminal. The first runs `stop`; the first once
-// persist-on-exit waits aborts the wait. One more right after either is a
-// wrapper's copy (npm, pnpm and npx pass Ctrl-C on) and is ignored; any
-// other request exits at once, as does one after the wait.
+// on a stdin that is not a terminal. The first runs `stop`. A copy is
+// ignored, with a hint; any other request aborts the persist-on-exit wait
+// while it runs, and otherwise exits at once.
 export const waitForTermination = (
     stop: (shutdown: MountShutdown) => Promise<void>,
-    host: Pick<NodeJS.Process, "on" | "off" | "exit"> = process,
+    host: Pick<NodeJS.Process, "on" | "off" | "exit" | "uptime"> = process,
     input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin
 ) =>
     new Promise<void>((resolve, reject) => {
         const abort = new AbortController();
         const shutdown: MountShutdown = {
             signal: abort.signal,
-            phase: 0,
+            waiting: false,
             exit: () => host.exit(process.exitCode || 130),
         };
         const signals = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] as const;
         const keepAlive = setInterval(() => {}, 1 << 30);
-        let phase = 0;
-        let requests = 0;
+        let last = -Infinity;
         const request = () => {
-            if (phase !== shutdown.phase)
-                [phase, requests] = [shutdown.phase, 0];
-            if (++requests === 2) return;
-            if (requests > 2 || phase > 1) return shutdown.exit();
-            if (phase)
-                return abort.abort(new Error("shutdown requested again"));
+            const at = host.uptime() * 1000;
+            if (at - last < COPY_MS)
+                return console.error(
+                    "shutdown: already stopping; request again to exit now"
+                );
+            const first = last < 0;
+            last = at;
+            if (!first)
+                return shutdown.waiting && !abort.signal.aborted
+                    ? abort.abort(new Error("shutdown requested again"))
+                    : shutdown.exit();
             // A closed terminal (SIGHUP) fails every write: ignore that.
             for (const stream of [process.stdout, process.stderr])
                 stream.off("error", ignore).on("error", ignore);
@@ -517,7 +526,7 @@ export const persistOnExit = async (
     }
     if (!entries) return;
     log(`waiting up to ${timeout} ms for receipts for ${entries} entries`);
-    if (shutdown) shutdown.phase = 1;
+    if (shutdown) shutdown.waiting = true;
     const started = Date.now();
     try {
         const acknowledged = await fsHandle.persistLocalWrites({
@@ -541,7 +550,7 @@ export const persistOnExit = async (
         process.exitCode ||= shutdown?.signal.aborted ? 130 : 75;
         if (shutdown?.signal.aborted) shutdown.exit();
     } finally {
-        if (shutdown) shutdown.phase = 2;
+        if (shutdown) shutdown.waiting = false;
     }
 };
 

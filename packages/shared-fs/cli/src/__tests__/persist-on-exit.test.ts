@@ -91,11 +91,21 @@ const untilEvent = async (
     }
 };
 
-/** A shutdown host: the process's signal events and exit, without a process. */
-const fakeHost = () =>
-    Object.assign(new EventEmitter(), { exit: vi.fn() }) as EventEmitter & {
-        exit: ReturnType<typeof vi.fn>;
-    };
+/**
+ * A shutdown host: the process's signal events, exit and clock, without a
+ * process. Its clock moves only when a test moves `ms`: a request less than
+ * 100 ms after the last one acted on is a wrapper's copy.
+ */
+const fakeHost = () => {
+    const host = Object.assign(new EventEmitter(), {
+        exit: vi.fn(),
+        ms: 0,
+        uptime: (): number => host.ms / 1000,
+    });
+    return host;
+};
+
+const HINT = "shutdown: already stopping; request again to exit now";
 
 /** persist-on-exit lines, as a script reading stderr sees them. */
 const persistLines = (lines: string[]) =>
@@ -138,23 +148,33 @@ describe("mount shutdown requests", () => {
         return Object.assign(state, { stopped, input });
     };
 
-    it("ignores a wrapper's copy of a request, aborts only a wait under way, and exits at once otherwise", async () => {
+    it("ignores a wrapper's copy of a request with a hint, aborts a wait under way, and exits at once otherwise", async () => {
+        const lines: string[] = [];
+        vi.spyOn(console, "error").mockImplementation((...args) => {
+            lines.push(args.join(" "));
+        });
         const host = fakeHost();
         const stop = pendingStop(host);
         expect(stop.shutdown).toBeUndefined();
 
-        // npm, pnpm and npx pass one Ctrl-C on as a second SIGINT.
+        // npm, pnpm and npx pass one Ctrl-C on as a second SIGINT, at once.
         host.emit("SIGINT");
+        host.ms += 99;
         host.emit("SIGINT");
         expect(stop.shutdown?.signal.aborted).toBe(false);
         expect(host.exit).not.toHaveBeenCalled();
+        expect(lines).toEqual([HINT]);
         // The wait is under way: a request aborts it, its copy does nothing.
-        stop.shutdown!.phase = 1;
+        stop.shutdown!.waiting = true;
+        host.ms += 2_000;
         host.emit("SIGTERM");
         host.emit("SIGTERM");
         expect(stop.shutdown!.signal.aborted).toBe(true);
         expect(host.exit).not.toHaveBeenCalled();
-        // A closed terminal (SIGHUP) is a request too: this one exits.
+        expect(lines).toEqual([HINT, HINT]);
+        // A closed terminal (SIGHUP) is a request too: the wait is already
+        // aborted, so this one exits.
+        host.ms += 100;
         host.emit("SIGHUP");
         expect(host.exit).toHaveBeenCalledWith(130);
 
@@ -167,24 +187,80 @@ describe("mount shutdown requests", () => {
         expect(stop.input.isPaused()).toBe(true);
     });
 
-    it("exits at once on a third request before the wait, and on any after it, with the exit code set", async () => {
+    it("exits at once on a second request outside the wait, with the exit code set", async () => {
         const host = fakeHost();
         const stop = pendingStop(host);
         host.emit("SIGHUP");
         expect(stop.shutdown).toBeDefined();
-        host.emit("SIGHUP");
-        expect(host.exit).not.toHaveBeenCalled();
-        host.emit("SIGBREAK");
+        // Run directly, a second Ctrl-C while the mount unmounts: out at
+        // once, as before persist-on-exit.
+        host.ms += 500;
+        host.emit("SIGINT");
         expect(host.exit).toHaveBeenLastCalledWith(130);
         // The wait gave up (75): Peerbit is stopping.
-        stop.shutdown!.phase = 2;
         process.exitCode = 75;
-        host.emit("SIGINT");
+        host.ms += 500;
+        host.emit("SIGBREAK");
         expect(host.exit).toHaveBeenLastCalledWith(75);
         expect(host.exit).toHaveBeenCalledTimes(2);
         stop.release();
         await stop.stopped;
     });
+
+    it.each([
+        ["--no-persist-on-exit", false, 5, true],
+        ["no other replica seen", true, 5, false],
+        ["nothing to wait for", true, 0, true],
+        ["a wait that succeeded", true, 5, true],
+    ])(
+        "exits at once on a second request while Peerbit stops: %s",
+        async (_, persistOnExitOption, entries, remoteReplicaSeen) => {
+            vi.spyOn(console, "error").mockImplementation(() => {});
+            const order: string[] = [];
+            const fsHandle = {
+                pendingLocalWrites: () => ({ entries, remoteReplicaSeen }),
+                persistLocalWrites: async () => entries,
+            };
+            const host = fakeHost();
+            host.exit.mockImplementation(() => void order.push("exit"));
+            let peerbitStopping!: () => void;
+            let releasePeerbit!: () => void;
+            const atPeerbit = new Promise<void>((resolve) => {
+                peerbitStopping = resolve;
+            });
+            const stopped = waitForTermination(
+                (shutdown) =>
+                    stopMountSession({
+                        persist: () =>
+                            persistOnExit(
+                                fsHandle as any,
+                                {
+                                    persistOnExit: persistOnExitOption,
+                                    persistTimeoutMs: 30_000,
+                                },
+                                shutdown
+                            ),
+                        stopPeerbit: () =>
+                            new Promise<void>((resolve) => {
+                                order.push("peerbit");
+                                releasePeerbit = resolve;
+                                peerbitStopping();
+                            }),
+                    }),
+                host as any,
+                new PassThrough()
+            );
+            host.emit("SIGINT");
+            await atPeerbit;
+            // A slow Peerbit stop (up to 10 s), and a second Ctrl-C.
+            host.ms += 1_000;
+            host.emit("SIGINT");
+            expect(order).toEqual(["peerbit", "exit"]);
+            expect(host.exit).toHaveBeenCalledWith(130);
+            releasePeerbit();
+            await stopped;
+        }
+    );
 
     it("takes a shutdown line on a piped stdin, but never reads a terminal", async () => {
         let stops = 0;
@@ -289,6 +365,7 @@ describe("mount shutdown requests", () => {
         await fenceRunning;
         expect(fence?.timeout).toBe(30_000);
         expect(fence?.signal?.aborted).toBe(false);
+        host.ms += 1_000;
         host.emit("SIGTERM");
         await stopped;
 
@@ -311,6 +388,8 @@ describe("mount shutdown requests", () => {
         expect(persistLines(lines).at(-1)).toBe(
             "persist-on-exit: gave up: aborted"
         );
+        // The copy of the first Ctrl-C.
+        expect(lines.filter((line) => line === HINT)).toHaveLength(1);
     });
 
     /** A fence that gives up, leaving `paths` unacknowledged. */
@@ -820,7 +899,7 @@ describe("mount --persist-on-exit over real TCP", () => {
         expect(gaveUp.at - waiting.at).toBeLessThan(persistTimeoutMs + 10_000);
     });
 
-    it("--no-persist-on-exit stops at once, as before: the writes stay only on the writer", async () => {
+    it("--no-persist-on-exit skips the wait: the writes stay only on the writer", async () => {
         const writer = await createPeer("writer");
         const receiver = await createPeer("receiver");
         await writer.peer.dial(receiver.peer.getMultiaddrs());
